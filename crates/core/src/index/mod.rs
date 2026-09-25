@@ -256,6 +256,15 @@ impl Index {
         Ok(Index { conn })
     }
 
+    /// SQLite's `data_version`: a number that moves whenever another connection has committed to
+    /// the index since this one last asked. What lets a reader keep something it read out of the
+    /// index for as long as the index says nothing has changed.
+    pub fn data_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA data_version", [], |r| r.get(0))?)
+    }
+
     /// Every write transaction in this file, and `BEGIN IMMEDIATE` rather than rusqlite's default
     /// `BEGIN DEFERRED` because the busy timeout above only works this way.
     ///
