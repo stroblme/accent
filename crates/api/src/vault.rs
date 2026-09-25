@@ -578,17 +578,21 @@ impl Vault {
     /// looks like while it is being typed. The walk costs 18 ms of the 55 ms this call takes on
     /// 10 000 dependency files, and a round trip on a remote vault, for an answer that can only
     /// be empty.
+    ///
+    /// `stop` ends a local walk early. It cannot cross to a host, so a remote walk runs to its
+    /// budget and the caller drops an answer it no longer wants.
     pub fn grep_unindexed(
         &self,
         query: &str,
         options: Options,
         limit: usize,
+        stop: &(dyn Fn() -> bool + Sync),
     ) -> Result<Vec<Match>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         match &self.backend {
-            Backend::Local(v) => v.grep_unindexed(&search::pattern(query, options)?, limit),
+            Backend::Local(v) => v.grep_unindexed(&search::pattern(query, options)?, limit, stop),
             Backend::Remote(r) => r
                 .call("grep_unindexed", json!([query, options, limit]))
                 .map_err(remote_err),

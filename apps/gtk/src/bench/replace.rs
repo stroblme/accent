@@ -54,6 +54,7 @@ pub(super) fn bench_replace(app: &Rc<App>) {
 
 fn bench_replace_print(sidebar: &crate::sidebar::Sidebar, step: &str) {
     let (page, rows, count) = sidebar.search_state();
+    let rows = rows.len();
     println!("bench replace step={step} page={page} rows={rows} count={count:?}");
 }
 

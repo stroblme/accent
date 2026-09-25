@@ -10,6 +10,10 @@ const SETTLE: Duration = Duration::from_millis(2500);
 /// How long to wait for a cold vault's first walk before giving up on it. `testvault` is 40k
 /// files and takes about half a minute.
 const INDEXED: Duration = Duration::from_secs(120);
+/// One keystroke of the `walk:` drill: faster than the walk's wait, as typing is.
+const TYPING: Duration = Duration::from_millis(100);
+/// From the last keystroke to a ranked answer on screen and the walk not yet started.
+const RANKED: Duration = Duration::from_millis(250);
 
 /// `ACCENT_BENCH_SEARCH=<query>[:<n>]` puts `<query>` in the Search pane, then writes `n` files
 /// holding it twice — one note unless the tail says otherwise, every second file a `.txt` rather
@@ -35,7 +39,27 @@ const INDEXED: Duration = Duration::from_secs(120);
 /// `RUST_LOG=accent=debug` prints `sidebar query … grep=… ms=…` for every query the run makes, so
 /// the `grep=true` lines after the `grep` step are what a requery nobody asked for costs in exact
 /// mode, and `<n>` is how many files the settled batch behind one of them touched.
+///
+/// `ACCENT_BENCH_SEARCH=walk:<query>` is a different drill: it turns All on and types `<query>` a
+/// character at a time, faster than the walk past the index waits for, then prints the rows once
+/// the ranked answer is up (`ranked`), once the walk has landed (`walked`) and with All off again
+/// (`all_off`). On a vault that is a git repository gitignoring a folder that holds the query,
+/// `walked` lists that folder's rows under `Not Indexed`, below the ranked ones, and neither of the
+/// other two steps does. `RUST_LOG=accent=debug` prints one `sidebar walk` line for the whole
+/// query, not one per character.
 pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
+    if let Some(query) = arg.strip_prefix("walk:") {
+        let typed: Vec<String> = (1..=query.chars().count())
+            .map(|n| query.chars().take(n).collect())
+            .collect();
+        return bench_search_indexed(app.clone(), Instant::now(), move |app| {
+            if let Some(sidebar) = app.sidebar.get() {
+                sidebar.show_pane("search");
+                sidebar.toggle_search_all();
+            }
+            bench_walk_type(app, typed, 0)
+        });
+    }
     // A `:<n>` tail stages a batch of several files, which is what a sync pull looks like; a
     // query with no such tail is the one note an autosave writes.
     let (query, count) = match arg
@@ -45,22 +69,28 @@ pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
         Some((query, count)) => (query.to_string(), count.max(1)),
         None => (arg.to_string(), 1),
     };
-    bench_search_indexed(app.clone(), query, count, Instant::now());
+    bench_search_indexed(app.clone(), Instant::now(), move |app| {
+        bench_search_run(app, query, count)
+    });
 }
 
 /// Nothing can be searched for until the first walk is over, and on a large vault that is not
 /// the 400 ms every other drill starts after.
-fn bench_search_indexed(app: Rc<App>, query: String, count: usize, since: Instant) {
+fn bench_search_indexed(app: Rc<App>, since: Instant, then: impl FnOnce(Rc<App>) + 'static) {
     if !app.reconciled.get() {
         if since.elapsed() > INDEXED {
             println!("bench search indexed=false");
             return bench_quit(&app);
         }
         glib::timeout_add_local_once(Duration::from_millis(200), move || {
-            bench_search_indexed(app, query, count, since)
+            bench_search_indexed(app, since, then)
         });
         return;
     }
+    then(app);
+}
+
+fn bench_search_run(app: Rc<App>, query: String, count: usize) {
     let Some(sidebar) = app.sidebar.get() else {
         return bench_quit(&app);
     };
@@ -176,11 +206,45 @@ fn bench_search_remove(paths: &[PathBuf]) {
     }
 }
 
+/// One keystroke of the `walk:` drill, and once the query is typed out, its three steps.
+fn bench_walk_type(app: Rc<App>, typed: Vec<String>, i: usize) {
+    let (Some(sidebar), Some(text)) = (app.sidebar.get(), typed.get(i)) else {
+        return bench_quit(&app);
+    };
+    sidebar.set_search_text(text);
+    if i + 1 < typed.len() {
+        glib::timeout_add_local_once(TYPING, move || bench_walk_type(app, typed, i + 1));
+        return;
+    }
+    glib::timeout_add_local_once(RANKED, move || {
+        bench_walk_print(&app, "ranked");
+        glib::timeout_add_local_once(SETTLE, move || {
+            bench_walk_print(&app, "walked");
+            if let Some(sidebar) = app.sidebar.get() {
+                sidebar.toggle_search_all();
+            }
+            glib::timeout_add_local_once(SETTLE, move || {
+                bench_walk_print(&app, "all_off");
+                bench_quit(&app);
+            });
+        });
+    });
+}
+
+fn bench_walk_print(app: &Rc<App>, step: &str) {
+    let Some(sidebar) = app.sidebar.get() else {
+        return println!("bench search walk step={step} pane=none");
+    };
+    let (page, rows, count) = sidebar.search_state();
+    println!("bench search walk step={step} page={page} count={count:?} rows={rows:?}");
+}
+
 fn bench_search_print(app: &Rc<App>, step: &str) {
     let Some(sidebar) = app.sidebar.get() else {
         return println!("bench search step={step} pane=none");
     };
     let (page, rows, count) = sidebar.search_state();
+    let rows = rows.len();
     let (button, sensitive) = sidebar.replace_all_state();
     println!(
         "bench search step={step} page={page} rows={rows} count={count:?} button=\"{button}\" \
