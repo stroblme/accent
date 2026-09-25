@@ -88,8 +88,11 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools platforms;android-37.2 build-tools;36.0.0 ndk;${{ env.NDK_VERSION }}
-      # For cargo-ndk and the Makefile's readelf. The runner's own ANDROID_NDK_HOME is r27.
-      - run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      # For cargo-ndk and the Makefile's readelf. The runner's own pair points at r27, and
+      # cargo-ndk warns when the two disagree.
+      - run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
       - run: cargo install cargo-ndk --locked
       # fmt, clippy and the ffi tests on the host, then both cross builds, then the 16 KB
       # alignment check over every library the APK will carry.
