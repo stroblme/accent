@@ -492,6 +492,15 @@ impl Vault {
         }
     }
 
+    /// Write `bytes` to a file nothing holds yet: an image pasted or dropped into a note. The bytes
+    /// travel as an upload's do, over ssh rather than in the protocol.
+    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        match &self.backend {
+            Backend::Local(v) => v.write_file(rel, bytes),
+            Backend::Remote(r) => r.write_file(rel, bytes),
+        }
+    }
+
     /// Copy a file out of the vault to somewhere on this machine.
     pub fn download(&self, rel: &str, dest: &Path) -> io::Result<()> {
         match &self.backend {

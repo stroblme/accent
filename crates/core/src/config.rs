@@ -46,6 +46,7 @@ eraser_partial = true
 [vaults."/home/me/Notes"]
 templates_dir = "Templates"
 new_file_dir = "Inbox"
+attachment_folder = "./attachments"
 
 [vaults."/home/me/Notes".lsp.servers]
 python3 = ["pylsp"]
@@ -214,6 +215,10 @@ pub struct VaultConfig {
     pub templates_dir: String,
     /// Empty means the vault root.
     pub new_file_dir: String,
+    /// Where an image pasted or dropped into a note is written, as Obsidian's setting of the same
+    /// job reads: empty is the note's own folder, `./sub` a folder inside it, anything else a
+    /// folder from the vault root ([`crate::attachment::folder`]).
+    pub attachment_folder: String,
     pub lsp: LspConfig,
 }
 
@@ -230,6 +235,7 @@ impl Default for VaultConfig {
         VaultConfig {
             templates_dir: "Templates".to_string(),
             new_file_dir: String::new(),
+            attachment_folder: String::new(),
             lsp: LspConfig::default(),
         }
     }
@@ -917,6 +923,7 @@ daily_template = "DailyNote.md"
         let v = &c.vaults["/home/me/Notes"];
         assert_eq!(v.templates_dir, "Templates");
         assert_eq!(v.new_file_dir, "Inbox");
+        assert_eq!(v.attachment_folder, "./attachments");
         // An override is a list, so an action can keep several chords, and an empty list is how
         // the user says "no shortcut at all" rather than "fall back to the default".
         assert_eq!(c.shortcuts["win.find-next"], ["F3"]);

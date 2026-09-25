@@ -4,6 +4,7 @@
 
 use super::*;
 
+mod attach;
 mod chrome;
 mod compare;
 mod diagnostics;
@@ -21,6 +22,7 @@ mod search;
 mod style;
 mod tags;
 
+use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_lines,
@@ -207,6 +209,8 @@ use tags::bench_tags;
 /// cuts two notes that link each other and a third, pastes them into the file's folder and
 /// answers the Update Links? question, printing every dialog that came — one is right — and
 /// the three notes' texts afterwards.
+/// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
+/// note and prints the text and the files they left (`attach::bench_attach`).
 /// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file as another in a folder not there yet, and a
 /// note also onto a folder, onto a file open in another tab and as `.txt` (`bench_save_as`).
 /// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
@@ -305,7 +309,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
     let save_as = std::env::var("ACCENT_BENCH_SAVE_AS").ok();
+    let attach = std::env::var("ACCENT_BENCH_ATTACH").ok();
     if expand.is_none()
+        && attach.is_none()
         && save_as.is_none()
         && find.is_none()
         && diag.is_none()
@@ -400,6 +406,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = save_as {
             return bench_save_as(&app, &rel);
+        }
+        if let Some(arg) = attach {
+            return bench_attach(&app, &arg);
         }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);

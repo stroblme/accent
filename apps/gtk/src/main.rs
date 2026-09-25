@@ -7,6 +7,7 @@
 
 mod actions;
 mod askpass;
+mod attach;
 mod bench;
 mod build;
 mod comment;

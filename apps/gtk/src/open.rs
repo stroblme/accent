@@ -1264,6 +1264,11 @@ impl App {
             );
         }
 
+        // A pasted or dropped image is written into the vault, which a loose note has none of.
+        if tab.flavour().is_note() && self.vault().is_some() && !doc::is_loose_key(&tab.rel()) {
+            self.wire_attachments(&tab);
+        }
+
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.
         if doc::is_loose_key(&tab.rel()) {
             tab.watch_file(glib::clone!(
