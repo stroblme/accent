@@ -11,9 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # rust-analyzer (with rust-src, the std it reads) is for accent-api's end-to-end LSP tests.
+      # Without the component rustup's `rust-analyzer` proxy is still on PATH, so the tests do
+      # not skip: the proxy exits at once and they fail.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-analyzer, rust-src
       - uses: Swatinem/rust-cache@v2
       # `--all` covers apps/gtk as well: rustfmt only parses the sources, it never resolves
       # dependencies, so the missing GTK dev headers on this runner do not matter.
@@ -36,11 +39,10 @@ jobs:
     container: fedora:44
     steps:
       # Before checkout: the base image has no git, so actions/checkout would fall back to the API.
-      # make, tar and curl are for `make pdfium`; the image ships curl-minimal, which the full
-      # curl package conflicts with, hence --allowerasing. dbus-daemon is for `make smoke`'s
-      # dbus-run-session.
+      # make, tar and curl are for `make pdfium`; the image already carries tar and the full curl.
+      # dbus-daemon is for `make smoke`'s dbus-run-session.
       - run: >
-          dnf install -y --allowerasing git gcc make tar curl gtk4-devel libadwaita-devel
+          dnf install -y git gcc make tar curl gtk4-devel libadwaita-devel
           gtksourceview5-devel webkitgtk6.0-devel libspelling-devel vte291-gtk4-devel
           xorg-x11-server-Xvfb dbus-daemon
           dejavu-sans-fonts
@@ -65,26 +67,33 @@ jobs:
   android:
     name: android app
     runs-on: ubuntu-latest
+    env:
+      # AGP 9.4's default NDK, so Gradle strips the libraries with the same NDK cargo-ndk linked
+      # them with. r27+ links 16 KB pages by default; `.cargo/config.toml` asks for them anyway.
+      NDK_VERSION: 28.2.13676358
     steps:
       - uses: actions/checkout@v5
+      # rust-analyzer and rust-src: `make android-check` runs accent-api's LSP tests too.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-analyzer, rust-src
           targets: aarch64-linux-android, x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
-      # The runner ships a JDK and an SDK; the NDK it ships is r27+, which links 16 KB pages by
-      # default. `.cargo/config.toml` asks for them anyway, so the check below holds either way.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
+      # The action's default list still names `tools`, which the SDK repository no longer has.
+      # These are what the build reads: `compileSdk` 37.2, AGP 9.4's default build-tools, the NDK.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-37.2 build-tools;36.0.0 ndk;${{ env.NDK_VERSION }}
+      # For cargo-ndk and the Makefile's readelf. The runner's own ANDROID_NDK_HOME is r27.
+      - run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
       - run: cargo install cargo-ndk --locked
       # fmt, clippy and the ffi tests on the host, then both cross builds, then the 16 KB
       # alignment check over every library the APK will carry.
       - run: make android-check
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}
       - run: make pdfium-android
       - run: make apk
       - run: make android-test
