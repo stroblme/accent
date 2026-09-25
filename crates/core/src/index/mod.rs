@@ -46,6 +46,7 @@ pub enum Phase {
 pub struct Progress {
     pub phase: Phase,
     pub done: usize,
+    /// 0 while the scan is still running: the walk has no total until it ends.
     pub total: usize,
 }
 

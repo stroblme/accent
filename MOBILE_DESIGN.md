@@ -229,7 +229,8 @@ The decisions under the Android app, each with its reason; the shared ones are i
 - **No watcher**: `Vault::open_unwatched`, and a rescan on every return to the app — inotify over
   emulated storage drops events; the app's own writes still reach the index.
 - **A first index lets the reader in while it runs**: the walk commits in batches and the tree lists
-  what it has as it goes — a large vault's first walk is tens of seconds. Stopping it is the
+  what it has as it goes — a large vault's first walk is tens of seconds. The scan before the
+  first batch writes nothing, so it counts the files it has found instead. Stopping it is the
   desktop's pause, and the rescan on a return is one of the walks a pause refuses.
 - **The PDF rules are the core's**, called by both apps (`pdf::highlight_quads`,
   `pdf::link_with_alias`, the ink ledger in `accent_core::pdf::ledger`) — the reader behaves as the

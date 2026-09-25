@@ -363,7 +363,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 indexing = true,
                 paused = false,
-                scanned = p.done.toLong(),
+                // Files found are not files read: past the first walk the status line counts the
+                // read ones, and the rescan every return starts runs a scan of its own first.
+                scanned = if (p.phase == Phase.SCAN && it.ready) 0 else p.done.toLong(),
                 phase = p.phase,
                 ready = it.ready || read,
             )
