@@ -416,6 +416,17 @@ impl App {
         self.toasts.add_toast(adw::Toast::new(text));
     }
 
+    /// A [`toast`](Self::toast) with a button on it, which runs `act` when pressed.
+    fn toast_with(&self, text: &str, button: &str, act: impl Fn() + 'static) {
+        self.toasted.set(self.toasted.get() + 1);
+        let toast = adw::Toast::builder()
+            .title(text)
+            .button_label(button)
+            .build();
+        toast.connect_button_clicked(move |_| act());
+        self.toasts.add_toast(toast);
+    }
+
     /// A failure, in the one shape every failure toast takes: "Cannot <what>: <why>". A reason
     /// that runs to several lines is a dialog's, not a toast's.
     fn cannot(&self, what: &str, why: impl std::fmt::Display) {

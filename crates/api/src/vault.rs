@@ -20,7 +20,7 @@ use crate::local::Local;
 use crate::{
     Backlink, Commit, Etag, Event, FileRow, Location, Match, Options, PdfLink, RenamePlan,
     RenameReport, ReplaceReport, Repo, SaveError, SearchHit, Session, Status, Submodule,
-    VaultConfig, fs, git, remote, rpc, ssh,
+    UndoReport, VaultConfig, fs, git, remote, rpc, ssh,
 };
 
 /// One open vault, wherever it lives.
@@ -382,6 +382,9 @@ methods! {
     /// The templates that name a target: one question for New from Template rather than one
     /// [`template_target`](Vault::template_target) per template, a round trip each when remote.
     any template_targets() -> Vec<String>;
+    /// Put back what the last [`replace_all`](Vault::replace_all) rewrote. The text it needs
+    /// stayed wherever the rewrite ran, the host on a remote vault, so only the report crosses.
+    any undo_replace() -> UndoReport, bounded by REPLACE_BOUND;
 
     // ------------------------------------------------------------ index reads
     any list_dir(rel: ref str) -> Vec<FileRow>;

@@ -17,6 +17,11 @@ const SETTLE: Duration = Duration::from_millis(1200);
 /// `before` must be `page=results rows=1` and `after` `page=empty rows=0`: the rows standing
 /// after the rewrite are the ones the new text answers for.
 ///
+/// Then it presses the toast's Undo (`App::undo_replace`, which Xvfb cannot click): `undone` must
+/// read `page=results rows=1` with the marker back in the note. Last it replaces again, edits the
+/// note behind the pane's back and undoes once more: `undo_skipped` must keep the edit, since a
+/// note changed since the rewrite is never written over.
+///
 /// One note is all a drill can rewrite — two would raise the confirmation Xvfb cannot answer —
 /// and one note is also the case where the worker has indexed the rewrite before the requery
 /// reaches the main loop anyway. So this covers the chain, not the race the requery used to
@@ -40,22 +45,45 @@ pub(super) fn bench_replace(app: &Rc<App>) {
             let Some(sidebar) = app.sidebar.get() else {
                 return bench_replace_done(&app, &path);
             };
-            bench_replace_print(sidebar, "before");
+            bench_replace_print(&app, &path, "before");
             sidebar.press_replace_all();
             glib::timeout_add_local_once(SETTLE, move || {
-                if let Some(sidebar) = app.sidebar.get() {
-                    bench_replace_print(sidebar, "after");
-                }
-                bench_replace_done(&app, &path);
+                bench_replace_print(&app, &path, "after");
+                app.undo_replace();
+                glib::timeout_add_local_once(SETTLE, move || {
+                    bench_replace_print(&app, &path, "undone");
+                    bench_replace_skip(app, path);
+                });
             });
         });
     });
 }
 
-fn bench_replace_print(sidebar: &crate::sidebar::Sidebar, step: &str) {
+/// Replace again, change the note before undoing, and print what the undo left in it.
+fn bench_replace_skip(app: Rc<App>, path: std::path::PathBuf) {
+    let Some(sidebar) = app.sidebar.get() else {
+        return bench_replace_done(&app, &path);
+    };
+    sidebar.press_replace_all();
+    glib::timeout_add_local_once(SETTLE, move || {
+        bench_replace_print(&app, &path, "replaced_again");
+        let _ = std::fs::write(&path, "edited after the replace\n");
+        app.undo_replace();
+        glib::timeout_add_local_once(SETTLE, move || {
+            bench_replace_print(&app, &path, "undo_skipped");
+            bench_replace_done(&app, &path);
+        });
+    });
+}
+
+fn bench_replace_print(app: &Rc<App>, path: &std::path::Path, step: &str) {
+    let Some(sidebar) = app.sidebar.get() else {
+        return println!("bench replace step={step} pane=none");
+    };
     let (page, rows, count) = sidebar.search_state();
     let rows = rows.len();
-    println!("bench replace step={step} page={page} rows={rows} count={count:?}");
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    println!("bench replace step={step} page={page} rows={rows} count={count:?} text={text:?}");
 }
 
 /// Take the drill's own note away again, whatever it managed to do with it.

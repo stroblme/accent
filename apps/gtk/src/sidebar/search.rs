@@ -29,10 +29,10 @@ const DEBOUNCE: Duration = Duration::from_millis(50);
 /// One step of the search progress bar. GTK4 has no indeterminate mode, so the bar is stepped by
 /// a timer of ours; at the default pulse step this crosses the trough in about two seconds.
 const PULSE: Duration = Duration::from_millis(80);
-/// How many matches Replace All rewrites without asking first. A rewrite cannot be undone and
-/// reaches files nobody has open, which is the choice DESIGN.md's States section keeps an
-/// `AdwAlertDialog` for; the one match the pane is already showing struck through is the case
-/// where the preview *is* the confirmation.
+/// How many matches Replace All rewrites without asking first. A rewrite reaches files nobody has
+/// open, and past 64 MB of them cannot be undone, which is the choice DESIGN.md's States section
+/// keeps an `AdwAlertDialog` for; the one match the pane is already showing struck through is the
+/// case where the preview *is* the confirmation.
 const CONFIRM_ABOVE: usize = 1;
 /// How many pulses a query has to outlive before its bar is drawn at all (DESIGN.md, Loading).
 /// Nothing else in the window starts a search, so a query the user did not ask for — the requery
@@ -563,7 +563,8 @@ impl Search {
             return confirm(
                 &self.apply,
                 &format!("Replace {total} Matches?"),
-                "Every match is rewritten in the file it is in. This cannot be undone.",
+                "Every match is rewritten in the file it is in. A rewrite of more than 64 MB \
+                 cannot be undone.",
                 "Replace All",
                 true,
                 move || search.run_replace_all(),
