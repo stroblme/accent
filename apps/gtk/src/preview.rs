@@ -11,7 +11,7 @@
 
 use crate::look::{self, Look, Served};
 use crate::theme;
-use accent_core::markdown::percent_decode;
+use accent_core::markdown::{self, percent_decode};
 use accent_core::path::parent_dir;
 use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, RefCell};
@@ -676,8 +676,8 @@ fn block_network(content: &webkit6::UserContentManager) {
     );
 }
 
-/// Route a navigation: links into the vault back to the app, web links to the browser, our own
-/// document load and an anchor into it through, everything else nowhere.
+/// Route a navigation: links into the vault back to the app, a web, mail, phone or message link
+/// to the system, our own document load and an anchor into it through, everything else nowhere.
 fn decide(
     view: &webkit6::WebView,
     decision: &webkit6::PolicyDecision,
@@ -717,15 +717,11 @@ fn decide(
             }
             _ => on_open(&target),
         },
-        // Only a click leaves the app: a note carrying `<meta http-equiv="refresh">` or a script
-        // redirect must not be able to open a browser on its own.
-        _ if (uri.starts_with("http://") || uri.starts_with("https://"))
-            && action.is_user_gesture() =>
-        {
+        _ if launches(&uri, action.is_user_gesture()) => {
             let parent = view.root().and_downcast::<gtk::Window>();
             gtk::UriLauncher::new(&uri).launch(parent.as_ref(), gio::Cancellable::NONE, |result| {
                 if let Err(e) = result {
-                    tracing::warn!("preview: cannot open link in browser: {e}");
+                    tracing::warn!("preview: cannot open link: {e}");
                 }
             });
         }
@@ -733,6 +729,14 @@ fn decide(
     }
     decision.ignore();
     true
+}
+
+/// Whether a navigation leaves the app for the system. Only a click does — a note carrying
+/// `<meta http-equiv="refresh">` or a script redirect must not open anything on its own — and only
+/// to what the editor's Go to Definition opens too ([`markdown::is_url`]): never `javascript:`,
+/// `data:` or `file:`.
+fn launches(uri: &str, clicked: bool) -> bool {
+    clicked && markdown::is_url(uri)
 }
 
 /// Whether `uri` is a place on the page `current` shows: the same document with a `#fragment`.
@@ -1084,6 +1088,24 @@ mod tests {
             Some(("open", "100%%zz".to_string()))
         );
         assert_eq!(accent_uri("https://example.com/x"), None);
+    }
+
+    /// A click hands the system what Go to Definition would, and nothing the page could run or
+    /// read the disk with; without a click nothing leaves at all.
+    #[test]
+    fn a_click_launches_what_the_editor_would_and_nothing_else() {
+        for url in ["https://e.org", "mailto:a@b.c", "tel:+123", "sms:+123"] {
+            assert!(launches(url, true), "{url}");
+            assert!(!launches(url, false), "{url} without a click");
+        }
+        for not in [
+            "javascript:alert(1)",
+            "javascript://%0aalert(1)",
+            "file:///etc/passwd",
+            "data:text/html,x",
+        ] {
+            assert!(!launches(not, true), "{not}");
+        }
     }
 
     #[test]
