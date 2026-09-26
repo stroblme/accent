@@ -39,7 +39,7 @@ pub fn recolour_pixel(px: [u8; 4], paper: [u8; 3], ink: [u8; 3]) -> [u8; 4] {
     let map = |i: usize, c: f32| {
         let (ink, paper) = (ink[i] as f32 / 255.0, paper[i] as f32 / 255.0);
         let target = ink + l * (paper - ink);
-        ((target + (c - l)) * 255.0).clamp(0.0, 255.0) as u8
+        ((target + (c - l)) * 255.0).round().clamp(0.0, 255.0) as u8
     };
     [map(0, r), map(1, g), map(2, b), px[3]]
 }
@@ -53,14 +53,27 @@ pub fn recolour(data: &mut [u8], paper: [u8; 3], ink: [u8; 3]) {
     }
 }
 
+/// Composite straight-alpha RGBA8 over white, in place, leaving it opaque: a transparent figure
+/// flattened onto the page it was drawn for, before [`recolour`] turns that white into paper. For
+/// a page that is not the window's own, where the window showing through would be the wrong
+/// colour — a remap is affine, so this is the same as recolouring and then filling with paper.
+pub fn onto_white(data: &mut [u8]) {
+    for px in data.as_chunks_mut::<4>().0 {
+        let a = u32::from(px[3]);
+        for c in &mut px[..3] {
+            *c = 255 - (((255 - u32::from(*c)) * a + 127) / 255) as u8;
+        }
+        px[3] = 255;
+    }
+}
+
 /// [`recolour_pixel`] as a colour matrix, for a renderer that applies one itself: four rows of
 /// five, row-major, in 0..1 units with the offset last, which is `feColorMatrix`'s layout.
 ///
 /// The remap is affine. With `Y` the pixel's luma, [`recolour_pixel`] computes
 /// `ink + Y·(paper − ink) + (c − Y)`, which is `c + ink + (paper − ink − 1)·Y`: row `i` is the
 /// identity row plus `paper_i − ink_i − 1` times the luma weights, offset by `ink_i`, and alpha
-/// passes through. The two agree within one step of a byte, the pixel path truncating where a
-/// renderer rounds.
+/// passes through. Both round, and agree within one step of a byte, which is the f32 arithmetic.
 pub fn colour_matrix(paper: [u8; 3], ink: [u8; 3]) -> [f32; 20] {
     let mut m = [0.0; 20];
     for i in 0..3 {
@@ -196,16 +209,34 @@ fn grid(width: u32, height: u32) -> impl Iterator<Item = usize> {
 /// which holds a stroke's overhang past its path; one sized to the canvas would need the root's
 /// `viewBox` parsed.
 pub fn recolour_svg(svg: &str, paper: [u8; 3], ink: [u8; 3]) -> Option<String> {
-    let open = root_content(svg)?;
+    filtered(svg, paper, ink, false)
+}
+
+/// [`recolour_svg`] on a page of the drawing's own, as [`onto_white`] does for a raster: a white
+/// backdrop under everything it draws, filtered with it into the paper. It covers the root's
+/// `viewBox`, or the viewport without one; a viewport wider than its box keeps a clear margin.
+pub fn recolour_svg_on_paper(svg: &str, paper: [u8; 3], ink: [u8; 3]) -> Option<String> {
+    filtered(svg, paper, ink, true)
+}
+
+fn filtered(svg: &str, paper: [u8; 3], ink: [u8; 3], backdrop: bool) -> Option<String> {
+    let (start, open) = root_content(svg)?;
     let close = svg.rfind("</svg").filter(|&c| c >= open)?;
     let values: Vec<String> = colour_matrix(paper, ink)
         .iter()
         .map(f32::to_string)
         .collect();
+    let backdrop = match (backdrop, view_box(&svg[start..open])) {
+        (false, _) => String::new(),
+        (true, Some([x, y, w, h])) => {
+            format!("<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"white\"/>")
+        }
+        (true, None) => "<rect width=\"100%\" height=\"100%\" fill=\"white\"/>".to_string(),
+    };
     Some(format!(
         "{}<filter id=\"accent-recolour\" color-interpolation-filters=\"sRGB\">\
          <feColorMatrix type=\"matrix\" values=\"{}\"/></filter>\
-         <g filter=\"url(#accent-recolour)\">{}</g>{}",
+         <g filter=\"url(#accent-recolour)\">{backdrop}{}</g>{}",
         &svg[..open],
         values.join(" "),
         &svg[open..close],
@@ -213,9 +244,25 @@ pub fn recolour_svg(svg: &str, paper: [u8; 3], ink: [u8; 3]) -> Option<String> {
     ))
 }
 
-/// Where the root element's content starts: just past its `<svg …>` start tag, a `>` inside a
-/// quoted attribute not counting. `None` without one, or for an empty `<svg …/>`.
-fn root_content(svg: &str) -> Option<usize> {
+/// The four numbers of a start tag's `viewBox`, read back as numbers so nothing but a number is
+/// written into the backdrop.
+fn view_box(tag: &str) -> Option<[f64; 4]> {
+    let rest = tag.split_once("viewBox=")?.1;
+    let quote = rest.chars().next().filter(|&q| q == '"' || q == '\'')?;
+    let numbers: Vec<f64> = rest[1..]
+        .split(quote)
+        .next()?
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|n| !n.is_empty())
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    numbers.try_into().ok()
+}
+
+/// Where the root element's start tag begins, and where its content starts: just past that tag,
+/// a `>` inside a quoted attribute not counting. `None` without one, or for an empty `<svg …/>`.
+fn root_content(svg: &str) -> Option<(usize, usize)> {
     let bytes = svg.as_bytes();
     let (start, _) = svg.match_indices("<svg").find(|(i, _)| {
         matches!(
@@ -229,7 +276,7 @@ fn root_content(svg: &str) -> Option<usize> {
             Some(q) if b == q => quote = None,
             Some(_) => {}
             None if b == b'"' || b == b'\'' => quote = Some(b),
-            None if b == b'>' => return (bytes[i - 1] != b'/').then_some(i + 1),
+            None if b == b'>' => return (bytes[i - 1] != b'/').then_some((start, i + 1)),
             None => {}
         }
     }
@@ -247,19 +294,26 @@ mod tests {
     const SOLARIZED_DARK: ([u8; 3], [u8; 3]) = ([0x00, 0x2b, 0x36], [0x83, 0x94, 0x96]);
     const PALETTES: [([u8; 3], [u8; 3]); 3] = [ADWAITA_DARK, SOLARIZED_LIGHT, SOLARIZED_DARK];
 
+    /// Exactly, not within a step: white paper that lands a shade off the window's own colour
+    /// is a seam around every page.
     #[test]
-    fn recolour_maps_paper_and_ink_to_the_theme() {
+    fn recolour_maps_paper_and_ink_exactly_to_the_theme() {
         for (paper, ink) in PALETTES {
-            // Tolerance of 1 per channel: the ramp runs through f32 and truncates on the way out.
-            let near = |got: [u8; 4], want: [u8; 3]| (0..3).all(|i| got[i].abs_diff(want[i]) <= 1);
-
-            let white = recolour_pixel([255, 255, 255, 255], paper, ink);
-            assert!(near(white, paper), "white -> {white:?}, want {paper:?}");
-            assert_eq!(white[3], 255, "alpha preserved");
-
-            let black = recolour_pixel([0, 0, 0, 255], paper, ink);
-            assert!(near(black, ink), "black -> {black:?}, want {ink:?}");
+            let [r, g, b, a] = recolour_pixel([255, 255, 255, 255], paper, ink);
+            assert_eq!(([r, g, b], a), (paper, 255), "white, alpha preserved");
+            let [r, g, b, _] = recolour_pixel([0, 0, 0, 255], paper, ink);
+            assert_eq!([r, g, b], ink, "black");
         }
+    }
+
+    #[test]
+    fn onto_white_flattens_transparency_and_leaves_the_opaque_alone() {
+        let mut data = vec![0, 0, 0, 0, 0, 0, 0, 128, 10, 20, 30, 255];
+        onto_white(&mut data);
+        assert_eq!(
+            data,
+            [255, 255, 255, 255, 127, 127, 127, 255, 10, 20, 30, 255]
+        );
     }
 
     #[test]
@@ -591,6 +645,30 @@ mod tests {
             "{out}"
         );
         assert!(out.ends_with("<path d=\"M0 0\"/>\n</g></svg>\n"), "{out}");
+    }
+
+    #[test]
+    fn on_paper_an_svg_gets_a_white_backdrop_over_its_view_box() {
+        let (paper, ink) = ADWAITA_DARK;
+        let content = r#"<path d="M0 0"/>"#;
+        let boxed = format!(r#"<svg viewBox="-5,10 320 200.5">{content}</svg>"#);
+        let out = recolour_svg_on_paper(&boxed, paper, ink).unwrap();
+        let backdrop = r#"<rect x="-5" y="10" width="320" height="200.5" fill="white"/>"#;
+        assert!(
+            out.contains(&format!(r#"(#accent-recolour)">{backdrop}{content}</g>"#)),
+            "{out}"
+        );
+        // Without a viewBox the canvas is the viewport, in pixels from its corner.
+        let bare = format!(r#"<svg width="10" height="10">{content}</svg>"#);
+        let out = recolour_svg_on_paper(&bare, paper, ink).unwrap();
+        assert!(
+            out.contains(r#"<rect width="100%" height="100%" fill="white"/><path"#),
+            "{out}"
+        );
+        // A viewBox that is not four numbers is no box to fill.
+        let odd = format!(r#"<svg viewBox='0 0 1 "x"'>{content}</svg>"#);
+        let out = recolour_svg_on_paper(&odd, paper, ink).unwrap();
+        assert!(out.contains(r#"<rect width="100%""#), "{out}");
     }
 
     #[test]
