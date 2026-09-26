@@ -109,9 +109,13 @@ impl LabelEditor {
             editor::spell_adapter(&editor.buffer, &editor.view).set_enabled(true);
         }
         // Styled as the note editor's companions are, on each change and in the theme's colours.
-        editor
-            .buffer
-            .connect_changed(|buffer| editor::style_companion(Flavour::Note, buffer));
+        // Weak: the view holds the buffer, which holds this closure.
+        let weak = editor.view.downgrade();
+        editor.buffer.connect_changed(move |buffer| {
+            if let Some(view) = weak.upgrade() {
+                editor::style_companion(Flavour::Note, buffer, &view);
+            }
+        });
         let (view, buffer) = (editor.view.clone(), editor.buffer.clone());
         editor.view.connect_realize(move |_| {
             editor::restyle_companion(Flavour::Note, &buffer, &view);

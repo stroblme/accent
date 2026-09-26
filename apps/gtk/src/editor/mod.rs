@@ -1542,7 +1542,8 @@ impl Tab {
     fn analyse_text(&self) {
         match self.flavour {
             Flavour::Note => {
-                let (analysis, offsets) = highlight::apply(&self.buffer);
+                let (analysis, offsets) =
+                    wrap::refence(&self.view, || highlight::apply(&self.buffer));
                 *self.links.borrow_mut() = analysis
                     .links
                     .into_iter()
