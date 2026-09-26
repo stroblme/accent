@@ -457,8 +457,9 @@ methods! {
         bounded by git::TRANSFER_TIMEOUT;
     git git_commit = commit(repo: ref Repo, message: ref str, all: val bool) -> String,
         bounded by git::TRANSFER_TIMEOUT;
-    /// A pull and then a push, each under its own bound.
-    git git_sync = sync(repo: ref Repo) -> String, bounded by git::TRANSFER_TIMEOUT * 2;
+    /// A Sync's two halves, asked for one after the other so the window knows which is running.
+    git git_pull = pull(repo: ref Repo) -> String, bounded by git::TRANSFER_TIMEOUT;
+    git git_push = push(repo: ref Repo) -> String, bounded by git::TRANSFER_TIMEOUT;
     /// Bring the remote-tracking refs up to date.
     git git_fetch = fetch(repo: ref Repo) -> String, bounded by git::FETCH_TIMEOUT;
     /// The oids a pull would bring in. Asked only where [`git::Status`] says there are any.

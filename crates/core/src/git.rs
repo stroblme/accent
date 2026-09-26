@@ -1433,18 +1433,36 @@ pub fn commit(repo: &Repo, message: &str, all: bool) -> Result<String, Error> {
     Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
-/// A push can be stopped part way ([`interrupt`]): the remote takes it whole or not at all.
+/// A Sync's second half. A push can be stopped part way ([`interrupt`]): the remote takes it
+/// whole or not at all.
+///
+/// A branch that has never been pushed has no ref to push onto, so there the push is publishing
+/// it.
 pub fn push(repo: &Repo) -> Result<String, Error> {
+    if upstream(repo).is_none() {
+        return publish(repo);
+    }
     transcript(repo, &["push"], true)
 }
 
-/// A pull cannot: its merge rewrites the working tree.
+/// A Sync's first half. A pull cannot be stopped: its merge rewrites the working tree.
 ///
 /// It merges, which was git's own default until it began refusing a diverged branch that
 /// `pull.rebase` and `pull.ff` say nothing about. A merge never rewrites a commit, and a conflict
 /// stops where the pane already shows one. `--no-rebase` outranks either setting where the user
 /// has one, `pull.ff = only` included: a Sync always merges.
+///
+/// Both halves run every time: the `behind` count a background [`fetch`] keeps current is a
+/// readout and not a decision — it can be a whole fetch interval old — and the pull is also what
+/// keeps the push from landing on a history the remote has moved past. A branch with no upstream
+/// has nothing to pull from, so there this does nothing and the push publishes it.
+///
+/// Two calls rather than one, so the window knows which half it is in: closing during the pull
+/// waits for git, closing during the push stops it (DESIGN.md, States).
 pub fn pull(repo: &Repo) -> Result<String, Error> {
+    if upstream(repo).is_none() {
+        return Ok(String::new());
+    }
     transcript(repo, &["pull", "--no-rebase"], false)
 }
 
@@ -1492,30 +1510,6 @@ fn default_remote(repo: &Repo) -> Result<String, Error> {
             many.join(", ")
         ))),
     }
-}
-
-/// Pull, then push, as one operation with one transcript.
-///
-/// Both halves run every time: the `behind` count a background [`fetch`] keeps current is a
-/// readout and not a decision — it can be a whole fetch interval old — and the pull is also what
-/// keeps the push from landing on a history the remote has moved past. A failed pull stops there,
-/// and its error is the whole answer.
-///
-/// A branch that has never been pushed is the one case that is not a pull and a push: there is no
-/// upstream to pull from and no ref to push onto, so the whole of a sync there is publishing it.
-pub fn sync(repo: &Repo) -> Result<String, Error> {
-    if upstream(repo).is_none() {
-        return publish(repo);
-    }
-    let pulled = pull(repo)?;
-    let pushed = push(repo)?;
-    let both = [pulled, pushed];
-    Ok(both
-        .iter()
-        .filter(|half| !half.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n"))
 }
 
 /// Push a branch that has no upstream and record the remote copy as its upstream, so that the
