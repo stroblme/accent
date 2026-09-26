@@ -642,10 +642,11 @@ impl Panel {
 
     /// Discarding is the one thing here that loses work, so it asks first (DESIGN.md, States).
     ///
-    /// `folder` is the folder row it was asked from, whose `entries` are every one under it; a
-    /// file's own row passes `None` and itself. An untracked file has nothing in the index to go
-    /// back to, so what "discard" means for it is that the file itself goes — to the trash, which
-    /// is at least recoverable, and all of a folder's in one go.
+    /// `folder` is the folder row it was asked from, whose `entries` are every one under it, or
+    /// `""` for the Changes header's Discard All and every entry of the section; a file's own row
+    /// passes `None` and itself. An untracked file has nothing in the index to go back to, so what
+    /// "discard" means for it is that the file itself goes — to the trash, which is at least
+    /// recoverable, and all of a folder's in one go.
     pub(super) fn discard(self: &Rc<Self>, folder: Option<&str>, entries: Vec<Entry>) {
         let Some(repo) = ({
             let state = self.state.borrow();
@@ -656,9 +657,9 @@ impl Panel {
         let (untracked, tracked): (Vec<Entry>, Vec<Entry>) =
             entries.into_iter().partition(|e| e.x == '?');
         let what = match (folder, tracked.first().or(untracked.first())) {
+            (_, None) => return,
             (Some(folder), _) => folder.to_string(),
             (None, Some(entry)) => split_name(&entry.path).1.to_string(),
-            (None, None) => return,
         };
         let body = discard_body(&what, folder.is_some(), tracked.len(), untracked.len());
         let root = self.hooks.vault.root();
@@ -671,29 +672,27 @@ impl Panel {
             Some(_) => format!("Discarded {}", files(paths.len())),
             None => format!("Discarded {what}"),
         };
+        let (heading, verb) = match folder {
+            Some("") => ("Discard All Changes?", "Discard All"),
+            _ => ("Discard Changes?", "Discard"),
+        };
         let panel = self.clone();
-        dialogs::confirm(
-            &self.hooks.window,
-            "Discard Changes?",
-            &body,
-            "Discard",
-            true,
-            move || {
-                if !keys.is_empty() {
-                    (panel.hooks.trash)(&keys);
-                    panel.schedule_refresh(Depth::Status);
-                }
-                panel.write("discard", paths, move |vault, repo, paths| {
-                    vault.git_discard(repo, paths).map(|()| done)
-                });
-            },
-        );
+        dialogs::confirm(&self.hooks.window, heading, &body, verb, true, move || {
+            if !keys.is_empty() {
+                (panel.hooks.trash)(&keys);
+                panel.schedule_refresh(Depth::Status);
+            }
+            panel.write("discard", paths, move |vault, repo, paths| {
+                vault.git_discard(repo, paths).map(|()| done)
+            });
+        });
     }
 }
 
 /// What the Discard confirmation says will happen. A file's own row names the file; a folder's
 /// names the folder and how many files of each kind it takes, the ones that go back to the index
-/// and the untracked ones that go to the trash.
+/// and the untracked ones that go to the trash, and Discard All, the folder `""`, says the same
+/// of the whole section.
 fn discard_body(what: &str, folder: bool, tracked: usize, untracked: usize) -> String {
     let undone = match tracked {
         0 => "",
@@ -715,8 +714,15 @@ fn discard_body(what: &str, folder: bool, tracked: usize, untracked: usize) -> S
         1 => Some("1 untracked file moves to the trash".to_string()),
         n => Some(format!("{n} untracked files move to the trash")),
     };
-    let parts: Vec<String> = back.into_iter().chain(trashed).collect();
-    format!("In {what}, {}.{undone}", parts.join(" and "))
+    let parts = back
+        .into_iter()
+        .chain(trashed)
+        .collect::<Vec<_>>()
+        .join(" and ");
+    match what {
+        "" => format!("{parts}.{undone}"),
+        _ => format!("In {what}, {parts}.{undone}"),
+    }
 }
 
 /// The one line of a git refusal that fits in a toast: git's own first line, without the prefix
@@ -759,6 +765,11 @@ mod tests {
         assert_eq!(
             discard_body("src", true, 0, 2),
             "In src, 2 untracked files move to the trash."
+        );
+        assert_eq!(
+            discard_body("", true, 3, 2),
+            "3 files go back to what the index holds and 2 untracked files move to the trash. \
+             This cannot be undone."
         );
     }
 

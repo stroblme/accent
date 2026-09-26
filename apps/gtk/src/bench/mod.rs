@@ -66,9 +66,10 @@ use tags::bench_tags;
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
 /// until the pointer is on the row, and then the changes list's splices across a refresh that
-/// changes nothing and two Stage clicks, and each section header's button and whether its row
-/// takes the hover highlight. `=press:<path>` instead prints where that row's Stage button is and stays up, for
-/// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
+/// changes nothing and two Stage clicks, and each section header's buttons and whether its row
+/// takes the hover highlight; last the Changes header's Discard All, its question answered.
+/// `=press:<path>` instead prints where that row's Stage button is and stays up, for an XTEST
+/// press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
 /// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did,
 /// and `=sync` asks for a Sync during the fetch on opening and prints whether it waited for it.
