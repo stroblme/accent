@@ -210,7 +210,8 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_CLIP=<rel_file>` copies a file and pastes it beside itself, then cuts the copy
 /// and pastes it in the vault root: the `(copy)` mark, the rows a Cut dims, and whether the paste
 /// of a Cut moved the file rather than copying it again. Then it puts two files on the clipboard
-/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root. Last it
+/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root, how many
+/// toasts said so — one is right — and what it said. Last it
 /// cuts two notes that link each other and a third, pastes them into the file's folder and
 /// answers the Update Links? question, printing every dialog that came — one is right — and
 /// the three notes' texts afterwards.

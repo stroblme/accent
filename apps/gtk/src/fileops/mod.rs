@@ -792,14 +792,7 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update: bool, verb: &'static str) {
         ops.clone(),
         several(&sources(&plan.moves)),
     );
-    // One move names where the file went; a batch goes into one folder, which it names instead.
-    let to = match &plan.moves[..] {
-        [(_, to)] => to.clone(),
-        many => match parent_dir(&many[0].1) {
-            "" => "the vault root".to_string(),
-            dir => dir.to_string(),
-        },
-    };
+    let to = batch_to(&plan.moves[0].1, plan.moves.len());
     let first = plan.moves[0].1.clone();
     glib::spawn_future_local(async move {
         let done = crate::work::off_thread("rename", {
@@ -918,6 +911,16 @@ pub fn trash_all(ops: &Rc<Ops>, rels: Vec<String>) {
 /// The paths a batch of moves takes from.
 fn sources(moves: &[(String, String)]) -> Vec<String> {
     moves.iter().map(|(from, _)| from.clone()).collect()
+}
+
+/// Where a batch of `count` files went, `first` being one's new path, as its toast names it: one
+/// file by where it is now, several by the folder they all went into.
+fn batch_to(first: &str, count: usize) -> String {
+    match (count, parent_dir(first)) {
+        (1, _) => first.to_string(),
+        (_, "") => "the vault root".to_string(),
+        (_, dir) => dir.to_string(),
+    }
 }
 
 /// How a toast or a dialog names the paths it is about: a single one by its name, several by
@@ -1285,6 +1288,13 @@ mod tests {
             rename_message("Renamed", "a.md", "b.md", 2, 3),
             "Renamed a.md, but 2 files could not be updated; 3 notes have unsaved changes and were not reloaded"
         );
+    }
+
+    #[test]
+    fn a_batch_is_named_by_its_path_or_by_the_folder_it_went_into() {
+        assert_eq!(batch_to("Notes/a (copy).md", 1), "Notes/a (copy).md");
+        assert_eq!(batch_to("Notes/a.md", 3), "Notes");
+        assert_eq!(batch_to("a.md", 2), "the vault root");
     }
 
     #[test]

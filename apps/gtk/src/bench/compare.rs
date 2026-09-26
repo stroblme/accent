@@ -373,7 +373,7 @@ async fn bench_scroll(compare: &diff::Compare) -> String {
 }
 
 /// What the toast over the window reads, whatever it says: [`bench_said`] looks for a failure.
-fn bench_toast(app: &Rc<App>) -> Option<String> {
+pub(super) fn bench_toast(app: &Rc<App>) -> Option<String> {
     let toast = find_widget(app.window.upcast_ref(), &|w| {
         w.type_().name() == "AdwToastWidget"
     })?;

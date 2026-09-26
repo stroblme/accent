@@ -490,6 +490,15 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
             .find(|row| row.kind != accent_core::walk::FileKind::Dir && row.rel_path != rel)
             .map(|row| row.rel_path);
         if let Some(second) = second {
+            // One toast for the two, once both have landed: a toast still up from the steps
+            // before would hold it back in the queue, where nothing can read it.
+            for _ in 0..150 {
+                if compare::bench_toast(&app).is_none() {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(100)).await;
+            }
+            let said = app.toasted.get();
             let both = [(rel.clone(), false), (second, false)];
             fileops::clipboard::copy_all(&ops, &both);
             fileops::clipboard::paste(&ops, "");
@@ -499,7 +508,11 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
                 .map(|(rel, _)| accent_core::path::basename(rel).to_string())
                 .map(|name| (name.clone(), vault.exists(&name)))
                 .collect();
-            println!("bench clip_copied_many {landed:?}");
+            println!(
+                "bench clip_copied_many {landed:?} toasts={} said={:?}",
+                app.toasted.get() - said,
+                compare::bench_toast(&app)
+            );
             for (name, _) in &landed {
                 let _ = vault.delete(name);
             }
