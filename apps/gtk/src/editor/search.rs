@@ -346,13 +346,16 @@ impl Tab {
         self.jump_to(&lang::iter_at(&self.buffer, pos), 0.25);
     }
 
-    /// Put the caret on the heading `anchor` names, by slug or by text as a link writes it. A
-    /// heading the note does not have leaves the caret where it was.
-    pub fn goto_heading(&self, anchor: &str) {
+    /// Put the caret on the heading `anchor` names, by slug or by text as a link writes it, and
+    /// say whether the note has it: one it does not have leaves the caret where it was.
+    pub fn goto_heading(&self, anchor: &str) -> bool {
         let text = self.text();
-        if let Some(h) = markdown::heading_for(&markdown::analyze(&text).headings, anchor) {
-            self.goto_pos(pos_of(&text, h.range.start));
-        }
+        let headings = markdown::analyze(&text).headings;
+        let Some(h) = markdown::heading_for(&headings, anchor) else {
+            return false;
+        };
+        self.goto_pos(pos_of(&text, h.range.start));
+        true
     }
 
     /// Jump to a character range, select it and reveal it: what a search result and a tag row
