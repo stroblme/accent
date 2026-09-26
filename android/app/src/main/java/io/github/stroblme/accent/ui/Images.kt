@@ -40,16 +40,18 @@ fun imageKind(name: String): ImageKind? = when (name.substringAfterLast('.', "")
 }
 
 /**
- * How an image is drawn: recoloured as a PDF page is ([pageTheme]) when it is a drawing — an SVG
- * always, a raster when it reads as a [document] — and as it is otherwise, which a photo is always
- * read as. [inverted] flips that either way. [document] costs a decode, so it is asked only in a
- * dark theme, the one place the answer changes anything.
+ * How an image is drawn, by a PDF page's rule ([pageTheme]): the theme recolours a drawing — an SVG
+ * always, a raster when it reads as a [document] — and leaves a photo alone. [inverted] sends any
+ * image to the other theme's page, whatever it shows, as it does a PDF: onto the dark page in a
+ * light theme, as it is in a dark one. [document] costs a decode, so it is asked only in a dark
+ * theme and of an image not inverted, the one place the answer changes anything.
  */
 internal fun imageTheme(kind: ImageKind, dark: Boolean, inverted: Boolean, document: () -> Boolean): Theme =
     when (kind) {
         ImageKind.Gif -> Theme.Plain
         ImageKind.Svg -> pageTheme(dark, inverted)
-        ImageKind.Raster -> pageTheme(dark && document(), inverted)
+        ImageKind.Raster ->
+            if (inverted) pageTheme(dark, inverted = true) else pageTheme(dark && document())
     }
 
 /**
@@ -61,6 +63,10 @@ internal fun imageTheme(kind: ImageKind, dark: Boolean, inverted: Boolean, docum
  * as a document, and the remap itself, are the core's (`accent_core::recolour`), so it looks the
  * same on the desktop too; the decoding is the platform's.
  *
+ * An image recoloured in a light theme is on the dark page, not the screen's, so it gets that page
+ * under it: an inverted PDF page is opaque, and a transparent figure's light ink would otherwise
+ * sit on white. In a dark theme it is on the screen's own page, and keeps its transparency.
+ *
  * Called on the WebView's own loading thread, never the main one: a verdict can be a decode, and a
  * recolour always is.
  */
@@ -69,9 +75,9 @@ fun served(file: File, dark: Boolean): WebResourceResponse = runCatching {
     when (val theme = imageTheme(kind, dark, file.path in Inverted.files) { document(file) }) {
         Theme.Plain -> asItIs(file, kind)
         is Theme.Recolour -> when (kind) {
-            ImageKind.Svg -> recolourSvg(file.readText(), theme)
+            ImageKind.Svg -> recolourSvg(file.readText(), theme, fill = !dark)
                 ?.let { WebResourceResponse(SVG, "utf-8", ByteArrayInputStream(it.toByteArray())) }
-            else -> recoloured(file, theme)
+            else -> recoloured(file, theme, fill = !dark)
         } ?: asItIs(file, kind)
     }
 }.getOrElse { blocked() }
@@ -135,12 +141,13 @@ private fun document(file: File): Boolean {
 
 /**
  * [file] recoloured onto [theme], as a PNG: straight alpha in and out, so a transparent figure keeps
- * its transparency. Decoded at a long side of [RECOLOURED_SIDE] at most, which keeps a large scan's
- * copies bounded. Null when the platform cannot decode it into RGBA8, and it is then served as it is.
+ * its transparency — unless it is to [fill] it with the paper. Decoded at a long side of
+ * [RECOLOURED_SIDE] at most, which keeps a large scan's copies bounded. Null when the platform
+ * cannot decode it into RGBA8, and it is then served as it is.
  */
-private fun recoloured(file: File, theme: Theme): WebResourceResponse? {
+private fun recoloured(file: File, theme: Theme, fill: Boolean): WebResourceResponse? {
     val bitmap = bounds(file)?.let { decode(file, it, RECOLOURED_SIDE) } ?: return null
-    bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(recolourImage(bitmap.rgba(), theme)))
+    bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(recolourImage(bitmap.rgba(), theme, fill)))
     val png = ByteArrayOutputStream()
     bitmap.compress(Bitmap.CompressFormat.PNG, 100, png)
     bitmap.recycle()

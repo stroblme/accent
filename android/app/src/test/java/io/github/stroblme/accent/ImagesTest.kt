@@ -31,19 +31,21 @@ class ImagesTest {
         assertNull("a dot in a folder is not an extension", imageKind("v1.2/README"))
     }
 
-    /** A document goes onto the dark page in a dark theme; a photo never unless inverted. */
+    /** A document goes onto the dark page in a dark theme; a photo does not. */
     @Test
     fun `a raster is recoloured when it reads as a document in a dark theme`() {
         assertEquals(recoloured, imageTheme(ImageKind.Raster, dark = true, inverted = false) { true })
         assertEquals(plain, imageTheme(ImageKind.Raster, dark = true, inverted = false) { false })
-        assertEquals(plain, imageTheme(ImageKind.Raster, dark = true, inverted = true) { true })
-        assertEquals(recoloured, imageTheme(ImageKind.Raster, dark = true, inverted = true) { false })
     }
 
-    /** Nothing to recolour in a light theme, so nothing is decoded to find out. */
+    /**
+     * Inverted, any image goes to the other theme's page, as a PDF does: shown as it is in a dark
+     * theme, onto the dark page in a light one. Neither depends on the verdict, so neither decodes.
+     */
     @Test
-    fun `a light theme never asks, and an invert recolours onto the dark page`() {
-        val never = { error("classified in a light theme") }
+    fun `an inverted raster goes to the other page, and neither it nor a light one is classified`() {
+        val never = { error("classified") }
+        assertEquals(plain, imageTheme(ImageKind.Raster, dark = true, inverted = true, never))
         assertEquals(plain, imageTheme(ImageKind.Raster, dark = false, inverted = false, never))
         assertEquals(recoloured, imageTheme(ImageKind.Raster, dark = false, inverted = true, never))
     }

@@ -17,23 +17,30 @@ pub fn looks_like_document(rgba: Vec<u8>, width: u32, height: u32) -> bool {
     recolour::classify(&rgba, width, height).document
 }
 
-/// Straight-alpha RGBA8 pixels moved onto the theme's paper and ink, alpha untouched; under
-/// [`Theme::Plain`] they come back as they went in.
+/// Straight-alpha RGBA8 pixels moved onto the theme's paper and ink, alpha untouched unless
+/// `fill` lays them on that paper, for a page that is not the screen's own
+/// ([`recolour::onto_white`]); under [`Theme::Plain`] they come back as they went in.
 #[uniffi::export]
-pub fn recolour_image(mut rgba: Vec<u8>, theme: Theme) -> Vec<u8> {
+pub fn recolour_image(mut rgba: Vec<u8>, theme: Theme, fill: bool) -> Vec<u8> {
     if let pdf::Theme::Recolour { paper, ink } = theme.into() {
+        if fill {
+            recolour::onto_white(&mut rgba);
+        }
         recolour::recolour(&mut rgba, paper, ink);
     }
     rgba
 }
 
-/// An SVG's text with the same recolouring as a filter, so it stays vector; under
-/// [`Theme::Plain`] it comes back as it went in. `None` when there is no root `<svg>` element to
-/// hang the filter on.
+/// An SVG's text with the same recolouring as a filter, so it stays vector, on the paper when
+/// `fill` asks for it ([`recolour::recolour_svg_on_paper`]); under [`Theme::Plain`] it comes back
+/// as it went in. `None` when there is no root `<svg>` element to hang the filter on.
 #[uniffi::export]
-pub fn recolour_svg(svg: String, theme: Theme) -> Option<String> {
+pub fn recolour_svg(svg: String, theme: Theme, fill: bool) -> Option<String> {
     match theme.into() {
         pdf::Theme::Plain => Some(svg),
+        pdf::Theme::Recolour { paper, ink } if fill => {
+            recolour::recolour_svg_on_paper(&svg, paper, ink)
+        }
         pdf::Theme::Recolour { paper, ink } => recolour::recolour_svg(&svg, paper, ink),
     }
 }
@@ -71,24 +78,33 @@ mod tests {
     #[test]
     fn an_image_lands_on_the_theme_paper_unless_plain() {
         let white = vec![255, 255, 255, 255, 0, 0, 0, 0];
-        assert_eq!(recolour_image(white.clone(), Theme::Plain), white);
-        let out = recolour_image(white, dark());
-        assert!(
-            out[..3]
-                .iter()
-                .zip([0x1d, 0x1d, 0x20])
-                .all(|(&a, b)| a.abs_diff(b) <= 1)
+        assert_eq!(recolour_image(white.clone(), Theme::Plain, true), white);
+        let out = recolour_image(white.clone(), dark(), false);
+        assert_eq!(
+            out,
+            [0x1d, 0x1d, 0x20, 255, 0xeb, 0xeb, 0xeb, 0],
+            "alpha untouched"
         );
-        assert_eq!((out[3], out[7]), (255, 0), "alpha untouched");
+        let filled = recolour_image(white, dark(), true);
+        assert_eq!(
+            filled[4..],
+            [0x1d, 0x1d, 0x20, 255],
+            "the clear pixel is paper"
+        );
     }
 
     #[test]
     fn an_svg_gets_the_filter_unless_plain() {
         let svg =
             "<svg xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M0 0H9\"/></svg>".to_string();
-        assert_eq!(recolour_svg(svg.clone(), Theme::Plain), Some(svg.clone()));
-        let out = recolour_svg(svg, dark()).unwrap();
+        assert_eq!(
+            recolour_svg(svg.clone(), Theme::Plain, true),
+            Some(svg.clone())
+        );
+        let out = recolour_svg(svg.clone(), dark(), false).unwrap();
         assert!(out.contains("<feColorMatrix type=\"matrix\""), "{out}");
-        assert_eq!(recolour_svg("not a drawing".into(), dark()), None);
+        assert!(!out.contains("<rect"), "{out}");
+        assert!(recolour_svg(svg, dark(), true).unwrap().contains("<rect"));
+        assert_eq!(recolour_svg("not a drawing".into(), dark(), false), None);
     }
 }
