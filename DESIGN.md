@@ -217,7 +217,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Status bar
 
 - A `GtkBox` as the editor column's `AdwToolbarView` bottom bar, so presentation mode takes it with the header and a hover over its strip brings it back there (Keyboard, Views). `.caption` `.dim-label`, 6 px padding, `accent-flat`.
-- At the start, what the window is busy with ("Indexing… 1200/42700 files", "Opening the document…"); at the end, the file's facts. A label with nothing to say hides.
+- At the start, what the window is busy with ("Indexing… 1200/42700 files", "Opening the document…"); at the end, the file's facts. A scan still counting has no total, so it says "Indexing… 12345 files found". A label with nothing to say hides.
 - The vault's own work wins the first slot, being what the reader waits on; then a copy to or from a host ("Downloading a.pdf…", "Uploading 3 files…"), the latest one running, from start to toast, saying that it runs rather than how far; then "Indexing suggestions…" (the ghost-text index), a convenience that waits its turn. No language server's progress is shown: rust-analyzer reports every `cargo check`, and the line would never settle.
 - The facts: what the file is (`Markdown`, `PDF`, `Image`, or `<language> · UTF-8 · LF` for code), whether it has unsaved edits, one count of its own, and its zoom.
 - The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport). A PDF's count is a button opening Add Page Before, Add Page After and Delete Page for that page, as the page's own menu offers them.

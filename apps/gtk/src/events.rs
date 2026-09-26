@@ -62,10 +62,8 @@ impl App {
         }
         match event {
             Event::Progress(p) => {
-                self.statusbar.set_progress(Some(&match p.total {
-                    0 => "Indexing…".to_string(),
-                    total => format!("Indexing… {}/{total} files", p.done),
-                }));
+                self.statusbar
+                    .set_progress(Some(&statusbar::indexing_label(p.done, p.total)));
                 // A walk is running, so the control beside the line is Stop. Set on every batch
                 // rather than once, which is also what turns Resume back into Stop.
                 self.statusbar.set_indexing(statusbar::Indexing::Running);
