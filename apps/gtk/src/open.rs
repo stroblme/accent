@@ -1188,13 +1188,17 @@ impl App {
         }
     }
 
-    /// A link named a heading `tab` does not have: the caret goes to its top, and a toast says
-    /// why it is there rather than where the link pointed. Go to Definition and a click in the
-    /// preview both end here.
+    /// A link named a heading or a block `tab` does not have: the caret goes to its top, and a
+    /// toast says why it is there rather than where the link pointed. Go to Definition and a
+    /// click in the preview both end here.
     pub fn no_heading(&self, tab: &Tab, anchor: &str) {
         tab.goto_pos(accent_api::Pos::default());
         let name = doc::file_name(&tab.rel()).to_string();
-        self.toast(&format!("No heading {anchor} in {name}"));
+        let what = match anchor.starts_with('^') {
+            true => "block",
+            false => "heading",
+        };
+        self.toast(&format!("No {what} {anchor} in {name}"));
     }
 
     /// Show the page and selection an anchor names, if the tab just opened is that PDF.

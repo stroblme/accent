@@ -197,6 +197,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Preview
 
 - A read-only WebKitGTK 6 view, the same clamp width, its stylesheet generated from `AdwStyleManager`; its images in the look their tabs have (Image).
+- A block's `^id` is not shown: its block carries it as its anchor, so `[text](#^id)` scrolls there as `[text](#slug)` does to a heading.
 - A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`), and only on a click — a redirect the page makes on its own opens nothing.
 
 ### Terminal
@@ -397,8 +398,8 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - **Completion** is `GtkSourceCompletion` with one provider: kind icon, label, the server's detail, and documentation in the details panel, resolved when a row is looked at. Accepting applies the server's own edit, snippet stops and imports included, as one undo step.
 - In a note, `[[` offers notes and `![[` every file; both write a note by its stem and anything else by its whole name, or by its path where the name would resolve to another file first.
 - `[[` also offers a note only linked to so far, after the real ones, by its path from the vault root and marked not created, so a second link reaches the same file once it is written; and a note by each front matter alias, written `[[Note|alias]]` because a link resolves by the file's name alone.
-- `[[Note#` (or `[[#`, this note) offers the note's headings by their text, as Obsidian links them.
-- A markdown link's destination, `[text](` or `![alt](`, offers every file by its percent-encoded path from the note's folder — how the index resolves it; the row reads the name, and what was typed matches anywhere in the vault. `[text](#` and `[text](Other.md#` offer headings by their GitHub slug; a link written with the heading text still resolves.
+- `[[Note#` (or `[[#`, this note) offers the note's headings by their text, as Obsidian links them, and `[[Note#^` its block ids, each beside the first line of the block it marks. A block id is Obsidian's: `^id` ending a paragraph, a list item or a heading marks it, and on a line of its own it marks the list, quote, table or block it follows.
+- A markdown link's destination, `[text](` or `![alt](`, offers every file by its percent-encoded path from the note's folder — how the index resolves it; the row reads the name, and what was typed matches anywhere in the vault. `[text](#` and `[text](Other.md#` offer headings by their GitHub slug, and block ids after `#^`; a link written with the heading text still resolves.
 - `#` offers tags, at the start of a line only once a letter follows a single `#`: writing a heading must not open a list.
 - **Hover** is the server's markdown as Pango markup, then every diagnostic at that position, all four severities: a hint shows nowhere else.
 - **Signature help** is a popover over the caret's line, the active parameter in bold, taking no grab so the call goes on being typed.
@@ -630,7 +631,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Code
 
-- Go to Definition `Ctrl+Shift+Return` / `F12` / Ctrl+click, one question for every text tab, asked about the text as it stands: on a note it follows a link — offering New File with the path typed in where nothing answers to it, and going to the top of the note with a toast for a heading the note does not have, as a click in the preview does — and an external link (any `scheme://`, `mailto:`, `tel:`, `sms:`; never `file:`, `javascript:` or `data:`) goes to the system. A bare `http(s)://` or `mailto:` URL under the caret opens in the browser from any text tab, ahead of the language server (a URL is not a symbol), and Ctrl+hover underlines it as it does a link.
+- Go to Definition `Ctrl+Shift+Return` / `F12` / Ctrl+click, one question for every text tab, asked about the text as it stands: on a note it follows a link — offering New File with the path typed in where nothing answers to it, and landing on the heading or the block (`#^id`) its anchor names, and going to the top of the note with a toast for one the note does not have, as a click in the preview does — and an external link (any `scheme://`, `mailto:`, `tel:`, `sms:`; never `file:`, `javascript:` or `data:`) goes to the system. A bare `http(s)://` or `mailto:` URL under the caret opens in the browser from any text tab, ahead of the language server (a URL is not a symbol), and Ctrl+hover underlines it as it does a link.
 - Fold / Unfold `Ctrl+Shift+[` / `Ctrl+Shift+]`, Fold All / Unfold All from the palette. Fold takes the innermost block holding the caret; the gutter chevron beside a block's first line is the same by pointer.
 - A shut block keeps to the lines it hid: text typed, pasted or inserted next to it stays in sight, and a line put between its header and what it hides opens it.
 - Nothing folds until a language server says what the blocks are, so there is no chevron column before it answers. Both chords carry Control and Shift, so they stay bound while a shell has the keyboard.

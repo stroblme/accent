@@ -187,9 +187,10 @@ use tags::bench_tags;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
 /// that offers to create it, with the name it arrives prefilled with. Then `[[#Nowhere]]`, which
 /// must put the caret on the note's first line and toast, as must a preview click on
-/// `[[#Elsewhere]]`, and a link typed at the end of a note past 16 K characters and followed at
-/// once, which must offer New File as well. Any text file will do for the underline: a `.txt` has
-/// no wikilinks, and its URL underlines all the same.
+/// `[[#Elsewhere]]`; `[[#^blk]]` followed both ways, which must land on the block it marks; and a
+/// link typed at the end of a note past 16 K characters and followed at once, which must offer New
+/// File as well. Any text file will do for the underline: a `.txt` has no wikilinks, and its URL
+/// underlines all the same.
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a

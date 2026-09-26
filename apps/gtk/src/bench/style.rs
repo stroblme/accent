@@ -538,10 +538,11 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
 /// Then `[[#Nowhere]]`, a heading the note does not have: `bad_anchor` prints the caret's line,
 /// which must be the top of the note, and the toast saying why; `preview_bad_anchor` the same for
 /// a click on `[[#Elsewhere]]` in the preview, which printed the caret's own line and no toast
-/// before the two shared a landing (`App::no_heading`). Last `late`: a link typed at the
-/// end of a note past 16 K characters and followed at once, before the pause its analysis waits
-/// for, which must offer New File as the first did — it printed `typed=None` while the server
-/// was sent the text only after that pause.
+/// before the two shared a landing (`App::no_heading`). Then `block` and `preview_block`, the
+/// same for a `^id` the note has and one it lacks. Last `late`: a link typed at the end of a note
+/// past 16 K characters and followed at once, before the pause its analysis waits for, which must
+/// offer New File as the first did — it printed `typed=None` while the server was sent the text
+/// only after that pause.
 async fn bench_dangling(app: Rc<App>, tab: Rc<Tab>) {
     app.go_to_definition();
     bench_new_file(&app, "dangling").await;
@@ -566,6 +567,32 @@ async fn bench_dangling(app: Rc<App>, tab: Rc<Tab>) {
     let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
     let said = super::compare::bench_toast(&app);
     println!("bench follow preview_bad_anchor caret_line={line} said={said:?}");
+
+    // A block id, followed from the editor and then as the preview hands it over: both put the
+    // caret on the paragraph the id ends, line 1, saying nothing; one the note lacks goes to
+    // the top and says it is a block. Each case with the toasts before it taken away.
+    let quiet = || async {
+        app.toasts.dismiss_all();
+        glib::timeout_future(Duration::from_millis(500)).await;
+    };
+    let link = 30;
+    quiet().await;
+    tab.set_text("# Intro\nfirst\nsecond ^blk\n\n[[#^blk]]\n");
+    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(link));
+    app.go_to_definition();
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    let said = super::compare::bench_toast(&app);
+    println!("bench follow block caret_line={line} said={said:?}");
+    for anchor in ["#^blk", "#^gone"] {
+        quiet().await;
+        tab.buffer.place_cursor(&tab.buffer.iter_at_offset(link));
+        app.open_target(anchor);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+        let said = super::compare::bench_toast(&app);
+        println!("bench follow preview_block {anchor} caret_line={line} said={said:?}");
+    }
 
     tab.set_text(&"word ".repeat(3400));
     // Past the server's refresh, so it holds the long text before the link is typed.
