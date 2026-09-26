@@ -656,6 +656,81 @@ fn zlib_stored(raw: &[u8]) -> Vec<u8> {
     z
 }
 
+/// An 8-bit PNG of `w` × `h` pixels, RGB with 3 `channels` and RGBA with 4, in one stored
+/// deflate stream.
+fn png_of(w: usize, h: usize, channels: usize, px: &[u8]) -> Vec<u8> {
+    // One filter byte (0 = None) in front of every scanline.
+    let mut raw = Vec::with_capacity(h * (1 + w * channels));
+    for row in px.chunks(w * channels) {
+        raw.push(0);
+        raw.extend_from_slice(row);
+    }
+    let colour_type = if channels == 4 { 6 } else { 2 }; // truecolour, with alpha or without
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&(w as u32).to_be_bytes());
+    ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+    ihdr.extend_from_slice(&[8, colour_type, 0, 0, 0]); // 8 bits, no interlace
+    let mut v = Vec::with_capacity(raw.len() + 128);
+    v.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+    png_chunk(&mut v, b"IHDR", &ihdr);
+    png_chunk(&mut v, b"IDAT", &zlib_stored(&raw));
+    png_chunk(&mut v, b"IEND", b"");
+    v
+}
+
+/// A figure image auto-theming should recolour: a white bar chart, black axes and bars, and
+/// one line in matplotlib's blue.
+fn figure_png() -> Vec<u8> {
+    let (w, h) = (320, 200);
+    let mut px = vec![255u8; w * h * 3];
+    let mut paint = |xs: std::ops::Range<usize>, ys: std::ops::Range<usize>, c: [u8; 3]| {
+        for y in ys {
+            for x in xs.clone() {
+                px[(y * w + x) * 3..][..3].copy_from_slice(&c);
+            }
+        }
+    };
+    paint(30..32, 20..180, [0; 3]);
+    paint(30..300, 178..180, [0; 3]);
+    for (i, top) in [120, 80, 140, 60, 100].into_iter().enumerate() {
+        paint(50 + i * 50..74 + i * 50, top..178, [0; 3]);
+    }
+    for x in 32..300 {
+        let y = (100.0 + 50.0 * (x as f64 / 30.0).sin()) as usize;
+        paint(x..x + 1, y..y + 3, [0x1f, 0x77, 0xb4]);
+    }
+    png_of(w, h, 3, &px)
+}
+
+/// Line art on nothing, as a scanner or a drawing app exports it: black strokes, a ring and a
+/// diagonal, on transparent pixels.
+fn lineart_png() -> Vec<u8> {
+    let (w, h) = (200, 200);
+    let mut px = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let (dx, dy) = (x as f64 - 100.0, y as f64 - 100.0);
+            let ring = ((dx * dx + dy * dy).sqrt() - 80.0).abs() < 1.5;
+            if ring || (dx - dy).abs() < 2.0 {
+                px[(y * w + x) * 4 + 3] = 255;
+            }
+        }
+    }
+    png_of(w, h, 4, &px)
+}
+
+/// The SVG one: black strokes and a label on a transparent canvas.
+const FIGURE_SVG: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">
+  <g fill="none" stroke="#000" stroke-width="2">
+    <path d="M40 20V170H300"/>
+    <path d="M40 150C100 40 180 40 290 120"/>
+    <rect x="200" y="30" width="80" height="40" rx="6"/>
+  </g>
+  <text x="240" y="55" font-family="sans-serif" font-size="14" text-anchor="middle">label</text>
+</svg>
+"##;
+
 /// A JPEG marker segment: 0xFF, the marker, and a big-endian length that counts itself.
 fn jpg_seg(out: &mut Vec<u8>, marker: u8, body: &[u8]) {
     out.extend_from_slice(&[0xFF, marker]);
@@ -711,22 +786,7 @@ impl Gen {
         let h = (n / (3 * w + 1)).max(1);
         let mut px = Vec::with_capacity(w * h * 3);
         self.payload(w * h * 3, &mut px);
-        // One filter byte (0 = None) in front of every scanline.
-        let mut raw = Vec::with_capacity(h * (1 + w * 3));
-        for row in px.chunks(w * 3) {
-            raw.push(0);
-            raw.extend_from_slice(row);
-        }
-        let mut ihdr = Vec::with_capacity(13);
-        ihdr.extend_from_slice(&(w as u32).to_be_bytes());
-        ihdr.extend_from_slice(&(h as u32).to_be_bytes());
-        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8 bits, truecolour, no interlace
-        let mut v = Vec::with_capacity(n + 128);
-        v.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-        png_chunk(&mut v, b"IHDR", &ihdr);
-        png_chunk(&mut v, b"IDAT", &zlib_stored(&raw));
-        png_chunk(&mut v, b"IEND", b"");
-        v
+        png_of(w, h, 3, &px)
     }
 
     /// A baseline JPEG of roughly `n` bytes: a grey diagonal ramp, one flat 8x8 block per step.
@@ -1022,10 +1082,10 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     let venv_in = (files / 40).clamp(2, 1000);
     let venv_ext = (files / 20).clamp(4, 2000);
 
-    // 30: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
-    // Syncthing artefacts, pyvenv.cfg, the five-page PDF), which the bulk fill has to leave room
-    // for.
-    let floor = notes + 30 + venv_in + flat_imgs + flat_pdfs + excal;
+    // 34: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
+    // Syncthing artefacts, pyvenv.cfg, the five-page PDF, the image-theming figures and their
+    // note), which the bulk fill has to leave room for.
+    let floor = notes + 34 + venv_in + flat_imgs + flat_pdfs + excal;
     if files < floor {
         bail!("--files {files} is too small for --notes {notes}: need at least {floor}");
     }
@@ -1323,6 +1383,20 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
         g.write(&format!("Attachments/{name}"), &b)?;
     }
     g.write("Attachments/pages.pdf", &Gen::pages_pdf(5))?;
+    // Image auto-theming's drill inputs: three figures a dark theme recolours, and a photo (noise,
+    // to the classifier) it leaves alone.
+    g.write("Attachments/figure.png", &figure_png())?;
+    g.write("Attachments/lineart.png", &lineart_png())?;
+    g.write("Attachments/figure.svg", FIGURE_SVG.as_bytes())?;
+    g.write(
+        "Notes-QC/Figures.md",
+        b"# Figures\n\n\
+          Three figures a dark theme puts on its own paper, and a photo it leaves alone.\n\n\
+          ![[Attachments/figure.png]]\n\n\
+          ![[Attachments/lineart.png]]\n\n\
+          ![[Attachments/figure.svg]]\n\n\
+          ![[Attachments/img-0.png]]\n",
+    )?;
     g.mkdir("Attachments/Excalidraw")?;
     for i in 0..excal {
         let n = g.rng.range(8 * 1024, 40 * 1024);
@@ -1562,6 +1636,17 @@ mod tests {
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(&png[12..16], b"IHDR");
         assert!(png.ends_with(&[0xAE, 0x42, 0x60, 0x82]), "IEND and its CRC");
+        // Image auto-theming's figures, one with alpha, and the note that embeds them.
+        let lineart = fs::read(vault.join("Attachments/lineart.png")).unwrap();
+        assert_eq!(lineart[25], 6, "RGBA colour type");
+        let figures = fs::read_to_string(vault.join("Notes-QC/Figures.md")).unwrap();
+        for f in ["figure.png", "lineart.png", "figure.svg", "img-0.png"] {
+            assert!(vault.join("Attachments").join(f).is_file(), "{f}");
+            assert!(
+                figures.contains(&format!("![[Attachments/{f}]]")),
+                "{figures}"
+            );
+        }
 
         // The files that are not notes.
         for f in [
