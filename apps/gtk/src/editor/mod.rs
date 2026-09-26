@@ -1524,7 +1524,7 @@ impl Tab {
     }
 
     /// Re-read the buffer once and refresh everything derived from it: the styling tags, and the
-    /// link table that Ctrl+click and Ctrl+Return follow. The preview listens on `on_edited` and
+    /// link table the Ctrl+hover underline reads. The preview listens on `on_edited` and
     /// debounces its own re-render, so calling this per keystroke only re-arms that timer.
     fn reanalyse(self: &Rc<Self>) {
         self.analyse_text();

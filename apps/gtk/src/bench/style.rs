@@ -458,17 +458,53 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
             probe("ctrl_released", "Other", false);
             let caret = tab.buffer.iter_at_offset(at("Nowhere"));
             tab.buffer.place_cursor(&caret);
-            glib::spawn_future_local(bench_dangling(app));
+            glib::spawn_future_local(bench_dangling(app, tab));
         });
     });
 }
 
 /// Follow the link under the caret, which nothing in the vault answers to, the way F12, the
 /// chord and a Ctrl+click do: New File comes up with the path the link spells already typed in,
-/// its anchor and alias left out. Both the resolve and the vault's templates arrive from a worker,
-/// so the dialog is waited for rather than assumed. Cancelling it is [`bench_close`]'s drill.
-async fn bench_dangling(app: Rc<App>) {
+/// its anchor and alias left out.
+///
+/// Then `[[#Nowhere]]`, a heading the note does not have: `bad_anchor` prints the caret's line,
+/// which must be the top of the note, and the toast saying why. Last `late`: a link typed at the
+/// end of a note past 16 K characters and followed at once, before the pause its analysis waits
+/// for, which must offer New File as the first did — it printed `typed=None` while the server
+/// was sent the text only after that pause.
+async fn bench_dangling(app: Rc<App>, tab: Rc<Tab>) {
     app.go_to_definition();
+    bench_new_file(&app, "dangling").await;
+    // Past the close animation, so the last case waits for a dialog of its own.
+    glib::timeout_future(Duration::from_millis(500)).await;
+
+    tab.set_text("# Intro\ntext\n[[#Nowhere]]\n");
+    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(18));
+    app.go_to_definition();
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    let said = super::compare::bench_toast(&app);
+    println!("bench follow bad_anchor caret_line={line} said={said:?}");
+
+    tab.set_text(&"word ".repeat(3400));
+    // Past the server's refresh, so it holds the long text before the link is typed.
+    glib::timeout_future(Duration::from_millis(600)).await;
+    tab.buffer
+        .insert(&mut tab.buffer.end_iter(), "[[Nowhere/Late]]");
+    tab.buffer
+        .place_cursor(&tab.buffer.iter_at_offset(tab.buffer.char_count() - 4));
+    app.go_to_definition();
+    // The typed link is the drill's, not the note's: it stops counting as an edit before the
+    // dialog takes the focus from the view, which is a save.
+    tab.discard();
+    bench_new_file(&app, "late").await;
+    bench_quit(&app);
+}
+
+/// Wait for the New File a followed link offers and print its heading and the name it arrives
+/// with, then close it. Both the resolve and the vault's templates arrive from a worker, so the
+/// dialog is waited for rather than assumed. What cancelling it leaves is [`bench_close`]'s drill.
+async fn bench_new_file(app: &Rc<App>, case: &str) {
     for _ in 0..40 {
         if app.window.visible_dialog().is_some() {
             break;
@@ -486,10 +522,12 @@ async fn bench_dangling(app: Rc<App>) {
         .and_downcast::<gtk::Entry>()
         .map(|entry| entry.text());
     println!(
-        "bench follow dangling heading={:?} typed={typed:?}",
-        dialog.and_then(|d| d.heading())
+        "bench follow {case} heading={:?} typed={typed:?}",
+        dialog.as_ref().and_then(|d| d.heading())
     );
-    bench_quit(&app);
+    if let Some(dialog) = dialog {
+        dialog.close();
+    }
 }
 
 /// Walk the window through the themes and print what a note's own tags are painted in on each

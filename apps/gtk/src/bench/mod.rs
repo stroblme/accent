@@ -177,8 +177,10 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
-/// that offers to create it, with the name it arrives prefilled with. Any text file will do: a
-/// `.txt` has no wikilinks, and its URL underlines all the same.
+/// that offers to create it, with the name it arrives prefilled with. Then `[[#Nowhere]]`, which
+/// must put the caret on the note's first line and toast, and a link typed at the end of a note
+/// past 16 K characters and followed at once, which must offer New File as well. Any text file
+/// will do for the underline: a `.txt` has no wikilinks, and its URL underlines all the same.
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a
