@@ -1402,7 +1402,7 @@ impl PdfTab {
 ///
 /// Must be called on the main thread: `theme.rs` holds the chosen theme in thread-local state.
 pub(super) fn theme_of(dark: bool) -> pdf::Theme {
-    match crate::theme::pdf_colours(dark) {
+    match crate::theme::page_colours(dark) {
         Some((paper, ink)) => pdf::Theme::Recolour { paper, ink },
         None => pdf::Theme::Plain,
     }

@@ -165,19 +165,30 @@ pub fn terminal_palette(dark: bool) -> &'static [&'static str; 16] {
     }
 }
 
-/// The paper and ink a PDF page is recoloured onto, or `None` to leave it exactly as the
-/// document defines it.
+/// A page's paper and ink, the two ends of the ramp `accent_core::recolour` puts it on.
+pub type Page = ([u8; 3], [u8; 3]);
+
+/// The paper and ink a PDF page or a document-like image is recoloured onto, or `None` to leave
+/// it exactly as the file defines it.
 ///
 /// A light theme leaves a page alone: white paper on a white view is what the author intended
 /// and what a printout looks like. Every other theme is asking for the page to belong to the
 /// window, so it is remapped — which is also how Solarized gets its cream paper rather than a
 /// white rectangle in the middle of a cream window.
-pub fn pdf_colours(dark: bool) -> Option<([u8; 3], [u8; 3])> {
+pub fn page_colours(dark: bool) -> Option<Page> {
     match (CHOICE.get(), dark) {
-        (Theme::Solarized, true) => Some((rgb(DARK_BASE), rgb(DARK_TEXT))),
+        (_, true) => Some(dark_page()),
         (Theme::Solarized, false) => Some((rgb(LIGHT_BASE), rgb(LIGHT_TEXT))),
-        (_, true) => Some((rgb(VIEW_DARK), rgb(VIEW_DARK_TEXT))),
         (_, false) => None,
+    }
+}
+
+/// The page of the theme's dark half, which is also where an image the light half leaves alone
+/// goes when the reader inverts it.
+pub fn dark_page() -> Page {
+    match CHOICE.get() {
+        Theme::Solarized => (rgb(DARK_BASE), rgb(DARK_TEXT)),
+        _ => (rgb(VIEW_DARK), rgb(VIEW_DARK_TEXT)),
     }
 }
 

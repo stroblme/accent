@@ -289,6 +289,7 @@ pub fn build_window(
         references: RefCell::new(None),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
+        inverted_images: Rc::default(),
         told_unheld: Cell::new(false),
         split,
         sidebar_column,

@@ -778,17 +778,93 @@ impl App {
                 }
             ),
         );
-        // The picture widget needs real bytes, and the protocol deliberately carries none.
-        let (viewer, picture) = (Rc::downgrade(&image), picture.downgrade());
+        // The decoder needs real bytes, and the protocol deliberately carries none.
+        let viewer = Rc::downgrade(&image);
         self.local_copy(key, path, move |app, copy| {
-            let (Some(image), Some(picture)) = (viewer.upgrade(), picture.upgrade()) else {
+            let Some(image) = viewer.upgrade() else {
                 return;
             };
             match copy {
-                Ok(copy) => picture.set_filename(Some(copy)),
+                Ok(copy) => app.show_image(&image, Some(copy)),
                 Err(e) => app.gone(image.key(), &image.page, e),
             }
         });
+    }
+
+    /// Show an image tab's file under the look in force, decoded and recoloured off the main
+    /// loop: read from `read` when given (opening, a reload), else recoloured again from the
+    /// texture it was read to, which a restyle that changes nothing for this image skips.
+    ///
+    /// Only the latest call's answer lands, and a read that lands under a look that has moved on
+    /// since asks again, so a theme change or an inversion while a large file decodes is kept.
+    pub(crate) fn show_image(self: &Rc<Self>, image: &Rc<doc::Viewer>, read: Option<PathBuf>) {
+        let wanted = (
+            look::Look::now(),
+            self.inverted_images.borrow().contains(&image.key()),
+        );
+        let (path, original) = match read {
+            // What is on screen is of the old contents, so a restyle meanwhile waits for these.
+            Some(path) => {
+                image.image.take();
+                (path, None)
+            }
+            None => match image.image.borrow().clone() {
+                _ if image.look.get() == Some(wanted) => return,
+                Some((path, texture)) => (path, Some(texture)),
+                // Still being read, under a look its landing will find is not this one.
+                None => return,
+            },
+        };
+        image.look.set(Some(wanted));
+        let ticket = image.shows.get().wrapping_add(1);
+        image.shows.set(ticket);
+        let (app, image) = (Rc::downgrade(self), Rc::downgrade(image));
+        glib::spawn_future_local(async move {
+            let ((look, inverted), from) = (wanted, path.clone());
+            let shown =
+                work::off_thread("image", move || look::show(&from, original, look, inverted))
+                    .await;
+            let (Some(app), Some(image)) = (app.upgrade(), image.upgrade()) else {
+                return;
+            };
+            let Some(picture) = picture_of(&image.page).filter(|_| image.shows.get() == ticket)
+            else {
+                return;
+            };
+            match shown {
+                Some(Ok(shown)) => {
+                    picture.set_paintable(Some(&shown.texture));
+                    // The size a zoomed picture asks for is worked out from its paintable, so a
+                    // file of another size would be drawn at its own while the readout kept the
+                    // old percentage. Asked again of this one, so the zoom means the same thing
+                    // either side of a reload.
+                    zoom::set_image_zoom(&picture, image.zoom.get());
+                    *image.image.borrow_mut() = Some((path, shown.original));
+                    app.show_image(&image, None);
+                }
+                // A file that never showed goes the way one that never arrived does; one that
+                // did keeps its last contents up.
+                Some(Err(e)) if picture.paintable().is_none() => {
+                    app.gone(image.key(), &image.page, std::io::Error::other(e))
+                }
+                Some(Err(e)) => app.cannot("reload", e),
+                None => app.cannot("reload", "the image worker stopped"),
+            }
+        });
+    }
+
+    /// Invert Image Colours over `key`: recolour it if the theme leaves it alone, show it as it
+    /// is if the theme recolours it, in its tabs and in the preview, until the app quits.
+    pub(crate) fn invert_image(self: &Rc<Self>, key: &str) {
+        {
+            let mut inverted = self.inverted_images.borrow_mut();
+            if !inverted.remove(key) {
+                inverted.insert(key.to_string());
+            }
+        }
+        for image in self.images().iter().filter(|image| image.key() == key) {
+            self.show_image(image, None);
+        }
     }
 
     /// Hand `landed` the path on *this* machine holding `key`'s bytes, for the readers that cannot
