@@ -1,6 +1,8 @@
 //! A drill over a zoomed image whose file changes size under it.
 
 use super::*;
+use crate::look::Look;
+use accent_core::config::Theme;
 
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` opens `<rel_png>`, zooms it one step off the fit
 /// so it asks for a size of its own, then copies `<rel_other_png>` over it — an image of another
@@ -60,5 +62,83 @@ fn image_state(app: &Rc<App>, when: &str) {
         picture.width(),
         picture.height(),
         crate::zoom::image_zoom_label(&image),
+    );
+}
+
+/// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` opens each image under Dark, printing how long it took
+/// to appear (decoded, classified and recoloured), then walks it through Light, Dark and
+/// Solarized, printing what the classifier said of it, whether the tab shows it recoloured, the
+/// pixel at (2,2) of what it shows and the paintable's type — then the same with Invert Image
+/// Colours on. `ms` is the worker's recolouring of the decoded texture, timed by calling it here.
+pub(super) fn bench_image_look(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        for rel in rels {
+            crate::theme::apply(Theme::Dark);
+            let t = Instant::now();
+            app.open_path(&rel);
+            let Some(Doc::Image(image)) = app.active_doc() else {
+                println!("bench image_look {rel} no_tab");
+                continue;
+            };
+            while image.image.borrow().is_none() && t.elapsed() < Duration::from_secs(20) {
+                glib::timeout_future(Duration::from_millis(2)).await;
+            }
+            println!("bench image_look {rel} appeared_ms={:.1}", ms_since(t));
+            for theme in [Theme::Light, Theme::Dark, Theme::Solarized] {
+                crate::theme::apply(theme);
+                app.restyle_all();
+                glib::timeout_future(Duration::from_millis(800)).await;
+                look_state(&image, &rel, theme, false);
+                let _ = WidgetExt::activate_action(&app.window, "win.image-invert", None);
+                glib::timeout_future(Duration::from_millis(800)).await;
+                look_state(&image, &rel, theme, true);
+                let _ = WidgetExt::activate_action(&app.window, "win.image-invert", None);
+            }
+        }
+        bench_quit(&app);
+    });
+}
+
+/// One `bench image_look` line for the image in `image`'s tab.
+fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
+    let shown = picture_of(&image.page).and_then(|p| p.paintable());
+    let read = image.image.borrow().clone();
+    let (Some(shown), Some((path, original))) = (shown, read) else {
+        return println!("bench image_look {rel} theme={theme:?} not_shown");
+    };
+    let verdict = match crate::look::verdict(&path) {
+        Some(v) => format!(
+            "document={} paper={:.2} colours={}",
+            v.document, v.paper, v.colours
+        ),
+        None => "document=- paper=- colours=-".to_string(),
+    };
+    let px = shown
+        .downcast_ref::<gdk::Texture>()
+        .map(|t| {
+            let mut downloader = gdk::TextureDownloader::new(t);
+            downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+            let (bytes, stride) = downloader.download_bytes();
+            let at = 2 * stride + 2 * 4;
+            format!(
+                "{},{},{},{}",
+                bytes[at],
+                bytes[at + 1],
+                bytes[at + 2],
+                bytes[at + 3]
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
+    let recoloured = shown.downcast_ref::<gdk::Texture>() != Some(&original);
+    let t = Instant::now();
+    let _ = crate::look::show(&path, Some(original), Look::now(), inverted);
+    println!(
+        "bench image_look {rel} theme={theme:?} dark={} inverted={inverted} {verdict} \
+         recoloured={recoloured} px(2,2)={px} type={} ms={:.1}",
+        adw::StyleManager::default().is_dark(),
+        shown.type_().name(),
+        ms_since(t),
     );
 }

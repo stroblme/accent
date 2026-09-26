@@ -190,6 +190,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-fit-width", "Fit Width", &[]),
     ("win.pdf-fit-page", "Fit Height", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
+    ("win.image-invert", "Invert Image Colours", &[]),
     ("win.pdf-copy", "Copy Selection", &[]),
     // No accelerator here for the same reason the paging commands have none: `Ctrl+Z` over a
     // note is GtkSourceView's own undo, and an application accelerator would take it from every
@@ -403,6 +404,7 @@ impl App {
             "back" => self.navigate(false),
             "forward" => self.navigate(true),
             "pdf-invert" => self.with_pdf(|pdf| pdf.toggle_invert()),
+            "image-invert" => self.with_image(|image| self.invert_image(&image.key())),
             "pdf-copy" => self.with_pdf(|pdf| pdf.copy_selection()),
             // The header's Undo and Redo fire these over a diagram too.
             "pdf-undo" => match self.active_diagram() {
@@ -612,6 +614,13 @@ impl App {
     fn with_pdf(&self, f: impl FnOnce(&Rc<pdftab::PdfTab>)) {
         if let Some(pdf) = self.active_pdf() {
             f(&pdf);
+        }
+    }
+
+    /// The same for the actions that only mean something over an image.
+    fn with_image(&self, f: impl FnOnce(&Rc<doc::Viewer>)) {
+        if let Some(Doc::Image(image)) = self.active_doc() {
+            f(&image);
         }
     }
 

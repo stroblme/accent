@@ -30,6 +30,7 @@ mod highlight;
 mod hover;
 mod lang;
 mod layout;
+mod look;
 mod marks;
 mod multicaret;
 mod nav;
@@ -270,6 +271,9 @@ struct App {
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
     preview: RefCell<Option<preview::Preview>>,
+    /// The images Invert Image Colours has turned round, by key, until the app quits: in their
+    /// tabs and in the preview alike, which reads it as it serves each image.
+    inverted_images: Rc<RefCell<HashSet<String>>>,
     /// Whether this window has said that its shells are not held (no `accent-cli` beside it).
     told_unheld: Cell<bool>,
     /// Every file and every tag in the vault, as the palette lists them. Kept warm in the
@@ -557,6 +561,17 @@ impl App {
             .borrow()
             .iter()
             .filter_map(|d| d.pdf().cloned())
+            .collect()
+    }
+
+    fn images(&self) -> Vec<Rc<doc::Viewer>> {
+        self.docs
+            .borrow()
+            .iter()
+            .filter_map(|d| match d {
+                Doc::Image(image) => Some(image.clone()),
+                _ => None,
+            })
             .collect()
     }
 
@@ -863,7 +878,7 @@ impl App {
 
     /// Re-colour what this window paints itself rather than through GTK's CSS, after the theme or
     /// the accent moved: the notes' tags and schemes, both sides of a comparison, the PDF pages,
-    /// the preview and the shells.
+    /// the images, the preview and the shells.
     ///
     /// One turn of the main loop later, never inside the change itself. `AdwStyleManager` raises
     /// `notify::dark` *before* it swaps the stylesheet on the display, so for the whole of that
@@ -883,7 +898,7 @@ impl App {
 
     /// The pass itself, once the cascade has settled. Split out only so the deferral above is the
     /// one thing [`App::restyle_all`] says.
-    fn restyle_now(&self) {
+    fn restyle_now(self: &Rc<Self>) {
         for tab in self.open_tabs() {
             tab.restyle();
         }
@@ -894,6 +909,10 @@ impl App {
         // of whatever is on screen.
         for pdf in self.pdfs() {
             pdf.restyle();
+        }
+        // An image is recoloured again from the texture it was read to.
+        for image in self.images() {
+            self.show_image(&image, None);
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.restyle();
