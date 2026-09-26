@@ -14,8 +14,8 @@ mod spans;
 pub use blocks::{BlockId, block_ids};
 pub use html::{math_errors, mathml, to_html};
 pub use links::{
-    Repaged, anchor_range, heading_for, is_image, is_url, link_key, path_keys, pdf_anchor,
-    percent_decode, percent_encode, repage_links, rewrite_moved, slugs, strip_ext,
+    Repaged, anchor_range, heading_for, is_image, is_url, link_key, path_keys, path_link_keys,
+    pdf_anchor, percent_decode, percent_encode, repage_links, rewrite_moved, slugs, strip_ext,
 };
 
 use frontmatter::{frontmatter, scan_tags};

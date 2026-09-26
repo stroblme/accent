@@ -373,6 +373,35 @@ impl Local {
         Ok(true)
     }
 
+    /// `text`, the note at `from`, as its copy at `to` has to read for every relative link,
+    /// reference definition and HTML `src`/`href` in it to name the file it named: what Save As
+    /// writes, the original left as it is. `None` when no path needs it. The text is the caller's,
+    /// unsaved edits and all, so its paths are resolved here rather than read from what the index
+    /// holds for `from`.
+    pub fn relink_copy(&self, from: &str, to: &str, text: &str) -> Result<Option<String>> {
+        let targets = self.path_targets(from, text)?;
+        Ok(markdown::rewrite_moved(
+            text,
+            from,
+            to,
+            &targets,
+            &HashMap::new(),
+        ))
+    }
+
+    /// What every path `text` spells from the note at `rel` resolves to
+    /// ([`markdown::path_link_keys`]), asked of the index one by one.
+    fn path_targets(&self, rel: &str, text: &str) -> Result<HashMap<String, String>> {
+        let index = self.index();
+        let mut out = HashMap::new();
+        for key in markdown::path_link_keys(text, rel) {
+            if let Some(file) = index.resolve_target(&key)? {
+                out.insert(key, file);
+            }
+        }
+        Ok(out)
+    }
+
     /// Point every note link into the PDF `rel` at where `edit` took the page it names, each note
     /// read, rewritten and written back through the etag gate as a rename's are.
     ///
@@ -430,10 +459,13 @@ impl Local {
         edit: PageEdit,
         keep: &[(String, usize)],
     ) -> Result<markdown::Repaged> {
-        let targets: HashMap<String, String> =
+        let mut targets: HashMap<String, String> =
             self.index().resolved_links(note)?.into_iter().collect();
         let path = self.resolve(note)?;
         let (text, etag) = fs::read_note(&path)?;
+        // A reference definition or an HTML `href` is no link the index holds, and may spell a
+        // path none of the note's links does.
+        targets.extend(self.path_targets(note, &text)?);
         let done = markdown::repage_links(&text, note, pdf, &targets, edit, keep);
         if let Some(rewritten) = &done.text {
             fs::write_note(&path, rewritten, Some(etag))?;
@@ -763,6 +795,35 @@ mod tests {
         ));
     }
 
+    /// Save As's copy in another folder points its paths back at what the note's pointed at, the
+    /// unsaved `<img>` included, and leaves the wikilink and the original alone.
+    #[test]
+    fn a_copy_elsewhere_keeps_its_relative_links() {
+        let note = "[x](../b.md) ![](img.png) [r][r] [[b]]\n\n[r]: sub/c.md\n";
+        let f = vault_of(&[
+            ("a/n.md", note),
+            ("b.md", "b\n"),
+            ("a/img.png", "png"),
+            ("a/sub/c.md", "c\n"),
+        ]);
+        let typed = format!("{note}<img src=\"img.png\">\n");
+        assert_eq!(
+            f.vault
+                .relink_copy("a/n.md", "x/y/copy.md", &typed)
+                .unwrap()
+                .as_deref(),
+            Some(concat!(
+                "[x](../../b.md) ![](../../a/img.png) [r][r] [[b]]\n\n",
+                "[r]: ../../a/sub/c.md\n<img src=\"../../a/img.png\">\n"
+            ))
+        );
+        assert_eq!(
+            f.vault.relink_copy("a/n.md", "a/m.md", &typed).unwrap(),
+            None
+        );
+        assert_eq!(f.read("a/n.md"), note);
+    }
+
     /// A page edit carries every link into the PDF with it, in every note, and the Undo of a
     /// delete puts back exactly what it changed.
     #[test]
@@ -815,6 +876,26 @@ mod tests {
         assert_eq!(
             f.read("a.md"),
             "[[paper.pdf#page=3&selection=0,0,0,4|Hi]] [[paper.pdf#page=1]]\n"
+        );
+    }
+
+    /// A reference definition and an HTML `href` follow a page edit, also where no link the index
+    /// holds spells their path: `[[paper]]` is keyed by the name alone.
+    #[test]
+    fn a_page_edit_follows_the_paths_no_link_spells() {
+        let f = vault_of(&[
+            ("paper.pdf", "%PDF-1.4\n"),
+            (
+                "c.md",
+                "[[paper#page=2]] <a href=\"paper.pdf#page=1\">one</a>\n\n[d]: paper.pdf#page=3\n",
+            ),
+        ]);
+        let move_first = crate::PageEdit::Move { from: 0, to: 2 };
+        let report = f.vault.repage_links("paper.pdf", move_first, &[]).unwrap();
+        assert_eq!(report.moved, 3);
+        assert_eq!(
+            f.read("c.md"),
+            "[[paper#page=1]] <a href=\"paper.pdf#page=3\">one</a>\n\n[d]: paper.pdf#page=2\n"
         );
     }
 

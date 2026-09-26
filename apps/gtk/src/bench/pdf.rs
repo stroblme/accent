@@ -57,22 +57,24 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
 /// and the first page deleted through the window actions — at once, no dialog being asked —
 /// each followed to the file. Then Undo walks all four back through the window's action, newest
 /// first, and Redo makes them again, the file read after each. A note linking into pages 1 to 3
-/// (a highlight, a jump and a markdown link) is written and opened in a tab first, and after every
-/// step its links' pages are printed as the file and the tab's buffer hold them, with what the
-/// toast said, if it said anything. Then the items of the two
+/// (a highlight, a jump, a markdown link, an HTML `href` and a reference definition) is written
+/// and opened in a tab first, and after every step its links' pages are printed as the file and
+/// the tab's buffer hold them, with what the toast said, if it said anything; it is renamed
+/// between the delete and its Undo, which finds the links the delete left by the new name. Then
+/// the items of the two
 /// menus that offer them: the page's own, without a selection and with one, and the status bar's
 /// page count, opened as a click does. What a headless run cannot reach is the pointer's half: the
 /// drag itself, the buttons on hover, the drop bar and the scroll at the strip's edge.
 pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
-        let note = linked_note(&app, &rel).await;
+        let note = RefCell::new(linked_note(&app, &rel).await);
         let Some(pdf) = opened(&app, &rel).await else {
             println!("bench pages no_tab");
             return bench_quit(&app);
         };
         let said = Cell::new(app.toasted.get());
-        let links = || links_read(&app, &pdf, &note, &said);
+        let links = || links_read(&app, &pdf, &note.borrow(), &said);
         println!("bench pages opened {} {}", pages_read(&pdf), links());
         pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 2 });
         written(&app).await;
@@ -95,6 +97,13 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
             pages_read(&pdf),
             links()
         );
+        if let Some(ops) = app.ops().cloned() {
+            let to = "Page links renamed.md".to_string();
+            crate::fileops::move_all(&ops, vec![(note.borrow().clone(), to.clone())]);
+            written(&app).await;
+            note.replace(to);
+            println!("bench pages renamed {}", links());
+        }
         let walks = [
             (
                 "undo",
@@ -282,13 +291,15 @@ fn pages_read(pdf: &pdftab::PdfTab) -> String {
 }
 
 /// Write `Page links.md` at the vault root, linking into pages 1 to 3 of `pdf` as a highlight,
-/// a jump and a markdown link, wait until the index has it as one of the PDF's backlinks, and open
+/// a jump, a markdown link, an HTML `href` into page 2 and a reference definition into page 1,
+/// wait until the index has it as one of the PDF's backlinks, and open
 /// it in a tab, which a rewrite has to reload.
 async fn linked_note(app: &Rc<App>, pdf: &str) -> String {
     let note = "Page links.md".to_string();
+    let encoded = accent_core::markdown::percent_encode(pdf);
     let text = format!(
-        "[[{pdf}#page=1&selection=0,0,0,4|Page]] [[{pdf}#page=2]] [three]({}#page=3)\n",
-        accent_core::markdown::percent_encode(pdf)
+        "[[{pdf}#page=1&selection=0,0,0,4|Page]] [[{pdf}#page=2]] [three]({encoded}#page=3)\n\
+         <a href=\"{encoded}#page=2\">two</a> [one][d]\n\n[d]: {encoded}#page=1\n"
     );
     let Some(vault) = app.vault().cloned() else {
         return note;

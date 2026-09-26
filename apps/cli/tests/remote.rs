@@ -389,7 +389,10 @@ fn a_remote_vault_connects_indexes_and_answers() {
 
     // A page edit's links are rewritten on the host, where the notes and the index are.
     vault
-        .write_file("e.md", b"[[paper.pdf#page=1]] [t](paper.pdf#page=2)\n")
+        .write_file(
+            "e.md",
+            b"[[paper.pdf#page=1]] [t](paper.pdf#page=2)\n\n[d]: paper.pdf#page=1\n",
+        )
         .unwrap();
     assert!(
         eventually(|| vault
@@ -401,11 +404,19 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let report = vault.repage_links("paper.pdf", moved, &[]).unwrap();
     assert_eq!(
         (report.rewritten, report.moved),
-        (vec!["e.md".to_string()], 2)
+        (vec!["e.md".to_string()], 3)
     );
     assert_eq!(
         vault.read("e.md").unwrap().0,
-        "[[paper.pdf#page=2]] [t](paper.pdf#page=1)\n"
+        "[[paper.pdf#page=2]] [t](paper.pdf#page=1)\n\n[d]: paper.pdf#page=2\n"
+    );
+    // Save As's copy in another folder has its paths pointed back by the host's index.
+    assert_eq!(
+        vault
+            .relink_copy("e.md", "x/copy.md", "[t](paper.pdf#page=1) [[paper.pdf]]\n")
+            .unwrap()
+            .as_deref(),
+        Some("[t](../paper.pdf#page=1) [[paper.pdf]]\n")
     );
 
     // Closing the vault takes the server and every forward it still has off the host. The master

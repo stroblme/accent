@@ -275,8 +275,8 @@ pub fn path_keys(rel: &str) -> Vec<String> {
 /// note's folder, percent-encoded, its `#anchor` untouched.
 ///
 /// Two path forms the parser does not hand over as links are scanned for as well: reference-style
-/// `[ref]: path "title"` definitions ([`definition_edits`]) and the `src`/`href` of the HTML a
-/// note holds ([`html_edits`]).
+/// `[ref]: path "title"` definitions and the `src`/`href` of the HTML a note holds
+/// ([`scanned_paths`]).
 pub fn rewrite_moved(
     text: &str,
     src_old: &str,
@@ -311,8 +311,9 @@ pub fn rewrite_moved(
         };
         edits.extend(edit);
     }
-    edits.extend(definition_edits(text, &analysis, &m));
-    edits.extend(html_edits(text, &analysis, &m));
+    for at in scanned_paths(text, &analysis) {
+        edits.extend(m.edit(text, at));
+    }
     // Back to front, so the earlier offsets stay valid. Links nest (an image inside a link), but
     // the bytes rewritten for each never overlap.
     edits.sort_by_key(|(at, _)| std::cmp::Reverse(at.start));
@@ -352,14 +353,11 @@ impl Moved<'_> {
     /// index resolved it to a file *before* the move, which is what leaves an `https://` URL, a
     /// bare `#anchor` and a `../..` past the root alone.
     fn repoint(&self, written: &str) -> Option<String> {
-        let rooted = written.starts_with('/');
-        if written.is_empty() || !(rooted || path::stays_inside(self.dir_old, written)) {
-            return None;
-        }
-        let key = link_key(&path::resolve(self.dir_old, written));
+        let key = path_key(self.dir_old, written)?;
         let (old, new) = moved(&key, self.targets, self.moves)?;
         // A path, so it still finds the file only if it spells that file's path from the note's
         // new folder: the index's by-name fallback is not something a markdown reader shares.
+        let rooted = written.starts_with('/');
         let now = link_key(&path::resolve(self.dir_new, written));
         if (rooted || path::stays_inside(self.dir_new, written))
             && [link_key(new), link_key(&strip_ext(new))].contains(&now)
@@ -390,25 +388,59 @@ fn markdown_edit(text: &str, link: &Link, m: &Moved) -> Option<(Range<usize>, St
     Some((destination(text, link)?, percent_encode(&to)))
 }
 
-/// The reference-style definitions a move leaves stale: `[ref]: path "title"` on a line of its own.
+/// The key a path written in a note in `dir` is looked up by — from that folder, or from the vault
+/// root when it starts with `/` — or `None` for an empty one and one that climbs out of the vault.
+fn path_key(dir: &str, written: &str) -> Option<String> {
+    let rooted = written.starts_with('/');
+    (!written.is_empty() && (rooted || path::stays_inside(dir, written)))
+        .then(|| link_key(&path::resolve(dir, written)))
+}
+
+/// The key of every path the note at `src` spells in `text` — a markdown link's, a reference
+/// definition's, an HTML `src` or `href` — as [`rewrite_moved`] and [`repage_links`] look them up
+/// in their `targets`. For a caller that resolves them itself, the text not being what the index
+/// holds for the note: Save As writes a tab's unsaved edits too.
+pub fn path_link_keys(text: &str, src: &str) -> Vec<String> {
+    let dir = parent_dir(src);
+    let a = analyze(text);
+    let links = a
+        .links
+        .iter()
+        .filter(|l| l.kind == LinkKind::Markdown)
+        .map(|l| l.target.clone());
+    let scanned = scanned_paths(text, &a)
+        .into_iter()
+        .filter_map(|at| Some(percent_decode(split_anchor(text.get(at)?).0)));
+    links
+        .chain(scanned)
+        .filter_map(|written| path_key(dir, &written))
+        .collect()
+}
+
+/// Where the two path forms the parser does not hand over as links sit in `text`, each with its
+/// `#anchor`: the destination of every reference-style definition, then every `src` and `href` of
+/// the HTML the note holds.
+fn scanned_paths(text: &str, a: &Analysis) -> Vec<Range<usize>> {
+    let mut out = definitions(text, a);
+    out.extend(html_values(text, a));
+    out
+}
+
+/// The destinations of the reference-style definitions: `[ref]: path "title"` on a line of its own.
 ///
 /// pulldown-cmark resolves a definition into the links that use it and never says where the
 /// definition itself sits, so this is a scan of its own: a line indented at most three spaces —
 /// four would make it code — whose `[label]` is closed by `]:`, outside anything verbatim. A
 /// footnote's `[^1]:` is a definition of another kind and its text is no path. The destination is
-/// read to the next space; a title after it, and a `<…>` destination's brackets, are left as
-/// written.
-fn definition_edits(text: &str, a: &Analysis, m: &Moved) -> Vec<(Range<usize>, String)> {
+/// read to the next space; a title after it, and a `<…>` destination's brackets, are left out.
+fn definitions(text: &str, a: &Analysis) -> Vec<Range<usize>> {
     let skip = verbatim(a);
     let mut out = Vec::new();
     let mut start = 0;
     for line in text.split_inclusive('\n') {
         let at = definition_destination(line).map(|r| start + r.start..start + r.end);
         start += line.len();
-        match at {
-            Some(at) if !skip.iter().any(|r| r.contains(&at.start)) => out.extend(m.edit(text, at)),
-            _ => {}
-        }
+        out.extend(at.filter(|at| !skip.iter().any(|r| r.contains(&at.start))));
     }
     out
 }
@@ -435,14 +467,17 @@ fn definition_destination(line: &str) -> Option<Range<usize>> {
     (len > 0).then_some(start..start + len)
 }
 
-/// The `src` and `href` a move leaves stale in the HTML a note holds — a block of it, or an inline
-/// tag. pulldown-cmark hands HTML over as opaque text, so these are scanned too.
-fn html_edits(text: &str, a: &Analysis, m: &Moved) -> Vec<(Range<usize>, String)> {
+/// The `src` and `href` values in the HTML a note holds — a block of it, or an inline tag.
+/// pulldown-cmark hands HTML over as opaque text, so these are scanned too.
+fn html_values(text: &str, a: &Analysis) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     for span in a.spans.iter().filter(|s| s.style == Style::Html) {
-        for at in attribute_values(&text[span.range.clone()]) {
-            out.extend(m.edit(text, span.range.start + at.start..span.range.start + at.end));
-        }
+        let base = span.range.start;
+        out.extend(
+            attribute_values(&text[span.range.clone()])
+                .into_iter()
+                .map(|at| base + at.start..base + at.end),
+        );
     }
     out
 }
@@ -540,7 +575,8 @@ pub struct Repaged {
 
 /// Point the links in the note `src` into the PDF `pdf` at where `edit` took the pages they name:
 /// `[[paper.pdf#page=3&selection=…]]`, `![[paper.pdf#page=3]]` and `[t](paper.pdf#page=3)`
-/// alike, the page number rewritten and nothing else of the link.
+/// alike, the page number rewritten and nothing else of the link. A reference definition's
+/// destination and an HTML `href` follow too, scanned for as [`rewrite_moved`] scans for them.
 ///
 /// A link into the page a delete took out names no page any more; it is left as written and
 /// handed back in [`Repaged::left`], because guessing at a neighbour would be a wrong link that
@@ -556,6 +592,32 @@ pub fn repage_links(
     keep: &[(String, usize)],
 ) -> Repaged {
     let dir = parent_dir(src);
+    let into_pdf =
+        |key: Option<String>| key.and_then(|k| targets.get(&k)).is_some_and(|f| f == pdf);
+    let a = analyze(text);
+    // Every link into the PDF, as where its markup sits and where the digits of its page do. A
+    // scanned path's markup is the destination as written, anchor and all.
+    let mut found: Vec<(Range<usize>, Option<Range<usize>>)> = Vec::new();
+    for link in &a.links {
+        let key = match link.kind {
+            LinkKind::Wiki | LinkKind::Embed => link_key(&link.target),
+            LinkKind::Markdown => link_key(&path::resolve(dir, &link.target)),
+            LinkKind::External => continue,
+        };
+        if into_pdf(Some(key)) {
+            found.push((link.range.clone(), page_number(text, link)));
+        }
+    }
+    for at in scanned_paths(text, &a) {
+        let Some((written, anchor)) = text.get(at.clone()).map(split_anchor) else {
+            continue;
+        };
+        if into_pdf(path_key(dir, &percent_decode(written))) {
+            let start = at.start + written.len() + 1;
+            let number = anchor.and_then(page_digits);
+            found.push((at, number.map(|r| start + r.start..start + r.end)));
+        }
+    }
     let mut out = Repaged::default();
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     // How many links into the PDF have read the same so far: before this rewrite, which is how
@@ -566,20 +628,12 @@ pub fn repage_links(
         *n += 1;
         *n - 1
     };
-    for link in &analyze(text).links {
-        let key = match link.kind {
-            LinkKind::Wiki | LinkKind::Embed => link_key(&link.target),
-            LinkKind::Markdown => link_key(&path::resolve(dir, &link.target)),
-            LinkKind::External => continue,
-        };
-        let Some(written) = text.get(link.range.clone()) else {
+    for (markup, number) in found {
+        let Some(written) = text.get(markup.clone()) else {
             continue;
         };
-        if targets.get(&key).map(String::as_str) != Some(pdf) {
-            continue;
-        }
         let kept = keep.contains(&(written.to_string(), nth(&mut before, written)));
-        let number = page_number(text, link).filter(|_| !kept);
+        let number = number.filter(|_| !kept);
         let page = number
             .clone()
             .and_then(|at| text[at].parse::<usize>().ok()?.checked_sub(1));
@@ -588,7 +642,7 @@ pub fn repage_links(
         match (number, page.map(|page| (page, edit.map(page)))) {
             (Some(at), Some((page, Some(to)))) if to != page => {
                 let with = (to + 1).to_string();
-                let start = link.range.start;
+                let start = markup.start;
                 now.replace_range(at.start - start..at.end - start, &with);
                 edits.push((at, with));
                 out.moved += 1;
@@ -601,8 +655,10 @@ pub fn repage_links(
             out.left.push((now, n));
         }
     }
+    // Back to front, the scanned paths coming after the links whatever their place.
+    edits.sort_by_key(|(at, _)| std::cmp::Reverse(at.start));
     let mut rewritten = text.to_string();
-    for (at, with) in edits.into_iter().rev() {
+    for (at, with) in edits {
         rewritten.replace_range(at, &with);
     }
     out.text = (rewritten != text).then_some(rewritten);
@@ -630,7 +686,12 @@ fn page_number(text: &str, link: &Link) -> Option<Range<usize>> {
     {
         return None;
     }
-    let mut at = start;
+    page_digits(anchor).map(|r| start + r.start..start + r.end)
+}
+
+/// Where the digits of `page=N` sit in an anchor as written, `None` when it names no page.
+fn page_digits(anchor: &str) -> Option<Range<usize>> {
+    let mut at = 0;
     for part in anchor.split('&') {
         if let Some(rest) = part.strip_prefix("page=") {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -1119,5 +1180,36 @@ mod tests {
                 ("[[p.pdf#page=2|again]]".to_string(), 0)
             ]
         );
+    }
+
+    /// The two path forms the parser does not hand over follow a page edit as a link does: a
+    /// reference definition and an HTML `href`, the definition's own `[r][one]` naming no page.
+    #[test]
+    fn a_page_edit_moves_reference_definitions_and_html_hrefs() {
+        let src = concat!(
+            "[r][one] <a href=\"../Papers/p.pdf#page=3\">three</a>\n\n",
+            "[one]: ../Papers/p.pdf#page=1 \"title\"\n",
+            "[two]: ../other.pdf#page=1\n",
+            "```\n[three]: ../Papers/p.pdf#page=1\n```\n"
+        );
+        let got = repaged(src, PageEdit::Move { from: 0, to: 2 }, &[]);
+        assert_eq!(
+            got.text.as_deref(),
+            Some(concat!(
+                "[r][one] <a href=\"../Papers/p.pdf#page=2\">three</a>\n\n",
+                "[one]: ../Papers/p.pdf#page=3 \"title\"\n",
+                "[two]: ../other.pdf#page=1\n",
+                "```\n[three]: ../Papers/p.pdf#page=1\n```\n"
+            ))
+        );
+        assert_eq!(got.moved, 2);
+        let deleted = repaged(src, PageEdit::Delete(0), &[]);
+        assert_eq!(deleted.left, [("../Papers/p.pdf#page=1".to_string(), 0)]);
+        let undone = repaged(
+            deleted.text.as_deref().unwrap(),
+            PageEdit::Insert(0),
+            &deleted.left,
+        );
+        assert_eq!(undone.text.as_deref(), Some(src));
     }
 }

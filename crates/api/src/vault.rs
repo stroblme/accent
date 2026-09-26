@@ -374,6 +374,9 @@ methods! {
     /// uploads the new one; the rename then says so rather than moving anything.
     any plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
     any rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
+    /// A note's text as Save As writes it at another path, its relative links pointed back at
+    /// what they named: asked where the index is.
+    any relink_copy(from: ref str, to: ref str, text: ref str) -> Option<String>;
     /// The notes' links into a PDF after a page edit, rewritten where the notes are.
     any repage_links(rel: ref str, edit: val PageEdit, keep: ref [KeptLink]) -> RepageReport,
         bounded by MOVE_BOUND;

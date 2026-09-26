@@ -1339,7 +1339,9 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
 /// `ACCENT_BENCH_SAVE_AS=<rel>`: Save As on the file at `rel`, past the dialog, which is only the
 /// path field Rename has. It writes to `Saved As/`, a folder that is not there yet, and prints the
 /// tab's key after and what each file holds. A note is also given an edit it has not saved first,
-/// which only the copy may hold, a diagram likewise, and a PDF a page before and a page after,
+/// which only the copy may hold, both halves linking to the note itself by a relative path, which
+/// the copy has to point back at the original — the vault paths its links name are printed, and
+/// whether the tab reloaded to what the copy holds; a diagram likewise, and a PDF a page before and a page after,
 /// which only the copy may get the second of; an image is copied as it is and its tab retitled;
 /// then a note is saved onto a folder, which is refused, onto its old
 /// name while a tab of its own has that open, whose Replace question is answered, and as `.txt`,
@@ -1357,9 +1359,11 @@ pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
         };
         let tab = doc.tab().cloned();
         if let Some(tab) = &tab {
-            tab.set_text("saved\n");
+            let own = accent_core::markdown::percent_encode(doc::file_name(&rel));
+            tab.set_text(&format!("saved [s]({own})\n"));
             let _ = app.write_tab(tab, None);
-            tab.buffer.insert(&mut tab.buffer.end_iter(), "typed\n");
+            let typed = format!("typed <img src=\"{own}\">\n");
+            tab.buffer.insert(&mut tab.buffer.end_iter(), &typed);
         }
         // A page not written out yet, which Save As writes before it copies.
         if let Some(pdf) = doc.pdf() {
@@ -1398,6 +1402,13 @@ pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
             tab.as_ref().and(text(disk(&copy))),
             disk(&rel) == disk(&copy),
         );
+        if let (Some(tab), Some(held)) = (&tab, text(disk(&copy))) {
+            println!(
+                "bench save_as_links copy={:?} tab_same={}",
+                accent_core::markdown::path_link_keys(&held, &copy),
+                tab.text() == held
+            );
+        }
         // An image has nothing unsaved, so the copy and the tab's new title are the whole of it.
         if let Doc::Image(viewer) = &doc {
             println!("bench save_as_image title={:?}", viewer.page.title());
