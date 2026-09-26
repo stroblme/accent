@@ -49,7 +49,10 @@ use panes::{
     bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window,
     bench_pins_restored, bench_tabs,
 };
-use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
+use pdf::{
+    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_pages, bench_pdf_stale,
+    bench_pdf_strip,
+};
 use replace::bench_replace;
 use search::bench_search;
 use style::{
@@ -169,7 +172,10 @@ use tags::bench_tags;
 /// `=strip:<rel_path>` is the pointer's half, held for XTEST: it opens the document with the
 /// Outline pane up and prints the same every two seconds for 40 s, so a hover and a drag along the
 /// thumbnail strip (`build-aux/xtest.py :N "drag X0 Y0 X1 Y1"`) can be watched landing in the
-/// file.
+/// file. `=bookmarks:<rel_path>[,<rel_diagram>]` scrolls through the document with the Outline pane
+/// up and prints the bookmark each page is under, whether it is in view and who has the keyboard,
+/// then the same after a page edit and whether the list is the one it was; with a diagram, the
+/// same for each of its pages (`pdf::bench_pdf_bookmarks`).
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -432,6 +438,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = pdf {
             if let Some(rel) = rel.strip_prefix("pages:") {
                 return bench_pdf_pages(&app, rel);
+            }
+            if let Some(arg) = rel.strip_prefix("bookmarks:") {
+                return bench_pdf_bookmarks(&app, arg);
             }
             if let Some(rel) = rel.strip_prefix("strip:") {
                 return bench_pdf_strip(&app, rel);
