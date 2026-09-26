@@ -31,8 +31,8 @@ use compare::{
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use files::{
-    bench_clip, bench_close, bench_drop, bench_expand, bench_hidden, bench_menu, bench_menu_press,
-    bench_paths, bench_save_as, bench_templates, bench_watch,
+    bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
+    bench_menu, bench_menu_press, bench_paths, bench_save_as, bench_templates, bench_watch,
 };
 use find::bench_find;
 use git::{
@@ -226,7 +226,10 @@ use tags::bench_tags;
 /// toasts said so — one is right — and what it said. Last it
 /// cuts two notes that link each other and a third, pastes them into the file's folder and
 /// answers the Update Links? question, printing every dialog that came — one is right — and
-/// the three notes' texts afterwards.
+/// the three notes' texts afterwards. Each paste is waited for, up to a minute, not timed.
+/// `ACCENT_BENCH_CLIP=outside:<dir>` pastes a folder and a file made on this machine into `<dir>`
+/// ("" is the root) as GNOME Files would, and prints what landed and the toast
+/// (`files::bench_clip_outside`).
 /// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
 /// note and prints the text and the files they left (`attach::bench_attach`).
 /// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
@@ -432,6 +435,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_drawing(&app);
         }
         if let Some(rel) = clip {
+            if let Some(dir) = rel.strip_prefix("outside:") {
+                return bench_clip_outside(&app, dir);
+            }
             return bench_clip(&app, &rel);
         }
         if let Some(rel) = save_as {
