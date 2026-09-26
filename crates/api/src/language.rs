@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use accent_core::markdown;
 use anyhow::Result;
@@ -411,6 +412,9 @@ pub(crate) struct Languages {
     /// Whether a prose document gets a ghost-text session; the preference behind it is global,
     /// so a vault reads it once and every document opened after that follows.
     pub(crate) ghost: AtomicBool,
+    /// When the ghost session was started within the last [`GHOST_WINDOW`]; `None` once the
+    /// vault has given up on it.
+    ghost_starts: Mutex<Option<Vec<Instant>>>,
 }
 
 impl Languages {
@@ -422,6 +426,7 @@ impl Languages {
             sessions: Mutex::new(HashMap::new()),
             docs: Mutex::new(HashMap::new()),
             ghost: AtomicBool::new(true),
+            ghost_starts: Mutex::new(Some(Vec::new())),
         })
     }
 
@@ -469,13 +474,20 @@ impl Languages {
             "--vault".to_string(),
             root.to_string_lossy().into_owned(),
         ];
-        let start = external::start(
-            argv,
-            root.clone(),
-            root,
-            self.events.clone(),
-            Some("suggestions"),
-        );
+        let start = async {
+            anyhow::ensure!(
+                self.ghost_may_start(Instant::now()),
+                "{GHOST} keeps exiting"
+            );
+            external::start(
+                argv,
+                root.clone(),
+                root,
+                self.events.clone(),
+                Some("suggestions"),
+            )
+            .await
+        };
         match self.session(key, start).await {
             Ok(session) => Some(session),
             Err(e) => {
@@ -483,6 +495,39 @@ impl Languages {
                 None
             }
         }
+    }
+
+    /// How a document gets the ghost session again once the one it was opened on has exited:
+    /// the running one, or a fresh start. Nothing while Ghost Text is off. Weak, because the
+    /// registry holds the document's provider.
+    fn respawn(self: &Arc<Self>) -> words::Respawn {
+        let me = Arc::downgrade(self);
+        Box::new(move || {
+            let me = me.upgrade();
+            Box::pin(async move {
+                let me = me.filter(|me| me.ghost.load(Ordering::Relaxed))?;
+                me.ghost_session().await
+            })
+        })
+    }
+
+    /// Count a start of the ghost session at `now`, or refuse it: a `merl-rt` that exits as soon
+    /// as it starts must not be started again on every pause in the typing. Past [`GHOST_STARTS`]
+    /// within [`GHOST_WINDOW`] the vault gives up on it until it is opened again, and says so once.
+    fn ghost_may_start(&self, now: Instant) -> bool {
+        let mut starts = locked(&self.ghost_starts);
+        let Some(recent) = starts.as_mut() else {
+            return false;
+        };
+        recent.retain(|t| now.duration_since(*t) < GHOST_WINDOW);
+        if recent.len() < GHOST_STARTS {
+            recent.push(now);
+            return true;
+        }
+        *starts = None;
+        let message = format!("Ghost text stopped: {GHOST} keeps exiting");
+        let _ = self.events.send(Event::Error(message));
+        false
     }
 
     /// Who answers for an open document.
@@ -621,7 +666,7 @@ impl Languages {
             // line and never a `missing`, because this is optional where a language server is
             // expected: nothing about the tab stops working without it.
             let ghost = match prose && me.ghost.load(Ordering::Relaxed) && in_path(GHOST) {
-                true => me.ghost_session().await,
+                true => me.ghost_session().await.map(|g| (g, me.respawn())),
                 false => None,
             };
             // Prose gets its words layered under whatever the primary answers, and gets them
@@ -678,6 +723,11 @@ impl Languages {
 /// an index of the vault's own notes. Not in `SERVERS`, because it answers beside a language's
 /// own provider rather than instead of one.
 const GHOST: &str = "merl-rt";
+
+/// Starts of the ghost session a vault allows within [`GHOST_WINDOW`]: the first, and two more
+/// after it exits.
+const GHOST_STARTS: usize = 3;
+const GHOST_WINDOW: Duration = Duration::from_secs(60);
 
 /// What answers for a language.
 pub(crate) enum Server {
@@ -1267,5 +1317,31 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: Event = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, Event::Diagnostics { items, .. } if items.len() == 1));
+    }
+
+    /// Exits spread out are started again every time; a burst of them is given up on for good,
+    /// and said so once.
+    #[test]
+    fn a_ghost_session_that_keeps_exiting_is_given_up_on_once() {
+        let (events, said) = std::sync::mpsc::channel();
+        let langs = Languages::new("/vault".into(), "/index.db".into(), events);
+        let t0 = Instant::now();
+        let at = |s| t0 + Duration::from_secs(s);
+        for s in [0, 30, 50, 61] {
+            assert!(langs.ghost_may_start(at(s)), "start at {s} s");
+        }
+        assert!(
+            !langs.ghost_may_start(at(70)),
+            "a fourth start within the minute"
+        );
+        assert!(!langs.ghost_may_start(at(500)), "given up for good");
+        let said: Vec<String> = said
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Error(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["Ghost text stopped: merl-rt keeps exiting"]);
     }
 }
