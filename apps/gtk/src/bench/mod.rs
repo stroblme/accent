@@ -39,7 +39,7 @@ use git::{
     bench_git, bench_git_close, bench_git_focus, bench_git_init, bench_git_press, bench_git_rebase,
     bench_git_switch, bench_git_sync_over_fetch,
 };
-use image::{bench_image, bench_image_look};
+use image::{bench_image, bench_image_look, bench_preview_look};
 use keys::{
     bench_hold, bench_keys, bench_list, bench_occurrence_keys, bench_shell_keys, bench_term,
 };
@@ -126,7 +126,8 @@ use tags::bench_tags;
 /// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` walks each image through the three themes, inverted and
 /// not, printing what the classifier said, the pixel the tab shows at (2,2) and the recolouring's
-/// cost (see `image::bench_image_look`).
+/// cost (see `image::bench_image_look`). `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` does the same for
+/// the images a note shows in the preview, with the requests the page made (`bench_preview_look`).
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
 /// two lines and the tab's — until VTE has reported a title of its own. Against `--terminal` that
 /// is the vault-less window; against a vault it opens a shell in a tab and covers that instead.
@@ -304,6 +305,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let hold = std::env::var("ACCENT_BENCH_HOLD").ok();
     let picture = std::env::var("ACCENT_BENCH_IMAGE").ok();
     let image_look = std::env::var("ACCENT_BENCH_IMAGE_LOOK").ok();
+    let preview_look = std::env::var("ACCENT_BENCH_PREVIEW_LOOK").ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let drawing = std::env::var("ACCENT_BENCH_DRAWING").is_ok();
@@ -368,6 +370,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && hold.is_none()
         && picture.is_none()
         && image_look.is_none()
+        && preview_look.is_none()
         && !close
         && !hidden
     {
@@ -508,6 +511,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rels) = image_look {
             return bench_image_look(&app, &rels);
+        }
+        if let Some(rel) = preview_look {
+            return bench_preview_look(&app, &rel);
         }
         if close {
             return bench_close(&app);

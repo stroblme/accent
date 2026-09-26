@@ -3,7 +3,7 @@
 //!
 //! The image tab and the preview both come through here, so a figure looks the same in either.
 //! The decision is [`Look::palette`], snapshotted on the main thread where the theme lives; the
-//! decoding, the classifying and the recolouring run on a worker ([`show`]), with
+//! decoding, the classifying and the recolouring run on a worker ([`show`], [`serve`]), with
 //! GDK's own decoders and `accent_core::recolour`.
 
 use std::cell::OnceCell;
@@ -83,6 +83,32 @@ pub fn show(
             .map_or_else(|| original.clone(), |t| t.upcast()),
     };
     Ok(Shown { original, texture })
+}
+
+/// What the preview hands WebKit for an image: the file as it is, or new bytes of a type.
+pub enum Served {
+    File,
+    Bytes(glib::Bytes, &'static str),
+}
+
+/// [`show`] for the preview: only an image that is recoloured is decoded, recoloured and encoded
+/// again, as a PNG; everything else, and anything that fails on the way, is served as the file.
+pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
+    if svg(path) {
+        return match look
+            .palette(true, inverted)
+            .and_then(|page| svg_filtered(path, page))
+        {
+            Some(svg) => Served::Bytes(glib::Bytes::from_owned(svg), "image/svg+xml"),
+            None => Served::File,
+        };
+    }
+    match recoloured(path, look, inverted, || {
+        gdk::Texture::from_filename(path).ok()
+    }) {
+        Some(texture) => Served::Bytes(texture.save_to_png_bytes(), "image/png"),
+        None => Served::File,
+    }
 }
 
 /// What the classifier said about `path`, while the file is as it was then: `None` where it has

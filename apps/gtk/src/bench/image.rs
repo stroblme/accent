@@ -3,6 +3,7 @@
 use super::*;
 use crate::look::Look;
 use accent_core::config::Theme;
+use webkit6::prelude::*;
 
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` opens `<rel_png>`, zooms it one step off the fit
 /// so it asks for a size of its own, then copies `<rel_other_png>` over it — an image of another
@@ -141,4 +142,157 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
         shown.type_().name(),
         ms_since(t),
     );
+}
+
+/// `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` shows a note in the split view and prints, for every
+/// image on the page, the pixel WebKit painted two in from its corner and at its centre, with how
+/// many requests the page has made so far: after the first render, after a render of the same
+/// text, under Light, Dark and Solarized, and then with every image on it inverted.
+///
+/// `=hold:<rel_note>` instead prints where each image is on screen and stays up for 40 s, printing
+/// the inverted images and the page's requests every two seconds, for an XTEST right-click on an
+/// image and a pick from its menu.
+pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
+    let (hold, rel) = match rel.strip_prefix("hold:") {
+        Some(rel) => (true, rel),
+        None => (false, rel),
+    };
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(400)).await;
+        app.set_mode(Mode::Split);
+        if hold {
+            return hold_preview(&app).await;
+        }
+        preview_look(&app, "first").await;
+        if let Some(tab) = app.active() {
+            app.render(&tab);
+        }
+        preview_look(&app, "rerender").await;
+        for theme in [Theme::Light, Theme::Dark, Theme::Solarized] {
+            crate::theme::apply(theme);
+            app.restyle_all();
+            preview_look(&app, &format!("{theme:?}")).await;
+        }
+        // The image menu's own route: the page's address, resolved to the vault key it names.
+        let keys: Vec<String> = page_images(&app)
+            .await
+            .iter()
+            .filter_map(|(src, ..)| {
+                let rel = src.strip_prefix("accent://file/")?;
+                app.vault()?
+                    .asset(&accent_core::markdown::percent_decode(rel))
+            })
+            .collect();
+        for key in &keys {
+            app.invert_image(key);
+        }
+        preview_look(&app, "inverted").await;
+        bench_quit(&app);
+    });
+}
+
+/// Every image on the preview's page: its address, its box in the document and whether it has
+/// finished loading.
+async fn page_images(app: &Rc<App>) -> Vec<(String, f64, f64, f64, f64, bool)> {
+    let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
+        return Vec::new();
+    };
+    let script = "JSON.stringify(Array.from(document.images).map(function (i) { \
+        var r = i.getBoundingClientRect(); \
+        return [i.src, r.left + scrollX, r.top + scrollY, r.width, r.height, \
+                i.complete && i.naturalWidth > 0]; }))";
+    let json = match view.evaluate_javascript_future(script, None, None).await {
+        Ok(value) => value.to_str().to_string(),
+        Err(e) => {
+            println!("bench preview_look js_error {e}");
+            return Vec::new();
+        }
+    };
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+/// Wait for the page to settle, then print a `bench preview_look` line per image, with how long
+/// the page and its images took to arrive (`ms`, from 300 ms after the render was asked for).
+async fn preview_look(app: &Rc<App>, when: &str) {
+    // The render is asked for on an idle or after the cache is cleared, so the old page is still
+    // up for a moment.
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
+        return println!("bench preview_look {when} no_preview");
+    };
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(20)
+        && (view.is_loading() || page_images(app).await.iter().any(|i| !i.5))
+    {
+        glib::timeout_future(Duration::from_millis(20)).await;
+    }
+    let ms = ms_since(started);
+    // A frame for what arrived to be painted.
+    glib::timeout_future(Duration::from_millis(200)).await;
+    let requests = app.preview.borrow().as_ref().map_or(0, |p| p.requests());
+    let shot = view
+        .snapshot_future(
+            webkit6::SnapshotRegion::FullDocument,
+            webkit6::SnapshotOptions::NONE,
+        )
+        .await;
+    let Ok(shot) = shot else {
+        return println!("bench preview_look {when} no_snapshot");
+    };
+    let mut downloader = gdk::TextureDownloader::new(&shot);
+    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+    let (bytes, stride) = downloader.download_bytes();
+    let pixel = |x: f64, y: f64| {
+        let (x, y) = (x as usize, y as usize);
+        match (x < shot.width() as usize, y < shot.height() as usize) {
+            (true, true) => {
+                let at = y * stride + x * 4;
+                format!("{},{},{}", bytes[at], bytes[at + 1], bytes[at + 2])
+            }
+            _ => "-".to_string(),
+        }
+    };
+    for (src, x, y, w, h, loaded) in page_images(app).await {
+        println!(
+            "bench preview_look {when} dark={} {src} loaded={loaded} px(2,2)={} px(centre)={} \
+             requests={requests} ms={ms:.0}",
+            adw::StyleManager::default().is_dark(),
+            pixel(x + 2.0, y + 2.0),
+            pixel(x + w / 2.0, y + h / 2.0),
+        );
+    }
+}
+
+/// See `=hold:` on [`bench_preview_look`].
+async fn hold_preview(app: &Rc<App>) {
+    preview_look(app, "hold").await;
+    let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
+        return bench_quit(app);
+    };
+    let origin = view
+        .compute_point(&app.window, &graphene::Point::new(0.0, 0.0))
+        .unwrap_or_else(|| graphene::Point::new(0.0, 0.0));
+    let scroll = view
+        .evaluate_javascript_future("scrollY", None, None)
+        .await
+        .map_or(0.0, |v| v.to_double());
+    for (src, x, y, w, h, _) in page_images(app).await {
+        println!(
+            "bench preview_look hold {src} at={:.0},{:.0}",
+            f64::from(origin.x()) + x + w / 2.0,
+            f64::from(origin.y()) + y - scroll + h / 2.0,
+        );
+    }
+    for _ in 0..20 {
+        glib::timeout_future(Duration::from_secs(2)).await;
+        let mut inverted: Vec<String> = app.inverted_images.borrow().iter().cloned().collect();
+        inverted.sort();
+        println!(
+            "bench preview_look hold inverted={inverted:?} requests={}",
+            app.preview.borrow().as_ref().map_or(0, |p| p.requests())
+        );
+    }
+    bench_quit(app);
 }
