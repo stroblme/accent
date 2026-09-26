@@ -510,7 +510,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 - Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Folder `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
 - Open Folder…, Open Remote…, Close Vault and Quit are `app.` actions, since each outlives the window that fired it; they still enter the palette's recently-run list.
-- **Save As…** is Rename's dialog with Save as its verb, so it names a path in the vault: the tab's content is written there and the tab follows it, while the original keeps what was last written to it (a PDF's strokes are written first, then the file copied). A file already there asks Replace, saying so when a tab has it open, which then closes unsaved; a folder is refused; a new extension reopens the tab as what the file now is. The copy's relative links are written as they are. Over a loose tab, a window without a vault, an image or anything that is no file it does nothing.
+- **Save As…** is Rename's dialog with Save as its verb, so it names a path in the vault: the tab's content is written there and the tab follows it, while the original keeps what was last written to it (a PDF's strokes are written first, then the file copied; an image is copied as it is). A file already there asks Replace, saying so when a tab has it open, which then closes unsaved; a folder is refused; a new extension reopens the tab as what the file now is. The copy's relative links are written as they are. Over a loose tab, a window without a vault or anything that is no file it does nothing.
 
 ### Palette and find
 

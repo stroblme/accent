@@ -1151,7 +1151,8 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
 /// path field Rename has. It writes to `Saved As/`, a folder that is not there yet, and prints the
 /// tab's key after and what each file holds. A note is also given an edit it has not saved first,
 /// which only the copy may hold, a diagram likewise, and a PDF a page before and a page after,
-/// which only the copy may get the second of; then a note is saved onto a folder, which is refused, onto its old
+/// which only the copy may get the second of; an image is copied as it is and its tab retitled;
+/// then a note is saved onto a folder, which is refused, onto its old
 /// name while a tab of its own has that open, whose Replace question is answered, and as `.txt`,
 /// which reopens it as text.
 pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
@@ -1208,6 +1209,10 @@ pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
             tab.as_ref().and(text(disk(&copy))),
             disk(&rel) == disk(&copy),
         );
+        // An image has nothing unsaved, so the copy and the tab's new title are the whole of it.
+        if let Doc::Image(viewer) = &doc {
+            println!("bench save_as_image title={:?}", viewer.page.title());
+        }
         if let Some(diagram) = doc.diagram() {
             let renamed = |rel: &str| text(disk(rel)).map(|t| t.contains("Renamed Unsaved"));
             println!(

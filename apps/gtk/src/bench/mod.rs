@@ -219,8 +219,9 @@ use tags::bench_tags;
 /// the three notes' texts afterwards.
 /// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
 /// note and prints the text and the files they left (`attach::bench_attach`).
-/// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file as another in a folder not there yet, and a
-/// note also onto a folder, onto a file open in another tab and as `.txt` (`bench_save_as`).
+/// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
+/// another in a folder not there yet, and a note also onto a folder, onto a file open in another
+/// tab and as `.txt` (`bench_save_as`).
 /// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
 /// list the way the popover's own grab does, printing which row stays highlighted while the menu
 /// is up and which once it has closed. Then it marks that row and one more, the way a Ctrl+click
