@@ -391,7 +391,7 @@ pub fn wire_window(app: &Rc<App>) {
 
     // Right-click over the zoom readout: a PDF's two fitting modes, which otherwise live only in
     // the palette. Parented on the status bar's own button rather than in a header bar, so the
-    // popover has a plain widget to hang off.
+    // popover has a plain widget to hang off, and opening upwards as the page count's does.
     //
     // The claim comes before anything else and happens whatever the tab is. `GtkButton`'s own
     // gesture is primary-only, so without it the press bubbled past the readout into the window
@@ -410,7 +410,8 @@ pub fn wire_window(app: &Rc<App>) {
             for action in ["win.pdf-fit-width", "win.pdf-fit-page"] {
                 menu.append(Some(label_of(action)), Some(action));
             }
-            crate::widgets::popup_menu(app.statusbar.zoom(), &menu, None);
+            crate::widgets::popup_menu(app.statusbar.zoom(), &menu, None)
+                .set_position(gtk::PositionType::Top);
         }
     ));
     app.statusbar.zoom().add_controller(fit);

@@ -569,7 +569,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - The range is a tenth to eight times for a page or an image, a half to triple for the document font.
 - The readout at the end of the status bar is the Reset control: clicking it is `Ctrl+0` — 100 % for a document, Fit Height for a PDF, though a PDF opens at Fit Width.
 - Fit Height fills the viewport's height with one page, edge to edge, landing on the top of the page being read: any margin would only show the next page. A pane too narrow for that fits the width, so the whole page stays on screen.
-- A PDF always shows its zoom (`Fit Width`, `Fit Height` or `N %`), fitting being a zoom too, and an image likewise (`Fit` or `N %`); a document and a terminal only off 100 %; a status page, a diff and a window with no tab never. Right-clicking it over a PDF offers Fit Width and Fit Height; the readout takes that press whatever the tab, so it never reaches the window handle under it.
+- A PDF always shows its zoom (`Fit Width`, `Fit Height` or `N %`), fitting being a zoom too, and an image likewise (`Fit` or `N %`); a document and a terminal only off 100 %; a status page, a diff and a window with no tab never. Right-clicking it over a PDF offers Fit Width and Fit Height in a menu opening upwards, the bar being the window's bottom edge; the readout takes that press whatever the tab, so it never reaches the window handle under it.
 
 ### Terminal
 
