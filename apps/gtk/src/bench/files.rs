@@ -1160,7 +1160,7 @@ pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
         }
         // A page not written out yet, which Save As writes before it copies.
         if let Some(pdf) = doc.pdf() {
-            pdf.add_page();
+            pdf.add_page(true);
         }
         // A diagram's edit not saved yet, which only the copy may hold.
         if let Some(diagram) = doc.diagram() {
@@ -1177,7 +1177,7 @@ pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
                 sizes(&rel),
                 sizes(&copy)
             );
-            pdf.add_page();
+            pdf.add_page(true);
             wait(2000).await;
             println!(
                 "bench save_as_pdf_after original={:?} copy={:?} pages={}",

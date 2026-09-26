@@ -207,10 +207,10 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-circle", "Circle", &[]),
     ("win.pdf-adjust", "Adjust", &[]),
     ("win.insert-sketch", "Insert Sketch", &[]),
-    ("win.pdf-add-page", "Add Page", &[]),
-    // A page put in after, taken out, or moved from the one being read. The thumbnail strip does
-    // the same by pointer, on any page.
-    ("win.pdf-insert-page", "Insert Page", &[]),
+    // A page put in before or after, taken out, or moved from the one being read. The thumbnail
+    // strip does the same by pointer, on any page.
+    ("win.pdf-add-page-before", "Add Page Before", &[]),
+    ("win.pdf-add-page-after", "Add Page After", &[]),
     ("win.pdf-delete-page", "Delete Page", &[]),
     ("win.pdf-move-page-up", "Move Page Up", &[]),
     ("win.pdf-move-page-down", "Move Page Down", &[]),
@@ -433,8 +433,8 @@ impl App {
             "pdf-circle" => self.pdf_mode(pdfview::Mode::Circle),
             "pdf-adjust" => self.pdf_mode(pdfview::Mode::Adjust),
             "insert-sketch" => self.insert_sketch(),
-            "pdf-add-page" => self.pdf_add_page(),
-            "pdf-insert-page" => self.pdf_insert_page(),
+            "pdf-add-page-before" => self.pdf_add_page(false),
+            "pdf-add-page-after" => self.pdf_add_page(true),
             "pdf-delete-page" => self.pdf_delete_page(),
             "pdf-move-page-up" => self.pdf_move_page(false),
             "pdf-move-page-down" => self.pdf_move_page(true),

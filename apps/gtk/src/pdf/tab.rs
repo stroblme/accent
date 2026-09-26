@@ -21,6 +21,14 @@ use std::sync::mpsc::{Sender, channel};
 /// How long after the last stroke the document is written out.
 const INK_SAVE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The page commands, each on the page being read: the page's own menu and the status bar's page
+/// count offer the same three.
+pub const PAGE_ACTIONS: [&str; 3] = [
+    "win.pdf-add-page-before",
+    "win.pdf-add-page-after",
+    "win.pdf-delete-page",
+];
+
 /// Where a document is being read, remembered per file in the session.
 pub use accent_core::config::PdfPlace as Place;
 
@@ -606,10 +614,11 @@ impl PdfTab {
         self.ask(Request::Save(None));
     }
 
-    /// Another blank page at the end, the size of the last one — a notebook's answer to running
-    /// out of paper.
-    pub fn add_page(self: &Rc<Self>) {
-        self.edit_pages(pdf::PageEdit::Insert(self.page_count()));
+    /// A blank page before or `after` the one being read, the size of the page before it. After
+    /// the last page it is a notebook's answer to running out of paper.
+    pub fn add_page(self: &Rc<Self>, after: bool) {
+        let at = self.current_page() + usize::from(after);
+        self.edit_pages(pdf::PageEdit::Insert(at));
     }
 
     /// Put a blank page in, take one out, or move one. Written out on the same timer a stroke is:
@@ -1060,11 +1069,12 @@ impl PdfTab {
 
     /// The page's own menu, on a secondary click over it.
     ///
-    /// Copy and Copy Link to Selection when there is a selection, then Add Page, Insert Page,
-    /// Delete Page and Export Highlights, which are about the document rather than about what is
-    /// selected and so are always offered — a read-only or remote document says so in a toast
-    /// rather than by hiding the row. The drawing tools are not here: they are the ring, which the
-    /// header's Drawing button opens.
+    /// Copy and Copy Link to Selection when there is a selection, then Add Page Before, Add Page
+    /// After, Delete Page and Export Highlights, which are about the document rather than about
+    /// what is selected and so are always offered — a read-only or remote document says so in a
+    /// toast rather than by hiding the row. The page commands act on the page being read, as they
+    /// do from the status bar's page count, not on the page under the pointer. The drawing tools
+    /// are not here: they are the ring, which the header's Drawing button opens.
     ///
     /// `win.` actions rather than a group of the tab's own: that is what gives them a row in the
     /// palette and a rebindable accelerator, which is the whole argument of DESIGN.md's keyboard
@@ -1076,13 +1086,15 @@ impl PdfTab {
         secondary.connect_pressed(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |_, _, x, y| tab.selection_menu(x, y)
+            move |_, _, x, y| {
+                tab.selection_menu(x, y);
+            }
         ));
         self.view.add_controller(secondary);
     }
 
-    /// Put the menu under the pointer.
-    fn selection_menu(&self, x: f64, y: f64) {
+    /// Put the menu under the pointer, at a point in the view's coordinates.
+    pub(crate) fn selection_menu(&self, x: f64, y: f64) -> gtk::PopoverMenu {
         let menu = gio::Menu::new();
         // Window actions, in sections, the way the terminal's menu is built: that is what puts
         // them in the palette and lets them be rebound, which a tab-local group could not.
@@ -1094,12 +1106,10 @@ impl PdfTab {
             menu.append_section(None, &clipboard);
         }
         let file = gio::Menu::new();
-        for action in [
-            "win.pdf-add-page",
-            "win.pdf-insert-page",
-            "win.pdf-delete-page",
-            "win.pdf-export-highlights",
-        ] {
+        for action in PAGE_ACTIONS
+            .into_iter()
+            .chain(["win.pdf-export-highlights"])
+        {
             file.append(Some(crate::actions::label_of(action)), Some(action));
         }
         menu.append_section(None, &file);
@@ -1109,7 +1119,7 @@ impl PdfTab {
         let at = gtk::graphene::Point::new(x as f32, y as f32);
         let at = self.view.compute_point(&self.host, &at).unwrap_or(at);
         let anchor = gtk::gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
-        crate::widgets::popup_menu(&self.host, &menu, Some(anchor));
+        crate::widgets::popup_menu(&self.host, &menu, Some(anchor))
     }
 
     /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own;

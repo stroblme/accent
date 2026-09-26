@@ -838,7 +838,8 @@ impl App {
         };
         self.statusbar.set_kind(kind.as_deref());
         // The count of what is wrong with a document is also the switch that keeps it out of the
-        // text; every other count is a readout with nothing to press.
+        // text, and a PDF's page count opens the page commands for that page; every other count
+        // is a readout with nothing to press.
         let press = match &doc {
             Some(Doc::Text(tab)) if tab.flavour() == editor::Flavour::Code && facts.is_some() => {
                 Some(match tab.diagnostics_hidden() {
@@ -846,6 +847,7 @@ impl App {
                     false => "Hide these in the text; the pointer still shows them",
                 })
             }
+            Some(Doc::Pdf(pdf)) if pdf.page_count() > 0 => Some("Add or delete a page"),
             _ => None,
         };
         self.statusbar.set_facts(facts.as_deref(), press);

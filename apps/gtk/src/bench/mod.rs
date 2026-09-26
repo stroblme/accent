@@ -137,25 +137,27 @@ use tags::bench_tags;
 /// Close Tab ended it in the holder (see `keys::bench_hold`). `=early` closes new shells before
 /// they can have started and prints whether any is held for nobody.
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
-/// and prints the layout either side of it, then appends a page with `win.pdf-add-page` and
+/// and prints the layout either side of it, then adds a page with `win.pdf-add-page-after` and
 /// prints the page count, where the reader landed and the page sizes the file holds on disk once
 /// the save has run, and what the vault itself then holds — on a remote vault the host's own copy,
 /// which is the only witness that the write was uploaded. It then renames the file the way a
-/// dropped row does and appends another page to it, which is the render thread following the new
+/// dropped row does and adds another page to it, which is the render thread following the new
 /// name. It writes to the document and moves it, so point it at a scratch copy; and point it at a
 /// document of several pages, since a one-page PDF is wholly on screen whatever the scroll offset
 /// was. `=stale:<rel_path>` is the remote vault's etag gate: it stamps the cached copy with an
-/// etag the host never had, appends a page and prints whether the host's copy is untouched and
-/// what `<name> (edited).pdf` beside it holds, then appends another and prints the same again —
+/// etag the host never had, adds a page and prints whether the host's copy is untouched and
+/// what `<name> (edited).pdf` beside it holds, then adds another and prints the same again —
 /// the second refusal must write that same copy rather than a numbered one, and must leave the
 /// toast count where the first put it. `=pages:<rel_path>` moves the first page below the third as
-/// a drop in the thumbnail strip does, inserts a page after the one being read and deletes the one
-/// being read through the window actions, answering the delete's dialog, and prints the page being
-/// read and each page's text on disk after every step. Point it at a scratch copy of the generated
-/// vault's `Attachments/pages.pdf`. `=strip:<rel_path>` is the pointer's half, held for XTEST: it
-/// opens the document with the Outline pane up and prints the same every two seconds for 40 s, so
-/// a hover and a drag along the thumbnail strip (`build-aux/xtest.py :N "drag X0 Y0 X1 Y1"`) can
-/// be watched landing in the file.
+/// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
+/// page, and deletes the one being read through the window actions, answering the delete's dialog,
+/// and prints the page being read and each page's text on disk after every step; then the items of
+/// the page's own menu without and with a selection, and of the status bar's page count's menu.
+/// Point it at a scratch copy of the generated vault's `Attachments/pages.pdf`.
+/// `=strip:<rel_path>` is the pointer's half, held for XTEST: it opens the document with the
+/// Outline pane up and prints the same every two seconds for 40 s, so a hover and a drag along the
+/// thumbnail strip (`build-aux/xtest.py :N "drag X0 Y0 X1 Y1"`) can be watched landing in the
+/// file.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
