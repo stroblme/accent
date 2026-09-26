@@ -634,8 +634,11 @@ impl Vault {
     ///
     /// That `stat` is asked through [`stat`](Self::stat) rather than [`exists`](Self::exists),
     /// which cannot say why it answered `false`: on a remote vault that is not answering, a link
-    /// to a note that is really there read as one to write, and Go to Definition offered New
-    /// File over it. Same reasoning as [`repos`](Self::repos) below.
+    /// to a note that is really there read as one to write, and a click offered New File over
+    /// it. Same reasoning as [`repos`](Self::repos) below.
+    ///
+    /// What a click in the preview follows. Go to Definition asks the note's language provider
+    /// instead, which answers the same way on the host, beside the files.
     pub fn follow(&self, target: &str) -> Result<Option<String>> {
         if let Some(rel) = self.resolve_link(target)? {
             return Ok(Some(rel));
@@ -1069,7 +1072,7 @@ mod tests {
                 target,
                 [Location {
                     path: "sub/Beta.md".to_string(),
-                    range: Range::default()
+                    ..Location::default()
                 }]
             );
             let hover = f.vault.hover("a.md", caret).await.unwrap().unwrap();
@@ -1114,6 +1117,83 @@ mod tests {
                 assert_eq!(target[0].path, "a.md");
                 assert_eq!(target[0].range.start.line, 1, "from character {character}");
             }
+        });
+    }
+
+    /// A link the index cannot place is still defined: by the file on disk in a tree the walk
+    /// never enters, and otherwise by the file New File would write for it, marked missing — a
+    /// wikilink's path from the vault root, a markdown link's from the note's folder.
+    #[test]
+    fn a_link_nothing_answers_to_is_defined_where_new_file_would_write_it() {
+        let f = Fixture::open(VaultConfig::default());
+        let text = "[[Nowhere/Other Note#Part|there]]\n[t](../Else%20Where#Part)\n\
+                    [[node_modules/pkg/Guide]]\n[m](mailto:a@b.c)\n";
+        f.write("node_modules/pkg/Guide.md", "# Guide\n");
+        f.write("Notes/Sub/a.md", text);
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        accent_lsp::runtime().block_on(async {
+            f.vault
+                .open_document("Notes/Sub/a.md", "markdown", text.to_string())
+                .await
+                .unwrap();
+            let mut found = Vec::new();
+            for line in 0..4 {
+                let at = Pos { line, character: 3 };
+                found.extend(f.vault.definition("Notes/Sub/a.md", at).await.unwrap());
+            }
+            let found: Vec<_> = found
+                .iter()
+                .map(|l| (l.path.as_str(), l.missing, l.is_url()))
+                .collect();
+            assert_eq!(
+                found,
+                [
+                    ("Nowhere/Other Note.md", true, false),
+                    ("Notes/Else Where.md", true, false),
+                    ("node_modules/pkg/Guide.md", false, false),
+                    ("mailto:a@b.c", false, true),
+                ]
+            );
+        });
+    }
+
+    /// What a link's `#anchor` names beyond a line comes back beside the path: a PDF's page, and
+    /// a heading the note does not have, which is answered with the top of the note.
+    #[test]
+    fn an_anchor_the_range_cannot_place_comes_back_with_the_file() {
+        let f = Fixture::open(VaultConfig::default());
+        let text = "# Intro\n[[#Nowhere]] [[#Intro]] [[b#Gone]] [[paper.pdf#page=3]]\n";
+        f.write("a.md", text);
+        f.write("b.md", "# B\n");
+        f.write("paper.pdf", "not really a pdf");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        accent_lsp::runtime().block_on(async {
+            f.vault
+                .open_document("a.md", "markdown", text.to_string())
+                .await
+                .unwrap();
+            let mut found = Vec::new();
+            for character in [2, 15, 26, 40] {
+                let at = Pos { line: 1, character };
+                found.extend(f.vault.definition("a.md", at).await.unwrap());
+            }
+            let found: Vec<_> = found
+                .iter()
+                .map(|l| (l.path.as_str(), l.range.start.line, l.anchor.as_deref()))
+                .collect();
+            assert_eq!(
+                found,
+                [
+                    ("a.md", 0, Some("Nowhere")),
+                    ("a.md", 0, None),
+                    ("b.md", 0, Some("Gone")),
+                    ("paper.pdf", 0, Some("page=3")),
+                ]
+            );
         });
     }
 

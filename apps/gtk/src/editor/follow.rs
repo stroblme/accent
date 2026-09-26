@@ -5,12 +5,16 @@
 //! every word looked the same as every other and the only way to find out was to click.
 //!
 //! A link is answered from the table the analysis already filled, and a bare URL from the line it
-//! is on, so either underlines on the motion event itself. A word in code has to be asked about,
-//! and the only thing that truly knows is the language server — underlining every identifier would
-//! say nothing, since the question is whether *this* one leads anywhere. So the pointer resting on
-//! a word for [`PROBE`] asks for its definition and the underline follows the answer. That is one
-//! request per word rested on, the same shape as the hover beside it, and the answer is remembered
-//! for as long as the pointer stays inside the word it was asked about.
+//! is on, so either underlines on the motion event itself. The table is only the hint: a long note
+//! fills it after a pause in the typing, and the click itself asks the note's provider about the
+//! text as it stands (`App::go_to_definition`).
+//!
+//! A word in code has to be asked about, and the only thing that truly knows is the language
+//! server — underlining every identifier would say nothing, since the question is whether *this*
+//! one leads anywhere. So the pointer resting on a word for [`PROBE`] asks for its definition and
+//! the underline follows the answer. That is one request per word rested on, the same shape as the
+//! hover beside it, and the answer is remembered for as long as the pointer stays inside the word
+//! it was asked about.
 
 use super::Tab;
 use crate::lang;

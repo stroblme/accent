@@ -328,6 +328,27 @@ fn a_remote_vault_connects_indexes_and_answers() {
         assert_eq!(names, [name]);
     }
 
+    // A link nothing answers to is defined where New File would write it, and one into the tree
+    // the index never walked as the file there: the host's own disk decides which.
+    let links = "[[Nowhere/New]]\n[[node_modules/pkg/index.js]]\n";
+    remote
+        .call::<serde_json::Value>(
+            "open_document",
+            serde_json::json!(["c.md", "markdown", links]),
+        )
+        .unwrap();
+    for (line, path, missing) in [
+        (0, "Nowhere/New.md", true),
+        (1, "node_modules/pkg/index.js", false),
+    ] {
+        let at = serde_json::json!({ "line": line, "character": 3 });
+        let found: Vec<accent_api::Location> = remote
+            .call("definition", serde_json::json!(["c.md", at]))
+            .unwrap();
+        let found: Vec<_> = found.iter().map(|l| (l.path.as_str(), l.missing)).collect();
+        assert_eq!(found, [(path, missing)]);
+    }
+
     // Closing the vault takes the server and every forward it still has off the host. The master
     // is left its ControlPersist minute on purpose, so it is not what is asserted on.
     remote.forward(back).unwrap();
