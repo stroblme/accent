@@ -123,7 +123,8 @@ impl Tab {
             diff::Side::Old => (editor, companion),
             diff::Side::New => (companion, editor),
         };
-        let compare = diff::Compare::new(old, new, Some(side), hunk_buttons);
+        let compare =
+            self.with_map_unset(|| diff::Compare::new(old, new, Some(side), hunk_buttons));
         // Every lay moves the hidden runs, and a message at the end of a collapsed line would be
         // drawn on the row that stands for the run: the diagnostics are laid again with them.
         compare.on_laid(glib::clone!(
@@ -161,7 +162,7 @@ impl Tab {
         let Some(comparing) = self.comparing.borrow_mut().take() else {
             return;
         };
-        comparing.compare.leave();
+        self.with_map_unset(|| comparing.compare.leave());
         // The gap tags went with it, so the messages the collapsed lines were keeping quiet about
         // belong back at the ends of their lines.
         self.paint_diagnostics();
@@ -174,5 +175,17 @@ impl Tab {
         self.page.set_title(&self.tab_title());
         // The banner's button comes back, if the comparison had taken it.
         self.render_banner();
+    }
+
+    /// Run `swap`, which may hand the editor's view another vertical adjustment, with the minimap
+    /// let go of the view around it. GtkSourceMap follows the adjustment the view had when it was
+    /// set, and lets go of whichever the view has when it is unset: across the swap it stood still
+    /// while the comparison scrolled, and a tab closed mid-comparison logged `instance … has no
+    /// handler with id` for both of its handlers.
+    fn with_map_unset<T>(&self, swap: impl FnOnce() -> T) -> T {
+        self.map.set_property("view", None::<&sourceview5::View>);
+        let out = swap();
+        self.map.set_view(&self.view);
+        out
     }
 }
