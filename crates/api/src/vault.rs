@@ -1127,7 +1127,7 @@ mod tests {
     fn a_link_nothing_answers_to_is_defined_where_new_file_would_write_it() {
         let f = Fixture::open(VaultConfig::default());
         let text = "[[Nowhere/Other Note#Part|there]]\n[t](../Else%20Where#Part)\n\
-                    [[node_modules/pkg/Guide]]\n[m](mailto:a@b.c)\n";
+                    [[node_modules/pkg/Guide]]\n[m](mailto:a@b.c)\n[c](tel:+123)\n[s](sms:+123)\n";
         f.write("node_modules/pkg/Guide.md", "# Guide\n");
         f.write("Notes/Sub/a.md", text);
         f.vault.rescan().unwrap();
@@ -1139,7 +1139,7 @@ mod tests {
                 .await
                 .unwrap();
             let mut found = Vec::new();
-            for line in 0..4 {
+            for line in 0..6 {
                 let at = Pos { line, character: 3 };
                 found.extend(f.vault.definition("Notes/Sub/a.md", at).await.unwrap());
             }
@@ -1154,6 +1154,8 @@ mod tests {
                     ("Notes/Else Where.md", true, false),
                     ("node_modules/pkg/Guide.md", false, false),
                     ("mailto:a@b.c", false, true),
+                    ("tel:+123", false, true),
+                    ("sms:+123", false, true),
                 ]
             );
         });

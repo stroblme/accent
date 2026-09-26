@@ -1182,11 +1182,22 @@ impl App {
             None if anchor.is_empty() => self.open_preview(rel),
             None => {
                 let anchor = anchor.to_string();
-                self.with_tab(rel, Opened::Preview, "open", move |_, tab| {
-                    tab.goto_heading(&anchor)
+                self.with_tab(rel, Opened::Preview, "open", move |app, tab| {
+                    if !tab.goto_heading(&anchor) {
+                        app.no_heading(tab, &anchor);
+                    }
                 });
             }
         }
+    }
+
+    /// A link named a heading `tab` does not have: the caret goes to its top, and a toast says
+    /// why it is there rather than where the link pointed. Go to Definition and a click in the
+    /// preview both end here.
+    pub fn no_heading(&self, tab: &Tab, anchor: &str) {
+        tab.goto_pos(accent_api::Pos::default());
+        let name = doc::file_name(&tab.rel()).to_string();
+        self.toast(&format!("No heading {anchor} in {name}"));
     }
 
     /// Show the page and selection an anchor names, if the tab just opened is that PDF.

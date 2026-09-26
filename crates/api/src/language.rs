@@ -65,9 +65,13 @@ pub struct Location {
 }
 
 impl Location {
-    /// A `scheme://` URL or a `mailto:` address: the two a note links out to.
+    /// A `scheme://` URL, or a `mailto:`, `tel:` or `sms:` address: what a note links out to.
+    /// A list rather than any `scheme:`, which a file named `a:b.md` at the root would match.
     pub fn is_url(&self) -> bool {
-        self.path.contains("://") || self.path.starts_with("mailto:")
+        self.path.contains("://")
+            || ["mailto:", "tel:", "sms:"]
+                .iter()
+                .any(|scheme| self.path.starts_with(scheme))
     }
 }
 
