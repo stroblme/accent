@@ -307,25 +307,25 @@ fn render_loop(
                     }
                 }
                 Request::Pages(edit) => match ink.edit_pages(&mut doc, edit) {
-                    Ok(()) => {
+                    Ok(step) => {
                         // Dirty like a stroke, so the tab's own timer writes it out: a page put
                         // in, taken out or moved is a change to the file and nothing else would
                         // save it.
                         ink.dirty = true;
-                        repaged(&doc, &mut glyphs, &view, edit, false);
+                        repaged(&doc, &mut glyphs, &view, edit, step);
                     }
                     Err(e) => tracing::warn!("{edit:?}: {e:#}"),
                 },
                 request @ (Request::Undo | Request::Redo) => {
-                    let undo = matches!(request, Request::Undo);
-                    for walked in ink.walk(&mut doc, !undo) {
+                    let redo = matches!(request, Request::Redo);
+                    for walked in ink.walk(&mut doc, redo) {
                         ink.dirty = true;
                         match walked {
                             pdf::Walked::Ink(page, area) => {
                                 send(&view, Reply::PageChanged(page, area))
                             }
-                            pdf::Walked::Pages(edit) => {
-                                repaged(&doc, &mut glyphs, &view, edit, undo)
+                            pdf::Walked::Pages(edit, step) => {
+                                repaged(&doc, &mut glyphs, &view, edit, step)
                             }
                         }
                     }
@@ -456,14 +456,14 @@ fn repaged(
     glyphs: &mut Glyphs,
     view: &glib::SendWeakRef<PdfView>,
     edit: pdf::PageEdit,
-    undo: bool,
+    step: u32,
 ) {
     *glyphs = std::mem::take(glyphs)
         .into_iter()
         .filter_map(|(page, found)| Some((edit.map(page)?, found)))
         .collect();
     let sizes = page_sizes(doc);
-    send(view, Reply::Repaged { sizes, edit, undo });
+    send(view, Reply::Repaged { sizes, edit, step });
 }
 
 /// Put `newer` at the top of the queue, and `rest` — what the interrupted batch has left to do —

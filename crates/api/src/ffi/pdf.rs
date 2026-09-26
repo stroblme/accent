@@ -382,7 +382,7 @@ impl PdfSession {
             .into_iter()
             .filter_map(|walked| match walked {
                 pdf::Walked::Ink(page, area) => Some((page, area)),
-                pdf::Walked::Pages(_) => None,
+                pdf::Walked::Pages(..) => None,
             })
             .collect();
         for (page, _) in &changed {

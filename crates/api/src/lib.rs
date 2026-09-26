@@ -47,6 +47,7 @@ pub use accent_core::git::{Branch, Commit, Entry, LogRow, Repo, Status, Submodul
 pub use accent_core::index::{
     Backlink, FileRow, Match, PdfLink, Progress, ReconcileStats, SearchHit, Stats,
 };
+pub use accent_core::page_edit::PageEdit;
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
 pub use language::{
@@ -176,6 +177,29 @@ pub struct RenameReport {
     /// after the moves.
     pub rewritten: Vec<String>,
     pub failed: Vec<(String, String)>,
+}
+
+/// What following a PDF's page edit did to the notes that link into it, in the shape
+/// [`RenameReport`] has.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RepageReport {
+    /// The notes rewritten.
+    pub rewritten: Vec<String>,
+    /// How many links now name another page.
+    pub moved: usize,
+    /// The links left naming the page a delete took out, which the Undo of that delete hands back
+    /// to keep.
+    pub left: Vec<KeptLink>,
+    pub failed: Vec<(String, String)>,
+}
+
+/// A link a page edit left where it was ([`accent_core::markdown::Repaged::left`]): its note,
+/// its markup, and which of that note's links into the PDF reading the same it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptLink {
+    pub note: String,
+    pub link: String,
+    pub nth: usize,
 }
 
 /// Take a lock, ignoring poison.

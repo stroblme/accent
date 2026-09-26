@@ -9,48 +9,6 @@ use pdfium_render::prelude::*;
 use super::doc::paper;
 use super::{PdfDoc, lock, pdfium};
 
-/// One change to a document's pages.
-///
-/// Everything a viewer keeps of a page — its renders, its glyphs, its ink history — is filed under
-/// the page's number, and [`PageEdit::map`] is how each of them follows the edit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PageEdit {
-    /// A blank page goes in at this index, the size of the page before it.
-    Insert(usize),
-    /// The page at this index goes.
-    Delete(usize),
-    /// The page at `from` is taken out and put back so that it ends up at `to`.
-    Move { from: usize, to: usize },
-}
-
-impl PageEdit {
-    /// Where the page that was at `page` is after the edit; `None` for the one deleted.
-    pub fn map(self, page: usize) -> Option<usize> {
-        match self {
-            PageEdit::Insert(at) => Some(page + usize::from(page >= at)),
-            PageEdit::Delete(at) if page == at => None,
-            PageEdit::Delete(at) => Some(page - usize::from(page > at)),
-            PageEdit::Move { from, to } if page == from => Some(to),
-            // Taking `from` out moves every page after it up one; putting it back at `to` moves
-            // every page from there on down one.
-            PageEdit::Move { from, to } => {
-                let out = page - usize::from(page > from);
-                Some(out + usize::from(out >= to))
-            }
-        }
-    }
-
-    /// The edit that takes this one back: a page put in comes out, a page taken out goes back
-    /// where it was, a moved page moves back.
-    pub fn inverse(self) -> PageEdit {
-        match self {
-            PageEdit::Insert(at) => PageEdit::Delete(at),
-            PageEdit::Delete(at) => PageEdit::Insert(at),
-            PageEdit::Move { from, to } => PageEdit::Move { from: to, to: from },
-        }
-    }
-}
-
 impl PdfDoc {
     /// A blank page at `at`, the size of the page before it (the first page's, at the front):
     /// what a paper notebook does when the page runs out, and what keeps a drawing readable in any

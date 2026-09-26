@@ -1,7 +1,9 @@
 //! Link targets: what a `[[wikilink]]` or `[text](target)` points at, the keys a file answers
-//! to, and rewriting the links a move leaves pointing at the wrong place.
+//! to, and rewriting the links a move leaves pointing at the wrong place, or a PDF's page edit at
+//! the wrong page.
 
 use super::{Analysis, Heading, Link, LinkKind, Pending, Style, analyze, block_ids};
+use crate::page_edit::PageEdit;
 use crate::path::{self, basename, parent_dir};
 use pulldown_cmark::LinkType;
 use std::collections::{HashMap, HashSet};
@@ -523,6 +525,123 @@ fn destination(text: &str, link: &Link) -> Option<Range<usize>> {
     })
 }
 
+/// What [`repage_links`] made of one note.
+#[derive(Debug, Default, PartialEq)]
+pub struct Repaged {
+    /// The note as it reads now, when a link in it changed.
+    pub text: Option<String>,
+    /// How many links now name another page.
+    pub moved: usize,
+    /// The links left naming the page a delete took out, each as its markup reads and which of
+    /// the note's links into the PDF that read the same it is: enough to find it again after
+    /// edits elsewhere in the note.
+    pub left: Vec<(String, usize)>,
+}
+
+/// Point the links in the note `src` into the PDF `pdf` at where `edit` took the pages they name:
+/// `[[paper.pdf#page=3&selection=…]]`, `![[paper.pdf#page=3]]` and `[t](paper.pdf#page=3)`
+/// alike, the page number rewritten and nothing else of the link.
+///
+/// A link into the page a delete took out names no page any more; it is left as written and
+/// handed back in [`Repaged::left`], because guessing at a neighbour would be a wrong link that
+/// looks right. `keep` is that list from the delete an Undo takes back: those links name the page
+/// coming back, so they stay, where every other link follows the insert and the note reads as it
+/// did. `targets` is the file each link key resolves to, as [`rewrite_moved`] takes it.
+pub fn repage_links(
+    text: &str,
+    src: &str,
+    pdf: &str,
+    targets: &HashMap<String, String>,
+    edit: PageEdit,
+    keep: &[(String, usize)],
+) -> Repaged {
+    let dir = parent_dir(src);
+    let mut out = Repaged::default();
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    // How many links into the PDF have read the same so far: before this rewrite, which is how
+    // `keep` counted, and after it, which is how the next one will.
+    let (mut before, mut after) = (HashMap::new(), HashMap::new());
+    let nth = |seen: &mut HashMap<String, usize>, markup: &str| {
+        let n = seen.entry(markup.to_string()).or_insert(0);
+        *n += 1;
+        *n - 1
+    };
+    for link in &analyze(text).links {
+        let key = match link.kind {
+            LinkKind::Wiki | LinkKind::Embed => link_key(&link.target),
+            LinkKind::Markdown => link_key(&path::resolve(dir, &link.target)),
+            LinkKind::External => continue,
+        };
+        let Some(written) = text.get(link.range.clone()) else {
+            continue;
+        };
+        if targets.get(&key).map(String::as_str) != Some(pdf) {
+            continue;
+        }
+        let kept = keep.contains(&(written.to_string(), nth(&mut before, written)));
+        let number = page_number(text, link).filter(|_| !kept);
+        let page = number
+            .clone()
+            .and_then(|at| text[at].parse::<usize>().ok()?.checked_sub(1));
+        let mut now = written.to_string();
+        let mut left = false;
+        match (number, page.map(|page| (page, edit.map(page)))) {
+            (Some(at), Some((page, Some(to)))) if to != page => {
+                let with = (to + 1).to_string();
+                let start = link.range.start;
+                now.replace_range(at.start - start..at.end - start, &with);
+                edits.push((at, with));
+                out.moved += 1;
+            }
+            (_, Some((_, None))) => left = true,
+            _ => {}
+        }
+        let n = nth(&mut after, &now);
+        if left {
+            out.left.push((now, n));
+        }
+    }
+    let mut rewritten = text.to_string();
+    for (at, with) in edits.into_iter().rev() {
+        rewritten.replace_range(at, &with);
+    }
+    out.text = (rewritten != text).then_some(rewritten);
+    out
+}
+
+/// Where the digits of a link's `page=N` sit in `text`, found from the target as written, the
+/// `#` after it and the anchor the parser read. `None` for a link with no page, and for one whose
+/// bytes do not spell what the parser read (a percent-encoded anchor), which is left alone rather
+/// than guessed at.
+fn page_number(text: &str, link: &Link) -> Option<Range<usize>> {
+    let target = match link.kind {
+        LinkKind::Wiki | LinkKind::Embed => {
+            let open = if link.kind == LinkKind::Embed { 3 } else { 2 };
+            let at = link.range.start + open..link.range.start + open + link.target.len();
+            (text.get(at.clone()) == Some(link.target.as_str())).then_some(at)?
+        }
+        LinkKind::Markdown => destination(text, link)?,
+        LinkKind::External => return None,
+    };
+    let anchor = link.anchor.as_deref()?;
+    let start = target.end + 1;
+    if text.get(target.end..start) != Some("#")
+        || text.get(start..start + anchor.len()) != Some(anchor)
+    {
+        return None;
+    }
+    let mut at = start;
+    for part in anchor.split('&') {
+        if let Some(rest) = part.strip_prefix("page=") {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            let from = at + "page=".len();
+            return (digits > 0).then_some(from..from + digits);
+        }
+        at += part.len() + 1;
+    }
+    None
+}
+
 /// Spell `new_rel` the way `target` spelled `old_rel`: a bare name stays bare, a path stays a
 /// path, and an extension is only written back if the author wrote one.
 fn as_written(target: &str, old_rel: &str, new_rel: &str) -> String {
@@ -933,6 +1052,72 @@ mod tests {
             )
             .unwrap(),
             "[t](../../img/a.png) [s](../b.md) [[c]]"
+        );
+    }
+
+    /// [`repage_links`] over a note at `notes/n.md`, every key of `Papers/p.pdf` and of
+    /// `other.pdf` resolving to its file.
+    fn repaged(text: &str, edit: PageEdit, keep: &[(String, usize)]) -> Repaged {
+        let targets = path_keys("Papers/p.pdf")
+            .into_iter()
+            .map(|k| (k, "Papers/p.pdf".to_string()))
+            .chain([("other.pdf".to_string(), "other.pdf".to_string())])
+            .collect();
+        repage_links(text, "notes/n.md", "Papers/p.pdf", &targets, edit, keep)
+    }
+
+    /// A highlight, a jump and a markdown link all follow a moved page, and nothing else is read
+    /// as a page: a link with no page, another PDF's, one in code.
+    #[test]
+    fn a_page_edit_moves_every_link_shape_and_nothing_else() {
+        let src = concat!(
+            "[[Papers/p.pdf#page=1&selection=0,0,0,4|Hello]] ![[p.pdf#page=2]]\n",
+            "[three](../Papers/p.pdf#page=3) [[p.pdf]] [[other.pdf#page=1]]\n\n",
+            "```\n[[p.pdf#page=1]]\n```\n"
+        );
+        let got = repaged(src, PageEdit::Move { from: 0, to: 2 }, &[]);
+        assert_eq!(
+            got.text.as_deref(),
+            Some(concat!(
+                "[[Papers/p.pdf#page=3&selection=0,0,0,4|Hello]] ![[p.pdf#page=1]]\n",
+                "[three](../Papers/p.pdf#page=2) [[p.pdf]] [[other.pdf#page=1]]\n\n",
+                "```\n[[p.pdf#page=1]]\n```\n"
+            ))
+        );
+        assert_eq!((got.moved, got.left), (3, vec![]));
+        // An edit that leaves every page it names where it was writes nothing.
+        let still = repaged(src, PageEdit::Insert(3), &[]);
+        assert_eq!((still.text, still.moved), (None, 0));
+    }
+
+    /// A link into a deleted page is left and handed back; the Undo that puts the page back is
+    /// given it to keep, and every other link follows the insert, so the note reads as it did —
+    /// also when a link that moved now reads the same as one that was left, either way round.
+    #[test]
+    fn undoing_a_delete_puts_back_exactly_what_it_changed() {
+        for src in [
+            "[[p.pdf#page=2]] [[p.pdf#page=3]] [[p.pdf#page=2|again]] [[p.pdf#page=1]]",
+            "[[p.pdf#page=3]] [[p.pdf#page=2]]",
+        ] {
+            let deleted = repaged(src, PageEdit::Delete(1), &[]);
+            let text = deleted.text.expect("a link moved");
+            assert!(!deleted.left.is_empty(), "{src}");
+            let undone = repaged(&text, PageEdit::Insert(1), &deleted.left);
+            assert_eq!(undone.text.as_deref(), Some(src));
+            assert!(undone.left.is_empty());
+        }
+        let deleted = repaged(
+            "[[p.pdf#page=2]] [[p.pdf#page=3]] [[p.pdf#page=2|again]]",
+            PageEdit::Delete(1),
+            &[],
+        );
+        assert_eq!(deleted.moved, 1);
+        assert_eq!(
+            deleted.left,
+            [
+                ("[[p.pdf#page=2]]".to_string(), 0),
+                ("[[p.pdf#page=2|again]]".to_string(), 0)
+            ]
         );
     }
 }

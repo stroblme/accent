@@ -471,28 +471,6 @@ fn an_appended_page_is_the_size_of_the_last_one_and_takes_ink() {
     assert_eq!(reopened.inks(1).unwrap().len(), 1);
 }
 
-#[test]
-fn a_page_edit_says_where_every_page_went() {
-    // Five pages, and where each of them is after the edit.
-    let after = |edit: PageEdit| (0..5).map(|p| edit.map(p)).collect::<Vec<_>>();
-    let s = Some;
-    assert_eq!(after(PageEdit::Insert(2)), [s(0), s(1), s(3), s(4), s(5)]);
-    assert_eq!(after(PageEdit::Insert(5)), [s(0), s(1), s(2), s(3), s(4)]);
-    assert_eq!(after(PageEdit::Delete(1)), [s(0), None, s(1), s(2), s(3)]);
-    let down = PageEdit::Move { from: 1, to: 3 };
-    assert_eq!(after(down), [s(0), s(3), s(1), s(2), s(4)]);
-    let up = PageEdit::Move { from: 3, to: 0 };
-    assert_eq!(after(up), [s(1), s(2), s(3), s(0), s(4)]);
-    // The inverse puts every page still there back where it was.
-    for edit in [PageEdit::Insert(2), PageEdit::Delete(1), down, up] {
-        for page in 0..5 {
-            if let Some(at) = edit.map(page) {
-                assert_eq!(edit.inverse().map(at), Some(page), "{edit:?} {page}");
-            }
-        }
-    }
-}
-
 /// Each page's text, trimmed, in the document's order.
 pub(super) fn page_texts(doc: &PdfDoc) -> Vec<String> {
     (0..doc.page_count())
