@@ -125,6 +125,12 @@ fn is_dark() -> bool {
     adw::StyleManager::default().is_dark()
 }
 
+/// Whether Solarized is on screen, for the one number that is not a colour and still differs by
+/// theme: the contrast floor dim text is held above (`highlight::dim`).
+pub fn solarized() -> bool {
+    CHOICE.get() == Theme::Solarized
+}
+
 /// The colour the preview paints behind the note. WebKit cannot see GTK's CSS variables, so the
 /// pane is handed the literal the rest of the window resolves to.
 pub fn view_bg(dark: bool) -> &'static str {

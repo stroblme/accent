@@ -463,7 +463,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 - The only three colour sources in code are `AdwStyleManager`'s accent, `Widget::color()` (the resolved foreground) and `StyleManager::is_dark()`; the comparison's hues below are the one place that bends. A rendered PDF page cannot read a CSS variable, so `theme.rs` hands the renderer the paper and ink, and stays the only file that writes a colour down.
 - GTK CSS uses `var(--accent-bg-color)`, `var(--view-bg-color)`, `var(--window-fg-color)` and friends: never `@named_colors` (libadwaita replaced them with variables), never a literal hex.
-- Editor tag colours are all derived (`highlight::restyle`): `link`, `wikilink`, `tag` and `image` take the accent in its standalone form, the colour the platform writes its own links in; `marker`, `frontmatter` and `listmarker` take the foreground at alpha 0.4, `quote` and `taskdone` at 0.6, each held above 2.8:1 against the page; `code` and `codeblock` get a foreground background at 0.07. No other colour is set anywhere.
+- Editor tag colours are all derived (`highlight::restyle`): `link`, `wikilink`, `tag` and `image` take the accent in its standalone form, the colour the platform writes its own links in; `marker`, `frontmatter` and `listmarker` take the foreground at alpha 0.4, `quote` and `taskdone` at 0.6, each held above 2.8:1 against the page — 1.8:1 on Solarized, whose prose is only 4.1:1, so a quote stays a step above a marker there; `code` and `codeblock` get a foreground background at 0.07. No other colour is set anywhere.
 - Three things depart from the single accent, each where one colour cannot carry the information:
   - the style scheme a code tab is coloured by (Typography);
   - a palette of hues rotated from the accent, for a CSV's columns and the git history's lanes: a sixth of the wheel per column, keeping the accent's saturation and value, column 0 the accent itself, a seventh column repeating the first hue rather than inventing a colour — derived at runtime, so it follows the system accent;
@@ -475,7 +475,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - The find bar paints the note's own background (`--view-bg-color`) in every theme through `accent-flat`, which has to reach `searchbar > revealer > box`: Adwaita paints that box in the header-bar colour, a band that shows once the chrome around it fades.
 - The 1 px paned separator is the only division. Under the pointer it takes the accent at the same width, dragged it thickens to 3 px, and a double-click puts it back at its default position.
 - Four themes, chosen in Preferences: System, Light and Dark are `AdwStyleManager` colour schemes and paint nothing of ours; Solarized redeclares libadwaita's `--*-bg-color` / `--*-fg-color` on `:root`, so every widget follows untouched and it still follows the system between its halves. It leaves the accent, shade and border variables alone, so the one-accent rule holds in all four.
-- Light and dark are the same design by construction: outside `theme.rs` nothing is picked per theme, so there is no second palette to keep in step, and the same holds for the accent, which the user can change at any moment.
+- Light and dark are the same design by construction: outside `theme.rs` no colour is picked per theme (Solarized's lower dim floor is a number), so there is no second palette to keep in step, and the same holds for the accent, which the user can change at any moment.
 
 ## Spacing
 
