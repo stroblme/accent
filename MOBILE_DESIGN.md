@@ -34,13 +34,29 @@ Compose widget stands in for which desktop one.
 
 ### Browse
 
-- A panel over what is being read, with the Search / Files / Command chips and the query field at
-  the foot of the screen, nearest the thumb. The desktop's eight sidebar panes and its palette
-  collapse into it.
+- A panel over what is being read, with the Search / Files / Tags / Backlinks / Command chips and
+  the query field at the foot of the screen, nearest the thumb. The desktop's eight sidebar panes
+  and its palette collapse into it.
+- The chips go from the whole vault to the one document and then to acting on it: what the notes
+  say, what they are called, what they are about, what links to the one in front, what can be
+  done. Five do not fit across a phone, so the row scrolls sideways under the thumb and keeps the
+  lit chip on screen as the pages are swiped; the chip cut off at the edge is what says there is
+  more. A scrolling row rather than shorter labels or icons, because each is the one word for its
+  page and the platform's own chips scroll the same way.
 - Search is the default: the tree until there is a query, then what the notes say. Files is the
   switcher — the recent files, then names ranked against the query — and Command the palette; both
   lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the
   keyboard up when their page lands.
+- Tags is every tag with how many notes carry it, most used first and bottom-up as Files is, the
+  query ranking them as it ranks names. A tap opens the tag on the same page: its notes by name and
+  folder, from the top, under `#tag · N` in the accent, which a tap or Back takes back to the tags.
+- Backlinks is the notes linking to the document in front — a note, a PDF or an image — once each,
+  by name and folder under "Linked from …", the desktop's References for a note. One opened from
+  here is one step from where the reader was: Back from it opens that document again, at its top,
+  since where a reader was in a page is the screen's to know. With nothing in front, or nothing
+  linking, the page says so in a line where the rows would be.
+- Tags and Backlinks keep the keyboard down when they land: each is a list to read, as the tree
+  is, and the field is there to narrow it.
 - A handle at the top, and a pull down anywhere in it closes it. No Close button: Back already does
   that, and a second way out costing a corner of the screen is a corner spent twice.
 
@@ -117,12 +133,13 @@ exist as a visible control.
 | Gesture | What it does | Its visible twin |
 |---|---|---|
 | Pull the panel down | Closes Browse | The handle at its top |
-| Swipe across the panel | Steps between Search, Files and Command | The chips, which travel with it |
+| Swipe across the panel | Steps between Search, Files, Tags, Backlinks and Command | The chips, which travel with it |
 | Tap the content | Puts the chrome up or takes it down | — |
 | Scroll on | Takes the chrome down; scrolling back brings it up | — |
 | Pinch on a page | Zooms a PDF, 1× to 8× (less on a viewport wider than 4095 px), around the point between the fingers | — |
 | Drag on a zoomed page | Pans it, both axes at once | — |
 | Tap a highlight on a page | Opens the note whose link makes it; Back returns to the page | The highlight |
+| Back on a tag's notes | Returns to the tags | The tag's heading |
 | Long press on a PDF page | Selects the word under the finger; a drag grows it, and the handles move either end | The handles and the floating toolbar it raises |
 | Long press on a note | Selects the text under the finger with the WebView's own handles, as a page of prose does everywhere else on the platform | The handles it raises |
 | Tap an image in a note | Opens it on its own screen, to zoom and invert; an image inside a link follows the link | The image |
@@ -310,5 +327,5 @@ The decisions under the Android app, each with its reason; the shared ones are i
   the platform does (a phone keyboard completes words), and the rest would be a second app inside
   this one. The test for any feature: does it help someone read their vault, make a small edit, or
   read and mark up a PDF.
-- Deferred rather than refused: tags and backlinks, templates and the daily note, a native Compose
-  renderer in place of the WebView, exporting highlights, and the PDF shapes and Adjust tool.
+- Deferred rather than refused: templates and the daily note, a native Compose renderer in place
+  of the WebView, exporting highlights, and the PDF shapes and Adjust tool.
