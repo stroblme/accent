@@ -41,6 +41,8 @@ import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalDensity
@@ -229,6 +231,28 @@ fun DocumentBar(title: String, actions: @Composable RowScope.() -> Unit) {
             modifier = Modifier.weight(1f),
         )
         actions()
+    }
+}
+
+/**
+ * A bar action that stays on until it is pressed again — Invert — drawn as the bar's other text
+ * buttons are, and filled with the accent while it is on. Its label says what it does, not whether
+ * it is doing it, so the fill is what says that.
+ */
+@Composable
+fun BarToggle(label: String, on: Boolean, onClick: () -> Unit, enabled: Boolean = true) {
+    val colors = MaterialTheme.colorScheme
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        colors = if (on) {
+            ButtonDefaults.textButtonColors(containerColor = colors.primary, contentColor = colors.onPrimary)
+        } else {
+            ButtonDefaults.textButtonColors()
+        },
+        modifier = Modifier.semantics { selected = on },
+    ) {
+        Text(label)
     }
 }
 

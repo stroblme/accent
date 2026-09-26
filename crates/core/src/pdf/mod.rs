@@ -24,9 +24,6 @@ pub use ledger::{Ink, NamedInk, fresh_id};
 pub use pages::PageEdit;
 pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_quads};
 
-// Recolouring lives in `crate::recolour`, shared with images; this is the PDF's name for it.
-pub use crate::recolour::recolour_pixel;
-
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 

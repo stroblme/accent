@@ -1718,7 +1718,7 @@ mod imp {
 /// The colour a stroke will have once the tile carrying it arrives.
 ///
 /// Two things happen to it on the way: every pixel of a page is put on the theme's paper–ink ramp
-/// (see `accent_core::pdf::recolour_pixel`), and a highlighter multiplies into the page rather
+/// (see `accent_core::recolour::recolour_pixel`), and a highlighter multiplies into the page rather
 /// than covering it. Painting the live stroke in its raw colour instead is why a highlighter used
 /// to jump to another shade on dark and Solarized the moment the render landed.
 ///
@@ -1726,9 +1726,9 @@ mod imp {
 /// letter it darkens a shade more than this, which is a pixel or two of the stroke's own width.
 fn as_rendered(style: accent_core::pdf::InkStyle, dark: bool, paper: gdk::RGBA) -> gdk::RGBA {
     let [r, g, b, a] = style.rgba;
-    let rgb = match crate::theme::pdf_colours(dark) {
+    let rgb = match crate::theme::page_colours(dark) {
         Some((page, ink)) => {
-            let px = accent_core::pdf::recolour_pixel([r, g, b, 255], page, ink);
+            let px = accent_core::recolour::recolour_pixel([r, g, b, 255], page, ink);
             [px[0], px[1], px[2]]
         }
         None => [r, g, b],

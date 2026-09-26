@@ -20,6 +20,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use accent_core::markdown;
 use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -65,9 +66,10 @@ pub struct Location {
 }
 
 impl Location {
-    /// A `scheme://` URL or a `mailto:` address: the two a note links out to.
+    /// Somewhere the system opens rather than the vault: see [`markdown::is_url`], which a click
+    /// in the preview asks as well.
     pub fn is_url(&self) -> bool {
-        self.path.contains("://") || self.path.starts_with("mailto:")
+        markdown::is_url(&self.path)
     }
 }
 

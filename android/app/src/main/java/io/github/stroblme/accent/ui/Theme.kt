@@ -12,12 +12,16 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.stroblme.accent.ffi.Theme
 
 /**
  * One accent, taken from the system; the page and the ink on it, taken from the desktop.
@@ -122,6 +126,33 @@ internal fun ColorScheme.flattened(dark: Boolean): ColorScheme {
         inverseSurface = if (dark) PageLight else PageDark,
         inverseOnSurface = if (dark) InkLight else InkDark,
     )
+}
+
+/**
+ * What a document is recoloured onto: a PDF page, and an image that reads as one ([imageTheme]).
+ *
+ * In a dark theme its paper lands on the dark page and its ink on the dark ink, each pixel keeping
+ * its own chroma, as the desktop does it; a light theme leaves it alone. [inverted] is the reader's
+ * hand on one file, the desktop's Invert: a light theme then recolours it onto the dark page, and a
+ * dark one shows it as it is. Always the dark pair, because the light one is the paper a document
+ * already has.
+ */
+internal fun pageTheme(dark: Boolean, inverted: Boolean = false): Theme =
+    if (dark != inverted) Theme.Recolour(PageDark.rgb(), InkDark.rgb()) else Theme.Plain
+
+/**
+ * The files the reader has inverted by hand ([pageTheme]'s `inverted`) — a PDF or an image, by
+ * Invert in its bar or a long press on the image in a note — by path on this device, or by address
+ * for a PDF from another app. Kept for as long as the app's process runs and nowhere else: a page
+ * or a figure that came out wrong is put right for this reading, not written into the vault.
+ */
+object Inverted {
+    var files by mutableStateOf(emptySet<String>())
+        private set
+
+    fun toggle(key: String) {
+        files = if (key in files) files - key else files + key
+    }
 }
 
 /**

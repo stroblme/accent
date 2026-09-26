@@ -468,7 +468,9 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
 /// its anchor and alias left out.
 ///
 /// Then `[[#Nowhere]]`, a heading the note does not have: `bad_anchor` prints the caret's line,
-/// which must be the top of the note, and the toast saying why. Last `late`: a link typed at the
+/// which must be the top of the note, and the toast saying why; `preview_bad_anchor` the same for
+/// a click on `[[#Elsewhere]]` in the preview, which printed the caret's own line and no toast
+/// before the two shared a landing (`App::no_heading`). Last `late`: a link typed at the
 /// end of a note past 16 K characters and followed at once, before the pause its analysis waits
 /// for, which must offer New File as the first did — it printed `typed=None` while the server
 /// was sent the text only after that pause.
@@ -485,6 +487,17 @@ async fn bench_dangling(app: Rc<App>, tab: Rc<Tab>) {
     let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
     let said = super::compare::bench_toast(&app);
     println!("bench follow bad_anchor caret_line={line} said={said:?}");
+
+    // What the preview hands over for a click on `[[#Elsewhere]]`, with the first toast taken
+    // away so the one read is this case's own.
+    app.toasts.dismiss_all();
+    glib::timeout_future(Duration::from_millis(500)).await;
+    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(18));
+    app.open_target("#Elsewhere");
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    let said = super::compare::bench_toast(&app);
+    println!("bench follow preview_bad_anchor caret_line={line} said={said:?}");
 
     tab.set_text(&"word ".repeat(3400));
     // Past the server's refresh, so it holds the long text before the link is typed.

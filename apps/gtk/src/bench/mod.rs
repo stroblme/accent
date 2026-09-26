@@ -39,7 +39,7 @@ use git::{
     bench_git, bench_git_close, bench_git_focus, bench_git_init, bench_git_press, bench_git_rebase,
     bench_git_switch, bench_git_sync_over_fetch,
 };
-use image::bench_image;
+use image::{bench_image, bench_image_look, bench_preview_look};
 use keys::{
     bench_hold, bench_keys, bench_list, bench_occurrence_keys, bench_shell_keys, bench_term,
 };
@@ -124,6 +124,10 @@ use tags::bench_tags;
 /// is gone.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload.
+/// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` walks each image through the three themes, inverted and
+/// not, printing what the classifier said, the pixel the tab shows at (2,2) and the recolouring's
+/// cost (see `image::bench_image_look`). `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` does the same for
+/// the images a note shows in the preview, with the requests the page made (`bench_preview_look`).
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
 /// two lines and the tab's — until VTE has reported a title of its own. Against `--terminal` that
 /// is the vault-less window; against a vault it opens a shell in a tab and covers that instead.
@@ -178,9 +182,10 @@ use tags::bench_tags;
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
 /// that offers to create it, with the name it arrives prefilled with. Then `[[#Nowhere]]`, which
-/// must put the caret on the note's first line and toast, and a link typed at the end of a note
-/// past 16 K characters and followed at once, which must offer New File as well. Any text file
-/// will do for the underline: a `.txt` has no wikilinks, and its URL underlines all the same.
+/// must put the caret on the note's first line and toast, as must a preview click on
+/// `[[#Elsewhere]]`, and a link typed at the end of a note past 16 K characters and followed at
+/// once, which must offer New File as well. Any text file will do for the underline: a `.txt` has
+/// no wikilinks, and its URL underlines all the same.
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a
@@ -300,6 +305,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let term = std::env::var("ACCENT_BENCH_TERM").is_ok();
     let hold = std::env::var("ACCENT_BENCH_HOLD").ok();
     let picture = std::env::var("ACCENT_BENCH_IMAGE").ok();
+    let image_look = std::env::var("ACCENT_BENCH_IMAGE_LOOK").ok();
+    let preview_look = std::env::var("ACCENT_BENCH_PREVIEW_LOOK").ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let drawing = std::env::var("ACCENT_BENCH_DRAWING").is_ok();
@@ -363,6 +370,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !term
         && hold.is_none()
         && picture.is_none()
+        && image_look.is_none()
+        && preview_look.is_none()
         && !close
         && !hidden
     {
@@ -500,6 +509,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = picture {
             return bench_image(&app, &arg);
+        }
+        if let Some(rels) = image_look {
+            return bench_image_look(&app, &rels);
+        }
+        if let Some(rel) = preview_look {
+            return bench_preview_look(&app, &rel);
         }
         if close {
             return bench_close(&app);

@@ -4,7 +4,9 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import io.github.stroblme.accent.ffi.Theme
 import io.github.stroblme.accent.ui.flattened
+import io.github.stroblme.accent.ui.pageTheme
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -60,6 +62,19 @@ class ThemeTest {
         val accent = Color(0xFF6750A4)
         assertEquals(accent, lightColorScheme(primary = accent).flattened(dark = false).primary)
         assertEquals(accent, darkColorScheme(primary = accent).flattened(dark = true).primary)
+    }
+
+    /**
+     * A PDF page, and an image that reads as a document: onto the dark page in a dark theme, left
+     * alone in a light one, and the other way round for a file the reader has inverted.
+     */
+    @Test
+    fun `a document is recoloured onto the dark page`() {
+        val dark = Theme.Recolour(0x1D1D20u, 0xEBEBEBu)
+        assertEquals(Theme.Plain, pageTheme(dark = false))
+        assertEquals(dark, pageTheme(dark = true))
+        assertEquals(Theme.Plain, pageTheme(dark = true, inverted = true))
+        assertEquals(dark, pageTheme(dark = false, inverted = true))
     }
 
     /** What makes the Browse pill dark on a light theme and light on a dark one. */

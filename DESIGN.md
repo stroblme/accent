@@ -193,7 +193,8 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### Preview
 
-- A read-only WebKitGTK 6 view, the same clamp width, its stylesheet generated from `AdwStyleManager`.
+- A read-only WebKitGTK 6 view, the same clamp width, its stylesheet generated from `AdwStyleManager`; its images in the look their tabs have (Image).
+- A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`), and only on a click — a redirect the page makes on its own opens nothing.
 
 ### Terminal
 
@@ -352,6 +353,14 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Notes name pages by number and are not rewritten, so an edit that leaves highlights pointing at other pages says how many in a toast.
 - The stand-ins have their own budget, a quarter of the tiles', so scrolling a long document end to end does not keep every page.
 
+### Image
+
+- A `GtkPicture` in a scroller, fitted to the window until zoomed, the file decoded off the main loop by GDK's own decoders.
+- A document-like image — a scan, a plot, a diagram, a screenshot of text — is recoloured onto the theme's paper and ink as a PDF page is (Architecture, Recolouring); a photo is left as it is, and Light leaves every image alone. An SVG is always recoloured, through a filter on its own vector; a GIF never unasked, being likely an animation. Transparency is judged over white, and kept on the window's own page. An image over 64 megapixels is left alone rather than held twice.
+- Invert Image Colours does to one file what Invert PDF Colours does to a document: whatever it shows, it goes onto the other half's page — from Light onto Dark's, from either Solarized half onto the other's — and under Dark, whose other half is Light, it shows as it is. A page that is not the window's own fills the image's transparent parts with its paper, so a drawing on nothing reads as a page. It lasts until the app quits and is written nowhere.
+- A theme change recolours the texture already decoded; the file is read again only when it changes on disk.
+- The preview shows an image as its tab would: the app's `accent:` scheme serves the recoloured bytes (a PNG, or the SVG with its filter), so the page carries no script or class for it. WebKit keeps what it was served across renders, so a new look or an inversion clears its memory cache and renders the note again. Its menu over an image ends with Invert Image Colours, the same toggle as the palette's.
+
 ### Diagram
 
 - A draw.io file (`.drawio`, `.dio`, `.drawio.xml`, or an `.xml` whose first element says so) in a tab of its own, on a canvas painting `accent-drawio`'s display list: fitted to the window on open and at `Ctrl+0`, zoomed around the pointer and scrolled like a PDF, panned by middle-drag or Space+drag.
@@ -462,7 +471,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 <https://gnome.pages.gitlab.gnome.org/libadwaita/doc/1.7/css-variables.html> · <https://gnome.pages.gitlab.gnome.org/libadwaita/doc/1.7/style-classes.html>
 
-- The only three colour sources in code are `AdwStyleManager`'s accent, `Widget::color()` (the resolved foreground) and `StyleManager::is_dark()`; the comparison's hues below are the one place that bends. A rendered PDF page cannot read a CSS variable, so `theme.rs` hands the renderer the paper and ink, and stays the only file that writes a colour down.
+- The only three colour sources in code are `AdwStyleManager`'s accent, `Widget::color()` (the resolved foreground) and `StyleManager::is_dark()`; the comparison's hues below are the one place that bends. A rendered PDF page or a recoloured image cannot read a CSS variable, so `theme.rs` hands the PDF renderer and the image loader the paper and ink, and stays the only file that writes a colour down.
 - GTK CSS uses `var(--accent-bg-color)`, `var(--view-bg-color)`, `var(--window-fg-color)` and friends: never `@named_colors` (libadwaita replaced them with variables), never a literal hex.
 - Editor tag colours are all derived (`highlight::restyle`): `link`, `wikilink`, `tag` and `image` take the accent in its standalone form, the colour the platform writes its own links in; `marker`, `frontmatter` and `listmarker` take the foreground at alpha 0.4, `quote` and `taskdone` at 0.6, each held above 2.8:1 against the page — 1.8:1 on Solarized, whose prose is only 4.1:1, so a quote stays a step above a marker there; `code` and `codeblock` get a foreground background at 0.07. No other colour is set anywhere.
 - Three things depart from the single accent, each where one colour cannot carry the information:
@@ -543,7 +552,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Next Page and Previous Page are palette commands with no accelerator, fired by those keys as the tab's own: each is a typing key, and an application accelerator is dispatched at the window ahead of whatever has the keyboard, so `Space` in the table would be taken from the editor, the terminal and every entry.
 - Back and Forward are the window's (History): a PDF keeps no stack of its own. Only jumps go in — a link, an outline row, a page typed into Go to Line, a search's first step; paging is reading, and a history of single steps would have nothing to go back to.
 - Ctrl held over a link previews where it leads without following it: a band of the target page around the destination, or an external link's address.
-- Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette.
+- Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette, and over an image Invert Image Colours.
 - Drawing `Ctrl+Shift+I` opens the ring. Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust (unbound) are on the ring and in the palette, a tool picked from the palette bringing the ring out.
 - Copy Selection, Copy Link to Selection, Export Highlights, Insert Sketch, Add Page Before, Add Page After and Delete Page are in the palette and the page's menu, Move Page Up and Move Page Down in the palette, all unbound: the thumbnail strip is where pages are organised by pointer.
 - While a pen is out `Ctrl+Z` takes back the last stroke, erase or move of this session and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note, and `Escape` puts the pen down: the tab's own keys, like Copy. Undo Drawing and Redo Drawing are also the header's two buttons and palette commands.
@@ -616,7 +625,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Code
 
-- Go to Definition `Ctrl+Shift+Return` / `F12` / Ctrl+click, one question for every text tab, asked about the text as it stands: on a note it follows a link — offering New File with the path typed in where nothing answers to it, and going to the top of the note with a toast for a heading the note does not have — and an external link opens in the browser. A bare `http(s)://` or `mailto:` URL under the caret opens in the browser from any text tab, ahead of the language server (a URL is not a symbol), and Ctrl+hover underlines it as it does a link.
+- Go to Definition `Ctrl+Shift+Return` / `F12` / Ctrl+click, one question for every text tab, asked about the text as it stands: on a note it follows a link — offering New File with the path typed in where nothing answers to it, and going to the top of the note with a toast for a heading the note does not have, as a click in the preview does — and an external link (any `scheme://`, `mailto:`, `tel:`, `sms:`; never `file:`, `javascript:` or `data:`) goes to the system. A bare `http(s)://` or `mailto:` URL under the caret opens in the browser from any text tab, ahead of the language server (a URL is not a symbol), and Ctrl+hover underlines it as it does a link.
 - Fold / Unfold `Ctrl+Shift+[` / `Ctrl+Shift+]`, Fold All / Unfold All from the palette. Fold takes the innermost block holding the caret; the gutter chevron beside a block's first line is the same by pointer.
 - A shut block keeps to the lines it hid: text typed, pasted or inserted next to it stays in sight, and a line put between its header and what it hides opens it.
 - Nothing folds until a language server says what the blocks are, so there is no chevron column before it answers. Both chords carry Control and Shift, so they stay bound while a shell has the keyboard.

@@ -132,17 +132,33 @@ pub fn heading_for<'a>(headings: &'a [Heading], anchor: &str) -> Option<&'a Head
 
 /// `scheme:` or `//host` — anything with an authority is not a vault path.
 fn is_external(dest: &str) -> bool {
-    if dest.starts_with("//") {
-        return true;
-    }
-    match dest.find(':') {
-        Some(i) if i > 0 => {
-            let s = &dest[..i];
-            s.starts_with(|c: char| c.is_ascii_alphabetic())
-                && s.bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
-        }
-        _ => false,
+    dest.starts_with("//") || scheme(dest).is_some()
+}
+
+/// The scheme `dest` starts with and what follows its `:`, as RFC 3986 spells a scheme: a letter,
+/// then letters, digits, `+`, `-` and `.`.
+fn scheme(dest: &str) -> Option<(&str, &str)> {
+    let (s, rest) = dest.split_once(':')?;
+    let named = s.starts_with(|c: char| c.is_ascii_alphabetic())
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'));
+    named.then_some((s, rest))
+}
+
+/// Whether a link target is handed to the system rather than followed in the vault: a
+/// `scheme://` address (the web, but also `ftp://`, `zotero://`, …), or a `mailto:`, `tel:` or
+/// `sms:` one. Never `javascript:` or `data:`, which carry what they run, `file:`, which reads the
+/// disk, or `accent:`, the preview's own scheme — whatever slashes follow them. The editor's Go
+/// to Definition and a click in the preview both ask this, so a link leaves the app the same way
+/// from either.
+pub fn is_url(target: &str) -> bool {
+    let Some((name, rest)) = scheme(target) else {
+        return false;
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "javascript" | "data" | "file" | "accent" => false,
+        "mailto" | "tel" | "sms" => !rest.is_empty(),
+        _ => rest.starts_with("//"),
     }
 }
 
@@ -527,6 +543,38 @@ fn ext(rel: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::markdown::testing::link;
+
+    /// What leaves the app for the system, from the editor and the preview alike: an address
+    /// with an authority, or one of the three that need none, and never what runs code or reads
+    /// the disk, whatever its slashes.
+    #[test]
+    fn a_url_is_what_the_system_is_handed() {
+        for url in [
+            "https://e.org/a",
+            "HTTP://e.org",
+            "ftp://host/f",
+            "mailto:a@b.c",
+            "tel:+123",
+            "sms:+123",
+        ] {
+            assert!(is_url(url), "{url}");
+        }
+        for not in [
+            "javascript:alert(1)",
+            "javascript://%0aalert(1)",
+            "JavaScript://x",
+            "file:///etc/passwd",
+            "data:text/html,<b>x</b>",
+            "accent://open/Note",
+            "mailto:",
+            "Notes/a.md",
+            "a:b.md",
+            "Notes/a://b",
+            "about:blank",
+        ] {
+            assert!(!is_url(not), "{not}");
+        }
+    }
 
     #[test]
     fn wikilink_variants() {

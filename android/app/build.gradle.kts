@@ -46,12 +46,11 @@ android {
 
     buildTypes {
         release {
-            // R8 stays off. uniffi's bindings reach the core by name — `Native.register` binds
-            // each `external fun uniffi_accent_api_*` to the symbol spelled the same way, and
-            // `@Structure.FieldOrder("capacity", "len", "data")` names struct fields as strings —
-            // so a rename breaks the core when its class initialises, and there is no device here
-            // to prove a keep set right. NOTEPAD.md says what a real session would have to check.
-            isMinifyEnabled = false
+            // R8, with what uniffi and JNA reach by name kept whole (`proguard-rules.pro`): a
+            // rename there breaks the core when its class initialises, not at build time.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 
@@ -62,6 +61,9 @@ android {
     }
 
     sourceSets["main"].kotlin.directories.add(bindings)
+    // Mermaid, the desktop's vendored copy rather than a second one: the rendered view draws a
+    // note's diagrams with it, served from the APK's assets (`NoteScreen`).
+    sourceSets["main"].assets.directories.add(repo.resolve("vendor/mermaid").path)
 }
 
 // The Rust core, cross-compiled into `src/main/jniLibs/<abi>/`. Gradle does not know how to build

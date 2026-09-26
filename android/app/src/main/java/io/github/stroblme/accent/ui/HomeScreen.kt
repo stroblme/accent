@@ -39,12 +39,13 @@ fun HomeScreen(model: VaultModel) {
     val snackbar = remember { SnackbarHostState() }
 
     // Whatever opens arrives with its chrome up, however the last thing read was left.
-    LaunchedEffect(state.open?.rel, state.pdf?.rel) { chrome.show() }
+    LaunchedEffect(state.open?.rel, state.pdf?.rel, state.image?.rel) { chrome.show() }
 
     // Back undoes the last thing that opened, in the order it opened: the screen over the note
     // (Browse's handler is its own, below), then the note. Only with nothing left does it leave
     // the app.
-    BackHandler(enabled = screen == Screen.Home && (state.open != null || state.pdf != null)) {
+    val reading = state.open != null || state.pdf != null || state.image != null
+    BackHandler(enabled = screen == Screen.Home && reading) {
         model.close()
     }
 
@@ -65,6 +66,7 @@ fun HomeScreen(model: VaultModel) {
             // back to the top. Closing Browse is coming back to the same line.
             val pdf = state.pdf
             val open = state.open
+            val image = state.image
             when {
                 pdf != null -> PdfScreen(
                     model = model,
@@ -75,9 +77,9 @@ fun HomeScreen(model: VaultModel) {
                 open != null -> NoteScreen(
                     model = model,
                     open = open,
-                    root = state.root.orEmpty(),
                     chrome = chrome,
                 )
+                image != null -> ImageScreen(image = image, chrome = chrome)
                 else -> Empty(
                     opening = state.opening,
                     indexing = state.indexing,

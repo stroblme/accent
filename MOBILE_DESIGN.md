@@ -47,8 +47,10 @@ Compose widget stands in for which desktop one.
 ### Note
 
 - Reading: the rendered note in a WebView, 16 dp side gutters, one thin bar over the top of it and,
-  while a find is open, the find bar below. The page is loaded when the note or the palette changes
-  and at no other time: a WebView told to load again sends the reader back to the top.
+  while a find is open, the find bar below. The page is loaded when the note, the palette or an
+  image inverted in it changes, and at no other time: a WebView told to load again sends the reader
+  back to the top, so a load of the note already in front puts them back where they were once it
+  has been drawn.
 - Editing: the same text with the same styling spans, markup visible and dimmed.
 
 ### PDF
@@ -78,6 +80,15 @@ Compose widget stands in for which desktop one.
   Its bar sits at the foot of the pages, as a note's does.
 - The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles: until then no
   tool can be picked and a finger only ever moves the page.
+
+### Image
+
+- An image file — from the files, the switcher, a link, or a tap on it in a note — opens on a screen
+  of its own rather than as a note: the image fitted whole to the screen on the page colour, under
+  the document's bar. A pinch zooms it, the WebView's own.
+- It is drawn by the note's rule (Colour), and the bar's one action is Invert, which sends this file
+  to the other theme's page for as long as the app runs, as a long press on the image in a note
+  does.
 
 ### Message
 
@@ -114,7 +125,15 @@ exist as a visible control.
 | Tap a highlight on a page | Opens the note whose link makes it; Back returns to the page | The highlight |
 | Long press on a PDF page | Selects the word under the finger; a drag grows it, and the handles move either end | The handles and the floating toolbar it raises |
 | Long press on a note | Selects the text under the finger with the WebView's own handles, as a page of prose does everywhere else on the platform | The handles it raises |
+| Tap an image in a note | Opens it on its own screen, to zoom and invert; an image inside a link follows the link | The image |
+| Long press on an image in a note | Inverts its colours against the recolouring rule, until the app is closed | Invert on the image's own screen, a tap away |
+| Pinch on an image | Zooms it, the WebView's own | — |
 
+- A tap or a long press on an image is taken only where the WebView's hit test says one is under the
+  finger; anywhere else a tap is the chrome's and a long press the WebView's selection. An image
+  inside a link is the link's to a tap, as on any page — the author made it one — and a long press
+  inverts it all the same. The long press's twin is the tap: the image on its own screen, where
+  Invert in the bar flips the same switch.
 - A panel is closed by pulling it down, the one gesture here that reads as itself: the handle says
   it moves, and down is where a panel goes. What is inside scrolls first, so only a drag the list
   cannot use pulls the panel, and letting go short of the threshold springs it back. Back does the
@@ -139,10 +158,10 @@ exist as a visible control.
 
 ## The document
 
-- A note and a PDF are one surface with two kinds of content: the same `DocumentBar` — the file's
-  name and the one thing that can be done to it — over the same `DocumentGap`, the content in the
-  rectangle that leaves (`ui/Common.kt`). Moving between a note and a PDF should not move what is
-  being read.
+- A note, a PDF and an image are one surface with three kinds of content: the same `DocumentBar` —
+  the file's name and the one thing that can be done to it — over the same `DocumentGap`, the
+  content in the rectangle that leaves (`ui/Common.kt`). Moving between a note and a PDF should not
+  move what is being read.
 - On both, the bar lies over the content, not above it (`DocumentFrame`): a document is read at a
   scroll offset, a PDF at a zoom as well, and a bar sometimes in the layout gives the document two
   positions, so tapping for the bar would move what the tap was aimed at.
@@ -156,7 +175,10 @@ exist as a visible control.
   once coming and going.
 - The bar's button is a note's Edit and Done. A PDF's are Find and Contents, the document's
   bookmarks; on a file with none, Contents is there and disabled: a gap where a control belongs is
-  worse than a control that says it has nothing to offer.
+  worse than a control that says it has nothing to offer. A PDF's third, and an image's one, is
+  Invert, disabled on a GIF, which is never recoloured.
+- Invert is a toggle, and the only one: its label says what it does, so while it is on the button is
+  filled with the accent (`BarToggle`), the one place the bar spends a fill.
 - Only one screen keeps window insets. A PDF inside a vault is inside a screen already clear of the
   status bar, so its own scaffold takes none; opened from another app it keeps them itself. Applied
   twice, the bar sits lower than a note's.
@@ -207,7 +229,15 @@ exist as a visible control.
   one thing.
 - A PDF is recoloured in a dark theme as on the desktop: the document's paper lands on the app's
   surface and its ink on the app's text, each pixel keeping its chroma, so a coloured figure stays
-  coloured.
+  coloured. Invert in its bar turns that round for the file, as an image's does below.
+- So is an image that reads as a document — a scan, a plot, a diagram, a screenshot of text — in a
+  note and on the image screen alike; a photo is left alone, an SVG is always a drawing, a GIF is
+  never touched (the decoder takes its first frame, and an animation would stop), and past 64 MP an
+  image is not looked at. Inverting one sends it to the other theme's page whatever it shows, as it
+  does a PDF: in a light theme onto the dark page, with that page under its transparent parts as a
+  PDF page's paper is, and in a dark one as it is. Per file, until the app's process ends, never
+  written anywhere — the desktop's Invert, for a figure the classifier got wrong or a PDF that reads
+  better the other way.
 
 ## Architecture
 
@@ -239,11 +269,38 @@ The decisions under the Android app, each with its reason; the shared ones are i
   here; what the two apps share is the vault, and that is a path.
 - **The rendered view is a `WebView`** over the core's `markdown::to_html`, with the desktop's
   `accent://` scheme and generated CSS — it is the only thing on the platform that draws MathML.
+- **Mermaid draws a note's diagrams, and is the only script a page runs** (`NoteScreen.mermaid`):
+  the desktop's vendored library, packed as an asset (about 1 MB of the APK) and served at
+  `accent://app/`, with the desktop's bootstrap in mermaid's dark or neutral theme by the page's
+  lightness. Scripting is on only for a note with a mermaid fence, and even there a note's own
+  script stays dead: the page's Content-Security-Policy admits a script only with a nonce drawn
+  fresh for that page, which the note cannot know, so its `<script>`, an `onerror` or a
+  `javascript:` link does nothing, as with scripting off; both of ours sit in the head, ahead of
+  anything the note leaves unclosed. The rest of the lockdown is unchanged and is what makes that
+  enough: no JavaScript interface, no file or content access, every request but the vault's images
+  and the library refused, every navigation handed to the app — and no `INTERNET` permission, so
+  nothing a page runs can reach the network. Mermaid runs at its default strict level, which
+  sanitises a diagram's labels and drops its click handlers.
+- **Images are recoloured on their way into a WebView** (`ui/Images.kt`): the note's page and the
+  image screen both take them from `served`, which classifies a raster from a copy decoded to a
+  512 px long side (`looksLikeDocument` samples 65 k pixels whatever it is given; the verdict is
+  cached by path, size and date), recolours it at a 2048 px long side and serves a PNG, and hands
+  an SVG over with the core's filter in it — straight alpha throughout, `BitmapFactory` decoding
+  without premultiplying. The rules are the core's (DESIGN.md, Recolouring); the image screen is a
+  WebView too, because nothing else here draws an SVG, and a recoloured SVG is a filter only a
+  browser applies. The WebViews share one memory cache, cleared before a load whenever the palette
+  or the inverted files differ from what it was filled under.
+- **An embed resolves as on the desktop**: the path the note spells if a file is there, otherwise
+  where the index places the name (`Vault::asset`), inside the vault or not at all.
 - **The editor is `BasicTextField(TextFieldState)`** with a styled `OutputTransformation` — the only
   field that is not deprecated, and `TextFieldBuffer.addStyle` is where the core's spans go.
 - **Wet strokes are a Compose `Canvas`** path committed on release — about thirty lines and no View
   interop; `androidx.ink` is the upgrade once a stylus has been held against it.
 - **minSdk 31** — where Material You reads the system colours the accent comes from.
+- **The release build is minified** (`app/proguard-rules.pro`) — unminified, Compose's dex was two
+  thirds of the APK. What JNA reaches by name is kept by what it is — JNA itself, every `Structure`,
+  every `Callback`, every `native` method — rather than by package, so the bindings' own Kotlin
+  shrinks with the rest.
 
 ## What is not here, and why
 
@@ -253,6 +310,5 @@ The decisions under the Android app, each with its reason; the shared ones are i
   the platform does (a phone keyboard completes words), and the rest would be a second app inside
   this one. The test for any feature: does it help someone read their vault, make a small edit, or
   read and mark up a PDF.
-- Deferred rather than refused: tags and backlinks, templates and the daily note, mermaid diagrams
-  in the rendered view, a native Compose renderer in place of the WebView, exporting highlights, and
-  the PDF shapes and Adjust tool.
+- Deferred rather than refused: tags and backlinks, templates and the daily note, a native Compose
+  renderer in place of the WebView, exporting highlights, and the PDF shapes and Adjust tool.

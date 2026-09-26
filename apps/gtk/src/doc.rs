@@ -7,14 +7,16 @@
 //! list to walk.
 
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use accent_core::path::{FileType, file_type};
+use gtk::gdk;
 
 use crate::diff::DiffTab;
 use crate::editor::Tab;
 use crate::fileops;
+use crate::look::Look;
 use crate::pdftab::PdfTab;
 use crate::terminal::Term;
 
@@ -26,6 +28,14 @@ pub struct Viewer {
     /// How far the document is zoomed, `None` while it is fitted to the window. Only an image
     /// has one: a status page draws at a size nobody chose.
     pub zoom: Cell<Option<f64>>,
+    /// An image's file on this machine and the texture it was decoded to, so a restyle recolours
+    /// without reading it again. `None` while it is being read, and on a status page.
+    pub image: RefCell<Option<(PathBuf, gdk::Texture)>>,
+    /// The look and inversion the image was last asked to be shown under, so a restyle that
+    /// changes neither does nothing.
+    pub look: Cell<Option<(Look, bool)>>,
+    /// Counts the times the image was sent to be shown, so only the last one's answer lands.
+    pub shows: Cell<u32>,
 }
 
 impl Viewer {
@@ -34,6 +44,9 @@ impl Viewer {
             key: RefCell::new(key.to_string()),
             page,
             zoom: Cell::new(None),
+            image: RefCell::new(None),
+            look: Cell::new(None),
+            shows: Cell::new(0),
         })
     }
 

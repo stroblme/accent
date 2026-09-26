@@ -164,16 +164,11 @@ impl App {
             self.open_as(&key, how);
             return self.show_pdf_anchor(&key, page);
         }
-        // Any other anchor is a heading the note does not have, and the location its top.
-        let missed = loc
-            .anchor
-            .as_ref()
-            .map(|heading| format!("No heading {heading} in {}", doc::file_name(&key)));
-        self.with_tab(&key, how, "go to", move |app, tab| {
-            tab.goto_pos(at);
-            if let Some(missed) = missed {
-                app.toast(&missed);
-            }
+        // Any other anchor is a heading the note does not have.
+        let missed = loc.anchor.clone();
+        self.with_tab(&key, how, "go to", move |app, tab| match missed {
+            Some(anchor) => app.no_heading(tab, &anchor),
+            None => tab.goto_pos(at),
         });
     }
 }

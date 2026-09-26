@@ -5,6 +5,7 @@ import androidx.activity.compose.BackHandler
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import android.webkit.WebView.HitTestResult
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -28,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.viewinterop.AndroidView
 import io.github.stroblme.accent.Open
+import io.github.stroblme.accent.OpenImage
 import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.ffi.Span
 import io.github.stroblme.accent.ffi.Style
@@ -35,6 +37,8 @@ import io.github.stroblme.accent.ffi.analyzeUtf16
 import io.github.stroblme.accent.ffi.toHtml
 import java.io.File
 import java.net.URLDecoder
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * One note, read or written.
@@ -45,7 +49,7 @@ import java.net.URLDecoder
  * to the field's output rather than to a buffer of tags.
  */
 @Composable
-fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
+fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome) {
     var editing by remember(open.rel) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         // Above the bar rather than under it, since the bar lies over the note and would cover
@@ -82,7 +86,7 @@ fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
             if (editing) {
                 Box(Modifier.padding(top = bar)) { Editor(model) }
             } else {
-                Rendered(model, open, root, chrome)
+                Rendered(model, open, chrome)
             }
         }
     }
@@ -148,8 +152,15 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
  * The rendered note, and where a search hit lands in it.
  *
  * `accent://open/…` is a link to another note and is handed back to the app; `accent://file/…` is
- * an image, served off the vault. Nothing else loads at all — the same rule the desktop preview
- * enforces with a content blocker.
+ * an image, served off the vault and recoloured as a PDF page is when it reads as a document
+ * ([served]); [MERMAID] is the diagram library, served out of the APK. Nothing else loads at all —
+ * the same rule the desktop preview enforces with a content blocker.
+ *
+ * A tap on an image opens it on its own screen ([ImageScreen]), where it can be zoomed and
+ * inverted; one on an image inside a link is the link's, as on any page. A long press on an image
+ * inverts it against the rule in place, for as long as the app runs ([Inverted]); anywhere else
+ * the press is the WebView's own, a selection. The page is loaded again for it, as for a palette
+ * change, and puts the reader back where they were.
  *
  * A hit arrives as the query it was found by ([Open.find]) and is placed by the WebView's own
  * find-in-page: every occurrence marked, the first one scrolled to. No offset crosses into the
@@ -166,8 +177,13 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
  * on the screen together — opening the bar clears whatever was marked before it.
  */
 @Composable
-private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome) {
+private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
     val colors = MaterialTheme.colorScheme
+    // What the images are served under, read by the loading thread; a change in either loads the
+    // page again, since an image is recoloured on its way into it.
+    val dark = colors.surface.dark()
+    val serving by rememberUpdatedState(dark)
+    val inverted = Inverted.files
     // Rendered from the same buffer the editor writes into rather than from what the vault last
     // read, so Done shows what was typed instead of what was saved a second ago. The whole page is
     // rebuilt only when the text or the palette changes; everything else that recomposes this
@@ -181,6 +197,10 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
     // inside the client, which is built once and would keep whichever note was open then.
     var view by remember { mutableStateOf<WebView?>(null) }
     var loaded by remember { mutableStateOf<String?>(null) }
+    // The file each image on the page was served from, by the address the page asks for it at:
+    // what a tap on one opens and a long press inverts. Written on the loading thread, read on the
+    // main one.
+    val images = remember { ConcurrentHashMap<String, OpenImage>() }
     // What the reader has typed into the find bar, and where in the page it got them: which match
     // of how many, straight off the view's own find listener. Reset every time the bar opens.
     var query by remember(open.finding) { mutableStateOf("") }
@@ -197,8 +217,8 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
     }
 
     // Text can only be found once it is there to find, so the query waits for the load — and
-    // since the page is loaded only when the note or the palette changes, a hit in the note
-    // already in front is marked without one.
+    // since the page is loaded only when the note, the palette or an inverted image changes, a hit
+    // in the note already in front is marked without one.
     LaunchedEffect(loaded, open.find) {
         val reveal = open.find ?: return@LaunchedEffect
         val web = view ?: return@LaunchedEffect
@@ -212,7 +232,14 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
 
     Column(Modifier.fillMaxSize()) {
         AndroidView(
-            modifier = Modifier.weight(1f).fillMaxWidth().onTap(chrome) {
+            modifier = Modifier.weight(1f).fillMaxWidth().onTap(
+                chrome,
+                // Not an image inside a link: the WebView follows that one on the same tap.
+                claimed = { _ ->
+                    val image = view?.imageHit(HitTestResult.IMAGE_TYPE)?.let { images[it] }
+                    image?.let { model.openFile(it.rel) } != null
+                },
+            ) {
                 if (!finding) view?.clearMatches()
             },
             factory = { ctx ->
@@ -224,7 +251,15 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
                     webViewClient = object : WebViewClient() {
                         /** What is on the screen now, and so what can be searched. */
                         override fun onPageFinished(view: WebView, url: String) {
-                            loaded = view.tag as? String
+                            val load = view.tag as? Load ?: return
+                            loaded = load.html
+                            // Once the page has been drawn rather than now: the view scrolls no
+                            // further than the content it has, and until then it has none.
+                            if (load.scroll > 0) {
+                                view.postVisualStateCallback(0, object : WebView.VisualStateCallback() {
+                                    override fun onComplete(requestId: Long) = view.scrollTo(0, load.scroll)
+                                })
+                            }
                         }
 
                         override fun shouldOverrideUrlLoading(
@@ -244,13 +279,26 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
                         ): WebResourceResponse? {
                             if (request.isForMainFrame) return null
                             val url = request.url.toString()
+                            if (url == MERMAID) {
+                                return WebResourceResponse(
+                                    "text/javascript",
+                                    "utf-8",
+                                    view.context.assets.open("mermaid.min.js"),
+                                )
+                            }
                             if (!url.startsWith("accent://file/")) return blocked()
-                            val rel = decode(url.removePrefix("accent://file/"))
-                            val file = File(root, rel)
-                            return runCatching {
-                                WebResourceResponse(null, null, file.inputStream())
-                            }.getOrElse { blocked() }
+                            val image = model.image(decode(url.removePrefix("accent://file/")))
+                                ?: return blocked()
+                            images[url] = image
+                            return served(File(image.path), serving)
                         }
+                    }
+                    // Taken only on an image, a linked one too, where it inverts; anywhere else it
+                    // is left to the view, whose long press is the selection.
+                    setOnLongClickListener {
+                        val hit = imageHit(HitTestResult.IMAGE_TYPE, HitTestResult.SRC_IMAGE_ANCHOR_TYPE)
+                        val image = hit?.let { images[it] }
+                        image?.let { Inverted.toggle(it.path) } != null
                     }
                     setOnScrollChangeListener { _, _, y, _, was -> chrome.scrolled((y - was).toFloat()) }
                     setFindListener { active, total, _ -> matches = active to total }
@@ -259,9 +307,17 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
             },
             update = { web ->
                 // The view's own tag is what it last loaded: `update` runs on every recomposition and
-                // only a different page is worth a load.
-                if (web.tag != html) {
-                    web.tag = html
+                // only a different page, or the same one with its images served otherwise, is worth
+                // a load. The note in front loaded again keeps the reader's place; another opens at
+                // its top.
+                val load = Load(open.rel, html, dark, inverted)
+                val last = web.tag as? Load
+                if (load != last) {
+                    if (last?.rel == open.rel) load.scroll = web.scrollY
+                    web.tag = load
+                    web.freshen(dark)
+                    // Scripts only for a page with diagrams to draw, and there only the app's own.
+                    web.settings.javaScriptEnabled = diagrams(html)
                     web.loadDataWithBaseURL(baseUri(open.rel), html, "text/html", "utf-8", null)
                 }
             },
@@ -287,7 +343,20 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
     }
 }
 
-private fun blocked() = WebResourceResponse(null, null, null)
+/**
+ * A page the rendered view was told to load: the note, its HTML, and what its images were served
+ * under. [scroll] is where the reader is put once it is up, and no part of which page it is.
+ */
+private data class Load(val rel: String, val html: String, val dark: Boolean, val inverted: Set<String>) {
+    var scroll = 0
+}
+
+/**
+ * The address of the image under the reader's last touch, if the view's hit test puts one of
+ * [types] there: the hit is taken on the way down, so it is ready by the time a tap or a long
+ * press is decided.
+ */
+private fun WebView.imageHit(vararg types: Int): String? = hitTestResult.takeIf { it.type in types }?.extra
 
 /** What a relative link inside the note resolves against: the directory the note is in. */
 private fun baseUri(rel: String): String {
@@ -301,11 +370,13 @@ private fun decode(s: String): String = runCatching { URLDecoder.decode(s, "UTF-
  * The shell around `to_html`'s fragment.
  *
  * The colours are handed in rather than read from a stylesheet, exactly as the desktop does:
- * a WebView cannot see the app's palette, and the palette is the system's.
+ * a WebView cannot see the app's palette, and the palette is the system's. A note with a mermaid
+ * fence gets the [mermaid] scripts too, in the dark or the light theme as the page is.
  */
-private fun page(body: String, fg: Color, bg: Color, accent: Color): String = """
+internal fun page(body: String, fg: Color, bg: Color, accent: Color): String = """
 <!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+${if (diagrams(body)) mermaid(if (bg.dark()) "dark" else "neutral") else ""}
 <style>
   :root { color-scheme: ${if (bg.dark()) "dark" else "light"}; }
   body {
@@ -327,7 +398,54 @@ private fun page(body: String, fg: Color, bg: Color, accent: Color): String = ""
 </style></head><body>$body</body></html>
 """
 
-private fun Color.css(): String = String.format("#%06X", 0xFFFFFF and toArgb())
+internal fun Color.css(): String = String.format("#%06X", 0xFFFFFF and toArgb())
+
+/** Whether rendered HTML holds a mermaid fence: pulldown-cmark's class on a fence's code. */
+internal fun diagrams(html: String): Boolean = "<code class=\"language-mermaid\">" in html
+
+/** Where a page asks for mermaid, which the view answers from the APK's assets. */
+private const val MERMAID = "accent://app/mermaid.min.js"
+
+/**
+ * Mermaid, and the bootstrap that draws a note's diagrams with it: the desktop's (`preview.rs`),
+ * in the [theme] it picks by the page's lightness, less the scroll-sync marker a phone has no use
+ * for. Each fence becomes a `<pre class="mermaid">` holding its source as typed, and a fence
+ * mermaid cannot draw gets that source back, so a typo never blanks a block.
+ *
+ * The only scripts a page ever runs. The policy admits a script only with the nonce drawn here,
+ * fresh for every page and unknowable to a note, so the note's own `<script>`, `onerror` or
+ * `javascript:` link stays as dead as on a page with scripting off. Both sit in the head, ahead of
+ * the note, where nothing it leaves unclosed can take them in; the library is deferred, so the note
+ * is drawn before 3.4 MB of it is parsed. MOBILE_DESIGN.md says why the rest of the view's
+ * lockdown makes this enough.
+ */
+private fun mermaid(theme: String): String {
+    val nonce = UUID.randomUUID()
+    return """
+<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-$nonce'">
+<script nonce="$nonce" defer src="$MERMAID"></script>
+<script nonce="$nonce">
+document.addEventListener('DOMContentLoaded', function () {
+  var blocks = document.querySelectorAll('pre > code.language-mermaid');
+  var nodes = [];
+  for (var i = 0; i < blocks.length; i++) {
+    var fence = blocks[i].parentElement;
+    var pre = document.createElement('pre');
+    pre.className = 'mermaid';
+    pre.textContent = blocks[i].textContent;
+    fence.parentElement.replaceChild(pre, fence);
+    nodes.push(pre);
+  }
+  var sources = nodes.map(function (n) { return n.textContent; });
+  mermaid.initialize({ startOnLoad: false, theme: '$theme', suppressErrorRendering: true });
+  mermaid.run({ nodes: nodes }).catch(function () {}).then(function () {
+    for (var j = 0; j < nodes.length; j++) {
+      if (!nodes[j].querySelector('svg')) { nodes[j].textContent = sources[j]; }
+    }
+  });
+});
+</script>"""
+}
 
 // ------------------------------------------------------------------------------------ writing
 
