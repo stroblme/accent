@@ -1,5 +1,6 @@
 //! How an image is shown under the theme: recoloured onto the page's paper and ink when it reads
-//! as a document, as it is when it does not, and the other way round once the reader inverts it.
+//! as a document, as it is when it does not, and onto the other half's page once the reader
+//! inverts it, as a PDF page is.
 //!
 //! The image tab and the preview both come through here, so a figure looks the same in either.
 //! The decision is [`Look::palette`], snapshotted on the main thread where the theme lives; the
@@ -21,33 +22,42 @@ use crate::theme::{self, Page};
 /// What the theme in force asks of images, as a worker can carry it.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Look {
-    /// The theme's page, `None` in Light, which leaves every image alone.
+    /// The page of the half on screen, `None` in Light, which leaves every image alone.
     theme: Option<Page>,
-    /// Where an image the theme leaves alone goes when it is inverted.
-    inverted_to: Page,
+    /// The other half's page, which an inverted image goes onto, as an inverted PDF page does.
+    opposite: Option<Page>,
 }
 
 impl Look {
     /// The look now. On the main thread only: `theme.rs` keeps the choice there.
     pub fn now() -> Look {
+        let dark = adw::StyleManager::default().is_dark();
         Look {
-            theme: theme::page_colours(adw::StyleManager::default().is_dark()),
-            inverted_to: theme::dark_page(),
+            theme: theme::page_colours(dark),
+            opposite: theme::page_colours(!dark),
         }
     }
 
     /// The paper and ink to recolour an image onto, or `None` to show it as it is.
     ///
-    /// The theme recolours a document and leaves a photo alone, the way it treats a PDF page;
-    /// inverting turns that round, onto the theme's page or, in Light, which has none, the dark
-    /// one.
+    /// The PDF's rule (`PdfTab::restyle`): the theme recolours a document and leaves a photo
+    /// alone, and an inverted image, whatever it shows, is recoloured as the other half of the
+    /// theme would — so under Dark, whose other half is Light, it is shown as it is.
     pub fn palette(&self, document: bool, inverted: bool) -> Option<Page> {
-        let recolour = (self.theme.is_some() && document) != inverted;
-        recolour.then(|| self.theme.unwrap_or(self.inverted_to))
+        match inverted {
+            true => self.opposite,
+            false => self.theme.filter(|_| document),
+        }
     }
 
-    /// Whether the answer turns on what the image shows. Not in Light, which treats every image
-    /// alike, so there nothing is ever classified.
+    /// Whether an image recoloured onto `page` has its transparent parts filled with the paper:
+    /// on any page but the window's own, which would otherwise show through in the wrong colour.
+    pub fn fills(&self, page: Page) -> bool {
+        self.theme != Some(page)
+    }
+
+    /// Whether the answer turns on what the image shows: only for the theme's own recolouring,
+    /// so Light and an inverted image never have one classified.
     fn asks(&self, inverted: bool) -> bool {
         self.palette(true, inverted) != self.palette(false, inverted)
     }
@@ -76,7 +86,7 @@ pub fn show(
         // An SVG is recoloured as a vector, through a filter, and drawn again from its text.
         true => look
             .palette(true, inverted)
-            .and_then(|page| svg_filtered(path, page))
+            .and_then(|page| svg_filtered(path, page, look.fills(page)))
             .and_then(|svg| gdk::Texture::from_bytes(&glib::Bytes::from_owned(svg)).ok())
             .unwrap_or_else(|| original.clone()),
         false => recoloured(path, look, inverted, || Some(original.clone()))
@@ -97,7 +107,7 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
     if svg(path) {
         return match look
             .palette(true, inverted)
-            .and_then(|page| svg_filtered(path, page))
+            .and_then(|page| svg_filtered(path, page, look.fills(page)))
         {
             Some(svg) => Served::Bytes(glib::Bytes::from_owned(svg), "image/svg+xml"),
             None => Served::File,
@@ -157,6 +167,9 @@ fn recoloured(
     };
     let (paper, ink) = look.palette(document, inverted)?;
     let mut pixels = pixels(&decoded()?)?;
+    if look.fills((paper, ink)) {
+        recolour::onto_white(&mut pixels.data);
+    }
     recolour::recolour(&mut pixels.data, paper, ink);
     Some(pixels.texture())
 }
@@ -229,10 +242,15 @@ fn stamp(path: &Path) -> Option<Stamp> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
-/// An SVG's text with the recolouring filter around its content.
-fn svg_filtered(path: &Path, (paper, ink): Page) -> Option<Vec<u8>> {
+/// An SVG's text with the recolouring filter around its content, drawn over its own paper when
+/// `fill` asks for it ([`Look::fills`]).
+fn svg_filtered(path: &Path, (paper, ink): Page, fill: bool) -> Option<Vec<u8>> {
     let text = std::fs::read_to_string(path).ok()?;
-    recolour::recolour_svg(&text, paper, ink).map(String::into_bytes)
+    match fill {
+        true => recolour::recolour_svg_on_paper(&text, paper, ink),
+        false => recolour::recolour_svg(&text, paper, ink),
+    }
+    .map(String::into_bytes)
 }
 
 /// Line art, always recoloured: the vector counterpart of a scan.
@@ -257,37 +275,47 @@ mod tests {
 
     const DARK: Page = ([29, 29, 32], [235, 235, 235]);
     const CREAM: Page = ([253, 246, 227], [101, 123, 131]);
+    const NIGHT: Page = ([0, 43, 54], [131, 148, 150]);
 
+    /// The PDF's rule: the theme recolours a document, and inverting puts any image on the other
+    /// half's page, or shows it plain where that half has none. Only a page that is not the
+    /// window's own gets its transparent parts filled.
     #[test]
-    fn a_theme_recolours_a_document_and_inverting_turns_that_round() {
+    fn a_theme_recolours_a_document_and_inverting_takes_the_other_half() {
         let light = Look {
             theme: None,
-            inverted_to: DARK,
+            opposite: Some(DARK),
+        };
+        let dark = Look {
+            theme: Some(DARK),
+            opposite: None,
         };
         let cream = Look {
             theme: Some(CREAM),
-            inverted_to: DARK,
+            opposite: Some(NIGHT),
         };
-        // (look, document, inverted) -> palette
+        // (look, document, inverted) -> (palette, filled)
         let table = [
             (light, false, false, None),
             (light, true, false, None),
-            (light, false, true, Some(DARK)),
-            (light, true, true, Some(DARK)),
-            (cream, false, false, None),
-            (cream, true, false, Some(CREAM)),
-            (cream, false, true, Some(CREAM)),
-            (cream, true, true, None),
+            (light, false, true, Some((DARK, true))),
+            (light, true, true, Some((DARK, true))),
+            (dark, false, false, None),
+            (dark, true, false, Some((DARK, false))),
+            (dark, false, true, None),
+            (dark, true, true, None),
+            (cream, true, false, Some((CREAM, false))),
+            (cream, false, true, Some((NIGHT, true))),
         ];
-        for (look, document, inverted, palette) in table {
+        for (look, document, inverted, want) in table {
+            let got = look.palette(document, inverted).map(|p| (p, look.fills(p)));
             assert_eq!(
-                look.palette(document, inverted),
-                palette,
+                got, want,
                 "{look:?} document={document} inverted={inverted}"
             );
         }
-        // Light treats every image alike, so it never has one classified.
-        assert!(!light.asks(false) && !light.asks(true));
-        assert!(cream.asks(false) && cream.asks(true));
+        // Only a theme's own recolouring turns on what the image shows.
+        assert!(!light.asks(false) && dark.asks(false) && cream.asks(false));
+        assert!(!light.asks(true) && !dark.asks(true) && !cream.asks(true));
     }
 }
