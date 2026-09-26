@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.stroblme.accent.ffi.Theme
 
 /**
  * One accent, taken from the system; the page and the ink on it, taken from the desktop.
@@ -123,6 +124,18 @@ internal fun ColorScheme.flattened(dark: Boolean): ColorScheme {
         inverseOnSurface = if (dark) InkLight else InkDark,
     )
 }
+
+/**
+ * What a document is recoloured onto: a PDF page, and an image that reads as one ([imageTheme]).
+ *
+ * In a dark theme its paper lands on the dark page and its ink on the dark ink, each pixel keeping
+ * its own chroma, as the desktop does it; a light theme leaves it alone. [inverted] is the reader's
+ * hand on one file, the desktop's Invert: a light theme then recolours it onto the dark page, and a
+ * dark one shows it as it is. Always the dark pair, because the light one is the paper a document
+ * already has.
+ */
+internal fun pageTheme(dark: Boolean, inverted: Boolean = false): Theme =
+    if (dark != inverted) Theme.Recolour(PageDark.rgb(), InkDark.rgb()) else Theme.Plain
 
 /**
  * How strongly what the reader does to a PDF page is painted over it, in the accent: the highlight

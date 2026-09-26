@@ -390,15 +390,7 @@ private fun Pages(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
-    val theme = remember(colors) {
-        // The same recolouring the desktop applies in a dark theme: the document's paper lands on
-        // the app's surface and its ink on the app's text, each pixel keeping its own chroma.
-        if (colors.surface.dark()) {
-            Theme.Recolour(colors.surface.rgb(), colors.onSurface.rgb())
-        } else {
-            Theme.Plain
-        }
-    }
+    val theme = remember(colors) { pageTheme(colors.surface.dark()) }
 
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     var zoom by remember { mutableFloatStateOf(1f) }

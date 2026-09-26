@@ -35,6 +35,7 @@ import io.github.stroblme.accent.ffi.analyzeUtf16
 import io.github.stroblme.accent.ffi.toHtml
 import java.io.File
 import java.net.URLDecoder
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * One note, read or written.
@@ -45,7 +46,7 @@ import java.net.URLDecoder
  * to the field's output rather than to a buffer of tags.
  */
 @Composable
-fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
+fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome) {
     var editing by remember(open.rel) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         // Above the bar rather than under it, since the bar lies over the note and would cover
@@ -82,7 +83,7 @@ fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
             if (editing) {
                 Box(Modifier.padding(top = bar)) { Editor(model) }
             } else {
-                Rendered(model, open, root, chrome)
+                Rendered(model, open, chrome)
             }
         }
     }
@@ -148,8 +149,13 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
  * The rendered note, and where a search hit lands in it.
  *
  * `accent://open/…` is a link to another note and is handed back to the app; `accent://file/…` is
- * an image, served off the vault. Nothing else loads at all — the same rule the desktop preview
- * enforces with a content blocker.
+ * an image, served off the vault and recoloured as a PDF page is when it reads as a document
+ * ([served]). Nothing else loads at all — the same rule the desktop preview enforces with a content
+ * blocker.
+ *
+ * A long press on an image inverts it against that rule, for as long as the app runs ([Inverted]);
+ * anywhere else the press is the WebView's own, a selection. The page is loaded again for it, as
+ * for a palette change, and puts the reader back where they were.
  *
  * A hit arrives as the query it was found by ([Open.find]) and is placed by the WebView's own
  * find-in-page: every occurrence marked, the first one scrolled to. No offset crosses into the
@@ -166,8 +172,13 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
  * on the screen together — opening the bar clears whatever was marked before it.
  */
 @Composable
-private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome) {
+private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
     val colors = MaterialTheme.colorScheme
+    // What the images are served under, read by the loading thread; a change in either loads the
+    // page again, since an image is recoloured on its way into it.
+    val dark = colors.surface.dark()
+    val serving by rememberUpdatedState(dark)
+    val inverted = Inverted.files
     // Rendered from the same buffer the editor writes into rather than from what the vault last
     // read, so Done shows what was typed instead of what was saved a second ago. The whole page is
     // rebuilt only when the text or the palette changes; everything else that recomposes this
@@ -181,6 +192,9 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
     // inside the client, which is built once and would keep whichever note was open then.
     var view by remember { mutableStateOf<WebView?>(null) }
     var loaded by remember { mutableStateOf<String?>(null) }
+    // The file each image on the page was served from, by the address the page asks for it at:
+    // what a long press on one inverts. Written on the loading thread, read on the main one.
+    val images = remember { ConcurrentHashMap<String, String>() }
     // What the reader has typed into the find bar, and where in the page it got them: which match
     // of how many, straight off the view's own find listener. Reset every time the bar opens.
     var query by remember(open.finding) { mutableStateOf("") }
@@ -197,8 +211,8 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
     }
 
     // Text can only be found once it is there to find, so the query waits for the load — and
-    // since the page is loaded only when the note or the palette changes, a hit in the note
-    // already in front is marked without one.
+    // since the page is loaded only when the note, the palette or an inverted image changes, a hit
+    // in the note already in front is marked without one.
     LaunchedEffect(loaded, open.find) {
         val reveal = open.find ?: return@LaunchedEffect
         val web = view ?: return@LaunchedEffect
@@ -224,7 +238,15 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
                     webViewClient = object : WebViewClient() {
                         /** What is on the screen now, and so what can be searched. */
                         override fun onPageFinished(view: WebView, url: String) {
-                            loaded = view.tag as? String
+                            val load = view.tag as? Load ?: return
+                            loaded = load.html
+                            // Once the page has been drawn rather than now: the view scrolls no
+                            // further than the content it has, and until then it has none.
+                            if (load.scroll > 0) {
+                                view.postVisualStateCallback(0, object : WebView.VisualStateCallback() {
+                                    override fun onComplete(requestId: Long) = view.scrollTo(0, load.scroll)
+                                })
+                            }
                         }
 
                         override fun shouldOverrideUrlLoading(
@@ -245,12 +267,20 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
                             if (request.isForMainFrame) return null
                             val url = request.url.toString()
                             if (!url.startsWith("accent://file/")) return blocked()
-                            val rel = decode(url.removePrefix("accent://file/"))
-                            val file = File(root, rel)
-                            return runCatching {
-                                WebResourceResponse(null, null, file.inputStream())
-                            }.getOrElse { blocked() }
+                            val path = model.imagePath(decode(url.removePrefix("accent://file/")))
+                                ?: return blocked()
+                            images[url] = path
+                            return served(File(path), serving)
                         }
+                    }
+                    // Taken only on an image, where it inverts; anywhere else it is left to the
+                    // view, whose long press is the selection. An image's hit carries its address.
+                    setOnLongClickListener {
+                        val hit = hitTestResult
+                        val image = hit.type == WebView.HitTestResult.IMAGE_TYPE ||
+                            hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
+                        val path = hit.extra?.takeIf { image }?.let { images[it] }
+                        path?.let { Inverted.toggle(it) } != null
                     }
                     setOnScrollChangeListener { _, _, y, _, was -> chrome.scrolled((y - was).toFloat()) }
                     setFindListener { active, total, _ -> matches = active to total }
@@ -259,9 +289,15 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
             },
             update = { web ->
                 // The view's own tag is what it last loaded: `update` runs on every recomposition and
-                // only a different page is worth a load.
-                if (web.tag != html) {
-                    web.tag = html
+                // only a different page, or the same one with its images served otherwise, is worth
+                // a load. The note in front loaded again keeps the reader's place; another opens at
+                // its top.
+                val load = Load(open.rel, html, dark, inverted)
+                val last = web.tag as? Load
+                if (load != last) {
+                    if (last?.rel == open.rel) load.scroll = web.scrollY
+                    web.tag = load
+                    web.freshen(dark)
                     web.loadDataWithBaseURL(baseUri(open.rel), html, "text/html", "utf-8", null)
                 }
             },
@@ -287,7 +323,13 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
     }
 }
 
-private fun blocked() = WebResourceResponse(null, null, null)
+/**
+ * A page the rendered view was told to load: the note, its HTML, and what its images were served
+ * under. [scroll] is where the reader is put once it is up, and no part of which page it is.
+ */
+private data class Load(val rel: String, val html: String, val dark: Boolean, val inverted: Set<String>) {
+    var scroll = 0
+}
 
 /** What a relative link inside the note resolves against: the directory the note is in. */
 private fun baseUri(rel: String): String {
@@ -327,7 +369,7 @@ private fun page(body: String, fg: Color, bg: Color, accent: Color): String = ""
 </style></head><body>$body</body></html>
 """
 
-private fun Color.css(): String = String.format("#%06X", 0xFFFFFF and toArgb())
+internal fun Color.css(): String = String.format("#%06X", 0xFFFFFF and toArgb())
 
 // ------------------------------------------------------------------------------------ writing
 
