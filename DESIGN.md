@@ -223,7 +223,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 - A `GtkBox` as the editor column's `AdwToolbarView` bottom bar, so presentation mode takes it with the header and a hover over its strip brings it back there (Keyboard, Views). `.caption` `.dim-label`, 6 px padding, `accent-flat`.
 - At the start, what the window is busy with ("Indexing… 1200/42700 files", "Opening the document…"); at the end, the file's facts. A scan still counting has no total, so it says "Indexing… 12345 files found". A label with nothing to say hides.
-- The vault's own work wins the first slot, being what the reader waits on; then a copy to or from a host ("Downloading a.pdf…", "Uploading 3 files…"), the latest one running, from start to toast, saying that it runs rather than how far; then "Indexing suggestions…" (the ghost-text index), a convenience that waits its turn. No language server's progress is shown: rust-analyzer reports every `cargo check`, and the line would never settle.
+- The vault's own work wins the first slot, being what the reader waits on; then a copy to or from a host ("Downloading a.pdf…", "Uploading 3 files…"), the latest one running, from start to toast, saying that it runs — and, for a batch of two files or more, how far by file, as indexing counts ("Copying Photos… 12/120 files", on a local vault too), a folder's total known once it has been walked; then "Indexing suggestions…" (the ghost-text index), a convenience that waits its turn. No language server's progress is shown: rust-analyzer reports every `cargo check`, and the line would never settle.
 - The facts: what the file is (`Markdown`, `PDF`, `Image`, or `<language> · UTF-8 · LF` for code), whether it has unsaved edits, one count of its own, and its zoom.
 - The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport). A PDF's count is a button opening Add Page Before, Add Page After and Delete Page for that page, as the page's own menu offers them.
 - The unsaved mark is the `•` a dirty tab wears: one symbol, one meaning. A saved file shows nothing.
@@ -734,6 +734,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 | Palette query | 50 ms | `palette.rs::DEBOUNCE` |
 | Search progress pulse | 80 ms | `sidebar/search.rs::PULSE` |
 | Connection progress pulse | 80 ms | `connect.rs::PULSE` |
+| A batch copy's file count on the status bar | 200 ms | `fileops/transfer.rs::TICK` |
 | Automatic reconnect | after 1, 2, 4, 8, 16 s, then every 30 s, for 10 min; the banner's count ticks every 1 s | `reconnect.rs::backoff`, `GIVE_UP` |
 | Preview re-render, a note's word count | 300 ms | `main.rs::RENDER` |
 | Symbols and folds after an edit | 300 ms | `lang.rs::REFRESH` |

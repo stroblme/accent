@@ -737,6 +737,7 @@ fn retired_daily_keys(app: &Rc<App>) {
 fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let toast = Rc::downgrade(app);
     let transferring = Rc::downgrade(app);
+    let transfer_count = Rc::downgrade(app);
     let open = Rc::downgrade(app);
     let flush = Rc::downgrade(app);
     let reload = Rc::downgrade(app);
@@ -758,6 +759,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         transferring: Box::new(move |what, running| {
             if let Some(app) = transferring.upgrade() {
                 app.statusbar.set_transfer(what, running);
+            }
+        }),
+        transfer_count: Box::new(move |from, to| {
+            if let Some(app) = transfer_count.upgrade() {
+                app.statusbar.retell_transfer(from, to);
             }
         }),
         open: Box::new(move |rel, stops| {
