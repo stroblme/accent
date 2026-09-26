@@ -68,9 +68,10 @@ fn image_state(app: &Rc<App>, when: &str) {
 
 /// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` opens each image under Dark, printing how long it took
 /// to appear (decoded, classified and recoloured), then walks it through Light, Dark and
-/// Solarized, printing what the classifier said of it, whether the tab shows it recoloured, the
-/// pixel at (2,2) of what it shows and the paintable's type — then the same with Invert Image
-/// Colours on. `ms` is the worker's recolouring of the decoded texture, timed by calling it here.
+/// Solarized, printing what the classifier said of it, whether the tab shows it recoloured, its
+/// size, the pixel at (2,2) of what it shows and the paintable's type — then the same with Invert
+/// Image Colours on. `ms` is the worker's recolouring of the decoded texture, timed by calling it
+/// here.
 pub(super) fn bench_image_look(app: &Rc<App>, rels: &str) {
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
     let app = app.clone();
@@ -137,8 +138,10 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
     let _ = crate::look::show(&path, Some(original), Look::now(), inverted);
     println!(
         "bench image_look {rel} theme={theme:?} dark={} inverted={inverted} {verdict} \
-         recoloured={recoloured} px(2,2)={px} type={} ms={:.1}",
+         recoloured={recoloured} size={}x{} px(2,2)={px} type={} ms={:.1}",
         adw::StyleManager::default().is_dark(),
+        shown.intrinsic_width(),
+        shown.intrinsic_height(),
         shown.type_().name(),
         ms_since(t),
     );
@@ -258,8 +261,8 @@ async fn preview_look(app: &Rc<App>, when: &str) {
     };
     for (src, x, y, w, h, loaded) in page_images(app).await {
         println!(
-            "bench preview_look {when} dark={} {src} loaded={loaded} px(2,2)={} px(centre)={} \
-             requests={requests} ms={ms:.0}",
+            "bench preview_look {when} dark={} {src} loaded={loaded} size={w}x{h} px(2,2)={} \
+             px(centre)={} requests={requests} ms={ms:.0}",
             adw::StyleManager::default().is_dark(),
             pixel(x + 2.0, y + 2.0),
             pixel(x + w / 2.0, y + h / 2.0),

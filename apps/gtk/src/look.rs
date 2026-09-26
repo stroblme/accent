@@ -9,10 +9,12 @@
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+use accent_core::orientation;
 use accent_core::recolour::{self, Verdict};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -80,7 +82,7 @@ pub fn show(
 ) -> Result<Shown, glib::Error> {
     let original = match original {
         Some(texture) => texture,
-        None => gdk::Texture::from_filename(path)?,
+        None => decode(path)?,
     };
     let texture = match svg(path) {
         // An SVG is recoloured as a vector, through a filter, and drawn again from its text.
@@ -113,9 +115,7 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
             None => Served::File,
         };
     }
-    match recoloured(path, look, inverted, || {
-        gdk::Texture::from_filename(path).ok()
-    }) {
+    match recoloured(path, look, inverted, || decode(path).ok()) {
         Some(texture) => Served::Bytes(texture.save_to_png_bytes(), "image/png"),
         None => Served::File,
     }
@@ -130,6 +130,27 @@ pub fn verdict(path: &Path) -> Option<Verdict> {
         .get(path)
         .filter(|(at, _)| *at == stamp)
         .map(|(_, v)| *v)
+}
+
+/// `path` decoded by GDK and turned the way up its EXIF says, which GDK's decoders ignore. One
+/// too large to hold twice is left as it is, as the recolouring leaves it.
+fn decode(path: &Path) -> Result<gdk::Texture, glib::Error> {
+    let texture = gdk::Texture::from_filename(path)?;
+    let mut head = Vec::new();
+    let tag = std::fs::File::open(path)
+        .and_then(|file| file.take(64 * 1024).read_to_end(&mut head))
+        .map_or(1, |_| orientation::read(&head));
+    let Some(p) = (tag != 1).then(|| pixels(&texture)).flatten() else {
+        return Ok(texture);
+    };
+    let (data, width, height) = orientation::apply(&p.data, p.width, p.height, tag);
+    Ok(Pixels {
+        data,
+        width,
+        height,
+    }
+    .texture()
+    .upcast())
 }
 
 /// Straight RGBA8 pixels and their size.
