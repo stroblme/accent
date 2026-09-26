@@ -84,6 +84,14 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      # Restores ~/.gradle/caches and ~/.gradle/wrapper and saves them after the job; it needs no
+      # project path, as its init scripts apply to any later Gradle run. `basic` is the MIT
+      # provider; the default is proprietary. Its key hashes `**/*.gradle*`, the wrapper properties and a
+      # root-level `gradle/*.versions.toml`, so a bump in `android/gradle/libs.versions.toml`
+      # alone keeps the old entry and downloads the new versions on every run.
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
       # The action installs only platform-tools by default. These are what the build reads:
       # `compileSdk` 37.2, AGP 9.4's default build-tools, the NDK.
       - uses: android-actions/setup-android@v4
