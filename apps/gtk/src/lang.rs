@@ -185,9 +185,16 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
     });
 }
 
+/// The buffer changed at all: the next request sends the text before it asks. Said on every
+/// edit, ahead of [`changed`], which a note over 16 K characters hears only once the typing
+/// pauses — a Go to Definition inside that pause asked about the text before it.
+pub fn edited(tab: &Tab) {
+    tab.lang.version.set(tab.lang.version.get().wrapping_add(1));
+}
+
 /// The buffer changed: the server's copy is stale and everything derived from it is too.
 pub fn changed(tab: &Rc<Tab>) {
-    tab.lang.version.set(tab.lang.version.get().wrapping_add(1));
+    edited(tab);
     // A signature that is up is about the call being typed, so it is asked again rather than
     // left saying what the last keystroke meant.
     if tab.lang.signature.is_shown() {

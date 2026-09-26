@@ -1490,6 +1490,7 @@ impl Tab {
         if self.loading.get() {
             return;
         }
+        lang::edited(self);
         // The other half of the rule above: an edit that leaves the caret where it was — Delete,
         // or a replacement over a selection — still answers the jump.
         self.clear_reveal();
