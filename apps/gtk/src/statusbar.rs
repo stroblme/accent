@@ -54,8 +54,9 @@ pub struct Bar {
     /// The dot a dirty tab wears, so one symbol means "unsaved" wherever it appears.
     unsaved: gtk::Label,
     /// The document's own count, and the button around it. A code tab's diagnostic count is also
-    /// the switch that keeps them out of the text, so the readout is a control there and plain
-    /// text everywhere else — a word count has nothing to press.
+    /// the switch that keeps them out of the text, and a PDF's page count opens the page commands,
+    /// so the readout is a control there and plain text everywhere else — a word count has nothing
+    /// to press.
     words: gtk::Label,
     facts: gtk::Button,
     /// The zoom readout, which is also the control that resets it.
@@ -242,7 +243,7 @@ impl Bar {
         self.facts.set_tooltip_text(press);
     }
 
-    /// The count itself, which the window hangs the diagnostics toggle off.
+    /// The count itself, which the window hangs the diagnostics toggle and a PDF's page menu off.
     pub fn facts_control(&self) -> &gtk::Button {
         &self.facts
     }

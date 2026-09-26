@@ -507,20 +507,14 @@ impl App {
         }
     }
 
-    /// Another blank page at the end of the open PDF, the size of its last one.
+    /// A blank page before or `after` the one being read in the open PDF.
     ///
     /// Explicit rather than automatic: a stroke cannot reach past the last page to ask for one —
-    /// the view clamps a drag to the page under it — so "drawing past the end" would have to be
-    /// invented as a gesture rather than observed. See NOTEPAD.
-    pub fn pdf_add_page(self: &Rc<Self>) {
+    /// the view clamps a drag to the page under it — so a drawing runs on with Add Page After on
+    /// its last page.
+    pub fn pdf_add_page(self: &Rc<Self>, after: bool) {
         let Some(pdf) = self.active_pdf() else { return };
-        pdf.add_page();
-    }
-
-    /// A blank page after the one being read, the size of it.
-    pub fn pdf_insert_page(self: &Rc<Self>) {
-        let Some(pdf) = self.active_pdf() else { return };
-        pdf.edit_pages(PageEdit::Insert(pdf.current_page() + 1));
+        pdf.add_page(after);
     }
 
     /// Take out the page being read, once the reader has said so. Never the last one.

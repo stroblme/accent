@@ -220,7 +220,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - At the start, what the window is busy with ("Indexing… 1200/42700 files", "Opening the document…"); at the end, the file's facts. A label with nothing to say hides.
 - The vault's own work wins the first slot, being what the reader waits on; then a copy to or from a host ("Downloading a.pdf…", "Uploading 3 files…"), the latest one running, from start to toast, saying that it runs rather than how far; then "Indexing suggestions…" (the ghost-text index), a convenience that waits its turn. No language server's progress is shown: rust-analyzer reports every `cargo check`, and the line would never settle.
 - The facts: what the file is (`Markdown`, `PDF`, `Image`, or `<language> · UTF-8 · LF` for code), whether it has unsaved edits, one count of its own, and its zoom.
-- The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport).
+- The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport). A PDF's count is a button opening Add Page Before, Add Page After and Delete Page for that page, as the page's own menu offers them.
 - The unsaved mark is the `•` a dirty tab wears: one symbol, one meaning. A saved file shows nothing.
 - The branch (which syncs the document's repository) and the zoom (which resets it) are flat buttons held to the caption's line height (`.accent-bar-button`): Adwaita's button minimum would otherwise make the bar 46 px tall instead of 29.
 - The zoom shown is the active tab's, never the window's document zoom over a tab it does not reach.
@@ -328,7 +328,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A `GtkScrollable` widget painting cached tiles, sharp at any zoom, with a low-resolution stand-in under a page whose tiles have not arrived; one render thread per document, which also opens it, so a large file costs nothing at startup.
 - Pages are recoloured onto the theme's paper and ink: light leaves them alone, dark and both Solarized halves remap them. A theme change renders every tile again, the colours being baked in.
 - A drag selects the text under it, across page breaks as readily as within a page.
-- A secondary click on the page: Copy and Copy Link to Selection while something is selected, then Add Page, Insert Page, Delete Page and Export Highlights — window actions in sections, the terminal's idiom, so the palette lists them and they can be rebound.
+- A secondary click on the page: Copy and Copy Link to Selection while something is selected, then Add Page Before, Add Page After, Delete Page and Export Highlights — window actions in sections, the terminal's idiom, so the palette lists them and they can be rebound.
 - **A highlight is a link** (Architecture): Copy Link to Selection puts `[[paper.pdf#page=1&selection=0,6,0,15|the quoted text]]` on the clipboard, one per page the drag covered, and pasting it into a note makes the highlight, painted in the accent at alpha 0.2 under the selection and the search marks. Clicking one opens the note holding it; following one from a note goes to the page and shows the selection. A link whose numbers no longer fit falls back to the text its alias quotes, then to the page.
 - Export Highlights writes them into the file as real `/Highlight` annotations in the accent, skipping quads it already has.
 - The drawing tools are a **ring**: Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust orbiting a hub that floats over the page, opening in the top right (the page is read from the left, a hand comes in from the bottom right), dragged anywhere by the hub and kept where this window left it. The header's Drawing toggle opens and closes it.
@@ -344,9 +344,9 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Ink and page edits are written into the file itself, atomically and gated on the etag the document was read at; the tab does not reload over its own write.
 - Insert Sketch puts a blank A4 page beside the note, embeds it and hands it the pen.
 - **The thumbnail strip organises the pages.** A thumbnail dragged along it moves its page, an accent bar marking the gap it lands in (none beside where it already is), the strip scrolling while the drag rests near an edge. The thumbnail under the pointer carries two round `.osd` buttons: Delete Page (absent on a one-page document, which a PDF keeps) and Insert Page Here on the gap below. A click goes to its page on release, a press being how a drag begins.
-- The page's menu and the palette have Insert Page and Delete Page for the page being read, the palette Move Page Up and Move Page Down.
+- The page's menu, the status bar's page count and the palette have Add Page Before, Add Page After and Delete Page for the page being read, not the one under the pointer; the palette Move Page Up and Move Page Down. A document grows at its end by Add Page After on its last page, never by itself: the view clamps a stroke to the page under it, so running off the end is no gesture to observe.
 - A delete asks first in an `AdwAlertDialog`: nothing puts the page back, Undo walking ink alone.
-- A move reorders the page tree, so bookmarks and links into the page follow it. After Insert the reader is on the new page; after a move or a delete, on the page they were reading, or the one that took its place.
+- A move reorders the page tree, so bookmarks and links into the page follow it. After an add the reader is on the new page; after a move or a delete, on the page they were reading, or the one that took its place.
 - Notes name pages by number and are not rewritten, so an edit that leaves highlights pointing at other pages says how many in a toast.
 - The stand-ins have their own budget, a quarter of the tiles', so scrolling a long document end to end does not keep every page.
 
@@ -543,7 +543,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Ctrl held over a link previews where it leads without following it: a band of the target page around the destination, or an external link's address.
 - Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette.
 - Drawing `Ctrl+Shift+I` opens the ring. Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust (unbound) are on the ring and in the palette, a tool picked from the palette bringing the ring out.
-- Copy Selection, Copy Link to Selection, Export Highlights, Insert Sketch, Add Page, Insert Page and Delete Page are in the palette and the page's menu, Move Page Up and Move Page Down in the palette, all unbound: the thumbnail strip is where pages are organised by pointer.
+- Copy Selection, Copy Link to Selection, Export Highlights, Insert Sketch, Add Page Before, Add Page After and Delete Page are in the palette and the page's menu, Move Page Up and Move Page Down in the palette, all unbound: the thumbnail strip is where pages are organised by pointer.
 - While a pen is out `Ctrl+Z` takes back the last stroke, erase or move of this session and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note, and `Escape` puts the pen down: the tab's own keys, like Copy. Undo Drawing and Redo Drawing are also the header's two buttons and palette commands.
 - Find and Go to Line keep their chords; over a PDF they search the document and go to a page.
 

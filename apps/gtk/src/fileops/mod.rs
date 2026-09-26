@@ -279,8 +279,8 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
 /// New blank PDF in `dir` ("" is the vault root), to draw on rather than to read.
 ///
 /// The size is picked here and fixed afterwards: a page is paper, and paper does not grow. When
-/// a drawing runs off the end, Add Page puts another page of the same size under it — which is
-/// what makes the file a notebook every PDF reader shows correctly, rather than one growing
+/// a drawing runs off the end, Add Page After puts another page of the same size under it — which
+/// is what makes the file a notebook every PDF reader shows correctly, rather than one growing
 /// `/MediaBox` only we understand.
 ///
 /// Local vaults only, for the reason the pen and Insert Sketch refuse on a remote one: a PDF

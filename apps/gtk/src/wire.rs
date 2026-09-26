@@ -363,10 +363,23 @@ pub fn wire_window(app: &Rc<App>) {
     // squiggles, the gutter marks and the messages at the ends of the lines all go, while the
     // count itself and the hover stay, so a diagnostic that is in the way is still readable by
     // pointing at its line. Per tab, as everything else in that corner of the bar is.
+    //
+    // A PDF's page count opens the page commands instead, acting on the page it names: the same
+    // three the page's own menu offers. Parented on the button, as the zoom's menu is below, and
+    // opening upwards, the bar being the window's bottom edge.
     app.statusbar.facts_control().connect_clicked(glib::clone!(
         #[weak]
         app,
-        move |_| {
+        move |button| {
+            if app.active_pdf().is_some() {
+                let menu = gio::Menu::new();
+                for action in pdftab::PAGE_ACTIONS {
+                    menu.append(Some(label_of(action)), Some(action));
+                }
+                crate::widgets::popup_menu(button, &menu, None)
+                    .set_position(gtk::PositionType::Top);
+                return;
+            }
             let Some(tab) = app.active() else {
                 return;
             };

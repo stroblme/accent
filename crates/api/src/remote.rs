@@ -416,7 +416,7 @@ impl Remote {
 
     /// Put a cached copy back on the host: the other half of [`fetch`](Self::fetch), for the
     /// readers that write into the file they were handed rather than through the vault — the PDF
-    /// pen, Add Page, Export Highlights.
+    /// pen, the page edits, Export Highlights.
     ///
     /// The host's etag is checked against the one the copy was fetched at, because the copy was
     /// drawn on without the host knowing: a file that moved under it is a conflict for the reader
