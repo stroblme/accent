@@ -234,6 +234,8 @@ pub struct Tab {
     comparing: RefCell<Option<Comparing>>,
     /// The buttons a comparison lays over the editor, kept across comparisons: see `diff::Pool`.
     overlays: Rc<diff::Pool>,
+    /// Git's conflict markers in the text, tinted and with their Accept buttons over them.
+    conflicts: Rc<crate::conflict::Conflicts>,
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
     /// The width cap on the document column, sized by [`Tab::set_clamp`]. Scrollable, so the
@@ -607,6 +609,7 @@ pub fn open(
         document: document.clone(),
         comparing: RefCell::new(None),
         overlays: Rc::default(),
+        conflicts: crate::conflict::Conflicts::new(&view, &buffer, &scroller),
         scroller: scroller.clone(),
         clamp,
         zoom: Cell::new(zoom),
@@ -1105,9 +1108,15 @@ impl Tab {
         self.marks.restyle(&self.view);
         diagnostics::restyle(&self.buffer, &self.view);
         self.fold_renderer.restyle(&self.view);
+        self.conflicts.restyle();
         if let Some(compare) = self.comparison() {
             compare.restyle();
         }
+    }
+
+    /// Git's conflict markers in this tab, for the palette's Accept and Next Conflict commands.
+    pub fn conflicts(&self) -> &crate::conflict::Conflicts {
+        &self.conflicts
     }
 
     /// What the language server last said about this file. Replaces the previous answer whole,
@@ -1564,6 +1573,7 @@ impl Tab {
         if let Some(compare) = self.comparison() {
             compare.refresh();
         }
+        self.conflicts.find();
     }
 
     /// Redraw the gutter's change bars from the committed text. On the debounce, not the

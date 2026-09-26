@@ -61,6 +61,9 @@ pub(crate) const REMOVED_HUE: (f32, f32, f32) = (0.80, 0.20, 0.25);
 /// Not a diff colour: the amber a warning is underlined in (`diagnostics.rs`). It lives beside
 /// the other two because they are one palette and are mixed by the same [`tint`].
 pub(crate) const WARNING_HUE: (f32, f32, f32) = (0.85, 0.60, 0.10);
+/// Nor this: the blue a conflict block's incoming side is tinted in (`conflict.rs`), its current
+/// side taking the green, as VS Code tints the two.
+pub(crate) const INCOMING_HUE: (f32, f32, f32) = (0.20, 0.50, 0.90);
 /// Share of the tint that is the hue; the rest is the foreground.
 const HUE_MIX: f32 = 0.65;
 const CHANGE_ALPHA: f32 = 0.16;

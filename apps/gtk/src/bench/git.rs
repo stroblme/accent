@@ -820,3 +820,126 @@ fn working_in(dir: &Path) -> usize {
         .filter(|cwd| cwd.starts_with(dir))
         .count()
 }
+
+/// Git's conflict markers in an editor tab, over a note a real `git merge` left with three blocks
+/// or more (`=markers:<rel>`). It prints the conflict tags and any heading tag on each line of the
+/// note, then where each block's row of buttons sits against its first line — the line's top, the
+/// row's top and bottom, the text's top — and holds 6 s for a screenshot. Then Next Conflict twice
+/// and Previous Conflict once from the top, printing the caret's line; Accept Current on the first
+/// block by its button, Accept Incoming from the palette's command with the caret in the next, and
+/// Accept Both on the next by its button, printing the text after each; three undos, printing
+/// whether the text is back; the first block's `=======` deleted and put back; and the rows while
+/// a comparison is up and once it has gone.
+pub(super) fn bench_git_markers(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(1500).await;
+        let Some(tab) = app.tab_for(&rel) else {
+            println!("bench git_markers no_tab");
+            return bench_quit(&app);
+        };
+        let original = tab.text();
+        for n in 0..tab.buffer.line_count() {
+            let Some(at) = tab.buffer.iter_at_line(n) else {
+                continue;
+            };
+            let tags: Vec<String> = at
+                .tags()
+                .iter()
+                .filter_map(|tag| tag.name())
+                .filter(|name| {
+                    name.starts_with("conflict") || highlight::HEADING_TAGS.contains(&name.as_str())
+                })
+                .map(String::from)
+                .collect();
+            let line = original.lines().nth(n as usize).unwrap_or_default();
+            println!("bench git_markers line={} {line:?} {tags:?}", n + 1);
+        }
+        let conflicts = tab.conflicts();
+        let rows = |when: &str| {
+            let laid = conflicts.laid();
+            let in_band = laid
+                .iter()
+                .flatten()
+                .all(|[line, top, bottom, text]| line <= top && bottom <= text);
+            println!("bench git_markers {when} rows={laid:?} in_band={in_band}");
+        };
+        rows("opened");
+        println!("bench git_markers hold");
+        wait(6000).await;
+
+        let caret_line = || tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line() + 1;
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        for action in ["conflict-next", "conflict-next", "conflict-previous"] {
+            let _ = WidgetExt::activate_action(&app.window, &format!("win.{action}"), None);
+            println!("bench git_markers {action} caret_line={}", caret_line());
+        }
+
+        let press = |label: &str| {
+            let button = conflicts.row(0).and_then(|row| {
+                find_widget(&row, &|w| {
+                    w.downcast_ref::<gtk::Button>()
+                        .is_some_and(|b| b.label().as_deref() == Some(label))
+                })
+            });
+            if let Some(button) = button.and_downcast::<gtk::Button>() {
+                button.emit_clicked();
+            }
+        };
+        let say = |what: &str| println!("bench git_markers {what} text={:?}", tab.text());
+        press("Accept Current");
+        wait(300).await;
+        say("current");
+        let text = tab.text();
+        if let Some(block) = accent_core::conflict::blocks(&text).first() {
+            let at = text[..block.ours.start].chars().count() as i32;
+            tab.buffer.place_cursor(&tab.buffer.iter_at_offset(at));
+        }
+        let _ = WidgetExt::activate_action(&app.window, "win.conflict-incoming", None);
+        wait(300).await;
+        say("incoming");
+        press("Accept Both");
+        wait(300).await;
+        say("both");
+        rows("resolved");
+        for _ in 0..3 {
+            tab.buffer.undo();
+        }
+        wait(300).await;
+        println!("bench git_markers undone back={}", tab.text() == original);
+        rows("undone");
+
+        let text = tab.text();
+        if let Some(block) = accent_core::conflict::blocks(&text).first() {
+            let split = &block.markers()[1];
+            let chars = |byte: usize| text[..byte].chars().count() as i32;
+            let (mut from, mut to) = (
+                tab.buffer.iter_at_offset(chars(split.start)),
+                tab.buffer.iter_at_offset(chars(split.end)),
+            );
+            tab.buffer.delete(&mut from, &mut to);
+        }
+        wait(300).await;
+        rows("split_deleted");
+        tab.buffer.undo();
+        wait(300).await;
+        rows("split_back");
+
+        tab.compare(
+            "Mine",
+            ("Disk", &original),
+            diff::Side::New,
+            false,
+            None,
+            "bench",
+        );
+        wait(500).await;
+        rows("comparing");
+        tab.leave_compare();
+        wait(500).await;
+        rows("compared");
+        bench_quit(&app);
+    });
+}

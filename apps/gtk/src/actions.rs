@@ -2,6 +2,7 @@
 //! force and the menus that name the actions.
 
 use super::*;
+use accent_core::conflict::Take;
 
 /// Every user-facing action: the name it answers to, the label the menu and the palette show, and
 /// its accelerators. One table, so an action cannot exist without being reachable and findable
@@ -167,6 +168,13 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.git-merge", "Merge Branch…", &[]),
     ("win.git-merge-abort", "Abort Merge", &[]),
     ("win.git-delete-branch", "Delete Branch…", &[]),
+    // The conflict block holding the caret (`conflict.rs`), unbound as VS Code leaves them: the
+    // buttons over each block are the pointer's way.
+    ("win.conflict-current", "Accept Current Change", &[]),
+    ("win.conflict-incoming", "Accept Incoming Change", &[]),
+    ("win.conflict-both", "Accept Both Changes", &[]),
+    ("win.conflict-next", "Next Conflict", &[]),
+    ("win.conflict-previous", "Previous Conflict", &[]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>w"]),
     (
         "win.pane-properties",
@@ -559,6 +567,28 @@ impl App {
             }
             "view-mode" => self.set_mode(self.mode.get().next()),
             "follow-link" => self.go_to_definition(),
+            "conflict-current" | "conflict-incoming" | "conflict-both" => {
+                let take = match name {
+                    "conflict-current" => Take::Current,
+                    "conflict-incoming" => Take::Incoming,
+                    _ => Take::Both,
+                };
+                if !self
+                    .active()
+                    .is_some_and(|tab| tab.conflicts().accept_at_caret(take))
+                {
+                    self.toast("No conflict at the caret");
+                }
+            }
+            "conflict-next" | "conflict-previous" => {
+                let forward = name == "conflict-next";
+                if !self
+                    .active()
+                    .is_some_and(|tab| tab.conflicts().step(forward))
+                {
+                    self.toast("No conflicts in this file");
+                }
+            }
             "fold" => self.with_active(Tab::fold_at_caret),
             "unfold" => self.with_active(Tab::unfold_at_caret),
             "fold-all" => self.with_active(Tab::fold_all),

@@ -89,6 +89,8 @@ impl Tab {
         label: &str,
     ) -> Rc<diff::Compare> {
         self.leave_compare();
+        // A comparison is a merge of its own, with its own tints and buttons over these lines.
+        self.conflicts.set_enabled(false);
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
         close.set_tooltip_text(Some("Stop Comparing"));
@@ -166,6 +168,7 @@ impl Tab {
         // The gap tags went with it, so the messages the collapsed lines were keeping quiet about
         // belong back at the ends of their lines.
         self.paint_diagnostics();
+        self.conflicts.set_enabled(true);
         comparing.holder.remove(&self.document);
         for widget in &comparing.shown {
             self.content.remove(widget);

@@ -3,6 +3,7 @@
 
 pub mod attachment;
 pub mod config;
+pub mod conflict;
 pub mod csv;
 pub mod diff;
 pub mod fs;
