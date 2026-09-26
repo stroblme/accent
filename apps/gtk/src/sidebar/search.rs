@@ -51,10 +51,11 @@ const WIDEN_AFTER: Duration = Duration::from_millis(350);
 /// The heading over the rows All's walk found past the index.
 const NOT_INDEXED: &str = "Not Indexed";
 /// Most rows one opened "+N more" row lists; any left over stay behind a tail row of their own,
-/// which opens the same way. A bound against the pathological file — a one-character pattern
-/// over a megabyte of minified code is a million matches of a clipped line each — and not a page
-/// size: a file with a few thousand matches opens whole.
-const MORE_AT_ONCE: usize = 1000;
+/// which opens the same way. A step the reader can take in, by the user's choice: a file with
+/// thousands of matches is walked a hundred at a time rather than poured into the list, and a
+/// one-character pattern over a megabyte of minified code — a million matches — costs nothing
+/// until it is asked for.
+const MORE_AT_ONCE: usize = 100;
 /// One query, already compiled. Built on the main thread from what the search box says, so an
 /// invalid pattern is reported without a worker thread being spent on it.
 pub enum Query {

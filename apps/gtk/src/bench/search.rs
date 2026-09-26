@@ -307,7 +307,7 @@ fn more_note() -> String {
 ///
 /// Each prints `before` and `after`: the rows, the count line, the tabs open, the list's scroll,
 /// how far down the list the tail row sat and the row now in its place sits, and which row is
-/// selected. `after` must list `rows` + N − 1 (at most 1000 more, and a tail row again past
+/// selected. `after` must list `rows` + N − 1 (at most 100 more, and a tail row again past
 /// that), with the count, the tabs, the scroll, the place and the selection as they were. Then
 /// `requery` asks the same question again, as a change in the vault does, and must list the file
 /// open still; `reset` asks for the query in capitals, a new question with the same matches, and
