@@ -290,15 +290,11 @@ impl App {
             self,
             move |pdf, result| app.exported(pdf, result)
         ));
-        // A page edit does not rewrite the notes that name pages by number (NOTEPAD), so the
-        // reader is told when it left some of them pointing at other pages.
-        pdf.connect_links_moved(glib::clone!(
+        // The notes name pages by number, and so do the pane's places: both follow a page edit.
+        pdf.connect_repaged(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_, moved| app.toast(&match moved {
-                1 => "A highlight in a note now points at another page".to_string(),
-                n => format!("{n} highlights in notes now point at other pages"),
-            })
+            move |pdf, edit, step| app.repaged(pdf, edit, step)
         ));
         pdf.connect_choice(glib::clone!(
             #[weak(rename_to = app)]

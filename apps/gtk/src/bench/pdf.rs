@@ -55,37 +55,44 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
 /// thumbnail strip makes, a page added before the one being read, one added after the last page
 /// and the first page deleted through the window actions — at once, no dialog being asked —
 /// each followed to the file. Then Undo walks all four back through the window's action, newest
-/// first, and Redo makes them again, the file read after each. Then the items of the two menus
-/// that offer them: the page's own, without a selection and with one, and the status bar's page
-/// count, opened as a click does. What a headless run cannot reach is the pointer's half: the
+/// first, and Redo makes them again, the file read after each. A note linking into pages 1 to 3
+/// (a highlight, a jump and a markdown link) is written and opened in a tab first, and after every
+/// step its links' pages are printed as the file and the tab's buffer hold them, with what the
+/// toast said, if it said anything. Then the items of the two
+/// menus that offer them: the page's own, without a selection and with one, and the status bar's
+/// page count, opened as a click does. What a headless run cannot reach is the pointer's half: the
 /// drag itself, the buttons on hover, the drop bar and the scroll at the strip's edge.
 pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
+        let note = linked_note(&app, &rel).await;
         let Some(pdf) = opened(&app, &rel).await else {
             println!("bench pages no_tab");
             return bench_quit(&app);
         };
-        println!("bench pages opened {}", pages_read(&pdf));
+        let said = Cell::new(app.toasted.get());
+        let links = || links_read(&app, &pdf, &note, &said);
+        println!("bench pages opened {} {}", pages_read(&pdf), links());
         pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 2 });
         written(&app).await;
-        println!("bench pages moved {}", pages_read(&pdf));
+        println!("bench pages moved {} {}", pages_read(&pdf), links());
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-before", None);
         written(&app).await;
-        println!("bench pages before {}", pages_read(&pdf));
+        println!("bench pages before {} {}", pages_read(&pdf), links());
         // After the last page, which is how a document grows at its end.
         pdf.goto_page(pdf.page_count() - 1);
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         written(&app).await;
-        println!("bench pages after {}", pages_read(&pdf));
+        println!("bench pages after {} {}", pages_read(&pdf), links());
         // A page with text on it, so Undo is seen putting the text back.
         pdf.goto_page(0);
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-delete-page", None);
         written(&app).await;
         println!(
-            "bench pages deleted dialog={} {}",
+            "bench pages deleted dialog={} {} {}",
             app.window.visible_dialog().is_some(),
-            pages_read(&pdf)
+            pages_read(&pdf),
+            links()
         );
         let walks = [
             (
@@ -103,7 +110,7 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
             for step in steps {
                 let _ = WidgetExt::activate_action(&app.window, action, None);
                 written(&app).await;
-                println!("bench pages {walk}_{step} {}", pages_read(&pdf));
+                println!("bench pages {walk}_{step} {} {}", pages_read(&pdf), links());
             }
         }
         println!("bench pages history={:?}", pdf.history());
@@ -173,6 +180,69 @@ fn pages_read(pdf: &pdftab::PdfTab) -> String {
         pdf.current_page() + 1,
         pdf.page_count()
     )
+}
+
+/// Write `Page links.md` at the vault root, linking into pages 1 to 3 of `pdf` as a highlight,
+/// a jump and a markdown link, wait until the index has it as one of the PDF's backlinks, and open
+/// it in a tab, which a rewrite has to reload.
+async fn linked_note(app: &Rc<App>, pdf: &str) -> String {
+    let note = "Page links.md".to_string();
+    let text = format!(
+        "[[{pdf}#page=1&selection=0,0,0,4|Page]] [[{pdf}#page=2]] [three]({}#page=3)\n",
+        accent_core::markdown::percent_encode(pdf)
+    );
+    let Some(vault) = app.vault().cloned() else {
+        return note;
+    };
+    if let Err(e) = vault.save(&note, &text, None) {
+        println!("bench pages note_not_written {e:?}");
+    }
+    for _ in 0..100 {
+        let linked = vault
+            .backlinks(pdf)
+            .is_ok_and(|links| links.iter().any(|b| b.src_rel_path == note));
+        if linked {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    app.open_path(&note);
+    for _ in 0..50 {
+        if app.tab_for(&note).is_some() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    note
+}
+
+/// The pages the note's links name, in the order it holds them — on disk, and in its tab unless
+/// the tab holds the same — and what the toast said since the last time this was asked: how the
+/// notes followed the step before it.
+fn links_read(app: &Rc<App>, pdf: &pdftab::PdfTab, note: &str, said: &Cell<usize>) -> String {
+    let pages = |text: &str| -> Vec<String> {
+        text.match_indices("#page=")
+            .map(|(at, found)| {
+                let rest = &text[at + found.len()..];
+                let end = rest.find(|c: char| !c.is_ascii_digit());
+                rest[..end.unwrap_or(rest.len())].to_string()
+            })
+            .collect()
+    };
+    let on_disk = app
+        .vault()
+        .and_then(|v| v.read(note).ok())
+        .map(|(text, _)| pages(&text))
+        .unwrap_or_default();
+    let tab = match app.tab_for(note).map(|tab| pages(&tab.text())) {
+        Some(held) if held == on_disk => "same".to_string(),
+        held => format!("{held:?}"),
+    };
+    let now = app.toasted.get();
+    let toast = (now > said.replace(now))
+        .then(|| pdf.relinks.borrow().toast.as_ref().and_then(|t| t.title()))
+        .flatten();
+    format!("links={on_disk:?} tab={tab} said={toast:?}")
 }
 
 /// Open `rel` and hand back the tab once its pages are known.

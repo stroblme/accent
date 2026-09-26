@@ -13,8 +13,8 @@ use accent_core::{markdown, search, template};
 use super::{Local, Msg};
 use crate::paths::{accent_conflict_name, with_md};
 use crate::{
-    Etag, FileEdits, FileKind, Regex, RenamePlan, RenameReport, ReplaceReport, SaveError,
-    UndoReport, fs, locked,
+    Etag, FileEdits, FileKind, KeptLink, PageEdit, Regex, RenamePlan, RenameReport, RepageReport,
+    ReplaceReport, SaveError, UndoReport, fs, locked,
 };
 
 /// Most text a Replace All keeps to undo itself with. The pre-images are held in memory, and the
@@ -373,6 +373,78 @@ impl Local {
         Ok(true)
     }
 
+    /// Point every note link into the PDF `rel` at where `edit` took the page it names, each note
+    /// read, rewritten and written back through the etag gate as a rename's are.
+    ///
+    /// The notes are the PDF's backlinks: every link the index resolved to it, a highlight's
+    /// `page=N&selection=…` and a plain `page=N` jump alike. `keep` is what the delete an Undo
+    /// takes back left behind (see [`markdown::repage_links`]). A note that cannot be read or
+    /// written is reported, not fatal: the page edit has already happened.
+    pub fn repage_links(
+        &self,
+        rel: &str,
+        edit: PageEdit,
+        keep: &[KeptLink],
+    ) -> Result<RepageReport> {
+        let notes: BTreeSet<String> = self
+            .index()
+            .backlinks(rel)?
+            .into_iter()
+            .map(|b| b.src_rel_path)
+            .collect();
+        let mut report = RepageReport::default();
+        for note in notes {
+            let kept: Vec<(String, usize)> = keep
+                .iter()
+                .filter(|k| k.note == note)
+                .map(|k| (k.link.clone(), k.nth))
+                .collect();
+            match self.repage_one(&note, rel, edit, &kept) {
+                Ok(done) => {
+                    report.moved += done.moved;
+                    report
+                        .left
+                        .extend(done.left.into_iter().map(|(link, nth)| KeptLink {
+                            note: note.clone(),
+                            link,
+                            nth,
+                        }));
+                    if done.text.is_some() {
+                        report.rewritten.push(note);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("following the pages of {rel} in {note}: {e:#}");
+                    report.failed.push((note, format!("{e:#}")));
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// [`repage_links`](Self::repage_links) for one note.
+    fn repage_one(
+        &self,
+        note: &str,
+        pdf: &str,
+        edit: PageEdit,
+        keep: &[(String, usize)],
+    ) -> Result<markdown::Repaged> {
+        let targets: HashMap<String, String> =
+            self.index().resolved_links(note)?.into_iter().collect();
+        let path = self.resolve(note)?;
+        let (text, etag) = fs::read_note(&path)?;
+        let done = markdown::repage_links(&text, note, pdf, &targets, edit, keep);
+        if let Some(rewritten) = &done.text {
+            fs::write_note(&path, rewritten, Some(etag))?;
+            self.post(Msg::Update {
+                rel: note.to_string(),
+                own: true,
+            });
+        }
+        Ok(done)
+    }
+
     /// Replace every match of `re` in every file whose indexed body has one — the files
     /// [`grep`](Self::grep) lists and counts under the same `include_ignored`, notes or not.
     ///
@@ -689,6 +761,61 @@ mod tests {
                 .any(|b| b.src_rel_path == "a.md"),
             BUDGET
         ));
+    }
+
+    /// A page edit carries every link into the PDF with it, in every note, and the Undo of a
+    /// delete puts back exactly what it changed.
+    #[test]
+    fn a_page_edit_rewrites_the_notes_linking_into_the_pdf() {
+        use crate::PageEdit;
+        let f = vault_of(&[
+            ("paper.pdf", "%PDF-1.4\n"),
+            (
+                "a.md",
+                "[[paper.pdf#page=1&selection=0,0,0,4|Hi]] [[paper.pdf#page=2]]\n",
+            ),
+            ("sub/b.md", "[three](../paper.pdf#page=3) [[paper.pdf]]\n"),
+            ("c.md", "[[paper.pdf#page=2]] elsewhere\n"),
+        ]);
+
+        let report = f
+            .vault
+            .repage_links("paper.pdf", PageEdit::Move { from: 0, to: 2 }, &[])
+            .unwrap();
+        assert_eq!(report.rewritten, ["a.md", "c.md", "sub/b.md"]);
+        assert_eq!((report.moved, report.left.len()), (4, 0));
+        assert_eq!(
+            f.read("a.md"),
+            "[[paper.pdf#page=3&selection=0,0,0,4|Hi]] [[paper.pdf#page=1]]\n"
+        );
+        assert_eq!(
+            f.read("sub/b.md"),
+            "[three](../paper.pdf#page=2) [[paper.pdf]]\n"
+        );
+
+        // The page that was first is the third now; deleting it leaves the highlight on it.
+        let deleted = f
+            .vault
+            .repage_links("paper.pdf", PageEdit::Delete(2), &[])
+            .unwrap();
+        assert_eq!(deleted.moved, 0);
+        assert_eq!(
+            deleted.left,
+            [crate::KeptLink {
+                note: "a.md".into(),
+                link: "[[paper.pdf#page=3&selection=0,0,0,4|Hi]]".into(),
+                nth: 0
+            }]
+        );
+        let undone = f
+            .vault
+            .repage_links("paper.pdf", PageEdit::Insert(2), &deleted.left)
+            .unwrap();
+        assert_eq!((undone.moved, undone.rewritten.len()), (0, 0));
+        assert_eq!(
+            f.read("a.md"),
+            "[[paper.pdf#page=3&selection=0,0,0,4|Hi]] [[paper.pdf#page=1]]\n"
+        );
     }
 
     #[test]

@@ -18,9 +18,9 @@ use accent_core::search;
 
 use crate::local::Local;
 use crate::{
-    Backlink, Commit, Etag, Event, FileRow, Location, Match, Options, PdfLink, RenamePlan,
-    RenameReport, ReplaceReport, Repo, SaveError, SearchHit, Session, Status, Submodule,
-    UndoReport, VaultConfig, fs, git, remote, rpc, ssh,
+    Backlink, Commit, Etag, Event, FileRow, KeptLink, Location, Match, Options, PageEdit, PdfLink,
+    RenamePlan, RenameReport, RepageReport, ReplaceReport, Repo, SaveError, SearchHit, Session,
+    Status, Submodule, UndoReport, VaultConfig, fs, git, remote, rpc, ssh,
 };
 
 /// One open vault, wherever it lives.
@@ -374,6 +374,9 @@ methods! {
     /// uploads the new one; the rename then says so rather than moving anything.
     any plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
     any rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
+    /// The notes' links into a PDF after a page edit, rewritten where the notes are.
+    any repage_links(rel: ref str, edit: val PageEdit, keep: ref [KeptLink]) -> RepageReport,
+        bounded by MOVE_BOUND;
     any adopt_conflict(original: ref str, conflict: ref str) -> Etag;
     any template_target(template: ref str) -> Option<String>;
     any note_from_template(template: ref str) -> Option<(String, Vec<usize>)>;

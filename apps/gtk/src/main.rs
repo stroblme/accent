@@ -45,6 +45,7 @@ mod preview;
 mod recall;
 mod reconnect;
 mod references;
+mod relink;
 mod ring;
 mod save;
 mod session;

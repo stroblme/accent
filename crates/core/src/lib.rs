@@ -11,6 +11,7 @@ pub mod fuzzy;
 pub mod git;
 pub mod index;
 pub mod markdown;
+pub mod page_edit;
 pub mod path;
 #[cfg(feature = "pdf")]
 pub mod pdf;

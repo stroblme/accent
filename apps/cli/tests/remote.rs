@@ -387,6 +387,27 @@ fn a_remote_vault_connects_indexes_and_answers() {
         }
     }
 
+    // A page edit's links are rewritten on the host, where the notes and the index are.
+    vault
+        .write_file("e.md", b"[[paper.pdf#page=1]] [t](paper.pdf#page=2)\n")
+        .unwrap();
+    assert!(
+        eventually(|| vault
+            .backlinks("paper.pdf")
+            .is_ok_and(|links| links.iter().any(|b| b.src_rel_path == "e.md"))),
+        "the host never indexed e.md"
+    );
+    let moved = accent_api::PageEdit::Move { from: 0, to: 1 };
+    let report = vault.repage_links("paper.pdf", moved, &[]).unwrap();
+    assert_eq!(
+        (report.rewritten, report.moved),
+        (vec!["e.md".to_string()], 2)
+    );
+    assert_eq!(
+        vault.read("e.md").unwrap().0,
+        "[[paper.pdf#page=2]] [t](paper.pdf#page=1)\n"
+    );
+
     // Closing the vault takes the server and every forward it still has off the host. The master
     // is left its ControlPersist minute on purpose, so it is not what is asserted on.
     remote.forward(back).unwrap();
