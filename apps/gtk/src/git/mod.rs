@@ -786,8 +786,8 @@ impl Panel {
         row.append(&switch);
         if deletable {
             let trash = icon_button("user-trash-symbolic", "Delete Branch");
-            // The hover rule the changed files' actions already follow, and the same class: a
-            // `GtkListBoxRow`'s node is `row`, which is what that CSS selects on.
+            // Shown on the row's hover and `:focus-within` by `.git-actions`: a `GtkListBoxRow`'s
+            // node is `row`, which is what that CSS selects on.
             trash.add_css_class("git-actions");
             let (weak, asked) = (Rc::downgrade(self), name.to_string());
             trash.connect_clicked(move |_| {

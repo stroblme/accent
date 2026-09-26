@@ -272,15 +272,29 @@ async fn bench_git_hover(list: &gtk::Widget, path: &str) {
             true => row.set_state_flags(gtk::StateFlags::PRELIGHT, false),
             false => row.unset_state_flags(gtk::StateFlags::PRELIGHT),
         }
+        // A tenth of a second into the slide, whether the buttons are still painted: they leave
+        // at full opacity as they came, rather than vanishing before the gap closes.
+        glib::timeout_future(Duration::from_millis(100)).await;
+        let sliding = buttons.child().is_some_and(|b| painted(&b));
         // Past the reveal's own slide, which is what the label's width waits on.
-        glib::timeout_future(Duration::from_millis(600)).await;
+        glib::timeout_future(Duration::from_millis(500)).await;
         println!(
-            "bench git_hover {path} pointer={on} name={} buttons={} revealed={}",
+            "bench git_hover {path} pointer={on} name={} buttons={} revealed={} \
+             painted_mid_slide={sliding}",
             label.width(),
             buttons.width(),
             buttons.reveals_child()
         );
     }
+}
+
+/// Whether `widget` draws anything. One at CSS opacity 0, or not drawn at all, has no render
+/// node, so its paintable is empty.
+fn painted(widget: &gtk::Widget) -> bool {
+    let snapshot = gtk::Snapshot::new();
+    let (w, h) = (f64::from(widget.width()), f64::from(widget.height()));
+    gtk::WidgetPaintable::new(Some(widget)).snapshot(&snapshot, w, h);
+    snapshot.to_node().is_some()
 }
 
 /// A commit row's own two buttons, which used to be a secondary-click menu.
