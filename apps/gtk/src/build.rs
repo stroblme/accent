@@ -537,6 +537,13 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
                 app.replace_in_files(query, options, replacement, literal, include_ignored, done)
             }
         )),
+        read: Arc::new({
+            let vault = vault.clone();
+            move |rel| match vault.read_text(rel) {
+                Ok(accent_api::Read::Text(text)) => Some(text.text),
+                _ => None,
+            }
+        }),
     }
 }
 

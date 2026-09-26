@@ -282,7 +282,9 @@ use tags::bench_tags;
 /// `=type:<query>` types a ranked query and prints each change of the rows with the milliseconds
 /// since the last keystroke: the prefix rows, then the mid-word rows appended below them;
 /// `=walk:<query>` does the same with All on, the walk past the index appending its rows last,
-/// under Not Indexed.
+/// under Not Indexed. `=more:<query>[:<n>]` opens a note's "+N more in this file" row, printing
+/// the rows, the count, the tabs and the scroll before and after, and again after the same query
+/// is asked again and a new one; `=click:` waits for a real XTEST press on it instead.
 ///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.

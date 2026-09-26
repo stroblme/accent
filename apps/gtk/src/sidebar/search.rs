@@ -10,13 +10,13 @@ use super::{OnOpen, Target};
 use crate::dialogs::confirm;
 use crate::recall::{self, QUERIES, REPLACEMENTS};
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
-use accent_core::index::{MIN_INFIX, Match, SearchHit};
+use accent_core::index::{Index, MIN_INFIX, Match, SearchHit};
 use accent_core::path::{basename, parent_dir};
 use accent_core::search::{self, Options, Regex};
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
-use std::cell::{Cell, Ref};
-use std::collections::HashSet;
+use std::cell::{Cell, Ref, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -50,6 +50,11 @@ const SHOW_AFTER: u32 = 2;
 const WIDEN_AFTER: Duration = Duration::from_millis(350);
 /// The heading over the rows All's walk found past the index.
 const NOT_INDEXED: &str = "Not Indexed";
+/// Most rows one opened "+N more" row lists; any left over stay behind a tail row of their own,
+/// which opens the same way. A bound against the pathological file — a one-character pattern
+/// over a megabyte of minified code is a million matches of a clipped line each — and not a page
+/// size: a file with a few thousand matches opens whole.
+const MORE_AT_ONCE: usize = 1000;
 /// One query, already compiled. Built on the main thread from what the search box says, so an
 /// invalid pattern is reported without a worker thread being spent on it.
 pub enum Query {
@@ -112,6 +117,9 @@ pub struct Data {
     /// reads the way the count beside the rows did. It writes one file at a time, so it runs off
     /// the main loop and calls `done` there once it has: the pane stays busy until then.
     pub replace_all: Box<dyn Fn(String, Options, String, bool, bool, Box<dyn FnOnce()>)>,
+    /// A file's text, or `None` when it cannot be read as text: what an opened "+N more" row
+    /// finds the rest of that file's matches in. Called on a worker thread, as `search` is.
+    pub read: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
 }
 
 /// FTS5 wraps matched terms in `«` and `»` (see `Index::search`). Escape first, so a note holding a
@@ -194,14 +202,106 @@ fn dir_label(rel_path: &str, line: Option<u32>) -> String {
 }
 
 /// The row under a file whose matches the per-file cap cut short. The dim line alone, and it
-/// opens the file where that file's first listed match is.
-fn more_row(rel_path: &str, more: usize, first: Option<Range<usize>>) -> Row {
+/// opens nothing: activating it lists those matches in its place ([`Search::expand`]).
+fn more_row(rel_path: &str, count: usize, more: More) -> Row {
     Row {
         rel_path: rel_path.to_string(),
-        at: first,
+        at: None,
         name: String::new(),
-        dir: format!("+{more} more in this file"),
+        dir: format!("+{count} more in this file"),
         snippet: String::new(),
+        more: Some(more),
+    }
+}
+
+/// What a tail row lists once it is opened: the rest of its file's matches, found again in the
+/// file's text the way the rows above it were found.
+#[derive(Clone)]
+struct More {
+    /// Where the rows above stopped: the first byte a match past them may start at.
+    from: usize,
+    how: Rest,
+}
+
+#[derive(Clone)]
+enum Rest {
+    /// The ranked query, as the phrase its rows marked.
+    Phrase(String),
+    /// An exact query's pattern, with the replacement its rows preview — `None` on a walked row,
+    /// which Replace All never opens — and whether `$1` in it is two characters.
+    Pattern {
+        re: Regex,
+        replacement: Option<String>,
+        literal: bool,
+    },
+}
+
+/// The rows an opened tail row becomes: its file's matches in `body` past the rows above it, as
+/// those rows were made, at most [`MORE_AT_ONCE`] and a tail row again for any left over. Empty
+/// once the file holds none past them any more.
+fn rest_rows(rel: &str, body: &str, more: &More, accent: &str) -> Vec<Row> {
+    match &more.how {
+        Rest::Phrase(query) => {
+            let hits = Index::phrase_hits_from(rel, body, query, more.from, MORE_AT_ONCE);
+            fts_rows(hits, query)
+        }
+        Rest::Pattern {
+            re,
+            replacement,
+            literal,
+        } => {
+            let (hits, _) = Index::matches_from(rel, None, body, re, more.from, MORE_AT_ONCE);
+            grep_rows(hits, re, replacement.as_deref(), *literal, accent)
+        }
+    }
+}
+
+/// Files' texts by path: the files opened under a question, read again along with its answer.
+type Bodies = HashMap<String, String>;
+
+/// `rows` with the tail row of each file in `bodies` opened, as a click on it opens it.
+fn open_tails(rows: Vec<Row>, bodies: &Bodies, accent: &str) -> Vec<Row> {
+    if bodies.is_empty() {
+        return rows;
+    }
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        match (&row.more, bodies.get(&row.rel_path)) {
+            (Some(more), Some(body)) => out.extend(rest_rows(&row.rel_path, body, more, accent)),
+            _ => out.push(row),
+        }
+    }
+    out
+}
+
+/// Ask `query`, then read the files in `opened` that its answer cuts short again. Run on a
+/// worker thread, so a question asked again — the vault moved under it — lands with those files
+/// already open ([`open_tails`]): listed shut first, the list would lose its place.
+fn answer_with_bodies(
+    run: &dyn Fn(Query) -> Answer,
+    read: &dyn Fn(&str) -> Option<String>,
+    query: Query,
+    opened: Vec<String>,
+) -> (Answer, Bodies) {
+    let answer = run(query);
+    let bodies = opened
+        .into_iter()
+        .filter(|rel| answer.cuts(rel))
+        .filter_map(|rel| read(&rel).map(|body| (rel, body)))
+        .collect();
+    (answer, bodies)
+}
+
+impl Answer {
+    /// Whether the per-file cap cut `rel`'s rows short here, leaving the file a tail row.
+    fn cuts(&self, rel: &str) -> bool {
+        let fts = |hits: &[SearchHit]| hits.iter().any(|h| h.more > 0 && h.rel_path == rel);
+        let grep = |hits: &[Match]| hits.iter().any(|m| m.more > 0 && m.rel_path == rel);
+        match self {
+            Answer::Fts(hits) | Answer::MidWord(hits) => fts(hits),
+            Answer::Grep { hits, walked, .. } => grep(hits) || grep(walked),
+            Answer::Walked(walked) => grep(walked),
+        }
     }
 }
 
@@ -248,6 +348,8 @@ struct Row {
     name: String,
     dir: String,
     snippet: String,
+    /// On a tail row, what opening it lists; `None` on every other row.
+    more: Option<More>,
 }
 
 // --- the query loop --------------------------------------------------------------------------------
@@ -281,6 +383,7 @@ struct Search {
     /// drawn.
     count: gtk::Label,
     body: gtk::Stack,
+    view: gtk::ListView,
     results: gio::ListStore,
     /// Which question the rows on screen are meant to answer. Every query takes the next number
     /// before it starts, so an answer arriving under a newer one is dropped instead of painted:
@@ -298,6 +401,10 @@ struct Search {
     /// What the ranked rows on screen counted — results, files, and whether the cap cut them —
     /// which the rows a walk appends later are added to.
     counted: Cell<(usize, usize, bool)>,
+    /// The question the rows on screen answer, and the files whose "+N more" row was opened under
+    /// it. The same question asked again — the vault moved under it — opens them again; any
+    /// other forgets them.
+    opened: RefCell<(Option<Key>, HashSet<String>)>,
 }
 
 impl Search {
@@ -366,6 +473,7 @@ impl Search {
         if key.text.trim().is_empty() {
             self.entry.remove_css_class("error");
             self.results.remove_all();
+            self.opened.replace(Default::default());
             self.body.set_visible_child_name("prompt");
             self.set_busy(self.busy());
             self.set_total(0);
@@ -396,12 +504,16 @@ impl Search {
         self.apply.set_sensitive(false);
 
         let search = self.clone();
+        let opened = self.opened_under(&key);
         glib::spawn_future_local(async move {
-            let run = search.data.search.clone();
+            let (run, read) = (search.data.search.clone(), search.data.read.clone());
             let t0 = Instant::now();
-            let answer = crate::work::off_thread("search", move || run(query)).await;
+            let answer = crate::work::off_thread("search", move || {
+                answer_with_bodies(&*run, &*read, query, opened)
+            })
+            .await;
             search.running.set(search.running.get() - 1);
-            let Some(answer) = answer else {
+            let Some((answer, bodies)) = answer else {
                 return search.set_busy(search.busy());
             };
             tracing::debug!(
@@ -432,7 +544,7 @@ impl Search {
             // The box has moved on since this was asked, so a newer query is already on its way
             // with the answer that belongs on screen. Old results stay up until it lands.
             if search.generation.load(Ordering::Relaxed) == mine {
-                search.show(&key, answer);
+                search.show(&key, answer, &bodies);
                 if let Some(listed) = listed
                     && (skip.is_some() || key.all)
                 {
@@ -477,11 +589,12 @@ impl Search {
                     all: key.all,
                     skip,
                 };
-                if let Some(Answer::MidWord(hits)) = search.ask("mid_word", &text, query).await
+                if let Some((Answer::MidWord(hits), bodies)) =
+                    search.ask("mid_word", &text, query).await
                     && !stale()
                 {
                     listed += hits.len();
-                    search.show_mid_word(hits, room);
+                    search.show_mid_word(hits, room, &text, &bodies);
                 }
             }
             let room = crate::SEARCH_LIMIT.saturating_sub(listed);
@@ -493,22 +606,32 @@ impl Search {
                 limit: room,
                 stop: Box::new(stale.clone()),
             };
-            if let Some(Answer::Walked(walked)) = search.ask("walk", &text, query).await
+            if let Some((Answer::Walked(walked), bodies)) = search.ask("walk", &text, query).await
                 && !stale()
             {
-                search.show_walked(&text, walked, room);
+                search.show_walked(&text, walked, room, &bodies);
             }
         });
     }
 
     /// Run one of [`widen_soon`](Self::widen_soon)'s questions on a worker thread, the bar
-    /// pulsing meanwhile.
-    async fn ask(self: &Rc<Self>, pass: &'static str, text: &str, query: Query) -> Option<Answer> {
+    /// pulsing meanwhile. The rows on screen answer the question it widens, so the files opened
+    /// under it are all of theirs.
+    async fn ask(
+        self: &Rc<Self>,
+        pass: &'static str,
+        text: &str,
+        query: Query,
+    ) -> Option<(Answer, Bodies)> {
         self.running.set(self.running.get() + 1);
         self.set_busy(true);
-        let run = self.data.search.clone();
+        let (run, read) = (self.data.search.clone(), self.data.read.clone());
+        let opened: Vec<String> = self.opened.borrow().1.iter().cloned().collect();
         let t0 = Instant::now();
-        let answer = crate::work::off_thread(pass, move || run(query)).await;
+        let answer = crate::work::off_thread(pass, move || {
+            answer_with_bodies(&*run, &*read, query, opened)
+        })
+        .await;
         self.running.set(self.running.get() - 1);
         self.set_busy(self.busy());
         tracing::debug!(
@@ -522,7 +645,13 @@ impl Search {
 
     /// Append the mid-word rows below the ranked ones, and count them in. Rows that filled the
     /// `room` they were given may have left matches out, so the count becomes a floor.
-    fn show_mid_word(&self, hits: Vec<SearchHit>, room: usize) {
+    fn show_mid_word(
+        self: &Rc<Self>,
+        hits: Vec<SearchHit>,
+        room: usize,
+        query: &str,
+        bodies: &Bodies,
+    ) {
         if hits.is_empty() {
             return;
         }
@@ -533,16 +662,16 @@ impl Search {
         let cut = cut || hits.len() >= room;
         self.counted.set((found, files, cut));
         self.count.set_text(&count_label(found, files, cut, cut));
-        let objects: Vec<glib::BoxedAnyObject> = fts_rows(hits)
-            .into_iter()
-            .map(glib::BoxedAnyObject::new)
-            .collect();
+        let rows = open_tails(fts_rows(hits, query), bodies, &accent_markup_colour());
+        let objects: Vec<glib::BoxedAnyObject> =
+            rows.into_iter().map(glib::BoxedAnyObject::new).collect();
         self.results.splice(self.results.n_items(), 0, &objects);
+        self.reopen(&objects, bodies);
     }
 
     /// Append the walk's rows below the ranked ones, and count them in. A walk that filled the
     /// `room` it was given may have left matches out, so its count is a floor.
-    fn show_walked(&self, text: &str, walked: Vec<Match>, room: usize) {
+    fn show_walked(self: &Rc<Self>, text: &str, walked: Vec<Match>, room: usize, bodies: &Bodies) {
         let Ok(re) = search::pattern(text, Options::default()) else {
             return;
         };
@@ -555,14 +684,19 @@ impl Search {
         let files = files + walked_files.collect::<HashSet<_>>().len();
         let cut = cut || walked.len() >= room;
         self.count.set_text(&count_label(found, files, cut, cut));
-        let rows = walked_rows(walked, &re, &accent_markup_colour());
+        let accent = accent_markup_colour();
+        let rows = open_tails(walked_rows(walked, &re, &accent), bodies, &accent);
         self.body.set_visible_child_name("results");
         let objects: Vec<glib::BoxedAnyObject> =
             rows.into_iter().map(glib::BoxedAnyObject::new).collect();
         self.results.splice(self.results.n_items(), 0, &objects);
+        self.reopen(&objects, bodies);
     }
 
-    fn show(&self, key: &Key, answer: Answer) {
+    /// Put an answer on screen in place of the rows there. `bodies` holds the files opened under
+    /// this question again, whose rows are listed open.
+    fn show(self: &Rc<Self>, key: &Key, answer: Answer, bodies: &Bodies) {
+        let accent = accent_markup_colour();
         // A row is one match, and a file's last row counts the ones the per-file cap left off it.
         // A list as long as the cap may have been cut short, and cannot count what it left out.
         let (rows, count) = match answer {
@@ -573,7 +707,10 @@ impl Search {
                 let files = files.collect::<HashSet<_>>().len();
                 let cut = hits.len() >= crate::SEARCH_LIMIT;
                 self.counted.set((found, files, cut));
-                (fts_rows(hits), count_label(found, files, cut, cut))
+                (
+                    fts_rows(hits, &key.text),
+                    count_label(found, files, cut, cut),
+                )
             }
             Answer::Grep {
                 hits,
@@ -592,7 +729,6 @@ impl Search {
                 let cut = hits.len() + walked.len() >= crate::SEARCH_LIMIT;
                 let count = count_label(found, files, cut && key.all, cut);
                 let replacement = self.replacement();
-                let accent = accent_markup_colour();
                 let literal = !key.options.regex;
                 let mut rows = grep_rows(hits, &re, replacement.as_deref(), literal, &accent);
                 // No preview on a walked row: the rewrite never opens its file, so striking the
@@ -608,9 +744,111 @@ impl Search {
             .set_text(if rows.is_empty() { "" } else { &count });
         self.body
             .set_visible_child_name(if rows.is_empty() { "empty" } else { "results" });
+        // Opened before they are listed, not after: a question asked again then lists as many
+        // rows as it replaces, and a list whose rows are all replaced keeps its place by position.
+        let rows = open_tails(rows, bodies, &accent);
         let objects: Vec<glib::BoxedAnyObject> =
             rows.into_iter().map(glib::BoxedAnyObject::new).collect();
-        self.results.splice(0, self.results.n_items(), &objects);
+        self.splice(0, self.results.n_items(), &objects);
+        let mut opened = self.opened.borrow_mut();
+        if opened.0.as_ref() != Some(key) {
+            *opened = (Some(key.clone()), HashSet::new());
+        }
+        drop(opened);
+        self.reopen(&objects, bodies);
+    }
+
+    /// The files opened under `key`, while the rows on screen answer it.
+    fn opened_under(&self, key: &Key) -> Vec<String> {
+        let opened = self.opened.borrow();
+        match opened.0.as_ref() == Some(key) {
+            true => opened.1.iter().cloned().collect(),
+            false => Vec::new(),
+        }
+    }
+
+    /// Open a tail row: list the matches it counts in its place, the first of them where it was,
+    /// so the pointer that opened it rests on a match and the rows above do not move.
+    ///
+    /// They are found again in the file's text, on a worker thread — a remote vault's file
+    /// crosses the link — the way the rows above them were found, past the last of those. A
+    /// newer answer landing meanwhile has taken the tail row away with the rows it replaced, and
+    /// the rows found for it are dropped: the row is looked for by identity, not by position,
+    /// which the tails opened before it have moved.
+    fn expand(self: &Rc<Self>, tail: glib::BoxedAnyObject) {
+        let (rel, more) = {
+            let row = tail.borrow::<Row>();
+            let Some(more) = row.more.clone() else {
+                return;
+            };
+            (row.rel_path.clone(), more)
+        };
+        self.opened.borrow_mut().1.insert(rel.clone());
+        let (read, accent) = (self.data.read.clone(), accent_markup_colour());
+        self.running.set(self.running.get() + 1);
+        self.set_busy(true);
+        let search = self.clone();
+        glib::spawn_future_local(async move {
+            let t0 = Instant::now();
+            let rows = crate::work::off_thread("more", move || {
+                read(&rel).map(|body| rest_rows(&rel, &body, &more, &accent))
+            })
+            .await
+            .flatten();
+            search.running.set(search.running.get() - 1);
+            search.set_busy(search.busy());
+            let Some(rows) = rows else {
+                return;
+            };
+            let at = (0..search.results.n_items())
+                .find(|&i| search.results.item(i).as_ref() == Some(tail.upcast_ref()));
+            let Some(at) = at else {
+                return;
+            };
+            let (found, t1) = (t0.elapsed(), Instant::now());
+            let objects: Vec<glib::BoxedAnyObject> =
+                rows.into_iter().map(glib::BoxedAnyObject::new).collect();
+            search.splice(at, 1, &objects);
+            tracing::debug!(
+                rows = objects.len(),
+                ms = found.as_secs_f64() * 1e3,
+                splice_ms = t1.elapsed().as_secs_f64() * 1e3,
+                "sidebar more"
+            );
+        });
+    }
+
+    /// Put `objects` on the list in place of `removed` rows at `at`, the keyboard staying in the
+    /// list if it was there. The window hands it on from a row that went to the first thing it
+    /// can focus, and the list scrolled to its top to show it; given to the list first, it goes
+    /// to the row the list keeps focused, which is in view where the one that went was.
+    fn splice(&self, at: u32, removed: u32, objects: &[glib::BoxedAnyObject]) {
+        let focused = self
+            .view
+            .state_flags()
+            .contains(gtk::StateFlags::FOCUS_WITHIN);
+        self.results.splice(at, removed, objects);
+        if focused {
+            self.view.grab_focus();
+        }
+    }
+
+    /// Open the tail rows the rows just listed brought back shut: a file opened under this
+    /// question after it was asked, whose text the answer came without.
+    fn reopen(self: &Rc<Self>, objects: &[glib::BoxedAnyObject], bodies: &Bodies) {
+        let tails: Vec<glib::BoxedAnyObject> = {
+            let opened = self.opened.borrow();
+            let wanted = |row: &Row| {
+                row.more.is_some()
+                    && opened.1.contains(&row.rel_path)
+                    && !bodies.contains_key(&row.rel_path)
+            };
+            let tails = objects.iter().filter(|o| wanted(&o.borrow::<Row>()));
+            tails.cloned().collect()
+        };
+        for tail in tails {
+            self.expand(tail);
+        }
     }
 
     /// How many matches the button would rewrite — not how many rows there are. The list is
@@ -701,32 +939,29 @@ fn compile_regex(key: &Key) -> Result<Regex, search::Error> {
     search::pattern(&key.text, key.options)
 }
 
-/// One row per hit of the ranked search, which is one per occurrence: the line the match sits on
-/// with the match marked in it, the file and that line as the dim half, and the same tail row a
-/// grep row gets where the per-file cap cut a file short. A hit whose body does not hold the
-/// query — a note found by its title — carries no line and quotes the head of the note instead.
-fn fts_rows(hits: Vec<SearchHit>) -> Vec<Row> {
+/// One row per hit of the ranked search for `query`, which is one per occurrence: the line the
+/// match sits on with the match marked in it, the file and that line as the dim half, and the
+/// same tail row a grep row gets where the per-file cap cut a file short. A hit whose body does
+/// not hold the query — a note found by its title — carries no line and quotes the head of the
+/// note instead.
+fn fts_rows(hits: Vec<SearchHit>, query: &str) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::with_capacity(hits.len());
-    // A file's hits arrive together, so the row under a new path is that file's first — which is
-    // where its tail row opens it.
-    let mut first: Option<(String, Option<Range<usize>>)> = None;
     for hit in hits {
-        if first.as_ref().is_none_or(|(rel, _)| *rel != hit.rel_path) {
-            first = Some((hit.rel_path.clone(), hit.at.clone()));
-        }
         rows.push(Row {
             name: basename(&hit.rel_path).to_string(),
             dir: dir_label(&hit.rel_path, hit.line),
             snippet: snippet_markup(&hit.snippet),
-            at: hit.at,
+            at: hit.at.clone(),
             rel_path: hit.rel_path.clone(),
+            more: None,
         });
         if hit.more > 0 {
-            rows.push(more_row(
-                &hit.rel_path,
-                hit.more,
-                first.as_ref().and_then(|(_, at)| at.clone()),
-            ));
+            // The count rides on the file's last listed hit, so the rest start past its end.
+            let more = More {
+                from: hit.at.map_or(0, |at| at.end),
+                how: Rest::Phrase(query.to_string()),
+            };
+            rows.push(more_row(&hit.rel_path, hit.more, more));
         }
     }
     rows
@@ -746,9 +981,6 @@ fn grep_rows(
     accent: &str,
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::with_capacity(hits.len());
-    // A file's matches arrive together, so the row under a new path is that file's first match —
-    // which is where its tail row opens it.
-    let mut first: Option<(String, Range<usize>)> = None;
     for m in hits {
         let matched = &m.line_text[m.range.clone()];
         let at = m.offset..m.offset + m.range.len();
@@ -756,22 +988,26 @@ fn grep_rows(
             true => re.replace(matched, search::NoExpand(r)).into_owned(),
             false => re.replace(matched, r).into_owned(),
         });
-        if first.as_ref().is_none_or(|(rel, _)| *rel != m.rel_path) {
-            first = Some((m.rel_path.clone(), at.clone()));
-        }
         rows.push(Row {
             name: basename(&m.rel_path).to_string(),
             dir: dir_label(&m.rel_path, Some(m.line)),
             snippet: match_markup(&m.line_text, m.range, replaced.as_deref(), accent),
             at: Some(at),
             rel_path: m.rel_path.clone(),
+            more: None,
         });
         if m.more > 0 {
-            rows.push(more_row(
-                &m.rel_path,
-                m.more,
-                first.as_ref().map(|(_, at)| at.clone()),
-            ));
+            // Past the start of the file's last listed match rather than its end: a pattern can
+            // match nothing (`^`), and the next match then starts one byte on.
+            let more = More {
+                from: m.offset + 1,
+                how: Rest::Pattern {
+                    re: re.clone(),
+                    replacement: replacement.map(str::to_string),
+                    literal,
+                },
+            };
+            rows.push(more_row(&m.rel_path, m.more, more));
         }
     }
     rows
@@ -789,6 +1025,7 @@ fn walked_rows(walked: Vec<Match>, re: &Regex, accent: &str) -> Vec<Row> {
         name: NOT_INDEXED.to_string(),
         dir: String::new(),
         snippet: String::new(),
+        more: None,
     };
     let mut rows = vec![heading];
     rows.extend(grep_rows(walked, re, None, true, accent));
@@ -815,6 +1052,9 @@ pub(super) struct Pane {
     /// standing after a rewrite are the new text's.
     pub(super) apply: gtk::Button,
     pub(super) state: Rc<dyn Fn() -> (String, Vec<String>, String)>,
+    /// The list of rows, which `ACCENT_BENCH_SEARCH=more:` activates a row of and reads the
+    /// scroll of.
+    pub(super) view: gtk::ListView,
 }
 
 pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
@@ -911,19 +1151,6 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     // go, and the tab it opens is this pane's preview, so walking the list replaces one tab
     // rather than leaving twenty behind.
     view.set_single_click_activate(true);
-    view.connect_activate({
-        let on_open = on_open.clone();
-        move |view, pos| {
-            if let Some(boxed) = view
-                .model()
-                .and_then(|m| m.item(pos))
-                .and_downcast::<glib::BoxedAnyObject>()
-            {
-                let row = boxed.borrow::<Row>();
-                on_open(&row.rel_path, row.at.clone().map(Target::Range));
-            }
-        }
-    });
 
     let body = gtk::Stack::builder().vexpand(true).build();
     body.add_named(
@@ -1080,12 +1307,14 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         pulse: Pulse::new(&progress),
         count,
         body: body.clone(),
+        view: view.clone(),
         results,
         generation: Arc::new(AtomicU64::new(0)),
         running: Cell::new(0),
         replacing: Cell::new(false),
         total: Cell::new(0),
         counted: Cell::new((0, 0, false)),
+        opened: RefCell::default(),
     });
 
     // Every handler below holds `search` weakly. Each is connected to a widget `Search` holds, so
@@ -1093,6 +1322,36 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     // pane's `restart` is the one strong handle, and the sidebar keeps it.
     //
     // A toggle is a click rather than a burst, so only what is typed is debounced.
+    view.connect_activate({
+        let on_open = on_open.clone();
+        glib::clone!(
+            #[weak]
+            search,
+            move |view, pos| {
+                let Some(boxed) = view
+                    .model()
+                    .and_then(|m| m.item(pos))
+                    .and_downcast::<glib::BoxedAnyObject>()
+                else {
+                    return;
+                };
+                let row = boxed.borrow::<Row>();
+                // A tail row is not a place to go: it lists what it counts in its place.
+                if row.more.is_some() {
+                    drop(row);
+                    // A scroll to a row in view scrolls nowhere, and makes it the row the list
+                    // holds in place through a change of its rows and gives the keyboard back to
+                    // once the row that had it is gone — otherwise whichever row it last scrolled
+                    // or moved focus to, off screen after a new answer. The first match listed
+                    // here is then under the pointer, and the rows below move down.
+                    let flags = gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT;
+                    view.scroll_to(pos, flags, None);
+                    return search.expand(boxed);
+                }
+                on_open(&row.rel_path, row.at.clone().map(Target::Range));
+            }
+        )
+    });
     let debounce = Rc::new(Debounce::new(DEBOUNCE));
     let debounced: Rc<dyn Fn()> = Rc::new({
         let debounce = debounce.clone();
@@ -1178,6 +1437,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         }),
         dirty: Rc::new(Cell::new(false)),
         apply,
+        view,
         state: Rc::new({
             let search = search.clone();
             move || {
@@ -1274,18 +1534,21 @@ mod tests {
             line,
             more,
         };
-        let rows = fts_rows(vec![
-            hit(Some(2), "one «ferris» here", 4..10, 0),
-            hit(Some(7), "and «ferris» again", 40..46, 3),
-            SearchHit {
-                rel_path: "b.md".into(),
-                title: Some("Ferris".into()),
-                snippet: "# «Ferris»".into(),
-                at: None,
-                line: None,
-                more: 0,
-            },
-        ]);
+        let rows = fts_rows(
+            vec![
+                hit(Some(2), "one «ferris» here", 4..10, 0),
+                hit(Some(7), "and «ferris» again", 40..46, 3),
+                SearchHit {
+                    rel_path: "b.md".into(),
+                    title: Some("Ferris".into()),
+                    snippet: "# «Ferris»".into(),
+                    at: None,
+                    line: None,
+                    more: 0,
+                },
+            ],
+            "ferris",
+        );
         let seen: Vec<_> = rows
             .iter()
             .map(|r| (r.name.as_str(), r.dir.as_str(), r.at.clone()))
@@ -1295,13 +1558,67 @@ mod tests {
             [
                 ("a.md", "notes/ — line 2", Some(4..10)),
                 ("a.md", "notes/ — line 7", Some(40..46)),
-                // The tail row opens the file where its first listed match is.
-                ("", "+3 more in this file", Some(4..10)),
+                // The tail row opens nothing: it lists the rest in its place.
+                ("", "+3 more in this file", None),
                 // A hit on a title alone has no line and no place in the body.
                 ("b.md", "", None),
             ]
         );
         assert_eq!(rows[0].snippet, "one <b>ferris</b> here");
+        // It picks up where the last listed occurrence ends.
+        let more = rows[2].more.as_ref().expect("a tail row");
+        assert!(matches!(&more.how, Rest::Phrase(q) if q == "ferris"));
+        assert_eq!(more.from, 46);
+        assert!(rows.iter().filter(|r| r.more.is_some()).count() == 1);
+    }
+
+    /// An opened tail row becomes the rows it counted, in the shape of the rows above it, and a
+    /// file with more than [`MORE_AT_ONCE`] of them leaves a tail row for the rest.
+    #[test]
+    fn an_opened_tail_row_lists_the_rest_of_its_file() {
+        let re = search::pattern("ferris", Options::default()).unwrap();
+        let body = "ferris\n".repeat(7);
+        let (listed, _) = accent_core::index::Index::matches_from("a.md", None, &body, &re, 0, 5);
+        let rows = grep_rows(listed, &re, Some("crab"), true, "teal");
+        let tail = rows
+            .last()
+            .and_then(|r| r.more.clone())
+            .expect("a tail row");
+        assert_eq!(
+            rows.last().map(|r| r.dir.as_str()),
+            Some("+2 more in this file")
+        );
+
+        let rest = rest_rows("a.md", &body, &tail, "teal");
+        let seen: Vec<_> = rest
+            .iter()
+            .map(|r| (r.dir.as_str(), r.at.clone()))
+            .collect();
+        assert_eq!(seen, [("line 6", Some(35..41)), ("line 7", Some(42..48))]);
+        // The replacement the rows above preview, previewed on these too.
+        assert!(
+            rest[0].snippet.contains("<s>ferris</s>"),
+            "{}",
+            rest[0].snippet
+        );
+        assert!(rest.iter().all(|r| r.more.is_none()));
+
+        let body = "ferris\n".repeat(5 + MORE_AT_ONCE + 3);
+        let rest = rest_rows("a.md", &body, &tail, "teal");
+        assert_eq!(rest.len(), MORE_AT_ONCE + 1);
+        assert_eq!(
+            rest.last().map(|r| r.dir.as_str()),
+            Some("+3 more in this file")
+        );
+
+        let rest = rest_rows("a.md", "no match left", &tail, "teal");
+        assert!(rest.is_empty());
+
+        // Asked again, the question lists the file open, from its text read with the answer.
+        let bodies = Bodies::from([("a.md".to_string(), "ferris\n".repeat(7))]);
+        let opened = open_tails(rows, &bodies, "teal");
+        assert_eq!(opened.len(), 7);
+        assert!(opened.iter().all(|r| r.more.is_none()));
     }
 
     #[test]
