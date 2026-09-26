@@ -20,6 +20,12 @@ impl App {
             }
         }
         accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), from, to);
+        // The links a PDF's page delete left are found again by their note's path at its Undo.
+        for pdf in self.docs().iter().filter_map(Doc::pdf) {
+            for kept in pdf.relinks.borrow_mut().left.values_mut().flatten() {
+                accent_core::config::rename_in(std::slice::from_mut(&mut kept.note), from, to);
+            }
+        }
         self.sync_active();
     }
 
@@ -154,6 +160,16 @@ impl App {
                 }
             }
             Event::FileChanged(rel) => {
+                // WebKit answers a render with what it was served, so an image the preview was
+                // served goes from its cache before the note is rendered again.
+                if self
+                    .preview
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|p| p.holds(&rel))
+                {
+                    self.reshow_preview_images();
+                }
                 let Some(doc) = self.doc_for(&rel) else {
                     return;
                 };

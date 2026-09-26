@@ -230,6 +230,7 @@ impl App {
                 // only when it changes, so this is once per page boundary crossed, not once per
                 // scrolled pixel, and needs no debounce of its own.
                 app.sync_status();
+                app.follow_outline();
                 app.save_session_soon();
             }
         ));
@@ -290,15 +291,11 @@ impl App {
             self,
             move |pdf, result| app.exported(pdf, result)
         ));
-        // A page edit does not rewrite the notes that name pages by number (NOTEPAD), so the
-        // reader is told when it left some of them pointing at other pages.
-        pdf.connect_links_moved(glib::clone!(
+        // The notes name pages by number, and so do the pane's places: both follow a page edit.
+        pdf.connect_repaged(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_, moved| app.toast(&match moved {
-                1 => "A highlight in a note now points at another page".to_string(),
-                n => format!("{n} highlights in notes now point at other pages"),
-            })
+            move |pdf, edit, step| app.repaged(pdf, edit, step)
         ));
         pdf.connect_choice(glib::clone!(
             #[weak(rename_to = app)]
@@ -758,6 +755,18 @@ impl App {
             .child(&picture)
             .build();
         let image = self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic", how);
+        // An SVG is drawn at the display's scale, so a window moved onto another display draws it
+        // again (`show_image` asks for the scale with the look).
+        let shown = Rc::downgrade(&image);
+        picture.connect_scale_factor_notify(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| {
+                if let Some(image) = shown.upgrade() {
+                    app.show_image(&image, None);
+                }
+            }
+        ));
         // On the scroller rather than the picture: while the image is fitted it is smaller than
         // the viewport, and a wheel over the empty space around it has to zoom too. Bubble
         // phase, ahead of the scroller's own controller, as everywhere else.
@@ -798,6 +807,7 @@ impl App {
         let wanted = (
             look::Look::now(),
             self.inverted_images.borrow().contains(&image.key()),
+            picture_of(&image.page).map_or(1, |p| p.scale_factor()),
         );
         let (path, original) = match read {
             // What is on screen is of the old contents, so a restyle meanwhile waits for these.
@@ -817,10 +827,11 @@ impl App {
         image.shows.set(ticket);
         let (app, image) = (Rc::downgrade(self), Rc::downgrade(image));
         glib::spawn_future_local(async move {
-            let ((look, inverted), from) = (wanted, path.clone());
-            let shown =
-                work::off_thread("image", move || look::show(&from, original, look, inverted))
-                    .await;
+            let ((look, inverted, scale), from) = (wanted, path.clone());
+            let shown = work::off_thread("image", move || {
+                look::show(&from, original, look, inverted, scale)
+            })
+            .await;
             let (Some(app), Some(image)) = (app.upgrade(), image.upgrade()) else {
                 return;
             };
@@ -830,7 +841,7 @@ impl App {
             };
             match shown {
                 Some(Ok(shown)) => {
-                    picture.set_paintable(Some(&shown.texture));
+                    picture.set_paintable(Some(&shown.paintable()));
                     // The size a zoomed picture asks for is worked out from its paintable, so a
                     // file of another size would be drawn at its own while the readout kept the
                     // old percentage. Asked again of this one, so the zoom means the same thing
@@ -869,6 +880,10 @@ impl App {
     /// work with anything else: the PDF engine and an image. That is the file itself on a local
     /// vault and a copy fetched over ssh on a remote one, a transfer of however long the file
     /// takes, so the asking is on a worker; a loose key is already a path here.
+    ///
+    /// While a host's bytes come, the status bar counts them ("Downloading paper.pdf… 12.3/80.0
+    /// MB"), and a PDF's "Opening the document…" waits for them (`sync_opening`). A cached copy
+    /// that is current moves nothing and says nothing.
     pub(crate) fn local_copy(
         self: &Rc<Self>,
         key: &str,
@@ -876,16 +891,45 @@ impl App {
         landed: impl FnOnce(&Rc<App>, std::io::Result<PathBuf>) + 'static,
     ) {
         let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
+        let remote = vault.as_ref().is_some_and(|v| v.is_remote());
         let (key, path) = (key.to_string(), path.to_path_buf());
+        if remote {
+            self.fetching.borrow_mut().insert(key.clone());
+            self.sync_opening();
+        }
+        let bytes = Arc::new(statusbar::Bytes::default());
+        let what = format!("Downloading {}", accent_core::path::basename(&key));
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let copy = crate::work::off_thread("fetch", move || match vault {
-                Some(vault) => vault.fetch(&key),
-                None => Ok(path),
-            })
+            let work = crate::work::off_thread("fetch", {
+                let (key, bytes) = (key.clone(), bytes.clone());
+                move || match vault {
+                    Some(vault) => vault.fetch_with(&key, &|done, total| bytes.set(done, total)),
+                    None => Ok(path),
+                }
+            });
+            let (say, retell) = (weak.clone(), weak.clone());
+            let copy = statusbar::counting(
+                move |text, running| {
+                    if let Some(app) = say.upgrade() {
+                        app.statusbar.set_transfer(text, running);
+                    }
+                },
+                move |from, to| {
+                    if let Some(app) = retell.upgrade() {
+                        app.statusbar.retell_transfer(from, to);
+                    }
+                },
+                move || bytes.line(&what),
+                work,
+            )
             .await
             .unwrap_or_else(|| Err(std::io::Error::other("the fetch stopped")));
             if let Some(app) = weak.upgrade() {
+                if remote {
+                    app.fetching.borrow_mut().remove(&key);
+                    app.sync_opening();
+                }
                 landed(&app, copy);
             }
         });

@@ -13,8 +13,8 @@ use accent_core::{markdown, search, template};
 use super::{Local, Msg};
 use crate::paths::{accent_conflict_name, with_md};
 use crate::{
-    Etag, FileEdits, FileKind, Regex, RenamePlan, RenameReport, ReplaceReport, SaveError,
-    UndoReport, fs, locked,
+    Etag, FileEdits, FileKind, KeptLink, PageEdit, Regex, RenamePlan, RenameReport, RepageReport,
+    ReplaceReport, SaveError, UndoReport, fs, locked,
 };
 
 /// Most text a Replace All keeps to undo itself with. The pre-images are held in memory, and the
@@ -300,7 +300,7 @@ impl Local {
     /// they were measured against: a file that changed since the plan is refused, not guessed at,
     /// and so is a set of edits that overlap.
     fn edit_one(&self, now: &str, found: &FileEdits) -> Result<()> {
-        let path = self.resolve(now)?;
+        let path = self.resolve_inside(now)?;
         let (mut text, _) = fs::read_note(&path)?;
         let mut edits = found.edits.clone();
         edits.sort_by_key(|(start, ..)| std::cmp::Reverse(*start));
@@ -360,7 +360,7 @@ impl Local {
         targets: &HashMap<String, String>,
         files: &HashMap<String, String>,
     ) -> Result<bool> {
-        let path = self.resolve(now)?;
+        let path = self.resolve_inside(now)?;
         let (text, etag) = fs::read_note(&path)?;
         let Some(rewritten) = markdown::rewrite_moved(&text, old, now, targets, files) else {
             return Ok(false);
@@ -371,6 +371,110 @@ impl Local {
             own: true,
         });
         Ok(true)
+    }
+
+    /// `text`, the note at `from`, as its copy at `to` has to read for every relative link,
+    /// reference definition and HTML `src`/`href` in it to name the file it named: what Save As
+    /// writes, the original left as it is. `None` when no path needs it. The text is the caller's,
+    /// unsaved edits and all, so its paths are resolved here rather than read from what the index
+    /// holds for `from`.
+    pub fn relink_copy(&self, from: &str, to: &str, text: &str) -> Result<Option<String>> {
+        let targets = self.path_targets(from, text)?;
+        Ok(markdown::rewrite_moved(
+            text,
+            from,
+            to,
+            &targets,
+            &HashMap::new(),
+        ))
+    }
+
+    /// What every path `text` spells from the note at `rel` resolves to
+    /// ([`markdown::path_link_keys`]), asked of the index one by one.
+    fn path_targets(&self, rel: &str, text: &str) -> Result<HashMap<String, String>> {
+        let index = self.index();
+        let mut out = HashMap::new();
+        for key in markdown::path_link_keys(text, rel) {
+            if let Some(file) = index.resolve_target(&key)? {
+                out.insert(key, file);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Point every note link into the PDF `rel` at where `edit` took the page it names, each note
+    /// read, rewritten and written back through the etag gate as a rename's are.
+    ///
+    /// The notes are the PDF's backlinks: every link the index resolved to it, a highlight's
+    /// `page=N&selection=…` and a plain `page=N` jump alike. `keep` is what the delete an Undo
+    /// takes back left behind (see [`markdown::repage_links`]). A note that cannot be read or
+    /// written is reported, not fatal: the page edit has already happened.
+    pub fn repage_links(
+        &self,
+        rel: &str,
+        edit: PageEdit,
+        keep: &[KeptLink],
+    ) -> Result<RepageReport> {
+        let notes: BTreeSet<String> = self
+            .index()
+            .backlinks(rel)?
+            .into_iter()
+            .map(|b| b.src_rel_path)
+            .collect();
+        let mut report = RepageReport::default();
+        for note in notes {
+            let kept: Vec<(String, usize)> = keep
+                .iter()
+                .filter(|k| k.note == note)
+                .map(|k| (k.link.clone(), k.nth))
+                .collect();
+            match self.repage_one(&note, rel, edit, &kept) {
+                Ok(done) => {
+                    report.moved += done.moved;
+                    report
+                        .left
+                        .extend(done.left.into_iter().map(|(link, nth)| KeptLink {
+                            note: note.clone(),
+                            link,
+                            nth,
+                        }));
+                    if done.text.is_some() {
+                        report.rewritten.push(note);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("following the pages of {rel} in {note}: {e:#}");
+                    report.failed.push((note, format!("{e:#}")));
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// [`repage_links`](Self::repage_links) for one note.
+    fn repage_one(
+        &self,
+        note: &str,
+        pdf: &str,
+        edit: PageEdit,
+        keep: &[(String, usize)],
+    ) -> Result<markdown::Repaged> {
+        let mut targets: HashMap<String, String> =
+            self.index().resolved_links(note)?.into_iter().collect();
+        let path = self.resolve_inside(note)?;
+        let (text, etag) = fs::read_note(&path)?;
+        // A reference definition or an HTML `href` is no link the index holds, and may spell a
+        // path none of the note's links does.
+        targets.extend(self.path_targets(note, &text)?);
+        let done = markdown::repage_links(&text, note, pdf, &targets, edit, keep);
+        if let Some(rewritten) = &done.text {
+            fs::write_note(&path, rewritten, Some(etag))?;
+            self.post(Msg::Update {
+                rel: note.to_string(),
+                own: true,
+            });
+        }
+        Ok(done)
     }
 
     /// Replace every match of `re` in every file whose indexed body has one — the files
@@ -481,7 +585,7 @@ impl Local {
         replacement: &str,
         literal: bool,
     ) -> Result<Option<(usize, Before)>> {
-        let path = self.resolve(rel)?;
+        let path = self.resolve_inside(rel)?;
         let (text, etag) = fs::read_note(&path)?;
         let matches = re.find_iter(&text).count();
         if matches == 0 {
@@ -689,6 +793,160 @@ mod tests {
                 .any(|b| b.src_rel_path == "a.md"),
             BUDGET
         ));
+    }
+
+    /// Save As's copy in another folder points its paths back at what the note's pointed at, the
+    /// unsaved `<img>` included, and leaves the wikilink and the original alone.
+    #[test]
+    fn a_copy_elsewhere_keeps_its_relative_links() {
+        let note = "[x](../b.md) ![](img.png) [r][r] [[b]]\n\n[r]: sub/c.md\n";
+        let f = vault_of(&[
+            ("a/n.md", note),
+            ("b.md", "b\n"),
+            ("a/img.png", "png"),
+            ("a/sub/c.md", "c\n"),
+        ]);
+        let typed = format!("{note}<img src=\"img.png\">\n");
+        assert_eq!(
+            f.vault
+                .relink_copy("a/n.md", "x/y/copy.md", &typed)
+                .unwrap()
+                .as_deref(),
+            Some(concat!(
+                "[x](../../b.md) ![](../../a/img.png) [r][r] [[b]]\n\n",
+                "[r]: ../../a/sub/c.md\n<img src=\"../../a/img.png\">\n"
+            ))
+        );
+        assert_eq!(
+            f.vault.relink_copy("a/n.md", "a/m.md", &typed).unwrap(),
+            None
+        );
+        assert_eq!(f.read("a/n.md"), note);
+    }
+
+    /// A page edit carries every link into the PDF with it, in every note, and the Undo of a
+    /// delete puts back exactly what it changed.
+    #[test]
+    fn a_page_edit_rewrites_the_notes_linking_into_the_pdf() {
+        use crate::PageEdit;
+        let f = vault_of(&[
+            ("paper.pdf", "%PDF-1.4\n"),
+            (
+                "a.md",
+                "[[paper.pdf#page=1&selection=0,0,0,4|Hi]] [[paper.pdf#page=2]]\n",
+            ),
+            ("sub/b.md", "[three](../paper.pdf#page=3) [[paper.pdf]]\n"),
+            ("c.md", "[[paper.pdf#page=2]] elsewhere\n"),
+        ]);
+
+        let report = f
+            .vault
+            .repage_links("paper.pdf", PageEdit::Move { from: 0, to: 2 }, &[])
+            .unwrap();
+        assert_eq!(report.rewritten, ["a.md", "c.md", "sub/b.md"]);
+        assert_eq!((report.moved, report.left.len()), (4, 0));
+        assert_eq!(
+            f.read("a.md"),
+            "[[paper.pdf#page=3&selection=0,0,0,4|Hi]] [[paper.pdf#page=1]]\n"
+        );
+        assert_eq!(
+            f.read("sub/b.md"),
+            "[three](../paper.pdf#page=2) [[paper.pdf]]\n"
+        );
+
+        // The page that was first is the third now; deleting it leaves the highlight on it.
+        let deleted = f
+            .vault
+            .repage_links("paper.pdf", PageEdit::Delete(2), &[])
+            .unwrap();
+        assert_eq!(deleted.moved, 0);
+        assert_eq!(
+            deleted.left,
+            [crate::KeptLink {
+                note: "a.md".into(),
+                link: "[[paper.pdf#page=3&selection=0,0,0,4|Hi]]".into(),
+                nth: 0
+            }]
+        );
+        let undone = f
+            .vault
+            .repage_links("paper.pdf", PageEdit::Insert(2), &deleted.left)
+            .unwrap();
+        assert_eq!((undone.moved, undone.rewritten.len()), (0, 0));
+        assert_eq!(
+            f.read("a.md"),
+            "[[paper.pdf#page=3&selection=0,0,0,4|Hi]] [[paper.pdf#page=1]]\n"
+        );
+    }
+
+    /// A reference definition and an HTML `href` follow a page edit, also where no link the index
+    /// holds spells their path: `[[paper]]` is keyed by the name alone.
+    #[test]
+    fn a_page_edit_follows_the_paths_no_link_spells() {
+        let f = vault_of(&[
+            ("paper.pdf", "%PDF-1.4\n"),
+            (
+                "c.md",
+                "[[paper#page=2]] <a href=\"paper.pdf#page=1\">one</a>\n\n[d]: paper.pdf#page=3\n",
+            ),
+        ]);
+        let move_first = crate::PageEdit::Move { from: 0, to: 2 };
+        let report = f.vault.repage_links("paper.pdf", move_first, &[]).unwrap();
+        assert_eq!(report.moved, 3);
+        assert_eq!(
+            f.read("c.md"),
+            "[[paper#page=1]] <a href=\"paper.pdf#page=3\">one</a>\n\n[d]: paper.pdf#page=2\n"
+        );
+    }
+
+    /// A note a symlink takes out of the vault is read through the link but never written by a
+    /// rewrite nobody aimed at it: Replace All and a rename's link update leave the file outside
+    /// alone and report it, while the notes inside are rewritten as before.
+    #[test]
+    fn a_rewrite_leaves_a_note_linked_in_from_outside_alone() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("y.md"), "colour [[B]]\n").unwrap();
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "colour [[B]]\n");
+        f.write("B.md", "the target\n");
+        let root = f.vault.root().to_path_buf();
+        std::os::unix::fs::symlink(outside.path().join("y.md"), root.join("x.md")).unwrap();
+        std::os::unix::fs::symlink(root.join("a.md"), root.join("alias.md")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("ext")).unwrap();
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let crate::vault::Backend::Local(local) = &f.vault.backend else {
+            panic!("the fixture opens a local vault");
+        };
+        assert!(local.resolve_inside("alias.md").is_ok(), "a link inside");
+        assert!(local.resolve_inside("x.md").is_err(), "a file link out");
+        assert!(
+            local.resolve_inside("ext/y.md").is_err(),
+            "a folder link out"
+        );
+        let outside_note = || std::fs::read_to_string(outside.path().join("y.md")).unwrap();
+        // `x.md` or `ext/y.md`, whichever the walk kept of the one file both lead to.
+        let said = |failed: &[(String, String)]| {
+            failed
+                .iter()
+                .any(|(_, why)| why.contains("outside the vault"))
+        };
+
+        let report = f
+            .vault
+            .replace_all("colour", Options::default(), "color", true, false)
+            .unwrap();
+        assert_eq!(report.rewritten, ["a.md"], "{report:?}");
+        assert!(said(&report.failed), "{report:?}");
+        assert_eq!(outside_note(), "colour [[B]]\n");
+
+        let plan = f.vault.plan_moves(&one("B.md", "C.md")).unwrap();
+        let report = f.vault.rename(&plan, true).unwrap();
+        assert_eq!(report.rewritten, ["a.md"], "{report:?}");
+        assert!(said(&report.failed), "{report:?}");
+        assert_eq!(f.read("a.md"), "color [[C]]\n");
+        assert_eq!(outside_note(), "colour [[B]]\n");
     }
 
     #[test]

@@ -5,9 +5,13 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import io.github.stroblme.accent.ffi.Theme
+import io.github.stroblme.accent.ui.conflictTints
 import io.github.stroblme.accent.ui.flattened
+import io.github.stroblme.accent.ui.page
 import io.github.stroblme.accent.ui.pageTheme
+import io.github.stroblme.accent.ui.rgba
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -54,6 +58,21 @@ class ThemeTest {
         assertEquals(0xFF8F8F92.toInt(), light.onSurfaceVariant.toArgb())
         val dark = darkColorScheme(onSurfaceVariant = tinted).flattened(dark = true)
         assertEquals(0xFF8E8E8F.toInt(), dark.onSurfaceVariant.toArgb())
+    }
+
+    /**
+     * A conflict block's sides are the desktop's green and blue mixed with the ink as its editor
+     * and preview mix them: under white ink these are the numbers its Dark preview paints.
+     */
+    @Test
+    fun `a conflict is tinted as on the desktop`() {
+        val (current, base, incoming) = conflictTints(Color.White)
+        assertEquals("rgba(114, 205, 147, 0.16)", current.first.rgba())
+        assertEquals("rgba(114, 205, 147, 0.35)", current.second.rgba())
+        assertEquals("rgba(255, 255, 255, 0.08)", base.first.rgba())
+        assertEquals("rgba(122, 172, 238, 0.16)", incoming.first.rgba())
+        val html = page("", Color.White, Color.Black, Color.Blue)
+        assertTrue(html, ".conflict-incoming { background: rgba(122, 172, 238, 0.16); }" in html)
     }
 
     /** The one family that is still the device's answer to what colour it is. */

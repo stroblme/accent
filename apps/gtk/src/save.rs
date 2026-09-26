@@ -897,9 +897,10 @@ impl App {
 
     /// Write what `doc` holds to `to`, then move its tab there. A save still on its way lands
     /// first, or its answer would come back to a tab that has moved, and a comparison goes, being
-    /// about the old file. A PDF's strokes are written out and the file copied: its bytes are the
-    /// render thread's. An image is copied as it is. `free` says nothing was at `to` when it was
-    /// looked at.
+    /// about the old file. A note's relative paths are pointed back at what they named from its
+    /// new folder. A PDF's strokes are written out and the file copied: its bytes are the render
+    /// thread's. An image is copied as it is. `free` says nothing was at `to` when it was looked
+    /// at.
     fn write_as(self: &Rc<Self>, doc: Doc, to: String, free: bool) {
         let Some(vault) = self.vault().cloned() else {
             return;
@@ -908,12 +909,16 @@ impl App {
             Doc::Text(tab) => {
                 self.land_save(tab, false);
                 tab.leave_compare();
-                (Contents::Text(tab.for_disk()), tab.save.edits.get())
+                let note = tab.flavour().is_note();
+                (Contents::Text(tab.for_disk(), note), tab.save.edits.get())
             }
             Doc::Diagram(diagram) => {
                 self.land_diagram(diagram, false);
                 diagram.finish_label();
-                (Contents::Text(diagram.for_disk()), diagram.save.edits.get())
+                (
+                    Contents::Text(diagram.for_disk(), false),
+                    diagram.save.edits.get(),
+                )
             }
             // No edit count: the strokes are all in the file once it is flushed.
             Doc::Pdf(pdf) => {
@@ -933,19 +938,9 @@ impl App {
                 move || {
                     fileops::make_parents(&vault, &to)?;
                     let written = match contents {
-                        // A free path is claimed first, as New File claims one, which also
-                        // gives the file a new file's mode rather than the write's private one.
-                        Contents::Text(text) => match free {
-                            true => vault.create_note(&to, None).map(drop),
-                            false => Ok(()),
+                        Contents::Text(text, note) => {
+                            write_text(&vault, &from, &to, text, note, free).map(Some)
                         }
-                        .map_err(|e| format!("{e:#}"))
-                        .and_then(|()| {
-                            vault
-                                .save(&to, &text, None)
-                                .map(Some)
-                                .map_err(|e| e.to_string())
-                        }),
                         Contents::File(local) => copy_pdf(&vault, &from, &local, &to)
                             .map(|()| None)
                             .map_err(|e| e.to_string()),
@@ -962,8 +957,8 @@ impl App {
                 return;
             };
             match written {
-                Some(Ok(etag)) => {
-                    app.follow_save_as(doc, &to, etag, edits);
+                Some(Ok(wrote)) => {
+                    app.follow_save_as(doc, &to, wrote, edits);
                     app.toast(&format!("Saved as {to}"));
                 }
                 Some(Err(why)) => app.toast(&why),
@@ -974,23 +969,35 @@ impl App {
 
     /// The tab once Save As has written `to`: reopened there when the extension changes what the
     /// file opens as, and otherwise pointed at it — clean, unless it was typed into while the
-    /// write was out, which the next autosave then writes to the new file.
-    fn follow_save_as(self: &Rc<Self>, doc: Doc, to: &str, etag: Option<Etag>, edits: u64) {
+    /// write was out, which the next autosave then writes to the new file. `wrote` is a text
+    /// write's etag, and whether the note's paths were rewritten on the way, which the tab then
+    /// reloads as a rename's notes are.
+    fn follow_save_as(
+        self: &Rc<Self>,
+        doc: Doc,
+        to: &str,
+        wrote: Option<(Etag, bool)>,
+        edits: u64,
+    ) {
         if doc::opens_differently(&doc.key(), to) {
             // What it held is in the new file, and the original keeps what it had.
             self.close_unsaved(&doc);
             return self.open_path(to);
         }
         doc.retarget(&self.root(), to);
-        match (&doc, etag) {
-            (Doc::Text(tab), Some(etag)) => {
+        match (&doc, wrote) {
+            (Doc::Text(tab), Some((etag, relinked))) => {
                 // What the old file's banner said is not about the new one.
                 tab.save.disk_changed.set(false);
                 tab.clear_disk_alert();
                 self.wrote(tab, etag, tab.save.edits.get() == edits);
                 self.fetch_head(tab);
+                // A buffer typed into meanwhile keeps its edits and gets the banner instead.
+                if relinked {
+                    self.refresh_tab(tab);
+                }
             }
-            (Doc::Diagram(diagram), Some(etag)) => {
+            (Doc::Diagram(diagram), Some((etag, _))) => {
                 diagram.clear_changed();
                 match diagram.save.edits.get() == edits {
                     true => diagram.mark_clean(etag),
@@ -1017,13 +1024,40 @@ impl App {
     }
 }
 
-/// What Save As writes: a tab's text, a PDF's file as it is on this machine, or an image's file,
-/// which the vault copies where it is: nothing of it is waiting on this machine to be written,
-/// so on a remote vault too it is the host's copy of the host's file.
+/// What Save As writes: a tab's text, and whether it is a note's, a PDF's file as it is on this
+/// machine, or an image's file, which the vault copies where it is: nothing of it is waiting on
+/// this machine to be written, so on a remote vault too it is the host's copy of the host's file.
 enum Contents {
-    Text(String),
+    Text(String, bool),
     File(PathBuf),
     Copy,
+}
+
+/// A text tab's `text` at `to`, and whether it was rewritten: a note's relative paths pointed back
+/// at what they named from `from`'s folder, where the index is, the host on a remote vault. A
+/// free path is claimed first, as New File claims one, which also gives the file a new file's
+/// mode rather than the write's private one.
+fn write_text(
+    vault: &Vault,
+    from: &str,
+    to: &str,
+    text: String,
+    note: bool,
+    free: bool,
+) -> Result<(Etag, bool), String> {
+    let relinked = match note {
+        true => vault
+            .relink_copy(from, to, &text)
+            .map_err(|e| format!("{e:#}"))?,
+        false => None,
+    };
+    if free {
+        vault.create_note(to, None).map_err(|e| format!("{e:#}"))?;
+    }
+    let etag = vault
+        .save(to, relinked.as_deref().unwrap_or(&text), None)
+        .map_err(|e| e.to_string())?;
+    Ok((etag, relinked.is_some()))
 }
 
 /// A PDF's bytes at `to`. The vault copies the file where it is, except on a remote vault: there

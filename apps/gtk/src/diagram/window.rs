@@ -151,6 +151,7 @@ impl App {
         tab.connect_jump(on(|app, tab| app.mark_page(&tab.page)));
         tab.connect_page(on(|app, _| {
             app.sync_status();
+            app.follow_outline();
             app.save_session_soon();
         }));
         tab.connect_pages(on(|app, tab| {

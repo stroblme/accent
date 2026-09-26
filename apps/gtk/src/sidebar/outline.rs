@@ -27,15 +27,25 @@ pub fn outline_note(title: &str, body: &str) -> gtk::Widget {
     status_page(ICON, title, body).upcast()
 }
 
-/// An outline as rows that jump: `(level, text, where a click goes)`, for a document whose
-/// outline does not change while it is read. [`List`] is the one that can be refilled.
-pub fn outline_list<T: Copy + 'static>(
-    rows: &[(u8, String, T)],
-    on_jump: impl Fn(T) + 'static,
-) -> gtk::Widget {
-    let list = List::new("");
-    list.fill(rows, on_jump);
-    list.scroller.upcast()
+/// `top` over `below` — a PDF's bookmarks over its thumbnail strip — split where the reader drags
+/// it. `below` is one widget kept for its document's whole life, so it is taken out of wherever it
+/// was first: a widget with two parents is a GTK critical.
+pub fn above(top: &gtk::Widget, below: &gtk::Widget) -> gtk::Widget {
+    if let Some(parent) = below.parent() {
+        match parent.downcast_ref::<gtk::Paned>() {
+            Some(paned) => paned.set_end_child(gtk::Widget::NONE),
+            None => below.unparent(),
+        }
+    }
+    let paned = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .resize_start_child(true)
+        .shrink_start_child(false)
+        .shrink_end_child(false)
+        .start_child(top)
+        .end_child(below)
+        .build();
+    paned.upcast()
 }
 
 /// The one run of rows a refill changes: where it starts, how many old rows it covers and how
@@ -74,15 +84,18 @@ type Jump = Rc<RefCell<Rc<dyn Fn(u32)>>>;
 /// An outline list that is refilled in place, so a document that changes under the reader keeps
 /// the pane where it was scrolled to: a list built afresh is a new scrolled window, at the top.
 ///
-/// Generic in what a row jumps to, because the two callers mean different things by it: a text
-/// tab's symbols carry a position in the buffer and a PDF's bookmarks carry a page number.
+/// Generic in what a row jumps to, because the callers mean different things by it: a text tab's
+/// symbols carry a position in the buffer, a PDF's bookmarks and a diagram's pages a page number.
 ///
 /// Indented by level rather than nested in a tree: an outline is read top to bottom, and an
 /// expander per row would hide exactly what the pane exists to show.
 pub(super) struct List {
     /// The document the rows are of.
     pub(super) key: String,
-    pub(super) scroller: gtk::ScrolledWindow,
+    /// What is shown under the rows, a PDF's thumbnail strip, which is also the document's.
+    pub(super) below: Option<gtk::Widget>,
+    /// What the pane shows: the rows, over `below` when there is one.
+    pub(super) root: gtk::Widget,
     model: gtk::StringList,
     /// Each row's level and text as shown: what a refill is compared with, and where a row being
     /// bound reads its indent.
@@ -101,7 +114,7 @@ pub(super) struct List {
 }
 
 impl List {
-    pub(super) fn new(key: &str) -> List {
+    pub(super) fn new(key: &str, below: Option<gtk::Widget>) -> List {
         let model = gtk::StringList::new(&[]);
         let rows: Rc<RefCell<Vec<(u8, String)>>> = Rc::default();
         let jump: Jump = Rc::new(RefCell::new(Rc::new(|_| {})));
@@ -143,9 +156,14 @@ impl List {
             move |_| select(&selection, followed.get())
         });
         view.add_controller(motion);
+        let rows_widget: gtk::Widget = scroller(&view).upcast();
         List {
             key: key.to_string(),
-            scroller: scroller(&view),
+            root: match &below {
+                Some(below) => above(&rows_widget, below),
+                None => rows_widget,
+            },
+            below,
             model,
             rows,
             jump,

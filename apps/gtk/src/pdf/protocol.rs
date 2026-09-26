@@ -50,11 +50,12 @@ pub enum Reply {
     /// says where each page the tab holds anything of went — for an Undo, the inverse of the edit
     /// it took back, a deleted page put back being an insert. Not [`Reply::Reloaded`], which
     /// throws away every render of a document that has been replaced — here every page is still
-    /// the page it was, only under another number. `undo` is that it was an Undo.
+    /// the page it was, only under another number. `step` names the history's step, the same for
+    /// the edit, its Undo and its Redo.
     Repaged {
         sizes: Vec<(f32, f32)>,
         edit: pdf::PageEdit,
-        undo: bool,
+        step: u32,
     },
     /// Where every note link that highlights this document lands on the page today, and which
     /// link each one is. The whole map every time, so a stale page cannot survive underneath.

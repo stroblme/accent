@@ -11,7 +11,7 @@
 
 use crate::{diff, highlight::Offsets, theme};
 use accent_core::conflict::{self, Block, Take};
-use gtk::{glib, prelude::*};
+use gtk::{gdk, glib, prelude::*};
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::{Rc, Weak};
@@ -39,6 +39,25 @@ const GAP: i32 = 3;
 /// that changed in it. The base, which neither side keeps, is the foreground at half of each.
 const BODY_ALPHA: f32 = 0.16;
 const HEAD_ALPHA: f32 = 0.35;
+
+/// The current, base and incoming sides' tints, each with its marker line's, from the resolved
+/// foreground: the editor's tags and the preview's boxes (`preview.rs`) alike.
+pub(crate) fn tints(fg: gdk::RGBA) -> [(gdk::RGBA, gdk::RGBA); 3] {
+    let side = |hue| {
+        (
+            diff::tint(hue, fg, BODY_ALPHA),
+            diff::tint(hue, fg, HEAD_ALPHA),
+        )
+    };
+    [
+        side(diff::ADDED_HUE),
+        (
+            theme::at(fg, BODY_ALPHA / 2.0),
+            theme::at(fg, HEAD_ALPHA / 2.0),
+        ),
+        side(diff::INCOMING_HUE),
+    ]
+}
 
 pub struct Conflicts {
     weak: Weak<Conflicts>,
@@ -170,19 +189,15 @@ impl Conflicts {
     /// The tints from the resolved foreground, as a comparison's are: once the view is mapped
     /// and on every theme change.
     pub fn restyle(&self) {
-        let fg = self.view.color();
-        for (name, colour) in [
-            (CURRENT_HEAD, diff::tint(diff::ADDED_HUE, fg, HEAD_ALPHA)),
-            (CURRENT, diff::tint(diff::ADDED_HUE, fg, BODY_ALPHA)),
-            (BASE_HEAD, theme::at(fg, HEAD_ALPHA / 2.0)),
-            (BASE, theme::at(fg, BODY_ALPHA / 2.0)),
-            (INCOMING, diff::tint(diff::INCOMING_HUE, fg, BODY_ALPHA)),
-            (
-                INCOMING_HEAD,
-                diff::tint(diff::INCOMING_HUE, fg, HEAD_ALPHA),
-            ),
-        ] {
-            self.tag(name).set_paragraph_background_rgba(Some(&colour));
+        let tags = [
+            (CURRENT, CURRENT_HEAD),
+            (BASE, BASE_HEAD),
+            (INCOMING, INCOMING_HEAD),
+        ];
+        for ((body, head), (tint, head_tint)) in tags.into_iter().zip(tints(self.view.color())) {
+            self.tag(body).set_paragraph_background_rgba(Some(&tint));
+            self.tag(head)
+                .set_paragraph_background_rgba(Some(&head_tint));
         }
     }
 

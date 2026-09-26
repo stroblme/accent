@@ -644,6 +644,77 @@ pub(super) fn bench_clip_outside(app: &Rc<App>, dir: &str) {
     });
 }
 
+/// A remote vault's bytes counted on the status bar three ways: `rel`, a PDF, opened in a tab and
+/// fetched into the ssh cache; the same file through Download… to `$TMPDIR`; and a 16 MB file
+/// of this machine's pasted into the vault root. Prints each one's lines with when they came and
+/// the sizes that landed, and takes the download and the pasted file back out. Point it at a
+/// large PDF with a fresh `XDG_CACHE_HOME`, or its copy is current and nothing moves.
+pub(super) fn bench_transfer(app: &Rc<App>, rel: &str) {
+    let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
+        return bench_quit(app);
+    };
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        until(|| app.reconciled.get() && vault.list_dir("").is_ok()).await;
+        let size = |path: &std::path::Path| std::fs::metadata(path).map_or(0, |m| m.len());
+        let host = vault.stat(&rel).ok().flatten().map_or(0, |etag| etag.size);
+
+        app.open_path(&rel);
+        let lines = lines_until(&app, || app.active_pdf().is_some_and(|p| !p.opening())).await;
+        say_lines("open", &lines);
+
+        let dest = std::env::temp_dir().join("downloaded.pdf");
+        let said = app.toasted.get();
+        fileops::download_to(&ops, &rel, dest.clone());
+        let lines = lines_until(&app, || app.toasted.get() > said).await;
+        say_lines("download", &lines);
+        println!("bench transfer_download host={host} here={}", size(&dest));
+
+        let big = std::env::temp_dir().join("big.bin");
+        let _ = std::fs::write(&big, vec![7u8; 16 * 1024 * 1024]);
+        let said = app.toasted.get();
+        fileops::import(&ops, "", vec![big.clone()], false);
+        let lines = lines_until(&app, || app.toasted.get() > said).await;
+        say_lines("upload", &lines);
+        let landed = vault
+            .stat("big.bin")
+            .ok()
+            .flatten()
+            .map_or(0, |etag| etag.size);
+        println!("bench transfer_upload here={} host={landed}", size(&big));
+
+        let _ = vault.delete("big.bin");
+        let _ = std::fs::remove_file(&big);
+        let _ = std::fs::remove_file(&dest);
+        bench_quit(&app);
+    });
+}
+
+/// Every line the status bar's busy slot showed until `done`, four minutes at most, with
+/// when each came in ms.
+async fn lines_until(app: &Rc<App>, done: impl Fn() -> bool) -> Vec<(u128, String)> {
+    let (t, mut lines) = (Instant::now(), Vec::<(u128, String)>::new());
+    while !done() && t.elapsed() < Duration::from_secs(240) {
+        let line = app.statusbar.progress_text();
+        if lines.last().map(|(_, last)| last) != Some(&line) {
+            lines.push((t.elapsed().as_millis(), line));
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    lines
+}
+
+/// The first three and the last three of `lines`, and how many there were.
+fn say_lines(what: &str, lines: &[(u128, String)]) {
+    let tail = lines.len().saturating_sub(3).max(3.min(lines.len()));
+    println!(
+        "bench transfer_{what} lines={} first={:?} last={:?}",
+        lines.len(),
+        &lines[..3.min(lines.len())],
+        &lines[tail..]
+    );
+}
+
 /// A Cut of two notes pasted into `dir`: one plan for both, so one Update Links? question, and
 /// every note rewritten once — the one linking both from the root, and the moved note whose own
 /// relative link now has a folder to climb out of. Prints each dialog as it comes, the number of
@@ -1268,7 +1339,9 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
 /// `ACCENT_BENCH_SAVE_AS=<rel>`: Save As on the file at `rel`, past the dialog, which is only the
 /// path field Rename has. It writes to `Saved As/`, a folder that is not there yet, and prints the
 /// tab's key after and what each file holds. A note is also given an edit it has not saved first,
-/// which only the copy may hold, a diagram likewise, and a PDF a page before and a page after,
+/// which only the copy may hold, both halves linking to the note itself by a relative path, which
+/// the copy has to point back at the original — the vault paths its links name are printed, and
+/// whether the tab reloaded to what the copy holds; a diagram likewise, and a PDF a page before and a page after,
 /// which only the copy may get the second of; an image is copied as it is and its tab retitled;
 /// then a note is saved onto a folder, which is refused, onto its old
 /// name while a tab of its own has that open, whose Replace question is answered, and as `.txt`,
@@ -1286,9 +1359,11 @@ pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
         };
         let tab = doc.tab().cloned();
         if let Some(tab) = &tab {
-            tab.set_text("saved\n");
+            let own = accent_core::markdown::percent_encode(doc::file_name(&rel));
+            tab.set_text(&format!("saved [s]({own})\n"));
             let _ = app.write_tab(tab, None);
-            tab.buffer.insert(&mut tab.buffer.end_iter(), "typed\n");
+            let typed = format!("typed <img src=\"{own}\">\n");
+            tab.buffer.insert(&mut tab.buffer.end_iter(), &typed);
         }
         // A page not written out yet, which Save As writes before it copies.
         if let Some(pdf) = doc.pdf() {
@@ -1327,6 +1402,13 @@ pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
             tab.as_ref().and(text(disk(&copy))),
             disk(&rel) == disk(&copy),
         );
+        if let (Some(tab), Some(held)) = (&tab, text(disk(&copy))) {
+            println!(
+                "bench save_as_links copy={:?} tab_same={}",
+                accent_core::markdown::path_link_keys(&held, &copy),
+                tab.text() == held
+            );
+        }
         // An image has nothing unsaved, so the copy and the tab's new title are the whole of it.
         if let Doc::Image(viewer) = &doc {
             println!("bench save_as_image title={:?}", viewer.page.title());

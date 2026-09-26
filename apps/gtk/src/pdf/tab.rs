@@ -9,11 +9,12 @@ use super::protocol::Request;
 use super::ring;
 use super::selection::pages_of;
 use super::{self as pdfview, Anchor, PdfView, PdfZoom, Reply, Span, render};
-use accent_api::PdfLink;
+use accent_api::{KeptLink, PdfLink};
 use accent_core::pdf;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{Sender, channel};
@@ -42,8 +43,24 @@ type FailHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, String)>>>;
 /// A width or a colour was picked on the ring for a tool.
 type ChoiceHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice)>>>;
 type UriHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
-/// A page edit left this many note links pointing at other pages.
-type CountHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, usize)>>>;
+/// The pages were edited, or an edit walked by Undo or Redo: the edit made, and its step.
+type RepageHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, pdf::PageEdit, u32)>>>;
+
+/// The notes' links following this document's page edits, which the window runs
+/// (`App::relink`): one rewrite at a time, in the order the edits were made, since each reads
+/// what the one before it wrote.
+#[derive(Default)]
+pub struct Relinks {
+    /// The edits still to follow, oldest first, each with its history step.
+    pub queue: VecDeque<(pdf::PageEdit, u32)>,
+    /// A rewrite is out on a worker.
+    pub running: bool,
+    /// The links each delete left naming the page it took out, by its step: what the Undo that
+    /// puts the page back keeps where they are.
+    pub left: HashMap<u32, Vec<KeptLink>>,
+    /// What the last rewrite said, replaced by the next one's rather than queued behind it.
+    pub toast: Option<adw::Toast>,
+}
 
 pub struct PdfTab {
     pub(super) key: RefCell<String>,
@@ -143,7 +160,8 @@ pub struct PdfTab {
     /// somewhere else.
     pub(super) on_saved: Hook,
     pub(super) on_choice: ChoiceHook,
-    pub(super) on_links_moved: CountHook,
+    pub(super) on_repaged: RepageHook,
+    pub relinks: RefCell<Relinks>,
 }
 
 /// A new tab of `tabs` for the PDF at `path`, showing itself opening until [`PdfTab::load`] is
@@ -243,7 +261,8 @@ pub fn open(
         on_save_failed: RefCell::new(None),
         on_saved: RefCell::new(None),
         on_choice: RefCell::new(None),
-        on_links_moved: RefCell::new(None),
+        on_repaged: RefCell::new(None),
+        relinks: RefCell::default(),
     });
 
     tab.view.set_zoom(place.zoom);
@@ -731,20 +750,17 @@ impl PdfTab {
         self.outline.borrow().clone()
     }
 
+    /// The bookmark the page being read is under, as its row in [`PdfTab::outline`].
+    pub fn bookmark_row(&self) -> Option<usize> {
+        covering(&self.outline.borrow(), self.current_page())
+    }
+
     /// The thumbnail strip, for the Outline pane to show under the bookmarks.
     ///
     /// Built once and handed out again on every refresh, so it keeps its scroll position and its
-    /// textures. It takes itself out of whatever held it last: the pane rebuilds its container
-    /// each time, and a widget with two parents is a GTK critical.
+    /// textures; whoever puts it somewhere new takes it out of where it was.
     pub fn thumbnails(&self) -> gtk::Widget {
-        let pane = &self.organize.pane;
-        if let Some(parent) = pane.parent() {
-            match parent.downcast_ref::<gtk::Paned>() {
-                Some(paned) => paned.set_end_child(gtk::Widget::NONE),
-                None => pane.unparent(),
-            }
-        }
-        pane.clone().upcast()
+        self.organize.pane.clone().upcast()
     }
 
     /// Search the whole document. An empty query clears what is shown.
@@ -853,9 +869,10 @@ impl PdfTab {
         *self.on_uri.borrow_mut() = Some(Rc::new(f));
     }
 
-    /// Called after a page edit that left note links pointing at other pages, with how many.
-    pub fn connect_links_moved(&self, f: impl Fn(&Rc<PdfTab>, usize) + 'static) {
-        *self.on_links_moved.borrow_mut() = Some(Rc::new(f));
+    /// Called after every page edit, Undo and Redo included, with the edit made and its step:
+    /// what the notes that name this document's pages by number have to follow.
+    pub fn connect_repaged(&self, f: impl Fn(&Rc<PdfTab>, pdf::PageEdit, u32) + 'static) {
+        *self.on_repaged.borrow_mut() = Some(Rc::new(f));
     }
 
     pub(super) fn emit(self: &Rc<Self>, hook: &Hook) {
@@ -1195,22 +1212,6 @@ impl PdfTab {
         self.clear_selection();
     }
 
-    /// Notes that highlight this document name its pages by number, so an edit that moved or took
-    /// out a page they name leaves them pointing at another one. They are not rewritten (NOTEPAD);
-    /// the reader is told how many, once for the edit.
-    fn warn_moved_links(self: &Rc<Self>, edit: pdf::PageEdit) {
-        let moved = self
-            .notes
-            .borrow()
-            .iter()
-            .filter(|link| edit.map(link.page) != Some(link.page))
-            .count();
-        let hook = self.on_links_moved.borrow().clone();
-        if let Some(f) = hook.filter(|_| moved > 0) {
-            f(self, moved);
-        }
-    }
-
     /// Everything from the render thread that is not a texture.
     fn on_reply(self: &Rc<Self>, reply: Reply) {
         match reply {
@@ -1300,7 +1301,7 @@ impl PdfTab {
                     f(self, why);
                 }
             }
-            Reply::Repaged { sizes, edit, undo } => {
+            Reply::Repaged { sizes, edit, step } => {
                 let anchor = self.view.anchor();
                 let map = |page| edit.map(page);
                 // One cache for both views, so it moves once; each view moves what it is still
@@ -1323,6 +1324,12 @@ impl PdfTab {
                         self.view.scroll_to(anchor);
                     }
                 }
+                // The highlights go with their pages at once. The notes holding them are
+                // rewritten behind this (`connect_repaged`), and the index's answer after that
+                // replaces these.
+                for link in self.notes.borrow_mut().iter_mut() {
+                    link.page = edit.map(link.page).unwrap_or(link.page);
+                }
                 // Asked again under the new numbers: the bookmarks' pages, where the notes'
                 // highlights land, the strokes a tool in hand needs, this page's links, and the
                 // search's matches.
@@ -1340,9 +1347,9 @@ impl PdfTab {
                 self.emit(&self.on_page);
                 // The strip's buttons are over whichever page is under the pointer now.
                 self.hover_thumbnail();
-                // An Undo puts the pages back where the notes had them.
-                if !undo {
-                    self.warn_moved_links(edit);
+                let hook = self.on_repaged.borrow().clone();
+                if let Some(f) = hook {
+                    f(self, edit, step);
                 }
                 self.save_soon();
             }
@@ -1391,6 +1398,19 @@ pub(super) fn theme_of(dark: bool) -> pdf::Theme {
     }
 }
 
+/// The bookmark a reader on `page` is under: of those starting on it or before, the one starting
+/// last, and of several starting on the same page the last listed, which is the innermost. `None`
+/// above the first bookmark; one naming no page covers nothing.
+fn covering(outline: &[pdf::Outline], page: usize) -> Option<usize> {
+    outline
+        .iter()
+        .enumerate()
+        .filter_map(|(row, entry)| Some((entry.page?, row)))
+        .filter(|(start, _)| *start <= page)
+        .max()
+        .map(|(_, row)| row)
+}
+
 /// The tree `path` reads `key` out of: `path` with `key`'s own components taken off the end.
 ///
 /// A PDF is always read from a file on this machine, which is the vault's own on a local vault
@@ -1426,5 +1446,27 @@ mod tests {
         );
         // Nothing sensible to say when the key is longer than the path it was read from.
         assert_eq!(tree("/a.pdf", "deep/nest/a.pdf"), None);
+    }
+
+    #[test]
+    fn the_bookmark_followed_is_the_one_the_page_is_under() {
+        let entry = |depth, page| pdf::Outline {
+            depth,
+            title: String::new(),
+            page,
+        };
+        // A chapter on the second page with a section on the third, a bookmark naming no page,
+        // and an appendix on the fifth.
+        let outline = [
+            entry(0, Some(1)),
+            entry(1, Some(2)),
+            entry(0, None),
+            entry(0, Some(4)),
+        ];
+        let rows: Vec<_> = (0..6).map(|page| covering(&outline, page)).collect();
+        assert_eq!(rows, [None, Some(0), Some(1), Some(1), Some(3), Some(3)]);
+        // A section starting on its chapter's page is the one the page is under.
+        let same = [entry(0, Some(2)), entry(1, Some(2))];
+        assert_eq!(covering(&same, 2), Some(1));
     }
 }

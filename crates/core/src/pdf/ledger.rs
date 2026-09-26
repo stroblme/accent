@@ -52,8 +52,13 @@ pub enum Step {
         matrix: pdf::Matrix,
     },
     /// A page was put in, taken out or moved. The page a delete took out is kept while it is out,
-    /// so Undo can put it back.
-    Paged { edit: PageEdit, kept: Option<Kept> },
+    /// so Undo can put it back. `id` names the step to whatever keeps something of its own about
+    /// it: the window keeps the note links a delete left naming the page it took out.
+    Paged {
+        edit: PageEdit,
+        kept: Option<Kept>,
+        id: u32,
+    },
 }
 
 /// A page taken out, for putting back: the page as a PDF of its own ([`PdfDoc::take_page`]), and
@@ -70,8 +75,9 @@ pub struct Kept {
 pub enum Walked {
     /// This much of this page's ink.
     Ink(usize, pdf::Rect),
-    /// The pages, as this edit moved them: taking an edit back is making its inverse.
-    Pages(PageEdit),
+    /// The pages, as this edit moved them: taking an edit back is making its inverse. The id is
+    /// the step's, as [`Ink::edit_pages`] gave it.
+    Pages(PageEdit, u32),
 }
 
 /// What the render thread knows about the ink of the pages it has touched or listed, so that the
@@ -195,12 +201,14 @@ impl Ink {
 
     /// Put a page in, take one out or move one, as a step of its own: Undo takes it back as it
     /// takes back a stroke, a page taken out coming back with its annotations and ink. Nothing
-    /// reaches the disk here: [`PdfDoc::save`] is the second half, as it is for ink.
-    pub fn edit_pages(&mut self, doc: &mut PdfDoc, edit: PageEdit) -> Result<()> {
+    /// reaches the disk here: [`PdfDoc::save`] is the second half, as it is for ink. The step's
+    /// id, which Undo and Redo hand back with it.
+    pub fn edit_pages(&mut self, doc: &mut PdfDoc, edit: PageEdit) -> Result<u32> {
         let mut kept = None;
         self.edit(doc, edit, &mut kept)?;
-        self.record(Step::Paged { edit, kept }, false);
-        Ok(())
+        let id = fresh_id();
+        self.record(Step::Paged { edit, kept, id }, false);
+        Ok(id)
     }
 
     /// Make one page edit. A page taken out goes into `kept` with the names its annotations had;
@@ -291,13 +299,13 @@ impl Ink {
     /// by the map or by its inverse, or the pages are edited or edited back.
     fn apply(&mut self, doc: &mut PdfDoc, step: &mut Step, forwards: bool) -> Result<Walked> {
         match (step, forwards) {
-            (Step::Paged { edit, kept }, _) => {
+            (Step::Paged { edit, kept, id }, _) => {
                 let made = match forwards {
                     true => *edit,
                     false => edit.inverse(),
                 };
                 self.edit(doc, made, kept)?;
-                Ok(Walked::Pages(made))
+                Ok(Walked::Pages(made, *id))
             }
             (Step::Moved { page, id, matrix }, _) => {
                 let index = self.locate(doc, *page, *id)?;
@@ -454,21 +462,22 @@ mod tests {
             return;
         };
         let mut ink = Ink::default();
-        ink.edit_pages(&mut doc, PageEdit::Insert(1)).unwrap();
-        ink.edit_pages(&mut doc, PageEdit::Move { from: 2, to: 0 })
+        let insert = ink.edit_pages(&mut doc, PageEdit::Insert(1)).unwrap();
+        let moved = ink
+            .edit_pages(&mut doc, PageEdit::Move { from: 2, to: 0 })
             .unwrap();
         assert_eq!(page_texts(&doc), ["Second page", "Hello accent", ""]);
 
         let undo = PageEdit::Move { from: 0, to: 2 };
-        assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo)]);
+        assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo, moved)]);
         assert_eq!(page_texts(&doc), ["Hello accent", "", "Second page"]);
         let undo = PageEdit::Delete(1);
-        assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo)]);
+        assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo, insert)]);
         assert_eq!(page_texts(&doc), ["Hello accent", "Second page"]);
         assert_eq!(ink.history(), (false, true));
 
         let redo = PageEdit::Insert(1);
-        assert_eq!(ink.walk(&mut doc, true), [Walked::Pages(redo)]);
+        assert_eq!(ink.walk(&mut doc, true), [Walked::Pages(redo, insert)]);
         ink.walk(&mut doc, true);
         assert_eq!(page_texts(&doc), ["Second page", "Hello accent", ""]);
         assert_eq!(ink.history(), (true, false));

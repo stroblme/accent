@@ -8,7 +8,9 @@
 //! third source in [`Layered`], answering the same shape.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -147,6 +149,10 @@ impl Words {
         locked(&self.docs).remove(rel);
     }
 
+    fn text(&self, rel: &str) -> Option<String> {
+        locked(&self.docs).get(rel).map(|doc| doc.text.clone())
+    }
+
     /// The words that continue what is being typed: the document's own, most used first, then
     /// the dictionary's, in its order. The word under the caret is never offered to itself.
     pub(crate) fn completion(&self, rel: &str, pos: Pos) -> Completions {
@@ -222,6 +228,11 @@ impl Words {
     }
 }
 
+/// Where a document's ghost session comes from once the one it was opened on has exited: the
+/// vault's, started again, or `None` once the vault has given up on it.
+pub(crate) type Respawn =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = Option<Arc<dyn Language>>> + Send>> + Send + Sync>;
+
 /// A prose document's providers, answering as one: the primary (a language server, or the index
 /// for a note) for everything it does, with the words appended to its completion and the ghost
 /// session answering beside both. A file with no primary at all (a `.txt`, a `.tex` without
@@ -230,9 +241,16 @@ impl Words {
 /// The ghost session hears the document's whole life — open, change, close — because it answers
 /// about the buffer as it is now. What it does not hear is every save: it re-reads the vault on
 /// one, so it is told when the user leaves the document instead. See [`Layered::settle`].
+///
+/// A ghost session that exits is started again on the next suggestion ([`Layered::ghost`]) and
+/// the primary never hears of it: what the ghost session fails to take is no one else's failure.
 pub(crate) struct Layered {
     primary: Option<Arc<dyn Language>>,
-    ghost: Option<Arc<dyn Language>>,
+    /// The ghost session the document is open on; `None` when there is none to be had.
+    ghost: Mutex<Option<Arc<dyn Language>>>,
+    respawn: Option<Respawn>,
+    /// The protocol's name for the document's language, to open it on a fresh ghost session.
+    language_id: OnceLock<String>,
     words: Words,
     /// The document was saved since the ghost session last heard about it.
     stale: AtomicBool,
@@ -241,36 +259,75 @@ pub(crate) struct Layered {
 impl Layered {
     pub(crate) fn new(
         primary: Option<Arc<dyn Language>>,
-        ghost: Option<Arc<dyn Language>>,
+        ghost: Option<(Arc<dyn Language>, Respawn)>,
     ) -> Layered {
+        let (ghost, respawn) = ghost.unzip();
         Layered {
             primary,
-            ghost,
+            ghost: Mutex::new(ghost),
+            respawn,
+            language_id: OnceLock::new(),
             words: Words::default(),
             stale: AtomicBool::new(false),
         }
+    }
+
+    /// Tell the ghost session something, if there is one. A failure is logged and goes no
+    /// further: a `merl-rt` that has exited must not take the primary's news down with it.
+    fn tell_ghost(&self, tell: impl FnOnce(&dyn Language) -> Result<()>) {
+        let ghost = locked(&self.ghost).clone();
+        if let Some(ghost) = ghost
+            && let Err(e) = tell(ghost.as_ref())
+        {
+            tracing::debug!("ghost text: {e:#}");
+        }
+    }
+
+    /// The ghost session to ask about `rel`, started again when the one the document was open
+    /// on has exited, and the document opened on the fresh one as it reads now.
+    async fn ghost(&self, rel: &str) -> Option<Arc<dyn Language>> {
+        let dead = match &*locked(&self.ghost) {
+            Some(ghost) if ghost.is_dead() => ghost.clone(),
+            live => return live.clone(),
+        };
+        let fresh = match &self.respawn {
+            Some(respawn) => respawn().await,
+            None => None,
+        };
+        let mut slot = locked(&self.ghost);
+        match &*slot {
+            Some(ghost) if Arc::ptr_eq(ghost, &dead) => {}
+            // Another request got there first.
+            other => return other.clone(),
+        }
+        if let Some(ghost) = &fresh {
+            let (id, text) = (self.language_id.get(), self.words.text(rel));
+            let id = id.map_or("", String::as_str);
+            if let Err(e) = ghost.open(rel, id, text.unwrap_or_default()) {
+                tracing::debug!("ghost text: {e:#}");
+            }
+        }
+        slot.clone_from(&fresh);
+        fresh
     }
 }
 
 impl Language for Layered {
     fn open(&self, rel: &str, language_id: &str, text: String) -> Result<Support> {
         self.words.open(rel, text.clone());
-        if let Some(g) = &self.ghost {
-            g.open(rel, language_id, text.clone())?;
-        }
+        let _ = self.language_id.set(language_id.to_string());
+        self.tell_ghost(|g| g.open(rel, language_id, text.clone()).map(drop));
         let mut support = match &self.primary {
             Some(p) => p.open(rel, language_id, text)?,
             None => Support::default(),
         };
-        support.inline = self.ghost.is_some();
+        support.inline = locked(&self.ghost).is_some();
         Ok(support)
     }
 
     fn change(&self, rel: &str, text: String) -> Result<()> {
         self.words.open(rel, text.clone());
-        if let Some(g) = &self.ghost {
-            g.change(rel, text.clone())?;
-        }
+        self.tell_ghost(|g| g.change(rel, text.clone()));
         match &self.primary {
             Some(p) => p.change(rel, text),
             None => Ok(()),
@@ -286,10 +343,10 @@ impl Language for Layered {
     /// whole vault on a `didSave`, which is a second's work on a large one. Leaving the document
     /// is the moment where that is affordable and where it is worth doing.
     fn settle(&self, rel: &str) -> Result<()> {
-        match &self.ghost {
-            Some(g) if self.stale.swap(false, Ordering::Relaxed) => g.saved(rel),
-            _ => Ok(()),
+        if self.stale.swap(false, Ordering::Relaxed) {
+            self.tell_ghost(|g| g.saved(rel));
         }
+        Ok(())
     }
 
     /// The primary's to answer: neither the words nor the ghost session diagnoses anything.
@@ -299,19 +356,23 @@ impl Language for Layered {
 
     fn close(&self, rel: &str) {
         self.words.close(rel);
-        if let Some(g) = &self.ghost {
+        self.tell_ghost(|g| {
             g.close(rel);
-        }
+            Ok(())
+        });
         if let Some(p) = &self.primary {
             p.close(rel);
         }
     }
 
     fn inline_completion(&self, rel: &str, pos: Pos) -> Fut<'_, Option<String>> {
-        match &self.ghost {
-            Some(g) => g.inline_completion(rel, pos),
-            None => Box::pin(async { Ok(None) }),
-        }
+        let rel = rel.to_string();
+        Box::pin(async move {
+            match self.ghost(&rel).await {
+                Some(g) => g.inline_completion(&rel, pos).await,
+                None => Ok(None),
+            }
+        })
     }
 
     fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Completions> {
@@ -383,8 +444,7 @@ impl Language for Layered {
         }
     }
 
-    /// ponytail: the ghost session is not counted. A dead merl would otherwise restart the
-    /// primary with it; it stays dead until the tab is reopened, which is the cheaper mistake.
+    /// The primary's alone: a ghost session that exits is started again by itself.
     fn is_dead(&self) -> bool {
         self.primary.as_ref().is_some_and(|p| p.is_dead())
     }
@@ -393,6 +453,7 @@ impl Language for Layered {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn the_word_before_the_caret_is_found_unless_it_is_someone_elses() {
@@ -439,6 +500,122 @@ mod tests {
         );
         assert!(answer.items.is_empty());
         assert!(answer.incomplete, "the next letter has to ask again");
+    }
+
+    /// A provider that says what it heard and answers a suggestion with its own name, until it
+    /// is made to exit.
+    struct Fake {
+        name: &'static str,
+        dead: AtomicBool,
+        heard: Mutex<Vec<String>>,
+    }
+
+    impl Fake {
+        fn new(name: &'static str) -> Arc<Fake> {
+            Arc::new(Fake {
+                name,
+                dead: AtomicBool::new(false),
+                heard: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn hear(&self, what: String) -> Result<()> {
+            anyhow::ensure!(!self.is_dead(), "{} has exited", self.name);
+            locked(&self.heard).push(what);
+            Ok(())
+        }
+
+        fn heard(&self) -> Vec<String> {
+            locked(&self.heard).clone()
+        }
+    }
+
+    impl Language for Fake {
+        fn open(&self, rel: &str, _: &str, text: String) -> Result<Support> {
+            self.hear(format!("open {rel} {text}"))?;
+            Ok(Support::default())
+        }
+        fn change(&self, rel: &str, text: String) -> Result<()> {
+            self.hear(format!("change {rel} {text}"))
+        }
+        fn close(&self, _: &str) {}
+        fn inline_completion(&self, _: &str, _: Pos) -> Fut<'_, Option<String>> {
+            Box::pin(async move {
+                anyhow::ensure!(!self.is_dead(), "{} has exited", self.name);
+                Ok(Some(self.name.to_string()))
+            })
+        }
+        fn completion(&self, _: &str, _: Pos, _: Option<char>) -> Fut<'_, Completions> {
+            Box::pin(async { Ok(Completions::default()) })
+        }
+        fn resolve(&self, _: &str, item: Completion) -> Fut<'_, Completion> {
+            Box::pin(async { Ok(item) })
+        }
+        fn signature_help(&self, _: &str, _: Pos) -> Fut<'_, Option<Signature>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn hover(&self, _: &str, _: Pos) -> Fut<'_, Option<Hover>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn definition(&self, _: &str, _: Pos) -> Fut<'_, Vec<Location>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn symbols(&self, _: &str) -> Fut<'_, Vec<Symbol>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn references(&self, _: &str, _: Pos) -> Fut<'_, Vec<Location>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn folds(&self, _: &str) -> Fut<'_, Vec<Fold>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn is_dead(&self) -> bool {
+            self.dead.load(Ordering::Relaxed)
+        }
+    }
+
+    /// A ghost session that exits is swapped for a fresh one on the next suggestion, the
+    /// document opened on it as it reads now, while the primary hears every change regardless.
+    /// Once the vault gives up, the document stops asking.
+    #[test]
+    fn a_ghost_session_that_exits_is_started_again_without_the_primary() {
+        let (primary, first, second) = (
+            Fake::new("primary"),
+            Fake::new("first"),
+            Fake::new("second"),
+        );
+        let asked = Arc::new(AtomicUsize::new(0));
+        let respawn: Respawn = Box::new({
+            let (asked, second) = (asked.clone(), second.clone());
+            move || {
+                // The fresh session the first time, and a vault that has given up after that.
+                let next = (asked.fetch_add(1, Ordering::Relaxed) == 0).then(|| second.clone());
+                Box::pin(async move { next.map(|g| g as Arc<dyn Language>) })
+            }
+        });
+        let doc = Layered::new(Some(primary.clone()), Some((first.clone(), respawn)));
+        let at = Pos::default();
+        let suggest = || accent_lsp::runtime().block_on(doc.inline_completion("a.md", at));
+
+        assert!(doc.open("a.md", "markdown", "one".into()).unwrap().inline);
+        assert_eq!(suggest().unwrap(), Some("first".into()));
+        first.dead.store(true, Ordering::Relaxed);
+        doc.change("a.md", "one two".into()).unwrap();
+        assert_eq!(primary.heard(), ["open a.md one", "change a.md one two"]);
+
+        assert_eq!(suggest().unwrap(), Some("second".into()));
+        assert_eq!(second.heard(), ["open a.md one two"]);
+        assert_eq!(suggest().unwrap(), Some("second".into()));
+        assert_eq!(
+            asked.load(Ordering::Relaxed),
+            1,
+            "a live session is not started again"
+        );
+
+        second.dead.store(true, Ordering::Relaxed);
+        assert_eq!(suggest().unwrap(), None, "given up on");
+        assert_eq!(suggest().unwrap(), None);
+        assert_eq!(asked.load(Ordering::Relaxed), 2, "and not asked for again");
     }
 
     #[test]

@@ -314,6 +314,16 @@ impl Nav {
         self.back.retain(|p| p.key != key);
         self.forward.retain(|p| p.key != key);
     }
+
+    /// The pages of the PDF `key` were edited: each place in it goes where `map` takes its anchor,
+    /// so Back returns to the page it left and not to whatever took that page's number.
+    pub fn repage(&mut self, key: &str, map: impl Fn(Anchor) -> Anchor) {
+        for place in self.back.iter_mut().chain(&mut self.forward) {
+            if let (true, Spot::Page(anchor)) = (place.key == key, &mut place.at) {
+                *anchor = map(*anchor);
+            }
+        }
+    }
 }
 
 /// Which side of a pane a new pane goes on.
@@ -1010,6 +1020,22 @@ mod tests {
         nav.forget("a.md");
         assert_eq!(nav.back(caret("c.md", 1)), Some(caret("b.md", 1)));
         assert!(nav.back(caret("c.md", 1)).is_none());
+
+        // A page edit takes the places in its document with the pages, and no other.
+        let page = |key: &str, n| Place {
+            key: key.to_string(),
+            at: Spot::Page(Anchor {
+                page: n,
+                u: 0.0,
+                v: 0.5,
+            }),
+        };
+        let mut nav = Nav::default();
+        nav.record(page("p.pdf", 0), now);
+        nav.record(page("q.pdf", 0), now);
+        nav.repage("p.pdf", |a| Anchor { page: 2, ..a });
+        assert_eq!(nav.back(caret("c.md", 1)), Some(page("q.pdf", 0)));
+        assert_eq!(nav.back(caret("c.md", 1)), Some(page("p.pdf", 2)));
     }
 
     /// Two tabs pinned besides the one asked about: a pinned tab goes no further right than the

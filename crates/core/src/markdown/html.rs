@@ -1,10 +1,11 @@
-//! The preview pane's HTML: wikilinks become `accent://` anchors, math becomes MathML, and every
-//! block carries the source line it starts on.
+//! The preview pane's HTML: wikilinks become `accent://` anchors, math becomes MathML, every
+//! block carries the source line it starts on, and a conflict block its sides in boxes.
 
 use super::blocks::block_ids;
 use super::links::{is_image, percent_encode, slugs, split_anchor};
 use super::options;
-use pulldown_cmark::{Event, LinkType, Parser, Tag as Cm, TagEnd};
+use crate::conflict::{self, Block};
+use pulldown_cmark::{Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
 use pulldown_latex::{Event as LatexEvent, ParserError, Storage};
 use std::error::Error;
 use std::ops::Range;
@@ -106,150 +107,225 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
 /// the editor's cursor is on, and each heading gets its [`slugs`] anchor as its `id`, so an
 /// in-note `[text](#slug)` scrolls there. A block with a [`block_ids`] id carries it on that
 /// span, as `^id`, which is how `[text](#^id)` names it, and the `^id` itself is not shown.
+///
+/// A conflict block git left in the note ([`conflict::blocks`]) is shown as its sides, each in a
+/// `<div class="conflict-current">` (`-base`, `-incoming`) captioned with its marker's label, and
+/// with no marker shown: read as markdown, `=======` would make the current side a heading and
+/// `>>>>>>>` a quote. The note is cut at the blocks and every stretch parsed on its own, so each
+/// side is the markdown it says whatever the other leaves open, and every line marker is the
+/// note's own.
 pub fn to_html(text: &str) -> String {
-    let blocks = block_ids(text);
-    let mut evts: Vec<Event> = Vec::new();
-    let mut link_wiki: Vec<bool> = Vec::new();
-    let mut image_wiki: Vec<bool> = Vec::new();
-    let mut skip = 0usize;
-    // Block starts arrive in source order, so one forward pass over the newlines suffices.
-    let mut counted = 0usize;
-    let mut line = 1usize;
-    // Each heading's place in `evts` and its text, gathered the way `analyze` gathers
-    // `Heading::text` — every text and code event inside, an embed's too — so the `id` is the
-    // anchor the editor resolves.
-    let mut headings: Vec<(usize, String)> = Vec::new();
-    let mut in_heading = false;
+    let mut page = Page::default();
+    let mut at = 0;
+    for block in conflict::blocks(text) {
+        page.markdown(text, at..block.range.start);
+        page.conflict(text, &block);
+        at = block.range.end;
+    }
+    page.markdown(text, at..text.len());
+    page.finish()
+}
 
-    for (ev, r) in Parser::new_ext(text, options()).into_offset_iter() {
-        match &ev {
-            Event::Start(Cm::Heading { .. }) => {
-                in_heading = true;
-                headings.push((evts.len(), String::new()));
-            }
-            Event::End(TagEnd::Heading(_)) => in_heading = false,
-            Event::Text(t) | Event::Code(t) if in_heading => {
-                if let Some((_, h)) = headings.last_mut() {
-                    h.push_str(t);
-                }
-            }
-            _ => {}
+/// What [`to_html`] has gathered so far, a stretch of the note at a time.
+#[derive(Default)]
+struct Page<'a> {
+    evts: Vec<Event<'a>>,
+    /// Each heading's place in `evts` and its text, gathered the way `analyze` gathers
+    /// `Heading::text` — every text and code event inside, an embed's too — so the `id` is the
+    /// anchor the editor resolves.
+    headings: Vec<(usize, String)>,
+    /// How far into the note the lines are counted, and the newlines up to there: block starts
+    /// arrive in source order, so one forward pass counts every marker's line.
+    counted: usize,
+    newlines: usize,
+}
+
+impl<'a> Page<'a> {
+    /// The 1-based line the byte `at` of the note is on.
+    fn line_at(&mut self, text: &str, at: usize) -> usize {
+        self.newlines += text[self.counted..at]
+            .bytes()
+            .filter(|b| *b == b'\n')
+            .count();
+        self.counted = at;
+        self.newlines + 1
+    }
+
+    fn html(&mut self, html: String) {
+        self.evts.push(Event::Html(html.into()));
+    }
+
+    /// The markdown of `text[part]`, parsed as a note of its own.
+    fn markdown(&mut self, text: &'a str, part: Range<usize>) {
+        let src = &text[part.clone()];
+        let mut opts = options();
+        // Front matter opens the note, never a stretch after a conflict block.
+        if part.start > 0 {
+            opts.remove(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
         }
-        if skip > 0 {
-            match ev {
-                Event::Start(Cm::Image { .. }) => skip += 1,
-                Event::End(TagEnd::Image) => skip -= 1,
+        let blocks = block_ids(src);
+        let mut link_wiki: Vec<bool> = Vec::new();
+        let mut image_wiki: Vec<bool> = Vec::new();
+        let mut skip = 0usize;
+        let mut in_heading = false;
+
+        for (ev, r) in Parser::new_ext(src, opts).into_offset_iter() {
+            match &ev {
+                Event::Start(Cm::Heading { .. }) => {
+                    in_heading = true;
+                    self.headings.push((self.evts.len(), String::new()));
+                }
+                Event::End(TagEnd::Heading(_)) => in_heading = false,
+                Event::Text(t) | Event::Code(t) if in_heading => {
+                    if let Some((_, h)) = self.headings.last_mut() {
+                        h.push_str(t);
+                    }
+                }
                 _ => {}
             }
-            continue;
-        }
-        let marker = is_block_start(&ev).then(|| {
-            line += text[counted..r.start]
-                .bytes()
-                .filter(|b| *b == b'\n')
-                .count();
-            counted = r.start;
-            let id = blocks
-                .iter()
-                .find(|b| b.start == r.start)
-                .map_or(String::new(), |b| format!(" id=\"^{}\"", b.id));
-            Event::Html(format!("<span data-line=\"{line}\"{id}></span>").into())
-        });
-        // The text a block's id ends goes on without it.
-        let ev = match (ev, blocks.iter().find(|b| r.contains(&b.marker.start))) {
-            (Event::Text(t), Some(b)) => {
-                let shown = t.strip_suffix(&text[b.marker.clone()]).unwrap_or(&t);
-                Event::Text(shown.trim_end().to_string().into())
-            }
-            (ev, _) => ev,
-        };
-        match ev {
-            Event::Start(Cm::Link {
-                link_type: LinkType::WikiLink { .. },
-                ref dest_url,
-                ..
-            }) => {
-                let (t, anchor) = split_anchor(dest_url);
-                evts.push(Event::Html(
-                    format!("<a href=\"{}\" class=\"wikilink\">", open_href(t, anchor)).into(),
-                ));
-                link_wiki.push(true);
-            }
-            Event::Start(Cm::Link { .. }) => {
-                link_wiki.push(false);
-                evts.push(ev);
-            }
-            Event::End(TagEnd::Link) => {
-                if link_wiki.pop().unwrap_or(false) {
-                    evts.push(Event::Html("</a>".into()));
-                } else {
-                    evts.push(ev);
+            if skip > 0 {
+                match ev {
+                    Event::Start(Cm::Image { .. }) => skip += 1,
+                    Event::End(TagEnd::Image) => skip -= 1,
+                    _ => {}
                 }
+                continue;
             }
-            Event::Start(Cm::Image {
-                link_type: LinkType::WikiLink { .. },
-                ref dest_url,
-                ..
-            }) => {
-                let (t, anchor) = split_anchor(dest_url);
-                if is_image(t) {
-                    evts.push(Event::Html(
-                        format!("<img src=\"accent://file/{}\">", percent_encode(t)).into(),
-                    ));
-                    skip = 1;
-                } else {
-                    evts.push(Event::Html(
-                        format!("<a href=\"{}\" class=\"embed\">", open_href(t, anchor)).into(),
-                    ));
-                    image_wiki.push(true);
-                }
-            }
-            Event::Start(Cm::Image { .. }) => {
-                image_wiki.push(false);
-                evts.push(ev);
-            }
-            Event::End(TagEnd::Image) => {
-                if image_wiki.pop().unwrap_or(false) {
-                    evts.push(Event::Html("</a>".into()));
-                } else {
-                    evts.push(ev);
-                }
-            }
-            Event::InlineMath(ref src) | Event::DisplayMath(ref src) => {
-                let html = mathml(src, matches!(ev, Event::DisplayMath(_)));
-                // A typo must never blank a formula: without MathML the original event goes on and
-                // pulldown-cmark's `.math` span shows the source as the author wrote it.
-                match html {
-                    Some(html) => evts.push(Event::Html(html.into())),
-                    None => evts.push(ev),
-                }
-            }
-            // The class GitHub uses, so the preview can draw the checkbox in place of the bullet.
-            // The marker is the first thing in its item, so the nearest item start is its own.
-            Event::TaskListMarker(_) => {
-                if let Some(li) = evts
+            let marker = is_block_start(&ev).then(|| {
+                let line = self.line_at(text, part.start + r.start);
+                let id = blocks
                     .iter()
-                    .rposition(|e| matches!(e, Event::Start(Cm::Item)))
-                {
-                    evts[li] = Event::Html("<li class=\"task-list-item\">".into());
+                    .find(|b| b.start == r.start)
+                    .map_or(String::new(), |b| format!(" id=\"^{}\"", b.id));
+                Event::Html(format!("<span data-line=\"{line}\"{id}></span>").into())
+            });
+            // The text a block's id ends goes on without it.
+            let ev = match (ev, blocks.iter().find(|b| r.contains(&b.marker.start))) {
+                (Event::Text(t), Some(b)) => {
+                    let shown = t.strip_suffix(&src[b.marker.clone()]).unwrap_or(&t);
+                    Event::Text(shown.trim_end().to_string().into())
                 }
-                evts.push(ev);
+                (ev, _) => ev,
+            };
+            match ev {
+                Event::Start(Cm::Link {
+                    link_type: LinkType::WikiLink { .. },
+                    ref dest_url,
+                    ..
+                }) => {
+                    let (t, anchor) = split_anchor(dest_url);
+                    self.html(format!(
+                        "<a href=\"{}\" class=\"wikilink\">",
+                        open_href(t, anchor)
+                    ));
+                    link_wiki.push(true);
+                }
+                Event::Start(Cm::Link { .. }) => {
+                    link_wiki.push(false);
+                    self.evts.push(ev);
+                }
+                Event::End(TagEnd::Link) => {
+                    if link_wiki.pop().unwrap_or(false) {
+                        self.html("</a>".into());
+                    } else {
+                        self.evts.push(ev);
+                    }
+                }
+                Event::Start(Cm::Image {
+                    link_type: LinkType::WikiLink { .. },
+                    ref dest_url,
+                    ..
+                }) => {
+                    let (t, anchor) = split_anchor(dest_url);
+                    if is_image(t) {
+                        self.html(format!("<img src=\"accent://file/{}\">", percent_encode(t)));
+                        skip = 1;
+                    } else {
+                        self.html(format!(
+                            "<a href=\"{}\" class=\"embed\">",
+                            open_href(t, anchor)
+                        ));
+                        image_wiki.push(true);
+                    }
+                }
+                Event::Start(Cm::Image { .. }) => {
+                    image_wiki.push(false);
+                    self.evts.push(ev);
+                }
+                Event::End(TagEnd::Image) => {
+                    if image_wiki.pop().unwrap_or(false) {
+                        self.html("</a>".into());
+                    } else {
+                        self.evts.push(ev);
+                    }
+                }
+                Event::InlineMath(ref src) | Event::DisplayMath(ref src) => {
+                    let html = mathml(src, matches!(ev, Event::DisplayMath(_)));
+                    // A typo must never blank a formula: without MathML the original event goes
+                    // on and pulldown-cmark's `.math` span shows the source as the author wrote it.
+                    match html {
+                        Some(html) => self.html(html),
+                        None => self.evts.push(ev),
+                    }
+                }
+                // The class GitHub uses, so the preview can draw the checkbox in place of the
+                // bullet. The marker is the first thing in its item, so the nearest item start is
+                // its own.
+                Event::TaskListMarker(_) => {
+                    if let Some(li) = self
+                        .evts
+                        .iter()
+                        .rposition(|e| matches!(e, Event::Start(Cm::Item)))
+                    {
+                        self.evts[li] = Event::Html("<li class=\"task-list-item\">".into());
+                    }
+                    self.evts.push(ev);
+                }
+                _ => self.evts.push(ev),
             }
-            _ => evts.push(ev),
-        }
-        evts.extend(marker);
-    }
-
-    let ids = slugs(headings.iter().map(|(_, h)| h.as_str()));
-    for ((at, _), slug) in headings.iter().zip(ids) {
-        if let Event::Start(Cm::Heading { id, .. }) = &mut evts[*at] {
-            *id = Some(slug.into());
+            self.evts.extend(marker);
         }
     }
 
-    let mut out = String::new();
-    pulldown_cmark::html::push_html(&mut out, evts.into_iter());
-    out
+    /// A conflict block's sides top to bottom, each in its box under its marker's label. A box
+    /// starts where the marker above it is, so that is its caption's line; the incoming side is
+    /// named by the marker below it, the `>>>>>>>` line.
+    fn conflict(&mut self, text: &'a str, block: &Block) {
+        let m = block.markers();
+        let (split, end) = (&m[m.len() - 2], &m[m.len() - 1]);
+        let sides = [
+            Some(("current", &m[0], m[0].start, block.ours.clone())),
+            block
+                .base
+                .clone()
+                .map(|base| ("base", &m[1], m[1].start, base)),
+            Some(("incoming", end, split.start, block.theirs.clone())),
+        ];
+        self.html("<div class=\"conflict\">\n".into());
+        for (side, named, top, lines) in sides.into_iter().flatten() {
+            let line = self.line_at(text, top);
+            let label = esc_attr(conflict::label(text, named.clone()));
+            self.html(format!(
+                "<div class=\"conflict-{side}\"><div class=\"conflict-label\">\
+                 <span data-line=\"{line}\"></span>{label}</div>\n"
+            ));
+            self.markdown(text, lines);
+            self.html("</div>\n".into());
+        }
+        self.html("</div>\n".into());
+    }
+
+    fn finish(mut self) -> String {
+        let ids = slugs(self.headings.iter().map(|(_, h)| h.as_str()));
+        for ((at, _), slug) in self.headings.iter().zip(ids) {
+            if let Event::Start(Cm::Heading { id, .. }) = &mut self.evts[*at] {
+                *id = Some(slug.into());
+            }
+        }
+        let mut out = String::new();
+        pulldown_cmark::html::push_html(&mut out, self.evts.into_iter());
+        out
+    }
 }
 
 #[cfg(test)]
@@ -401,6 +477,63 @@ mod tests {
         assert!(!h.contains("^list<") && !h.contains(" ^para"), "{h}");
     }
 
+    /// The source lines of the markers in `h`, top to bottom.
+    fn lines(h: &str) -> Vec<&str> {
+        h.match_indices("<span data-line=\"")
+            .map(|(i, m)| {
+                let rest = &h[i + m.len()..];
+                &rest[..rest.find('"').unwrap()]
+            })
+            .collect()
+    }
+
+    /// A conflict block is its sides in tinted boxes, each captioned with its marker's label and
+    /// rendered as the markdown it is, with no marker on the page: read as markdown, `=======`
+    /// would make the current side a heading and `>>>>>>>` a quote.
+    #[test]
+    fn html_shows_a_conflict_as_its_sides() {
+        let src = "intro\n<<<<<<< HEAD\nours *here*\n=======\n# Theirs\n\n- item\n\
+                   >>>>>>> feature/<x>\nafter\n";
+        let h = to_html(src);
+        assert_eq!(
+            h,
+            "<p><span data-line=\"1\"></span>intro</p>\n\
+             <div class=\"conflict\">\n\
+             <div class=\"conflict-current\">\
+             <div class=\"conflict-label\"><span data-line=\"2\"></span>HEAD</div>\n\
+             <p><span data-line=\"3\"></span>ours <em>here</em></p>\n\
+             </div>\n\
+             <div class=\"conflict-incoming\">\
+             <div class=\"conflict-label\"><span data-line=\"4\"></span>feature/&lt;x></div>\n\
+             <h1 id=\"theirs\"><span data-line=\"5\"></span>Theirs</h1>\n\
+             <ul>\n<li><span data-line=\"7\"></span>item</li>\n</ul>\n\
+             </div>\n\
+             </div>\n\
+             <p><span data-line=\"9\"></span>after</p>\n"
+        );
+    }
+
+    /// A diff3 block's base sits between the two, and a side that deleted every line is an empty
+    /// box under its label.
+    #[test]
+    fn html_shows_a_diff3_base_between_the_sides() {
+        let h = to_html("<<<<<<< HEAD\nours\n||||||| base\n## Base\n=======\n>>>>>>> side\n");
+        let order: Vec<usize> = ["conflict-current", "conflict-base", "conflict-incoming"]
+            .iter()
+            .map(|class| h.find(&format!("<div class=\"{class}\">")).expect(class))
+            .collect();
+        assert!(order.is_sorted(), "{h}");
+        assert!(
+            h.contains("<span data-line=\"3\"></span>base</div>\n<h2 id=\"base\">"),
+            "{h}"
+        );
+        assert!(h.contains("side</div>\n</div>\n</div>"), "{h}");
+        assert_eq!(lines(&h), ["1", "2", "3", "4", "5"]);
+        for marker in ["<<<", "|||", "===", "&gt;&gt;", "blockquote"] {
+            assert!(!h.contains(marker), "{marker} in {h}");
+        }
+    }
+
     /// The preview markers are tested on their own; strip them so the older assertions stay
     /// about the HTML the renderer produces.
     fn bare(text: &str) -> String {
@@ -416,14 +549,7 @@ mod tests {
     fn html_marks_block_source_lines() {
         let src = "# Title\n\nFirst para.\n\nSecond para.\n\n- item\n\n```rs\ncode\n```\n";
         let h = to_html(src);
-        let lines: Vec<&str> = h
-            .match_indices("<span data-line=\"")
-            .map(|(i, m)| {
-                let rest = &h[i + m.len()..];
-                &rest[..rest.find('"').unwrap()]
-            })
-            .collect();
-        assert_eq!(lines, ["1", "3", "5", "7", "9"], "{h}");
+        assert_eq!(lines(&h), ["1", "3", "5", "7", "9"], "{h}");
         assert!(
             h.contains("<h1 id=\"title\"><span data-line=\"1\"></span>Title</h1>"),
             "{h}"

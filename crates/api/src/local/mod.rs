@@ -172,6 +172,19 @@ impl Local {
         Local::join(&self.root, rel)
     }
 
+    /// [`resolve`](Self::resolve) for a file a rewrite across the vault is about to write —
+    /// Replace All, a move's link updates, a page edit's — refusing one a symlink takes outside
+    /// the root. Readers follow such a link, since a vault links folders in on purpose; a rewrite
+    /// that nobody aimed at the file must not reach through one into `~/.bashrc`. One
+    /// `canonicalize` per file written.
+    pub(crate) fn resolve_inside(&self, rel: &str) -> io::Result<PathBuf> {
+        let path = self.resolve(rel)?;
+        match path.canonicalize()?.starts_with(&self.root) {
+            true => Ok(path),
+            false => Err(outside(rel)),
+        }
+    }
+
     /// [`resolve`](Self::resolve) against any root, so a remote vault can do the same arithmetic
     /// with the root the server reported.
     pub fn join(root: &Path, rel: &str) -> io::Result<PathBuf> {

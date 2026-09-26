@@ -11,7 +11,11 @@
 //! thing left lit under a window that is otherwise out of the way.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use gtk::glib;
 use gtk::prelude::*;
 
 /// What the vault's line says while it is paused. One string, because [`crate::App::sync_opening`]
@@ -354,6 +358,78 @@ pub fn indexing_label(done: usize, total: usize) -> String {
     }
 }
 
+/// How often a running copy's line is brought up to date with how far it has got.
+const TICK: Duration = Duration::from_millis(200);
+
+/// How far one file's copy to or from a host has got, told by the worker moving it and read by
+/// its line on the bar.
+#[derive(Default)]
+pub struct Bytes {
+    done: AtomicU64,
+    total: AtomicU64,
+}
+
+impl Bytes {
+    /// What a transfer's progress callback hands on: the bytes moved so far, of how many.
+    pub fn set(&self, done: u64, total: u64) {
+        self.done.store(done, Ordering::Relaxed);
+        self.total.store(total, Ordering::Relaxed);
+    }
+
+    /// `what` ("Downloading paper.pdf") and how far it has got, as the connection bar counts the
+    /// server's upload: "Downloading paper.pdf… 12.3/80.0 MB". `None` until a byte has moved,
+    /// so a copy that turns out to be current says nothing at all.
+    pub fn line(&self, what: &str) -> Option<String> {
+        let (done, total) = (
+            self.done.load(Ordering::Relaxed),
+            self.total.load(Ordering::Relaxed),
+        );
+        let mb = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0));
+        (total > 0).then(|| format!("{what}… {}/{} MB", mb(done), mb(total)))
+    }
+}
+
+/// Wait for `work`, keeping its line on the bar to what `line` says every [`TICK`]: put up with
+/// `say(text, true)` once there is one, changed in place with `retell`, and taken down with
+/// `say(text, false)` when the work is over, which is also what ends the timer.
+pub async fn counting<T>(
+    say: impl Fn(&str, bool) + 'static,
+    retell: impl Fn(&str, &str) + 'static,
+    line: impl Fn() -> Option<String> + 'static,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let say = Rc::new(say);
+    let shown = Rc::new(RefCell::new(line()));
+    if let Some(text) = shown.borrow().as_deref() {
+        say(text, true);
+    }
+    let tick = glib::timeout_add_local(TICK, {
+        let (say, shown) = (say.clone(), shown.clone());
+        move || {
+            let next = line();
+            let before = shown.borrow().clone();
+            match (before, next) {
+                (None, Some(next)) => {
+                    say(&next, true);
+                    *shown.borrow_mut() = Some(next);
+                }
+                (Some(before), Some(next)) if before != next => {
+                    retell(&before, &next);
+                    *shown.borrow_mut() = Some(next);
+                }
+                _ => {}
+            }
+            glib::ControlFlow::Continue
+        }
+    });
+    let answer = work.await;
+    tick.remove();
+    if let Some(text) = shown.borrow().as_deref() {
+        say(text, false);
+    }
+    answer
+}
+
 /// Where the reader is in a PDF, which is what that tab has to say where a note has its word
 /// count. `page` is 0-based, the way the viewer counts them, and the readout is not.
 ///
@@ -397,6 +473,17 @@ mod tests {
         assert_eq!(indexing_label(1, 0), "Indexing… 1 file found");
         assert_eq!(indexing_label(12345, 0), "Indexing… 12345 files found");
         assert_eq!(indexing_label(1200, 42700), "Indexing… 1200/42700 files");
+    }
+
+    #[test]
+    fn a_copy_says_how_far_it_has_got_once_bytes_move() {
+        let bytes = Bytes::default();
+        assert_eq!(bytes.line("Downloading paper.pdf"), None);
+        bytes.set(12 * 1024 * 1024 + 300 * 1024, 80 * 1024 * 1024);
+        assert_eq!(
+            bytes.line("Downloading paper.pdf").as_deref(),
+            Some("Downloading paper.pdf… 12.3/80.0 MB")
+        );
     }
 
     #[test]

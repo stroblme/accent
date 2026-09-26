@@ -871,11 +871,17 @@ impl Gen {
     /// strip and page edits have a document whose pages can be told apart. Nothing is drawn from
     /// the stream, so every other file comes out as it did; the bulk fill, which runs last and to
     /// exactly `--files`, ends one file sooner.
+    ///
+    /// Its outline starts on the second page, so the Outline pane has a page above its first
+    /// bookmark to follow: Introduction on page 2 with Details under it on page 3, and Appendix on
+    /// the last page. `n` is at least 3.
     fn pages_pdf(n: usize) -> Vec<u8> {
-        // 1 the catalog, 2 the page tree, 3 the font, then each page and its text.
+        // 1 the catalog, 2 the page tree, 3 the font, then each page and its text, then the
+        // outline's root and its three entries.
         let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+        let (root, page) = (4 + 2 * n, |p: usize| 4 + 2 * (p - 1));
         let mut objs = vec![
-            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            format!("<< /Type /Catalog /Pages 2 0 R /Outlines {root} 0 R >>"),
             format!("<< /Type /Pages /Kids [{}] /Count {n} >>", kids.join(" ")),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
         ];
@@ -890,6 +896,24 @@ impl Gen {
                 content.len()
             ));
         }
+        let (intro, details, appendix) = (root + 1, root + 2, root + 3);
+        objs.extend([
+            format!("<< /Type /Outlines /First {intro} 0 R /Last {appendix} 0 R /Count 3 >>"),
+            format!(
+                "<< /Title (Introduction) /Parent {root} 0 R /Next {appendix} 0 R \
+                 /First {details} 0 R /Last {details} 0 R /Count 1 /Dest [{} 0 R /XYZ 0 842 0] >>",
+                page(2)
+            ),
+            format!(
+                "<< /Title (Details) /Parent {intro} 0 R /Dest [{} 0 R /XYZ 0 842 0] >>",
+                page(3)
+            ),
+            format!(
+                "<< /Title (Appendix) /Parent {root} 0 R /Prev {intro} 0 R \
+                 /Dest [{} 0 R /XYZ 0 842 0] >>",
+                page(n)
+            ),
+        ]);
         Self::pdf_of(&objs)
     }
 

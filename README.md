@@ -7,10 +7,11 @@ UI and UX focus on efficiency paired with a aggressively minimal design aimed to
 Some features:
 - Vault management with templates, tags and links
 - PDF viewer and editor with Pen support
-- Language server and autocompletion based on [Merl]()
+- Light/Dark/Solarized theming, including images and PDFs
+- Language server and autocompletion based on [Merl](https://github.com/stroblme/merl)
 - Git management and diff. view for resolving file conflicts
 - Remote vaults via dedicated ssh server
-- Integrated terminal
+- Integrated terminal and terminal emulator (tmux-like)
 - Multi-pane support, Android app and much more
 
 This project was formally known as "UNote" (PDF Editor) and is now rewritten from scratch.
@@ -21,8 +22,6 @@ Accent can do everything UNote did (and much more) and I didn't saw a reason for
 The current implementation is focused on Linux/openSUSE (Gnome) and Android support.
 That being said, other distros and desktops will very likely work.
 Adding Windows or Mac support is a thing that will not happen any time soon (sorry).
-
-TODO: flatpak install and one-line install bash command
 
 ```
 make requirements      # names what is missing, see Requirements below
@@ -72,12 +71,12 @@ sudo pacman -S --needed base-devel gtk4 libadwaita gtksourceview5 webkitgtk-6.0 
 
 ## Roadmap
 
+- [ ] Flatpak install
 - [ ] Debugger (DAP client)
 - [ ] MCP server
 - [ ] Bibtex library management
 - [ ] Export and printing notes
 - [ ] Pasting/ dropping images into .md files
-- [ ] Persistent terminals
 
 ## License & References
 
