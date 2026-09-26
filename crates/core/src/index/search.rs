@@ -373,7 +373,8 @@ impl<'a> Lines<'a> {
 
     /// The 1-based line the match at `start..end` begins on, that line clipped to what a sidebar
     /// row can show, and where the match sits in the clipped text. A match running past the end
-    /// of its line — a phrase the note wrote across two — is marked to the end of the line.
+    /// of its line — a phrase the note wrote across two — is marked to the end of the line, and
+    /// one that starts in the `\r\n` the row trims is an empty mark at its end.
     fn at(&mut self, start: usize, end: usize) -> (u32, String, Range<usize>) {
         while self.cursor < start {
             if self.body.as_bytes()[self.cursor] == b'\n' {
@@ -388,7 +389,7 @@ impl<'a> Lines<'a> {
             .next()
             .unwrap_or(rest)
             .trim_end_matches('\r');
-        let from = start - self.line_start;
+        let from = (start - self.line_start).min(line_text.len());
         let to = (end - self.line_start).min(line_text.len());
         let (text, range) = clip(line_text, from..to);
         (self.line, text, range)
@@ -900,6 +901,35 @@ mod tests {
         let (few, _) = ix.grep(&re, 3, false).unwrap();
         assert_eq!(few.len(), 3);
         assert_eq!(few[2].more, 97);
+    }
+
+    /// A match can start in a line ending the row does not show: the `\n` of a CRLF line, whose
+    /// `\r` the row trims. Its range started past the end of the row's text, and the sidebar's
+    /// slice of it panicked.
+    #[test]
+    fn a_match_in_a_crlf_line_ending_stays_inside_its_row() {
+        let re = crate::search::pattern(
+            r"\n",
+            crate::search::Options {
+                regex: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (mut out, mut total) = (Vec::new(), 0);
+        Index::matches_in(
+            "crlf.md",
+            None,
+            "one\r\ntwo\r\n",
+            &re,
+            10,
+            &mut out,
+            &mut total,
+        );
+        assert_eq!(out.len(), 2);
+        for m in &out {
+            assert_eq!(m.line_text.get(m.range.clone()), Some(""), "{m:?}");
+        }
     }
 
     #[test]
