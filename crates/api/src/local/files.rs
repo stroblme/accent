@@ -300,7 +300,7 @@ impl Local {
     /// they were measured against: a file that changed since the plan is refused, not guessed at,
     /// and so is a set of edits that overlap.
     fn edit_one(&self, now: &str, found: &FileEdits) -> Result<()> {
-        let path = self.resolve(now)?;
+        let path = self.resolve_inside(now)?;
         let (mut text, _) = fs::read_note(&path)?;
         let mut edits = found.edits.clone();
         edits.sort_by_key(|(start, ..)| std::cmp::Reverse(*start));
@@ -360,7 +360,7 @@ impl Local {
         targets: &HashMap<String, String>,
         files: &HashMap<String, String>,
     ) -> Result<bool> {
-        let path = self.resolve(now)?;
+        let path = self.resolve_inside(now)?;
         let (text, etag) = fs::read_note(&path)?;
         let Some(rewritten) = markdown::rewrite_moved(&text, old, now, targets, files) else {
             return Ok(false);
@@ -461,7 +461,7 @@ impl Local {
     ) -> Result<markdown::Repaged> {
         let mut targets: HashMap<String, String> =
             self.index().resolved_links(note)?.into_iter().collect();
-        let path = self.resolve(note)?;
+        let path = self.resolve_inside(note)?;
         let (text, etag) = fs::read_note(&path)?;
         // A reference definition or an HTML `href` is no link the index holds, and may spell a
         // path none of the note's links does.
@@ -585,7 +585,7 @@ impl Local {
         replacement: &str,
         literal: bool,
     ) -> Result<Option<(usize, Before)>> {
-        let path = self.resolve(rel)?;
+        let path = self.resolve_inside(rel)?;
         let (text, etag) = fs::read_note(&path)?;
         let matches = re.find_iter(&text).count();
         if matches == 0 {
@@ -897,6 +897,56 @@ mod tests {
             f.read("c.md"),
             "[[paper#page=1]] <a href=\"paper.pdf#page=3\">one</a>\n\n[d]: paper.pdf#page=2\n"
         );
+    }
+
+    /// A note a symlink takes out of the vault is read through the link but never written by a
+    /// rewrite nobody aimed at it: Replace All and a rename's link update leave the file outside
+    /// alone and report it, while the notes inside are rewritten as before.
+    #[test]
+    fn a_rewrite_leaves_a_note_linked_in_from_outside_alone() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("y.md"), "colour [[B]]\n").unwrap();
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "colour [[B]]\n");
+        f.write("B.md", "the target\n");
+        let root = f.vault.root().to_path_buf();
+        std::os::unix::fs::symlink(outside.path().join("y.md"), root.join("x.md")).unwrap();
+        std::os::unix::fs::symlink(root.join("a.md"), root.join("alias.md")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("ext")).unwrap();
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let crate::vault::Backend::Local(local) = &f.vault.backend else {
+            panic!("the fixture opens a local vault");
+        };
+        assert!(local.resolve_inside("alias.md").is_ok(), "a link inside");
+        assert!(local.resolve_inside("x.md").is_err(), "a file link out");
+        assert!(
+            local.resolve_inside("ext/y.md").is_err(),
+            "a folder link out"
+        );
+        let outside_note = || std::fs::read_to_string(outside.path().join("y.md")).unwrap();
+        // `x.md` or `ext/y.md`, whichever the walk kept of the one file both lead to.
+        let said = |failed: &[(String, String)]| {
+            failed
+                .iter()
+                .any(|(_, why)| why.contains("outside the vault"))
+        };
+
+        let report = f
+            .vault
+            .replace_all("colour", Options::default(), "color", true, false)
+            .unwrap();
+        assert_eq!(report.rewritten, ["a.md"], "{report:?}");
+        assert!(said(&report.failed), "{report:?}");
+        assert_eq!(outside_note(), "colour [[B]]\n");
+
+        let plan = f.vault.plan_moves(&one("B.md", "C.md")).unwrap();
+        let report = f.vault.rename(&plan, true).unwrap();
+        assert_eq!(report.rewritten, ["a.md"], "{report:?}");
+        assert!(said(&report.failed), "{report:?}");
+        assert_eq!(f.read("a.md"), "color [[C]]\n");
+        assert_eq!(outside_note(), "colour [[B]]\n");
     }
 
     #[test]
