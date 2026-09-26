@@ -363,11 +363,11 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### Image
 
-- A `GtkPicture` in a scroller, fitted to the window until zoomed, the file decoded off the main loop by GDK's own decoders, and a JPEG turned the way its EXIF says (`accent_core::orientation`), which they ignore and WebKit does not.
+- A `GtkPicture` in a scroller, fitted to the window until zoomed, the file decoded off the main loop by GDK's own decoders, and a JPEG turned the way its EXIF says (`accent_core::orientation`), which they ignore and WebKit does not. An SVG is drawn at the display's scale, as `GtkPicture` draws one, and again when the window moves to a display of another.
 - A document-like image — a scan, a plot, a diagram, a screenshot of text — is recoloured onto the theme's paper and ink as a PDF page is (Architecture, Recolouring); a photo is left as it is, and Light leaves every image alone. An SVG is always recoloured, through a filter on its own vector; a GIF never unasked, being likely an animation. Transparency is judged over white, and kept on the window's own page. An image over 64 megapixels is left alone rather than held twice.
 - Invert Image Colours does to one file what Invert PDF Colours does to a document: whatever it shows, it goes onto the other half's page — from Light onto Dark's, from either Solarized half onto the other's — and under Dark, whose other half is Light, it shows as it is. A page that is not the window's own fills the image's transparent parts with its paper, so a drawing on nothing reads as a page. It lasts until the app quits and is written nowhere.
 - A theme change recolours the texture already decoded; the file is read again only when it changes on disk.
-- The preview shows an image as its tab would: the app's `accent:` scheme serves the recoloured bytes (a PNG, or the SVG with its filter), so the page carries no script or class for it. WebKit keeps what it was served across renders, so a new look or an inversion clears its memory cache and renders the note again. Its menu over an image ends with Invert Image Colours, the same toggle as the palette's.
+- The preview shows an image as its tab would: the app's `accent:` scheme serves the recoloured bytes (a PNG, or the SVG with its filter), so the page carries no script or class for it. WebKit keeps what it was served across renders, so a new look, an inversion or a change on disk of an image it was served clears its memory cache and renders the note again. Its menu over an image ends with Invert Image Colours, the same toggle as the palette's.
 
 ### Diagram
 

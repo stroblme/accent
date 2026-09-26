@@ -69,8 +69,8 @@ fn image_state(app: &Rc<App>, when: &str) {
 /// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` opens each image under Dark, printing how long it took
 /// to appear (decoded, classified and recoloured), then walks it through Light, Dark and
 /// Solarized, printing what the classifier said of it, whether the tab shows it recoloured, its
-/// size, the pixel at (2,2) of what it shows and the paintable's type — then the same with Invert
-/// Image Colours on. `ms` is the worker's recolouring of the decoded texture, timed by calling it
+/// size and its texture's, the pixel at (2,2) of that texture and the paintable's type — then the
+/// same with Invert Image Colours on. `ms` is the worker's recolouring of the decoded texture, timed by calling it
 /// here.
 pub(super) fn bench_image_look(app: &Rc<App>, rels: &str) {
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
@@ -105,7 +105,9 @@ pub(super) fn bench_image_look(app: &Rc<App>, rels: &str) {
 
 /// One `bench image_look` line for the image in `image`'s tab.
 fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
-    let shown = picture_of(&image.page).and_then(|p| p.paintable());
+    let picture = picture_of(&image.page);
+    let scale = picture.as_ref().map_or(1, |p| p.scale_factor());
+    let shown = picture.and_then(|p| p.paintable());
     let read = image.image.borrow().clone();
     let (Some(shown), Some((path, original))) = (shown, read) else {
         return println!("bench image_look {rel} theme={theme:?} not_shown");
@@ -117,8 +119,14 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
         ),
         None => "document=- paper=- colours=-".to_string(),
     };
-    let px = shown
-        .downcast_ref::<gdk::Texture>()
+    // An SVG's texture is drawn at the display's scale, inside a paintable of its logical size.
+    let texture = shown.downcast_ref::<gdk::Texture>().cloned().or_else(|| {
+        shown
+            .downcast_ref::<crate::look::Scaled>()
+            .map(|s| s.texture())
+    });
+    let px = texture
+        .as_ref()
         .map(|t| {
             let mut downloader = gdk::TextureDownloader::new(t);
             downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
@@ -133,15 +141,18 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
             )
         })
         .unwrap_or_else(|| "-".to_string());
-    let recoloured = shown.downcast_ref::<gdk::Texture>() != Some(&original);
+    let recoloured = texture.as_ref() != Some(&original);
+    let pixels = texture.map_or((0, 0), |t| (t.width(), t.height()));
     let t = Instant::now();
-    let _ = crate::look::show(&path, Some(original), Look::now(), inverted);
+    let _ = crate::look::show(&path, Some(original), Look::now(), inverted, scale);
     println!(
         "bench image_look {rel} theme={theme:?} dark={} inverted={inverted} {verdict} \
-         recoloured={recoloured} size={}x{} px(2,2)={px} type={} ms={:.1}",
+         recoloured={recoloured} size={}x{} pixels={}x{} px(2,2)={px} type={} ms={:.1}",
         adw::StyleManager::default().is_dark(),
         shown.intrinsic_width(),
         shown.intrinsic_height(),
+        pixels.0,
+        pixels.1,
         shown.type_().name(),
         ms_since(t),
     );
@@ -157,7 +168,13 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 /// `=hold:<rel_note>` instead prints where each image is on screen and stays up for 40 s, printing
 /// the inverted images and the page's requests every two seconds, for an XTEST right-click on an
 /// image and a pick from its menu.
+///
+/// `=change:<rel_note>,<rel_img>,<rel_other>` instead copies `<rel_other>` over `<rel_img>` once
+/// the note shows, a figure exported again under the preview, and prints the page either side.
 pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
+    if let Some(arg) = rel.strip_prefix("change:") {
+        return change_preview(app, arg);
+    }
     let (hold, rel) = match rel.strip_prefix("hold:") {
         Some(rel) => (true, rel),
         None => (false, rel),
@@ -290,6 +307,30 @@ async fn preview_look(app: &Rc<App>, when: &str) {
     {
         println!("bench preview_look {when} shot_error {e}");
     }
+}
+
+/// See `=change:` on [`bench_preview_look`].
+fn change_preview(app: &Rc<App>, arg: &str) {
+    let [rel, image, other] = arg.split(',').collect::<Vec<_>>()[..] else {
+        println!("bench preview_look change needs <rel_note>,<rel_img>,<rel_other>");
+        return bench_quit(app);
+    };
+    app.open_path(rel);
+    let (app, image, other) = (app.clone(), image.to_string(), other.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(400)).await;
+        app.set_mode(Mode::Split);
+        preview_look(&app, "before").await;
+        let root = app.root();
+        if let Err(e) = std::fs::copy(root.join(&other), root.join(&image)) {
+            println!("bench preview_look cannot_replace {e}");
+            return bench_quit(&app);
+        }
+        // The watcher's event, and the render it asks for.
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        preview_look(&app, "changed").await;
+        bench_quit(&app);
+    });
 }
 
 /// See `=hold:` on [`bench_preview_look`].

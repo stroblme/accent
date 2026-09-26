@@ -31,9 +31,9 @@ pub struct Viewer {
     /// An image's file on this machine and the texture it was decoded to, so a restyle recolours
     /// without reading it again. `None` while it is being read, and on a status page.
     pub image: RefCell<Option<(PathBuf, gdk::Texture)>>,
-    /// The look and inversion the image was last asked to be shown under, so a restyle that
-    /// changes neither does nothing.
-    pub look: Cell<Option<(Look, bool)>>,
+    /// The look, inversion and display scale the image was last asked to be shown under, so a
+    /// restyle that changes none of them does nothing.
+    pub look: Cell<Option<(Look, bool, i32)>>,
     /// Counts the times the image was sent to be shown, so only the last one's answer lands.
     pub shows: Cell<u32>,
 }

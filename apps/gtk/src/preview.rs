@@ -297,6 +297,9 @@ struct Assets {
     /// How many requests the page has made, for the drills: whether WebKit asks again for an
     /// image it was served before.
     requests: Cell<u32>,
+    /// The keys served since WebKit's memory cache was last cleared, whose bytes it may answer a
+    /// render with even after the file has changed.
+    served: RefCell<HashSet<String>>,
 }
 
 /// Where the find readout goes; see [`Preview::connect_found`].
@@ -332,6 +335,7 @@ impl Preview {
             resolve: Arc::new(resolve),
             inverted,
             requests: Cell::new(0),
+            served: RefCell::default(),
         });
 
         let context = webkit6::WebContext::new();
@@ -472,6 +476,7 @@ impl Preview {
     /// Drop every image WebKit keeps from the page, then `then`, which renders the note again:
     /// a new look or an inverted image is served only to a page that asks for it once more.
     pub fn forget_images(&self, then: impl FnOnce() + 'static) {
+        self.inner.assets.served.borrow_mut().clear();
         let Some(data) = self.inner.session.website_data_manager() else {
             return then();
         };
@@ -490,6 +495,12 @@ impl Preview {
                 (then.into_inner())();
             },
         );
+    }
+
+    /// Whether WebKit may still hold `key`'s bytes as they were when it was served, so a change
+    /// of the file wants [`Preview::forget_images`].
+    pub fn holds(&self, key: &str) -> bool {
+        self.inner.assets.served.borrow().contains(key)
     }
 
     /// How many requests the page has made so far.
@@ -791,7 +802,7 @@ fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
 /// the same pairing the git pane uses, and only the finishing comes back to the main loop. The
 /// worker also decides how an image is shown in the look in force, which may mean recolouring it
 /// ([`look::serve`]).
-fn serve(assets: &Assets, request: &webkit6::URISchemeRequest) {
+fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     assets.requests.set(assets.requests.get() + 1);
     let uri = request.uri().unwrap_or_default();
     let Some(("file", rel)) = accent_uri(&uri) else {
@@ -800,15 +811,20 @@ fn serve(assets: &Assets, request: &webkit6::URISchemeRequest) {
     // The look and the inverted set live on this thread; the worker gets a copy of each.
     let (resolve, request) = (assets.resolve.clone(), request.clone());
     let (look, inverted) = (Look::now(), assets.inverted.borrow().clone());
+    let assets = assets.clone();
     glib::spawn_future_local(async move {
         let answer = crate::work::off_thread("asset", move || {
             let (key, path) = resolve_asset(&*resolve, &rel)?;
             let served = look::serve(&path, look, inverted.contains(&key));
-            Some((path, served))
+            Some((key, path, served))
         });
-        match answer.await {
-            Some(Some((path, Served::File))) => send(&request, &path),
-            Some(Some((_, Served::Bytes(bytes, mime)))) => {
+        let answer = answer.await;
+        if let Some(Some((key, ..))) = &answer {
+            assets.served.borrow_mut().insert(key.clone());
+        }
+        match answer {
+            Some(Some((_, path, Served::File))) => send(&request, &path),
+            Some(Some((_, _, Served::Bytes(bytes, mime)))) => {
                 let stream = gio::MemoryInputStream::from_bytes(&bytes);
                 request.finish(&stream, bytes.len() as i64, Some(mime));
             }
