@@ -12,12 +12,14 @@
 //! A line's paragraph values are the ones on its first character, so that is the character
 //! [`retag`] checks, and a tag goes on whole lines. [`follow`] keeps the tags in step with the text:
 //! every line once, then only the lines each insertion or deletion touched, so a keystroke costs
-//! the same in a long file as in a short one.
+//! the same in a long file as in a short one. A note's fenced block is code, and its lines wrap as
+//! code does whatever they open with; [`refence`] follows the styling pass that finds the fences.
 
-use crate::typing;
+use crate::{highlight, typing};
 use gtk::pango;
 use gtk::prelude::*;
 use sourceview5::prelude::*;
+use std::ops::Range;
 use std::rc::Rc;
 
 /// The deepest column a wrap hangs at: a line seven levels into four-space code, or a paragraph
@@ -70,10 +72,7 @@ pub fn measure(view: &sourceview5::View) {
 /// markers set their own hang.
 pub fn follow(view: &sourceview5::View, markers: bool) {
     let buffer = view.buffer();
-    let table = buffer.tag_table();
-    let tags: Rc<[gtk::TextTag]> = (1..=COLUMNS)
-        .filter_map(|column| table.lookup(&name(column)))
-        .collect();
+    let tags = tags(&buffer);
     retag(view, &tags, markers, 0, buffer.line_count() - 1);
     // After the default handlers, which leave the insertion's iter behind the inserted text and a
     // deletion's two on the join. Weak: the view holds the buffer, which holds these closures.
@@ -101,6 +100,72 @@ pub fn follow(view: &sourceview5::View, markers: bool) {
     }
 }
 
+/// The wrap tags of `buffer`'s table, `wrap1` first.
+fn tags(buffer: &gtk::TextBuffer) -> Rc<[gtk::TextTag]> {
+    let table = buffer.tag_table();
+    (1..=COLUMNS)
+        .filter_map(|column| table.lookup(&name(column)))
+        .collect()
+}
+
+/// Run `restyle`, a note's styling pass, then retag the lines it put into a fence or took out of
+/// one. The pass moves the `codeblock` tag a fence's lines are known by without an edit on them —
+/// typing a fence open takes in every line below it — so no insertion or deletion retags them.
+/// Only the runs of fenced lines that differ before and after are retagged: a pass that opens or
+/// closes nothing costs two walks over the tag's toggles.
+pub fn refence<T>(view: &sourceview5::View, restyle: impl FnOnce() -> T) -> T {
+    let before = fences(view);
+    let styled = restyle();
+    let after = fences(view);
+    let tags = tags(&view.buffer());
+    for lines in moved(&before, &after) {
+        retag(view, &tags, true, lines.start, lines.end - 1);
+    }
+    styled
+}
+
+/// The runs of lines in a fence, as the `codeblock` tag lies now: a line is in one when its first
+/// character is, the character its wrap is read from.
+fn fences(view: &sourceview5::View) -> Vec<Range<i32>> {
+    let buffer = view.buffer();
+    let Some(tag) = buffer.tag_table().lookup(highlight::CODEBLOCK) else {
+        return Vec::new();
+    };
+    // A line counts from its own start, so a run that starts or ends inside a line starts at the
+    // next and ends at that one.
+    let line = |at: &gtk::TextIter| at.line() + i32::from(!at.starts_line());
+    let (mut runs, mut at) = (Vec::new(), buffer.start_iter());
+    while at.has_tag(&tag) || at.forward_to_tag_toggle(Some(&tag)) {
+        let first = line(&at);
+        at.forward_to_tag_toggle(Some(&tag));
+        let end = line(&at);
+        if first < end {
+            runs.push(first..end);
+        }
+    }
+    runs
+}
+
+/// The runs that differ between two lists of them: every run of either past what the two have
+/// in common at the front and at the back. A line in none of them is in a fence in both or in
+/// neither.
+fn moved<'a>(
+    before: &'a [Range<i32>],
+    after: &'a [Range<i32>],
+) -> impl Iterator<Item = &'a Range<i32>> {
+    let head = before.iter().zip(after).take_while(|(b, a)| b == a).count();
+    let (before, after) = (&before[head..], &after[head..]);
+    let tail = before
+        .iter()
+        .rev()
+        .zip(after.iter().rev())
+        .take_while(|(b, a)| b == a)
+        .count();
+    before[..before.len() - tail]
+        .iter()
+        .chain(&after[..after.len() - tail])
+}
+
 /// Give each of lines `first..=last` the tag its column wants.
 ///
 /// An edit's few lines are checked one by one, and only a line whose first character carries the
@@ -115,8 +180,17 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
         width if width > 0 => width as usize,
         _ => tab_width,
     };
-    let want = |line: &str| {
-        let column = typing::wrap_column(line, tab_width, level, markers).min(COLUMNS);
+    // A fence's lines are code, so what they open with is no marker ([`refence`]).
+    let fence = markers
+        .then(|| buffer.tag_table().lookup(highlight::CODEBLOCK))
+        .flatten();
+    let want = |text: &str, line: i32| {
+        let fenced = fence.as_ref().is_some_and(|tag| {
+            buffer
+                .iter_at_line(line)
+                .is_some_and(|start| start.has_tag(tag))
+        });
+        let column = typing::wrap_column(text, tab_width, level, markers && !fenced).min(COLUMNS);
         column.checked_sub(1).and_then(|index| tags.get(index))
     };
     let line_end = |line| crate::editor::line_end(&buffer, line);
@@ -128,7 +202,7 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
             let end = line_end(line);
             let mut head = start;
             head.forward_chars(HEAD_CHARS);
-            let want = want(&buffer.text(&start, &head.min(end), true));
+            let want = want(&buffer.text(&start, &head.min(end), true), line);
             let have: Vec<gtk::TextTag> = start
                 .tags()
                 .into_iter()
@@ -161,7 +235,12 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
         }
     }
     // `lines` ends a line where the buffer does, the file's CRLF being `\n` by the time it is here.
-    let wants: Vec<_> = buffer.text(&start, &end, true).lines().map(want).collect();
+    let wants: Vec<_> = buffer
+        .text(&start, &end, true)
+        .lines()
+        .zip(first..)
+        .map(|(text, line)| want(text, line))
+        .collect();
     let mut from = 0;
     for to in 1..=wants.len() {
         if to < wants.len() && wants[to] == wants[from] {
@@ -171,5 +250,28 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
             buffer.apply_tag(tag, &start, &line_end(first + to as i32 - 1));
         }
         from = to;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the fences a pass moved are retagged: what the two lists share at either end is left
+    /// alone, and everything between, from both, is not.
+    #[test]
+    // A run of lines is a range, and a list of one of them is what this is about.
+    #[allow(clippy::single_range_in_vec_init)]
+    fn only_the_fences_that_moved_are_retagged() {
+        let moved = |before: &[Range<i32>], after: &[Range<i32>]| {
+            moved(before, after).cloned().collect::<Vec<_>>()
+        };
+        assert!(moved(&[2..5, 9..12], &[2..5, 9..12]).is_empty());
+        // Opened on a note's first run: that fence and the rest of the file.
+        assert_eq!(moved(&[], &[3..40]), [3..40]);
+        // Closed again, which gives the lines below back.
+        assert_eq!(moved(&[3..40], &[3..8]), [3..40, 3..8]);
+        // A fence opened between two others: the ones either side stay put.
+        assert_eq!(moved(&[0..2, 20..24], &[0..2, 10..14, 20..24]), [10..14]);
     }
 }

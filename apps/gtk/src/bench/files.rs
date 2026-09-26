@@ -490,6 +490,15 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
             .find(|row| row.kind != accent_core::walk::FileKind::Dir && row.rel_path != rel)
             .map(|row| row.rel_path);
         if let Some(second) = second {
+            // One toast for the two, once both have landed: a toast still up from the steps
+            // before would hold it back in the queue, where nothing can read it.
+            for _ in 0..150 {
+                if compare::bench_toast(&app).is_none() {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(100)).await;
+            }
+            let said = app.toasted.get();
             let both = [(rel.clone(), false), (second, false)];
             fileops::clipboard::copy_all(&ops, &both);
             fileops::clipboard::paste(&ops, "");
@@ -499,7 +508,11 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
                 .map(|(rel, _)| accent_core::path::basename(rel).to_string())
                 .map(|name| (name.clone(), vault.exists(&name)))
                 .collect();
-            println!("bench clip_copied_many {landed:?}");
+            println!(
+                "bench clip_copied_many {landed:?} toasts={} said={:?}",
+                app.toasted.get() - said,
+                compare::bench_toast(&app)
+            );
             for (name, _) in &landed {
                 let _ = vault.delete(name);
             }
@@ -1138,7 +1151,8 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
 /// path field Rename has. It writes to `Saved As/`, a folder that is not there yet, and prints the
 /// tab's key after and what each file holds. A note is also given an edit it has not saved first,
 /// which only the copy may hold, a diagram likewise, and a PDF a page before and a page after,
-/// which only the copy may get the second of; then a note is saved onto a folder, which is refused, onto its old
+/// which only the copy may get the second of; an image is copied as it is and its tab retitled;
+/// then a note is saved onto a folder, which is refused, onto its old
 /// name while a tab of its own has that open, whose Replace question is answered, and as `.txt`,
 /// which reopens it as text.
 pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
@@ -1195,6 +1209,10 @@ pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
             tab.as_ref().and(text(disk(&copy))),
             disk(&rel) == disk(&copy),
         );
+        // An image has nothing unsaved, so the copy and the tab's new title are the whole of it.
+        if let Doc::Image(viewer) = &doc {
+            println!("bench save_as_image title={:?}", viewer.page.title());
+        }
         if let Some(diagram) = doc.diagram() {
             let renamed = |rel: &str| text(disk(rel)).map(|t| t.contains("Renamed Unsaved"));
             println!(

@@ -66,9 +66,10 @@ use tags::bench_tags;
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
 /// until the pointer is on the row, and then the changes list's splices across a refresh that
-/// changes nothing and two Stage clicks, and each section header's button and whether its row
-/// takes the hover highlight. `=press:<path>` instead prints where that row's Stage button is and stays up, for
-/// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
+/// changes nothing and two Stage clicks, and each section header's buttons and whether its row
+/// takes the hover highlight; last the Changes header's Discard All, its question answered.
+/// `=press:<path>` instead prints where that row's Stage button is and stays up, for an XTEST
+/// press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
 /// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did,
 /// and `=sync` asks for a Sync during the fetch on opening and prints whether it waited for it.
@@ -192,7 +193,9 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_NUMBERS=<rel_note>,<rel_code>,<rel_note>` opens the first two and flips the Line
 /// Numbers switch in the preferences three times, printing after each step whether every open tab
 /// shows its numbers, how wide the column is and whether the tab is in front: the third file
-/// opens after the first flip, and the last flip is made with both notes behind the code.
+/// opens after the first flip, and the last flip is made with both notes behind the code. Then
+/// `config.toml` turns them off by hand with the dialog up, and it prints what the dialog's row
+/// says afterwards, whether accent wrote the file again, and whether that row still writes it.
 ///
 /// `ACCENT_BENCH_THEME=<rel_note>` walks the window through Light, Dark and Solarized the way a
 /// system switch and the preferences do, and prints what the note's theme-derived tags and the
@@ -210,14 +213,16 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_CLIP=<rel_file>` copies a file and pastes it beside itself, then cuts the copy
 /// and pastes it in the vault root: the `(copy)` mark, the rows a Cut dims, and whether the paste
 /// of a Cut moved the file rather than copying it again. Then it puts two files on the clipboard
-/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root. Last it
+/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root, how many
+/// toasts said so — one is right — and what it said. Last it
 /// cuts two notes that link each other and a third, pastes them into the file's folder and
 /// answers the Update Links? question, printing every dialog that came — one is right — and
 /// the three notes' texts afterwards.
 /// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
 /// note and prints the text and the files they left (`attach::bench_attach`).
-/// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file as another in a folder not there yet, and a
-/// note also onto a folder, onto a file open in another tab and as `.txt` (`bench_save_as`).
+/// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
+/// another in a folder not there yet, and a note also onto a folder, onto a file open in another
+/// tab and as `.txt` (`bench_save_as`).
 /// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
 /// list the way the popover's own grab does, printing which row stays highlighted while the menu
 /// is up and which once it has closed. Then it marks that row and one more, the way a Ctrl+click

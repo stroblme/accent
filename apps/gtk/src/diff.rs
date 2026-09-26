@@ -898,7 +898,7 @@ impl Compare {
         }
         let pane = self.pane(side);
         pane.buffer.set_text(&text);
-        editor::style_companion(pane.flavour, &pane.buffer);
+        editor::style_companion(pane.flavour, &pane.buffer, &pane.view);
         self.refresh();
     }
 

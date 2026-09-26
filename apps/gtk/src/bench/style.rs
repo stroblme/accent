@@ -246,9 +246,11 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
 /// Open each of `rels` in turn in a narrow window and print, for every line, the wrap tag on its
 /// first character, that tag's indent, and how far right of the line's first screen row its second
 /// one starts: the hang as GTK laid it out, `None` for a line that does not wrap. Each tab stays up
-/// for four seconds, for a screenshot. The last one, meant to be code, is then filled with 10k
-/// indented lines, three to a depth as code's blocks come, and the fill, a keystroke, a Return and
-/// a new indent width are timed, each with the tag it left on the line it touched.
+/// for four seconds, for a screenshot; a note is first given a fence opened above everything, and
+/// closed again, with every line's tag printed each time. The last one, meant to be code, is then
+/// filled with 10k indented lines, three to a depth as code's blocks come, and the fill, a
+/// keystroke, a Return and a new indent width are timed, each with the tag it left on the line it
+/// touched.
 pub(super) fn bench_wrap(app: &Rc<App>, rels: &str) {
     let app = app.clone();
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
@@ -264,6 +266,21 @@ pub(super) fn bench_wrap(app: &Rc<App>, rels: &str) {
             };
             for line in 0..tab.buffer.line_count() {
                 println!("bench wrap {rel} {}", bench_wrap_line(&tab, line));
+            }
+            // A fence typed open above a note takes in every line below it, which then wraps as
+            // code; taken out again, they hang behind their markers once more.
+            if tab.flavour().is_note() {
+                let tags = |tab: &Rc<Tab>| {
+                    (0..tab.buffer.line_count())
+                        .map(|line| bench_wrap_tag(tab, line))
+                        .collect::<Vec<_>>()
+                };
+                tab.buffer.insert(&mut tab.buffer.start_iter(), "```\n");
+                println!("bench wrap_fence_opened {rel} {:?}", tags(&tab));
+                if let Some(mut second) = tab.buffer.iter_at_line(1) {
+                    tab.buffer.delete(&mut tab.buffer.start_iter(), &mut second);
+                }
+                println!("bench wrap_fence_closed {rel} {:?}", tags(&tab));
             }
             println!("bench wrap_hold {rel}");
             glib::timeout_future(Duration::from_secs(4)).await;
@@ -588,6 +605,45 @@ pub(super) fn bench_numbers(app: &Rc<App>, rels: &str) {
         app.open_path(&later);
         glib::timeout_future(Duration::from_millis(300)).await;
         step("on_behind_then_front");
+        // Off again by a hand edit to config.toml with the dialog up: the tabs and the dialog's
+        // row both follow the file, and nothing is written back over it.
+        let _ = WidgetExt::activate_action(&app.window, "win.preferences", None);
+        let path = accent_core::config::config_path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::write(
+            &path,
+            text.replace("line_numbers = true", "line_numbers = false"),
+        );
+        let stamp = || {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&path)
+                .map(|m| (m.ino(), m.mtime_nsec()))
+                .ok()
+        };
+        let written = stamp();
+        // Past the second a write accent owes the file would wait.
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let row = find_widget(app.window.upcast_ref(), &|w| {
+            w.downcast_ref::<adw::SwitchRow>()
+                .is_some_and(|row| row.title() == "Line Numbers")
+        })
+        .and_downcast::<adw::SwitchRow>();
+        println!(
+            "bench numbers hand_edit row={:?} rewritten={}",
+            row.as_ref().map(|row| row.is_active()),
+            stamp() != written
+        );
+        step("hand_edit");
+        // The row built from the file is as live as the one it replaced.
+        if let Some(row) = row {
+            row.set_active(true);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            println!(
+                "bench numbers row_after_edit writes={}",
+                text.contains("line_numbers = true")
+            );
+        }
         bench_quit(&app);
     });
 }

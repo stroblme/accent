@@ -201,13 +201,64 @@ fn bench_git_stage(app: &Rc<App>) {
             settle().await;
         }
         println!("bench git_changes_rows {}", git.changes_rows());
+
+        // The Changes header's Discard All: a staged file changed again and a file made that git
+        // does not track, its one question printed and answered, and what is left of either.
+        let (changed, made) = (app.root().join("b.md"), app.root().join("all-new.md"));
+        let _ = std::fs::write(&changed, "discarded\n");
+        let _ = std::fs::write(&made, "untracked\n");
+        git.schedule_refresh(crate::git::Depth::Status);
+        settle().await;
+        let header = list.as_ref().and_then(|list| {
+            find_widget(list, &|w| {
+                w.is_mapped()
+                    && w.downcast_ref::<gtk::Stack>().is_some_and(|s| {
+                        s.visible_child_name().as_deref() == Some("header")
+                            && s.visible_child()
+                                .and_then(|h| h.first_child())
+                                .and_downcast::<gtk::Label>()
+                                .is_some_and(|l| l.text() == "Changes")
+                    })
+            })
+        });
+        let button = header.and_then(|h| row_button(&h, "Discard All"));
+        println!(
+            "bench git_step discard_all button={} rows={}",
+            button.is_some(),
+            git.changes_rows()
+        );
+        if let Some(button) = button {
+            button.emit_clicked();
+        }
+        for _ in 0..2 {
+            glib::timeout_future(Duration::from_millis(500)).await;
+            let Some(dialog) = app
+                .window
+                .visible_dialog()
+                .and_downcast::<adw::AlertDialog>()
+            else {
+                continue;
+            };
+            let (heading, body) = (dialog.heading().unwrap_or_default(), dialog.body());
+            println!("bench git_dialog {heading:?} {body:?}");
+            dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+            dialog.close();
+            settle().await;
+        }
+        println!(
+            "bench git_discard_all rows={} reverted={} untracked_gone={}",
+            git.changes_rows(),
+            std::fs::read_to_string(&changed).is_ok_and(|t| t != "discarded\n"),
+            !made.exists()
+        );
         bench_quit(&app);
     });
 }
 
-/// The section headers on screen: their title, their bulk button's icon and tooltip, and whether
-/// their row is `.activatable`, the class Adwaita's hover and press highlight is written for. The
-/// file and folder rows are counted beside them, and every one of those is to keep it.
+/// The section headers on screen: their title, their bulk button's icon and tooltip, the Discard
+/// All beside it where the header offers one, and whether their row is `.activatable`, the class
+/// Adwaita's hover and press highlight is written for. The file and folder rows are counted beside
+/// them, and every one of those is to keep it.
 fn bench_git_headers(view: &gtk::ListView) {
     let (mut rows, mut lit) = (0, 0);
     let mut row = view.first_child();
@@ -226,12 +277,18 @@ fn bench_git_headers(view: &gtk::ListView) {
         }
         let header = stack.visible_child();
         let title = header.as_ref().and_then(|h| h.first_child());
-        let button = header
+        let button = title
+            .as_ref()
+            .and_then(|t| t.next_sibling())
+            .and_downcast::<gtk::Button>();
+        let discard = header
             .as_ref()
             .and_then(|h| h.last_child())
-            .and_downcast::<gtk::Button>();
+            .and_downcast::<gtk::Button>()
+            .filter(|b| b.is_visible())
+            .map(|b| (b.icon_name(), b.tooltip_text()));
         println!(
-            "bench git_header {:?} activatable={activatable} icon={:?} tip={:?}",
+            "bench git_header {:?} activatable={activatable} icon={:?} tip={:?} discard={discard:?}",
             title.and_downcast::<gtk::Label>().map(|l| l.text()),
             button.as_ref().and_then(|b| b.icon_name()),
             button.as_ref().and_then(|b| b.tooltip_text()),

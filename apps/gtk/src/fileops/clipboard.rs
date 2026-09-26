@@ -14,7 +14,7 @@
 //! machine that has to be carried in ([`transfer::import`]).
 
 use super::paths::{free_path, move_dest};
-use super::{Ops, move_all, several, transfer};
+use super::{Ops, batch_to, move_all, several, transfer};
 use accent_core::path::basename;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -222,11 +222,7 @@ fn parse(mime: &str, text: &str) -> (bool, Vec<String>) {
 fn apply(ops: &Rc<Ops>, dir: &str, clip: Clip) {
     match clip.cut {
         true => move_here(ops, &clip.inside, dir),
-        false => {
-            for (rel, is_dir) in &clip.inside {
-                copy_here(ops, rel, dir, *is_dir);
-            }
-        }
+        false => copy_here(ops, clip.inside, dir),
     }
     if !clip.outside.is_empty() {
         transfer::import(ops, dir, clip.outside, clip.cut);
@@ -267,28 +263,52 @@ fn move_here(ops: &Rc<Ops>, inside: &[(String, bool)], dir: &str) {
     }
 }
 
-/// A Copy pasted duplicates, under a name the destination does not hold yet.
-fn copy_here(ops: &Rc<Ops>, rel: &str, dir: &str, is_dir: bool) {
-    let (vault, ops) = (ops.vault.clone(), ops.clone());
-    let (rel, dir) = (rel.to_string(), dir.to_string());
-    let name = basename(&rel).to_string();
+/// A Copy pasted duplicates, each under a name the destination does not hold yet. One worker
+/// copies them in turn, so two of one name take two names, and one toast says what landed once
+/// every copy has; a copy that fails is named on its own, as Move to Trash names one.
+fn copy_here(ops: &Rc<Ops>, inside: Vec<(String, bool)>, dir: &str) {
+    if inside.is_empty() {
+        return;
+    }
+    let (vault, ops, dir) = (ops.vault.clone(), ops.clone(), dir.to_string());
+    let name = several(
+        &inside
+            .iter()
+            .map(|(rel, _)| rel.clone())
+            .collect::<Vec<_>>(),
+    );
     glib::spawn_future_local(async move {
-        let done = crate::work::attempt(&format!("copy {name}"), {
-            let name = name.clone();
-            move || {
-                // Naming and copying on the same worker: each candidate name costs a `stat`,
-                // which on a remote vault is a round trip the window must not wait on.
-                let to = free_path(&dir, &name, is_dir, |rel| vault.exists(rel));
-                vault.copy(&rel, &to).map(|()| to)
-            }
+        let done = crate::work::off_thread("copy", move || {
+            inside
+                .into_iter()
+                .map(|(rel, is_dir)| {
+                    // Naming and copying on the same worker: each candidate name costs a `stat`,
+                    // which on a remote vault is a round trip the window must not wait on.
+                    let to = free_path(&dir, basename(&rel), is_dir, |rel| vault.exists(rel));
+                    (vault.copy(&rel, &to).map(|()| to), rel)
+                })
+                .collect::<Vec<_>>()
         })
         .await;
+        let Some(done) = done else {
+            return (ops.toast)(&format!("Cannot copy {name}: the worker stopped"));
+        };
+        let (mut copied, mut landed) = (Vec::new(), Vec::new());
+        for (answer, rel) in done {
+            match answer {
+                Ok(to) => {
+                    copied.push(rel);
+                    landed.push(to);
+                }
+                Err(e) => (ops.toast)(&format!("Cannot copy {}: {e}", basename(&rel))),
+            }
+        }
         // Neither the tree nor the index is poked: the watcher reports what landed, wherever the
         // files are, the same way it reports a new note.
-        (ops.toast)(&match done {
-            Ok(to) => format!("Copied {name} to {to}"),
-            Err(why) => why,
-        });
+        if let Some(first) = landed.first() {
+            let to = batch_to(first, landed.len());
+            (ops.toast)(&format!("Copied {} to {to}", several(&copied)));
+        }
     });
 }
 
