@@ -17,6 +17,7 @@ import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.Vault
 import io.github.stroblme.accent.ffi.pdfAnchor
+import io.github.stroblme.accent.ui.imageKind
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -102,6 +103,12 @@ data class OpenPdf(
 )
 
 /**
+ * The image in front of the reader: where it is in the vault, and where on disk. It opens on the
+ * image screen rather than as a note, which is what every file that was not a PDF used to do.
+ */
+data class OpenImage(val rel: String, val path: String)
+
+/**
  * Where a PDF opens: [top] points down page [page], at [zoom] and pushed [panX] pixels sideways —
  * the place a reader left it, which Back from a note returns them to. Or the page a link into it
  * names and the four numbers of the passage it quotes there, shown as the selection.
@@ -154,6 +161,7 @@ data class VaultState(
     val results: List<SearchHit> = emptyList(),
     val open: Open? = null,
     val pdf: OpenPdf? = null,
+    val image: OpenImage? = null,
     /**
      * The PDF the open note was reached from, by a tap on a highlight its link paints, and where
      * the reader was in it: what closing the note goes back to. Anything else opened lets it go.
@@ -481,7 +489,19 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             if (rel.endsWith(".pdf", ignoreCase = true)) {
                 val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
                 path.onSuccess { p ->
-                    _state.update { it.copy(pdf = OpenPdf(rel, p, at), open = null, back = null) }
+                    _state.update {
+                        it.copy(pdf = OpenPdf(rel, p, at), open = null, image = null, back = null)
+                    }
+                }
+                    .onFailure { fail("Cannot open this file", it) }
+                return@leave
+            }
+            if (imageKind(rel) != null) {
+                val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
+                path.onSuccess { p ->
+                    _state.update {
+                        it.copy(image = OpenImage(rel, p), open = null, pdf = null, back = null)
+                    }
                 }
                     .onFailure { fail("Cannot open this file", it) }
                 return@leave
@@ -496,6 +516,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 _state.update {
                     it.copy(
                         pdf = null,
+                        image = null,
                         open = Open(rel, note.text, note.etag, conflicts = conflicts, find = find),
                         back = back,
                     )
@@ -508,7 +529,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * Put the note down, writing anything the pause was still holding — and go back to the PDF it
      * was reached from, where the reader left it, if a highlight there is what opened it.
      */
-    fun close() = leave { _state.update { it.copy(open = null, pdf = it.back, back = null) } }
+    fun close() = leave {
+        _state.update { it.copy(open = null, pdf = it.back, image = null, back = null) }
+    }
 
     /**
      * Open the note whose link paints a highlight on the PDF in front, marked at the text the link
@@ -518,6 +541,17 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun openFromPdf(link: PdfLink, place: PdfPlace) {
         val from = _state.value.pdf ?: return
         openFile(link.srcRelPath, find = link.alias, back = from.copy(at = place, finding = false))
+    }
+
+    /**
+     * Where on this device the image an embed names is: the path as the note spells it when a file
+     * is there, and otherwise the one the index places that name at — `![[img.png]]` is written the
+     * way a wikilink is, and the file lives in `Attachments/`. Null for a path out of the vault, or
+     * for nothing at all. Blocking: the rendered view asks from its own loading thread.
+     */
+    fun imagePath(rel: String): String? {
+        val v = vault ?: return null
+        return runCatching { v.asset(rel)?.let { v.pathOf(it) } }.getOrNull()
     }
 
     /** The note links into this PDF, which paint as its highlights. */

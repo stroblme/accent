@@ -47,8 +47,10 @@ Compose widget stands in for which desktop one.
 ### Note
 
 - Reading: the rendered note in a WebView, 16 dp side gutters, one thin bar over the top of it and,
-  while a find is open, the find bar below. The page is loaded when the note or the palette changes
-  and at no other time: a WebView told to load again sends the reader back to the top.
+  while a find is open, the find bar below. The page is loaded when the note, the palette or an
+  image inverted in it changes, and at no other time: a WebView told to load again sends the reader
+  back to the top, so a load of the note already in front puts them back where they were once it
+  has been drawn.
 - Editing: the same text with the same styling spans, markup visible and dimmed.
 
 ### PDF
@@ -78,6 +80,14 @@ Compose widget stands in for which desktop one.
   Its bar sits at the foot of the pages, as a note's does.
 - The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles: until then no
   tool can be picked and a finger only ever moves the page.
+
+### Image
+
+- An image file — from the files, the switcher or a link — opens on a screen of its own rather than
+  as a note: the image fitted whole to the screen on the page colour, under the document's bar. A
+  pinch zooms it, the WebView's own.
+- It is drawn by the note's rule (Colour), and the bar's one action is Invert, which flips that rule
+  for this file for as long as the app runs, as a long press on the image in a note does.
 
 ### Message
 
@@ -114,7 +124,13 @@ exist as a visible control.
 | Tap a highlight on a page | Opens the note whose link makes it; Back returns to the page | The highlight |
 | Long press on a PDF page | Selects the word under the finger; a drag grows it, and the handles move either end | The handles and the floating toolbar it raises |
 | Long press on a note | Selects the text under the finger with the WebView's own handles, as a page of prose does everywhere else on the platform | The handles it raises |
+| Long press on an image in a note | Inverts its colours against the recolouring rule, until the app is closed | Invert on the image's own screen |
+| Pinch on an image | Zooms it, the WebView's own | — |
 
+- A long press on an image is taken only on an image, where the WebView's hit test says one is
+  under the finger; anywhere else it is left to the WebView, whose long press is the selection. Its
+  twin is a screen away rather than on this one: the image opened on its own, where Invert is in the
+  bar and flips the same switch.
 - A panel is closed by pulling it down, the one gesture here that reads as itself: the handle says
   it moves, and down is where a panel goes. What is inside scrolls first, so only a drag the list
   cannot use pulls the panel, and letting go short of the threshold springs it back. Back does the
@@ -139,10 +155,10 @@ exist as a visible control.
 
 ## The document
 
-- A note and a PDF are one surface with two kinds of content: the same `DocumentBar` — the file's
-  name and the one thing that can be done to it — over the same `DocumentGap`, the content in the
-  rectangle that leaves (`ui/Common.kt`). Moving between a note and a PDF should not move what is
-  being read.
+- A note, a PDF and an image are one surface with three kinds of content: the same `DocumentBar` —
+  the file's name and the one thing that can be done to it — over the same `DocumentGap`, the
+  content in the rectangle that leaves (`ui/Common.kt`). Moving between a note and a PDF should not
+  move what is being read.
 - On both, the bar lies over the content, not above it (`DocumentFrame`): a document is read at a
   scroll offset, a PDF at a zoom as well, and a bar sometimes in the layout gives the document two
   positions, so tapping for the bar would move what the tap was aimed at.
@@ -156,7 +172,8 @@ exist as a visible control.
   once coming and going.
 - The bar's button is a note's Edit and Done. A PDF's are Find and Contents, the document's
   bookmarks; on a file with none, Contents is there and disabled: a gap where a control belongs is
-  worse than a control that says it has nothing to offer.
+  worse than a control that says it has nothing to offer. An image's is Invert, disabled on a GIF,
+  which is never recoloured.
 - Only one screen keeps window insets. A PDF inside a vault is inside a screen already clear of the
   status bar, so its own scaffold takes none; opened from another app it keeps them itself. Applied
   twice, the bar sits lower than a note's.
@@ -208,6 +225,12 @@ exist as a visible control.
 - A PDF is recoloured in a dark theme as on the desktop: the document's paper lands on the app's
   surface and its ink on the app's text, each pixel keeping its chroma, so a coloured figure stays
   coloured.
+- So is an image that reads as a document — a scan, a plot, a diagram, a screenshot of text — in a
+  note and on the image screen alike; a photo is left alone, an SVG is always a drawing, a GIF is
+  never touched (the decoder takes its first frame, and an animation would stop), and past 64 MP an
+  image is not looked at. Inverting one flips the rule for that file: in a light theme it goes onto
+  the dark page, in a dark one it shows as it is. Per file, until the app's process ends, never
+  written anywhere — the desktop's Invert, for a figure the classifier got wrong.
 
 ## Architecture
 
@@ -239,6 +262,17 @@ The decisions under the Android app, each with its reason; the shared ones are i
   here; what the two apps share is the vault, and that is a path.
 - **The rendered view is a `WebView`** over the core's `markdown::to_html`, with the desktop's
   `accent://` scheme and generated CSS — it is the only thing on the platform that draws MathML.
+- **Images are recoloured on their way into a WebView** (`ui/Images.kt`): the note's page and the
+  image screen both take them from `served`, which classifies a raster from a copy decoded to a
+  512 px long side (`looksLikeDocument` samples 65 k pixels whatever it is given; the verdict is
+  cached by path, size and date), recolours it at a 2048 px long side and serves a PNG, and hands
+  an SVG over with the core's filter in it — straight alpha throughout, `BitmapFactory` decoding
+  without premultiplying. The rules are the core's (DESIGN.md, Recolouring); the image screen is a
+  WebView too, because nothing else here draws an SVG, and a recoloured SVG is a filter only a
+  browser applies. The WebViews share one memory cache, cleared before a load whenever the palette
+  or the inverted files differ from what it was filled under.
+- **An embed resolves as on the desktop**: the path the note spells if a file is there, otherwise
+  where the index places the name (`Vault::asset`), inside the vault or not at all.
 - **The editor is `BasicTextField(TextFieldState)`** with a styled `OutputTransformation` — the only
   field that is not deprecated, and `TextFieldBuffer.addStyle` is where the core's spans go.
 - **Wet strokes are a Compose `Canvas`** path committed on release — about thirty lines and no View
