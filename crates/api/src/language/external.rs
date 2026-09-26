@@ -912,9 +912,11 @@ impl Language for External {
             let text = self.text_of(&rel)?;
             let params = json!({"textDocument": self.doc_id(&rel)?});
             let answer = match self.ask("textDocument/documentSymbol", params).await? {
-                Some(DocumentSymbolResponse::Nested(rows)) if self.texlab => Some(
-                    DocumentSymbolResponse::Nested(super::latex::tidy(rows, &text, self.encoding)),
-                ),
+                Some(DocumentSymbolResponse::Nested(rows)) if self.texlab => {
+                    let aux = std::fs::read_to_string(self.root.join(&rel).with_extension("aux"));
+                    let rows = super::latex::tidy(rows, &text, aux.ok().as_deref(), self.encoding);
+                    Some(DocumentSymbolResponse::Nested(rows))
+                }
                 answer => answer,
             };
             Ok(symbols_of(answer, &text, self.encoding))

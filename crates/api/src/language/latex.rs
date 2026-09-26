@@ -1,9 +1,23 @@
 //! texlab's outline of a LaTeX document, put right before it is shown.
 //!
-//! texlab numbers a heading by finding its title in the table of contents the last build left in
-//! the `.aux` file, so a `\paragraph` or a starred heading titled like a numbered one is given
-//! that one's number: `\paragraph{Results}` under `\subsection{Results}` reads "1.1 Results".
-//! LaTeX numbers neither, so the number is taken off again.
+//! texlab numbers a heading by looking its title up in the table of contents the last build left
+//! in the `.aux` file: two headings of one title both read the last one's number, a title holding
+//! a command reads none (the toc writes `\emph{best}` as `\emph  {best}`), and a `\paragraph` or a
+//! starred heading titled like a numbered one reads that one's number. Here the headings take the
+//! toc's entries in order instead ([`Toc`]), from the `.aux` beside the file, which is where a
+//! document built in place and every file it `\include`s leave theirs. The numbers are the ones
+//! the PDF shows, whatever the class makes of them (IEEEtran's `I-A`, memoir's
+//! `\chapternumberline`, a changed `secnumdepth`), and like the PDF's they are the last build's.
+//!
+//! Counting the headings in the text instead would stay current between builds, but it cannot
+//! number an `\include`d chapter, the chapters before it being in other files, nor anything a
+//! class or a preamble numbers otherwise than article, report and book do.
+//!
+//! A file with no `.aux` of its own (an `\input` one, a build into another directory, no build
+//! yet) keeps texlab's numbers, less the one on a `\paragraph`, a `\subparagraph` or a starred
+//! heading, which LaTeX never numbers.
+//!
+//! Every name is put on one line, texlab sending a title written over two lines as written.
 //!
 //! texlab also lists every display-math environment, labelled or not, and one inside another as
 //! its child: an `aligned` in a labelled `equation` is a second row under the first. Only an
@@ -18,41 +32,227 @@ use super::external::Encoding;
 /// The protocol's `Constant`, which is texlab's kind for a display-math environment.
 const EQUATION: u32 = 14;
 
-/// `symbols` as texlab answered them for `text`, put right.
-pub(super) fn tidy(symbols: Vec<DocumentSymbol>, text: &str, enc: Encoding) -> Vec<DocumentSymbol> {
+/// LaTeX's sectioning commands, which are the levels its table of contents names too.
+const LEVELS: [&str; 7] = [
+    "part",
+    "chapter",
+    "section",
+    "subsection",
+    "subsubsection",
+    "paragraph",
+    "subparagraph",
+];
+
+/// `symbols` as texlab answered them for `text`, put right; `aux` is the file's own `.aux`.
+pub(super) fn tidy(
+    symbols: Vec<DocumentSymbol>,
+    text: &str,
+    aux: Option<&str>,
+    enc: Encoding,
+) -> Vec<DocumentSymbol> {
+    // An `.aux` listing no heading is not this file's build.
+    let mut toc = aux.map(Toc::parse).filter(|toc| !toc.entries.is_empty());
+    walk(symbols, text, enc, &mut toc)
+}
+
+/// [`tidy`], a heading before what it holds, so the headings meet the toc in document order.
+fn walk(
+    symbols: Vec<DocumentSymbol>,
+    text: &str,
+    enc: Encoding,
+    toc: &mut Option<Toc>,
+) -> Vec<DocumentSymbol> {
     symbols
         .into_iter()
         .flat_map(|mut symbol| {
-            let children = tidy(symbol.children.take().unwrap_or_default(), text, enc);
+            let children = symbol.children.take().unwrap_or_default();
             if symbol.kind == EQUATION && symbol.detail.is_none() {
-                return children;
+                return walk(children, text, enc, toc);
             }
             let start = byte_of(text, enc.char_pos(text, symbol.range.start));
-            if let Some(title) = start.and_then(|at| unnumbered(&symbol.name, &text[at..])) {
-                symbol.name = title.to_string();
-            }
-            symbol.children = Some(children);
+            symbol.name = match start.and_then(|at| Heading::parse(&text[at..])) {
+                Some(heading) => heading.name(&symbol.name, toc.as_mut()),
+                None => one_line(&symbol.name),
+            };
+            symbol.children = Some(walk(children, text, enc, toc));
             vec![symbol]
         })
         .collect()
 }
 
-/// `name` without the number texlab put in front of it, when the heading `source` starts with is
-/// one LaTeX leaves unnumbered: a `\paragraph`, a `\subparagraph` or a starred one. texlab writes
-/// `<number> <title>`, the title being the first `{…}` after the command, trimmed.
-fn unnumbered<'a>(name: &'a str, source: &str) -> Option<&'a str> {
-    let command = source.strip_prefix('\\')?;
-    let end = command
-        .find(|c: char| !c.is_ascii_alphabetic())
-        .unwrap_or(command.len());
-    let (command, rest) = command.split_at(end);
-    if !matches!(command, "paragraph" | "subparagraph") && !rest.starts_with('*') {
-        return None;
+/// A sectioning command as written: `\section*[short]{title}`.
+struct Heading<'a> {
+    level: &'a str,
+    starred: bool,
+    /// The title the toc takes instead, if there is one.
+    short: Option<&'a str>,
+    title: &'a str,
+}
+
+impl<'a> Heading<'a> {
+    /// The heading `source` starts with, if it starts with one.
+    fn parse(source: &'a str) -> Option<Self> {
+        let (level, rest) = command(source)?;
+        if !LEVELS.contains(&level) {
+            return None;
+        }
+        let starred = rest.starts_with('*');
+        let rest = rest.strip_prefix('*').unwrap_or(rest).trim_start();
+        let (short, rest) = match rest.strip_prefix('[') {
+            Some(inner) => inner
+                .split_once(']')
+                .map(|(short, rest)| (Some(short), rest))?,
+            None => (None, rest),
+        };
+        let (title, _) = group(rest)?;
+        Some(Self {
+            level,
+            starred,
+            short,
+            title,
+        })
     }
-    let title = rest[rest.find('{')? + 1..].trim_start();
-    let (_, bare) = name.split_once(' ')?;
-    let after = title.strip_prefix(bare)?;
-    after.trim_start().starts_with('}').then_some(bare)
+
+    /// The heading's name in the outline, texlab having called it `texlab`: its number, if it has
+    /// one, then its title.
+    fn name(&self, texlab: &str, toc: Option<&mut Toc>) -> String {
+        let title = one_line(self.title);
+        let number = match toc {
+            _ if self.starred => None,
+            Some(toc) => toc.number(self.level, &key(self.short.unwrap_or(self.title))),
+            None if matches!(self.level, "paragraph" | "subparagraph") => None,
+            None => one_line(texlab)
+                .strip_suffix(&title)
+                .map(str::trim_end)
+                .filter(|number| !number.is_empty())
+                .map(String::from),
+        };
+        match number {
+            Some(number) => format!("{number} {title}"),
+            None => title,
+        }
+    }
+}
+
+/// The table of contents in an `.aux` file, handed to the headings in order.
+struct Toc {
+    entries: Vec<Entry>,
+    /// The first entry no heading has taken or gone past.
+    next: usize,
+}
+
+/// A line of the toc, `\contentsline {<level>}{\numberline {<number>}<title>}{<page>}…`, with no
+/// `\numberline` for a heading LaTeX did not number.
+struct Entry {
+    level: String,
+    number: Option<String>,
+    /// The title as [`key`] has it.
+    key: String,
+}
+
+impl Toc {
+    fn parse(aux: &str) -> Self {
+        let entries = aux
+            .split("\\contentsline")
+            .skip(1)
+            .filter_map(|line| {
+                let (level, rest) = group(line)?;
+                let (text, _) = group(rest)?;
+                let (number, title) = match command(text) {
+                    // memoir numbers a chapter by `\chapternumberline`.
+                    Some((name, rest)) if name.ends_with("numberline") => {
+                        group(rest).map(|(number, title)| (Some(number), title))?
+                    }
+                    _ => (None, text),
+                };
+                LEVELS.contains(&level).then(|| Entry {
+                    level: level.to_string(),
+                    number: number.map(|n| printed(n).filter(|c| !"{} ".contains(*c)).collect()),
+                    key: key(title),
+                })
+            })
+            .collect();
+        Self { entries, next: 0 }
+    }
+
+    /// The number the last build gave the next heading, of `level` and titled `key`: that of the
+    /// next entry of that level and title, the entries skipped over being those of headings
+    /// deleted since the build or written by an `\input` file. A heading whose title the toc has
+    /// otherwise (a macro in it expanded, the title edited since the build) takes the next entry
+    /// instead when that one is of its level.
+    fn number(&mut self, level: &str, key: &str) -> Option<String> {
+        let rest = &self.entries[self.next..];
+        let skip = rest
+            .iter()
+            .position(|entry| entry.level == level && entry.key == key)
+            .or_else(|| (rest.first()?.level == level).then_some(0))?;
+        self.next += skip + 1;
+        self.entries[self.next - 1].number.clone()
+    }
+}
+
+/// The control word `text` starts with, without its backslash, and what follows it.
+fn command(text: &str) -> Option<(&str, &str)> {
+    let text = text.strip_prefix('\\')?;
+    let end = text
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(text.len());
+    Some(text.split_at(end))
+}
+
+/// What is inside the `{…}` group `text` starts with, and what follows it.
+fn group(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim_start().strip_prefix('{')?;
+    let mut depth = 0;
+    let mut chars = text.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\\' => _ = chars.next(),
+            '{' => depth += 1,
+            '}' if depth == 0 => return Some((&text[..at], &text[at + 1..])),
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A title as it is matched to the toc: its letters and digits, the commands in it left out,
+/// the toc writing them otherwise (`\emph  {best}`) and the white space moved about.
+fn key(title: &str) -> String {
+    printed(&one_line(title))
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// `text` without its control words, the backslash of a control symbol (`\&`) included.
+fn printed(text: &str) -> impl Iterator<Item = char> + '_ {
+    let mut chars = text.chars().peekable();
+    std::iter::from_fn(move || {
+        loop {
+            match chars.next()? {
+                '\\' => while chars.next_if(char::is_ascii_alphabetic).is_some() {},
+                c => return Some(c),
+            }
+        }
+    })
+}
+
+/// `text` on one line as LaTeX reads it: without its comments, each run of white space one space.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .map(uncommented)
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `line` up to its comment, if it has one.
+fn uncommented(line: &str) -> &str {
+    let comment = line
+        .match_indices('%')
+        .find(|&(at, _)| !line[..at].ends_with('\\'));
+    comment.map_or(line, |(at, _)| &line[..at])
 }
 
 #[cfg(test)]
@@ -98,12 +298,114 @@ mod tests {
             .collect()
     }
 
-    fn tidied(text: &str, answer: Vec<Value>) -> Vec<String> {
+    fn tidied(text: &str, aux: Option<&str>, answer: Vec<Value>) -> Vec<String> {
         let symbols = serde_json::from_value(Value::Array(answer)).unwrap();
-        names(&tidy(symbols, text, Encoding::Utf16))
+        names(&tidy(symbols, text, aux, Encoding::Utf16))
     }
 
-    /// What texlab 5.26 answers once a build has numbered "Results" 1 and "Method" 1.1.
+    /// An article as texlab 5.26 outlines it, with the `.aux` pdflatex wrote for it (hyperref
+    /// loaded, `\foo` defined as "bar"): the toc's entries go to the headings in order.
+    #[test]
+    fn headings_take_their_numbers_from_the_toc_in_order() {
+        let text = "\\section{Intro}\n\\subsection{Results}\n\\subsection{The \\emph{best} one}\n\
+                    \\subsection{Results}\n\\section*{Starred}\n\\subsection{A long\ntitle}\n\
+                    \\subsubsection{Deep $x^2$ \\foo}\n\\paragraph{Para}\n\\appendix\n\
+                    \\section{Proofs}\n\\subsection{Lemma}\n";
+        let aux = r"\relax
+\providecommand\hyper@newdestlabel[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Intro}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Results}{1}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}The \emph  {best} one}{1}{subsection.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.3}Results}{1}{subsection.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4}A long title}{1}{subsection.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.4.1}Deep $x^2$ bar}{1}{subsubsection.1.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Para}{1}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {A}Proofs}{1}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.1}Lemma}{1}{subsection.A.1}\protected@file@percent }
+\gdef \@abspage@last{1}
+";
+        let deep = heading("Deep $x^2$ \\foo", 7, vec![heading("Para", 8, vec![])]);
+        let answer = vec![
+            heading(
+                "1 Intro",
+                0,
+                vec![
+                    heading("1.3 Results", 1, vec![]),
+                    heading("The \\emph{best} one", 2, vec![]),
+                    heading("1.3 Results", 3, vec![]),
+                ],
+            ),
+            heading("Starred", 4, vec![heading("A long\ntitle", 5, vec![deep])]),
+            heading("A Proofs", 10, vec![heading("A.1 Lemma", 11, vec![])]),
+        ];
+        assert_eq!(
+            tidied(text, Some(aux), answer),
+            [
+                "1 Intro [1.1 Results, 1.2 The \\emph{best} one, 1.3 Results]",
+                "Starred [1.4 A long title [1.4.1 Deep $x^2$ \\foo [Para]]]",
+                "A Proofs [A.1 Lemma]"
+            ]
+        );
+    }
+
+    /// A report as texlab 5.26 outlines it, with its `.aux`: chapters number their sections, a
+    /// `\subsubsection` is not numbered, a starred chapter is in the toc by `\addcontentsline`,
+    /// and `\include{chapters/two}` left its entries in `chapters/two.aux`.
+    #[test]
+    fn a_report_numbers_sections_within_chapters() {
+        let text = "\\chapter{One}\n\\section{Results}\n\\subsection{Sub}\n\\subsubsection{Deep}\n\
+                    \\chapter*{Preface}\n\\addcontentsline{toc}{chapter}{Preface}\n\
+                    \\include{chapters/two}\n\\part{Last}\n\\chapter{Three}\n\\section{Results}\n\
+                    \\appendix\n\\chapter{App}\n\\section{Results}\n";
+        let aux = r"\relax
+\@writefile{toc}{\contentsline {chapter}{\numberline {1}One}{1}{}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\p@ }}
+\@writefile{lot}{\addvspace {10\p@ }}
+\@writefile{toc}{\contentsline {section}{\numberline {1.1}Results}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1.1}Sub}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{Deep}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{Preface}{2}{}\protected@file@percent }
+\@input{chapters/two.aux}
+\@writefile{toc}{\contentsline {part}{I\hspace  {1em}Last}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {3}Three}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.1}Results}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {A}App}{6}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {A.1}Results}{6}{}\protected@file@percent }
+\gdef \@abspage@last{6}
+";
+        let one = vec![heading(
+            "A.1 Results",
+            1,
+            vec![heading(
+                "1.1.1 Sub",
+                2,
+                vec![heading("1.1.1 Deep", 3, vec![])],
+            )],
+        )];
+        let answer = vec![
+            heading("1 One", 0, one),
+            heading("Preface", 4, vec![]),
+            heading(
+                "Last",
+                7,
+                vec![
+                    heading("3 Three", 8, vec![heading("A.1 Results", 9, vec![])]),
+                    heading("A App", 11, vec![heading("A.1 Results", 12, vec![])]),
+                ],
+            ),
+        ];
+        assert_eq!(
+            tidied(text, Some(aux), answer),
+            [
+                "1 One [1.1 Results [1.1.1 Sub [Deep]]]",
+                "Preface",
+                "Last [3 Three [3.1 Results], A App [A.1 Results]]"
+            ]
+        );
+    }
+
+    /// What texlab 5.26 answers once a build has numbered "Results" 1 and "Method" 1.1, for a
+    /// file with no `.aux` beside it: texlab's numbers stay where LaTeX numbers the heading.
     #[test]
     fn paragraphs_and_starred_headings_lose_the_number_texlab_gave_them() {
         let text = "\\section{Results}\n\\subsection{Method}\n\\paragraph{ Results }\n\
@@ -118,7 +420,7 @@ mod tests {
             heading("1.1 Method", 4, vec![heading("2024 was a year", 5, vec![])]),
         ];
         assert_eq!(
-            tidied(text, answer),
+            tidied(text, None, answer),
             [
                 "1 Results [1.1 Method [Results [Method]]]",
                 "Method [2024 was a year]"
@@ -145,7 +447,7 @@ mod tests {
             ],
         )];
         assert_eq!(
-            tidied(text, answer),
+            tidied(text, None, answer),
             ["Maths [Equation (eq:sum), Equation (eq:row), Equation (eq:inner)]"]
         );
     }
