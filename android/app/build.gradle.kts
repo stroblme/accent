@@ -61,12 +61,12 @@ android {
         jniLibs { useLegacyPackaging = false }
     }
 
-    sourceSets["main"].kotlin.srcDir(bindings)
+    sourceSets["main"].kotlin.directories.add(bindings)
 }
 
 // The Rust core, cross-compiled into `src/main/jniLibs/<abi>/`. Gradle does not know how to build
 // Rust and does not try: it runs the same `make` targets a developer would.
-val cargoNdk by tasks.registering(Exec::class) {
+val cargoNdk = tasks.register<Exec>("cargoNdk") {
     workingDir = repo
     commandLine("make", "android")
     inputs.dir(repo.resolve("crates"))
@@ -75,7 +75,7 @@ val cargoNdk by tasks.registering(Exec::class) {
 }
 
 // The Kotlin the app calls the core through, read out of the library that was just built.
-val uniffiBindgen by tasks.registering(Exec::class) {
+val uniffiBindgen = tasks.register<Exec>("uniffiBindgen") {
     dependsOn(cargoNdk)
     workingDir = repo
     commandLine("make", "bindings")

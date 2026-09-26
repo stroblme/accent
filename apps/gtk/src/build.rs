@@ -908,7 +908,10 @@ thread_local! {
 /// the caption's own line height, and they stay buttons rather than becoming labels, so the click,
 /// the focus ring and the tooltip stay. `.accent-statusbar` spaces the status bar with padding
 /// rather than margins, so its background covers the whole bar where presentation mode shows it
-/// over the document.
+/// over the document. `.accent-idle-pane` is on every pane's tab bar but the active one's
+/// (`App::mark_active_pane`): its selected tab is outlined rather than filled, so two panes do not
+/// show two identical pills. Not under the pointer, where it takes Adwaita's hover fill like any
+/// other tab, and not on a bar of one tab, which Adwaita draws with no pill at all.
 ///
 /// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
 /// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
@@ -1000,6 +1003,9 @@ fn install_chrome_css() {
              .accent-flat, .accent-flat:backdrop, \
                .accent-flat > revealer > box, .accent-flat > revealer > box:backdrop {{ \
                background-color: var(--view-bg-color); }} \
+             tabbar.accent-idle-pane tabbox:not(.single-tab) tab:selected:not(:hover) {{ \
+               background-color: transparent; \
+               box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 25%, transparent); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
              .accent-statusbar {{ padding: 6px 12px; }} \
              .accent-ring-tool, .accent-ring-hub {{ min-width: 0; min-height: 0; padding: 0; \

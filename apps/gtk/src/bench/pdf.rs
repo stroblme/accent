@@ -1,15 +1,16 @@
-//! Drills over a PDF: the layout either side of Fit Height, the page Add Page appends, the page
-//! edits, and the blank document New Drawing writes.
+//! Drills over a PDF: the layout either side of Fit Height, the page Add Page After puts in, the
+//! page edits and their menus, and the blank document New Drawing writes.
 
 use super::*;
 
 /// Open a PDF, leave the reader halfway down its second page, fit the page from there, and then
-/// append one.
+/// add one after it.
 ///
-/// Fit Height and Add Page are fired as the window actions the status bar's menu, the page's own
-/// menu and the palette all fire, so a route that never reaches the tab shows up here as a zoom
-/// that did not change or a page count that did not grow. The append is followed all the way to
-/// the file: the document is re-opened from disk at the end, which is what a second reader sees.
+/// Fit Height and Add Page After are fired as the window actions the status bar's menus, the
+/// page's own menu and the palette all fire, so a route that never reaches the tab shows up here
+/// as a zoom that did not change or a page count that did not grow. The new page is followed all
+/// the way to the file: the document is re-opened from disk at the end, which is what a second
+/// reader sees.
 pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -31,7 +32,7 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
             pdf.geometry(),
             pdf.zoom_label()
         );
-        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         written(&app).await;
         let sizes = accent_core::pdf::PdfDoc::open(pdf.path())
             .and_then(|doc| doc.page_sizes())
@@ -51,9 +52,11 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
 }
 
 /// Page edits end to end: the first page moved below the third by the call a drop in the
-/// thumbnail strip makes, a page inserted after the one being read and the one being read deleted
-/// through the window actions — the delete's dialog answered by emitting its own `response`, as
-/// [`bench_drawing`] answers New Drawing's — each followed to the file. What a headless run cannot
+/// thumbnail strip makes, a page added before the one being read, one added after the last page
+/// and the one being read deleted through the window actions — the delete's dialog answered by
+/// emitting its own `response`, as [`bench_drawing`] answers New Drawing's — each followed to the
+/// file. Then the items of the two menus that offer them: the page's own, without a selection and
+/// with one, and the status bar's page count, opened as a click does. What a headless run cannot
 /// reach is the pointer's half: the drag itself, the buttons on hover, the drop bar and the scroll
 /// at the strip's edge.
 pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
@@ -67,9 +70,14 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
         pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 2 });
         written(&app).await;
         println!("bench pages moved {}", pages_read(&pdf));
-        let _ = WidgetExt::activate_action(&app.window, "win.pdf-insert-page", None);
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-before", None);
         written(&app).await;
-        println!("bench pages inserted {}", pages_read(&pdf));
+        println!("bench pages before {}", pages_read(&pdf));
+        // After the last page, which is how a document grows at its end.
+        pdf.goto_page(pdf.page_count() - 1);
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        written(&app).await;
+        println!("bench pages after {}", pages_read(&pdf));
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-delete-page", None);
         for _ in 0..40 {
             if app.window.visible_dialog().is_some() {
@@ -95,6 +103,31 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
         dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
         written(&app).await;
         println!("bench pages deleted {}", pages_read(&pdf));
+        let items = |menu: gtk::PopoverMenu| {
+            let items = menu.menu_model().map(|m| fileops::labels(&m));
+            menu.popdown();
+            items
+        };
+        println!(
+            "bench pages menu {:?}",
+            items(pdf.selection_menu(10.0, 10.0))
+        );
+        // "Page" on the first page, selected as a followed link selects it.
+        pdf.show_link(0, Some([0, 0, 0, 4]));
+        glib::timeout_future(Duration::from_millis(500)).await;
+        println!(
+            "bench pages menu_selected {:?}",
+            items(pdf.selection_menu(10.0, 10.0))
+        );
+        let count = app.statusbar.facts_control();
+        count.emit_clicked();
+        let popover = find_widget(count.upcast_ref(), &|w| w.is::<gtk::PopoverMenu>());
+        println!(
+            "bench pages count_menu tooltip={:?} clickable={} {:?}",
+            count.tooltip_text(),
+            count.can_target(),
+            popover.and_downcast::<gtk::PopoverMenu>().and_then(items)
+        );
         bench_quit(&app);
     });
 }
@@ -169,7 +202,7 @@ async fn written(app: &Rc<App>) {
     }
 }
 
-/// The same document under a new name: rename it the way a dropped row does, then append another
+/// The same document under a new name: rename it the way a dropped row does, then add another
 /// page and read the file back.
 ///
 /// The render thread owns the path it reloads from and saves to, so a rename it was never told
@@ -199,7 +232,7 @@ async fn bench_pdf_renamed(app: &Rc<App>) {
         pdf.path().file_name().map(|n| n.to_string_lossy()),
         !was.exists()
     );
-    let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
+    let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
     written(app).await;
     let sizes = accent_core::pdf::PdfDoc::open(pdf.path())
         .and_then(|doc| doc.page_sizes())
@@ -228,7 +261,7 @@ fn vault_pages(app: &Rc<App>, key: &str) -> String {
     }
 }
 
-/// The etag gate on the way back to a host: a page appended to a document whose host copy has
+/// The etag gate on the way back to a host: a page added to a document whose host copy has
 /// moved since it was fetched must not overwrite it, and the ink must not be dropped either — it
 /// goes beside the original in the vault, as `<name> (edited).pdf`.
 ///
@@ -237,7 +270,7 @@ fn vault_pages(app: &Rc<App>, key: &str) -> String {
 /// that follows wins the race against the save under test every time. What `push` compares is
 /// the stamp against the host, so this is the same input from where it stands.
 ///
-/// A second page is appended after the first refusal, which is the reader who keeps drawing: it
+/// A second page is added after the first refusal, which is the reader who keeps drawing: it
 /// must write the same copy again rather than a numbered one, and it must not toast again.
 pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
@@ -266,7 +299,7 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
             accent_api::remote::edited_name(&key, 1),
             accent_api::remote::edited_name(&key, 2),
         );
-        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         written(&app).await;
         println!(
             "bench pdf stale refused pages={} in_vault {} edited {} said={} {:?} kept={}",
@@ -277,7 +310,7 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
             bench_said(&app),
             kept.exists()
         );
-        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         written(&app).await;
         println!(
             "bench pdf stale again pages={} in_vault {} edited {} said={} numbered={}",

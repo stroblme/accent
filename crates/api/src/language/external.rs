@@ -655,6 +655,7 @@ impl External {
                 None => raw_range(range),
             },
             path: rel,
+            ..Location::default()
         })
     }
 

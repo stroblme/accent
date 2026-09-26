@@ -368,13 +368,12 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
 /// A commit row's Check Out Commit and Copy Commit ID buttons, the two things a commit offers.
 ///
 /// The same surface a changed file's actions have: hidden until the pointer or the keyboard is on
-/// the row (`.git-actions` and `changes::reveal_on_hover`), in a revealer so they measure nothing
-/// while they are away and the summary reads out to the whole width of the pane. Like those, they
-/// hold the `GtkListItem` rather than the row's data, because the data under a recycled row is
-/// replaced without the widgets being rebuilt.
+/// the row (`changes::reveal_on_hover`), in a revealer so they measure nothing while they are away
+/// and the summary reads out to the whole width of the pane. Like those, they hold the
+/// `GtkListItem` rather than the row's data, because the data under a recycled row is replaced
+/// without the widgets being rebuilt.
 fn commit_actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    actions.add_css_class("git-actions");
     for (icon, tooltip, detach) in [
         ("go-jump-symbolic", "Check Out Commit", true),
         ("edit-copy-symbolic", "Copy Commit ID", false),

@@ -2,8 +2,7 @@
 //! note or a PDF at a location the index or a language server named.
 
 use super::*;
-use accent_core::markdown::Link;
-use accent_core::path::{parent_dir, resolve};
+use accent_core::markdown;
 
 /// DESIGN.md, Motion: the References pane follows the caret by 300 ms.
 const REFERENCES: Duration = Duration::from_millis(300);
@@ -85,29 +84,28 @@ impl App {
 
     /// Go to Definition: the chord, `F12` and a Ctrl+click in the view all end up here.
     ///
-    /// A link under the caret is followed as a link, because that is what the reader pointed at:
-    /// an external one in the browser, one into the vault through [`App::open_target`], as a click
-    /// in the preview is — which is what offers New File where nothing answers to it. A bare URL
-    /// in any text goes to the browser the same way, ahead of the server: it is not a symbol.
-    /// Everything else is a question for the language server, whether the tab holds a note or a
-    /// source file.
+    /// A bare URL in any text goes to the browser ahead of the server: it is not a symbol.
+    /// Everything else is a question for the tab's language server, whether the tab holds a note
+    /// or a source file. A note's is the index, which answers a link with the file it names, the
+    /// file New File would write where nothing answers to it, or the URL it links out to — about
+    /// the text as it stands, which the link table a long note re-analyses after a pause is not.
     pub fn go_to_definition(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
             return;
         };
-        let link = tab.link_at_cursor();
-        if let Some(url) = match &link {
-            Some(link) => (link.kind == LinkKind::External).then(|| link.target.clone()),
-            None => tab.url_at_cursor(),
-        } {
+        if let Some(url) = tab.url_at_cursor() {
             return self.launch(&url);
         }
         let Some(vault) = tab.lang.vault() else {
+            // Nobody answers for a tab outside every vault, but a link out to the web needs nobody.
+            if let Some(link) = tab
+                .link_at_cursor()
+                .filter(|l| l.kind == LinkKind::External)
+            {
+                return self.launch(&link.target);
+            }
             return self.needs_vault("go to a definition");
         };
-        if let Some(link) = link {
-            return self.open_target(&followed(&tab.rel(), &link));
-        }
         // Said once per tab: a file whose server is not installed would otherwise toast on every
         // Ctrl+click, and the answer does not change while the tab is open. And not said at all
         // while the Outline pane is on screen saying it — the claim is left unspent there, so
@@ -138,42 +136,45 @@ impl App {
         });
     }
 
-    /// Open a location and put the caret on it: a URL in the browser, a path in a tab.
+    /// Open a location and put the caret on it: a URL in the browser, a path in a tab, and a file
+    /// nothing is at yet in New File, with the path typed in.
     pub fn open_at(self: &Rc<Self>, loc: &Location) {
         if loc.is_url() {
             return self.launch(&loc.path);
         }
-        // A definition into a PDF carries its anchor in the path, so that a wikilink into a
-        // page reaches the page (`language/notes.rs`, `definition`).
-        let (path, anchor) = split_pdf_anchor(&loc.path);
-        let (key, at) = (path.to_string(), loc.range.start);
+        // Where the caret was, so Back returns to it.
         self.mark();
+        if loc.missing {
+            // Cancelling says nothing: the reader followed a link and changed their mind.
+            if let Some(ops) = self.ops() {
+                fileops::new_linked_note(ops, &loc.path);
+            }
+            return;
+        }
+        let (key, at) = (loc.path.clone(), loc.range.start);
         // Outside the vault: the same door a file dropped on the window comes through, and the
         // tab it opens gets no language server of its own.
         let how = match doc::is_loose_key(&key) {
             true => Opened::Kept,
             false => Opened::Preview,
         };
-        if anchor.is_some() {
+        // Only text has a caret to put anywhere; a PDF lands on the page its anchor names.
+        let page = loc.anchor.as_deref().and_then(markdown::pdf_anchor);
+        if page.is_some() || !matches!(doc::kind_of(&key), Kind::Note | Kind::Text) {
             self.open_as(&key, how);
-            return self.show_pdf_anchor(&key, anchor);
+            return self.show_pdf_anchor(&key, page);
         }
-        self.with_tab(&key, how, "go to", move |_, tab| tab.goto_pos(at));
-    }
-}
-
-/// What following `link` in the note `rel` hands [`App::open_target`]: the target from the vault
-/// root, anchor and all, which is what the preview hands it for a click. A markdown link is
-/// written from the note's own folder; a wikilink names its target from the root already, and a
-/// bare `#anchor` of either kind is a place in the note itself.
-fn followed(rel: &str, link: &Link) -> String {
-    let target = match link.kind {
-        LinkKind::Markdown if !link.target.is_empty() => resolve(parent_dir(rel), &link.target),
-        _ => link.target.clone(),
-    };
-    match &link.anchor {
-        Some(anchor) => format!("{target}#{anchor}"),
-        None => target,
+        // Any other anchor is a heading the note does not have, and the location its top.
+        let missed = loc
+            .anchor
+            .as_ref()
+            .map(|heading| format!("No heading {heading} in {}", doc::file_name(&key)));
+        self.with_tab(&key, how, "go to", move |app, tab| {
+            tab.goto_pos(at);
+            if let Some(missed) = missed {
+                app.toast(&missed);
+            }
+        });
     }
 }
 
@@ -211,6 +212,7 @@ pub fn reference_target(row: &str) -> Option<Location> {
     Some(Location {
         path: path.to_string(),
         range: accent_api::Range { start: at, end: at },
+        ..Location::default()
     })
 }
 
@@ -242,20 +244,6 @@ fn references_empty(doc: Option<&Doc>) -> (&'static str, &'static str) {
 /// A place in a PDF a link names: the page, and the selection on it if it names one.
 pub type PdfAnchor = (usize, Option<[usize; 4]>);
 
-/// Split a link target into the path and the PDF anchor it carries, if it carries one.
-///
-/// `paper.pdf#page=3&selection=4,0,4,11` is a path *and* a place in it; a heading anchor is not
-/// this function's business and stays with the path it came in on.
-pub fn split_pdf_anchor(target: &str) -> (&str, Option<PdfAnchor>) {
-    match target.split_once('#') {
-        Some((path, anchor)) => match accent_core::markdown::pdf_anchor(anchor) {
-            Some(at) => (path, Some(at)),
-            None => (target, None),
-        },
-        None => (target, None),
-    }
-}
-
 /// The character range `bytes` names in `text`, or `None` when it names no range this text has.
 ///
 /// The index reports byte offsets and `GtkTextBuffer` addresses characters, so a search hit has to
@@ -282,6 +270,7 @@ mod tests {
                 start: pos,
                 end: pos,
             },
+            ..Location::default()
         }
     }
 
@@ -306,28 +295,6 @@ mod tests {
         assert!(reference_target("no-line-here").is_none());
         // The icon is the file's, not the line number's.
         assert_eq!(reference_icon("notes/a.md:3"), crate::doc::icon_for("a.md"));
-    }
-
-    /// Every way a note spells a link reaches `open_target` as the vault path the preview would
-    /// hand it, so a missing note is offered at the same place whichever of the two followed it.
-    #[test]
-    fn a_link_is_followed_by_its_path_from_the_vault_root() {
-        let followed_in = |rel: &str, text: &str| {
-            let links = accent_core::markdown::analyze(text).links;
-            followed(rel, &links[0])
-        };
-        let note = "Notes/Sub/a.md";
-        assert_eq!(followed_in(note, "[[Foo]]"), "Foo");
-        assert_eq!(followed_in(note, "[[Folder/Foo]]"), "Folder/Foo");
-        assert_eq!(followed_in(note, "[[Foo#Part|there]]"), "Foo#Part");
-        assert_eq!(followed_in(note, "[[#Part]]"), "#Part");
-        assert_eq!(followed_in(note, "[t](Foo.md)"), "Notes/Sub/Foo.md");
-        assert_eq!(followed_in(note, "[t](Foo)"), "Notes/Sub/Foo");
-        assert_eq!(
-            followed_in(note, "[t](../Foo%20Bar.md#Part)"),
-            "Notes/Foo Bar.md#Part"
-        );
-        assert_eq!(followed_in(note, "[t](#part)"), "#part");
     }
 
     #[test]

@@ -822,12 +822,15 @@ impl App {
 
     /// Save As…: the file in front written under a path typed in the vault's path field, and its
     /// tab moved onto the new file (DESIGN.md, Keyboard). What the tab holds goes there, and the
-    /// original keeps what was last written to it. Only a vault's own text, diagram or PDF: a
-    /// loose tab, a window without a vault and a tab that is no file have no vault path to type,
-    /// so there it does nothing.
+    /// original keeps what was last written to it. Only a vault's own text, diagram, PDF or
+    /// image: a loose tab, a window without a vault and a tab that is no file have no vault path
+    /// to type, so there it does nothing.
     pub fn save_as(self: &Rc<Self>) {
         let Some(doc) = self.active_doc().filter(|doc| {
-            matches!(doc, Doc::Text(_) | Doc::Diagram(_) | Doc::Pdf(_)) && !doc.is_loose()
+            matches!(
+                doc,
+                Doc::Text(_) | Doc::Diagram(_) | Doc::Pdf(_) | Doc::Image(_)
+            ) && !doc.is_loose()
         }) else {
             return;
         };
@@ -895,7 +898,8 @@ impl App {
     /// Write what `doc` holds to `to`, then move its tab there. A save still on its way lands
     /// first, or its answer would come back to a tab that has moved, and a comparison goes, being
     /// about the old file. A PDF's strokes are written out and the file copied: its bytes are the
-    /// render thread's. `free` says nothing was at `to` when it was looked at.
+    /// render thread's. An image is copied as it is. `free` says nothing was at `to` when it was
+    /// looked at.
     fn write_as(self: &Rc<Self>, doc: Doc, to: String, free: bool) {
         let Some(vault) = self.vault().cloned() else {
             return;
@@ -916,6 +920,7 @@ impl App {
                 pdf.flush_blocking();
                 (Contents::File(pdf.path()), 0)
             }
+            Doc::Image(_) => (Contents::Copy, 0),
             _ => return,
         };
         let from = doc.key();
@@ -942,6 +947,10 @@ impl App {
                                 .map_err(|e| e.to_string())
                         }),
                         Contents::File(local) => copy_pdf(&vault, &from, &local, &to)
+                            .map(|()| None)
+                            .map_err(|e| e.to_string()),
+                        Contents::Copy => vault
+                            .copy(&from, &to)
                             .map(|()| None)
                             .map_err(|e| e.to_string()),
                     };
@@ -1008,10 +1017,13 @@ impl App {
     }
 }
 
-/// What Save As writes: a tab's text, or a PDF's file as it is on this machine.
+/// What Save As writes: a tab's text, a PDF's file as it is on this machine, or an image's file,
+/// which the vault copies where it is: nothing of it is waiting on this machine to be written,
+/// so on a remote vault too it is the host's copy of the host's file.
 enum Contents {
     Text(String),
     File(PathBuf),
+    Copy,
 }
 
 /// A PDF's bytes at `to`. The vault copies the file where it is, except on a remote vault: there

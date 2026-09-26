@@ -49,17 +49,25 @@ pub struct Range {
     pub end: Pos,
 }
 
-/// Somewhere to go. `path` is vault-relative inside the vault, absolute outside it, and a
-/// `scheme://` URL when the target is not a file at all (an external link in a note).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Somewhere to go. `path` is vault-relative inside the vault, absolute outside it, and a URL
+/// when the target is not a file at all (an external link in a note).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Location {
     pub path: String,
     pub range: Range,
+    /// A link's `#anchor` where `range` cannot place it: a PDF's `page=3&selection=…`, or a
+    /// heading the file does not have, `range` then being the top of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// Nothing is there yet: `path` is the file following the link would create.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
 }
 
 impl Location {
+    /// A `scheme://` URL or a `mailto:` address: the two a note links out to.
     pub fn is_url(&self) -> bool {
-        self.path.contains("://")
+        self.path.contains("://") || self.path.starts_with("mailto:")
     }
 }
 

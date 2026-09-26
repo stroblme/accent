@@ -246,9 +246,11 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
 /// Open each of `rels` in turn in a narrow window and print, for every line, the wrap tag on its
 /// first character, that tag's indent, and how far right of the line's first screen row its second
 /// one starts: the hang as GTK laid it out, `None` for a line that does not wrap. Each tab stays up
-/// for four seconds, for a screenshot. The last one, meant to be code, is then filled with 10k
-/// indented lines, three to a depth as code's blocks come, and the fill, a keystroke, a Return and
-/// a new indent width are timed, each with the tag it left on the line it touched.
+/// for four seconds, for a screenshot; a note is first given a fence opened above everything, and
+/// closed again, with every line's tag printed each time. The last one, meant to be code, is then
+/// filled with 10k indented lines, three to a depth as code's blocks come, and the fill, a
+/// keystroke, a Return and a new indent width are timed, each with the tag it left on the line it
+/// touched.
 pub(super) fn bench_wrap(app: &Rc<App>, rels: &str) {
     let app = app.clone();
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
@@ -264,6 +266,21 @@ pub(super) fn bench_wrap(app: &Rc<App>, rels: &str) {
             };
             for line in 0..tab.buffer.line_count() {
                 println!("bench wrap {rel} {}", bench_wrap_line(&tab, line));
+            }
+            // A fence typed open above a note takes in every line below it, which then wraps as
+            // code; taken out again, they hang behind their markers once more.
+            if tab.flavour().is_note() {
+                let tags = |tab: &Rc<Tab>| {
+                    (0..tab.buffer.line_count())
+                        .map(|line| bench_wrap_tag(tab, line))
+                        .collect::<Vec<_>>()
+                };
+                tab.buffer.insert(&mut tab.buffer.start_iter(), "```\n");
+                println!("bench wrap_fence_opened {rel} {:?}", tags(&tab));
+                if let Some(mut second) = tab.buffer.iter_at_line(1) {
+                    tab.buffer.delete(&mut tab.buffer.start_iter(), &mut second);
+                }
+                println!("bench wrap_fence_closed {rel} {:?}", tags(&tab));
             }
             println!("bench wrap_hold {rel}");
             glib::timeout_future(Duration::from_secs(4)).await;
@@ -441,17 +458,53 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
             probe("ctrl_released", "Other", false);
             let caret = tab.buffer.iter_at_offset(at("Nowhere"));
             tab.buffer.place_cursor(&caret);
-            glib::spawn_future_local(bench_dangling(app));
+            glib::spawn_future_local(bench_dangling(app, tab));
         });
     });
 }
 
 /// Follow the link under the caret, which nothing in the vault answers to, the way F12, the
 /// chord and a Ctrl+click do: New File comes up with the path the link spells already typed in,
-/// its anchor and alias left out. Both the resolve and the vault's templates arrive from a worker,
-/// so the dialog is waited for rather than assumed. Cancelling it is [`bench_close`]'s drill.
-async fn bench_dangling(app: Rc<App>) {
+/// its anchor and alias left out.
+///
+/// Then `[[#Nowhere]]`, a heading the note does not have: `bad_anchor` prints the caret's line,
+/// which must be the top of the note, and the toast saying why. Last `late`: a link typed at the
+/// end of a note past 16 K characters and followed at once, before the pause its analysis waits
+/// for, which must offer New File as the first did — it printed `typed=None` while the server
+/// was sent the text only after that pause.
+async fn bench_dangling(app: Rc<App>, tab: Rc<Tab>) {
     app.go_to_definition();
+    bench_new_file(&app, "dangling").await;
+    // Past the close animation, so the last case waits for a dialog of its own.
+    glib::timeout_future(Duration::from_millis(500)).await;
+
+    tab.set_text("# Intro\ntext\n[[#Nowhere]]\n");
+    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(18));
+    app.go_to_definition();
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    let said = super::compare::bench_toast(&app);
+    println!("bench follow bad_anchor caret_line={line} said={said:?}");
+
+    tab.set_text(&"word ".repeat(3400));
+    // Past the server's refresh, so it holds the long text before the link is typed.
+    glib::timeout_future(Duration::from_millis(600)).await;
+    tab.buffer
+        .insert(&mut tab.buffer.end_iter(), "[[Nowhere/Late]]");
+    tab.buffer
+        .place_cursor(&tab.buffer.iter_at_offset(tab.buffer.char_count() - 4));
+    app.go_to_definition();
+    // The typed link is the drill's, not the note's: it stops counting as an edit before the
+    // dialog takes the focus from the view, which is a save.
+    tab.discard();
+    bench_new_file(&app, "late").await;
+    bench_quit(&app);
+}
+
+/// Wait for the New File a followed link offers and print its heading and the name it arrives
+/// with, then close it. Both the resolve and the vault's templates arrive from a worker, so the
+/// dialog is waited for rather than assumed. What cancelling it leaves is [`bench_close`]'s drill.
+async fn bench_new_file(app: &Rc<App>, case: &str) {
     for _ in 0..40 {
         if app.window.visible_dialog().is_some() {
             break;
@@ -469,10 +522,12 @@ async fn bench_dangling(app: Rc<App>) {
         .and_downcast::<gtk::Entry>()
         .map(|entry| entry.text());
     println!(
-        "bench follow dangling heading={:?} typed={typed:?}",
-        dialog.and_then(|d| d.heading())
+        "bench follow {case} heading={:?} typed={typed:?}",
+        dialog.as_ref().and_then(|d| d.heading())
     );
-    bench_quit(&app);
+    if let Some(dialog) = dialog {
+        dialog.close();
+    }
 }
 
 /// Walk the window through the themes and print what a note's own tags are painted in on each
@@ -588,6 +643,45 @@ pub(super) fn bench_numbers(app: &Rc<App>, rels: &str) {
         app.open_path(&later);
         glib::timeout_future(Duration::from_millis(300)).await;
         step("on_behind_then_front");
+        // Off again by a hand edit to config.toml with the dialog up: the tabs and the dialog's
+        // row both follow the file, and nothing is written back over it.
+        let _ = WidgetExt::activate_action(&app.window, "win.preferences", None);
+        let path = accent_core::config::config_path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::write(
+            &path,
+            text.replace("line_numbers = true", "line_numbers = false"),
+        );
+        let stamp = || {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&path)
+                .map(|m| (m.ino(), m.mtime_nsec()))
+                .ok()
+        };
+        let written = stamp();
+        // Past the second a write accent owes the file would wait.
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let row = find_widget(app.window.upcast_ref(), &|w| {
+            w.downcast_ref::<adw::SwitchRow>()
+                .is_some_and(|row| row.title() == "Line Numbers")
+        })
+        .and_downcast::<adw::SwitchRow>();
+        println!(
+            "bench numbers hand_edit row={:?} rewritten={}",
+            row.as_ref().map(|row| row.is_active()),
+            stamp() != written
+        );
+        step("hand_edit");
+        // The row built from the file is as live as the one it replaced.
+        if let Some(row) = row {
+            row.set_active(true);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            println!(
+                "bench numbers row_after_edit writes={}",
+                text.contains("line_numbers = true")
+            );
+        }
         bench_quit(&app);
     });
 }
@@ -606,7 +700,7 @@ fn bench_theme_colours(tab: &Rc<Tab>) -> String {
     let scheme = tab.buffer.style_scheme();
     format!(
         "dark={} scheme={:?} scheme_text={:?} page={page} view_fg={}@{:.2}:1 marker={} \
-         listmarker={} quote={} taskdone={} code_bg={} link={}",
+         listmarker={} quote={} taskdone={} code_bg={} link={} lanes={}",
         adw::StyleManager::default().is_dark(),
         scheme.as_ref().map(|s| s.id()),
         scheme
@@ -621,6 +715,11 @@ fn bench_theme_colours(tab: &Rc<Tab>) -> String {
         fg("taskdone"),
         says(table.lookup("code").and_then(|t| t.background_rgba())),
         fg("link"),
+        // The wheel a CSV's columns and the git history's lanes share.
+        (0..6)
+            .map(|lane| says(Some(crate::highlight::lane_colour(lane))))
+            .collect::<Vec<_>>()
+            .join(","),
     )
 }
 

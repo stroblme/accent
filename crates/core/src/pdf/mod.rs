@@ -24,6 +24,9 @@ pub use ledger::{Ink, NamedInk, fresh_id};
 pub use pages::PageEdit;
 pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_quads};
 
+// Recolouring lives in `crate::recolour`, shared with images; this is the PDF's name for it.
+pub use crate::recolour::recolour_pixel;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -324,43 +327,4 @@ pub struct Outline {
     pub depth: usize,
     pub title: String,
     pub page: Option<usize>,
-}
-
-// ---------------------------------------------------------------------------------------------
-// Recolouring
-// ---------------------------------------------------------------------------------------------
-
-/// Move a pixel onto the theme's paper–ink ramp while keeping its chroma, so white paper becomes
-/// `paper` and black text becomes `ink`, but a yellow highlight stays yellow.
-///
-/// The pixel's luminance picks a point on the ramp; the pixel's own offset from its luminance is
-/// then added back per channel, which is what carries the colour across.
-///
-// ponytail: this keeps the *absolute* chroma offset `c - luminance` and clamps, which is one
-// multiply-free pass over the buffer and good enough to read by. The ceiling: saturated colours
-// near the ends of the ramp lose some saturation to the clamp, and it is not a real perceptual
-// space. Upgrade path when someone complains is Oklab — convert, remap L, convert back — at
-// roughly 3x the cost, at which point this wants SIMD or the GPU.
-pub fn recolour_pixel(px: [u8; 4], paper: [u8; 3], ink: [u8; 3]) -> [u8; 4] {
-    let (r, g, b) = (
-        px[0] as f32 / 255.0,
-        px[1] as f32 / 255.0,
-        px[2] as f32 / 255.0,
-    );
-    let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let map = |i: usize, c: f32| {
-        let (ink, paper) = (ink[i] as f32 / 255.0, paper[i] as f32 / 255.0);
-        let target = ink + l * (paper - ink);
-        ((target + (c - l)) * 255.0).clamp(0.0, 255.0) as u8
-    };
-    [map(0, r), map(1, g), map(2, b), px[3]]
-}
-
-/// [`recolour_pixel`] over a whole RGBA8 buffer, in place. Shared by the page and tile renders so
-/// the two cannot drift apart.
-pub(super) fn recolour(data: &mut [u8], paper: [u8; 3], ink: [u8; 3]) {
-    for px in data.as_chunks_mut::<4>().0 {
-        let out = recolour_pixel([px[0], px[1], px[2], px[3]], paper, ink);
-        px.copy_from_slice(&out);
-    }
 }

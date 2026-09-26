@@ -270,6 +270,11 @@ impl Shell {
                 self.config_broken.set(false);
                 *self.config.borrow_mut() = taken.config.clone();
                 self.apply_config(&taken.config);
+                // A Preferences dialog up in any window still shows the values it was built with.
+                let apps: Vec<Rc<App>> = self.windows.borrow().clone();
+                for dialog in apps.iter().filter_map(|app| app.window.visible_dialog()) {
+                    settings::reload(&dialog);
+                }
                 match taken.unwritten {
                     true => self.save_config_soon(),
                     // A write still waiting has nothing left of ours to carry.

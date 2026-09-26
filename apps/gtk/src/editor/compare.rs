@@ -35,7 +35,7 @@ pub fn companion(
     view.set_widget_name(name);
     // A comparison is about lines, so the numbers are always on here.
     line_numbers(&view, &buffer).set_visible(true);
-    style_companion(flavour, &buffer);
+    style_companion(flavour, &buffer, &view);
     (view, buffer)
 }
 
@@ -43,16 +43,16 @@ pub fn companion(
 /// with the note's own styling (`diagram/label.rs`).
 pub fn overlay_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
     let (view, buffer) = build(Flavour::Note, None, text);
-    style_companion(Flavour::Note, &buffer);
+    style_companion(Flavour::Note, &buffer, &view);
     (view, buffer)
 }
 
 /// The styling a companion's text implies: what [`Tab::analyse`] does for the editor, less the
 /// parts that need a tab.
-pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer) {
+pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     match flavour {
         Flavour::Note => {
-            highlight::apply(buffer);
+            wrap::refence(view, || highlight::apply(buffer));
         }
         Flavour::Csv => highlight::apply_csv(buffer),
         Flavour::Code => {}

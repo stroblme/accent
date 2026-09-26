@@ -66,9 +66,10 @@ use tags::bench_tags;
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
 /// until the pointer is on the row, and then the changes list's splices across a refresh that
-/// changes nothing and two Stage clicks, and each section header's button and whether its row
-/// takes the hover highlight. `=press:<path>` instead prints where that row's Stage button is and stays up, for
-/// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
+/// changes nothing and two Stage clicks, and each section header's buttons and whether its row
+/// takes the hover highlight; last the Changes header's Discard All, its question answered.
+/// `=press:<path>` instead prints where that row's Stage button is and stays up, for an XTEST
+/// press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
 /// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did,
 /// and `=sync` asks for a Sync during the fetch on opening and prints whether it waited for it.
@@ -137,25 +138,27 @@ use tags::bench_tags;
 /// Close Tab ended it in the holder (see `keys::bench_hold`). `=early` closes new shells before
 /// they can have started and prints whether any is held for nobody.
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
-/// and prints the layout either side of it, then appends a page with `win.pdf-add-page` and
+/// and prints the layout either side of it, then adds a page with `win.pdf-add-page-after` and
 /// prints the page count, where the reader landed and the page sizes the file holds on disk once
 /// the save has run, and what the vault itself then holds — on a remote vault the host's own copy,
 /// which is the only witness that the write was uploaded. It then renames the file the way a
-/// dropped row does and appends another page to it, which is the render thread following the new
+/// dropped row does and adds another page to it, which is the render thread following the new
 /// name. It writes to the document and moves it, so point it at a scratch copy; and point it at a
 /// document of several pages, since a one-page PDF is wholly on screen whatever the scroll offset
 /// was. `=stale:<rel_path>` is the remote vault's etag gate: it stamps the cached copy with an
-/// etag the host never had, appends a page and prints whether the host's copy is untouched and
-/// what `<name> (edited).pdf` beside it holds, then appends another and prints the same again —
+/// etag the host never had, adds a page and prints whether the host's copy is untouched and
+/// what `<name> (edited).pdf` beside it holds, then adds another and prints the same again —
 /// the second refusal must write that same copy rather than a numbered one, and must leave the
 /// toast count where the first put it. `=pages:<rel_path>` moves the first page below the third as
-/// a drop in the thumbnail strip does, inserts a page after the one being read and deletes the one
-/// being read through the window actions, answering the delete's dialog, and prints the page being
-/// read and each page's text on disk after every step. Point it at a scratch copy of the generated
-/// vault's `Attachments/pages.pdf`. `=strip:<rel_path>` is the pointer's half, held for XTEST: it
-/// opens the document with the Outline pane up and prints the same every two seconds for 40 s, so
-/// a hover and a drag along the thumbnail strip (`build-aux/xtest.py :N "drag X0 Y0 X1 Y1"`) can
-/// be watched landing in the file.
+/// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
+/// page, and deletes the one being read through the window actions, answering the delete's dialog,
+/// and prints the page being read and each page's text on disk after every step; then the items of
+/// the page's own menu without and with a selection, and of the status bar's page count's menu.
+/// Point it at a scratch copy of the generated vault's `Attachments/pages.pdf`.
+/// `=strip:<rel_path>` is the pointer's half, held for XTEST: it opens the document with the
+/// Outline pane up and prints the same every two seconds for 40 s, so a hover and a drag along the
+/// thumbnail strip (`build-aux/xtest.py :N "drag X0 Y0 X1 Y1"`) can be watched landing in the
+/// file.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -174,8 +177,10 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
-/// that offers to create it, with the name it arrives prefilled with. Any text file will do: a
-/// `.txt` has no wikilinks, and its URL underlines all the same.
+/// that offers to create it, with the name it arrives prefilled with. Then `[[#Nowhere]]`, which
+/// must put the caret on the note's first line and toast, and a link typed at the end of a note
+/// past 16 K characters and followed at once, which must offer New File as well. Any text file
+/// will do for the underline: a `.txt` has no wikilinks, and its URL underlines all the same.
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a
@@ -190,11 +195,13 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_NUMBERS=<rel_note>,<rel_code>,<rel_note>` opens the first two and flips the Line
 /// Numbers switch in the preferences three times, printing after each step whether every open tab
 /// shows its numbers, how wide the column is and whether the tab is in front: the third file
-/// opens after the first flip, and the last flip is made with both notes behind the code.
+/// opens after the first flip, and the last flip is made with both notes behind the code. Then
+/// `config.toml` turns them off by hand with the dialog up, and it prints what the dialog's row
+/// says afterwards, whether accent wrote the file again, and whether that row still writes it.
 ///
 /// `ACCENT_BENCH_THEME=<rel_note>` walks the window through Light, Dark and Solarized the way a
-/// system switch and the preferences do, and prints what the note's theme-derived tags hold on
-/// each side of every switch: as it lands, and again once the restyle it defers has run. A second
+/// system switch and the preferences do, and prints what the note's theme-derived tags and the
+/// hues a CSV's columns and the git lanes share hold on each side of every switch: as it lands, and again once the restyle it defers has run. A second
 /// launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark` is Solarized's other half.
 ///
 /// `ACCENT_BENCH_REVEAL=<rel_note>` jumps into a note as a search hit, a tag and a Go to Line
@@ -208,14 +215,16 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_CLIP=<rel_file>` copies a file and pastes it beside itself, then cuts the copy
 /// and pastes it in the vault root: the `(copy)` mark, the rows a Cut dims, and whether the paste
 /// of a Cut moved the file rather than copying it again. Then it puts two files on the clipboard
-/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root. Last it
+/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root, how many
+/// toasts said so — one is right — and what it said. Last it
 /// cuts two notes that link each other and a third, pastes them into the file's folder and
 /// answers the Update Links? question, printing every dialog that came — one is right — and
 /// the three notes' texts afterwards.
 /// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
 /// note and prints the text and the files they left (`attach::bench_attach`).
-/// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file as another in a folder not there yet, and a
-/// note also onto a folder, onto a file open in another tab and as `.txt` (`bench_save_as`).
+/// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
+/// another in a folder not there yet, and a note also onto a folder, onto a file open in another
+/// tab and as `.txt` (`bench_save_as`).
 /// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
 /// list the way the popover's own grab does, printing which row stays highlighted while the menu
 /// is up and which once it has closed. Then it marks that row and one more, the way a Ctrl+click

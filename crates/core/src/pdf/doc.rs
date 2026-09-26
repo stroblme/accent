@@ -6,7 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 use pdfium_render::prelude::*;
 
-use super::{Glyph, Link, LinkTarget, Outline, Rect, RgbaImage, Theme, lock, pdfium, recolour};
+use super::{Glyph, Link, LinkTarget, Outline, Rect, RgbaImage, Theme, lock, pdfium};
+use crate::recolour::recolour;
 
 pub struct PdfDoc {
     // `Option` only so that `Drop` can close the document while still holding `CALLS`; it is

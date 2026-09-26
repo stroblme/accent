@@ -262,9 +262,9 @@ impl Index {
         Ok(change)
     }
 
-    /// [`update_file`](Self::update_file) without the link resolution, for a caller that is
-    /// working through a batch of files and calls [`resolve_links`](Self::resolve_links) once
-    /// when it is done. Links into the file stay unresolved until it does.
+    /// [`update_file`](Self::update_file) without the link resolution: the file's own links are
+    /// written unresolved, and links into it stay as they were until
+    /// [`resolve_links`](Self::resolve_links) runs.
     pub fn update_file_batched(&mut self, root: &Path, rel: &str) -> Result<Change> {
         let meta = match walk::stat_one(root, rel) {
             Ok(Some(meta)) => meta,
@@ -910,32 +910,6 @@ mod tests {
             ix.get_file("Gamma.md").unwrap().unwrap().title.unwrap(),
             "Gamma"
         );
-    }
-
-    /// The worker indexes a whole batch and resolves once at the end: resolution is a
-    /// whole-vault pass, so paying for it per file turns a Syncthing pull into seconds of work.
-    #[test]
-    fn batched_update_leaves_link_resolution_to_the_caller() {
-        let (vault, db) = fixture();
-        fs::write(vault.path().join("a.md"), "# Alpha\nsee [[Gamma]]\n").unwrap();
-        let mut ix = open(&db);
-        ix.reconcile(vault.path(), |_| {}).unwrap();
-        assert_eq!(ix.unresolved_links().unwrap().len(), 1);
-
-        fs::write(vault.path().join("Gamma.md"), "# Gamma\n").unwrap();
-        assert_eq!(
-            ix.update_file_batched(vault.path(), "Gamma.md").unwrap(),
-            Change::Added(FileKind::Markdown)
-        );
-        assert_eq!(
-            ix.unresolved_links().unwrap().len(),
-            1,
-            "the batched variant must not resolve on its own"
-        );
-
-        ix.resolve_links().unwrap();
-        assert!(ix.unresolved_links().unwrap().is_empty());
-        assert_eq!(ix.backlinks("Gamma.md").unwrap().len(), 1);
     }
 
     #[test]

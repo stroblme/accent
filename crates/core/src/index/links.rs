@@ -19,14 +19,16 @@ const BEST_REL_PATH: &str = "SELECT f.rel_path FROM file_keys k JOIN files f ON 
      WHERE k.key = ?1 ORDER BY length(f.rel_path), f.id LIMIT 1";
 
 /// [`Index::resolve_links`] narrowed to what one indexed file can have changed: the links it
-/// holds, and every link whose key it answers to — which is where a dangling link finds its new
-/// note, and a resolved one a shorter path. Both halves are index lookups.
+/// holds, every link whose key it answers to — which is where a dangling link finds its new
+/// note, and a resolved one a shorter path — and every link that resolved to it, which a file
+/// turned folder no longer answers. All three are index lookups.
 pub(super) fn resolve_links_of(tx: &rusqlite::Transaction<'_>, rel: &str) -> Result<()> {
     tx.prepare_cached(&format!(
         "UPDATE links SET resolved_file = {BEST_FILE}
           WHERE src_file = (SELECT id FROM files WHERE rel_path = ?1)
              OR key IN (SELECT k.key FROM file_keys k JOIN files f ON f.id = k.file_id
-                         WHERE f.rel_path = ?1)"
+                         WHERE f.rel_path = ?1)
+             OR resolved_file = (SELECT id FROM files WHERE rel_path = ?1)"
     ))?
     .execute([rel])?;
     Ok(())
@@ -36,9 +38,9 @@ impl Index {
     /// Obsidian link resolution: a target matches a file's path or name, with or without the
     /// extension, case-insensitively; the shortest `rel_path` wins. Unmatched stays NULL.
     ///
-    /// The whole `links` table in one statement, for the cold build and for a batch caller that
-    /// changed many files and resolves once. A single file's worth is [`resolve_links_of`], and a
-    /// a removal re-points its own links as it goes. Returns how many links resolve.
+    /// The whole `links` table in one statement, for the cold build. A single file's worth is
+    /// [`resolve_links_of`], and a removal re-points its own links as it goes. Returns how many
+    /// links resolve.
     pub fn resolve_links(&mut self) -> Result<usize> {
         let tx = self.write_tx()?;
         tx.execute(&format!("UPDATE links SET resolved_file = {BEST_FILE}"), [])?;
@@ -324,6 +326,26 @@ mod tests {
         );
         assert_eq!(ix.backlinks("sub/Beta.md").unwrap().len(), 1);
         assert!(ix.unresolved_links().unwrap().is_empty());
+    }
+
+    /// A file that becomes a folder of the same name loses its keys, and the links it answered
+    /// have to let go of it as they would of a removed file: a folder is no link target.
+    #[test]
+    fn a_file_turned_folder_lets_its_links_dangle() {
+        let (vault, db) = fixture();
+        fs::write(vault.path().join("d.md"), "see [[Ideas]]\n").unwrap();
+        fs::write(vault.path().join("Ideas"), "plain\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(ix.backlinks("Ideas").unwrap().len(), 1);
+
+        fs::remove_file(vault.path().join("Ideas")).unwrap();
+        fs::create_dir(vault.path().join("Ideas")).unwrap();
+        assert_eq!(
+            ix.update_file(vault.path(), "Ideas").unwrap(),
+            Change::Updated(FileKind::Dir)
+        );
+        assert!(ix.backlinks("Ideas").unwrap().is_empty());
     }
 
     /// A note linked to before it is written is offered once, by the path New File would make,

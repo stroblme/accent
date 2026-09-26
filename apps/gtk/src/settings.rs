@@ -7,7 +7,7 @@
 
 use accent_core::config::{Config, FocusMode, Theme, VaultConfig};
 use adw::prelude::*;
-use gtk::pango;
+use gtk::{gio, pango};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -62,6 +62,16 @@ pub fn save(config: &Config) {
     }
 }
 
+/// The action an open Preferences dialog answers by building its rows again ([`reload`]).
+const RELOAD: &str = "preferences.reload";
+
+/// Build an open Preferences dialog's rows again from the config: what a hand edit to
+/// `config.toml` does to one (`Shell::config_file_changed`). Only a Preferences dialog has the
+/// action, so any other dialog is left alone.
+pub fn reload(dialog: &adw::Dialog) {
+    let _ = dialog.activate_action(RELOAD, None);
+}
+
 /// The dialog itself, split off so Restore Defaults can build it a second time. Every row reads
 /// its value once, at construction, so a reset that changes all of them is a new page rather than
 /// a handle kept on each row.
@@ -70,6 +80,37 @@ fn page(
     config: Rc<RefCell<Config>>,
     root: Option<PathBuf>,
     on_change: Rc<dyn Fn(&Config)>,
+) {
+    let dialog = adw::PreferencesDialog::builder()
+        .title("Preferences")
+        .build();
+    fill(&dialog, parent, &config, &root, &on_change);
+
+    // A config taken in from the file is a new page in the same dialog, for the reason a reset
+    // is: every row is built reading its new value, so no row's handler runs and nothing is
+    // written back. Weak: the action hangs off the dialog.
+    let action = gio::SimpleAction::new("reload", None);
+    action.connect_activate({
+        let (weak, parent) = (dialog.downgrade(), parent.clone());
+        move |_, _| {
+            if let Some(dialog) = weak.upgrade() {
+                fill(&dialog, &parent, &config, &root, &on_change);
+            }
+        }
+    });
+    let actions = gio::SimpleActionGroup::new();
+    actions.add_action(&action);
+    dialog.insert_action_group("preferences", Some(&actions));
+    dialog.present(Some(parent));
+}
+
+/// Put a page of rows reading `config` into `dialog`, in place of the one it has.
+fn fill(
+    dialog: &adw::PreferencesDialog,
+    parent: &gtk::Widget,
+    config: &Rc<RefCell<Config>>,
+    root: &Option<PathBuf>,
+    on_change: &Rc<dyn Fn(&Config)>,
 ) {
     // The config is cloned out of the cell before saving, so `on_change` is free to borrow it
     // again without meeting an outstanding borrow of ours.
@@ -82,25 +123,21 @@ fn page(
         }
     });
 
-    let dialog = adw::PreferencesDialog::builder()
-        .title("Preferences")
-        .build();
-
     let page = adw::PreferencesPage::new();
-    page.add(&appearance_group(&config, &save));
-    page.add(&editor_group(&config, &save));
-    page.add(&files_group(&config, &save));
-    page.add(&git_group(&config, &save));
-    page.add(&pdf_group(&config, &save));
-    if let Some(root) = &root {
-        page.add(&vault_group(&config, root, &save));
+    page.add(&appearance_group(config, &save));
+    page.add(&editor_group(config, &save));
+    page.add(&files_group(config, &save));
+    page.add(&git_group(config, &save));
+    page.add(&pdf_group(config, &save));
+    if let Some(root) = root {
+        page.add(&vault_group(config, root, &save));
     }
-    page.add(&reset_group(
-        &dialog, parent, &config, &root, &save, &on_change,
-    ));
+    page.add(&reset_group(dialog, parent, config, root, &save, on_change));
 
+    if let Some(old) = dialog.visible_page() {
+        dialog.remove(&old);
+    }
     dialog.add(&page);
-    dialog.present(Some(parent));
 }
 
 // ------------------------------------------------------------------------------- appearance

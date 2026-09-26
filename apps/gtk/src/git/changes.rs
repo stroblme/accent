@@ -31,6 +31,9 @@ enum Row {
         /// no bulk action: conflicts are resolved one file at a time, and submodules are a
         /// read-only list.
         all: Option<Section>,
+        /// Whether the header offers Discard All: the Changes header's alone, and only where
+        /// Discard can take every entry of the section, as a folder row's ([`discardable`]).
+        discardable: bool,
     },
     /// A folder in the tree view, standing for everything under it in one section.
     Folder {
@@ -247,9 +250,19 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
             }
         }
     ));
+    // Discard All beside it, over the rows' own Discard: every change in the section, after the
+    // one question a folder row's Discard asks.
+    let discard = icon_button("document-revert-symbolic", "Discard All");
+    let weak = panel.clone();
+    discard.connect_clicked(move |_| {
+        if let Some(panel) = weak.upgrade() {
+            panel.discard(Some(""), panel.section_entries(Section::Changes, ""));
+        }
+    });
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     header.append(&title);
     header.append(&all);
+    header.append(&discard);
 
     // A folder of the tree view: the chevron says whether it is open, the folder icon says it is
     // one — the same icon the Files tree gives a directory — and the label carries whatever
@@ -294,9 +307,9 @@ enum Act {
 
 /// Show a row's buttons while the pointer or the keyboard is on it, and give them no width at all
 /// the rest of the time, so the name beside them reads out to the whole width of the pane and is
-/// cut short only where there is really something to give way to. `.git-actions` fades them in
-/// and out; what it cannot do is stop them reserving their room, a `GtkRevealer` that is shut
-/// measuring nothing.
+/// cut short only where there is really something to give way to. A `GtkRevealer` does both: shut,
+/// it measures nothing, and it slides them in and out at full opacity, the same way whether the
+/// pointer or the focus is what let them go.
 ///
 /// Watched on the list row rather than on the stack inside it: that is the widget GTK marks with
 /// PRELIGHT while the pointer is anywhere on it and with FOCUS_WITHIN while one of its buttons has
@@ -362,12 +375,11 @@ fn revealers(row: &gtk::Widget) -> Vec<gtk::Revealer> {
 }
 
 /// A row's Stage / Unstage / Discard buttons, the same three on a file and on a folder. They show
-/// on the row's hover and `:focus-within` (`.git-actions`), and the binder picks which of them the
-/// row offers. In a revealer, which is what keeps them from reserving their width while they are
-/// away ([`reveal_on_hover`]).
+/// while the pointer or the keyboard is on the row, and the binder picks which of them the row
+/// offers. In a revealer, which is what keeps them from reserving their width while they are away
+/// ([`reveal_on_hover`]).
 fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    actions.add_css_class("git-actions");
     for (icon, tooltip, act) in [
         ("list-add-symbolic", "Stage", Act::Stage),
         ("list-remove-symbolic", "Unstage", Act::Unstage),
@@ -449,7 +461,10 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
     let Some(title) = header.first_child().and_downcast::<gtk::Label>() else {
         return;
     };
-    let Some(all) = title.next_sibling().and_downcast::<gtk::Button>() else {
+    let (Some(all), Some(discard_all)) = (
+        title.next_sibling().and_downcast::<gtk::Button>(),
+        header.last_child(),
+    ) else {
         return;
     };
     let Some(actions) = buttons(entry.last_child()) else {
@@ -464,11 +479,13 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
         Row::Header {
             title: text,
             all: section,
+            discardable,
         } => {
             stack.set_visible_child_name("header");
             stack.set_tooltip_text(None);
             title.set_text(text);
             all.set_visible(section.is_some());
+            discard_all.set_visible(discardable);
             let (icon, tip) = match section {
                 Some(Section::Staged) => ("list-remove-symbolic", "Unstage All"),
                 _ => ("list-add-symbolic", "Stage All"),
@@ -603,7 +620,13 @@ fn rows_of(
         if entries.is_empty() {
             continue;
         }
-        rows.push(Row::Header { title, all });
+        let discardable =
+            section == Section::Changes && entries.iter().all(|e| discardable(e, &key(&e.path)));
+        rows.push(Row::Header {
+            title,
+            all,
+            discardable,
+        });
         match tree {
             true => rows.extend(grouped(&entries, section, collapsed, key)),
             false => rows.extend(entries.into_iter().map(|entry| Row::Entry {
@@ -618,6 +641,7 @@ fn rows_of(
         rows.push(Row::Header {
             title: "Submodules",
             all: None,
+            discardable: false,
         });
         rows.extend(subs.iter().cloned().map(Row::Submodule));
     }
@@ -793,6 +817,24 @@ mod tests {
             "no conflicts section"
         );
         assert_eq!(rows.len(), 4);
+        assert!(
+            matches!(
+                &rows[2],
+                Row::Header {
+                    title: "Changes",
+                    discardable: true,
+                    ..
+                }
+            ),
+            "Discard All over the working tree's changes, and over nothing else"
+        );
+        assert!(matches!(
+            &rows[0],
+            Row::Header {
+                discardable: false,
+                ..
+            }
+        ));
         assert!(matches!(
             &rows[1],
             Row::Entry { entry, section: Section::Staged, key, .. } if entry.path == "a.md" && key == "a.md"
@@ -818,7 +860,8 @@ mod tests {
             rows.first(),
             Some(Row::Header {
                 title: "Merge Conflicts",
-                all: None
+                all: None,
+                discardable: false,
             })
         ));
         assert!(matches!(rows.last(), Some(Row::Submodule(_))));

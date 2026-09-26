@@ -198,6 +198,13 @@ fn monospace_family() -> String {
 /// may be quieter than the one people already read.
 const DIM_FLOOR: f32 = 2.8;
 
+/// The floor on Solarized alone. Its prose is only 4.13:1 light and 4.75:1 dark, so under
+/// [`DIM_FLOOR`] a list marker (0.4) and a quote (0.6) were both lifted onto 2.8:1 and read the
+/// same. 1.8 is Adwaita's marker carried over: 2.84:1 under prose at 12.6:1 is 41 % of the
+/// prose's contrast on a log scale, and 41 % of 4.13:1 is 1.8:1. The marker lands on 1.80:1 light
+/// under a quote at 2.16:1, and dark keeps both alphas, 1.86:1 under 2.59:1.
+const SOLARIZED_DIM_FLOOR: f32 = 1.8;
+
 /// What `colour` reads at against `page`, composited over it: a translucent foreground *is* a mix
 /// with what is behind it, so that mix is the contrast the reader gets. WCAG 2.1's ratio, which
 /// is the only definition of "reads at" anyone shares.
@@ -220,19 +227,29 @@ pub fn reads_at(colour: gdk::RGBA, page: gdk::RGBA) -> f32 {
     (mixed.max(under) + 0.05) / (mixed.min(under) + 0.05)
 }
 
-/// `ink` at `alpha`, or at as much more of it as it takes to clear [`DIM_FLOOR`] against `page`.
+/// `ink` at `alpha`, or at as much more of it as it takes to clear the theme's floor
+/// ([`DIM_FLOOR`], [`SOLARIZED_DIM_FLOOR`]) against `page`.
+pub fn dim(ink: gdk::RGBA, page: gdk::RGBA, alpha: f32) -> gdk::RGBA {
+    let floor = match theme::solarized() {
+        true => SOLARIZED_DIM_FLOOR,
+        false => DIM_FLOOR,
+    };
+    lift(ink, page, alpha, floor)
+}
+
+/// `ink` at `alpha`, or at as much more of it as it takes to clear `floor` against `page`.
 ///
 /// Contrast against the page only grows as the ink does, so the smallest alpha that clears the
 /// floor is a bisection away; a page with no room left hands back the ink itself.
-pub fn dim(ink: gdk::RGBA, page: gdk::RGBA, alpha: f32) -> gdk::RGBA {
-    if reads_at(theme::at(ink, alpha), page) >= DIM_FLOOR {
+fn lift(ink: gdk::RGBA, page: gdk::RGBA, alpha: f32, floor: f32) -> gdk::RGBA {
+    if reads_at(theme::at(ink, alpha), page) >= floor {
         return theme::at(ink, alpha);
     }
     let (mut lo, mut hi) = (alpha, 1.0);
     // Twenty halvings land within 1e-6 of the boundary, far finer than the 1/255 it is painted at.
     for _ in 0..20 {
         let mid = 0.5 * (lo + hi);
-        match reads_at(theme::at(ink, mid), page) >= DIM_FLOOR {
+        match reads_at(theme::at(ink, mid), page) >= floor {
             true => hi = mid,
             false => lo = mid,
         }
@@ -246,16 +263,22 @@ pub fn page(dark: bool) -> gdk::RGBA {
     gdk::RGBA::parse(crate::theme::view_bg(dark)).unwrap_or(gdk::RGBA::WHITE)
 }
 
+/// The accent that text on the page is written in: the standalone one, not `accent_color_rgba`.
+/// That one is the brand colour a button is filled with, and it is the same in both halves of the
+/// theme. libadwaita darkens it for a light page and lightens it for a dark one before anybody
+/// writes text in it, which is what `to_standalone_rgba` hands back — the colour the platform's
+/// own links are written in. The link tags, a CSV's columns and the git history's lanes all take it.
+fn text_accent() -> gdk::RGBA {
+    let style = adw::StyleManager::default();
+    style.accent_color().to_standalone_rgba(style.is_dark())
+}
+
 /// Apply the standalone accent and the foreground-derived dim colours. Call once after the view is
 /// realised and again on every `notify::accent-color` / `notify::dark`.
 pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     let table = buffer.tag_table();
     let style = adw::StyleManager::default();
-    // The standalone accent, not `accent_color_rgba`: that one is the brand colour a button is
-    // filled with, and it is the same in both halves of the theme. libadwaita darkens it for a
-    // light page and lightens it for a dark one before anybody writes text in it, which is what
-    // `to_standalone_rgba` hands back — the colour the platform's own links are written in.
-    let accent = style.accent_color().to_standalone_rgba(style.is_dark());
+    let accent = text_accent();
     let fg = view.color();
     let page = page(style.is_dark());
     let set = |name: &str, f: &dyn Fn(&gtk::TextTag)| {
@@ -456,7 +479,7 @@ pub fn apply_csv(buffer: &sourceview5::Buffer) {
 /// is called: the palette follows the system accent and the columns have no other colour source.
 pub fn restyle_csv(buffer: &sourceview5::Buffer) {
     let table = buffer.tag_table();
-    let accent = adw::StyleManager::default().accent_color_rgba();
+    let accent = text_accent();
     let hsv = gtk::rgb_to_hsv(accent.red(), accent.green(), accent.blue());
     for (column, name) in CSV_TAG_NAMES.iter().enumerate() {
         let Some(tag) = table.lookup(name) else {
@@ -472,7 +495,7 @@ pub fn restyle_csv(buffer: &sourceview5::Buffer) {
 /// accent's hue turned `column` sixths of a turn, so lane 0 is the accent and a seventh lane
 /// repeats the first hue instead of inventing a colour.
 pub fn lane_colour(column: usize) -> gdk::RGBA {
-    let accent = adw::StyleManager::default().accent_color_rgba();
+    let accent = text_accent();
     let hsv = gtk::rgb_to_hsv(accent.red(), accent.green(), accent.blue());
     let (h, s, v) = rotate(hsv, column % CSV_COLUMNS);
     let (r, g, b) = gtk::hsv_to_rgb(h, s, v);
@@ -506,9 +529,25 @@ mod tests {
         let ink = gdk::RGBA::parse("#657b83").unwrap();
         let page = gdk::RGBA::parse("#fdf6e3").unwrap();
         assert!(reads_at(theme::at(ink, 0.4), page) < DIM_FLOOR);
-        let lifted = dim(ink, page, 0.4);
+        let lifted = lift(ink, page, 0.4, DIM_FLOOR);
         assert!(lifted.alpha() > 0.4, "alpha {}", lifted.alpha());
         assert!((reads_at(lifted, page) - DIM_FLOOR).abs() < 0.01);
+    }
+
+    #[test]
+    fn solarized_keeps_a_quote_a_step_above_a_marker() {
+        // Base00 on base3 and base0 on base03: the floor lifts the light marker alone.
+        for (ink, page, marker) in [("#657b83", "#fdf6e3", 1.80), ("#839496", "#002b36", 1.86)] {
+            let (ink, page) = (
+                gdk::RGBA::parse(ink).unwrap(),
+                gdk::RGBA::parse(page).unwrap(),
+            );
+            let dimmed = lift(ink, page, 0.4, SOLARIZED_DIM_FLOOR);
+            let quote = lift(ink, page, 0.6, SOLARIZED_DIM_FLOOR);
+            assert!((reads_at(dimmed, page) - marker).abs() < 0.01);
+            assert_eq!(quote.alpha(), 0.6);
+            assert!(reads_at(quote, page) > 1.15 * reads_at(dimmed, page));
+        }
     }
 
     #[test]

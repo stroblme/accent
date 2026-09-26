@@ -23,7 +23,7 @@ impl App {
     pub fn reveal_page(&self, page: &adw::TabPage) {
         if let Some(pane) = self.pane_of(page) {
             pane.tabs.set_selected_page(page);
-            *self.active_pane.borrow_mut() = pane;
+            self.set_active_pane(&pane);
         }
     }
 
@@ -392,7 +392,7 @@ impl App {
         if Rc::ptr_eq(&self.pane(), pane)
             && let Some(next) = self.panes.borrow().first().cloned()
         {
-            *self.active_pane.borrow_mut() = next;
+            self.set_active_pane(&next);
         }
         self.sync_panes();
         self.sync_active();
@@ -406,7 +406,19 @@ impl App {
             return false;
         }
         *self.active_pane.borrow_mut() = pane.clone();
+        self.mark_active_pane();
         true
+    }
+
+    /// Every pane's bar but the active one's draws its selected tab as an outline rather than a
+    /// fill (`.accent-idle-pane`), so a split says which pane the keyboard and the next note go
+    /// to. A lone pane is the active one and keeps its fill.
+    fn mark_active_pane(&self) {
+        let active = self.pane();
+        for pane in self.panes.borrow().iter() {
+            let idle = !Rc::ptr_eq(pane, &active);
+            crate::widgets::set_class(&pane.bar, "accent-idle-pane", idle);
+        }
     }
 
     /// Give the keyboard to what `pane` is showing, so a document moved into it takes the caret
@@ -440,8 +452,8 @@ impl App {
         });
     }
 
-    /// What changes when a pane appears or goes: whether the tab bars may hide themselves, and
-    /// whether there is any note left to show at all.
+    /// What changes when a pane appears or goes: whether the tab bars may hide themselves, which
+    /// of them are not the active one's, and whether there is any note left to show at all.
     pub fn sync_panes(&self) {
         let panes = self.panes.borrow();
         // A single pane's bar disappears with its second tab, as it always did. Several panes have
@@ -451,6 +463,7 @@ impl App {
         for pane in panes.iter() {
             pane.bar.set_autohide(alone);
         }
+        self.mark_active_pane();
         let name = if pages == 0 { "empty" } else { "tabs" };
         self.content.set_visible_child_name(name);
     }

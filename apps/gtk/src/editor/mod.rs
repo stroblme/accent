@@ -1490,6 +1490,7 @@ impl Tab {
         if self.loading.get() {
             return;
         }
+        lang::edited(self);
         // The other half of the rule above: an edit that leaves the caret where it was — Delete,
         // or a replacement over a selection — still answers the jump.
         self.clear_reveal();
@@ -1523,7 +1524,7 @@ impl Tab {
     }
 
     /// Re-read the buffer once and refresh everything derived from it: the styling tags, and the
-    /// link table that Ctrl+click and Ctrl+Return follow. The preview listens on `on_edited` and
+    /// link table the Ctrl+hover underline reads. The preview listens on `on_edited` and
     /// debounces its own re-render, so calling this per keystroke only re-arms that timer.
     fn reanalyse(self: &Rc<Self>) {
         self.analyse_text();
@@ -1542,7 +1543,8 @@ impl Tab {
     fn analyse_text(&self) {
         match self.flavour {
             Flavour::Note => {
-                let (analysis, offsets) = highlight::apply(&self.buffer);
+                let (analysis, offsets) =
+                    wrap::refence(&self.view, || highlight::apply(&self.buffer));
                 *self.links.borrow_mut() = analysis
                     .links
                     .into_iter()

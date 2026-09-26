@@ -315,6 +315,7 @@ pub(crate) fn placed(
         out.push(Location {
             range: range_of(&source, &(b.byte_start as usize..b.byte_end as usize)),
             path: b.src_rel_path,
+            ..Location::default()
         });
     }
     out
@@ -760,36 +761,52 @@ impl Notes {
         if link.kind == LinkKind::External {
             return Ok(vec![Location {
                 path: link.target.clone(),
-                range: Range::default(),
+                ..Location::default()
             }]);
         }
         // `[[#Heading]]` has no target: it points into the note the caret is in.
         let target = match link.target.is_empty() {
             true => rel.to_string(),
-            false => match locked(&self.index).resolve_target(&target_of(rel, link))? {
-                Some(target) => target,
-                // A dangling link goes nowhere; offering to create the note is the app's business.
-                None => return Ok(Vec::new()),
-            },
+            false => {
+                let asked = target_of(rel, link);
+                let resolved = locked(&self.index).resolve_target(&asked)?;
+                match resolved.or_else(|| self.unwalked(&asked)) {
+                    Some(target) => target,
+                    // Nothing is there yet: the answer is the file New File would write for it.
+                    None => {
+                        return Ok(vec![Location {
+                            path: path::linked_path(&asked),
+                            missing: true,
+                            ..Location::default()
+                        }]);
+                    }
+                }
+            }
         };
         let range = link
             .anchor
             .as_ref()
-            .and_then(|anchor| self.heading(&target, anchor))
-            .unwrap_or_default();
-        // A PDF anchor rides along in the path, `paper.pdf#page=3&selection=…`, so following the
-        // link reaches the page and the selection rather than the first page.
-        //
-        // ponytail: in the path rather than in a field of its own, because `Location` is built in
-        // eleven places across the api and lsp crates and every one of them would have to name a
-        // field that only a PDF ever fills. `Location::is_url` already reads `path` for a `://`,
-        // so a path that is not only a path is the shape this type has. A field is the upgrade if
-        // anything else ever needs an anchor.
-        let path = match link.anchor.as_deref() {
-            Some(a) if markdown::pdf_anchor(a).is_some() => format!("{target}#{a}"),
-            _ => target,
-        };
-        Ok(vec![Location { path, range }])
+            .and_then(|anchor| self.heading(&target, anchor));
+        Ok(vec![Location {
+            path: target,
+            range: range.unwrap_or_default(),
+            // What the range cannot say comes back beside it: a PDF's page and selection, so the
+            // link reaches them rather than the first page, or a heading the note does not have,
+            // so the reader is told why they are at its top.
+            anchor: link.anchor.clone().filter(|_| range.is_none()),
+            missing: false,
+        }])
+    }
+
+    /// The file a link the index cannot place names in a tree the walk never enters — a
+    /// gitignored `build/`, a `node_modules` — which is the one New File would otherwise write
+    /// ([`path::linked_path`]). Asked of the disk here, on the host that has the files.
+    fn unwalked(&self, asked: &str) -> Option<String> {
+        let path = path::linked_path(asked);
+        Local::join(&self.root, &path)
+            .ok()?
+            .is_file()
+            .then_some(path)
     }
 
     /// Where the heading an anchor names sits in `rel`, if it is there at all.
