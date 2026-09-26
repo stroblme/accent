@@ -283,6 +283,10 @@ The decisions under the Android app, each with its reason; the shared ones are i
 - **Wet strokes are a Compose `Canvas`** path committed on release — about thirty lines and no View
   interop; `androidx.ink` is the upgrade once a stylus has been held against it.
 - **minSdk 31** — where Material You reads the system colours the accent comes from.
+- **The release build is minified** (`app/proguard-rules.pro`) — unminified, Compose's dex was two
+  thirds of the APK. What JNA reaches by name is kept by what it is — JNA itself, every `Structure`,
+  every `Callback`, every `native` method — rather than by package, so the bindings' own Kotlin
+  shrinks with the rest.
 
 ## What is not here, and why
 
