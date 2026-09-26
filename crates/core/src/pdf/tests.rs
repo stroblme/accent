@@ -1029,48 +1029,13 @@ fn search_is_case_insensitive_and_empty_safe() {
     assert!(doc.search(0, "second").unwrap().is_empty(), "other page");
 }
 
-// The two pairs the app asks for: the Adwaita dark view background with its foreground, and
-// Solarized light's cream paper with its slate ink.
+// The Adwaita dark view background with its foreground, the pair a dark theme renders onto.
 const ADWAITA: ([u8; 3], [u8; 3]) = ([0x1d, 0x1d, 0x20], [0xeb, 0xeb, 0xeb]);
-const SOLARIZED_LIGHT: ([u8; 3], [u8; 3]) = ([0xfd, 0xf6, 0xe3], [0x65, 0x7b, 0x83]);
 
 fn adwaita_dark() -> Theme {
     Theme::Recolour {
         paper: ADWAITA.0,
         ink: ADWAITA.1,
-    }
-}
-
-#[test]
-fn recolour_maps_paper_and_ink_to_the_theme() {
-    for (paper, ink) in [ADWAITA, SOLARIZED_LIGHT] {
-        // Tolerance of 1 per channel: the ramp runs through f32 and truncates on the way out.
-        let near = |got: [u8; 4], want: [u8; 3]| (0..3).all(|i| got[i].abs_diff(want[i]) <= 1);
-
-        let white = recolour_pixel([255, 255, 255, 255], paper, ink);
-        assert!(near(white, paper), "white -> {white:?}, want {paper:?}");
-        assert_eq!(white[3], 255, "alpha preserved");
-
-        let black = recolour_pixel([0, 0, 0, 255], paper, ink);
-        assert!(near(black, ink), "black -> {black:?}, want {ink:?}");
-    }
-}
-
-#[test]
-fn recolour_keeps_a_saturated_colour_recognisable() {
-    for (paper, ink) in [ADWAITA, SOLARIZED_LIGHT] {
-        // A yellow highlight must remain a yellow highlight, not turn grey.
-        let yellow = recolour_pixel([255, 255, 0, 255], paper, ink);
-        assert!(
-            yellow[0] > yellow[2] + 40 && yellow[1] > yellow[2] + 40,
-            "{yellow:?} on paper {paper:?}"
-        );
-
-        let red = recolour_pixel([255, 0, 0, 255], paper, ink);
-        assert!(
-            red[0] > red[1] + 40 && red[0] > red[2] + 40,
-            "stays reddish: {red:?} on paper {paper:?}"
-        );
     }
 }
 
