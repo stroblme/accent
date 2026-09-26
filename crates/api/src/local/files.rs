@@ -459,10 +459,13 @@ impl Local {
         edit: PageEdit,
         keep: &[(String, usize)],
     ) -> Result<markdown::Repaged> {
-        let targets: HashMap<String, String> =
+        let mut targets: HashMap<String, String> =
             self.index().resolved_links(note)?.into_iter().collect();
         let path = self.resolve(note)?;
         let (text, etag) = fs::read_note(&path)?;
+        // A reference definition or an HTML `href` is no link the index holds, and may spell a
+        // path none of the note's links does.
+        targets.extend(self.path_targets(note, &text)?);
         let done = markdown::repage_links(&text, note, pdf, &targets, edit, keep);
         if let Some(rewritten) = &done.text {
             fs::write_note(&path, rewritten, Some(etag))?;
@@ -873,6 +876,26 @@ mod tests {
         assert_eq!(
             f.read("a.md"),
             "[[paper.pdf#page=3&selection=0,0,0,4|Hi]] [[paper.pdf#page=1]]\n"
+        );
+    }
+
+    /// A reference definition and an HTML `href` follow a page edit, also where no link the index
+    /// holds spells their path: `[[paper]]` is keyed by the name alone.
+    #[test]
+    fn a_page_edit_follows_the_paths_no_link_spells() {
+        let f = vault_of(&[
+            ("paper.pdf", "%PDF-1.4\n"),
+            (
+                "c.md",
+                "[[paper#page=2]] <a href=\"paper.pdf#page=1\">one</a>\n\n[d]: paper.pdf#page=3\n",
+            ),
+        ]);
+        let move_first = crate::PageEdit::Move { from: 0, to: 2 };
+        let report = f.vault.repage_links("paper.pdf", move_first, &[]).unwrap();
+        assert_eq!(report.moved, 3);
+        assert_eq!(
+            f.read("c.md"),
+            "[[paper#page=1]] <a href=\"paper.pdf#page=3\">one</a>\n\n[d]: paper.pdf#page=2\n"
         );
     }
 

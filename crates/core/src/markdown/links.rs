@@ -575,7 +575,8 @@ pub struct Repaged {
 
 /// Point the links in the note `src` into the PDF `pdf` at where `edit` took the pages they name:
 /// `[[paper.pdf#page=3&selection=…]]`, `![[paper.pdf#page=3]]` and `[t](paper.pdf#page=3)`
-/// alike, the page number rewritten and nothing else of the link.
+/// alike, the page number rewritten and nothing else of the link. A reference definition's
+/// destination and an HTML `href` follow too, scanned for as [`rewrite_moved`] scans for them.
 ///
 /// A link into the page a delete took out names no page any more; it is left as written and
 /// handed back in [`Repaged::left`], because guessing at a neighbour would be a wrong link that
@@ -591,6 +592,32 @@ pub fn repage_links(
     keep: &[(String, usize)],
 ) -> Repaged {
     let dir = parent_dir(src);
+    let into_pdf =
+        |key: Option<String>| key.and_then(|k| targets.get(&k)).is_some_and(|f| f == pdf);
+    let a = analyze(text);
+    // Every link into the PDF, as where its markup sits and where the digits of its page do. A
+    // scanned path's markup is the destination as written, anchor and all.
+    let mut found: Vec<(Range<usize>, Option<Range<usize>>)> = Vec::new();
+    for link in &a.links {
+        let key = match link.kind {
+            LinkKind::Wiki | LinkKind::Embed => link_key(&link.target),
+            LinkKind::Markdown => link_key(&path::resolve(dir, &link.target)),
+            LinkKind::External => continue,
+        };
+        if into_pdf(Some(key)) {
+            found.push((link.range.clone(), page_number(text, link)));
+        }
+    }
+    for at in scanned_paths(text, &a) {
+        let Some((written, anchor)) = text.get(at.clone()).map(split_anchor) else {
+            continue;
+        };
+        if into_pdf(path_key(dir, &percent_decode(written))) {
+            let start = at.start + written.len() + 1;
+            let number = anchor.and_then(page_digits);
+            found.push((at, number.map(|r| start + r.start..start + r.end)));
+        }
+    }
     let mut out = Repaged::default();
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     // How many links into the PDF have read the same so far: before this rewrite, which is how
@@ -601,20 +628,12 @@ pub fn repage_links(
         *n += 1;
         *n - 1
     };
-    for link in &analyze(text).links {
-        let key = match link.kind {
-            LinkKind::Wiki | LinkKind::Embed => link_key(&link.target),
-            LinkKind::Markdown => link_key(&path::resolve(dir, &link.target)),
-            LinkKind::External => continue,
-        };
-        let Some(written) = text.get(link.range.clone()) else {
+    for (markup, number) in found {
+        let Some(written) = text.get(markup.clone()) else {
             continue;
         };
-        if targets.get(&key).map(String::as_str) != Some(pdf) {
-            continue;
-        }
         let kept = keep.contains(&(written.to_string(), nth(&mut before, written)));
-        let number = page_number(text, link).filter(|_| !kept);
+        let number = number.filter(|_| !kept);
         let page = number
             .clone()
             .and_then(|at| text[at].parse::<usize>().ok()?.checked_sub(1));
@@ -623,7 +642,7 @@ pub fn repage_links(
         match (number, page.map(|page| (page, edit.map(page)))) {
             (Some(at), Some((page, Some(to)))) if to != page => {
                 let with = (to + 1).to_string();
-                let start = link.range.start;
+                let start = markup.start;
                 now.replace_range(at.start - start..at.end - start, &with);
                 edits.push((at, with));
                 out.moved += 1;
@@ -636,8 +655,10 @@ pub fn repage_links(
             out.left.push((now, n));
         }
     }
+    // Back to front, the scanned paths coming after the links whatever their place.
+    edits.sort_by_key(|(at, _)| std::cmp::Reverse(at.start));
     let mut rewritten = text.to_string();
-    for (at, with) in edits.into_iter().rev() {
+    for (at, with) in edits {
         rewritten.replace_range(at, &with);
     }
     out.text = (rewritten != text).then_some(rewritten);
@@ -665,7 +686,12 @@ fn page_number(text: &str, link: &Link) -> Option<Range<usize>> {
     {
         return None;
     }
-    let mut at = start;
+    page_digits(anchor).map(|r| start + r.start..start + r.end)
+}
+
+/// Where the digits of `page=N` sit in an anchor as written, `None` when it names no page.
+fn page_digits(anchor: &str) -> Option<Range<usize>> {
+    let mut at = 0;
     for part in anchor.split('&') {
         if let Some(rest) = part.strip_prefix("page=") {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
@@ -1154,5 +1180,36 @@ mod tests {
                 ("[[p.pdf#page=2|again]]".to_string(), 0)
             ]
         );
+    }
+
+    /// The two path forms the parser does not hand over follow a page edit as a link does: a
+    /// reference definition and an HTML `href`, the definition's own `[r][one]` naming no page.
+    #[test]
+    fn a_page_edit_moves_reference_definitions_and_html_hrefs() {
+        let src = concat!(
+            "[r][one] <a href=\"../Papers/p.pdf#page=3\">three</a>\n\n",
+            "[one]: ../Papers/p.pdf#page=1 \"title\"\n",
+            "[two]: ../other.pdf#page=1\n",
+            "```\n[three]: ../Papers/p.pdf#page=1\n```\n"
+        );
+        let got = repaged(src, PageEdit::Move { from: 0, to: 2 }, &[]);
+        assert_eq!(
+            got.text.as_deref(),
+            Some(concat!(
+                "[r][one] <a href=\"../Papers/p.pdf#page=2\">three</a>\n\n",
+                "[one]: ../Papers/p.pdf#page=3 \"title\"\n",
+                "[two]: ../other.pdf#page=1\n",
+                "```\n[three]: ../Papers/p.pdf#page=1\n```\n"
+            ))
+        );
+        assert_eq!(got.moved, 2);
+        let deleted = repaged(src, PageEdit::Delete(0), &[]);
+        assert_eq!(deleted.left, [("../Papers/p.pdf#page=1".to_string(), 0)]);
+        let undone = repaged(
+            deleted.text.as_deref().unwrap(),
+            PageEdit::Insert(0),
+            &deleted.left,
+        );
+        assert_eq!(undone.text.as_deref(), Some(src));
     }
 }
