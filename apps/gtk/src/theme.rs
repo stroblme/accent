@@ -177,18 +177,10 @@ pub type Page = ([u8; 3], [u8; 3]);
 /// white rectangle in the middle of a cream window.
 pub fn page_colours(dark: bool) -> Option<Page> {
     match (CHOICE.get(), dark) {
-        (_, true) => Some(dark_page()),
+        (Theme::Solarized, true) => Some((rgb(DARK_BASE), rgb(DARK_TEXT))),
         (Theme::Solarized, false) => Some((rgb(LIGHT_BASE), rgb(LIGHT_TEXT))),
+        (_, true) => Some((rgb(VIEW_DARK), rgb(VIEW_DARK_TEXT))),
         (_, false) => None,
-    }
-}
-
-/// The page of the theme's dark half, which is also where an image the light half leaves alone
-/// goes when the reader inverts it.
-pub fn dark_page() -> Page {
-    match CHOICE.get() {
-        Theme::Solarized => (rgb(DARK_BASE), rgb(DARK_TEXT)),
-        _ => (rgb(VIEW_DARK), rgb(VIEW_DARK_TEXT)),
     }
 }
 
