@@ -1219,7 +1219,9 @@ fn sync_moves_a_commit_each_way_through_the_bare_origin() {
     commit_all(&work, "mine");
     let repo = open(&work);
 
-    sync(&repo).unwrap();
+    // A Sync is the two calls in turn, which is what lets a closing window tell them apart.
+    pull(&repo).unwrap();
+    push(&repo).unwrap();
     let st = status(&repo).unwrap();
     assert_eq!(
         (st.branch.ahead, st.branch.behind),
@@ -1295,12 +1297,15 @@ fn a_sync_without_an_upstream_publishes_the_branch() {
     let repo = open(&work);
     assert_eq!(status(&repo).unwrap().branch.upstream, None);
 
-    sync(&repo).unwrap();
+    // There is nothing to pull from yet, so the first half does nothing and the second publishes.
+    assert_eq!(pull(&repo).unwrap(), "");
+    push(&repo).unwrap();
     let st = status(&repo).unwrap();
     assert_eq!(st.branch.upstream.as_deref(), Some("origin/side"));
     assert_eq!((st.branch.ahead, st.branch.behind), (0, 0));
     // And the next sync is an ordinary one, which is the point of tracking it.
-    sync(&repo).unwrap();
+    pull(&repo).unwrap();
+    push(&repo).unwrap();
 }
 
 #[test]

@@ -605,7 +605,8 @@ fn row_button(row: &gtk::Widget, tooltip: &str) -> Option<gtk::Button> {
 /// whose origin is slow both ways — `remote.origin.uploadpack` set to `sleep 3; git-upload-pack`,
 /// a `pre-receive` hook in the origin that sleeps 3 s — with a commit to push, and launch it from
 /// outside the clone's parent directory: what it prints last is how many processes are still
-/// working in there, which is to be none.
+/// working in there, which is to be none. On a remote vault the processes are the host's, so
+/// `pull` and `push` go by the pane's own word for the half, and `fetch` is not for one.
 pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
     let Some(gtk_app) = app.window.application() else {
         return bench_quit(app);
@@ -614,8 +615,9 @@ pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
     glib::spawn_future_local(async move {
         // The printing goes on after the window has gone.
         let _hold = gtk_app.hold();
-        // A remote vault's pane and its repository come with the host's answers.
-        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), 30000).await;
+        // A remote vault's pane and its repository come with the host's answers, which on a slow
+        // link take their time: waited for, not timed.
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
@@ -629,15 +631,21 @@ pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
             wait_for(|| !running("fetch"), 10000).await;
             git.sync(None);
             match phase.as_str() {
-                "push" => wait_for(|| running("push"), 10000).await,
+                // The pane's flag goes up just before git starts, and a local push is waited for
+                // until git has it, so what is stopped is a push already running.
+                "push" => {
+                    let remote = app.vault().is_some_and(|v| v.is_remote());
+                    wait_for(|| git.pushing() && (remote || running("push")), 20000).await
+                }
                 _ => glib::timeout_future(Duration::from_millis(800)).await,
             }
         }
         let dir = root.parent().unwrap_or(&root).to_path_buf();
         println!(
-            "bench git_close phase={phase} fetch={} push={} busy={} working={}",
+            "bench git_close phase={phase} fetch={} push={} pushing={} busy={} working={}",
             running("fetch"),
             running("push"),
+            git.pushing(),
             git.busy(),
             working_in(&dir)
         );
@@ -689,7 +697,7 @@ pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
 pub(super) fn bench_git_sync_over_fetch(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
-        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), 30000).await;
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
@@ -703,7 +711,8 @@ pub(super) fn bench_git_sync_over_fetch(app: &Rc<App>) {
             pulled_early |= pulling(&root);
             glib::timeout_future(Duration::from_millis(20)).await;
         }
-        wait_for(|| !git.busy(), 20000).await;
+        // The whole Sync, push included: `busy` leaves a push out, a close not waiting for one.
+        wait_for(|| !git.busy() && !git.pushing(), 20000).await;
         glib::timeout_future(Duration::from_millis(300)).await;
         // A toast may be queued behind another, so what the Sync did is read off the repository:
         // nothing left to pull is a pull that went through, and a refusal of several lines is a
@@ -751,7 +760,7 @@ fn pulling(dir: &Path) -> bool {
 pub(super) fn bench_git_rebase(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
-        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), 30000).await;
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
@@ -786,6 +795,10 @@ pub(super) fn bench_git_rebase(app: &Rc<App>) {
         bench_quit(&app);
     });
 }
+
+/// How long a drill waits for the pane to find a repository, in ms: a host on a slow link has
+/// been seen to take past 30 s over its first index, and the wait ends as soon as it has.
+const REPOS: u64 = 120_000;
 
 async fn wait_for(done: impl Fn() -> bool, ms: u64) {
     let t = Instant::now();
