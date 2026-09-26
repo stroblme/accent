@@ -317,7 +317,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - This Vault holds three folder rows: Templates, New Files and Attachments. The Attachments row keeps `./` and `/` as typed, those being the note's folder and the vault root.
 - The document font's Reset is an icon button (`document-revert-symbolic`): the font button already shows the whole font name, and a text button would leave it nowhere to go.
 - There is one config per process, so a change made anywhere — the dialog, the palette, the drawing ring, a rebound shortcut, Leave Out of Search — takes effect in every window at once, redoing only what it moved, and is written a second later, so a run of picks is one write.
-- `config.toml` is watched: a hand edit is taken in as it lands and never written over. accent's own unsaved changes stay on top key by key; where both changed one key the file wins, and the log says so.
+- `config.toml` is watched: a hand edit is taken in as it lands and never written over. accent's own unsaved changes stay on top key by key; where both changed one key the file wins, and the log says so. An open Preferences dialog is given a new page of rows reading what was taken in, as Restore Defaults' is, so no row writes back what it was built with.
 - A file that does not parse is neither taken in nor written over: a toast and a log line say so once, accent keeps its running settings, and what changes meanwhile is written once the file parses again, or lost if accent quits first. Only a file that fails to parse at startup is moved aside to `config.toml.broken`.
 
 ### Tooltips

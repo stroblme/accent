@@ -605,6 +605,45 @@ pub(super) fn bench_numbers(app: &Rc<App>, rels: &str) {
         app.open_path(&later);
         glib::timeout_future(Duration::from_millis(300)).await;
         step("on_behind_then_front");
+        // Off again by a hand edit to config.toml with the dialog up: the tabs and the dialog's
+        // row both follow the file, and nothing is written back over it.
+        let _ = WidgetExt::activate_action(&app.window, "win.preferences", None);
+        let path = accent_core::config::config_path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::write(
+            &path,
+            text.replace("line_numbers = true", "line_numbers = false"),
+        );
+        let stamp = || {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&path)
+                .map(|m| (m.ino(), m.mtime_nsec()))
+                .ok()
+        };
+        let written = stamp();
+        // Past the second a write accent owes the file would wait.
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let row = find_widget(app.window.upcast_ref(), &|w| {
+            w.downcast_ref::<adw::SwitchRow>()
+                .is_some_and(|row| row.title() == "Line Numbers")
+        })
+        .and_downcast::<adw::SwitchRow>();
+        println!(
+            "bench numbers hand_edit row={:?} rewritten={}",
+            row.as_ref().map(|row| row.is_active()),
+            stamp() != written
+        );
+        step("hand_edit");
+        // The row built from the file is as live as the one it replaced.
+        if let Some(row) = row {
+            row.set_active(true);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            println!(
+                "bench numbers row_after_edit writes={}",
+                text.contains("line_numbers = true")
+            );
+        }
         bench_quit(&app);
     });
 }

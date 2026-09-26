@@ -192,7 +192,9 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_NUMBERS=<rel_note>,<rel_code>,<rel_note>` opens the first two and flips the Line
 /// Numbers switch in the preferences three times, printing after each step whether every open tab
 /// shows its numbers, how wide the column is and whether the tab is in front: the third file
-/// opens after the first flip, and the last flip is made with both notes behind the code.
+/// opens after the first flip, and the last flip is made with both notes behind the code. Then
+/// `config.toml` turns them off by hand with the dialog up, and it prints what the dialog's row
+/// says afterwards, whether accent wrote the file again, and whether that row still writes it.
 ///
 /// `ACCENT_BENCH_THEME=<rel_note>` walks the window through Light, Dark and Solarized the way a
 /// system switch and the preferences do, and prints what the note's theme-derived tags and the
