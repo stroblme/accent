@@ -263,16 +263,22 @@ pub fn page(dark: bool) -> gdk::RGBA {
     gdk::RGBA::parse(crate::theme::view_bg(dark)).unwrap_or(gdk::RGBA::WHITE)
 }
 
+/// The accent that text on the page is written in: the standalone one, not `accent_color_rgba`.
+/// That one is the brand colour a button is filled with, and it is the same in both halves of the
+/// theme. libadwaita darkens it for a light page and lightens it for a dark one before anybody
+/// writes text in it, which is what `to_standalone_rgba` hands back — the colour the platform's
+/// own links are written in. The link tags, a CSV's columns and the git history's lanes all take it.
+fn text_accent() -> gdk::RGBA {
+    let style = adw::StyleManager::default();
+    style.accent_color().to_standalone_rgba(style.is_dark())
+}
+
 /// Apply the standalone accent and the foreground-derived dim colours. Call once after the view is
 /// realised and again on every `notify::accent-color` / `notify::dark`.
 pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     let table = buffer.tag_table();
     let style = adw::StyleManager::default();
-    // The standalone accent, not `accent_color_rgba`: that one is the brand colour a button is
-    // filled with, and it is the same in both halves of the theme. libadwaita darkens it for a
-    // light page and lightens it for a dark one before anybody writes text in it, which is what
-    // `to_standalone_rgba` hands back — the colour the platform's own links are written in.
-    let accent = style.accent_color().to_standalone_rgba(style.is_dark());
+    let accent = text_accent();
     let fg = view.color();
     let page = page(style.is_dark());
     let set = |name: &str, f: &dyn Fn(&gtk::TextTag)| {
@@ -473,7 +479,7 @@ pub fn apply_csv(buffer: &sourceview5::Buffer) {
 /// is called: the palette follows the system accent and the columns have no other colour source.
 pub fn restyle_csv(buffer: &sourceview5::Buffer) {
     let table = buffer.tag_table();
-    let accent = adw::StyleManager::default().accent_color_rgba();
+    let accent = text_accent();
     let hsv = gtk::rgb_to_hsv(accent.red(), accent.green(), accent.blue());
     for (column, name) in CSV_TAG_NAMES.iter().enumerate() {
         let Some(tag) = table.lookup(name) else {
@@ -489,7 +495,7 @@ pub fn restyle_csv(buffer: &sourceview5::Buffer) {
 /// accent's hue turned `column` sixths of a turn, so lane 0 is the accent and a seventh lane
 /// repeats the first hue instead of inventing a colour.
 pub fn lane_colour(column: usize) -> gdk::RGBA {
-    let accent = adw::StyleManager::default().accent_color_rgba();
+    let accent = text_accent();
     let hsv = gtk::rgb_to_hsv(accent.red(), accent.green(), accent.blue());
     let (h, s, v) = rotate(hsv, column % CSV_COLUMNS);
     let (r, g, b) = gtk::hsv_to_rgb(h, s, v);

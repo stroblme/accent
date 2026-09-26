@@ -606,7 +606,7 @@ fn bench_theme_colours(tab: &Rc<Tab>) -> String {
     let scheme = tab.buffer.style_scheme();
     format!(
         "dark={} scheme={:?} scheme_text={:?} page={page} view_fg={}@{:.2}:1 marker={} \
-         listmarker={} quote={} taskdone={} code_bg={} link={}",
+         listmarker={} quote={} taskdone={} code_bg={} link={} lanes={}",
         adw::StyleManager::default().is_dark(),
         scheme.as_ref().map(|s| s.id()),
         scheme
@@ -621,6 +621,11 @@ fn bench_theme_colours(tab: &Rc<Tab>) -> String {
         fg("taskdone"),
         says(table.lookup("code").and_then(|t| t.background_rgba())),
         fg("link"),
+        // The wheel a CSV's columns and the git history's lanes share.
+        (0..6)
+            .map(|lane| says(Some(crate::highlight::lane_colour(lane))))
+            .collect::<Vec<_>>()
+            .join(","),
     )
 }
 
