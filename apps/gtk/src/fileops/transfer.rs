@@ -5,15 +5,14 @@
 use super::paths::{child_path, free_path};
 use super::{Ops, batch_to};
 use crate::dialogs::confirm;
+use crate::statusbar::Bytes;
 use accent_core::path::basename;
 use adw::prelude::*;
 use gtk::{gio, glib};
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 /// How many file names an upload's toast or dialog spells out before it counts instead.
 const NAMED: usize = 3;
@@ -35,24 +34,32 @@ pub fn download(ops: &Rc<Ops>, rel: &str) {
     let (ops, rel, window) = (ops.clone(), rel.to_string(), ops.window.clone());
     dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
         // The error is almost always "the user closed the chooser", which needs no toast.
-        let Some(dest) = result.ok().and_then(|f| f.path()) else {
-            return;
-        };
-        let vault = ops.vault.clone();
-        let busy = format!("Downloading {name}…");
-        (ops.transferring)(&busy, true);
-        // Bytes over ssh, so off the main thread: a large PDF would otherwise freeze the window
-        // for as long as the copy takes.
-        glib::spawn_future_local(async move {
-            let done = crate::work::attempt(&format!("download {name}"), move || {
-                vault.download(&rel, &dest)
-            })
-            .await;
-            (ops.transferring)(&busy, false);
-            (ops.toast)(&match done {
-                Ok(()) => format!("Downloaded {name}"),
-                Err(why) => why,
-            });
+        if let Some(dest) = result.ok().and_then(|f| f.path()) {
+            download_to(&ops, &rel, dest);
+        }
+    });
+}
+
+/// Download… once the chooser has answered: `rel` copied to `dest`, its bytes counted on the
+/// status bar as they come ("Downloading paper.pdf… 12.3/80.0 MB"), and one toast at the end.
+pub fn download_to(ops: &Rc<Ops>, rel: &str, dest: PathBuf) {
+    let (vault, ops, rel) = (ops.vault.clone(), ops.clone(), rel.to_string());
+    let name = basename(&rel).to_string();
+    let bytes = Arc::new(Bytes::default());
+    let what = format!("Downloading {name}");
+    // Bytes over ssh, so off the main thread: a large PDF would otherwise freeze the window for
+    // as long as the copy takes.
+    glib::spawn_future_local(async move {
+        let asked = format!("download {name}");
+        let work = crate::work::attempt(&asked, {
+            let bytes = bytes.clone();
+            move || vault.download_with(&rel, &dest, &|done, total| bytes.set(done, total))
+        });
+        let line = move || Some(bytes.line(&what).unwrap_or_else(|| format!("{what}…")));
+        let done = counting_on(&ops, line, work).await;
+        (ops.toast)(&match done {
+            Ok(()) => format!("Downloaded {name}"),
+            Err(why) => why,
         });
     });
 }
@@ -150,7 +157,7 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
     let count = Arc::new(Count::default());
     count.total.store(chosen.len(), Ordering::Relaxed);
-    let line = counting("Uploading", &chosen);
+    let line = batch_line("Uploading", &chosen, &count);
     glib::spawn_future_local(async move {
         let work = crate::work::off_thread("upload", {
             let count = count.clone();
@@ -160,7 +167,9 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
                     let Some(name) = local_name(file) else {
                         continue;
                     };
-                    match vault.upload(file, &child_path(&dir, &name)) {
+                    let to = child_path(&dir, &name);
+                    match vault.upload_with(file, &to, &|done, total| count.bytes.set(done, total))
+                    {
                         Ok(()) => uploaded += 1,
                         Err(_) => failed.push(name),
                     }
@@ -169,7 +178,7 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
                 (uploaded, failed)
             }
         });
-        let done = counted(&ops, line, &count, work).await;
+        let done = counting_on(&ops, line, work).await;
         // Neither the tree nor the index is poked here: the watcher on the host reports what
         // landed, the same way it reports anything else written there.
         (ops.toast)(&match done {
@@ -191,7 +200,7 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
 pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
     let count = Arc::new(Count::default());
-    let line = counting("Copying", &files);
+    let line = batch_line("Copying", &files, &count);
     glib::spawn_future_local(async move {
         let work = crate::work::off_thread("copy", {
             let count = count.clone();
@@ -220,7 +229,9 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
                         cut,
                         |rel| vault.create_dir(rel),
                         |from, rel| {
-                            let sent = vault.upload(from, rel);
+                            let sent = vault.upload_with(from, rel, &|done, total| {
+                                count.bytes.set(done, total)
+                            });
                             count.done.fetch_add(1, Ordering::Relaxed);
                             sent
                         },
@@ -240,7 +251,7 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
                 report
             }
         });
-        let done = counted(&ops, line, &count, work).await;
+        let done = counting_on(&ops, line, work).await;
         (ops.toast)(&match done {
             Some(report) => report.message(cut),
             None => "Cannot paste".to_string(),
@@ -249,59 +260,61 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
 }
 
 /// How far a batch has got, counted on the worker and read on the main loop: the files tried so
-/// far, and how many there are, 0 until the walk has counted them.
+/// far and how many there are, 0 until the walk has counted them, and the bytes of the one file
+/// in flight, which is what a batch of one says instead.
 #[derive(Default)]
 struct Count {
     done: AtomicUsize,
     total: AtomicUsize,
+    bytes: Bytes,
 }
 
-/// How often a running batch's count on the status bar is brought up to date.
-const TICK: Duration = Duration::from_millis(200);
-
-/// What the status bar says for a batch of `chosen` while `count` is `(done, total)`: that it
-/// runs ("Copying Photos…"), and from two files on how far it has got, as indexing counts
-/// ("Copying Photos… 12/120 files", "Uploading… 3/12 files").
-fn counting(verb: &str, chosen: &[PathBuf]) -> impl Fn(usize, usize) -> String + 'static {
-    let (verb, chosen) = (verb.to_string(), chosen.to_vec());
-    move |done, total| match (chosen.as_slice(), total) {
-        (_, 0 | 1) => busy_line(&verb, &chosen),
-        ([one], total) => format!(
-            "{verb} {}… {done}/{total} files",
-            local_name(one).unwrap_or_default()
-        ),
-        (_, total) => format!("{verb}… {done}/{total} files"),
+/// What the status bar says for a batch of `chosen` while `count` counts it: that it runs
+/// ("Copying Photos…"); from two files on, how far by file, as indexing counts ("Copying Photos…
+/// 12/120 files", "Uploading… 3/12 files"); and for one file sent over the link, how far by byte
+/// ("Uploading big.pdf… 12.3/80.0 MB"), a local copy being the disk's speed and saying nothing.
+fn batch_line(
+    verb: &str,
+    chosen: &[PathBuf],
+    count: &Arc<Count>,
+) -> impl Fn() -> Option<String> + 'static {
+    let (verb, chosen, count) = (verb.to_string(), chosen.to_vec(), count.clone());
+    move || {
+        let (done, total) = (
+            count.done.load(Ordering::Relaxed),
+            count.total.load(Ordering::Relaxed),
+        );
+        Some(match (chosen.as_slice(), total) {
+            (_, 0 | 1) => {
+                let what = busy_what(&verb, &chosen);
+                count
+                    .bytes
+                    .line(&what)
+                    .unwrap_or_else(|| format!("{what}…"))
+            }
+            ([one], total) => format!(
+                "{verb} {}… {done}/{total} files",
+                local_name(one).unwrap_or_default()
+            ),
+            (_, total) => format!("{verb}… {done}/{total} files"),
+        })
     }
 }
 
-/// Wait for `work`, its line on the status bar from start to end, kept to what `count` says every
-/// [`TICK`]. The timer goes with the work, which is what ends it.
-async fn counted<T>(
+/// [`crate::statusbar::counting`] on the window's status bar, through `ops`.
+async fn counting_on<T>(
     ops: &Rc<Ops>,
-    line: impl Fn(usize, usize) -> String + 'static,
-    count: &Arc<Count>,
+    line: impl Fn() -> Option<String> + 'static,
     work: impl std::future::Future<Output = T>,
 ) -> T {
-    let shown = Rc::new(RefCell::new(line(0, 0)));
-    (ops.transferring)(&shown.borrow(), true);
-    let tick = glib::timeout_add_local(TICK, {
-        let (ops, shown, count) = (ops.clone(), shown.clone(), count.clone());
-        move || {
-            let next = line(
-                count.done.load(Ordering::Relaxed),
-                count.total.load(Ordering::Relaxed),
-            );
-            if *shown.borrow() != next {
-                (ops.transfer_count)(&shown.borrow(), &next);
-                *shown.borrow_mut() = next;
-            }
-            glib::ControlFlow::Continue
-        }
-    });
-    let answer = work.await;
-    tick.remove();
-    (ops.transferring)(&shown.borrow(), false);
-    answer
+    let (say, retell) = (ops.clone(), ops.clone());
+    crate::statusbar::counting(
+        move |text, running| (say.transferring)(text, running),
+        move |from, to| (retell.transfer_count)(from, to),
+        line,
+        work,
+    )
+    .await
 }
 
 /// What carrying one path from this machine into the vault takes: the folders to make, parents
@@ -447,15 +460,15 @@ impl Imported {
     }
 }
 
-/// What the status bar says while a transfer runs: the file by name when there is one, otherwise
+/// What a running transfer is, for the status bar: the file by name when there is one, otherwise
 /// how many. The verb is the caller's — Upload Files… uploads, and a paste of files from outside
 /// the vault copies them in, which on a local vault never leaves this machine.
-fn busy_line(verb: &str, chosen: &[PathBuf]) -> String {
+fn busy_what(verb: &str, chosen: &[PathBuf]) -> String {
     let what = match chosen {
         [one] => local_name(one).unwrap_or_else(|| file_count(1)),
         many => file_count(many.len()),
     };
-    format!("{verb} {what}…")
+    format!("{verb} {what}")
 }
 
 /// What the toast says after an upload: how many landed, then the ones that did not, by name.
@@ -516,22 +529,37 @@ mod tests {
     /// the way indexing counts; one file is never counted.
     #[test]
     fn a_batch_counts_its_files_once_it_knows_how_many() {
-        let folder = counting("Copying", &[PathBuf::from("/tmp/Photos")]);
-        assert_eq!(folder(0, 0), "Copying Photos…");
-        assert_eq!(folder(12, 120), "Copying Photos… 12/120 files");
-        assert_eq!(folder(0, 1), "Copying Photos…");
+        let count = Arc::new(Count::default());
+        let folder = batch_line("Copying", &[PathBuf::from("/tmp/Photos")], &count);
+        assert_eq!(folder().as_deref(), Some("Copying Photos…"));
+        count.total.store(120, Ordering::Relaxed);
+        count.done.store(12, Ordering::Relaxed);
+        assert_eq!(folder().as_deref(), Some("Copying Photos… 12/120 files"));
+
+        // One file counts its bytes instead, once they move.
+        let count = Arc::new(Count::default());
+        count.total.store(1, Ordering::Relaxed);
+        let one = batch_line("Uploading", &[PathBuf::from("/tmp/big.pdf")], &count);
+        assert_eq!(one().as_deref(), Some("Uploading big.pdf…"));
+        count.bytes.set(1024 * 1024, 4 * 1024 * 1024);
+        assert_eq!(one().as_deref(), Some("Uploading big.pdf… 1.0/4.0 MB"));
+
         let two = [PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")];
-        assert_eq!(counting("Uploading", &two)(1, 2), "Uploading… 1/2 files");
+        let count = Arc::new(Count::default());
+        count.total.store(2, Ordering::Relaxed);
+        count.done.store(1, Ordering::Relaxed);
+        let many = batch_line("Uploading", &two, &count);
+        assert_eq!(many().as_deref(), Some("Uploading… 1/2 files"));
     }
 
     #[test]
     fn a_running_transfer_names_one_file_and_counts_several() {
         assert_eq!(
-            busy_line("Uploading", &[PathBuf::from("/tmp/a.png")]),
-            "Uploading a.png…"
+            busy_what("Uploading", &[PathBuf::from("/tmp/a.png")]),
+            "Uploading a.png"
         );
         let two = [PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")];
-        assert_eq!(busy_line("Copying", &two), "Copying 2 files…");
+        assert_eq!(busy_what("Copying", &two), "Copying 2 files");
     }
 
     /// A folder from this disk is walked into folders to make and files to send, each landing

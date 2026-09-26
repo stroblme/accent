@@ -644,6 +644,77 @@ pub(super) fn bench_clip_outside(app: &Rc<App>, dir: &str) {
     });
 }
 
+/// A remote vault's bytes counted on the status bar three ways: `rel`, a PDF, opened in a tab and
+/// fetched into the ssh cache; the same file through Download… to `$TMPDIR`; and a 16 MB file
+/// of this machine's pasted into the vault root. Prints each one's lines with when they came and
+/// the sizes that landed, and takes the download and the pasted file back out. Point it at a
+/// large PDF with a fresh `XDG_CACHE_HOME`, or its copy is current and nothing moves.
+pub(super) fn bench_transfer(app: &Rc<App>, rel: &str) {
+    let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
+        return bench_quit(app);
+    };
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        until(|| app.reconciled.get() && vault.list_dir("").is_ok()).await;
+        let size = |path: &std::path::Path| std::fs::metadata(path).map_or(0, |m| m.len());
+        let host = vault.stat(&rel).ok().flatten().map_or(0, |etag| etag.size);
+
+        app.open_path(&rel);
+        let lines = lines_until(&app, || app.active_pdf().is_some_and(|p| !p.opening())).await;
+        say_lines("open", &lines);
+
+        let dest = std::env::temp_dir().join("downloaded.pdf");
+        let said = app.toasted.get();
+        fileops::download_to(&ops, &rel, dest.clone());
+        let lines = lines_until(&app, || app.toasted.get() > said).await;
+        say_lines("download", &lines);
+        println!("bench transfer_download host={host} here={}", size(&dest));
+
+        let big = std::env::temp_dir().join("big.bin");
+        let _ = std::fs::write(&big, vec![7u8; 16 * 1024 * 1024]);
+        let said = app.toasted.get();
+        fileops::import(&ops, "", vec![big.clone()], false);
+        let lines = lines_until(&app, || app.toasted.get() > said).await;
+        say_lines("upload", &lines);
+        let landed = vault
+            .stat("big.bin")
+            .ok()
+            .flatten()
+            .map_or(0, |etag| etag.size);
+        println!("bench transfer_upload here={} host={landed}", size(&big));
+
+        let _ = vault.delete("big.bin");
+        let _ = std::fs::remove_file(&big);
+        let _ = std::fs::remove_file(&dest);
+        bench_quit(&app);
+    });
+}
+
+/// Every line the status bar's busy slot showed until `done`, four minutes at most, with
+/// when each came in ms.
+async fn lines_until(app: &Rc<App>, done: impl Fn() -> bool) -> Vec<(u128, String)> {
+    let (t, mut lines) = (Instant::now(), Vec::<(u128, String)>::new());
+    while !done() && t.elapsed() < Duration::from_secs(240) {
+        let line = app.statusbar.progress_text();
+        if lines.last().map(|(_, last)| last) != Some(&line) {
+            lines.push((t.elapsed().as_millis(), line));
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    lines
+}
+
+/// The first three and the last three of `lines`, and how many there were.
+fn say_lines(what: &str, lines: &[(u128, String)]) {
+    let tail = lines.len().saturating_sub(3).max(3.min(lines.len()));
+    println!(
+        "bench transfer_{what} lines={} first={:?} last={:?}",
+        lines.len(),
+        &lines[..3.min(lines.len())],
+        &lines[tail..]
+    );
+}
+
 /// A Cut of two notes pasted into `dir`: one plan for both, so one Update Links? question, and
 /// every note rewritten once — the one linking both from the root, and the moved note whose own
 /// relative link now has a folder to climb out of. Prints each dialog as it comes, the number of

@@ -491,19 +491,36 @@ impl Vault {
     /// file — the PDF viewer, an image, the preview's assets. `NotFound` when there is nothing at
     /// `rel`, on either backend.
     pub fn fetch(&self, rel: &str) -> io::Result<PathBuf> {
+        self.fetch_with(rel, &|_, _| ())
+    }
+
+    /// [`fetch`](Self::fetch), telling `progress` the bytes so far and how many there are while
+    /// a remote vault's copy downloads. A local file is already here, so it tells nothing.
+    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> io::Result<PathBuf> {
         match &self.backend {
             Backend::Local(v) => v
                 .resolve(rel)
                 .and_then(|path| std::fs::metadata(&path).map(|_| path)),
-            Backend::Remote(r) => r.fetch(rel),
+            Backend::Remote(r) => r.fetch_with(rel, progress),
         }
     }
 
     /// Copy a file from this machine into the vault.
     pub fn upload(&self, local: &Path, rel: &str) -> io::Result<()> {
+        self.upload_with(local, rel, &|_, _| ())
+    }
+
+    /// [`upload`](Self::upload), telling `progress` the bytes sent so far and how many there are
+    /// on a remote vault. A local copy is the disk's speed, and tells nothing.
+    pub fn upload_with(
+        &self,
+        local: &Path,
+        rel: &str,
+        progress: &dyn Fn(u64, u64),
+    ) -> io::Result<()> {
         match &self.backend {
             Backend::Local(v) => std::fs::copy(local, v.resolve(rel)?).map(|_| ()),
-            Backend::Remote(r) => r.upload(local, rel),
+            Backend::Remote(r) => r.upload_with(local, rel, progress),
         }
     }
 
@@ -518,9 +535,20 @@ impl Vault {
 
     /// Copy a file out of the vault to somewhere on this machine.
     pub fn download(&self, rel: &str, dest: &Path) -> io::Result<()> {
+        self.download_with(rel, dest, &|_, _| ())
+    }
+
+    /// [`download`](Self::download), telling `progress` the bytes so far and how many there are
+    /// on a remote vault.
+    pub fn download_with(
+        &self,
+        rel: &str,
+        dest: &Path,
+        progress: &dyn Fn(u64, u64),
+    ) -> io::Result<()> {
         match &self.backend {
             Backend::Local(v) => std::fs::copy(v.resolve(rel)?, dest).map(|_| ()),
-            Backend::Remote(r) => r.download(rel, dest),
+            Backend::Remote(r) => r.download_with(rel, dest, progress),
         }
     }
 

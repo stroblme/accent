@@ -32,7 +32,8 @@ use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use files::{
     bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
-    bench_menu, bench_menu_press, bench_paths, bench_save_as, bench_templates, bench_watch,
+    bench_menu, bench_menu_press, bench_paths, bench_save_as, bench_templates, bench_transfer,
+    bench_watch,
 };
 use find::bench_find;
 use git::{
@@ -235,6 +236,8 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_CLIP=outside:<dir>` pastes a folder and a file made on this machine into `<dir>`
 /// ("" is the root) as GNOME Files would, and prints what landed and the toast
 /// (`files::bench_clip_outside`).
+/// `ACCENT_BENCH_TRANSFER=<rel_pdf>` opens, downloads and uploads over a remote vault and prints
+/// the status bar's byte counts for each (`files::bench_transfer`).
 /// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
 /// note and prints the text and the files they left (`attach::bench_attach`).
 /// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
@@ -333,6 +336,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let collapse = std::env::var("ACCENT_BENCH_COLLAPSE").is_ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
+    let transfer = std::env::var("ACCENT_BENCH_TRANSFER").ok();
     let menu = std::env::var("ACCENT_BENCH_MENU").ok();
     let drop = std::env::var("ACCENT_BENCH_DROP").ok();
     let watch = std::env::var("ACCENT_BENCH_WATCH").ok();
@@ -352,6 +356,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !replace
         && search.is_none()
         && clip.is_none()
+        && transfer.is_none()
         && menu.is_none()
         && drop.is_none()
         && watch.is_none()
@@ -438,6 +443,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if drawing {
             return bench_drawing(&app);
+        }
+        if let Some(rel) = transfer {
+            return bench_transfer(&app, &rel);
         }
         if let Some(rel) = clip {
             if let Some(dir) = rel.strip_prefix("outside:") {

@@ -314,6 +314,7 @@ pub fn build_window(
         chrome_hidden: Cell::new(false),
         navigating: Cell::new(false),
         reconciled: Cell::new(false),
+        fetching: RefCell::new(HashSet::new()),
         restored: Cell::new(false),
         menu_page: RefCell::new(None),
         pinned: RefCell::new(Vec::new()),
