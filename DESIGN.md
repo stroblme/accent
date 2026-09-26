@@ -66,7 +66,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Two, so the sidebar reaches the top of the window and the tab bar spans only the editor column.
 - Sidebar header: the start window controls and the pane switcher.
 - Main header: the sidebar toggle (always visible, so a hidden sidebar comes back without the keyboard), `AdwWindowTitle` with the vault name and the note path, the Drawing toggle while a PDF or a diagram is in front, the primary menu, the end window controls. It takes the start window controls while the sidebar is hidden.
-- Undo and Redo sit left of the Drawing toggle while a tool is in hand and either has something to walk (over a diagram, whenever either has), as a pair with the empty one insensitive, so neither moves under the pointer.
+- Undo and Redo sit left of the Drawing toggle while the PDF or the diagram in front has something for either to walk, tool in hand or not, as a pair with the empty one insensitive, so neither moves under the pointer.
 - Toggle Preview has no button, only its action, chord and palette entry: a window has only so many places for one.
 - A header carries the document's name, not its facts; those, and what the window is busy with, are the status bar's.
 - The window's own title is the vault name alone — `Notes (host)` on a remote vault, `Accent` without one — and does not follow the tab: it is what tells windows apart in the switcher and the task manager.
@@ -348,9 +348,10 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Insert Sketch puts a blank A4 page beside the note, embeds it and hands it the pen.
 - **The thumbnail strip organises the pages.** A thumbnail dragged along it moves its page, an accent bar marking the gap it lands in (none beside where it already is), the strip scrolling while the drag rests near an edge. The thumbnail under the pointer carries two round `.osd` buttons: Delete Page (absent on a one-page document, which a PDF keeps) and Insert Page Here on the gap below. A click goes to its page on release, a press being how a drag begins.
 - The page's menu, the status bar's page count and the palette have Add Page Before, Add Page After and Delete Page for the page being read, not the one under the pointer; the palette Move Page Up and Move Page Down. A document grows at its end by Add Page After on its last page, never by itself: the view clamps a stroke to the page under it, so running off the end is no gesture to observe.
-- A delete asks first in an `AdwAlertDialog`: nothing puts the page back, Undo walking ink alone.
-- A move reorders the page tree, so bookmarks and links into the page follow it. After an add the reader is on the new page; after a move or a delete, on the page they were reading, or the one that took its place.
-- Notes name pages by number and are not rewritten, so an edit that leaves highlights pointing at other pages says how many in a toast.
+- **A page edit is an Undo step**, in the one history the ink keeps, so Undo takes back strokes, adds, moves and deletes in the order they were made. A delete therefore asks nothing: Undo puts the page back.
+- A move reorders the page tree, so bookmarks and links into the page follow it. After an add the reader is on the new page — after an Undo of a delete, on the page put back; after a move or a delete, on the page they were reading, or the one that took its place.
+- A deleted page is kept as a PDF of its own (`PdfDoc::take_page`, pdfium's page import) and imported back by Undo, its text, annotations and ink with it: pdfium cannot hand back a page once it is gone. What points at it does not come back: pdfium's copy drops every reference to another page, so a link on it into the document loses its target, and the bookmarks, links and `\ref` targets elsewhere keep naming the page that went, so they stay dead after the Undo and in the file it saves. The copy is one page per delete; a snapshot of the whole file would bring them back at a file's worth per delete (NOTEPAD).
+- Notes name pages by number and are not rewritten, so an edit that leaves highlights pointing at other pages says how many in a toast; an Undo, putting the pages back where the notes had them, says nothing.
 - The stand-ins have their own budget, a quarter of the tiles', so scrolling a long document end to end does not keep every page.
 
 ### Image
@@ -555,7 +556,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette, and over an image Invert Image Colours.
 - Drawing `Ctrl+Shift+I` opens the ring. Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust (unbound) are on the ring and in the palette, a tool picked from the palette bringing the ring out.
 - Copy Selection, Copy Link to Selection, Export Highlights, Insert Sketch, Add Page Before, Add Page After and Delete Page are in the palette and the page's menu, Move Page Up and Move Page Down in the palette, all unbound: the thumbnail strip is where pages are organised by pointer.
-- While a pen is out `Ctrl+Z` takes back the last stroke, erase or move of this session and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note, and `Escape` puts the pen down: the tab's own keys, like Copy. Undo Drawing and Redo Drawing are also the header's two buttons and palette commands.
+- `Ctrl+Z` takes back the last stroke, erase, move or page edit of this session, tool in hand or not, and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note; `Escape` puts the pen down. They are the tab's own keys, like Copy, so an entry with the keyboard, the find bar's included, keeps its own undo. Undo PDF Edit and Redo PDF Edit are also the header's two buttons and palette commands.
 - Find and Go to Line keep their chords; over a PDF they search the document and go to a page.
 
 ### Diagram

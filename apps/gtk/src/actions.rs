@@ -195,8 +195,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // No accelerator here for the same reason the paging commands have none: `Ctrl+Z` over a
     // note is GtkSourceView's own undo, and an application accelerator would take it from every
     // text view in the window. The PDF tab's key controller fires these two.
-    ("win.pdf-undo", "Undo Drawing", &[]),
-    ("win.pdf-redo", "Redo Drawing", &[]),
+    ("win.pdf-undo", "Undo PDF Edit", &[]),
+    ("win.pdf-redo", "Redo PDF Edit", &[]),
     ("win.pdf-copy-link", "Copy Link to Selection", &[]),
     ("win.pdf-export-highlights", "Export Highlights to PDF", &[]),
     ("win.pdf-draw", "Drawing", &["<Control><Shift>i"]),

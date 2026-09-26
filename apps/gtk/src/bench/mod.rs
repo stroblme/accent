@@ -157,9 +157,10 @@ use tags::bench_tags;
 /// the second refusal must write that same copy rather than a numbered one, and must leave the
 /// toast count where the first put it. `=pages:<rel_path>` moves the first page below the third as
 /// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
-/// page, and deletes the one being read through the window actions, answering the delete's dialog,
-/// and prints the page being read and each page's text on disk after every step; then the items of
-/// the page's own menu without and with a selection, and of the status bar's page count's menu.
+/// page, and deletes the first through the window actions, which asks nothing, then walks
+/// all four back with Undo and forward again with Redo, and prints the page being read and each
+/// page's text on disk after every step; then the items of the page's own menu without and with a
+/// selection, and of the status bar's page count's menu.
 /// Point it at a scratch copy of the generated vault's `Attachments/pages.pdf`.
 /// `=strip:<rel_path>` is the pointer's half, held for XTEST: it opens the document with the
 /// Outline pane up and prints the same every two seconds for 40 s, so a hover and a drag along the
