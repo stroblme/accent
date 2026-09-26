@@ -236,6 +236,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 - One `AdwTabView` + `AdwTabBar` per pane, panes nesting in `GtkPaned`s. Each bar lives in its pane's document column (`.inline`), so it spans its own pane and presentation mode takes it with the document.
 - A bar hides only while its pane is the window's only one and holds a single tab: with several panes the bar says which notes are where.
+- The active pane's selected tab keeps Adwaita's filled pill; every other pane's is drawn as an outline, so a split says which pane the keyboard and the next note go to. A bar of one tab has no pill either way, and a tab under the pointer takes the hover fill.
 - A tab is titled with the file's whole name, `.md` included: a vault holds more than notes, and `todo` beside `todo.txt` should not be told apart by an icon.
 - The icon slot is the document's own — a PDF, an image, a shell, a comparison, a file that would not open — and empty for a note or a source file: file-type icons belong to the file lists (Iconography).
 - A pane is split from the tab or tree menu, `win.split-*`, or by dropping a tab or a tree row on one of its four edges. A tab dropped on the middle of another pane moves to the end of its bar, taking the keyboard. A pane whose last tab closes or leaves closes with it; the window always keeps one.
