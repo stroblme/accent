@@ -906,10 +906,23 @@ fn dim(c: gdk::RGBA, alpha: f32) -> String {
 }
 
 /// The whole preview look, derived from three values plus the document font. The alphas are the
-/// ones `highlight.rs::restyle` gives the editor, so the two panes read as one app.
+/// ones `highlight.rs::restyle` gives the editor, so the two panes read as one app; so are a
+/// conflict block's tints (`conflict::tints`), its sides boxed where the editor tints lines.
 fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) -> String {
     let (text, accent) = (css_rgba(fg), css_rgba(accent));
     let (surface, quote, rule) = (dim(fg, 0.07), dim(fg, 0.6), dim(fg, 0.15));
+    let tints: String = ["current", "base", "incoming"]
+        .into_iter()
+        .zip(crate::conflict::tints(fg))
+        .map(|(side, (body, head))| {
+            format!(
+                ".conflict-{side} {{ background: {}; }}\n\
+                 .conflict-{side} > .conflict-label {{ background: {}; }}\n",
+                css_rgba(body),
+                css_rgba(head)
+            )
+        })
+        .collect();
     format!(
         "html {{ background: {bg}; color: {text}; font-family: \"{family}\", sans-serif; \
          font-size: {pt}pt; }}\n\
@@ -945,7 +958,14 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) 
          hr {{ border: 0; border-top: 1px solid {rule}; margin: 24px 0; }}\n\
          table {{ border-collapse: collapse; }}\n\
          th, td {{ border: 1px solid {rule}; padding: 6px 12px; }}\n\
-         th {{ font-weight: 700; }}\n"
+         th {{ font-weight: 700; }}\n\
+         /* A conflict block: its sides stacked in one rounded box, each under a caption naming\n\
+            it. A side is a flow root, so its paragraphs' margins stay inside its tint. */\n\
+         .conflict {{ margin: 1em 0; border-radius: 6px; overflow: auto; }}\n\
+         .conflict > div {{ display: flow-root; padding: 0 12px; }}\n\
+         .conflict-label {{ margin: 0 -12px; padding: 2px 12px; font-size: 0.85em; \
+         font-weight: 700; }}\n\
+         {tints}"
     )
 }
 
@@ -986,6 +1006,25 @@ mod tests {
             "{css}"
         );
         assert!(css.contains("border-left: 3px solid rgba(255, 0, 0, 1.00)"));
+    }
+
+    /// A conflict block's boxes are the editor's tints of its sides, their captions the tints of
+    /// the marker lines, so the two panes show one block.
+    #[test]
+    fn theme_css_tints_a_conflict_as_the_editor_does() {
+        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0);
+        for (side, (body, head)) in ["current", "base", "incoming"]
+            .into_iter()
+            .zip(crate::conflict::tints(FG))
+        {
+            let rule = format!(".conflict-{side} {{ background: {}; }}", css_rgba(body));
+            assert!(css.contains(&rule), "{rule} in {css}");
+            let rule = format!(
+                ".conflict-{side} > .conflict-label {{ background: {}; }}",
+                css_rgba(head)
+            );
+            assert!(css.contains(&rule), "{rule} in {css}");
+        }
     }
 
     #[test]

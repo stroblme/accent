@@ -240,6 +240,9 @@ exist as a visible control.
   look like one editor on both. Secondary text and borders are that ink thinned over that page, so
   nothing under the accent is tinted. Those four values are every colour the app ships; the
   launcher icon's paper is the light page.
+- The one departure is a conflict block git left in a note, whose sides the rendered view boxes as
+  the desktop's preview does, in its green and blue mixed with the ink by its numbers
+  (`conflictTints`): a conflict's two sides have to read as two, and as they do on the desktop.
 - The Browse button is the exception: `inverseSurface`, the other mode's pair, dark on a light theme
   and light on a dark one. It is the one thing on screen that is not the document, and a pale pill
   on a pale page is a pill nobody sees; contrast rather than colour, so the accent still means only
