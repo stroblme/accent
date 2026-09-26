@@ -1,13 +1,13 @@
 //! Which pages a document has and in what order: a blank page put in, a page taken out, a page
-//! moved somewhere else.
+//! moved somewhere else, and a page taken out put back.
 
 use std::os::raw::{c_int, c_ulong};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use pdfium_render::prelude::*;
 
 use super::doc::paper;
-use super::{PdfDoc, lock};
+use super::{PdfDoc, lock, pdfium};
 
 /// One change to a document's pages.
 ///
@@ -39,20 +39,19 @@ impl PageEdit {
             }
         }
     }
+
+    /// The edit that takes this one back: a page put in comes out, a page taken out goes back
+    /// where it was, a moved page moves back.
+    pub fn inverse(self) -> PageEdit {
+        match self {
+            PageEdit::Insert(at) => PageEdit::Delete(at),
+            PageEdit::Delete(at) => PageEdit::Insert(at),
+            PageEdit::Move { from, to } => PageEdit::Move { from: to, to: from },
+        }
+    }
 }
 
 impl PdfDoc {
-    /// Make one change to the pages.
-    ///
-    /// Nothing reaches the disk here: [`PdfDoc::save`] is the second half, as it is for ink.
-    pub fn edit_pages(&mut self, edit: PageEdit) -> Result<()> {
-        match edit {
-            PageEdit::Insert(at) => self.insert_page(at),
-            PageEdit::Delete(page) => self.delete_page(page),
-            PageEdit::Move { from, to } => self.move_page(from, to),
-        }
-    }
-
     /// A blank page at `at`, the size of the page before it (the first page's, at the front):
     /// what a paper notebook does when the page runs out, and what keeps a drawing readable in any
     /// viewer — one MediaBox per page, none of them growing. `at` may be the page count, which
@@ -90,6 +89,45 @@ impl PdfDoc {
         self.page(page)?
             .delete()
             .map_err(|e| anyhow!("delete page {page}: {e:?}"))
+    }
+
+    /// Take a page out and hand it back as a PDF of its own — its content, the resources it uses
+    /// and its annotations, ink included — for [`PdfDoc::put_page`] to put back: pdfium cannot
+    /// hand back a page once it is gone.
+    ///
+    /// What points at the page, or from it to another, does not come back with it. pdfium's copy
+    /// drops every reference to a page outside it, so a link on the page to another loses its
+    /// target; and the bookmarks, links and named destinations elsewhere keep naming the page
+    /// deleted here, not the copy put back.
+    pub fn take_page(&mut self, page: usize) -> Result<Vec<u8>> {
+        let copy = {
+            let pdfium = pdfium()?;
+            let _guard = lock();
+            let mut copy = pdfium.create_new_pdf().context("create pdf")?;
+            copy.pages_mut()
+                .copy_page_from_document(self.doc(), page as PdfPageIndex, 0)
+                .map_err(|e| anyhow!("copy page {page}: {e:?}"))?;
+            copy.save_to_bytes().context("save the page")?
+        };
+        self.delete_page(page)?;
+        Ok(copy)
+    }
+
+    /// Put a page [`PdfDoc::take_page`] took out back in at `at`.
+    pub fn put_page(&mut self, at: usize, page: &[u8]) -> Result<()> {
+        let pdfium = pdfium()?;
+        let _guard = lock();
+        let count = self.doc().pages().len() as usize;
+        if at > count {
+            return Err(anyhow!("cannot put page {at} back into {count}"));
+        }
+        let source = pdfium
+            .load_pdf_from_byte_slice(page, None)
+            .context("open the page kept")?;
+        self.doc_mut()
+            .pages_mut()
+            .copy_page_from_document(&source, 0, at as PdfPageIndex)
+            .map_err(|e| anyhow!("put page {at} back: {e:?}"))
     }
 
     /// Move the page at `from` so that it ends up at `to`.

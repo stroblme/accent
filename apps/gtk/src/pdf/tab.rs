@@ -580,8 +580,8 @@ impl PdfTab {
         self.view.mode().action().map(crate::actions::label_of)
     }
 
-    /// Take back the last stroke drawn, drag erased or move made in this tab, through
-    /// `win.pdf-undo`.
+    /// Take back the last change made in this tab — a stroke drawn, a drag erased, a stroke moved,
+    /// a page put in, taken out or moved — through `win.pdf-undo`.
     pub fn undo(self: &Rc<Self>) {
         self.ask(Request::Undo);
     }
@@ -621,33 +621,12 @@ impl PdfTab {
         self.edit_pages(pdf::PageEdit::Insert(at));
     }
 
-    /// Put a blank page in, take one out, or move one. Written out on the same timer a stroke is:
-    /// the thread marks the document dirty and this asks for the save a second later.
+    /// Put a blank page in, take one out, or move one, at once: each is a step Undo takes back, a
+    /// page taken out coming back with its ink. Written out on the same timer a stroke is, when
+    /// the thread answers with the new pages. The thread refuses to take out the last page — a
+    /// PDF keeps one.
     pub fn edit_pages(self: &Rc<Self>, edit: pdf::PageEdit) {
         self.ask(Request::Pages(edit));
-        self.save_soon();
-    }
-
-    /// Ask before taking `page` out, since nothing puts it back: Undo walks ink, not pages. The
-    /// last page is never offered — a PDF keeps one.
-    pub fn ask_delete_page(self: &Rc<Self>, page: usize) {
-        if self.page_count() < 2 {
-            return;
-        }
-        let name = crate::doc::file_name(&self.key()).to_string();
-        let tab = Rc::downgrade(self);
-        crate::dialogs::confirm(
-            &self.view,
-            &format!("Delete Page {}?", page + 1),
-            &format!("The page is removed from {name}. This cannot be undone."),
-            "Delete",
-            true,
-            move || {
-                if let Some(tab) = tab.upgrade() {
-                    tab.edit_pages(pdf::PageEdit::Delete(page));
-                }
-            },
-        );
     }
 
     /// The same, but wait for it — the window is closing and the process is about to end, so a
@@ -1141,27 +1120,27 @@ impl PdfTab {
                     tab.run("win.pdf-copy");
                     return glib::Propagation::Stop;
                 }
-                // The pen's own keys, on the tab like Copy: `Ctrl+Z` and `Escape` belong to
-                // whatever has the keyboard, and here that is the page being drawn on. Redo is
-                // `Ctrl+Shift+Z` or `Ctrl+Y`, the two a note's own undo answers to.
-                if tab.mode() != pdfview::Mode::Select {
-                    if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
-                        let history = match (key.to_lower(), shift) {
-                            (gtk::gdk::Key::z, false) => Some("win.pdf-undo"),
-                            (gtk::gdk::Key::z, true) | (gtk::gdk::Key::y, false) => {
-                                Some("win.pdf-redo")
-                            }
-                            _ => None,
-                        };
-                        if let Some(action) = history {
-                            tab.run(action);
-                            return glib::Propagation::Stop;
+                // Undo and Redo, on the tab like Copy, with a tool in hand or not: `Ctrl+Z`
+                // belongs to whatever has the keyboard, and here that is the page, whose strokes
+                // and page edits are one history. Redo is `Ctrl+Shift+Z` or `Ctrl+Y`, the two a
+                // note's own undo answers to.
+                if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                    let history = match (key.to_lower(), shift) {
+                        (gtk::gdk::Key::z, false) => Some("win.pdf-undo"),
+                        (gtk::gdk::Key::z, true) | (gtk::gdk::Key::y, false) => {
+                            Some("win.pdf-redo")
                         }
-                    }
-                    if key == gtk::gdk::Key::Escape {
-                        tab.set_mode(pdfview::Mode::Select);
+                        _ => None,
+                    };
+                    if let Some(action) = history {
+                        tab.run(action);
                         return glib::Propagation::Stop;
                     }
+                }
+                // `Escape` puts the pen down.
+                if tab.mode() != pdfview::Mode::Select && key == gtk::gdk::Key::Escape {
+                    tab.set_mode(pdfview::Mode::Select);
+                    return glib::Propagation::Stop;
                 }
                 // `Space`, `n`, `p` and the arrows stay bare keys here rather than joining the
                 // table: an application accelerator is dispatched at the window ahead of whatever
@@ -1321,7 +1300,7 @@ impl PdfTab {
                     f(self, why);
                 }
             }
-            Reply::Repaged { sizes, edit } => {
+            Reply::Repaged { sizes, edit, undo } => {
                 let anchor = self.view.anchor();
                 let map = |page| edit.map(page);
                 // One cache for both views, so it moves once; each view moves what it is still
@@ -1361,7 +1340,11 @@ impl PdfTab {
                 self.emit(&self.on_page);
                 // The strip's buttons are over whichever page is under the pointer now.
                 self.hover_thumbnail();
-                self.warn_moved_links(edit);
+                // An Undo puts the pages back where the notes had them.
+                if !undo {
+                    self.warn_moved_links(edit);
+                }
+                self.save_soon();
             }
             Reply::Reloaded(sizes) => {
                 // Whatever the far end had that we did not is in hand now, so a refusal after

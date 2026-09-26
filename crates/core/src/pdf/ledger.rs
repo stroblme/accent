@@ -1,4 +1,5 @@
-//! The ink undo ledger: what this session drew, erased and moved on a document's pages.
+//! The undo ledger: what this session drew, erased and moved on a document's pages, and which
+//! pages it put in, took out and moved.
 //!
 //! It lives here rather than in a viewer because both viewers need it — the GTK render thread
 //! and the Android session — and because it is pure bookkeeping over [`PdfDoc`]: no widget, no
@@ -9,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Result, anyhow};
 
-use crate::pdf::{self, PdfDoc};
+use crate::pdf::{self, PageEdit, PdfDoc};
 
 /// One ink stroke as the tools address it: the id it was given, which unlike its place in
 /// `/Annots` survives every erase and move made before it lands, and its shape.
@@ -22,9 +23,13 @@ pub fn fresh_id() -> u32 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// One change this session made to a page's ink, for Undo to walk back and Redo to walk forward
-/// again. Each names its annotation by an id rather than an index, because every erase and every
-/// move shuffles the indices.
+/// One change this session made to a page's ink or to the pages, for Undo to walk back and Redo
+/// to walk forward again. A stroke is named by an id rather than an index, because every erase
+/// and every move shuffles the indices.
+///
+/// A step's page number is the page's number when the step was made, and is never rewritten:
+/// Undo and Redo walk the one history newest first, so whenever a step is walked the pages are
+/// in the order they were in when it was made.
 #[derive(Debug, Clone)]
 pub enum Step {
     /// A stroke or a shape was drawn. What it drew is kept once Undo has taken it off, so that
@@ -46,23 +51,27 @@ pub enum Step {
         id: u32,
         matrix: pdf::Matrix,
     },
+    /// A page was put in, taken out or moved. The page a delete took out is kept while it is out,
+    /// so Undo can put it back.
+    Paged { edit: PageEdit, kept: Option<Kept> },
 }
 
-impl Step {
-    /// The page it changed and the stroke it names.
-    fn at(&self) -> (usize, u32) {
-        match *self {
-            Step::Drawn { page, id, .. }
-            | Step::Erased { page, id, .. }
-            | Step::Moved { page, id, .. } => (page, id),
-        }
-    }
+/// A page taken out, for putting back: the page as a PDF of its own ([`PdfDoc::take_page`]), and
+/// the names its annotations had, so the steps made on it before it went still find their
+/// strokes when it is back.
+#[derive(Debug, Clone)]
+pub struct Kept {
+    page: Vec<u8>,
+    ids: Vec<Option<u32>>,
+}
 
-    fn page_mut(&mut self) -> &mut usize {
-        match self {
-            Step::Drawn { page, .. } | Step::Erased { page, .. } | Step::Moved { page, .. } => page,
-        }
-    }
+/// What one step of Undo or Redo changed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Walked {
+    /// This much of this page's ink.
+    Ink(usize, pdf::Rect),
+    /// The pages, as this edit moved them: taking an edit back is making its inverse.
+    Pages(PageEdit),
 }
 
 /// What the render thread knows about the ink of the pages it has touched or listed, so that the
@@ -70,9 +79,10 @@ impl Step {
 /// changes and nothing else.
 ///
 /// `ids` mirrors a page's `/Annots` from the first time it is touched or listed: `Some` is an
-/// annotation that has been given a name, `None` one nobody has asked about. `done` is the undo
-/// list and `undone` the redo list, newest last, one entry per gesture: the strokes one eraser
-/// drag takes come back together.
+/// annotation that has been given a name, `None` one nobody has asked about. It is filed under
+/// the page's number today, and follows every page edit. `done` is the undo list and `undone`
+/// the redo list, newest last, one entry per gesture: the strokes one eraser drag takes come back
+/// together.
 #[derive(Default)]
 pub struct Ink {
     ids: HashMap<usize, Vec<Option<u32>>>,
@@ -183,29 +193,40 @@ impl Ink {
         self.record(Step::Moved { page, id, matrix }, false);
     }
 
-    /// The document's pages were put in, taken out or reordered, and `map` says where each page
-    /// went — `None` for one that is gone (see [`pdf::PageEdit::map`]).
-    ///
-    /// What the ledger holds of a page follows it. The steps of a deleted page go with it: Undo
-    /// cannot put a stroke back on a page that is not there, and a step keeping the old number
-    /// would land on whichever page took it. The page edit itself is no step — it is not ink.
-    pub fn repage(&mut self, map: impl Fn(usize) -> Option<usize>) {
+    /// Put a page in, take one out or move one, as a step of its own: Undo takes it back as it
+    /// takes back a stroke, a page taken out coming back with its annotations and ink. Nothing
+    /// reaches the disk here: [`PdfDoc::save`] is the second half, as it is for ink.
+    pub fn edit_pages(&mut self, doc: &mut PdfDoc, edit: PageEdit) -> Result<()> {
+        let mut kept = None;
+        self.edit(doc, edit, &mut kept)?;
+        self.record(Step::Paged { edit, kept }, false);
+        Ok(())
+    }
+
+    /// Make one page edit. A page taken out goes into `kept` with the names its annotations had;
+    /// a page put in is the one kept, if there is one, or a blank one. What the ledger knows of
+    /// every other page follows it to its new number.
+    fn edit(&mut self, doc: &mut PdfDoc, edit: PageEdit, kept: &mut Option<Kept>) -> Result<()> {
+        match (edit, kept.as_ref()) {
+            (PageEdit::Insert(at), Some(put)) => doc.put_page(at, &put.page)?,
+            (PageEdit::Insert(at), None) => doc.insert_page(at)?,
+            (PageEdit::Delete(page), _) => {
+                let copy = doc.take_page(page)?;
+                let ids = self.ids.remove(&page).unwrap_or_default();
+                *kept = Some(Kept { page: copy, ids });
+            }
+            (PageEdit::Move { from, to }, _) => doc.move_page(from, to)?,
+        }
         self.ids = std::mem::take(&mut self.ids)
             .into_iter()
-            .filter_map(|(page, slots)| Some((map(page)?, slots)))
+            .filter_map(|(page, slots)| Some((edit.map(page)?, slots)))
             .collect();
-        for history in [&mut self.done, &mut self.undone] {
-            for gesture in history.iter_mut() {
-                gesture.retain_mut(|step| match map(step.at().0) {
-                    Some(page) => {
-                        *step.page_mut() = page;
-                        true
-                    }
-                    None => false,
-                });
-            }
-            history.retain(|gesture| !gesture.is_empty());
+        if let PageEdit::Insert(at) = edit
+            && let Some(put) = kept.take()
+        {
+            self.ids.insert(at, put.ids);
         }
+        Ok(())
     }
 
     /// Whether Undo, and then Redo, has anything to walk.
@@ -224,11 +245,13 @@ impl Ink {
     }
 
     /// Walk the last gesture back (Undo), or the last one Undo took forward again (Redo), and
-    /// say which page each of its steps changed and how much of it.
+    /// say what each of its steps changed.
     ///
     /// A step that cannot be made — pdfium refusing, or a stroke the ledger lost track of — drops
-    /// its gesture from the history, after whatever steps of it came first.
-    pub fn walk(&mut self, doc: &mut PdfDoc, forwards: bool) -> Vec<(usize, pdf::Rect)> {
+    /// its gesture from the history, after whatever steps of it came first. A page edit that
+    /// cannot be made drops the whole history: every step on either side of it names pages by
+    /// the numbers it would have given them.
+    pub fn walk(&mut self, doc: &mut PdfDoc, forwards: bool) -> Vec<Walked> {
         let gesture = match forwards {
             true => self.undone.pop(),
             false => self.done.pop(),
@@ -243,9 +266,13 @@ impl Ink {
         let mut changed = Vec::new();
         for step in &mut gesture {
             match self.apply(doc, step, forwards) {
-                Ok(area) => changed.push((step.at().0, area)),
+                Ok(walked) => changed.push(walked),
                 Err(e) => {
-                    tracing::warn!("walking the ink history on page {}: {e:#}", step.at().0);
+                    tracing::warn!("walking the history: {e:#}");
+                    if matches!(step, Step::Paged { .. }) {
+                        self.done.clear();
+                        self.undone.clear();
+                    }
                     return changed;
                 }
             }
@@ -260,47 +287,61 @@ impl Ink {
         changed
     }
 
-    /// Make one step (`forwards`) or take it back: a stroke goes on or comes off the page, or
-    /// moves by the map or by its inverse. How much of the page that changed.
-    fn apply(&mut self, doc: &mut PdfDoc, step: &mut Step, forwards: bool) -> Result<pdf::Rect> {
-        let (page, id) = step.at();
-        self.note(page, doc.annotation_count(page)?);
-        let index = self.index_of(page, id);
-        let gone = || anyhow!("stroke {id} is not on page {page}");
+    /// Make one step (`forwards`) or take it back: a stroke goes on or comes off the page or moves
+    /// by the map or by its inverse, or the pages are edited or edited back.
+    fn apply(&mut self, doc: &mut PdfDoc, step: &mut Step, forwards: bool) -> Result<Walked> {
         match (step, forwards) {
-            (Step::Moved { matrix, .. }, _) => {
-                let index = index.ok_or_else(gone)?;
+            (Step::Paged { edit, kept }, _) => {
+                let made = match forwards {
+                    true => *edit,
+                    false => edit.inverse(),
+                };
+                self.edit(doc, made, kept)?;
+                Ok(Walked::Pages(made))
+            }
+            (Step::Moved { page, id, matrix }, _) => {
+                let index = self.locate(doc, *page, *id)?;
                 let m = match forwards {
                     true => *matrix,
                     false => pdf::invert(*matrix),
                 };
-                let area = doc.transform_ink(page, index, m)?;
-                self.requeued(page, index);
-                Ok(area)
+                let area = doc.transform_ink(*page, index, m)?;
+                self.requeued(*page, index);
+                Ok(Walked::Ink(*page, area))
             }
             // Drawing forwards puts a stroke on, and so does erasing backwards.
-            (Step::Drawn { kept, .. }, true) | (Step::Erased { kept, .. }, false) => {
+            (Step::Drawn { page, id, kept }, true) | (Step::Erased { page, id, kept }, false) => {
+                self.note(*page, doc.annotation_count(*page)?);
                 let drawn = kept
                     .as_ref()
                     .ok_or_else(|| anyhow!("nothing kept of {id}"))?;
-                let area = doc.redraw_ink(page, drawn)?;
-                self.appended(page, id);
-                Ok(area)
+                let area = doc.redraw_ink(*page, drawn)?;
+                self.appended(*page, *id);
+                Ok(Walked::Ink(*page, area))
             }
-            (Step::Drawn { kept, .. }, false) | (Step::Erased { kept, .. }, true) => {
-                let index = index.ok_or_else(gone)?;
-                let (drawn, area) = doc.take_ink(page, index)?;
-                self.removed(page, index);
+            (Step::Drawn { page, id, kept }, false) | (Step::Erased { page, id, kept }, true) => {
+                let index = self.locate(doc, *page, *id)?;
+                let (drawn, area) = doc.take_ink(*page, index)?;
+                self.removed(*page, index);
                 *kept = Some(drawn);
-                Ok(area)
+                Ok(Walked::Ink(*page, area))
             }
         }
+    }
+
+    /// Where the stroke named `id` sits in `page`'s `/Annots` today, the page mirrored first.
+    fn locate(&mut self, doc: &PdfDoc, page: usize, id: u32) -> Result<usize> {
+        self.note(page, doc.annotation_count(page)?);
+        self.index_of(page, id)
+            .ok_or_else(|| anyhow!("stroke {id} is not on page {page}"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pdf::PageEdit;
+    use crate::pdf::tests::{open_tiny, page_texts, reopen};
 
     /// A stroke's id follows it through the moves and erases that shuffle `/Annots`, and the id
     /// of one that is gone names nothing — which is what keeps a list that has not caught up
@@ -405,30 +446,106 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A page edit takes the history with it: a step follows its page to wherever it went, and
-    /// the steps of a deleted page go, leaving Undo nothing to aim at another page with.
+    /// Undo takes an added page out again and moves a moved one back, each as the edit that
+    /// undoes it, and Redo makes both again.
     #[test]
-    fn the_history_follows_its_pages() {
+    fn undo_and_redo_walk_an_insert_and_a_move() {
+        let Some((_dir, mut doc)) = open_tiny() else {
+            return;
+        };
         let mut ink = Ink::default();
-        ink.drew(0, 0);
-        let a = newest(&ink, 0);
-        ink.drew(2, 0);
-        let c = newest(&ink, 2);
-        // Page 0 of three goes to the end, and the two after it move up one.
-        ink.repage(|p| pdf::PageEdit::Move { from: 0, to: 2 }.map(p));
-        assert_eq!((ink.index_of(2, a), ink.index_of(1, c)), (Some(0), Some(0)));
-        assert_eq!(pages(&ink), [2, 1]);
-        // The page holding `c` is deleted, and the page after it takes its number.
-        ink.repage(|p| pdf::PageEdit::Delete(1).map(p));
-        assert_eq!((ink.index_of(1, a), ink.index_of(1, c)), (Some(0), None));
-        assert_eq!(pages(&ink), [1]);
+        ink.edit_pages(&mut doc, PageEdit::Insert(1)).unwrap();
+        ink.edit_pages(&mut doc, PageEdit::Move { from: 2, to: 0 })
+            .unwrap();
+        assert_eq!(page_texts(&doc), ["Second page", "Hello accent", ""]);
+
+        let undo = PageEdit::Move { from: 0, to: 2 };
+        assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo)]);
+        assert_eq!(page_texts(&doc), ["Hello accent", "", "Second page"]);
+        let undo = PageEdit::Delete(1);
+        assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo)]);
+        assert_eq!(page_texts(&doc), ["Hello accent", "Second page"]);
+        assert_eq!(ink.history(), (false, true));
+
+        let redo = PageEdit::Insert(1);
+        assert_eq!(ink.walk(&mut doc, true), [Walked::Pages(redo)]);
+        ink.walk(&mut doc, true);
+        assert_eq!(page_texts(&doc), ["Second page", "Hello accent", ""]);
         assert_eq!(ink.history(), (true, false));
     }
 
-    /// The page each step of the undo list is on, oldest first.
-    fn pages(ink: &Ink) -> Vec<usize> {
-        ink.done.iter().flatten().map(|step| step.at().0).collect()
+    /// Strokes and page edits walk back in the order they were made, through one history: a
+    /// deleted page comes back with its text and its ink, the stroke drawn on it before the
+    /// delete is still Undo's to take, and Redo deletes it again. The page put back is the one
+    /// the save writes.
+    #[test]
+    fn undo_puts_a_deleted_page_back_with_its_ink() {
+        let Some((dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let mut ink = Ink::default();
+        let draw = |doc: &mut PdfDoc, ink: &mut Ink, page| {
+            let before = doc.annotation_count(page).unwrap();
+            let line = pdf::Shape::Line {
+                a: (20.0, 20.0),
+                b: (80.0, 20.0),
+            };
+            doc.add_shape(page, line, STYLE).unwrap();
+            ink.drew(page, before);
+        };
+        // What each page reads, and how many strokes it carries.
+        let pages = |doc: &PdfDoc| -> Vec<(String, usize)> {
+            let texts = page_texts(doc).into_iter().enumerate();
+            texts
+                .map(|(p, t)| (t, doc.inks(p).unwrap().len()))
+                .collect()
+        };
+        let hello = |n| ("Hello accent".to_string(), n);
+        let second = |n| ("Second page".to_string(), n);
+        // A stroke on each page, the first page deleted, and a stroke on the page that took its
+        // number.
+        draw(&mut doc, &mut ink, 0);
+        draw(&mut doc, &mut ink, 1);
+        ink.edit_pages(&mut doc, PageEdit::Delete(0)).unwrap();
+        draw(&mut doc, &mut ink, 0);
+        assert_eq!(pages(&doc), [second(2)]);
+
+        let mut walk = |forwards| {
+            ink.walk(&mut doc, forwards);
+            pages(&doc)
+        };
+        let back: Vec<_> = (0..4).map(|_| walk(false)).collect();
+        assert_eq!(
+            back,
+            [
+                vec![second(1)],
+                vec![hello(1), second(1)],
+                vec![hello(1), second(0)],
+                vec![hello(0), second(0)],
+            ]
+        );
+        let forward: Vec<_> = (0..4).map(|_| walk(true)).collect();
+        assert_eq!(
+            forward,
+            [
+                vec![hello(1), second(0)],
+                vec![hello(1), second(1)],
+                vec![second(1)],
+                vec![second(2)],
+            ]
+        );
+        // The redone delete kept the page again, for the next Undo.
+        walk(false);
+        assert_eq!(walk(false), [hello(1), second(1)]);
+        let saved = reopen(&dir, &doc);
+        assert_eq!(page_texts(&saved), ["Hello accent", "Second page"]);
     }
+
+    const STYLE: pdf::InkStyle = pdf::InkStyle {
+        width: 2.0,
+        rgba: [0, 0, 0, 255],
+        multiply: false,
+    };
 
     /// The name of the annotation last put on the end of `page`.
     fn newest(ink: &Ink, page: usize) -> u32 {

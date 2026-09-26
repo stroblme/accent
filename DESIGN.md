@@ -66,7 +66,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Two, so the sidebar reaches the top of the window and the tab bar spans only the editor column.
 - Sidebar header: the start window controls and the pane switcher.
 - Main header: the sidebar toggle (always visible, so a hidden sidebar comes back without the keyboard), `AdwWindowTitle` with the vault name and the note path, the Drawing toggle while a PDF or a diagram is in front, the primary menu, the end window controls. It takes the start window controls while the sidebar is hidden.
-- Undo and Redo sit left of the Drawing toggle while a tool is in hand and either has something to walk (over a diagram, whenever either has), as a pair with the empty one insensitive, so neither moves under the pointer.
+- Undo and Redo sit left of the Drawing toggle while the PDF or the diagram in front has something for either to walk, tool in hand or not, as a pair with the empty one insensitive, so neither moves under the pointer.
 - Toggle Preview has no button, only its action, chord and palette entry: a window has only so many places for one.
 - A header carries the document's name, not its facts; those, and what the window is busy with, are the status bar's.
 - The window's own title is the vault name alone — `Notes (host)` on a remote vault, `Accent` without one — and does not follow the tab: it is what tells windows apart in the switcher and the task manager.
@@ -151,7 +151,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Create Branch… is `git switch -c` from HEAD, with no base picker and git validating the name.
 - Merge Branch… merges another local branch into HEAD with no fast-forward flag, so git's default and the user's `merge.ff` decide. The toast says what came of it — up to date, fast-forwarded, merged, or conflicts in N files — read off the repository, not off git's words.
 - A stopped merge raises an `AdwBanner` over the pane, "A merge is in progress", until committed or aborted; its Abort asks first, since it discards every resolution made so far. A stopped rebase raises the same banner reading "A rebase is in progress": Commit reads Continue and the message box goes, each commit keeping its own message, and Abort asks the same question. A Continue that stops again leaves the banner up.
-- Conflicts are the Merge Conflicts section's rows: a row opens the note with git's markers, Stage marks it resolved, and nothing opens on its own.
+- Conflicts are the Merge Conflicts section's rows: a row opens the note with git's markers and their Accept buttons (Editor), Stage marks it resolved, and nothing opens on its own.
 - Sync and Commit share a row, the pane's two actions: a row of its own costs 40 px the changes and the history need. Sync carries the ahead and behind counts and `mail-send-receive-symbolic`.
 - Sync pulls then pushes, both halves every time: the counts come from a background fetch (on opening the vault, on picking a repository, every five minutes while the window has focus), so they are a readout, not a decision. A failed pull stops there and keeps its transcript.
 - Sync's pull is a merge (`git pull --no-rebase`): it never rewrites a commit, and a conflict stops in the Merge Conflicts row. It merges even where the user's `pull.rebase` or `pull.ff = only` says otherwise, by the user's decision.
@@ -179,6 +179,9 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 - `sourceview5::View` in an `AdwClampScrollable` in a `GtkScrolledWindow`: a plain `AdwClamp` makes GTK insert a `GtkViewport`, whose dead adjustments break the view's own scrolling to the caret.
 - A sticky block title over the top of the view pins the opening line of the heading or fenced block the first visible line is in, as VS Code pins a function signature, until that line is back on screen; the innermost block wins. Only those two blocks, both already tagged by the styling pass: a language's own structure would need a parser. A plain label in the document font, aligned with the text, on a `.view` box with a rule under it; never in a code or CSV tab.
+- **Git's conflict markers are decorated as VS Code decorates them**, in every text tab: a block's current side tinted green and its incoming side blue, each marker line more strongly than its side, a diff3 base grey and `=======` bare. Accept Current, Accept Incoming and Accept Both sit in a band the `<<<<<<<` line is given above itself, the comparison's `.osd` row of buttons, and each replaces the block with what it keeps as one undo step.
+- A block is git's seven-character markers at the start of their lines, in order (`accent_core::conflict`); one edited out of order loses its tint and buttons alone, the blocks after it keeping theirs. They are found again as the styling is, on the keystroke up to 16 KB and on the debounce above.
+- The markers are not markdown: read as it, `=======` would make the current side a heading and `>>>>>>>` a quote, so the analysis blanks them and each side is styled as the prose it is. While a comparison is up the blocks go bare, the comparison being a merge of its own.
 
 ### Code editor
 
@@ -348,9 +351,10 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Insert Sketch puts a blank A4 page beside the note, embeds it and hands it the pen.
 - **The thumbnail strip organises the pages.** A thumbnail dragged along it moves its page, an accent bar marking the gap it lands in (none beside where it already is), the strip scrolling while the drag rests near an edge. The thumbnail under the pointer carries two round `.osd` buttons: Delete Page (absent on a one-page document, which a PDF keeps) and Insert Page Here on the gap below. A click goes to its page on release, a press being how a drag begins.
 - The page's menu, the status bar's page count and the palette have Add Page Before, Add Page After and Delete Page for the page being read, not the one under the pointer; the palette Move Page Up and Move Page Down. A document grows at its end by Add Page After on its last page, never by itself: the view clamps a stroke to the page under it, so running off the end is no gesture to observe.
-- A delete asks first in an `AdwAlertDialog`: nothing puts the page back, Undo walking ink alone.
-- A move reorders the page tree, so bookmarks and links into the page follow it. After an add the reader is on the new page; after a move or a delete, on the page they were reading, or the one that took its place.
-- Notes name pages by number and are not rewritten, so an edit that leaves highlights pointing at other pages says how many in a toast.
+- **A page edit is an Undo step**, in the one history the ink keeps, so Undo takes back strokes, adds, moves and deletes in the order they were made. A delete therefore asks nothing: Undo puts the page back.
+- A move reorders the page tree, so bookmarks and links into the page follow it. After an add the reader is on the new page — after an Undo of a delete, on the page put back; after a move or a delete, on the page they were reading, or the one that took its place.
+- A deleted page is kept as a PDF of its own (`PdfDoc::take_page`, pdfium's page import) and imported back by Undo, its text, annotations and ink with it: pdfium cannot hand back a page once it is gone. What points at it does not come back: pdfium's copy drops every reference to another page, so a link on it into the document loses its target, and the bookmarks, links and `\ref` targets elsewhere keep naming the page that went, so they stay dead after the Undo and in the file it saves. The copy is one page per delete; a snapshot of the whole file would bring them back at a file's worth per delete (NOTEPAD).
+- Notes name pages by number and are not rewritten, so an edit that leaves highlights pointing at other pages says how many in a toast; an Undo, putting the pages back where the notes had them, says nothing.
 - The stand-ins have their own budget, a quarter of the tiles', so scrolling a long document end to end does not keep every page.
 
 ### Image
@@ -477,7 +481,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Three things depart from the single accent, each where one colour cannot carry the information:
   - the style scheme a code tab is coloured by (Typography);
   - a palette of hues rotated from the accent, for a CSV's columns and the git history's lanes: a sixth of the wheel per column, keeping the accent's saturation and value, column 0 the accent itself — in the standalone form the links take, both being text on the page — a seventh column repeating the first hue rather than inventing a colour — derived at runtime, so it follows the system accent;
-  - a comparison's green and red, and a warning's amber: fixed hue weights mixed with the resolved foreground (`diff::tint`), because a diff has to read as green and red and libadwaita publishes its success and error colours only as CSS variables Rust cannot read. The editor gutter's change bars take the same two, green for an added line and a red wedge where lines went, and the accent for a rewritten one.
+  - a comparison's green and red, a conflict block's green and blue, and a warning's amber: fixed hue weights mixed with the resolved foreground (`diff::tint`), because a diff has to read as green and red, a conflict's two sides as VS Code's green and blue, and libadwaita publishes its success and error colours only as CSS variables Rust cannot read. The editor gutter's change bars take the same two, green for an added line and a red wedge where lines went, and the accent for a rewritten one.
 - The preview stylesheet derives everything from three values: foreground, background, accent. WebKitGTK cannot see GTK's CSS variables, so it gets the background as a literal from `theme.rs`. One rule is not derived: a `$$` block gets `margin: 1.2em 0`, a heading's standing room, since a `<math display="block">` box carries none of a prose line's half-leading and two formulas would otherwise sit closer than two paragraphs.
 - A diagram's page is painted in the colours the draw.io file gives it, in light and dark alike, the theme reaching only the surround and the accent only the selection: a diagram's colours are its content. The Properties pane may put any colour into the document; none is a literal in code.
 - **`theme.rs` is the only file allowed to write a hex literal**, and one anywhere else is a bug the pre-flight grep catches. It holds libadwaita's `--view-bg-color` pair (`#ffffff` / `#1d1d20`) and their foregrounds, the Solarized palette (Ethan Schoonover's, MIT), and the terminal's ANSI palettes: Ayu and Ayu Light (MIT, from `mbadolato/iTerm2-Color-Schemes`) under the Adwaita themes, Solarized's own under Solarized. Only the dark one has a contrast floor in the tests (3.0:1 on `#1d1d20`): Ayu Light and Solarized are low-contrast by design and ship as their authors made them.
@@ -555,7 +559,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette, and over an image Invert Image Colours.
 - Drawing `Ctrl+Shift+I` opens the ring. Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust (unbound) are on the ring and in the palette, a tool picked from the palette bringing the ring out.
 - Copy Selection, Copy Link to Selection, Export Highlights, Insert Sketch, Add Page Before, Add Page After and Delete Page are in the palette and the page's menu, Move Page Up and Move Page Down in the palette, all unbound: the thumbnail strip is where pages are organised by pointer.
-- While a pen is out `Ctrl+Z` takes back the last stroke, erase or move of this session and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note, and `Escape` puts the pen down: the tab's own keys, like Copy. Undo Drawing and Redo Drawing are also the header's two buttons and palette commands.
+- `Ctrl+Z` takes back the last stroke, erase, move or page edit of this session, tool in hand or not, and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note; `Escape` puts the pen down. They are the tab's own keys, like Copy, so an entry with the keyboard, the find bar's included, keeps its own undo. Undo PDF Edit and Redo PDF Edit are also the header's two buttons and palette commands.
 - Find and Go to Line keep their chords; over a PDF they search the document and go to a page.
 
 ### Diagram
@@ -607,6 +611,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 ### Git
 
 - Sync (unbound): pull then push, from the pane's button, the status bar's branch or the palette — one action, syncing the repository the active document sits in.
+- Accept Current Change, Accept Incoming Change and Accept Both Changes (unbound) resolve the conflict block holding the caret, Next Conflict and Previous Conflict (unbound) put the caret on the next block's `<<<<<<<` line, going round at the ends; each says so in a toast when there is none.
 - Merge Branch…, Abort Merge and Delete Branch… (unbound) act on the repository the pane shows, the one whose conflicts it lists. Merge Branch… is also the branch popover's last button and puts the pane on screen; Abort Merge is the merge banner's Abort and says so when there is no merge to abort; Delete Branch… is the popover's trash buttons by keyboard and puts the pane on screen.
 
 ### Notes

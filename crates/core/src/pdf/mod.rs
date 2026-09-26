@@ -20,7 +20,7 @@ mod text;
 pub use annot::{LinkHighlights, highlight_quads};
 pub use doc::{A4, PdfDoc, blank_pdf};
 pub use ink::{Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, swept, thin};
-pub use ledger::{Ink, NamedInk, fresh_id};
+pub use ledger::{Ink, NamedInk, Walked, fresh_id};
 pub use pages::PageEdit;
 pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_quads};
 

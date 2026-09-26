@@ -133,6 +133,10 @@ struct Pending {
 
 /// Analyse a note. Must be fast enough to run on every (debounced) keystroke.
 pub fn analyze(text: &str) -> Analysis {
+    // Git's conflict markers are not markdown: read as it, `=======` makes the current side a
+    // heading and `>>>>>>>` a quote. Blanked, each side reads as the prose it is.
+    let blank = crate::conflict::blank_markers(text);
+    let text = blank.as_deref().unwrap_or(text);
     let mut a = Analysis::default();
     let mut heading: Option<(Range<usize>, u8, String)> = None;
     let mut open: Vec<Pending> = Vec::new();
@@ -317,6 +321,18 @@ pub(super) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflict_markers_are_not_read_as_markdown() {
+        // Read as markdown, `=======` makes the two lines above it a heading and `>>>>>>>` a
+        // quote seven deep.
+        let t = "<<<<<<< HEAD\nours *here*\n=======\ntheirs\n>>>>>>> side\n";
+        let a = analyze(t);
+        assert!(a.headings.is_empty() && a.title.is_none());
+        let styles: Vec<Style> = a.spans.iter().map(|s| s.style).collect();
+        assert_eq!(styles, [Style::Emphasis, Style::Marker, Style::Marker]);
+        assert_eq!(testing::at(t, &a.spans[0]), "here");
+    }
 
     #[test]
     fn headings_and_title_precedence() {
