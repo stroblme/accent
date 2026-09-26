@@ -6,9 +6,6 @@ import android.util.LruCache
 import android.util.Size
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import io.github.stroblme.accent.ffi.Theme
 import io.github.stroblme.accent.ffi.looksLikeDocument
 import io.github.stroblme.accent.ffi.recolourImage
@@ -54,20 +51,6 @@ internal fun imageTheme(kind: ImageKind, dark: Boolean, inverted: Boolean, docum
         ImageKind.Svg -> pageTheme(dark, inverted)
         ImageKind.Raster -> pageTheme(dark && document(), inverted)
     }
-
-/**
- * The images the reader has inverted by hand — a long press on one in a note, Invert on the image
- * screen — by path on this device. Kept for as long as the app's process runs and nowhere else: a
- * figure that came out wrong is put right for this reading, not written into the vault.
- */
-object Inverted {
-    var files by mutableStateOf(emptySet<String>())
-        private set
-
-    fun toggle(path: String) {
-        files = if (path in files) files - path else files + path
-    }
-}
 
 /**
  * [file] as a rendered page is to show it in a [dark] theme or a light one: as it is on disk, or

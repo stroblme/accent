@@ -113,6 +113,7 @@ fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome
         File(path).name.removeSuffix(".pdf"),
         chrome,
         linkName = pdf.rel,
+        invertKey = path,
         at = pdf.at,
         notes = notes,
         onNote = model::openFromPdf,
@@ -163,6 +164,7 @@ fun LoosePdfScreen(uri: Uri) {
             name.removeSuffix(".pdf"),
             chrome,
             linkName = name,
+            invertKey = uri.toString(),
             finding = finding,
             onFinding = { finding = it },
         ) { model ->
@@ -191,6 +193,8 @@ private fun Reader(
     chrome: Chrome,
     /** What a copied link calls the document: its vault path, or its file name from outside. */
     linkName: String,
+    /** What Invert remembers it by ([Inverted]): its path, or its address from outside. */
+    invertKey: String,
     /** Where it opens, if not at the top. */
     at: PdfPlace? = null,
     /** The note links into it, which paint as highlights; none for a document from outside. */
@@ -209,6 +213,7 @@ private fun Reader(
     var contents by remember(doc) { mutableStateOf(false) }
     /** A page something outside the column has asked for, until the column has gone there. */
     var wanted by remember(doc) { mutableStateOf<Int?>(null) }
+    val inverted = invertKey in Inverted.files
 
     if (failed != null) {
         Column(
@@ -250,7 +255,7 @@ private fun Reader(
             DocumentFrame(
                 barShown = chrome.shown,
                 bar = {
-                    // Find, and the bookmarks. Contents says so even on a file carrying no
+                    // Find, the bookmarks, and Invert. Contents says so even on a file carrying no
                     // outline, the way it used to say Edit: a gap where a control belongs is worse
                     // than one that says it has nothing to offer. Where the annotation tools go is
                     // still open ([ANNOTATIONS]).
@@ -259,6 +264,7 @@ private fun Reader(
                         TextButton(onClick = { contents = true }, enabled = marks.isNotEmpty()) {
                             Text("Contents")
                         }
+                        BarToggle("Invert", on = inverted, onClick = { Inverted.toggle(invertKey) })
                     }
                 },
             ) { bar ->
@@ -267,6 +273,7 @@ private fun Reader(
                     doc,
                     linkName,
                     tool,
+                    inverted,
                     chrome,
                     wanted,
                     at,
@@ -371,6 +378,8 @@ private fun Pages(
     doc: PdfModel,
     linkName: String,
     tool: Tool,
+    /** The reader has turned the recolouring round for this file ([pageTheme]). */
+    inverted: Boolean,
     chrome: Chrome,
     wanted: Int?,
     /** Where the document opens, if not at the top. */
@@ -390,7 +399,7 @@ private fun Pages(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
-    val theme = remember(colors) { pageTheme(colors.surface.dark()) }
+    val theme = remember(colors, inverted) { pageTheme(colors.surface.dark(), inverted) }
 
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     var zoom by remember { mutableFloatStateOf(1f) }

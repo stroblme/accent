@@ -83,9 +83,9 @@ Compose widget stands in for which desktop one.
 
 ### Image
 
-- An image file — from the files, the switcher or a link — opens on a screen of its own rather than
-  as a note: the image fitted whole to the screen on the page colour, under the document's bar. A
-  pinch zooms it, the WebView's own.
+- An image file — from the files, the switcher, a link, or a tap on it in a note — opens on a screen
+  of its own rather than as a note: the image fitted whole to the screen on the page colour, under
+  the document's bar. A pinch zooms it, the WebView's own.
 - It is drawn by the note's rule (Colour), and the bar's one action is Invert, which flips that rule
   for this file for as long as the app runs, as a long press on the image in a note does.
 
@@ -124,13 +124,15 @@ exist as a visible control.
 | Tap a highlight on a page | Opens the note whose link makes it; Back returns to the page | The highlight |
 | Long press on a PDF page | Selects the word under the finger; a drag grows it, and the handles move either end | The handles and the floating toolbar it raises |
 | Long press on a note | Selects the text under the finger with the WebView's own handles, as a page of prose does everywhere else on the platform | The handles it raises |
-| Long press on an image in a note | Inverts its colours against the recolouring rule, until the app is closed | Invert on the image's own screen |
+| Tap an image in a note | Opens it on its own screen, to zoom and invert; an image inside a link follows the link | The image |
+| Long press on an image in a note | Inverts its colours against the recolouring rule, until the app is closed | Invert on the image's own screen, a tap away |
 | Pinch on an image | Zooms it, the WebView's own | — |
 
-- A long press on an image is taken only on an image, where the WebView's hit test says one is
-  under the finger; anywhere else it is left to the WebView, whose long press is the selection. Its
-  twin is a screen away rather than on this one: the image opened on its own, where Invert is in the
-  bar and flips the same switch.
+- A tap or a long press on an image is taken only where the WebView's hit test says one is under the
+  finger; anywhere else a tap is the chrome's and a long press the WebView's selection. An image
+  inside a link is the link's to a tap, as on any page — the author made it one — and a long press
+  inverts it all the same. The long press's twin is the tap: the image on its own screen, where
+  Invert in the bar flips the same switch.
 - A panel is closed by pulling it down, the one gesture here that reads as itself: the handle says
   it moves, and down is where a panel goes. What is inside scrolls first, so only a drag the list
   cannot use pulls the panel, and letting go short of the threshold springs it back. Back does the
@@ -172,8 +174,10 @@ exist as a visible control.
   once coming and going.
 - The bar's button is a note's Edit and Done. A PDF's are Find and Contents, the document's
   bookmarks; on a file with none, Contents is there and disabled: a gap where a control belongs is
-  worse than a control that says it has nothing to offer. An image's is Invert, disabled on a GIF,
-  which is never recoloured.
+  worse than a control that says it has nothing to offer. A PDF's third, and an image's one, is
+  Invert, disabled on a GIF, which is never recoloured.
+- Invert is a toggle, and the only one: its label says what it does, so while it is on the button is
+  filled with the accent (`BarToggle`), the one place the bar spends a fill.
 - Only one screen keeps window insets. A PDF inside a vault is inside a screen already clear of the
   status bar, so its own scaffold takes none; opened from another app it keeps them itself. Applied
   twice, the bar sits lower than a note's.
@@ -224,13 +228,14 @@ exist as a visible control.
   one thing.
 - A PDF is recoloured in a dark theme as on the desktop: the document's paper lands on the app's
   surface and its ink on the app's text, each pixel keeping its chroma, so a coloured figure stays
-  coloured.
+  coloured. Invert in its bar turns that round for the file, as an image's does below.
 - So is an image that reads as a document — a scan, a plot, a diagram, a screenshot of text — in a
   note and on the image screen alike; a photo is left alone, an SVG is always a drawing, a GIF is
   never touched (the decoder takes its first frame, and an animation would stop), and past 64 MP an
   image is not looked at. Inverting one flips the rule for that file: in a light theme it goes onto
   the dark page, in a dark one it shows as it is. Per file, until the app's process ends, never
-  written anywhere — the desktop's Invert, for a figure the classifier got wrong.
+  written anywhere — the desktop's Invert, for a figure the classifier got wrong or a PDF that reads
+  better the other way.
 
 ## Architecture
 

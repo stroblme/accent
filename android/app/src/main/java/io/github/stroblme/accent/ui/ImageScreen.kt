@@ -8,8 +8,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberUpdatedState
@@ -20,7 +18,7 @@ import io.github.stroblme.accent.OpenImage
 import java.io.File
 
 /**
- * An image on its own: opened from the files, the switcher or a link.
+ * An image on its own: opened from the files, the switcher, a link, or a tap on it in a note.
  *
  * The note's surface — the same bar lying over it, the same tap for the bar — with the image fitted
  * to the screen, and recoloured by the rule a note's images follow ([served]). The bar's one
@@ -45,10 +43,12 @@ fun ImageScreen(image: OpenImage, chrome: Chrome) {
             DocumentBar(name) {
                 // A GIF is never recoloured, so there is nothing to invert: disabled rather than
                 // gone, as Contents is on a PDF with no bookmarks.
-                TextButton(
+                BarToggle(
+                    "Invert",
+                    on = image.path in inverted,
                     onClick = { Inverted.toggle(image.path) },
                     enabled = imageKind(name) != ImageKind.Gif,
-                ) { Text("Invert") }
+                )
             }
         },
     ) {
