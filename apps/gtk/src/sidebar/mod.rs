@@ -111,6 +111,7 @@ struct VaultPanes {
     /// The Replace All button and what the body is showing, for `ACCENT_BENCH_REPLACE`.
     apply_replace: gtk::Button,
     search_state: Rc<dyn Fn() -> (String, Vec<String>, String)>,
+    search_view: gtk::ListView,
     references: gtk::StringList,
     references_stack: gtk::Stack,
     /// The empty page of the References pane. Its words change with what the tab holds — a note
@@ -262,6 +263,7 @@ impl Sidebar {
                         search_dirty: search.dirty,
                         apply_replace: search.apply,
                         search_state: search.state,
+                        search_view: search.view,
                         references,
                         references_stack,
                         references_empty,
@@ -541,6 +543,11 @@ impl Sidebar {
             Some(panes) => (panes.search_state)(),
             None => (String::new(), Vec::new(), String::new()),
         }
+    }
+
+    /// The Search pane's list of rows, for `ACCENT_BENCH_SEARCH=more:`.
+    pub fn search_view(&self) -> Option<gtk::ListView> {
+        self.panes.as_ref().map(|panes| panes.search_view.clone())
     }
 
     /// What the Replace All button says and whether it can be pressed. What

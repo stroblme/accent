@@ -174,7 +174,10 @@ impl Index {
                 break;
             }
             let body: Option<String> = st.query_row([&hit.rel_path], |r| r.get(0)).optional()?;
-            let rows = body.map_or_else(Vec::new, |body| phrase_hits(&hit, &body, phrase, room));
+            let rows = body.map_or_else(Vec::new, |body| {
+                let cap = room.min(PER_FILE);
+                phrase_hits(&hit.rel_path, hit.title.as_deref(), &body, phrase, 0, cap)
+            });
             match rows.is_empty() {
                 true => out.push(hit),
                 false => out.extend(rows),
@@ -296,19 +299,39 @@ impl Index {
         out: &mut Vec<Match>,
         total: &mut usize,
     ) {
+        let cap = limit.saturating_sub(out.len()).min(PER_FILE);
+        let (rows, found) = Self::matches_from(rel, title, body, re, 0, cap);
+        *total += found;
+        out.extend(rows);
+    }
+
+    /// The matches of `re` in one body that start at byte `from` or later: at most `cap` rows,
+    /// the rest counted into the last one's [`Match::more`], and how many there are in all.
+    /// [`matches_in`](Self::matches_in) lists a file's first few through it, and the sidebar the
+    /// rest once the reader opens that file's "+N more" row.
+    ///
+    /// The regex still runs from the top of the body, so `^` and `\b` read the text before `from`
+    /// as the first pass did and the matches are the ones it counted.
+    pub fn matches_from(
+        rel: &str,
+        title: Option<&str>,
+        body: &str,
+        re: &Regex,
+        from: usize,
+        cap: usize,
+    ) -> (Vec<Match>, usize) {
         // `find_iter` walks forward, so the line number follows it instead of being counted
         // from the start of the note for every hit.
         let mut lines = Lines::new(body);
-        let (first, mut listed) = (out.len(), 0usize);
-        for m in re.find_iter(body) {
-            *total += 1;
-            if out.len() >= limit || listed >= PER_FILE {
-                if let Some(last) = out[first..].last_mut() {
+        let (mut out, mut total): (Vec<Match>, usize) = (Vec::new(), 0);
+        for m in re.find_iter(body).skip_while(|m| m.start() < from) {
+            total += 1;
+            if out.len() >= cap {
+                if let Some(last) = out.last_mut() {
                     last.more += 1;
                 }
                 continue;
             }
-            listed += 1;
             let (line, line_text, range) = lines.at(m.start(), m.end());
             out.push(Match {
                 rel_path: rel.to_string(),
@@ -320,6 +343,22 @@ impl Index {
                 more: 0,
             });
         }
+        (out, total)
+    }
+
+    /// [`matches_from`](Self::matches_from) for the rows [`search`](Self::search) lists: the
+    /// ranked query's occurrences in one body from byte `from` on, one row each, at most `cap`
+    /// and the rest counted onto the last. The phrase is folded as `search` folds it, so the rows
+    /// go on where that file's listed ones stopped.
+    pub fn phrase_hits_from(
+        rel: &str,
+        body: &str,
+        query: &str,
+        from: usize,
+        cap: usize,
+    ) -> Vec<SearchHit> {
+        let phrase = fold(&terms(query).join(" "));
+        phrase_hits(rel, None, body, &phrase, from, cap)
     }
 
     /// The files whose indexed body matches at all, in `rel_path` order: the bodies
@@ -396,21 +435,32 @@ impl<'a> Lines<'a> {
     }
 }
 
-/// Every occurrence of the folded `phrase` in `body` as a hit of its own: the line it sits on,
-/// clipped the way an exact search clips one, with that occurrence alone marked in it. At most
-/// `room` rows and at most [`PER_FILE`], the occurrences past that counted onto the last row.
+/// Every occurrence of the folded `phrase` in `body` from byte `from` on as a hit of its own: the
+/// line it sits on, clipped the way an exact search clips one, with that occurrence alone marked
+/// in it. At most `cap` rows, the occurrences past that counted onto the last row.
 ///
 /// Empty where the body does not hold the phrase — a hit on the title, or one folded across a
 /// stretch [`folded_find`] cannot put back together — and the caller keeps its file row then.
-fn phrase_hits(hit: &SearchHit, body: &str, phrase: &str, room: usize) -> Vec<SearchHit> {
+fn phrase_hits(
+    rel: &str,
+    title: Option<&str>,
+    body: &str,
+    phrase: &str,
+    from: usize,
+    cap: usize,
+) -> Vec<SearchHit> {
     let mut out: Vec<SearchHit> = Vec::new();
     let mut lines = Lines::new(body);
-    let mut from = 0usize;
+    // A place read off an earlier copy of the file may be past its end or inside a character.
+    let mut from = from.min(body.len());
+    while !body.is_char_boundary(from) {
+        from += 1;
+    }
     // A zero-length match would never advance, so an empty query lists nothing rather than looping.
     while let Some((at, len)) = folded_find(&body[from..], phrase).filter(|&(_, len)| len > 0) {
         let start = from + at;
         from = start + len;
-        if out.len() >= room.min(PER_FILE) {
+        if out.len() >= cap {
             if let Some(last) = out.last_mut() {
                 last.more += 1;
             }
@@ -418,8 +468,8 @@ fn phrase_hits(hit: &SearchHit, body: &str, phrase: &str, room: usize) -> Vec<Se
         }
         let (line, text, range) = lines.at(start, start + len);
         out.push(SearchHit {
-            rel_path: hit.rel_path.clone(),
-            title: hit.title.clone(),
+            rel_path: rel.to_string(),
+            title: title.map(str::to_string),
             // The guillemets the UI turns into bold, around this occurrence and not around every
             // one on the line: two matches on one line are two rows, and each says which it is.
             snippet: format!(
@@ -832,6 +882,36 @@ mod tests {
         let hits = ix.search("ferris", 100, false).unwrap();
         assert_eq!(hits.len(), PER_FILE, "{hits:?}");
         assert_eq!(hits.last().map(|h| h.more), Some(100 - PER_FILE));
+    }
+
+    /// A file's "+N more" row, opened: the matches past its last listed row, found again in its
+    /// text the way the listed ones were, at most as many as asked and the rest counted onto the
+    /// last of them.
+    #[test]
+    fn the_rest_of_a_file_picks_up_where_its_rows_stopped() {
+        let body = "ferris\n".repeat(12);
+        let re = crate::search::pattern("ferris", crate::search::Options::default()).unwrap();
+        let (listed, total) = Index::matches_from("a.md", None, &body, &re, 0, PER_FILE);
+        assert_eq!((listed.len(), total, listed[4].more), (PER_FILE, 12, 7));
+        let from = listed[4].offset + 1;
+        let (rest, _) = Index::matches_from("a.md", None, &body, &re, from, 100);
+        let lines: Vec<u32> = rest.iter().map(|m| m.line).collect();
+        assert_eq!(lines, (6..=12).collect::<Vec<_>>());
+        let (step, _) = Index::matches_from("a.md", None, &body, &re, from, 3);
+        assert_eq!((step.len(), step[2].more), (3, 4));
+
+        // The ranked phrase picks up where its last listed occurrence ends.
+        let hits = Index::phrase_hits_from("a.md", &body, "Ferris", 0, PER_FILE);
+        assert_eq!(hits[4].more, 7);
+        let from = hits[4].at.clone().unwrap().end;
+        let rest = Index::phrase_hits_from("a.md", &body, "Ferris", from, 100);
+        let lines: Vec<Option<u32>> = rest.iter().map(|h| h.line).collect();
+        assert_eq!(lines, (6..=12).map(Some).collect::<Vec<_>>());
+        // A file changed since may put the place inside a character; that is no panic.
+        assert_eq!(
+            Index::phrase_hits_from("a.md", "é ferris", "ferris", 1, 9).len(),
+            1
+        );
     }
 
     #[test]

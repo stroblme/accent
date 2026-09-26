@@ -48,6 +48,18 @@ const LOOK: Duration = Duration::from_millis(2);
 /// All off again (`all_off`). `RUST_LOG=accent=debug` prints one `sidebar pass` line per pass for
 /// the whole query, not one per character.
 pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
+    let more = (arg.strip_prefix("more:").map(|rest| (rest, false)))
+        .or_else(|| arg.strip_prefix("click:").map(|rest| (rest, true)));
+    if let Some((rest, click)) = more {
+        let (query, lines) = match rest.rsplit_once(':') {
+            Some((query, n)) if n.parse::<usize>().is_ok() => (query, n.parse().unwrap_or(12)),
+            _ => (rest, 12),
+        };
+        let query = query.to_string();
+        return bench_search_indexed(app.clone(), Instant::now(), move |app| {
+            bench_more(app, query, lines, click)
+        });
+    }
     let typed = arg
         .strip_prefix("type:")
         .map(|query| (query, false))
@@ -275,4 +287,223 @@ fn bench_search_print(app: &Rc<App>, step: &str) {
         "bench search step={step} page={page} rows={rows} count={count:?} button=\"{button}\" \
          sensitive={sensitive}"
     );
+}
+
+/// Files beside the one `=more:` opens, each holding the query twice, so the list scrolls.
+const MORE_BESIDE: usize = 30;
+/// How long `=click:` waits for the press.
+const CLICK_WAIT: Duration = Duration::from_secs(20);
+
+/// The note `=more:` opens: named to sort among the others, so the exact scan, which lists in
+/// path order, puts it in the middle of the list.
+fn more_note() -> String {
+    format!("{NOTE}-15more.md")
+}
+
+/// `ACCENT_BENCH_SEARCH=more:<query>[:<n>]` writes a note holding `<query>` on `n` lines (12
+/// unless the tail says otherwise) — five rows and a "+N more in this file" under them — beside
+/// thirty files holding it twice, so the list scrolls, puts the tail row in the middle of the
+/// list and opens it the way a click does. Once ranked, then with the replace row open.
+///
+/// Each prints `before` and `after`: the rows, the count line, the tabs open, the list's scroll,
+/// how far down the list the tail row sat and the row now in its place sits, and which row is
+/// selected. `after` must list `rows` + N − 1 (at most 1000 more, and a tail row again past
+/// that), with the count, the tabs, the scroll, the place and the selection as they were. Then
+/// `requery` asks the same question again, as a change in the vault does, and must list the file
+/// open still; `reset` asks for the query in capitals, a new question with the same matches, and
+/// must list it shut.
+///
+/// `=click:` is the same drill with a real press: it prints `aim <x> <y>`, where the tail row is
+/// on the screen, and waits 20 s for `build-aux/xtest.py <display> "move <x> <y>; down; up"`.
+fn bench_more(app: Rc<App>, query: String, lines: usize, click: bool) {
+    let Some(sidebar) = app.sidebar.get() else {
+        return bench_quit(&app);
+    };
+    let paths = bench_search_paths(&app, MORE_BESIDE);
+    bench_search_write(&paths, &query);
+    let more = app.root().join(more_note());
+    let body: String = (1..=lines)
+        .map(|i| format!("line {i} holds {query}\n"))
+        .collect();
+    if let Err(e) = std::fs::write(&more, body) {
+        println!("bench search wrote=false {e}");
+    }
+    sidebar.show_pane("search");
+    sidebar.set_search_text(&query);
+    glib::timeout_add_local_once(SETTLE, move || {
+        bench_more_open(app, query, "ranked", click, move |app, query| {
+            if let Some(sidebar) = app.sidebar.get() {
+                sidebar.set_search_text(&query);
+                sidebar.show_replace();
+            }
+            glib::timeout_add_local_once(SETTLE, move || {
+                bench_more_open(app, query, "exact", click, move |app, _| {
+                    bench_search_remove(&paths);
+                    bench_search_remove(&[more]);
+                    bench_quit(&app);
+                })
+            });
+        })
+    });
+}
+
+/// One mode of `=more:`: centre the tail row, open it, and print what the list did.
+fn bench_more_open(
+    app: Rc<App>,
+    query: String,
+    mode: &'static str,
+    click: bool,
+    then: impl FnOnce(Rc<App>, String) + 'static,
+) {
+    let (Some(sidebar), Some(view)) = (
+        app.sidebar.get(),
+        app.sidebar.get().and_then(|s| s.search_view()),
+    ) else {
+        return bench_quit(&app);
+    };
+    let (_, rows, _) = sidebar.search_state();
+    let Some(tail) = rows.iter().position(|r| r.starts_with('+')) else {
+        println!("bench search more={mode} tail=none rows={}", rows.len());
+        return then(app, query);
+    };
+    let tail_label = rows[tail].clone();
+    view.scroll_to(tail as u32, gtk::ListScrollFlags::NONE, None);
+    // A frame or two for the list to lay itself out at each new scroll.
+    glib::timeout_add_local_once(Duration::from_millis(300), move || {
+        if let (Some(adj), Some(y)) = (view.vadjustment(), bench_row_y(&view, "", &tail_label)) {
+            let top = (adj.value() + y - adj.page_size() / 2.0).max(0.0);
+            adj.set_value(top.min(adj.upper() - adj.page_size()));
+        }
+        if let Some(selection) = view.model().and_downcast::<gtk::SingleSelection>() {
+            selection.set_selected(tail as u32);
+        }
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            bench_more_activate(app, view, query, mode, tail, click, then)
+        });
+    });
+}
+
+/// `=more:`'s tail row, centred: print the list, open the row, and print it again.
+fn bench_more_activate(
+    app: Rc<App>,
+    view: gtk::ListView,
+    query: String,
+    mode: &'static str,
+    tail: usize,
+    click: bool,
+    then: impl FnOnce(Rc<App>, String) + 'static,
+) {
+    let Some(sidebar) = app.sidebar.get() else {
+        return bench_quit(&app);
+    };
+    let (_, rows, _) = sidebar.search_state();
+    let (seen, tail_label) = (rows.len(), rows[tail].clone());
+    let file = more_note();
+    bench_more_print(&app, &view, mode, "before", ("", &tail_label));
+    let tabs = app.open_tabs().len();
+    let asked = Instant::now();
+    let wait = match click {
+        true => {
+            match bench_row_aim(&view, &tail_label) {
+                Some((x, y)) => println!("bench search more={mode} aim {x:.0} {y:.0}"),
+                None => println!("bench search more={mode} aim=none"),
+            }
+            CLICK_WAIT
+        }
+        false => {
+            view.emit_by_name::<()>("activate", &[&(tail as u32)]);
+            SETTLE
+        }
+    };
+    // Taken once, by the look that sees the rows change.
+    let mut next = Some((then, tail_label));
+    glib::timeout_add_local(LOOK, move || {
+        let now = app.sidebar.get().map_or(seen, |s| s.search_state().1.len());
+        if now == seen && asked.elapsed() < wait {
+            return glib::ControlFlow::Continue;
+        }
+        let Some((then, tail_label)) = next.take() else {
+            return glib::ControlFlow::Break;
+        };
+        println!(
+            "bench search more={mode} opened_ms={} tabs_opened={}",
+            asked.elapsed().as_millis(),
+            app.open_tabs().len() - tabs
+        );
+        let (app, view, query, file) = (app.clone(), view.clone(), query.clone(), file.clone());
+        // Printed a moment later, once the list has laid the new rows out.
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            bench_more_print(&app, &view, mode, "after", (&file, "line 6"));
+            if let Some(sidebar) = app.sidebar.get() {
+                sidebar.requery_search();
+            }
+            glib::timeout_add_local_once(SETTLE, move || {
+                bench_more_print(&app, &view, mode, "requery", (&file, "line 6"));
+                if let Some(sidebar) = app.sidebar.get() {
+                    sidebar.set_search_text(&query.to_uppercase());
+                }
+                glib::timeout_add_local_once(SETTLE, move || {
+                    bench_more_print(&app, &view, mode, "reset", ("", &tail_label));
+                    then(app, query);
+                });
+            });
+        });
+        glib::ControlFlow::Break
+    });
+}
+
+/// What `=more:` reads at each step; `at` names the row whose place on the list is printed, by
+/// its name and its dim line.
+fn bench_more_print(app: &Rc<App>, view: &gtk::ListView, mode: &str, step: &str, at: (&str, &str)) {
+    let Some(sidebar) = app.sidebar.get() else {
+        return;
+    };
+    let (page, rows, count) = sidebar.search_state();
+    let tails: Vec<&String> = rows.iter().filter(|r| r.starts_with('+')).collect();
+    let selected = view
+        .model()
+        .and_downcast::<gtk::SingleSelection>()
+        .map(|s| s.selected());
+    let scroll = view.vadjustment().map(|a| a.value());
+    println!(
+        "bench search more={mode} step={step} page={page} rows={} count={count:?} tabs={} \
+         scroll={scroll:?} y={:?} {:?} selected={selected:?} tails={tails:?}",
+        rows.len(),
+        app.open_tabs().len(),
+        bench_row_y(view, at.0, at.1),
+        at.1,
+    );
+}
+
+/// Where on the screen the middle of the tail row with the dim line `dir` is. With no window
+/// manager under Xvfb the window's surface sits at the screen's corner, so that is the widget's
+/// place in the surface.
+fn bench_row_aim(view: &gtk::ListView, dir: &str) -> Option<(f64, f64)> {
+    let y = bench_row_y(view, "", dir)?;
+    let root = view.root()?;
+    let native = view.native()?;
+    let (sx, sy) = native.surface_transform();
+    let at = view.compute_point(&root, &gtk::graphene::Point::new(40.0, y as f32 + 12.0))?;
+    Some((f64::from(at.x()) + sx, f64::from(at.y()) + sy))
+}
+
+/// How far down the list's visible part the row named `name` with the dim line `dir` sits, or
+/// `None` while it is not laid out. Each list child holds one row: the head box of icon, name and
+/// dim line, above the snippet.
+fn bench_row_y(view: &gtk::ListView, name: &str, dir: &str) -> Option<f64> {
+    let label = |w: Option<gtk::Widget>| w.and_downcast::<gtk::Label>().map(|l| l.text());
+    let mut child = view.first_child();
+    while let Some(item) = child {
+        let head = item.first_child().and_then(|row| row.first_child());
+        if let Some(head) = head {
+            let icon = head.first_child();
+            let found = label(icon.and_then(|i| i.next_sibling())).as_deref() == Some(name)
+                && label(head.last_child()).as_deref() == Some(dir);
+            if found && item.is_child_visible() {
+                return item.compute_bounds(view).map(|b| f64::from(b.y()));
+            }
+        }
+        child = item.next_sibling();
+    }
+    None
 }
