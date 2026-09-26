@@ -59,7 +59,7 @@ fn main() -> Result<()> {
     let (paper, ink) = ([0x1d, 0x1d, 0x20], [0xeb, 0xeb, 0xeb]);
     let t = Instant::now();
     for px in dark.data.as_chunks_mut::<4>().0 {
-        *px = accent_core::pdf::recolour_pixel(*px, paper, ink);
+        *px = accent_core::recolour::recolour_pixel(*px, paper, ink);
     }
     println!(
         "  dark pass: {:>7.1} ms  ({} px)",
