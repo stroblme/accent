@@ -338,23 +338,33 @@ impl App {
                 // linking `escape.png -> ~/.ssh/id_rsa` must not render it.
                 // `asset` first, because `![[img.png]]` names the file the way a wikilink does
                 // and the index is what knows it lives in `Attachments/`.
-                Some(vault) => vault
-                    .asset(rel)
-                    .and_then(|rel| vault.fetch(&rel).ok())
-                    .filter(|path| {
-                        match (path.canonicalize(), vault.root().canonicalize()) {
-                            (Ok(real), Ok(root)) => real.starts_with(root),
-                            // A remote vault's copy lives in the cache, not under the root, and the
-                            // host already refused anything that escapes it there.
-                            _ => vault.is_remote(),
-                        }
-                    }),
-                None => Some(root.join(rel)),
+                Some(vault) => {
+                    let key = vault.asset(rel)?;
+                    let path = vault.fetch(&key).ok()?;
+                    let inside = match (path.canonicalize(), vault.root().canonicalize()) {
+                        (Ok(real), Ok(root)) => real.starts_with(root),
+                        // A remote vault's copy lives in the cache, not under the root, and the
+                        // host already refused anything that escapes it there.
+                        _ => vault.is_remote(),
+                    };
+                    inside.then_some((key, path))
+                }
+                // A loose file's key is its path, as its tab's is.
+                None => {
+                    let path = root.join(rel);
+                    Some((path.to_string_lossy().into_owned(), path))
+                }
             },
+            self.inverted_images.clone(),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
                 move |target: &str| app.open_target(target)
+            ),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |key: &str| app.invert_image(key)
             ),
         );
         self.paned.set_end_child(Some(preview.widget()));
@@ -377,6 +387,22 @@ impl App {
             move |label| app.pane().find.set_matches_text(label)
         ));
         *self.preview.borrow_mut() = Some(preview);
+    }
+
+    /// Serve the preview's images again, after their look changed: WebKit keeps what it was
+    /// served, so its cache goes first and the note is rendered again after it.
+    pub fn reshow_preview_images(self: &Rc<Self>) {
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.forget_images(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || {
+                    if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
+                        app.render(&tab);
+                    }
+                }
+            ));
+        }
     }
 
     pub fn render(self: &Rc<Self>, tab: &Rc<Tab>) {

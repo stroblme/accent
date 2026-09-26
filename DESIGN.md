@@ -193,7 +193,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### Preview
 
-- A read-only WebKitGTK 6 view, the same clamp width, its stylesheet generated from `AdwStyleManager`.
+- A read-only WebKitGTK 6 view, the same clamp width, its stylesheet generated from `AdwStyleManager`; its images in the look their tabs have (Image).
 
 ### Terminal
 
@@ -358,6 +358,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A document-like image — a scan, a plot, a diagram, a screenshot of text — is recoloured onto the theme's paper and ink as a PDF page is (Architecture, Recolouring); a photo is left as it is, and Light leaves every image alone. An SVG is always recoloured, through a filter on its own vector; a GIF never unasked, being likely an animation. Transparency is judged over white and kept. An image over 64 megapixels is left alone rather than held twice.
 - Invert Image Colours turns that round for one file: what the theme recolours shows as it is, and what it leaves alone goes onto its page — on Light, which has none, onto the dark one, as an inverted PDF does. It lasts until the app quits and is written nowhere.
 - A theme change recolours the texture already decoded; the file is read again only when it changes on disk.
+- The preview shows an image as its tab would: the app's `accent:` scheme serves the recoloured bytes (a PNG, or the SVG with its filter), so the page carries no script or class for it. WebKit keeps what it was served across renders, so a new look or an inversion clears its memory cache and renders the note again. Its menu over an image ends with Invert Image Colours, the same toggle as the palette's.
 
 ### Diagram
 

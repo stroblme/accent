@@ -9,11 +9,13 @@
 //! stylesheet. The font comes from `editor::default_font` for the same reason. Editor and preview
 //! therefore agree by construction, in every theme, accent and font.
 
+use crate::look::{self, Look, Served};
 use crate::theme;
 use accent_core::markdown::percent_decode;
 use accent_core::path::parent_dir;
 use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -135,6 +137,12 @@ const MERMAID: &str = concat!(
 struct Inner {
     view: webkit6::WebView,
     content: webkit6::UserContentManager,
+    /// Kept for its cache, which holds every image served to the page until it is cleared.
+    session: webkit6::NetworkSession,
+    assets: Rc<Assets>,
+    /// The look the page's images were last served under, so a restyle can say whether they
+    /// have to be served again.
+    look: Cell<Look>,
     /// The sheet currently injected, so `restyle` can replace instead of stack.
     sheet: RefCell<Option<webkit6::UserStyleSheet>>,
     /// [`MERMAID`] while a note with a diagram is shown, `None` otherwise.
@@ -275,10 +283,21 @@ fn matches_label(at: u32, total: u32) -> String {
     }
 }
 
-/// What the preview is allowed to read: a vault-relative path in, a file on *this* machine out,
-/// `None` when there is none. Every window passes `Vault::fetch`, which is the file itself for a
-/// local vault and a copy fetched over ssh for a remote one — so a call can block on the network.
-type Resolve = dyn Fn(&str) -> Option<PathBuf> + Send + Sync;
+/// What the preview is allowed to read: a vault-relative path in, the vault file it names (its
+/// key) and that file on *this* machine out, `None` when there is none. Every window passes
+/// `Vault::fetch`, which is the file itself for a local vault and a copy fetched over ssh for a
+/// remote one — so a call can block on the network.
+type Resolve = dyn Fn(&str) -> Option<(String, PathBuf)> + Send + Sync;
+
+/// What the `accent:` scheme serves from.
+struct Assets {
+    resolve: Arc<Resolve>,
+    /// The images the reader inverted, by key: the window's own set, which its image tabs read too.
+    inverted: Rc<RefCell<HashSet<String>>>,
+    /// How many requests the page has made, for the drills: whether WebKit asks again for an
+    /// image it was served before.
+    requests: Cell<u32>,
+}
 
 /// Where the find readout goes; see [`Preview::connect_found`].
 type Report = Box<dyn Fn(&str)>;
@@ -290,25 +309,40 @@ pub struct Preview {
 
 impl Preview {
     /// `resolve` turns a vault-relative asset path into a file on this machine; [`resolve_asset`]
-    /// says which half of the containment guarantee is whose. `on_open` fires when the reader
-    /// clicks a link into the vault, with a wikilink's target as written or a markdown link's
-    /// vault path, and the `#anchor` if there is one.
+    /// says which half of the containment guarantee is whose. `inverted` holds the images the
+    /// reader inverted, which are served the other way round from what the theme asks. `on_open`
+    /// fires when the reader clicks a link into the vault, with a wikilink's target as written or
+    /// a markdown link's vault path, and the `#anchor` if there is one; `on_invert` when the
+    /// reader asks the image menu to invert an image, with its key.
     ///
     /// ponytail: every `Preview` builds its own `WebContext`, so one per tab means one WebKit
     /// process group per tab. Sharing a context (and its registered scheme) across previews is the
     /// upgrade path if tab memory ever shows up in a measurement.
     pub fn new(
-        resolve: impl Fn(&str) -> Option<PathBuf> + Send + Sync + 'static,
+        resolve: impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync + 'static,
+        inverted: Rc<RefCell<HashSet<String>>>,
         on_open: impl Fn(&str) + 'static,
+        on_invert: impl Fn(&str) + 'static,
     ) -> Preview {
         // `register_uri_scheme` asks only for `'static` and calls back on the main loop, so an `Rc`
         // would be enough to hold the resolver there — but every request hands it to a
         // `gio::spawn_blocking` worker, and crossing a thread needs `Send`. Hence `Arc`, and the
         // `Send + Sync` bound that an `Arc` of a shared closure requires.
-        let resolve: Arc<Resolve> = Arc::new(resolve);
+        let assets = Rc::new(Assets {
+            resolve: Arc::new(resolve),
+            inverted,
+            requests: Cell::new(0),
+        });
 
         let context = webkit6::WebContext::new();
-        context.register_uri_scheme("accent", move |request| serve(&resolve, request));
+        context.register_uri_scheme(
+            "accent",
+            glib::clone!(
+                #[strong]
+                assets,
+                move |request| serve(&assets, request)
+            ),
+        );
 
         // Ephemeral: no cookie jar, no disk cache, nothing that outlives the window.
         let session = webkit6::NetworkSession::new_ephemeral();
@@ -347,6 +381,9 @@ impl Preview {
         let inner = Rc::new(Inner {
             view,
             content,
+            session,
+            assets,
+            look: Cell::new(Look::now()),
             sheet: RefCell::new(None),
             mermaid: RefCell::new(None),
             loaded: Cell::new(false),
@@ -377,6 +414,7 @@ impl Preview {
             .connect_decide_policy(move |view, decision, kind| {
                 decide(view, decision, kind, &on_open)
             });
+        image_menu(&inner, on_invert);
 
         // `color()` only resolves the theme foreground once the widget is mapped, so restyle
         // then as well — same reasoning as `editor.rs`.
@@ -423,9 +461,45 @@ impl Preview {
         }
     }
 
-    /// Rebuild the stylesheet from the current GNOME theme, accent colour and document font.
-    pub fn restyle(&self) {
+    /// Rebuild the stylesheet from the current GNOME theme, accent colour and document font, and
+    /// say whether the page's images want serving again ([`Preview::forget_images`]).
+    pub fn restyle(&self) -> bool {
         Self::apply_style(&self.inner);
+        let look = Look::now();
+        self.inner.look.replace(look) != look
+    }
+
+    /// Drop every image WebKit keeps from the page, then `then`, which renders the note again:
+    /// a new look or an inverted image is served only to a page that asks for it once more.
+    pub fn forget_images(&self, then: impl FnOnce() + 'static) {
+        let Some(data) = self.inner.session.website_data_manager() else {
+            return then();
+        };
+        // The callback wants `Send`, and comes back on this thread; the guard carries `then`,
+        // which is not, across a boundary it never really crosses.
+        let then = glib::thread_guard::ThreadGuard::new(then);
+        let span = glib::TimeSpan::from_seconds(0);
+        data.clear(
+            webkit6::WebsiteDataTypes::MEMORY_CACHE,
+            span,
+            gio::Cancellable::NONE,
+            move |result| {
+                if let Err(e) = result {
+                    tracing::warn!(target: PREVIEW, "cannot clear the image cache: {e}");
+                }
+                (then.into_inner())();
+            },
+        );
+    }
+
+    /// How many requests the page has made so far.
+    pub fn requests(&self) -> u32 {
+        self.inner.assets.requests.get()
+    }
+
+    /// The web view, for a drill that reads the page itself.
+    pub fn view(&self) -> &webkit6::WebView {
+        &self.inner.view
     }
 
     fn apply_style(inner: &Inner) {
@@ -668,6 +742,39 @@ fn same_page(uri: &str, current: &str) -> bool {
     uri.split_once('#').is_some_and(|(doc, _)| doc == page)
 }
 
+// ----------------------------------------------------------------------------------- image menu
+
+/// Offer Invert Image Colours in the page's menu over an image of the vault's, handing
+/// `on_invert` the image's key once the vault has named the file.
+fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
+    let action = gio::SimpleAction::new("invert-image", Some(glib::VariantTy::STRING));
+    let (resolve, on_invert) = (inner.assets.resolve.clone(), Rc::new(on_invert));
+    action.connect_activate(move |_, rel| {
+        let Some(rel) = rel.and_then(|v| v.str()).map(str::to_string) else {
+            return;
+        };
+        let (resolve, on_invert) = (resolve.clone(), on_invert.clone());
+        glib::spawn_future_local(async move {
+            let found = crate::work::off_thread("asset", move || resolve_asset(&*resolve, &rel));
+            if let Some(Some((key, _))) = found.await {
+                on_invert(&key);
+            }
+        });
+    });
+    inner.view.connect_context_menu(move |_, menu, hit| {
+        let uri = hit.context_is_image().then(|| hit.image_uri()).flatten();
+        if let Some(("file", rel)) = uri.as_deref().and_then(accent_uri) {
+            menu.append(&webkit6::ContextMenuItem::new_separator());
+            menu.append(&webkit6::ContextMenuItem::from_gaction(
+                &action,
+                "Invert Image Colours",
+                Some(&rel.to_variant()),
+            ));
+        }
+        false
+    });
+}
+
 // ----------------------------------------------------------------------------------- uri scheme
 
 /// Answer one `accent://file/<rel>` request, or fail it. Everything the preview is allowed to see
@@ -677,16 +784,30 @@ fn same_page(uri: &str, current: &str) -> bool {
 /// is an ssh round trip, and the handler runs on the main loop — a large image would freeze the
 /// window. WebKit documents the way out on `register_uri_scheme`: keep a reference to the request
 /// and finish it once the data is there. So the resolving goes to a `gio::spawn_blocking` worker,
-/// the same pairing the git pane uses, and only the finishing comes back to the main loop.
-fn serve(resolve: &Arc<Resolve>, request: &webkit6::URISchemeRequest) {
+/// the same pairing the git pane uses, and only the finishing comes back to the main loop. The
+/// worker also decides how an image is shown in the look in force, which may mean recolouring it
+/// ([`look::serve`]).
+fn serve(assets: &Assets, request: &webkit6::URISchemeRequest) {
+    assets.requests.set(assets.requests.get() + 1);
     let uri = request.uri().unwrap_or_default();
     let Some(("file", rel)) = accent_uri(&uri) else {
         return deny(request, "not a vault file");
     };
-    let (resolve, request) = (resolve.clone(), request.clone());
+    // The look and the inverted set live on this thread; the worker gets a copy of each.
+    let (resolve, request) = (assets.resolve.clone(), request.clone());
+    let (look, inverted) = (Look::now(), assets.inverted.borrow().clone());
     glib::spawn_future_local(async move {
-        match crate::work::off_thread("asset", move || resolve_asset(&*resolve, &rel)).await {
-            Some(Some(path)) => send(&request, &path),
+        let answer = crate::work::off_thread("asset", move || {
+            let (key, path) = resolve_asset(&*resolve, &rel)?;
+            let served = look::serve(&path, look, inverted.contains(&key));
+            Some((path, served))
+        });
+        match answer.await {
+            Some(Some((path, Served::File))) => send(&request, &path),
+            Some(Some((_, Served::Bytes(bytes, mime)))) => {
+                let stream = gio::MemoryInputStream::from_bytes(&bytes);
+                request.finish(&stream, bytes.len() as i64, Some(mime));
+            }
             Some(None) => deny(&request, "outside the vault"),
             None => deny(&request, "the asset worker stopped"),
         }
@@ -717,7 +838,7 @@ fn deny(request: &webkit6::URISchemeRequest, what: &str) {
 /// what stops `![[../../../etc/passwd]]` however the resolver is written. The other half is the
 /// resolver's, and has to be: only it knows the root, so only it can say whether the file it hands
 /// back is still inside the vault once symlinks have been followed.
-fn resolve_asset(resolve: &Resolve, rel: &str) -> Option<PathBuf> {
+fn resolve_asset(resolve: &Resolve, rel: &str) -> Option<(String, PathBuf)> {
     if rel.is_empty() || Path::new(rel).is_absolute() {
         return None;
     }
@@ -885,11 +1006,11 @@ mod tests {
 
     /// A resolver of the shape a caller that owns the root passes in: a join that canonicalises,
     /// so nothing under the root can lead out of it.
-    fn vault_resolver(root: PathBuf) -> impl Fn(&str) -> Option<PathBuf> + Send + Sync {
+    fn vault_resolver(root: PathBuf) -> impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync {
         move |rel| {
             let root = root.canonicalize().ok()?;
             let path = root.join(rel).canonicalize().ok()?;
-            path.starts_with(&root).then_some(path)
+            path.starts_with(&root).then(|| (rel.to_string(), path))
         }
     }
 
@@ -901,7 +1022,10 @@ mod tests {
         let resolve = vault_resolver(root.clone());
         assert_eq!(
             resolve_asset(&resolve, "attachments/img.png"),
-            Some(root.canonicalize().unwrap().join("attachments/img.png"))
+            Some((
+                "attachments/img.png".to_string(),
+                root.canonicalize().unwrap().join("attachments/img.png")
+            ))
         );
         // Nothing there is the resolver's `None`, and reaches the reader as the same refusal.
         assert_eq!(resolve_asset(&resolve, "missing.png"), None);
@@ -912,7 +1036,7 @@ mod tests {
     fn resolve_asset_rejects_traversal_and_absolute_paths() {
         // A resolver that hands back whatever it is asked for, so a `None` below can only have
         // come from the check here — which is the point: it holds for any resolver.
-        let naive = |rel: &str| Some(PathBuf::from(rel));
+        let naive = |rel: &str| Some((rel.to_string(), PathBuf::from(rel)));
         for rel in [
             "../../../../etc/passwd",
             "notes/../../etc/passwd",

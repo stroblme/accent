@@ -914,8 +914,9 @@ impl App {
         for image in self.images() {
             self.show_image(&image, None);
         }
-        if let Some(preview) = self.preview.borrow().as_ref() {
-            preview.restyle();
+        // The images a note shows are served in the look, so a new one is a new page.
+        if self.preview.borrow().as_ref().is_some_and(|p| p.restyle()) {
+            self.reshow_preview_images();
         }
         for term in self.terminals() {
             term.restyle();
