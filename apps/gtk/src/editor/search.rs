@@ -346,15 +346,15 @@ impl Tab {
         self.jump_to(&lang::iter_at(&self.buffer, pos), 0.25);
     }
 
-    /// Put the caret on the heading `anchor` names, by slug or by text as a link writes it, and
-    /// say whether the note has it: one it does not have leaves the caret where it was.
+    /// Put the caret on the heading `anchor` names, by slug or by text as a link writes it, or on
+    /// the block a `^id` marks, and say whether the note has it: one it does not have leaves the
+    /// caret where it was.
     pub fn goto_heading(&self, anchor: &str) -> bool {
         let text = self.text();
-        let headings = markdown::analyze(&text).headings;
-        let Some(h) = markdown::heading_for(&headings, anchor) else {
+        let Some(at) = markdown::anchor_range(&text, anchor) else {
             return false;
         };
-        self.goto_pos(pos_of(&text, h.range.start));
+        self.goto_pos(pos_of(&text, at.start));
         true
     }
 

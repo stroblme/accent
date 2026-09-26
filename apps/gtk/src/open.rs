@@ -517,13 +517,13 @@ impl App {
         pdf.add_page(after);
     }
 
-    /// Take out the page being read, once the reader has said so. Never the last one.
+    /// Take out the page being read, at once: Undo puts it back. Never the last one.
     pub fn pdf_delete_page(self: &Rc<Self>) {
         let Some(pdf) = self.active_pdf() else { return };
         if pdf.page_count() < 2 {
             return self.cannot("delete the page", "a PDF keeps at least one page");
         }
-        pdf.ask_delete_page(pdf.current_page());
+        pdf.edit_pages(PageEdit::Delete(pdf.current_page()));
     }
 
     /// Move the page being read one place towards the end (`down`) or the start of the document.
@@ -628,16 +628,13 @@ impl App {
         self.sync_history();
     }
 
-    /// Undo and Redo in the header, while a tool is in hand over the PDF in front — the same
-    /// condition `Ctrl+Z` answers under — and either has something to walk. They come and go as a
-    /// pair, the one with nothing insensitive: hidden one at a time, Redo appearing beside the
-    /// Drawing toggle pushed Undo out from under the pointer.
-    ///
-    /// Over a diagram every edit is a step, so there the pair shows whenever either side has
-    /// something to walk, tool in hand or not.
+    /// Undo and Redo in the header, while the PDF or the diagram in front has something for
+    /// either to walk, tool in hand or not: a page edit is a step as a stroke is. They come and go
+    /// as a pair, the one with nothing insensitive: hidden one at a time, Redo appearing beside
+    /// the Drawing toggle pushed Undo out from under the pointer.
     pub fn sync_history(&self) {
         let (undo, redo) = match self.active_doc() {
-            Some(Doc::Pdf(pdf)) if pdf.mode() != pdfview::Mode::Select => pdf.history(),
+            Some(Doc::Pdf(pdf)) => pdf.history(),
             Some(Doc::Diagram(d)) => d.history(),
             _ => (false, false),
         };
@@ -1191,13 +1188,17 @@ impl App {
         }
     }
 
-    /// A link named a heading `tab` does not have: the caret goes to its top, and a toast says
-    /// why it is there rather than where the link pointed. Go to Definition and a click in the
-    /// preview both end here.
+    /// A link named a heading or a block `tab` does not have: the caret goes to its top, and a
+    /// toast says why it is there rather than where the link pointed. Go to Definition and a
+    /// click in the preview both end here.
     pub fn no_heading(&self, tab: &Tab, anchor: &str) {
         tab.goto_pos(accent_api::Pos::default());
         let name = doc::file_name(&tab.rel()).to_string();
-        self.toast(&format!("No heading {anchor} in {name}"));
+        let what = match anchor.starts_with('^') {
+            true => "block",
+            false => "heading",
+        };
+        self.toast(&format!("No {what} {anchor} in {name}"));
     }
 
     /// Show the page and selection an anchor names, if the tab just opened is that PDF.

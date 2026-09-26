@@ -130,7 +130,7 @@ impl PdfTab {
                         return;
                     };
                     match delete {
-                        true => tab.ask_delete_page(page),
+                        true => tab.edit_pages(PageEdit::Delete(page)),
                         false => tab.edit_pages(PageEdit::Insert(page + 1)),
                     }
                 }

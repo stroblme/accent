@@ -376,7 +376,15 @@ impl PdfSession {
     fn walk(&self, forwards: bool) -> Vec<PageArea> {
         let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let State { doc, ink, inks, .. } = &mut *s;
-        let changed = ink.walk(doc, forwards);
+        // Only the desktop edits pages, so the history here holds ink alone.
+        let changed: Vec<(usize, pdf::Rect)> = ink
+            .walk(doc, forwards)
+            .into_iter()
+            .filter_map(|walked| match walked {
+                pdf::Walked::Ink(page, area) => Some((page, area)),
+                pdf::Walked::Pages(_) => None,
+            })
+            .collect();
         for (page, _) in &changed {
             inks.remove(page);
         }

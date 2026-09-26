@@ -12,6 +12,7 @@ mod bench;
 mod build;
 mod comment;
 mod completion;
+mod conflict;
 mod connect;
 mod diagnostics;
 mod diagram;

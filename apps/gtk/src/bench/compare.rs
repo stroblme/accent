@@ -194,7 +194,11 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
 /// Every comparison that opens is then scrolled half a page down and read back once it has had
 /// time to lay itself again (`scrolled want=… got=…`, the two equal): a file with one side empty
 /// — untracked, newly staged, deleted, or added by the commit — went back to `got=0`, the empty
-/// column's view pulling the scroll they share into its own few pixels. `stale:` opens the file
+/// column's view pulling the scroll they share into its own few pixels. In the note's own tab the
+/// minimap is switched on first and its scroll printed either side (`map=…->…`), then again across
+/// a page of the editor's own scroll once the comparison is left (`left map=…->…`): it stood still
+/// while the editor was on the companion's scrollbar. Point it at a note whose changes keep most
+/// rows on screen, or the minimap has nothing to scroll. `stale:` opens the file
 /// first and prints whether its editor has its own scrollbar back once the comparison has been
 /// left (`own_scroll=true`), then scrolls it: the editor used to keep the companion's adjustment,
 /// and with it the freed companion's handler, and that scroll crashed the window — every time
@@ -312,10 +316,24 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                     bench_compare_line(&compare)
                 );
                 println!("bench compare_row tops {}", bench_tops(&compare));
+                // The minimap, switched on over the comparison, follows the scroll both columns
+                // share, and the editor's own once the comparison is left.
+                tab.set_minimap(true);
+                wait(300).await;
+                let map = bench_map(tab);
                 println!(
-                    "bench compare_row scrolled {}",
-                    bench_scroll(&compare).await
+                    "bench compare_row scrolled {} map={map:?}->{:?}",
+                    bench_scroll(&compare).await,
+                    bench_map(tab)
                 );
+                tab.leave_compare();
+                wait(300).await;
+                let map = bench_map(tab);
+                if let Some(adj) = tab.view.vadjustment() {
+                    adj.set_value(adj.value() + adj.page_size());
+                }
+                wait(500).await;
+                println!("bench compare_row left map={map:?}->{:?}", bench_map(tab));
             }
             // A Staged row and a commit's file open a tab of two read-only panes instead, which
             // has to open scrolled to the first change.
@@ -370,6 +388,15 @@ async fn bench_scroll(compare: &diff::Compare) -> String {
     adj.set_value(want);
     glib::timeout_future(Duration::from_millis(500)).await;
     format!("want={want} got={}", adj.value())
+}
+
+/// Where the minimap's own scroll is while it is on, which has to follow the editor's.
+fn bench_map(tab: &Tab) -> Option<f64> {
+    let map = tab.minimap().downcast_ref::<sourceview5::Map>()?;
+    map.is_visible()
+        .then(|| map.vadjustment())
+        .flatten()
+        .map(|adj| adj.value())
 }
 
 /// What the toast over the window reads, whatever it says: [`bench_said`] looks for a failure.

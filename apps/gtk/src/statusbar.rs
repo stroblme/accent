@@ -173,9 +173,9 @@ impl Bar {
         self.show_busy();
     }
 
-    /// A copy to or from the host has started (`running`) or ended: "Downloading a.pdf…". Its
-    /// size is not asked for, so it says that it runs rather than how far it has got. A close
-    /// waiting for git says so here too.
+    /// A copy to or from the host has started (`running`) or ended: "Downloading a.pdf…". A file's
+    /// size is not asked for, so one file says that it runs rather than how far it has got; a
+    /// batch counts its files ([`Bar::retell_transfer`]). A close waiting for git says so here too.
     pub fn set_transfer(&self, text: &str, running: bool) {
         {
             let mut transfers = self.transfers.borrow_mut();
@@ -189,6 +189,24 @@ impl Bar {
             }
         }
         self.show_busy();
+    }
+
+    /// A running copy's line says something new, in its place among the others: how many of its
+    /// files a batch has sent ("Copying Photos… 12/120 files").
+    pub fn retell_transfer(&self, from: &str, to: &str) {
+        if let Some(line) = self.transfers.borrow_mut().iter_mut().find(|t| *t == from) {
+            *line = to.to_string();
+        }
+        self.show_busy();
+    }
+
+    /// What the busy line says now, for the drills: nothing while it is hidden, which keeps the
+    /// last text it had.
+    pub fn progress_text(&self) -> String {
+        match self.progress.is_visible() {
+            true => self.progress.label().to_string(),
+            false => String::new(),
+        }
     }
 
     /// One line for all of them, and the vault's own work wins: opening a document or reading the

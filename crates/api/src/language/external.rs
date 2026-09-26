@@ -222,6 +222,7 @@ fn completions_of(
             .filter_map(|raw| completion_of(raw, text, pos, enc, resolvable))
             .collect(),
         incomplete,
+        pages: None,
     }
 }
 
@@ -481,6 +482,8 @@ pub(crate) struct External {
     root: PathBuf,
     /// The server is texlab, whose outline wants putting right ([`super::latex`]).
     texlab: bool,
+    /// The builds' tables of contents that number texlab's outline.
+    tocs: super::latex::Tocs,
 }
 
 /// Start a language server for `root` and hand back what answers with it.
@@ -529,6 +532,7 @@ pub(crate) async fn start(
         texlab: Path::new(&name)
             .file_stem()
             .is_some_and(|stem| stem == "texlab"),
+        tocs: Default::default(),
     }))
 }
 
@@ -912,9 +916,12 @@ impl Language for External {
             let text = self.text_of(&rel)?;
             let params = json!({"textDocument": self.doc_id(&rel)?});
             let answer = match self.ask("textDocument/documentSymbol", params).await? {
-                Some(DocumentSymbolResponse::Nested(rows)) if self.texlab => Some(
-                    DocumentSymbolResponse::Nested(super::latex::tidy(rows, &text, self.encoding)),
-                ),
+                Some(DocumentSymbolResponse::Nested(rows)) if self.texlab => {
+                    let (own, near) = self.tocs.of(&self.root, &self.root.join(&rel));
+                    let rows =
+                        super::latex::tidy(rows, &text, own.as_deref(), &near, self.encoding);
+                    Some(DocumentSymbolResponse::Nested(rows))
+                }
                 answer => answer,
             };
             Ok(symbols_of(answer, &text, self.encoding))

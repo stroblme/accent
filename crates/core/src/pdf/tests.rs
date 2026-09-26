@@ -119,7 +119,7 @@ fn open_pdf(bytes: &[u8]) -> Option<(tempfile::TempDir, PdfDoc)> {
     Some((dir, PdfDoc::open(&path).unwrap()))
 }
 
-fn open_tiny() -> Option<(tempfile::TempDir, PdfDoc)> {
+pub(super) fn open_tiny() -> Option<(tempfile::TempDir, PdfDoc)> {
     open_tiny_with(false)
 }
 
@@ -193,7 +193,7 @@ fn selection_link_has_the_obsidian_shape() {
 }
 
 /// Save the document into its own temporary directory and open the copy.
-fn reopen(dir: &tempfile::TempDir, doc: &PdfDoc) -> PdfDoc {
+pub(super) fn reopen(dir: &tempfile::TempDir, doc: &PdfDoc) -> PdfDoc {
     let out = dir.path().join("out.pdf");
     std::fs::write(&out, doc.save().unwrap()).unwrap();
     PdfDoc::open(&out).unwrap()
@@ -483,10 +483,18 @@ fn a_page_edit_says_where_every_page_went() {
     assert_eq!(after(down), [s(0), s(3), s(1), s(2), s(4)]);
     let up = PageEdit::Move { from: 3, to: 0 };
     assert_eq!(after(up), [s(1), s(2), s(3), s(0), s(4)]);
+    // The inverse puts every page still there back where it was.
+    for edit in [PageEdit::Insert(2), PageEdit::Delete(1), down, up] {
+        for page in 0..5 {
+            if let Some(at) = edit.map(page) {
+                assert_eq!(edit.inverse().map(at), Some(page), "{edit:?} {page}");
+            }
+        }
+    }
 }
 
 /// Each page's text, trimmed, in the document's order.
-fn page_texts(doc: &PdfDoc) -> Vec<String> {
+pub(super) fn page_texts(doc: &PdfDoc) -> Vec<String> {
     (0..doc.page_count())
         .map(|p| {
             let glyphs = doc.page_text(p).unwrap();
@@ -527,7 +535,7 @@ fn a_page_inserted_between_two_is_blank_and_sized_like_the_one_before() {
     let Some((dir, mut doc)) = open_tiny() else {
         return;
     };
-    doc.edit_pages(PageEdit::Insert(1)).unwrap();
+    doc.insert_page(1).unwrap();
     let doc = reopen(&dir, &doc);
     assert_eq!(page_texts(&doc), ["Hello accent", "", "Second page"]);
     assert_eq!(doc.page_size(1).unwrap(), doc.page_size(0).unwrap());
@@ -540,7 +548,7 @@ fn a_page_is_deleted_and_the_last_one_is_kept() {
     let Some((dir, mut doc)) = open_tiny() else {
         return;
     };
-    doc.edit_pages(PageEdit::Delete(0)).unwrap();
+    doc.delete_page(0).unwrap();
     let mut doc = reopen(&dir, &doc);
     assert_eq!(page_texts(&doc), ["Second page"]);
     assert!(doc.delete_page(0).is_err(), "a PDF keeps one page");

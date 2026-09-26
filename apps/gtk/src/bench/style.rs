@@ -188,6 +188,74 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// Delete at the end of a folded heading and Backspace at the start of the line after its fold,
+/// each of which joins a visible line to a hidden one, then ask for the iter at every pixel row of
+/// the note, as GtkSourceView asks at the top and bottom of the screen on every frame. A line left
+/// partly hidden aborts the process there (GTK's "Byte index … is off the end of the line"); kept
+/// to whole lines, each case prints what is hidden and what the joined line reads.
+pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
+    // Short lines after the fold: GTK's walk past the joined line lands in a line too short for
+    // the bytes it carried along, which is what aborts.
+    const FOLDED: &str = "# One\na hidden line\nhidden\nbody\n# Two\nplain line\n";
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        for case in ["delete", "backspace"] {
+            tab.set_text(FOLDED);
+            let fold = accent_api::Fold {
+                start_line: 0,
+                end_line: 3,
+            };
+            crate::fold::fold(tab.buffer.upcast_ref(), fold);
+            // The keys themselves, from where each one stands: GTK deletes the character next to
+            // the caret whether it is hidden or not.
+            match case {
+                "delete" => {
+                    tab.buffer.place_cursor(&line_end(&tab.buffer, 0));
+                    tab.view.emit_delete_from_cursor(gtk::DeleteType::Chars, 1);
+                }
+                _ => {
+                    let at = FOLDED.find("# Two").expect("bench needle") as i32;
+                    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(at));
+                    tab.view.emit_backspace();
+                }
+            }
+            // A frame, so the lines are measured as they are drawn.
+            glib::timeout_future(Duration::from_millis(200)).await;
+            let (y, height) = tab.view.line_yrange(&tab.buffer.end_iter());
+            for y in 0..y + height {
+                tab.view.iter_at_location(0, y);
+            }
+            let hidden: String = tab
+                .text()
+                .chars()
+                .enumerate()
+                .filter(|(i, _)| {
+                    !crate::fold::hiding(
+                        tab.buffer.upcast_ref(),
+                        &tab.buffer.iter_at_offset(*i as i32),
+                    )
+                    .is_empty()
+                })
+                .map(|(_, c)| c)
+                .collect();
+            let caret = crate::editor::caret(&tab.buffer).line();
+            let line = tab
+                .text()
+                .lines()
+                .nth(caret as usize)
+                .unwrap_or_default()
+                .to_string();
+            println!("bench seam case={case} hidden={hidden:?} line={line:?}");
+        }
+        bench_quit(&app);
+    });
+}
+
 /// Fill `tab` with `chars` of body, then type `# Heading` on a line of its own, one character at a
 /// time the way a keyboard delivers it.
 fn bench_style_typing(tab: &Rc<Tab>, chars: usize) {
@@ -470,10 +538,11 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
 /// Then `[[#Nowhere]]`, a heading the note does not have: `bad_anchor` prints the caret's line,
 /// which must be the top of the note, and the toast saying why; `preview_bad_anchor` the same for
 /// a click on `[[#Elsewhere]]` in the preview, which printed the caret's own line and no toast
-/// before the two shared a landing (`App::no_heading`). Last `late`: a link typed at the
-/// end of a note past 16 K characters and followed at once, before the pause its analysis waits
-/// for, which must offer New File as the first did — it printed `typed=None` while the server
-/// was sent the text only after that pause.
+/// before the two shared a landing (`App::no_heading`). Then `block` and `preview_block`, the
+/// same for a `^id` the note has and one it lacks. Last `late`: a link typed at the end of a note
+/// past 16 K characters and followed at once, before the pause its analysis waits for, which must
+/// offer New File as the first did — it printed `typed=None` while the server was sent the text
+/// only after that pause.
 async fn bench_dangling(app: Rc<App>, tab: Rc<Tab>) {
     app.go_to_definition();
     bench_new_file(&app, "dangling").await;
@@ -498,6 +567,32 @@ async fn bench_dangling(app: Rc<App>, tab: Rc<Tab>) {
     let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
     let said = super::compare::bench_toast(&app);
     println!("bench follow preview_bad_anchor caret_line={line} said={said:?}");
+
+    // A block id, followed from the editor and then as the preview hands it over: both put the
+    // caret on the paragraph the id ends, line 1, saying nothing; one the note lacks goes to
+    // the top and says it is a block. Each case with the toasts before it taken away.
+    let quiet = || async {
+        app.toasts.dismiss_all();
+        glib::timeout_future(Duration::from_millis(500)).await;
+    };
+    let link = 30;
+    quiet().await;
+    tab.set_text("# Intro\nfirst\nsecond ^blk\n\n[[#^blk]]\n");
+    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(link));
+    app.go_to_definition();
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    let said = super::compare::bench_toast(&app);
+    println!("bench follow block caret_line={line} said={said:?}");
+    for anchor in ["#^blk", "#^gone"] {
+        quiet().await;
+        tab.buffer.place_cursor(&tab.buffer.iter_at_offset(link));
+        app.open_target(anchor);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+        let said = super::compare::bench_toast(&app);
+        println!("bench follow preview_block {anchor} caret_line={line} said={said:?}");
+    }
 
     tab.set_text(&"word ".repeat(3400));
     // Past the server's refresh, so it holds the long text before the link is typed.

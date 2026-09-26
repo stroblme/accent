@@ -92,7 +92,8 @@ fn render_loop(
     // What the file looked like when this document was read. Every write from here updates it,
     // which is how the tab tells its own save from someone else's and does not reload over it.
     let mut etag = accent_core::fs::Etag::of(&path).ok();
-    // What has been drawn here, so Undo reaches this session's strokes and no others.
+    // What has been drawn here and which pages were edited, so Undo reaches this session's
+    // changes and no others.
     let mut ink = Ink::default();
     // What the tab was last told Undo and Redo have to walk, so it hears again only on a change.
     let mut told = (false, false);
@@ -305,28 +306,28 @@ fn render_loop(
                         }
                     }
                 }
-                Request::Pages(edit) => match doc.edit_pages(edit) {
+                Request::Pages(edit) => match ink.edit_pages(&mut doc, edit) {
                     Ok(()) => {
                         // Dirty like a stroke, so the tab's own timer writes it out: a page put
                         // in, taken out or moved is a change to the file and nothing else would
                         // save it.
                         ink.dirty = true;
-                        // What is kept of a page is filed under its number, which the edit may
-                        // have given to another page.
-                        ink.repage(|page| edit.map(page));
-                        glyphs = std::mem::take(&mut glyphs)
-                            .into_iter()
-                            .filter_map(|(page, found)| Some((edit.map(page)?, found)))
-                            .collect();
-                        let sizes = page_sizes(&doc);
-                        send(&view, Reply::Repaged { sizes, edit });
+                        repaged(&doc, &mut glyphs, &view, edit, false);
                     }
                     Err(e) => tracing::warn!("{edit:?}: {e:#}"),
                 },
                 request @ (Request::Undo | Request::Redo) => {
-                    for (page, area) in ink.walk(&mut doc, matches!(request, Request::Redo)) {
+                    let undo = matches!(request, Request::Undo);
+                    for walked in ink.walk(&mut doc, !undo) {
                         ink.dirty = true;
-                        send(&view, Reply::PageChanged(page, area));
+                        match walked {
+                            pdf::Walked::Ink(page, area) => {
+                                send(&view, Reply::PageChanged(page, area))
+                            }
+                            pdf::Walked::Pages(edit) => {
+                                repaged(&doc, &mut glyphs, &view, edit, undo)
+                            }
+                        }
                     }
                 }
                 Request::Save(ack) => {
@@ -446,6 +447,23 @@ fn render_loop(
             }
         }
     }
+}
+
+/// The pages were edited, or an edit taken back: the glyphs read of each page follow it to its
+/// new number, and the tab hears the page sizes and where every page went.
+fn repaged(
+    doc: &PdfDoc,
+    glyphs: &mut Glyphs,
+    view: &glib::SendWeakRef<PdfView>,
+    edit: pdf::PageEdit,
+    undo: bool,
+) {
+    *glyphs = std::mem::take(glyphs)
+        .into_iter()
+        .filter_map(|(page, found)| Some((edit.map(page)?, found)))
+        .collect();
+    let sizes = page_sizes(doc);
+    send(view, Reply::Repaged { sizes, edit, undo });
 }
 
 /// Put `newer` at the top of the queue, and `rest` — what the interrupted batch has left to do —

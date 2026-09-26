@@ -31,13 +31,13 @@ use compare::{
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use files::{
-    bench_clip, bench_close, bench_drop, bench_expand, bench_hidden, bench_menu, bench_menu_press,
-    bench_paths, bench_save_as, bench_templates, bench_watch,
+    bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
+    bench_menu, bench_menu_press, bench_paths, bench_save_as, bench_templates, bench_watch,
 };
 use find::bench_find;
 use git::{
-    bench_git, bench_git_close, bench_git_focus, bench_git_init, bench_git_press, bench_git_rebase,
-    bench_git_switch, bench_git_sync_over_fetch,
+    bench_git, bench_git_close, bench_git_focus, bench_git_init, bench_git_markers,
+    bench_git_press, bench_git_rebase, bench_git_switch, bench_git_sync_over_fetch,
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
 use keys::{
@@ -52,8 +52,8 @@ use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_
 use replace::bench_replace;
 use search::bench_search;
 use style::{
-    bench_drag_fold, bench_follow, bench_numbers, bench_occurrences, bench_reveal, bench_style,
-    bench_theme, bench_wrap,
+    bench_drag_fold, bench_follow, bench_numbers, bench_occurrences, bench_reveal, bench_seam,
+    bench_style, bench_theme, bench_wrap,
 };
 use tags::bench_tags;
 
@@ -75,7 +75,8 @@ use tags::bench_tags;
 /// and `=sync` asks for a Sync during the fetch on opening and prints whether it waited for it.
 /// `=focus` clicks rows and walks the keyboard over them through XTEST, and prints whether each
 /// row's buttons are out. `=switch` picks the second repository and clicks the history's first row
-/// at once, and prints what that asked for.
+/// at once, and prints what that asked for. `=markers:<rel>` resolves the conflict blocks a merge
+/// left in a note through their buttons and the palette (see `git::bench_git_markers`).
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
@@ -99,6 +100,8 @@ use tags::bench_tags;
 /// file in a narrow window and prints where every line's wrapped rows hang, then times the wrap
 /// indent on 10k lines of code in the last one. `=dragfold:<rel>` selects a folded section and
 /// prints where to press and let go for XTEST, then what a real drag of it left in the note.
+/// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
+/// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
@@ -155,9 +158,10 @@ use tags::bench_tags;
 /// the second refusal must write that same copy rather than a numbered one, and must leave the
 /// toast count where the first put it. `=pages:<rel_path>` moves the first page below the third as
 /// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
-/// page, and deletes the one being read through the window actions, answering the delete's dialog,
-/// and prints the page being read and each page's text on disk after every step; then the items of
-/// the page's own menu without and with a selection, and of the status bar's page count's menu.
+/// page, and deletes the first through the window actions, which asks nothing, then walks
+/// all four back with Undo and forward again with Redo, and prints the page being read and each
+/// page's text on disk after every step; then the items of the page's own menu without and with a
+/// selection, and of the status bar's page count's menu.
 /// Point it at a scratch copy of the generated vault's `Attachments/pages.pdf`.
 /// `=strip:<rel_path>` is the pointer's half, held for XTEST: it opens the document with the
 /// Outline pane up and prints the same every two seconds for 40 s, so a hover and a drag along the
@@ -183,9 +187,10 @@ use tags::bench_tags;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
 /// that offers to create it, with the name it arrives prefilled with. Then `[[#Nowhere]]`, which
 /// must put the caret on the note's first line and toast, as must a preview click on
-/// `[[#Elsewhere]]`, and a link typed at the end of a note past 16 K characters and followed at
-/// once, which must offer New File as well. Any text file will do for the underline: a `.txt` has
-/// no wikilinks, and its URL underlines all the same.
+/// `[[#Elsewhere]]`; `[[#^blk]]` followed both ways, which must land on the block it marks; and a
+/// link typed at the end of a note past 16 K characters and followed at once, which must offer New
+/// File as well. Any text file will do for the underline: a `.txt` has no wikilinks, and its URL
+/// underlines all the same.
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a
@@ -224,7 +229,10 @@ use tags::bench_tags;
 /// toasts said so — one is right — and what it said. Last it
 /// cuts two notes that link each other and a third, pastes them into the file's folder and
 /// answers the Update Links? question, printing every dialog that came — one is right — and
-/// the three notes' texts afterwards.
+/// the three notes' texts afterwards. Each paste is waited for, up to a minute, not timed.
+/// `ACCENT_BENCH_CLIP=outside:<dir>` pastes a folder and a file made on this machine into `<dir>`
+/// ("" is the root) as GNOME Files would, and prints what landed and the toast
+/// (`files::bench_clip_outside`).
 /// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
 /// note and prints the text and the files they left (`attach::bench_attach`).
 /// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
@@ -430,6 +438,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_drawing(&app);
         }
         if let Some(rel) = clip {
+            if let Some(dir) = rel.strip_prefix("outside:") {
+                return bench_clip_outside(&app, dir);
+            }
             return bench_clip(&app, &rel);
         }
         if let Some(rel) = save_as {
@@ -547,6 +558,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(phase) = arg.strip_prefix("close:") {
                 return bench_git_close(&app, phase);
             }
+            if let Some(rel) = arg.strip_prefix("markers:") {
+                return bench_git_markers(&app, rel);
+            }
             return match (arg.strip_prefix("press:"), arg.as_str()) {
                 (Some(path), _) => bench_git_press(&app, path),
                 (None, "init") => bench_git_init(&app),
@@ -560,6 +574,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = style {
             if let Some(rel) = rel.strip_prefix("dragfold:") {
                 return bench_drag_fold(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("seam:") {
+                return bench_seam(&app, rel);
             }
             return match rel.strip_prefix("wrap:") {
                 Some(rels) => bench_wrap(&app, rels),

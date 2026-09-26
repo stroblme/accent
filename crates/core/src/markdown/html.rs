@@ -1,6 +1,7 @@
 //! The preview pane's HTML: wikilinks become `accent://` anchors, math becomes MathML, and every
 //! block carries the source line it starts on.
 
+use super::blocks::block_ids;
 use super::links::{is_image, percent_encode, slugs, split_anchor};
 use super::options;
 use pulldown_cmark::{Event, LinkType, Parser, Tag as Cm, TagEnd};
@@ -103,8 +104,10 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
 ///
 /// Each block opens with an empty `<span data-line="N">`, so the preview can scroll to the line
 /// the editor's cursor is on, and each heading gets its [`slugs`] anchor as its `id`, so an
-/// in-note `[text](#slug)` scrolls there.
+/// in-note `[text](#slug)` scrolls there. A block with a [`block_ids`] id carries it on that
+/// span, as `^id`, which is how `[text](#^id)` names it, and the `^id` itself is not shown.
 pub fn to_html(text: &str) -> String {
+    let blocks = block_ids(text);
     let mut evts: Vec<Event> = Vec::new();
     let mut link_wiki: Vec<bool> = Vec::new();
     let mut image_wiki: Vec<bool> = Vec::new();
@@ -146,8 +149,20 @@ pub fn to_html(text: &str) -> String {
                 .filter(|b| *b == b'\n')
                 .count();
             counted = r.start;
-            Event::Html(format!("<span data-line=\"{line}\"></span>").into())
+            let id = blocks
+                .iter()
+                .find(|b| b.start == r.start)
+                .map_or(String::new(), |b| format!(" id=\"^{}\"", b.id));
+            Event::Html(format!("<span data-line=\"{line}\"{id}></span>").into())
         });
+        // The text a block's id ends goes on without it.
+        let ev = match (ev, blocks.iter().find(|b| r.contains(&b.marker.start))) {
+            (Event::Text(t), Some(b)) => {
+                let shown = t.strip_suffix(&text[b.marker.clone()]).unwrap_or(&t);
+                Event::Text(shown.trim_end().to_string().into())
+            }
+            (ev, _) => ev,
+        };
         match ev {
             Event::Start(Cm::Link {
                 link_type: LinkType::WikiLink { .. },
@@ -368,6 +383,22 @@ mod tests {
         let headings = crate::markdown::analyze(src).headings;
         assert_eq!(ids, slugs(headings.iter().map(|h| h.text.as_str())), "{h}");
         assert_eq!(ids, ["notes", "notes-1", "c-and-logopng"]);
+    }
+
+    /// A block with an id carries it on its line marker, so an in-note `[text](#^id)` scrolls to
+    /// it, and the `^id` itself is not shown, as Obsidian's reading view shows none.
+    #[test]
+    fn html_gives_a_block_its_id_and_hides_it() {
+        let h = to_html("Some prose. ^para\n\n- a\n- b\n\n^list\n");
+        assert!(
+            h.contains("<p><span data-line=\"1\" id=\"^para\"></span>Some prose.</p>"),
+            "{h}"
+        );
+        assert!(
+            h.contains("<li><span data-line=\"3\" id=\"^list\"></span>a</li>"),
+            "{h}"
+        );
+        assert!(!h.contains("^list<") && !h.contains(" ^para"), "{h}");
     }
 
     /// The preview markers are tested on their own; strip them so the older assertions stay

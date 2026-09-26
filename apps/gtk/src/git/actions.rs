@@ -75,6 +75,7 @@ impl Panel {
             if sync {
                 panel.sync_slot.set_visible_child_name("button");
                 panel.sync_busy.set(false);
+                panel.pushing.store(false, Ordering::Relaxed);
                 (panel.hooks.syncing)(false);
             }
             // A close waiting for git: the last command to go through closes the window, and one
@@ -116,14 +117,14 @@ impl Panel {
 
     /// Whether closing the window now would cut git off while it rewrites the files: any command
     /// the pane has running, except a sync that has reached its push, which like a fetch is
-    /// stopped instead ([`Panel::stop`]). Which half a sync is in is the host's to know on a
-    /// remote vault, so there a sync counts all the way through (DESIGN.md, States).
+    /// stopped instead ([`Panel::stop`]) (DESIGN.md, States).
     pub fn busy(&self) -> bool {
-        let state = self.state.borrow();
-        let pushing = self.sync_busy.get()
-            && !self.hooks.vault.is_remote()
-            && state.repos.iter().any(|r| git::running(&r.root, "push"));
-        self.jobs.get() > usize::from(pushing)
+        self.jobs.get() > usize::from(self.pushing())
+    }
+
+    /// Whether the sync in flight has pulled and is pushing.
+    pub fn pushing(&self) -> bool {
+        self.sync_busy.get() && self.pushing.load(Ordering::Relaxed)
     }
 
     /// Call `then` once the commands under way have ended, with whether they all went through,
@@ -229,16 +230,19 @@ impl Panel {
             .get(index)
             .map(|s| (s.branch.behind, s.branch.ahead))
             .unwrap_or_default();
-        let fetch_lock = self.fetch_lock.clone();
+        let (fetch_lock, pushing) = (self.fetch_lock.clone(), self.pushing.clone());
         self.command("sync".to_string(), true, Fail::Say, move |vault, repo| {
             // Behind a background fetch still running, which its pull would race for the refs.
             let _fetched = fetch_lock.lock();
-            vault.git_sync(repo).map(|transcript| {
-                tracing::debug!("git sync: {transcript}");
-                match moved {
-                    (0, 0) => "Synced".to_string(),
-                    (pulled, pushed) => format!("Synced · {pulled} pulled, {pushed} pushed"),
-                }
+            // Two calls, so the window can tell the halves apart. A close in the instant between
+            // the flag and git starting its push lets that push finish, as a host's always does.
+            let pulled = vault.git_pull(repo)?;
+            pushing.store(true, Ordering::Relaxed);
+            let pushed = vault.git_push(repo)?;
+            tracing::debug!("git sync: {pulled}\n{pushed}");
+            Ok(match moved {
+                (0, 0) => "Synced".to_string(),
+                (pulled, pushed) => format!("Synced · {pulled} pulled, {pushed} pushed"),
             })
         });
     }

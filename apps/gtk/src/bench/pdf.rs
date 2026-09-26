@@ -53,12 +53,12 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
 
 /// Page edits end to end: the first page moved below the third by the call a drop in the
 /// thumbnail strip makes, a page added before the one being read, one added after the last page
-/// and the one being read deleted through the window actions — the delete's dialog answered by
-/// emitting its own `response`, as [`bench_drawing`] answers New Drawing's — each followed to the
-/// file. Then the items of the two menus that offer them: the page's own, without a selection and
-/// with one, and the status bar's page count, opened as a click does. What a headless run cannot
-/// reach is the pointer's half: the drag itself, the buttons on hover, the drop bar and the scroll
-/// at the strip's edge.
+/// and the first page deleted through the window actions — at once, no dialog being asked —
+/// each followed to the file. Then Undo walks all four back through the window's action, newest
+/// first, and Redo makes them again, the file read after each. Then the items of the two menus
+/// that offer them: the page's own, without a selection and with one, and the status bar's page
+/// count, opened as a click does. What a headless run cannot reach is the pointer's half: the
+/// drag itself, the buttons on hover, the drop bar and the scroll at the strip's edge.
 pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -78,31 +78,35 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         written(&app).await;
         println!("bench pages after {}", pages_read(&pdf));
+        // A page with text on it, so Undo is seen putting the text back.
+        pdf.goto_page(0);
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-delete-page", None);
-        for _ in 0..40 {
-            if app.window.visible_dialog().is_some() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(50)).await;
-        }
-        let Some(dialog) = app
-            .window
-            .visible_dialog()
-            .and_then(|d| d.downcast::<adw::AlertDialog>().ok())
-        else {
-            println!("bench pages no_dialog");
-            return bench_quit(&app);
-        };
-        println!(
-            "bench pages asked heading={:?} body={:?}",
-            dialog.heading(),
-            dialog.body()
-        );
-        // The id every `dialogs::confirm` question answers with, named rather than spelled: a
-        // drill that guesses it reports the dialog and then silently answers nothing.
-        dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
         written(&app).await;
-        println!("bench pages deleted {}", pages_read(&pdf));
+        println!(
+            "bench pages deleted dialog={} {}",
+            app.window.visible_dialog().is_some(),
+            pages_read(&pdf)
+        );
+        let walks = [
+            (
+                "undo",
+                "win.pdf-undo",
+                ["deleted", "after", "before", "moved"],
+            ),
+            (
+                "redo",
+                "win.pdf-redo",
+                ["moved", "before", "after", "deleted"],
+            ),
+        ];
+        for (walk, action, steps) in walks {
+            for step in steps {
+                let _ = WidgetExt::activate_action(&app.window, action, None);
+                written(&app).await;
+                println!("bench pages {walk}_{step} {}", pages_read(&pdf));
+            }
+        }
+        println!("bench pages history={:?}", pdf.history());
         let items = |menu: gtk::PopoverMenu| {
             let items = menu.menu_model().map(|m| fileops::labels(&m));
             menu.popdown();

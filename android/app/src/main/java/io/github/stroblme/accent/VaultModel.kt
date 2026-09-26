@@ -7,6 +7,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.stroblme.accent.ffi.AccentException
+import io.github.stroblme.accent.ffi.Backlink
 import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.Event
 import io.github.stroblme.accent.ffi.FileRow
@@ -15,6 +16,7 @@ import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.SearchHit
+import io.github.stroblme.accent.ffi.TagCount
 import io.github.stroblme.accent.ffi.Vault
 import io.github.stroblme.accent.ffi.pdfAnchor
 import io.github.stroblme.accent.ui.imageKind
@@ -108,6 +110,18 @@ data class OpenPdf(
  */
 data class OpenImage(val rel: String, val path: String)
 
+/** The document a note was reached from, which Back from the note returns to. */
+sealed interface Back {
+    /** A PDF, by a tap on a highlight the note's link paints, kept where the reader was in it. */
+    data class Pdf(val pdf: OpenPdf) : Back
+
+    /**
+     * Any document, by one of Browse's backlinks, opened again: at its top, since the place a
+     * reader was in a page or a PDF is the screen's rather than the model's.
+     */
+    data class File(val rel: String) : Back
+}
+
 /**
  * Where a PDF opens: [top] points down page [page], at [zoom] and pushed [panX] pixels sideways —
  * the place a reader left it, which Back from a note returns them to. Or the page a link into it
@@ -162,11 +176,8 @@ data class VaultState(
     val open: Open? = null,
     val pdf: OpenPdf? = null,
     val image: OpenImage? = null,
-    /**
-     * The PDF the open note was reached from, by a tap on a highlight its link paints, and where
-     * the reader was in it: what closing the note goes back to. Anything else opened lets it go.
-     */
-    val back: OpenPdf? = null,
+    /** What closing the open note goes back to. Anything else opened lets it go. */
+    val back: Back? = null,
     val message: String? = null,
 ) {
     /**
@@ -213,6 +224,12 @@ class Corpus(
      */
     data class Row(val name: String, val rel: String, val unwritten: Boolean = false)
 }
+
+/**
+ * The notes behind a document's [links], once each, in the index's path order: a note that links
+ * to it three times is one backlink, as it is on the desktop.
+ */
+fun linkingNotes(links: List<Backlink>): List<String> = links.map { it.srcRelPath }.distinct()
 
 /**
  * The vault, its events, and the one note in front of the reader.
@@ -476,10 +493,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * source and the screen holds the page that source rendered to, so the only thing that
      * survives the crossing is the words. A PDF drops it.
      *
-     * [at] is where a PDF opens, and [back] the PDF a note is opened from, for [close] to return
-     * to; see [openFromPdf].
+     * [at] is where a PDF opens, and [back] the document a note is opened from, for [close] to
+     * return to; see [openFromPdf].
      */
-    fun openFile(rel: String, find: String? = null, at: PdfPlace? = null, back: OpenPdf? = null) {
+    fun openFile(rel: String, find: String? = null, at: PdfPlace? = null, back: Back? = null) {
         val v = vault ?: return
         // What is in the buffer belongs to the note it was typed into, and the buffer is about to
         // hold another note's text: a write left pending across the swap would put these words in
@@ -526,11 +543,16 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Put the note down, writing anything the pause was still holding — and go back to the PDF it
-     * was reached from, where the reader left it, if a highlight there is what opened it.
+     * Put the note down, writing anything the pause was still holding — and go back to the
+     * document it was reached from ([Back]), if a highlight or a backlink is what opened it.
      */
     fun close() = leave {
-        _state.update { it.copy(open = null, pdf = it.back, image = null, back = null) }
+        when (val to = _state.value.back) {
+            is Back.File -> openFile(to.rel)
+            else -> _state.update {
+                it.copy(open = null, pdf = (to as? Back.Pdf)?.pdf, image = null, back = null)
+            }
+        }
     }
 
     /**
@@ -540,7 +562,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun openFromPdf(link: PdfLink, place: PdfPlace) {
         val from = _state.value.pdf ?: return
-        openFile(link.srcRelPath, find = link.alias, back = from.copy(at = place, finding = false))
+        val back = Back.Pdf(from.copy(at = place, finding = false))
+        openFile(link.srcRelPath, find = link.alias, back = back)
     }
 
     /**
@@ -552,6 +575,21 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun image(rel: String): OpenImage? {
         val v = vault ?: return null
         return runCatching { v.asset(rel)?.let { OpenImage(it, v.pathOf(it)) } }.getOrNull()
+    }
+
+    /** The notes that link to the document at [rel], once each ([linkingNotes]). */
+    suspend fun linkedFrom(rel: String): List<String> = withContext(Dispatchers.IO) {
+        linkingNotes(runCatching { vault?.backlinks(rel) }.getOrNull().orEmpty())
+    }
+
+    /** Every tag in the vault with how many notes carry it, most used first. */
+    suspend fun tags(): List<TagCount> = withContext(Dispatchers.IO) {
+        runCatching { vault?.tags() }.getOrNull().orEmpty()
+    }
+
+    /** The notes carrying [tag], by path. */
+    suspend fun filesWithTag(tag: String): List<String> = withContext(Dispatchers.IO) {
+        runCatching { vault?.filesWithTag(tag) }.getOrNull().orEmpty().map { it.relPath }
     }
 
     /** The note links into this PDF, which paint as its highlights. */

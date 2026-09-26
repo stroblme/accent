@@ -451,7 +451,7 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
         };
         fileops::clipboard::copy(&ops, &rel, false);
         fileops::clipboard::paste(&ops, &dir);
-        glib::timeout_future(Duration::from_secs(2)).await;
+        until(|| vault.exists(&copied)).await;
         println!(
             "bench clip_copied {copied} there={} source_kept={}",
             u8::from(vault.exists(&copied)),
@@ -474,7 +474,7 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
 
         let moved = accent_core::path::basename(&copied).to_string();
         fileops::clipboard::paste(&ops, "");
-        glib::timeout_future(Duration::from_secs(2)).await;
+        until(|| vault.exists(&moved) && !vault.exists(&copied)).await;
         println!(
             "bench clip_moved to={moved} there={} source_gone={}",
             u8::from(vault.exists(&moved)),
@@ -502,7 +502,15 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
             let both = [(rel.clone(), false), (second, false)];
             fileops::clipboard::copy_all(&ops, &both);
             fileops::clipboard::paste(&ops, "");
-            glib::timeout_future(Duration::from_secs(2)).await;
+            let names: Vec<&str> = both
+                .iter()
+                .map(|(rel, _)| accent_core::path::basename(rel))
+                .collect();
+            until(|| names.iter().all(|name| vault.exists(name))).await;
+            // The one toast comes once both have landed, a moment after the second does; a
+            // second toast, which would be wrong, is given half a second to show itself.
+            until(|| app.toasted.get() > said).await;
+            glib::timeout_future(Duration::from_millis(500)).await;
             let landed: Vec<(String, bool)> = both
                 .iter()
                 .map(|(rel, _)| accent_core::path::basename(rel).to_string())
@@ -522,6 +530,116 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
         // The drill writes into the vault, so it takes its own leavings back out again.
         let _ = vault.delete(&moved);
         let _ = vault.delete(&copied);
+        bench_quit(&app);
+    });
+}
+
+/// Wait until `done`, or a minute: long enough for a paste over a slow link, where every name a
+/// copy tries is a `stat` on the host, and the drill then prints what did not happen.
+async fn until(done: impl Fn() -> bool) {
+    let t = Instant::now();
+    while !done() && t.elapsed() < Duration::from_secs(60) {
+        glib::timeout_future(Duration::from_millis(200)).await;
+    }
+}
+
+/// A folder and a file from this machine pasted into `dir` of the vault ("" is the root), put on
+/// the clipboard in GNOME Files' own format: the folder is walked and made again file by file,
+/// its link out of itself left out, and one toast says so. Both are made under `$TMPDIR`, which a
+/// drill's launch makes its own. Prints every line the status bar gave the paste — a count of
+/// the 33 files, where the paste lasts long enough for one tick — then what landed and the
+/// toast, and takes both out again.
+pub(super) fn bench_clip_outside(app: &Rc<App>, dir: &str) {
+    let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
+        return bench_quit(app);
+    };
+    let src = std::env::temp_dir().join(format!("clip-outside-{}", std::process::id()));
+    let (folder, lone) = (src.join("Carried"), src.join("lone.md"));
+    for (rel, text) in [("Carried/a.md", "# a\n"), ("Carried/sub/b.md", "# b\n")] {
+        let _ = std::fs::create_dir_all(src.join(rel).parent().unwrap_or(&src));
+        let _ = std::fs::write(src.join(rel), text);
+    }
+    let _ = std::fs::create_dir_all(folder.join("empty"));
+    let _ = std::fs::create_dir_all(folder.join("many"));
+    for n in 0..30 {
+        let _ = std::fs::write(folder.join(format!("many/{n:02}.md")), "many\n");
+    }
+    let _ = std::fs::write(&lone, "lone\n");
+    let _ = std::fs::write(src.join("outside.md"), "out\n");
+    let _ = std::os::unix::fs::symlink(src.join("outside.md"), folder.join("out.md"));
+    let at = |name: &str| match dir {
+        "" => name.to_string(),
+        dir => format!("{dir}/{name}"),
+    };
+    let (carried, one, dir) = (at("Carried"), at("lone.md"), dir.to_string());
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        // Connected as well as indexed: a remote vault refuses a call while it is still
+        // connecting, and the paste's folders are made by one.
+        for _ in 0..600 {
+            if app.reconciled.get() && vault.list_dir("").is_ok() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(200)).await;
+        }
+        // What GNOME Files writes for a Copy, spelled out rather than taken from our own Copy, so
+        // what is checked is the reading of Files' format.
+        let uris: Vec<String> = [&folder, &lone]
+            .iter()
+            .map(|p| gio::File::for_path(p).uri().to_string())
+            .collect();
+        let text = format!("copy\n{}", uris.join("\n"));
+        let provider = gdk::ContentProvider::for_bytes(
+            "x-special/gnome-copied-files",
+            &glib::Bytes::from(text.as_bytes()),
+        );
+        let _ = app.window.clipboard().set_content(Some(&provider));
+        let t = Instant::now();
+        fileops::clipboard::paste(&ops, &dir);
+        let deepest = format!("{carried}/sub/b.md");
+        // The paste's line from start to end, read off the bar: over once it has been and gone,
+        // or once the files are there without it having been seen at all.
+        let mut lines: Vec<(u128, String)> = Vec::new();
+        for n in 0.. {
+            let line = app.statusbar.progress_text();
+            match line.starts_with("Copying") {
+                true if lines.last().map(|(_, l)| l) != Some(&line) => {
+                    lines.push((t.elapsed().as_millis(), line))
+                }
+                true => {}
+                false if !lines.is_empty() => break,
+                false if n % 20 == 19 && vault.exists(&deepest) && vault.exists(&one) => break,
+                false => {}
+            }
+            if t.elapsed() > Duration::from_secs(120) {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+        println!("bench clip_outside_lines {lines:?}");
+        until(|| vault.exists(&deepest) && vault.exists(&one)).await;
+        let landed_ms = ms_since(t);
+        let mut said = None;
+        for _ in 0..300 {
+            said = compare::bench_toast(&app).filter(|s| s.starts_with("Copied"));
+            if said.is_some() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        let there: Vec<(&str, bool)> = ["a.md", "sub/b.md", "many/29.md", "empty", "out.md"]
+            .into_iter()
+            .map(|rel| (rel, vault.exists(&format!("{carried}/{rel}"))))
+            .collect();
+        println!(
+            "bench clip_outside {there:?} lone={} after_ms={landed_ms:.0} said={said:?} \
+             sources_kept={}",
+            vault.exists(&one),
+            folder.exists() && lone.exists()
+        );
+        let _ = vault.delete(&carried);
+        let _ = vault.delete(&one);
+        let _ = std::fs::remove_dir_all(&src);
         bench_quit(&app);
     });
 }

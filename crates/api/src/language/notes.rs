@@ -21,8 +21,8 @@ use accent_core::markdown::{self, LinkKind};
 use accent_core::path::{self, FileType, basename, parent_dir, stem};
 
 use super::{
-    Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range,
-    Severity, Signature, Support, Symbol, byte_of, pos_of, range_of,
+    Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, PdfPages, Pos,
+    Range, Severity, Signature, Support, Symbol, byte_of, pos_of, range_of,
 };
 use crate::{Backlink, Event, Local, locked};
 
@@ -103,6 +103,29 @@ pub(crate) fn heading_names(headings: &[markdown::Heading]) -> Vec<&str> {
     out
 }
 
+/// A link to each block id in `text`, `lead` and `close` being what goes around its `^id`:
+/// labelled by the id, with the first line of the block it marks beside it.
+pub(crate) fn block_links(text: &str, lead: &str, close: &str, replace: Range) -> Vec<Completion> {
+    markdown::block_ids(text)
+        .into_iter()
+        .map(|b| {
+            let link = format!("{lead}^{}", b.id);
+            let line = text[b.start..b.marker.start].lines().next().unwrap_or("");
+            Completion {
+                label: format!("^{}", b.id),
+                detail: Some(line.trim().to_string()).filter(|l| !l.is_empty()),
+                insert: format!("{link}{close}"),
+                filter: Some(link),
+                replace,
+                ..empty_item()
+            }
+        })
+        .collect()
+}
+
+/// A PDF's bookmarks as `(title, page index)`, flattened depth-first.
+pub(crate) type Outline = Vec<(String, Option<usize>)>;
+
 /// `[[paper.pdf#page=N]]` for each of a PDF's bookmarks, labelled by the bookmark's title.
 ///
 /// `outline` is the document's, flattened depth-first, as `(title, page index)`. A bookmark with
@@ -132,6 +155,23 @@ pub(crate) fn page_links(
             })
         })
         .collect()
+}
+
+impl PdfPages {
+    /// The bookmarks as [`page_links`] rows where `outline` could be read, and the question
+    /// itself, unanswered, where it could not: [`pdf_outline`] reads `None` with no PDF reader.
+    pub(crate) fn answer(self, outline: Option<Outline>) -> Completions {
+        match outline {
+            Some(outline) => Completions {
+                items: page_links(&outline, &self.note, self.replace),
+                ..Completions::default()
+            },
+            None => Completions {
+                pages: Some(self),
+                ..Completions::default()
+            },
+        }
+    }
 }
 
 /// What the index knows a link in the note `rel` by. A markdown link names its file from the
@@ -500,8 +540,8 @@ impl Notes {
                     .take_while(|c| *c == ']')
                     .count();
                 replace.end.character += eaten as u32;
-                if let Some((note, _)) = prefix.split_once('#') {
-                    return self.heading_links(rel, note, replace);
+                if let Some((note, anchor)) = prefix.split_once('#') {
+                    return self.heading_links(rel, note, anchor.starts_with('^'), replace);
                 }
 
                 let index = locked(&self.index);
@@ -574,6 +614,7 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: more,
+                    pages: None,
                 })
             }
             Trigger::Anchor => {
@@ -591,7 +632,14 @@ impl Notes {
                         }
                     }
                 };
-                let headings = markdown::analyze(other.as_deref().unwrap_or(&text)).headings;
+                let text = other.as_deref().unwrap_or(&text);
+                if prefix.starts_with('^') {
+                    return Ok(Completions {
+                        items: block_links(text, &format!("{dest}#"), "", replace),
+                        ..Completions::default()
+                    });
+                }
+                let headings = markdown::analyze(text).headings;
                 let slugs = markdown::slugs(headings.iter().map(|h| h.text.as_str()));
                 let items = headings
                     .iter()
@@ -613,6 +661,7 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: false,
+                    pages: None,
                 })
             }
             Trigger::Path => {
@@ -643,6 +692,7 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: more,
+                    pages: None,
                 })
             }
             Trigger::Tag => {
@@ -660,16 +710,24 @@ impl Notes {
                         })
                         .collect(),
                     incomplete: more,
+                    pages: None,
                 })
             }
         }
     }
 
     /// `[[note#Heading]]` for each heading of the note `note` names, or of this one when it names
-    /// none, and `[[paper.pdf#page=N]]` for each bookmark when what it names is a PDF. The link
-    /// keeps the target as it was typed; one the index cannot find offers nothing, and so does a
-    /// file that is neither.
-    fn heading_links(&self, rel: &str, note: &str, replace: Range) -> Result<Completions> {
+    /// none — `[[note#^id]]` for each block id instead once a `^` is typed — and
+    /// `[[paper.pdf#page=N]]` for each bookmark when what it names is a PDF. The link keeps the
+    /// target as it was typed; one the index cannot find offers nothing, and so does a file that is
+    /// neither.
+    fn heading_links(
+        &self,
+        rel: &str,
+        note: &str,
+        blocks: bool,
+        replace: Range,
+    ) -> Result<Completions> {
         let target = match note {
             "" => rel.to_string(),
             _ => match locked(&self.index).resolve_target(note)? {
@@ -679,15 +737,23 @@ impl Notes {
         };
         if target.ends_with(".pdf") {
             let outline = pdf_outline(&Local::join(&self.root, &target)?)?;
-            return Ok(Completions {
-                items: page_links(&outline, note, replace),
-                incomplete: false,
-            });
+            let pages = PdfPages {
+                rel: target,
+                note: note.to_string(),
+                replace,
+            };
+            return Ok(pages.answer(outline));
         }
         if !target.ends_with(".md") {
             return Ok(Completions::default());
         }
         let text = self.text_of(&target)?;
+        if blocks {
+            return Ok(Completions {
+                items: block_links(&text, &format!("[[{note}#"), "]]", replace),
+                ..Completions::default()
+            });
+        }
         let items = heading_names(&markdown::analyze(&text).headings)
             .into_iter()
             .map(|name| {
@@ -704,6 +770,7 @@ impl Notes {
         Ok(Completions {
             items,
             incomplete: false,
+            pages: None,
         })
     }
 
@@ -786,13 +853,13 @@ impl Notes {
         let range = link
             .anchor
             .as_ref()
-            .and_then(|anchor| self.heading(&target, anchor));
+            .and_then(|anchor| self.anchored(&target, anchor));
         Ok(vec![Location {
             path: target,
             range: range.unwrap_or_default(),
             // What the range cannot say comes back beside it: a PDF's page and selection, so the
-            // link reaches them rather than the first page, or a heading the note does not have,
-            // so the reader is told why they are at its top.
+            // link reaches them rather than the first page, or a heading or a block the note does
+            // not have, so the reader is told why they are at its top.
             anchor: link.anchor.clone().filter(|_| range.is_none()),
             missing: false,
         }])
@@ -809,11 +876,10 @@ impl Notes {
             .then_some(path)
     }
 
-    /// Where the heading an anchor names sits in `rel`, if it is there at all.
-    fn heading(&self, rel: &str, anchor: &str) -> Option<Range> {
+    /// Where the heading or the block an anchor names sits in `rel`, if it is there at all.
+    fn anchored(&self, rel: &str, anchor: &str) -> Option<Range> {
         let text = self.text_of(rel).ok()?;
-        let headings = markdown::analyze(&text).headings;
-        markdown::heading_for(&headings, anchor).map(|h| range_of(&text, &h.range))
+        markdown::anchor_range(&text, anchor).map(|r| range_of(&text, &r))
     }
 
     fn symbols(&self, rel: &str) -> Result<Vec<Symbol>> {
@@ -918,23 +984,26 @@ fn or_empty<T: Default>(what: &str, r: Result<T>) -> T {
     })
 }
 
-/// A PDF's bookmarks as `(title, page index)`, flattened depth-first.
+/// The [`Outline`] of the PDF at `path`, or `None` where there is no PDF reader to ask.
 ///
 /// One open of one file, on the thread the keystroke came in on and behind pdfium's global lock,
 /// so it happens only once the prefix already resolves to a `.pdf`.
 #[cfg(feature = "pdf")]
-fn pdf_outline(path: &Path) -> Result<Vec<(String, Option<usize>)>> {
-    Ok(accent_core::pdf::PdfDoc::open(path)?
-        .outline()?
-        .into_iter()
-        .map(|entry| (entry.title, entry.page))
-        .collect())
+pub(crate) fn pdf_outline(path: &Path) -> Result<Option<Outline>> {
+    Ok(Some(
+        accent_core::pdf::PdfDoc::open(path)?
+            .outline()?
+            .into_iter()
+            .map(|entry| (entry.title, entry.page))
+            .collect(),
+    ))
 }
 
-/// Without the `pdf` feature there is no pdfium binding to ask, so a PDF offers no pages.
+/// Without the `pdf` feature there is no pdfium binding to ask, which is `accent-cli serve` on a
+/// host: the question goes back to the window ([`PdfPages`]).
 #[cfg(not(feature = "pdf"))]
-fn pdf_outline(_path: &Path) -> Result<Vec<(String, Option<usize>)>> {
-    Ok(Vec::new())
+pub(crate) fn pdf_outline(_path: &Path) -> Result<Option<Outline>> {
+    Ok(None)
 }
 
 /// The fields a note's completion never fills, so the interesting ones stay together above.
@@ -1079,6 +1148,27 @@ mod tests {
         assert_eq!(markdown::pdf_anchor("page=5"), Some((4, None)));
     }
 
+    /// A side with no PDF reader — a host's `serve` — cannot list the bookmarks, so it answers with
+    /// the PDF and the link for whoever holds a copy of the file to list them from.
+    #[test]
+    fn a_pdf_nobody_here_can_read_is_left_to_the_side_with_a_copy() {
+        let pages = PdfPages {
+            rel: "Papers/paper.pdf".to_string(),
+            note: "paper.pdf".to_string(),
+            replace: Range::default(),
+        };
+        let unread = pages.clone().answer(None);
+        assert!(unread.items.is_empty());
+        assert_eq!(unread.pages.as_ref(), Some(&pages));
+
+        let read = pages.answer(Some(vec![("Intro".to_string(), Some(0))]));
+        assert_eq!(
+            read.pages, None,
+            "listed, so nothing is left for anyone else"
+        );
+        assert_eq!(read.items[0].insert, "[[paper.pdf#page=1]]");
+    }
+
     /// A second `[[` to a note that is only linked to so far offers it, spelled the way the first
     /// link will reach it once it is written, behind the note that is there.
     #[test]
@@ -1115,6 +1205,55 @@ mod tests {
                 ("[[Nowhere/Other]]", Some("Nowhere/Other.md, not created"))
             ]
         );
+    }
+
+    /// `#^id` goes to the block the id marks, from a wikilink or a markdown link, and one the
+    /// note does not have comes back as the anchor it missed; `#^` offers the note's ids.
+    #[test]
+    fn a_block_anchor_is_followed_and_completed() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(
+            vault.path().join("Other.md"),
+            "# Other\nFirst.\nSecond. ^blk\n",
+        )
+        .unwrap();
+        let a = "[[Other#^blk]] [x](Other.md#^BLK) [[Other#^gone]]\n[[Other#^\n[y](Other.md#^\n";
+        std::fs::write(vault.path().join("a.md"), a).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+        )
+        .unwrap();
+        let at = |line, character| Pos { line, character };
+        let landed = |pos| {
+            let loc = notes.definition("a.md", pos).unwrap().remove(0);
+            (loc.path, loc.range.start, loc.range.end, loc.anchor)
+        };
+        let block = ("Other.md".into(), at(1, 0), at(2, 12), None);
+        assert_eq!(landed(at(0, 3)), block);
+        assert_eq!(landed(at(0, 17)), block, "a markdown link, in any case");
+        assert_eq!(
+            landed(at(0, 38)),
+            ("Other.md".into(), at(0, 0), at(0, 0), Some("^gone".into()))
+        );
+
+        let rows = |pos| -> Vec<(String, Option<String>, String)> {
+            let items = notes.completion("a.md", pos).unwrap().items;
+            items
+                .into_iter()
+                .map(|i| (i.label, i.detail, i.insert))
+                .collect()
+        };
+        let row = |insert: &str| ("^blk".into(), Some("First.".into()), insert.into());
+        assert_eq!(rows(at(1, 9)), [row("[[Other#^blk]]")]);
+        assert_eq!(rows(at(2, 14)), [row("Other.md#^blk")]);
     }
 
     /// The paths a completion ranks are kept between keystrokes, and read again once the index

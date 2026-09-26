@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use accent_api::Vault;
@@ -196,6 +197,9 @@ pub struct Panel {
     /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
     /// filled: this is the transfer [`Panel::sync_slot`] spins for.
     sync_busy: Cell<bool>,
+    /// The sync in flight has pulled and is pushing: raised by the worker between the two calls,
+    /// so a closing window knows which half it has caught ([`Panel::busy`]), on a host as here.
+    pushing: Arc<AtomicBool>,
     /// A background fetch is in flight, so a timer tick landing on a slow one is dropped rather
     /// than stacked.
     fetch_busy: Cell<bool>,
@@ -361,6 +365,7 @@ impl Panel {
             watches: RefCell::new(Vec::new()),
             syncing: Cell::new(false),
             sync_busy: Cell::new(false),
+            pushing: Arc::default(),
             fetch_busy: Cell::new(false),
             fetch_lock: Arc::default(),
             fetch_failed: Cell::new(false),
@@ -721,7 +726,7 @@ impl Panel {
     /// What the Sync button says it will do, and whether it can. Both read from the last refresh,
     /// so a background fetch that failed can put its own line on the tooltip without one.
     ///
-    /// A branch with no upstream is not a dead end: syncing it publishes it (`git::sync`), so the
+    /// A branch with no upstream is not a dead end: syncing it publishes it (`git::push`), so the
     /// button stays live and the tooltip says which of the two it will be.
     pub(super) fn sync_state(&self) {
         let state = self.state.borrow();
