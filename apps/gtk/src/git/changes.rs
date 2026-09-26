@@ -294,9 +294,9 @@ enum Act {
 
 /// Show a row's buttons while the pointer or the keyboard is on it, and give them no width at all
 /// the rest of the time, so the name beside them reads out to the whole width of the pane and is
-/// cut short only where there is really something to give way to. `.git-actions` fades them in
-/// and out; what it cannot do is stop them reserving their room, a `GtkRevealer` that is shut
-/// measuring nothing.
+/// cut short only where there is really something to give way to. A `GtkRevealer` does both: shut,
+/// it measures nothing, and it slides them in and out at full opacity, the same way whether the
+/// pointer or the focus is what let them go.
 ///
 /// Watched on the list row rather than on the stack inside it: that is the widget GTK marks with
 /// PRELIGHT while the pointer is anywhere on it and with FOCUS_WITHIN while one of its buttons has
@@ -362,12 +362,11 @@ fn revealers(row: &gtk::Widget) -> Vec<gtk::Revealer> {
 }
 
 /// A row's Stage / Unstage / Discard buttons, the same three on a file and on a folder. They show
-/// on the row's hover and `:focus-within` (`.git-actions`), and the binder picks which of them the
-/// row offers. In a revealer, which is what keeps them from reserving their width while they are
-/// away ([`reveal_on_hover`]).
+/// while the pointer or the keyboard is on the row, and the binder picks which of them the row
+/// offers. In a revealer, which is what keeps them from reserving their width while they are away
+/// ([`reveal_on_hover`]).
 fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    actions.add_css_class("git-actions");
     for (icon, tooltip, act) in [
         ("list-add-symbolic", "Stage", Act::Stage),
         ("list-remove-symbolic", "Unstage", Act::Unstage),

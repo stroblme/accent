@@ -88,7 +88,17 @@ fn bench_dividers(app: &Rc<App>) {
 /// the pane a note would open into, and the pane holding the keyboard. All three have to name the
 /// same pane after a move, or the window says the tab went somewhere the caret did not.
 fn bench_pane_at(app: &Rc<App>, page: &adw::TabPage) {
-    println!("bench panes {}", app.panes.borrow().len());
+    // Which panes draw their selected tab outlined: every one but the active pane's.
+    let panes = app.panes.borrow().clone();
+    let outlined: Vec<bool> = panes
+        .iter()
+        .map(|pane| pane.bar.has_css_class("accent-idle-pane"))
+        .collect();
+    let active = panes.iter().position(|pane| Rc::ptr_eq(pane, &app.pane()));
+    println!(
+        "bench panes {} active={active:?} outlined={outlined:?}",
+        panes.len()
+    );
     let root = app.window.clone().upcast::<gtk::Widget>();
     let at = |what: &str, pane: Option<&Rc<Pane>>| match pane {
         Some(pane) => {

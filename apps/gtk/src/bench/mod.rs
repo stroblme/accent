@@ -195,8 +195,8 @@ use tags::bench_tags;
 /// opens after the first flip, and the last flip is made with both notes behind the code.
 ///
 /// `ACCENT_BENCH_THEME=<rel_note>` walks the window through Light, Dark and Solarized the way a
-/// system switch and the preferences do, and prints what the note's theme-derived tags hold on
-/// each side of every switch: as it lands, and again once the restyle it defers has run. A second
+/// system switch and the preferences do, and prints what the note's theme-derived tags and the
+/// hues a CSV's columns and the git lanes share hold on each side of every switch: as it lands, and again once the restyle it defers has run. A second
 /// launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark` is Solarized's other half.
 ///
 /// `ACCENT_BENCH_REVEAL=<rel_note>` jumps into a note as a search hit, a tag and a Go to Line

@@ -326,6 +326,16 @@ pub fn words_label(count: usize) -> String {
     }
 }
 
+/// The vault's line while a walk runs. The scan has no total until it ends (`total` 0), so until
+/// then the line says how many files it has found.
+pub fn indexing_label(done: usize, total: usize) -> String {
+    match (done, total) {
+        (1, 0) => "Indexing… 1 file found".to_string(),
+        (found, 0) => format!("Indexing… {found} files found"),
+        (done, total) => format!("Indexing… {done}/{total} files"),
+    }
+}
+
 /// Where the reader is in a PDF, which is what that tab has to say where a note has its word
 /// count. `page` is 0-based, the way the viewer counts them, and the readout is not.
 ///
@@ -361,6 +371,14 @@ mod tests {
         assert_eq!(words_label(0), "0 words");
         assert_eq!(words_label(1), "1 word");
         assert_eq!(words_label(42), "42 words");
+    }
+
+    #[test]
+    fn indexing_label_counts_the_files_found_until_the_scan_has_a_total() {
+        assert_eq!(indexing_label(0, 0), "Indexing… 0 files found");
+        assert_eq!(indexing_label(1, 0), "Indexing… 1 file found");
+        assert_eq!(indexing_label(12345, 0), "Indexing… 12345 files found");
+        assert_eq!(indexing_label(1200, 42700), "Indexing… 1200/42700 files");
     }
 
     #[test]
