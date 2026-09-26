@@ -37,6 +37,7 @@ import io.github.stroblme.accent.ffi.analyzeUtf16
 import io.github.stroblme.accent.ffi.toHtml
 import java.io.File
 import java.net.URLDecoder
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -152,8 +153,8 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
  *
  * `accent://open/…` is a link to another note and is handed back to the app; `accent://file/…` is
  * an image, served off the vault and recoloured as a PDF page is when it reads as a document
- * ([served]). Nothing else loads at all — the same rule the desktop preview enforces with a content
- * blocker.
+ * ([served]); [MERMAID] is the diagram library, served out of the APK. Nothing else loads at all —
+ * the same rule the desktop preview enforces with a content blocker.
  *
  * A tap on an image opens it on its own screen ([ImageScreen]), where it can be zoomed and
  * inverted; one on an image inside a link is the link's, as on any page. A long press on an image
@@ -278,6 +279,13 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
                         ): WebResourceResponse? {
                             if (request.isForMainFrame) return null
                             val url = request.url.toString()
+                            if (url == MERMAID) {
+                                return WebResourceResponse(
+                                    "text/javascript",
+                                    "utf-8",
+                                    view.context.assets.open("mermaid.min.js"),
+                                )
+                            }
                             if (!url.startsWith("accent://file/")) return blocked()
                             val image = model.image(decode(url.removePrefix("accent://file/")))
                                 ?: return blocked()
@@ -308,6 +316,8 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
                     if (last?.rel == open.rel) load.scroll = web.scrollY
                     web.tag = load
                     web.freshen(dark)
+                    // Scripts only for a page with diagrams to draw, and there only the app's own.
+                    web.settings.javaScriptEnabled = diagrams(html)
                     web.loadDataWithBaseURL(baseUri(open.rel), html, "text/html", "utf-8", null)
                 }
             },
@@ -360,11 +370,13 @@ private fun decode(s: String): String = runCatching { URLDecoder.decode(s, "UTF-
  * The shell around `to_html`'s fragment.
  *
  * The colours are handed in rather than read from a stylesheet, exactly as the desktop does:
- * a WebView cannot see the app's palette, and the palette is the system's.
+ * a WebView cannot see the app's palette, and the palette is the system's. A note with a mermaid
+ * fence gets the [mermaid] scripts too, in the dark or the light theme as the page is.
  */
-private fun page(body: String, fg: Color, bg: Color, accent: Color): String = """
+internal fun page(body: String, fg: Color, bg: Color, accent: Color): String = """
 <!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+${if (diagrams(body)) mermaid(if (bg.dark()) "dark" else "neutral") else ""}
 <style>
   :root { color-scheme: ${if (bg.dark()) "dark" else "light"}; }
   body {
@@ -387,6 +399,53 @@ private fun page(body: String, fg: Color, bg: Color, accent: Color): String = ""
 """
 
 internal fun Color.css(): String = String.format("#%06X", 0xFFFFFF and toArgb())
+
+/** Whether rendered HTML holds a mermaid fence: pulldown-cmark's class on a fence's code. */
+internal fun diagrams(html: String): Boolean = "<code class=\"language-mermaid\">" in html
+
+/** Where a page asks for mermaid, which the view answers from the APK's assets. */
+private const val MERMAID = "accent://app/mermaid.min.js"
+
+/**
+ * Mermaid, and the bootstrap that draws a note's diagrams with it: the desktop's (`preview.rs`),
+ * in the [theme] it picks by the page's lightness, less the scroll-sync marker a phone has no use
+ * for. Each fence becomes a `<pre class="mermaid">` holding its source as typed, and a fence
+ * mermaid cannot draw gets that source back, so a typo never blanks a block.
+ *
+ * The only scripts a page ever runs. The policy admits a script only with the nonce drawn here,
+ * fresh for every page and unknowable to a note, so the note's own `<script>`, `onerror` or
+ * `javascript:` link stays as dead as on a page with scripting off. Both sit in the head, ahead of
+ * the note, where nothing it leaves unclosed can take them in; the library is deferred, so the note
+ * is drawn before 3.4 MB of it is parsed. MOBILE_DESIGN.md says why the rest of the view's
+ * lockdown makes this enough.
+ */
+private fun mermaid(theme: String): String {
+    val nonce = UUID.randomUUID()
+    return """
+<meta http-equiv="Content-Security-Policy" content="script-src 'nonce-$nonce'">
+<script nonce="$nonce" defer src="$MERMAID"></script>
+<script nonce="$nonce">
+document.addEventListener('DOMContentLoaded', function () {
+  var blocks = document.querySelectorAll('pre > code.language-mermaid');
+  var nodes = [];
+  for (var i = 0; i < blocks.length; i++) {
+    var fence = blocks[i].parentElement;
+    var pre = document.createElement('pre');
+    pre.className = 'mermaid';
+    pre.textContent = blocks[i].textContent;
+    fence.parentElement.replaceChild(pre, fence);
+    nodes.push(pre);
+  }
+  var sources = nodes.map(function (n) { return n.textContent; });
+  mermaid.initialize({ startOnLoad: false, theme: '$theme', suppressErrorRendering: true });
+  mermaid.run({ nodes: nodes }).catch(function () {}).then(function () {
+    for (var j = 0; j < nodes.length; j++) {
+      if (!nodes[j].querySelector('svg')) { nodes[j].textContent = sources[j]; }
+    }
+  });
+});
+</script>"""
+}
 
 // ------------------------------------------------------------------------------------ writing
 

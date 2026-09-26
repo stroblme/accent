@@ -269,6 +269,18 @@ The decisions under the Android app, each with its reason; the shared ones are i
   here; what the two apps share is the vault, and that is a path.
 - **The rendered view is a `WebView`** over the core's `markdown::to_html`, with the desktop's
   `accent://` scheme and generated CSS — it is the only thing on the platform that draws MathML.
+- **Mermaid draws a note's diagrams, and is the only script a page runs** (`NoteScreen.mermaid`):
+  the desktop's vendored library, packed as an asset (about 1 MB of the APK) and served at
+  `accent://app/`, with the desktop's bootstrap in mermaid's dark or neutral theme by the page's
+  lightness. Scripting is on only for a note with a mermaid fence, and even there a note's own
+  script stays dead: the page's Content-Security-Policy admits a script only with a nonce drawn
+  fresh for that page, which the note cannot know, so its `<script>`, an `onerror` or a
+  `javascript:` link does nothing, as with scripting off; both of ours sit in the head, ahead of
+  anything the note leaves unclosed. The rest of the lockdown is unchanged and is what makes that
+  enough: no JavaScript interface, no file or content access, every request but the vault's images
+  and the library refused, every navigation handed to the app — and no `INTERNET` permission, so
+  nothing a page runs can reach the network. Mermaid runs at its default strict level, which
+  sanitises a diagram's labels and drops its click handlers.
 - **Images are recoloured on their way into a WebView** (`ui/Images.kt`): the note's page and the
   image screen both take them from `served`, which classifies a raster from a copy decoded to a
   512 px long side (`looksLikeDocument` samples 65 k pixels whatever it is given; the verdict is
@@ -298,6 +310,5 @@ The decisions under the Android app, each with its reason; the shared ones are i
   the platform does (a phone keyboard completes words), and the rest would be a second app inside
   this one. The test for any feature: does it help someone read their vault, make a small edit, or
   read and mark up a PDF.
-- Deferred rather than refused: tags and backlinks, templates and the daily note, mermaid diagrams
-  in the rendered view, a native Compose renderer in place of the WebView, exporting highlights, and
-  the PDF shapes and Adjust tool.
+- Deferred rather than refused: tags and backlinks, templates and the daily note, a native Compose
+  renderer in place of the WebView, exporting highlights, and the PDF shapes and Adjust tool.

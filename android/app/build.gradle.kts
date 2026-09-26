@@ -61,6 +61,9 @@ android {
     }
 
     sourceSets["main"].kotlin.directories.add(bindings)
+    // Mermaid, the desktop's vendored copy rather than a second one: the rendered view draws a
+    // note's diagrams with it, served from the APK's assets (`NoteScreen`).
+    sourceSets["main"].assets.directories.add(repo.resolve("vendor/mermaid").path)
 }
 
 // The Rust core, cross-compiled into `src/main/jniLibs/<abi>/`. Gradle does not know how to build
