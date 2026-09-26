@@ -755,6 +755,18 @@ impl App {
             .child(&picture)
             .build();
         let image = self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic", how);
+        // An SVG is drawn at the display's scale, so a window moved onto another display draws it
+        // again (`show_image` asks for the scale with the look).
+        let shown = Rc::downgrade(&image);
+        picture.connect_scale_factor_notify(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| {
+                if let Some(image) = shown.upgrade() {
+                    app.show_image(&image, None);
+                }
+            }
+        ));
         // On the scroller rather than the picture: while the image is fitted it is smaller than
         // the viewport, and a wheel over the empty space around it has to zoom too. Bubble
         // phase, ahead of the scroller's own controller, as everywhere else.
@@ -795,6 +807,7 @@ impl App {
         let wanted = (
             look::Look::now(),
             self.inverted_images.borrow().contains(&image.key()),
+            picture_of(&image.page).map_or(1, |p| p.scale_factor()),
         );
         let (path, original) = match read {
             // What is on screen is of the old contents, so a restyle meanwhile waits for these.
@@ -814,10 +827,11 @@ impl App {
         image.shows.set(ticket);
         let (app, image) = (Rc::downgrade(self), Rc::downgrade(image));
         glib::spawn_future_local(async move {
-            let ((look, inverted), from) = (wanted, path.clone());
-            let shown =
-                work::off_thread("image", move || look::show(&from, original, look, inverted))
-                    .await;
+            let ((look, inverted, scale), from) = (wanted, path.clone());
+            let shown = work::off_thread("image", move || {
+                look::show(&from, original, look, inverted, scale)
+            })
+            .await;
             let (Some(app), Some(image)) = (app.upgrade(), image.upgrade()) else {
                 return;
             };
@@ -827,7 +841,7 @@ impl App {
             };
             match shown {
                 Some(Ok(shown)) => {
-                    picture.set_paintable(Some(&shown.texture));
+                    picture.set_paintable(Some(&shown.paintable()));
                     // The size a zoomed picture asks for is worked out from its paintable, so a
                     // file of another size would be drawn at its own while the readout kept the
                     // old percentage. Asked again of this one, so the zoom means the same thing

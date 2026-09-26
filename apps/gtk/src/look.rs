@@ -17,7 +17,8 @@ use std::time::SystemTime;
 use accent_core::orientation;
 use accent_core::recolour::{self, Verdict};
 use gtk::prelude::*;
-use gtk::{gdk, glib};
+use gtk::subclass::prelude::ObjectSubclassIsExt;
+use gtk::{gdk, gdk_pixbuf, gio, glib};
 
 use crate::theme::{self, Page};
 
@@ -70,31 +71,85 @@ impl Look {
 pub struct Shown {
     pub original: gdk::Texture,
     pub texture: gdk::Texture,
+    /// The texture's pixels to one of the picture's: the display's scale for an SVG, drawn that
+    /// much larger, and 1 for a raster, which has only its own pixels.
+    pub scale: i32,
 }
 
-/// Decode `path`, unless `original` already holds it, and recolour it as `look` asks. On a
-/// worker: a large scan takes a while to decode, and longer to recolour.
+impl Shown {
+    /// What the picture is handed: the texture, at its logical size.
+    pub fn paintable(&self) -> gdk::Paintable {
+        match self.scale {
+            1 => self.texture.clone().upcast(),
+            scale => Scaled::new(&self.texture, scale).upcast(),
+        }
+    }
+}
+
+/// Decode `path`, unless `original` already holds it, and recolour it as `look` asks, an SVG drawn
+/// at `scale` (the display's). On a worker: a large scan takes a while to decode, and longer to
+/// recolour.
 pub fn show(
     path: &Path,
     original: Option<gdk::Texture>,
     look: Look,
     inverted: bool,
+    scale: i32,
 ) -> Result<Shown, glib::Error> {
+    if svg(path) {
+        return show_svg(path, look, inverted, scale);
+    }
     let original = match original {
         Some(texture) => texture,
         None => decode(path)?,
     };
-    let texture = match svg(path) {
-        // An SVG is recoloured as a vector, through a filter, and drawn again from its text.
-        true => look
-            .palette(true, inverted)
-            .and_then(|page| svg_filtered(path, page, look.fills(page)))
-            .and_then(|svg| gdk::Texture::from_bytes(&glib::Bytes::from_owned(svg)).ok())
-            .unwrap_or_else(|| original.clone()),
-        false => recoloured(path, look, inverted, || Some(original.clone()))
-            .map_or_else(|| original.clone(), |t| t.upcast()),
+    let texture = recoloured(path, look, inverted, || Some(original.clone()))
+        .map_or_else(|| original.clone(), |t| t.upcast());
+    Ok(Shown {
+        original,
+        texture,
+        scale: 1,
+    })
+}
+
+/// [`show`] for an SVG, drawn again from its text every time, at the display's scale as GTK draws
+/// one: it is recoloured as a vector, through a filter, and a drawing costs little.
+fn show_svg(path: &Path, look: Look, inverted: bool, scale: i32) -> Result<Shown, glib::Error> {
+    let (text, _) = gio::File::for_path(path).load_bytes(gio::Cancellable::NONE)?;
+    let original = rasterise(&text, scale)?;
+    let texture = look
+        .palette(true, inverted)
+        .and_then(|page| svg_filtered(path, page, look.fills(page)))
+        .and_then(|svg| rasterise(&svg, scale).ok())
+        .unwrap_or_else(|| original.clone());
+    Ok(Shown {
+        original,
+        texture,
+        scale,
+    })
+}
+
+/// An SVG drawn at `scale` times its own size, through gdk-pixbuf, as GTK draws a picture's.
+fn rasterise(svg: &[u8], scale: i32) -> Result<gdk::Texture, glib::Error> {
+    let loader = gdk_pixbuf::PixbufLoader::new();
+    loader.connect_size_prepared(move |loader, w, h| loader.set_size(w * scale, h * scale));
+    loader.write(svg)?;
+    loader.close()?;
+    let pixbuf = loader
+        .pixbuf()
+        .ok_or_else(|| glib::Error::new(gdk_pixbuf::PixbufError::Failed, "no image"))?;
+    let format = match pixbuf.has_alpha() {
+        true => gdk::MemoryFormat::R8g8b8a8,
+        false => gdk::MemoryFormat::R8g8b8,
     };
-    Ok(Shown { original, texture })
+    Ok(gdk::MemoryTexture::new(
+        pixbuf.width(),
+        pixbuf.height(),
+        format,
+        &pixbuf.read_pixel_bytes(),
+        pixbuf.rowstride() as usize,
+    )
+    .upcast())
 }
 
 /// What the preview hands WebKit for an image: the file as it is, or new bytes of a type.
@@ -288,6 +343,73 @@ fn extension(path: &Path) -> String {
     path.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default()
+}
+
+mod imp {
+    use std::cell::{Cell, OnceCell};
+
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+    use gtk::{gdk, glib};
+
+    #[derive(Default)]
+    pub struct Scaled {
+        pub texture: OnceCell<gdk::Texture>,
+        pub scale: Cell<i32>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Scaled {
+        const NAME: &'static str = "AccentScaled";
+        type Type = super::Scaled;
+        type Interfaces = (gdk::Paintable,);
+    }
+
+    impl ObjectImpl for Scaled {}
+
+    impl PaintableImpl for Scaled {
+        fn flags(&self) -> gdk::PaintableFlags {
+            gdk::PaintableFlags::STATIC_SIZE | gdk::PaintableFlags::STATIC_CONTENTS
+        }
+
+        fn intrinsic_width(&self) -> i32 {
+            self.texture
+                .get()
+                .map_or(0, |t| t.width() / self.scale.get())
+        }
+
+        fn intrinsic_height(&self) -> i32 {
+            self.texture
+                .get()
+                .map_or(0, |t| t.height() / self.scale.get())
+        }
+
+        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
+            if let Some(texture) = self.texture.get() {
+                texture.snapshot(snapshot, width, height);
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    /// A texture drawn `scale` times larger than it is to be shown, sized as it is to be shown:
+    /// GTK's own `GtkScaler`, which it keeps private.
+    pub struct Scaled(ObjectSubclass<imp::Scaled>) @implements gdk::Paintable;
+}
+
+impl Scaled {
+    fn new(texture: &gdk::Texture, scale: i32) -> Scaled {
+        let scaled: Scaled = glib::Object::new();
+        let _ = scaled.imp().texture.set(texture.clone());
+        scaled.imp().scale.set(scale);
+        scaled
+    }
+
+    /// The texture as drawn, for a drill.
+    pub fn texture(&self) -> gdk::Texture {
+        self.imp().texture.get().cloned().expect("set in `new`")
+    }
 }
 
 #[cfg(test)]
