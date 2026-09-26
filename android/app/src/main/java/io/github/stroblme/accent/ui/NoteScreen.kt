@@ -5,6 +5,7 @@ import androidx.activity.compose.BackHandler
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import android.webkit.WebView.HitTestResult
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -28,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.viewinterop.AndroidView
 import io.github.stroblme.accent.Open
+import io.github.stroblme.accent.OpenImage
 import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.ffi.Span
 import io.github.stroblme.accent.ffi.Style
@@ -153,9 +155,11 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
  * ([served]). Nothing else loads at all — the same rule the desktop preview enforces with a content
  * blocker.
  *
- * A long press on an image inverts it against that rule, for as long as the app runs ([Inverted]);
- * anywhere else the press is the WebView's own, a selection. The page is loaded again for it, as
- * for a palette change, and puts the reader back where they were.
+ * A tap on an image opens it on its own screen ([ImageScreen]), where it can be zoomed and
+ * inverted; one on an image inside a link is the link's, as on any page. A long press on an image
+ * inverts it against the rule in place, for as long as the app runs ([Inverted]); anywhere else
+ * the press is the WebView's own, a selection. The page is loaded again for it, as for a palette
+ * change, and puts the reader back where they were.
  *
  * A hit arrives as the query it was found by ([Open.find]) and is placed by the WebView's own
  * find-in-page: every occurrence marked, the first one scrolled to. No offset crosses into the
@@ -193,8 +197,9 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
     var view by remember { mutableStateOf<WebView?>(null) }
     var loaded by remember { mutableStateOf<String?>(null) }
     // The file each image on the page was served from, by the address the page asks for it at:
-    // what a long press on one inverts. Written on the loading thread, read on the main one.
-    val images = remember { ConcurrentHashMap<String, String>() }
+    // what a tap on one opens and a long press inverts. Written on the loading thread, read on the
+    // main one.
+    val images = remember { ConcurrentHashMap<String, OpenImage>() }
     // What the reader has typed into the find bar, and where in the page it got them: which match
     // of how many, straight off the view's own find listener. Reset every time the bar opens.
     var query by remember(open.finding) { mutableStateOf("") }
@@ -226,7 +231,14 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
 
     Column(Modifier.fillMaxSize()) {
         AndroidView(
-            modifier = Modifier.weight(1f).fillMaxWidth().onTap(chrome) {
+            modifier = Modifier.weight(1f).fillMaxWidth().onTap(
+                chrome,
+                // Not an image inside a link: the WebView follows that one on the same tap.
+                claimed = { _ ->
+                    val image = view?.imageHit(HitTestResult.IMAGE_TYPE)?.let { images[it] }
+                    image?.let { model.openFile(it.rel) } != null
+                },
+            ) {
                 if (!finding) view?.clearMatches()
             },
             factory = { ctx ->
@@ -267,20 +279,18 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
                             if (request.isForMainFrame) return null
                             val url = request.url.toString()
                             if (!url.startsWith("accent://file/")) return blocked()
-                            val path = model.imagePath(decode(url.removePrefix("accent://file/")))
+                            val image = model.image(decode(url.removePrefix("accent://file/")))
                                 ?: return blocked()
-                            images[url] = path
-                            return served(File(path), serving)
+                            images[url] = image
+                            return served(File(image.path), serving)
                         }
                     }
-                    // Taken only on an image, where it inverts; anywhere else it is left to the
-                    // view, whose long press is the selection. An image's hit carries its address.
+                    // Taken only on an image, a linked one too, where it inverts; anywhere else it
+                    // is left to the view, whose long press is the selection.
                     setOnLongClickListener {
-                        val hit = hitTestResult
-                        val image = hit.type == WebView.HitTestResult.IMAGE_TYPE ||
-                            hit.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
-                        val path = hit.extra?.takeIf { image }?.let { images[it] }
-                        path?.let { Inverted.toggle(it) } != null
+                        val hit = imageHit(HitTestResult.IMAGE_TYPE, HitTestResult.SRC_IMAGE_ANCHOR_TYPE)
+                        val image = hit?.let { images[it] }
+                        image?.let { Inverted.toggle(it.path) } != null
                     }
                     setOnScrollChangeListener { _, _, y, _, was -> chrome.scrolled((y - was).toFloat()) }
                     setFindListener { active, total, _ -> matches = active to total }
@@ -330,6 +340,13 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
 private data class Load(val rel: String, val html: String, val dark: Boolean, val inverted: Set<String>) {
     var scroll = 0
 }
+
+/**
+ * The address of the image under the reader's last touch, if the view's hit test puts one of
+ * [types] there: the hit is taken on the way down, so it is ready by the time a tap or a long
+ * press is decided.
+ */
+private fun WebView.imageHit(vararg types: Int): String? = hitTestResult.takeIf { it.type in types }?.extra
 
 /** What a relative link inside the note resolves against: the directory the note is in. */
 private fun baseUri(rel: String): String {

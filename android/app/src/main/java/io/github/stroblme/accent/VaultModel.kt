@@ -544,14 +544,14 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Where on this device the image an embed names is: the path as the note spells it when a file
-     * is there, and otherwise the one the index places that name at — `![[img.png]]` is written the
-     * way a wikilink is, and the file lives in `Attachments/`. Null for a path out of the vault, or
-     * for nothing at all. Blocking: the rendered view asks from its own loading thread.
+     * The image an embed names, in the vault and on this device: the path as the note spells it
+     * when a file is there, and otherwise the one the index places that name at — `![[img.png]]` is
+     * written the way a wikilink is, and the file lives in `Attachments/`. Null for a path out of
+     * the vault, or for nothing at all. Blocking: the rendered view asks from its loading thread.
      */
-    fun imagePath(rel: String): String? {
+    fun image(rel: String): OpenImage? {
         val v = vault ?: return null
-        return runCatching { v.asset(rel)?.let { v.pathOf(it) } }.getOrNull()
+        return runCatching { v.asset(rel)?.let { OpenImage(it, v.pathOf(it)) } }.getOrNull()
     }
 
     /** The note links into this PDF, which paint as its highlights. */
