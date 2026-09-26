@@ -750,20 +750,17 @@ impl PdfTab {
         self.outline.borrow().clone()
     }
 
+    /// The bookmark the page being read is under, as its row in [`PdfTab::outline`].
+    pub fn bookmark_row(&self) -> Option<usize> {
+        covering(&self.outline.borrow(), self.current_page())
+    }
+
     /// The thumbnail strip, for the Outline pane to show under the bookmarks.
     ///
     /// Built once and handed out again on every refresh, so it keeps its scroll position and its
-    /// textures. It takes itself out of whatever held it last: the pane rebuilds its container
-    /// each time, and a widget with two parents is a GTK critical.
+    /// textures; whoever puts it somewhere new takes it out of where it was.
     pub fn thumbnails(&self) -> gtk::Widget {
-        let pane = &self.organize.pane;
-        if let Some(parent) = pane.parent() {
-            match parent.downcast_ref::<gtk::Paned>() {
-                Some(paned) => paned.set_end_child(gtk::Widget::NONE),
-                None => pane.unparent(),
-            }
-        }
-        pane.clone().upcast()
+        self.organize.pane.clone().upcast()
     }
 
     /// Search the whole document. An empty query clears what is shown.
@@ -1401,6 +1398,19 @@ pub(super) fn theme_of(dark: bool) -> pdf::Theme {
     }
 }
 
+/// The bookmark a reader on `page` is under: of those starting on it or before, the one starting
+/// last, and of several starting on the same page the last listed, which is the innermost. `None`
+/// above the first bookmark; one naming no page covers nothing.
+fn covering(outline: &[pdf::Outline], page: usize) -> Option<usize> {
+    outline
+        .iter()
+        .enumerate()
+        .filter_map(|(row, entry)| Some((entry.page?, row)))
+        .filter(|(start, _)| *start <= page)
+        .max()
+        .map(|(_, row)| row)
+}
+
 /// The tree `path` reads `key` out of: `path` with `key`'s own components taken off the end.
 ///
 /// A PDF is always read from a file on this machine, which is the vault's own on a local vault
@@ -1436,5 +1446,27 @@ mod tests {
         );
         // Nothing sensible to say when the key is longer than the path it was read from.
         assert_eq!(tree("/a.pdf", "deep/nest/a.pdf"), None);
+    }
+
+    #[test]
+    fn the_bookmark_followed_is_the_one_the_page_is_under() {
+        let entry = |depth, page| pdf::Outline {
+            depth,
+            title: String::new(),
+            page,
+        };
+        // A chapter on the second page with a section on the third, a bookmark naming no page,
+        // and an appendix on the fifth.
+        let outline = [
+            entry(0, Some(1)),
+            entry(1, Some(2)),
+            entry(0, None),
+            entry(0, Some(4)),
+        ];
+        let rows: Vec<_> = (0..6).map(|page| covering(&outline, page)).collect();
+        assert_eq!(rows, [None, Some(0), Some(1), Some(1), Some(3), Some(3)]);
+        // A section starting on its chapter's page is the one the page is under.
+        let same = [entry(0, Some(2)), entry(1, Some(2))];
+        assert_eq!(covering(&same, 2), Some(1));
     }
 }

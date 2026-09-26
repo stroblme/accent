@@ -696,14 +696,8 @@ impl App {
                 };
                 return sidebar.set_outline(Some(&sidebar::outline_note(title, body)));
             }
-            let outline = pdf.outline();
-            let content = gtk::Paned::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .resize_start_child(true)
-                .shrink_start_child(false)
-                .shrink_end_child(false)
-                .build();
-            let rows: Vec<(u8, String, usize)> = outline
+            let rows: Vec<(u8, String, usize)> = pdf
+                .outline()
                 .iter()
                 .map(|entry| {
                     (
@@ -713,20 +707,19 @@ impl App {
                     )
                 })
                 .collect();
-            let top = match rows.is_empty() {
-                true => sidebar::outline_note("No Bookmarks", "This PDF has no outline."),
-                false => sidebar::outline_list(
-                    &rows,
-                    glib::clone!(
-                        #[weak]
-                        pdf,
-                        move |page| pdf.goto_page(page)
-                    ),
-                ),
-            };
-            content.set_start_child(Some(&top));
-            content.set_end_child(Some(&pdf.thumbnails()));
-            return sidebar.set_outline(Some(content.upcast_ref()));
+            if rows.is_empty() {
+                let none = sidebar::outline_note("No Bookmarks", "This PDF has no outline.");
+                return sidebar.set_outline(Some(&sidebar::above(&none, &pdf.thumbnails())));
+            }
+            let jump = glib::clone!(
+                #[weak]
+                pdf,
+                move |page| pdf.goto_page(page)
+            );
+            sidebar.set_outline_rows(&doc.key(), &rows, jump, Some(&pdf.thumbnails()));
+            // The bookmarks are new, or a page edit moved them: either way the one the page being
+            // read is under may be another.
+            return self.follow_outline();
         }
         // A diagram's outline is its pages, as a PDF's is its bookmarks.
         if let Some(d) = doc.diagram() {
@@ -736,15 +729,13 @@ impl App {
                 .enumerate()
                 .map(|(i, name)| (1, name, i))
                 .collect();
-            let list = sidebar::outline_list(
-                &rows,
-                glib::clone!(
-                    #[weak]
-                    d,
-                    move |page| d.goto_page(page)
-                ),
+            let jump = glib::clone!(
+                #[weak]
+                d,
+                move |page| d.goto_page(page)
             );
-            return sidebar.set_outline(Some(&list));
+            sidebar.set_outline_rows(&doc.key(), &rows, jump, None);
+            return self.follow_outline();
         }
         let Some(tab) = doc.tab() else {
             return sidebar.set_outline(None);
@@ -777,6 +768,7 @@ impl App {
                 tab,
                 move |at| tab.goto_pos(at)
             ),
+            None,
         );
         // A new list opens on the caret's section, and a refill catches up with a caret moved
         // since the last edit, which was followed against the rows of the text before it. One
@@ -798,8 +790,9 @@ impl App {
     }
 
     /// Select the Outline row of the heading or symbol the caret is in and scroll it into view,
-    /// as VS Code's Follow Cursor does. Nothing while the pane is out of sight: showing it calls
-    /// this again, and it catches up then.
+    /// as VS Code's Follow Cursor does; on a PDF the bookmark the page being read is under, on a
+    /// diagram the page shown. Nothing while the pane is out of sight: showing it calls this
+    /// again, and it catches up then.
     fn follow_outline(&self) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
@@ -807,8 +800,19 @@ impl App {
         if !self.sidebar_column.is_visible() || !sidebar.is_showing("outline") {
             return;
         }
-        let Some(tab) = self.active() else {
-            return;
+        let tab = match self.active_doc() {
+            Some(Doc::Text(tab)) => tab,
+            // Above the first bookmark the list goes back to its top, as above a note's first
+            // heading.
+            Some(Doc::Pdf(pdf)) => {
+                let row = pdf.bookmark_row();
+                return sidebar.follow_outline(&pdf.key(), row, row.or(Some(0)));
+            }
+            Some(Doc::Diagram(d)) => {
+                let row = Some(d.page_index());
+                return sidebar.follow_outline(&d.key(), row, row);
+            }
+            _ => return,
         };
         let line = lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert())).line;
         let row = tab.lang.outline_row(line);

@@ -121,6 +121,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 - What the open tab outlines: a text file's symbols from the language layer (a note's headings, a source file's functions and types, nested as the server nests them), a PDF's bookmarks and thumbnail strip (see PDF), or an empty state.
 - On a text tab it follows the caret, as VS Code's Follow Cursor does: the innermost heading or symbol holding the caret is selected and scrolled into view as little as it takes, never activated and never given the keyboard. Above the first heading the list returns to its top; in a gap between two functions it stays put, or it would jump to the top and back. It follows moves of the caret — a click, an arrow key, a jump — and not edits: typing, a paste or an undo refills the list in place and leaves its scroll and its selected row as they are, a caret moved in the same turn of the main loop as an edit being the edit's. A tab switched back to opens on its caret's section. The caret's row is put back when the pointer leaves. There is no toggle.
+- On a PDF it follows the page being read the same way: the bookmark that page is under — the one starting on it or last before it, the innermost of several starting on one page — is selected and scrolled to as the page under the middle of the view changes, and above the first bookmark the list returns to its top. On a diagram the page shown is the selected row. A page edit refills the list in place, the thumbnail strip staying under it.
 
 **Properties**
 
@@ -378,7 +379,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - With the connector in hand the shape under the pointer shows its connection points as small accent crosses, the one in reach lit, and an end dropped on one is pinned there. Otherwise an end attaches to the shape under it only when its other end lies outside that shape: an arrow drawn within a slide's text box is on it, not leaving it.
 - A label is edited as Markdown in the note editor, floated over the cell at the label's size with an accent outline: opened by a double click (the innermost shape under it, or a label's own text), `Return`, or typing over the one selected shape (a bare arrow's opens halfway along it), finished by a click elsewhere, Escape or `Ctrl+Return`.
 - A formula label is typeset by WebKit and painted as a picture.
-- Pages are the Outline pane's rows.
+- Pages are the Outline pane's rows, the one shown selected.
 - Every change is one undo step, saved a second after the last through the etag-gated save. A change on disk under unsaved edits raises a banner whose Resolve… asks Reload or Overwrite: there is no comparison of two diagrams to offer.
 
 ### Comparison

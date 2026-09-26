@@ -13,7 +13,7 @@ mod search;
 mod tags;
 mod widgets;
 
-pub use outline::{outline_list, outline_note};
+pub use outline::{above, outline_note};
 pub use ports::Data as PortsData;
 pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
@@ -88,8 +88,8 @@ pub struct Sidebar {
     /// belongs in it depends entirely on the open tab: a note's headings, a PDF's bookmarks and
     /// thumbnails, or a sentence saying why there is nothing.
     outline_bin: adw::Bin,
-    /// The list in `outline_bin` while it holds a text document's outline, kept to be refilled
-    /// rather than rebuilt while that document is edited.
+    /// The list in `outline_bin` while it holds a document's outline as rows, kept to be refilled
+    /// rather than rebuilt while that document is edited or read.
     outline_list: RefCell<Option<outline::List>>,
     /// The Properties pane: the diagram in front's own widget, and the page, hidden while no
     /// diagram is in front.
@@ -390,21 +390,24 @@ impl Sidebar {
         }
     }
 
-    /// Show the outline of the text document `key` as rows that jump. The list on screen is
-    /// refilled when it is already that document's, so an edit, a save or a language server's
-    /// answer leaves it scrolled where it was; another document gets a new list, from the top,
-    /// and `true` back.
+    /// Show the outline of the document `key` as rows that jump, over `below` when there is one
+    /// (a PDF's thumbnail strip). The list on screen is refilled when it is already that
+    /// document's, so an edit, a save, a language server's answer or a page edit leaves it
+    /// scrolled where it was; another document gets a new list, from the top, and `true` back.
     pub fn set_outline_rows<T: Copy + 'static>(
         &self,
         key: &str,
         rows: &[(u8, String, T)],
         on_jump: impl Fn(T) + 'static,
+        below: Option<&gtk::Widget>,
     ) -> bool {
         let mut kept = self.outline_list.borrow_mut();
-        let fresh = kept.as_ref().is_none_or(|list| list.key != key);
+        let fresh = kept
+            .as_ref()
+            .is_none_or(|list| list.key != key || list.below.as_ref() != below);
         if fresh {
-            let list = outline::List::new(key);
-            self.outline_bin.set_child(Some(&list.scroller));
+            let list = outline::List::new(key, below.cloned());
+            self.outline_bin.set_child(Some(&list.root));
             *kept = Some(list);
         }
         if let Some(list) = kept.as_ref() {
@@ -413,8 +416,8 @@ impl Sidebar {
         fresh
     }
 
-    /// Select `row` of the text document `key`'s outline, the one its caret is in, and scroll
-    /// `shown` into view; `None` selects nothing, or scrolls nowhere.
+    /// Select `row` of the document `key`'s outline, the one its caret or its reader is in, and
+    /// scroll `shown` into view; `None` selects nothing, or scrolls nowhere.
     pub fn follow_outline(&self, key: &str, row: Option<usize>, shown: Option<usize>) {
         if let Some(list) = self.outline_list.borrow().as_ref()
             && list.key == key

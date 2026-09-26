@@ -1,5 +1,6 @@
 //! Drills over a PDF: the layout either side of Fit Height, the page Add Page After puts in, the
-//! page edits and their menus, and the blank document New Drawing writes.
+//! page edits and their menus, the Outline pane following the reader, and the blank document New
+//! Drawing writes.
 
 use super::*;
 
@@ -159,6 +160,104 @@ pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
         }
         bench_quit(&app);
     });
+}
+
+/// The Outline pane following the reader: the bookmark the page is under as `rel` is scrolled
+/// through (a scroll, not a jump), then the list after a page edit, which must be the same list
+/// refilled; with `,<rel_diagram>` a diagram's pages as it turns to each. Every line says which
+/// row is selected, whether it is on screen and who has the keyboard, which a follow never takes.
+pub(super) fn bench_pdf_bookmarks(app: &Rc<App>, arg: &str) {
+    let (rel, diagram) = match arg.split_once(',') {
+        Some((rel, diagram)) => (rel.to_string(), Some(diagram.to_string())),
+        None => (arg.to_string(), None),
+    };
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench bookmarks no_tab");
+            return bench_quit(&app);
+        };
+        // Showing the pane hands it the keyboard; the reader takes it back, as a click would.
+        app.show_pane("outline");
+        pdf.key_target().grab_focus();
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let list = outline_view(&app);
+        for page in [0, 1, 2, 3, 4, 2, 0] {
+            pdf.scroll_to(pdfview::Anchor {
+                page,
+                u: 0.0,
+                v: 0.5,
+            });
+            glib::timeout_future(Duration::from_millis(300)).await;
+            println!(
+                "bench bookmarks page={} {}",
+                pdf.current_page() + 1,
+                outline_row(&app)
+            );
+        }
+        // The first page goes to the end, and the reader, on it, with it.
+        pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 4 });
+        written(&app).await;
+        println!(
+            "bench bookmarks moved page={} kept={} {}",
+            pdf.current_page() + 1,
+            list.is_some() && outline_view(&app) == list,
+            outline_row(&app)
+        );
+        if let Some(rel) = diagram {
+            app.open_path(&rel);
+            glib::timeout_future(Duration::from_millis(800)).await;
+            let Some(d) = app.active_diagram() else {
+                println!("bench bookmarks no_diagram");
+                return bench_quit(&app);
+            };
+            d.key_target().grab_focus();
+            for page in (0..d.page_count()).rev() {
+                d.show_page(page);
+                glib::timeout_future(Duration::from_millis(300)).await;
+                println!(
+                    "bench bookmarks diagram_page={} {}",
+                    page + 1,
+                    outline_row(&app)
+                );
+            }
+        }
+        bench_quit(&app);
+    });
+}
+
+/// The Outline pane's list, if it is showing one.
+fn outline_view(app: &Rc<App>) -> Option<gtk::ListView> {
+    app.sidebar
+        .get()
+        .and_then(|s| s.outline_child())
+        .and_then(|c| find_widget(&c, &|w| w.is::<gtk::ListView>()))
+        .and_downcast::<gtk::ListView>()
+}
+
+/// The row the Outline pane has selected, its text, whether it is on screen, and who has the
+/// keyboard.
+fn outline_row(app: &Rc<App>) -> String {
+    let Some(list) = outline_view(app) else {
+        return "list=none".to_string();
+    };
+    let Some(selection) = list.model().and_downcast::<gtk::SingleSelection>() else {
+        return "selection=none".to_string();
+    };
+    let text = selection
+        .selected_item()
+        .and_downcast::<gtk::StringObject>()
+        .map(|s| s.string().to_string());
+    // Every row is one line of the same label, so a row's place is its index times the height.
+    let adj = list.vadjustment().expect("bench adjustment");
+    let height = adj.upper() / f64::from(selection.n_items().max(1));
+    let top = f64::from(selection.selected()) * height;
+    let in_view = text.is_some()
+        && top >= adj.value() - 0.5
+        && top + height <= adj.value() + adj.page_size() + 0.5;
+    let focus = gtk::prelude::GtkWindowExt::focus(&app.window)
+        .map_or("none".to_string(), |w| w.type_().name().to_string());
+    format!("selected={text:?} in_view={in_view} focus={focus}")
 }
 
 /// The page being read, and what each page of the file on disk says: what a second reader opens.
