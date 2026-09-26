@@ -8,8 +8,12 @@ use crate::dialogs::confirm;
 use accent_core::path::basename;
 use adw::prelude::*;
 use gtk::{gio, glib};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 /// How many file names an upload's toast or dialog spells out before it counts instead.
 const NAMED: usize = 3;
@@ -144,24 +148,28 @@ fn replace_body(existing: &[String]) -> String {
 /// Send the chosen files, off the main thread, and report once.
 fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
-    let busy = busy_line("Uploading", &chosen);
-    (ops.transferring)(&busy, true);
+    let count = Arc::new(Count::default());
+    count.total.store(chosen.len(), Ordering::Relaxed);
+    let line = counting("Uploading", &chosen);
     glib::spawn_future_local(async move {
-        let done = crate::work::off_thread("upload", move || {
-            let (mut uploaded, mut failed) = (0, Vec::new());
-            for file in &chosen {
-                let Some(name) = local_name(file) else {
-                    continue;
-                };
-                match vault.upload(file, &child_path(&dir, &name)) {
-                    Ok(()) => uploaded += 1,
-                    Err(_) => failed.push(name),
+        let work = crate::work::off_thread("upload", {
+            let count = count.clone();
+            move || {
+                let (mut uploaded, mut failed) = (0, Vec::new());
+                for file in &chosen {
+                    let Some(name) = local_name(file) else {
+                        continue;
+                    };
+                    match vault.upload(file, &child_path(&dir, &name)) {
+                        Ok(()) => uploaded += 1,
+                        Err(_) => failed.push(name),
+                    }
+                    count.done.fetch_add(1, Ordering::Relaxed);
                 }
+                (uploaded, failed)
             }
-            (uploaded, failed)
-        })
-        .await;
-        (ops.transferring)(&busy, false);
+        });
+        let done = counted(&ops, line, &count, work).await;
         // Neither the tree nor the index is poked here: the watcher on the host reports what
         // landed, the same way it reports anything else written there.
         (ops.toast)(&match done {
@@ -182,43 +190,118 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
 /// vault, file by file ([`Carry`]).
 pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
-    let busy = busy_line("Copying", &files);
-    (ops.transferring)(&busy, true);
+    let count = Arc::new(Count::default());
+    let line = counting("Copying", &files);
     glib::spawn_future_local(async move {
-        let done = crate::work::off_thread("copy", move || {
-            let mut report = Imported::default();
-            for file in &files {
-                let Some(name) = local_name(file) else {
-                    continue;
-                };
-                let is_dir = file.is_dir();
-                let to = free_path(&dir, &name, is_dir, |rel| vault.exists(rel));
-                let (sent, failed) = Carry::of(file, &to).send(
-                    cut,
-                    |rel| vault.create_dir(rel),
-                    |from, rel| vault.upload(from, rel),
-                );
-                if !failed.contains(&to) {
-                    report.landed.push(to);
-                    report.folders |= is_dir;
+        let work = crate::work::off_thread("copy", {
+            let count = count.clone();
+            move || {
+                // Every name and every walk first, so the count has its total before the first
+                // file goes. A name is taken once chosen, or two pasted files of one name would
+                // both be given it.
+                let mut claimed = Vec::new();
+                let mut carries = Vec::new();
+                for file in &files {
+                    let Some(name) = local_name(file) else {
+                        continue;
+                    };
+                    let is_dir = file.is_dir();
+                    let to = free_path(&dir, &name, is_dir, |rel| {
+                        claimed.iter().any(|c| c == rel) || vault.exists(rel)
+                    });
+                    claimed.push(to.clone());
+                    carries.push((Carry::of(file, &to), to, is_dir));
                 }
-                report.files += sent;
-                // Named from the folder pasted into, which the toast has already said.
-                let inside = |rel: String| match rel.strip_prefix(&format!("{dir}/")) {
-                    Some(rest) => rest.to_string(),
-                    None => rel,
-                };
-                report.failed.extend(failed.into_iter().map(inside));
+                let total = carries.iter().map(|(carry, ..)| carry.files.len()).sum();
+                count.total.store(total, Ordering::Relaxed);
+                let mut report = Imported::default();
+                for (carry, to, is_dir) in carries {
+                    let (sent, failed) = carry.send(
+                        cut,
+                        |rel| vault.create_dir(rel),
+                        |from, rel| {
+                            let sent = vault.upload(from, rel);
+                            count.done.fetch_add(1, Ordering::Relaxed);
+                            sent
+                        },
+                    );
+                    if !failed.contains(&to) {
+                        report.landed.push(to);
+                        report.folders |= is_dir;
+                    }
+                    report.files += sent;
+                    // Named from the folder pasted into, which the toast has already said.
+                    let inside = |rel: String| match rel.strip_prefix(&format!("{dir}/")) {
+                        Some(rest) => rest.to_string(),
+                        None => rel,
+                    };
+                    report.failed.extend(failed.into_iter().map(inside));
+                }
+                report
             }
-            report
-        })
-        .await;
-        (ops.transferring)(&busy, false);
+        });
+        let done = counted(&ops, line, &count, work).await;
         (ops.toast)(&match done {
             Some(report) => report.message(cut),
             None => "Cannot paste".to_string(),
         });
     });
+}
+
+/// How far a batch has got, counted on the worker and read on the main loop: the files tried so
+/// far, and how many there are, 0 until the walk has counted them.
+#[derive(Default)]
+struct Count {
+    done: AtomicUsize,
+    total: AtomicUsize,
+}
+
+/// How often a running batch's count on the status bar is brought up to date.
+const TICK: Duration = Duration::from_millis(200);
+
+/// What the status bar says for a batch of `chosen` while `count` is `(done, total)`: that it
+/// runs ("Copying Photos…"), and from two files on how far it has got, as indexing counts
+/// ("Copying Photos… 12/120 files", "Uploading… 3/12 files").
+fn counting(verb: &str, chosen: &[PathBuf]) -> impl Fn(usize, usize) -> String + 'static {
+    let (verb, chosen) = (verb.to_string(), chosen.to_vec());
+    move |done, total| match (chosen.as_slice(), total) {
+        (_, 0 | 1) => busy_line(&verb, &chosen),
+        ([one], total) => format!(
+            "{verb} {}… {done}/{total} files",
+            local_name(one).unwrap_or_default()
+        ),
+        (_, total) => format!("{verb}… {done}/{total} files"),
+    }
+}
+
+/// Wait for `work`, its line on the status bar from start to end, kept to what `count` says every
+/// [`TICK`]. The timer goes with the work, which is what ends it.
+async fn counted<T>(
+    ops: &Rc<Ops>,
+    line: impl Fn(usize, usize) -> String + 'static,
+    count: &Arc<Count>,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let shown = Rc::new(RefCell::new(line(0, 0)));
+    (ops.transferring)(&shown.borrow(), true);
+    let tick = glib::timeout_add_local(TICK, {
+        let (ops, shown, count) = (ops.clone(), shown.clone(), count.clone());
+        move || {
+            let next = line(
+                count.done.load(Ordering::Relaxed),
+                count.total.load(Ordering::Relaxed),
+            );
+            if *shown.borrow() != next {
+                (ops.transfer_count)(&shown.borrow(), &next);
+                *shown.borrow_mut() = next;
+            }
+            glib::ControlFlow::Continue
+        }
+    });
+    let answer = work.await;
+    tick.remove();
+    (ops.transferring)(&shown.borrow(), false);
+    answer
 }
 
 /// What carrying one path from this machine into the vault takes: the folders to make, parents
@@ -427,6 +510,18 @@ mod tests {
         assert!(clashes("Other", &files, have).is_empty());
         // "" is the vault root, and must not become a leading slash.
         assert_eq!(clashes("", &files, |rel| rel == "b.png"), ["b.png"]);
+    }
+
+    /// A batch says that it runs until it knows how many files it has, then how far it has got,
+    /// the way indexing counts; one file is never counted.
+    #[test]
+    fn a_batch_counts_its_files_once_it_knows_how_many() {
+        let folder = counting("Copying", &[PathBuf::from("/tmp/Photos")]);
+        assert_eq!(folder(0, 0), "Copying Photos…");
+        assert_eq!(folder(12, 120), "Copying Photos… 12/120 files");
+        assert_eq!(folder(0, 1), "Copying Photos…");
+        let two = [PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")];
+        assert_eq!(counting("Uploading", &two)(1, 2), "Uploading… 1/2 files");
     }
 
     #[test]
