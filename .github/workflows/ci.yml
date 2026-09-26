@@ -24,7 +24,8 @@ jobs:
       # apps/gtk links gtk4, libadwaita, gtksourceview5, webkit6 and libspelling, whose -devel
       # packages ubuntu-latest does not carry. The gtk job below lints and tests it instead.
       - run: cargo clippy --workspace --exclude accent --all-targets --locked --features accent-core/pdf -- -D warnings
-      - run: cargo test --locked
+      # Without --no-fail-fast the first failing test binary hides every crate after it.
+      - run: cargo test --locked --no-fail-fast
       # The PDF tests skip themselves when libpdfium is missing, so without this the job would
       # pass without running any of them. `make test-pdf` would fetch it too; a separate step
       # keeps a download failure distinguishable from a test failure.
@@ -55,7 +56,7 @@ jobs:
       # the smoke run needs it present to exercise anything but the degraded path.
       - run: make pdfium
       - run: cargo clippy -p accent --locked -- -D warnings
-      - run: cargo test -p accent --locked
+      - run: cargo test -p accent --locked --no-fail-fast
       - run: cargo build --release --locked -p accent -p accent-cli
       # The generator is a core example, not a CLI subcommand; `make vault` is its only caller.
       - run: make vault VAULT_NOTES=200 VAULT_FILES=2000
@@ -79,15 +80,17 @@ jobs:
           components: rustfmt, clippy, rust-analyzer, rust-src
           targets: aarch64-linux-android, x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
-      # The action's default list still names `tools`, which the SDK repository no longer has.
-      # These are what the build reads: `compileSdk` 37.2, AGP 9.4's default build-tools, the NDK.
-      - uses: android-actions/setup-android@v3
+      # The action installs only platform-tools by default. These are what the build reads:
+      # `compileSdk` 37.2, AGP 9.4's default build-tools, the NDK.
+      - uses: android-actions/setup-android@v4
         with:
           packages: platform-tools platforms;android-37.2 build-tools;36.0.0 ndk;${{ env.NDK_VERSION }}
+          # Otherwise every licence is printed in full, some 800 lines ahead of the build's own.
+          log-accepted-android-sdk-licenses: false
       # For cargo-ndk and the Makefile's readelf. The runner's own pair points at r27, and
       # cargo-ndk warns when the two disagree.
       - run: |
