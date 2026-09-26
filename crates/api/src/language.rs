@@ -161,6 +161,21 @@ pub struct Completion {
 pub struct Completions {
     pub items: Vec<Completion>,
     pub incomplete: bool,
+    /// A PDF's bookmarks the side that answered could not list, having no PDF reader: a host's
+    /// `serve`. The window lists them from its own copy of the file ([`Vault::completion`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<PdfPages>,
+}
+
+/// `[[paper.pdf#` left for the side holding a copy of the PDF to answer: which file, and what
+/// each `[[paper.pdf#page=N]]` row keeps of the link as typed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PdfPages {
+    /// The PDF the link resolved to, vault-relative.
+    pub rel: String,
+    /// The link's target as it was typed, which every row spells the same way.
+    pub note: String,
+    pub replace: Range,
 }
 
 /// The signature the caret is inside a call of.
@@ -791,9 +806,18 @@ impl Vault {
 /// [`Languages`] finds the provider that holds the document and spawns the request on the
 /// runtime, [`Vault`] asks it here or on the host that has the files, and the host answers it
 /// through the same rpc dispatch every other method goes through. Each line reads
-/// `façade => trait method`.
+/// `façade => trait method`, and `then f` finishes a host's answer here with `f`.
 macro_rules! requests {
-    ($( $(#[$doc:meta])* $name:ident => $inner:ident ( $($arg:ident : $ty:ty),* ) -> $ret:ty; )*) => {
+    (@remote $r:ident $name:ident $params:expr) => {
+        remote_task($r.clone(), stringify!($name), $params)
+    };
+    (@remote $r:ident $name:ident $params:expr, $then:path) => {
+        remote_task_then($r.clone(), stringify!($name), $params, $then)
+    };
+    ($(
+        $(#[$doc:meta])*
+        $name:ident => $inner:ident ( $($arg:ident : $ty:ty),* ) -> $ret:ty $(, then $then:path)?;
+    )*) => {
         impl Languages { $(
             pub(crate) fn $name(&self, rel: String, $($arg: $ty),*) -> Task<$ret> {
                 let provider = self.provider(&rel);
@@ -807,7 +831,7 @@ macro_rules! requests {
                 match &self.backend {
                     Backend::Local(v) => v.$name(rel, $($arg),*),
                     Backend::Remote(r) => {
-                        remote_task(r.clone(), stringify!($name), json!([rel, $($arg),*]))
+                        requests!(@remote r $name json!([rel, $($arg),*]) $(, $then)?)
                     }
                 }
             }
@@ -850,7 +874,8 @@ macro_rules! requests {
 }
 
 requests! {
-    completion => completion(pos: Pos, trigger: Option<char>) -> Completions;
+    /// On a remote vault the host answers all but a PDF's bookmarks, which are read here.
+    completion => completion(pos: Pos, trigger: Option<char>) -> Completions, then list_pages;
     /// Fill in what the popup left out until a row was looked at.
     resolve_completion => resolve(item: Completion) -> Completion;
     signature_help => signature_help(pos: Pos) -> Option<Signature>;
@@ -946,15 +971,40 @@ fn remote_task<T: DeserializeOwned + Send + 'static>(
     method: &'static str,
     params: Value,
 ) -> Task<T> {
+    remote_task_then(r, method, params, |_, answer| Ok(answer))
+}
+
+/// [`remote_task`], with the answer finished by `then` on the same blocking thread.
+fn remote_task_then<T: DeserializeOwned + Send + 'static>(
+    r: Arc<Remote>,
+    method: &'static str,
+    params: Value,
+    then: fn(&Remote, T) -> Result<T>,
+) -> Task<T> {
     let asked: Arc<crate::remote::Asked> = Arc::default();
     Task::blocking({
         let (r, asked) = (r.clone(), asked.clone());
         move || {
-            r.call_tracked(method, params, &asked, crate::rpc::DEADLINE)
-                .map_err(remote_err)
+            let answer = r
+                .call_tracked(method, params, &asked, crate::rpc::DEADLINE)
+                .map_err(remote_err)?;
+            then(&r, answer)
         }
     })
     .cancelled_by(move || r.cancel(&asked))
+}
+
+/// List the bookmarks a host left unlisted in its answer to `[[paper.pdf#`, its `serve` having no
+/// PDF reader: from the copy this machine keeps to show the PDF, fetched as opening it would be.
+/// Remote bytes travel as files, never in the protocol (DESIGN.md, Architecture).
+fn list_pages(r: &Remote, mut answer: Completions) -> Result<Completions> {
+    match answer.pages.take() {
+        Some(pages) => {
+            let outline = notes::pdf_outline(&r.fetch(&pages.rel)?)?;
+            Ok(pages.answer(outline))
+        }
+        None => Ok(answer),
+    }
 }
 
 /// The two lifecycle calls the macros do not write, where the vault is.

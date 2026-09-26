@@ -349,6 +349,44 @@ fn a_remote_vault_connects_indexes_and_answers() {
         assert_eq!(found, [(path, missing)]);
     }
 
+    // `[[paper.pdf#` lists the PDF's bookmarks, though the host's `serve` has no PDF reader: the
+    // host answers with the file and the link, and the window lists them from its own copy.
+    vault.write_file("paper.pdf", &bookmarked_pdf()).unwrap();
+    assert!(
+        eventually(
+            || vault.resolve_link("paper.pdf").ok().flatten().as_deref() == Some("paper.pdf")
+        ),
+        "the host never indexed paper.pdf"
+    );
+    remote
+        .call::<serde_json::Value>(
+            "open_document",
+            serde_json::json!(["d.md", "markdown", "[[paper.pdf#\n"]),
+        )
+        .unwrap();
+    let at = accent_api::Pos {
+        line: 0,
+        character: 12,
+    };
+    let asked: accent_api::Completions = remote
+        .call("completion", serde_json::json!(["d.md", at, null]))
+        .unwrap();
+    assert!(asked.items.is_empty(), "{asked:?}");
+    assert_eq!(asked.pages.map(|p| p.rel).as_deref(), Some("paper.pdf"));
+    let listed = wait(vault.completion("d.md", at, None)).unwrap();
+    match listed.pages {
+        // A client built without a PDF reader leaves the question as the host did.
+        Some(_) => eprintln!("no PDF reader here either: run with --features accent-api/pdf"),
+        None => {
+            let rows: Vec<(&str, &str)> = listed
+                .items
+                .iter()
+                .map(|c| (c.label.as_str(), c.insert.as_str()))
+                .collect();
+            assert_eq!(rows, [("Second", "[[paper.pdf#page=2]]")]);
+        }
+    }
+
     // Closing the vault takes the server and every forward it still has off the host. The master
     // is left its ControlPersist minute on purpose, so it is not what is asserted on.
     remote.forward(back).unwrap();
@@ -405,6 +443,51 @@ fn a_remote_vault_connects_indexes_and_answers() {
         eprintln!("host prepared, {pass}, in {:?}", t.elapsed());
     }
     exit();
+}
+
+/// Wait for a [`accent_api::Task`] without a runtime of our own: it runs on the library's, and
+/// this only asks whether it has finished.
+fn wait<T>(task: impl std::future::Future<Output = T>) -> T {
+    let mut task = std::pin::pin!(task);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(answer) = task.as_mut().poll(&mut cx) {
+            return answer;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Two blank pages and one bookmark, "Second", on the second: the smallest PDF with an outline,
+/// written by hand as `accent-api`'s own notes tests write it.
+fn bookmarked_pdf() -> Vec<u8> {
+    let objs = [
+        "<</Type/Catalog/Pages 2 0 R/Outlines 4 0 R>>",
+        "<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>",
+        "<</Type/Outlines/First 6 0 R/Last 6 0 R/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>",
+        "<</Title(Second)/Parent 4 0 R/Dest[5 0 R /XYZ 0 80 0]>>",
+    ];
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+    }
+    let xref = out.len();
+    out.push_str(&format!(
+        "xref\n0 {}\n0000000000 65535 f \n",
+        objs.len() + 1
+    ));
+    for off in &offsets {
+        out.push_str(&format!("{off:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
+        objs.len() + 1
+    ));
+    out.into_bytes()
 }
 
 /// Run `script` on the host over a connection of its own, and answer with what it printed.

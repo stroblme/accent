@@ -50,8 +50,8 @@ pub use accent_core::index::{
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
 pub use language::{
-    Completion, Completions, Diagnostic, Fold, Hover, Kind, Location, Pos, Range, Severity,
-    Signature, Support, Symbol, Task, TextEdit,
+    Completion, Completions, Diagnostic, Fold, Hover, Kind, Location, PdfPages, Pos, Range,
+    Severity, Signature, Support, Symbol, Task, TextEdit,
 };
 
 // ---------------------------------------------------------------- public data

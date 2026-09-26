@@ -21,8 +21,8 @@ use accent_core::markdown::{self, LinkKind};
 use accent_core::path::{self, FileType, basename, parent_dir, stem};
 
 use super::{
-    Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range,
-    Severity, Signature, Support, Symbol, byte_of, pos_of, range_of,
+    Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, PdfPages, Pos,
+    Range, Severity, Signature, Support, Symbol, byte_of, pos_of, range_of,
 };
 use crate::{Backlink, Event, Local, locked};
 
@@ -103,6 +103,9 @@ pub(crate) fn heading_names(headings: &[markdown::Heading]) -> Vec<&str> {
     out
 }
 
+/// A PDF's bookmarks as `(title, page index)`, flattened depth-first.
+pub(crate) type Outline = Vec<(String, Option<usize>)>;
+
 /// `[[paper.pdf#page=N]]` for each of a PDF's bookmarks, labelled by the bookmark's title.
 ///
 /// `outline` is the document's, flattened depth-first, as `(title, page index)`. A bookmark with
@@ -132,6 +135,23 @@ pub(crate) fn page_links(
             })
         })
         .collect()
+}
+
+impl PdfPages {
+    /// The bookmarks as [`page_links`] rows where `outline` could be read, and the question
+    /// itself, unanswered, where it could not: [`pdf_outline`] reads `None` with no PDF reader.
+    pub(crate) fn answer(self, outline: Option<Outline>) -> Completions {
+        match outline {
+            Some(outline) => Completions {
+                items: page_links(&outline, &self.note, self.replace),
+                ..Completions::default()
+            },
+            None => Completions {
+                pages: Some(self),
+                ..Completions::default()
+            },
+        }
+    }
 }
 
 /// What the index knows a link in the note `rel` by. A markdown link names its file from the
@@ -574,6 +594,7 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: more,
+                    pages: None,
                 })
             }
             Trigger::Anchor => {
@@ -613,6 +634,7 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: false,
+                    pages: None,
                 })
             }
             Trigger::Path => {
@@ -643,6 +665,7 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: more,
+                    pages: None,
                 })
             }
             Trigger::Tag => {
@@ -660,6 +683,7 @@ impl Notes {
                         })
                         .collect(),
                     incomplete: more,
+                    pages: None,
                 })
             }
         }
@@ -679,10 +703,12 @@ impl Notes {
         };
         if target.ends_with(".pdf") {
             let outline = pdf_outline(&Local::join(&self.root, &target)?)?;
-            return Ok(Completions {
-                items: page_links(&outline, note, replace),
-                incomplete: false,
-            });
+            let pages = PdfPages {
+                rel: target,
+                note: note.to_string(),
+                replace,
+            };
+            return Ok(pages.answer(outline));
         }
         if !target.ends_with(".md") {
             return Ok(Completions::default());
@@ -704,6 +730,7 @@ impl Notes {
         Ok(Completions {
             items,
             incomplete: false,
+            pages: None,
         })
     }
 
@@ -918,23 +945,26 @@ fn or_empty<T: Default>(what: &str, r: Result<T>) -> T {
     })
 }
 
-/// A PDF's bookmarks as `(title, page index)`, flattened depth-first.
+/// The [`Outline`] of the PDF at `path`, or `None` where there is no PDF reader to ask.
 ///
 /// One open of one file, on the thread the keystroke came in on and behind pdfium's global lock,
 /// so it happens only once the prefix already resolves to a `.pdf`.
 #[cfg(feature = "pdf")]
-fn pdf_outline(path: &Path) -> Result<Vec<(String, Option<usize>)>> {
-    Ok(accent_core::pdf::PdfDoc::open(path)?
-        .outline()?
-        .into_iter()
-        .map(|entry| (entry.title, entry.page))
-        .collect())
+pub(crate) fn pdf_outline(path: &Path) -> Result<Option<Outline>> {
+    Ok(Some(
+        accent_core::pdf::PdfDoc::open(path)?
+            .outline()?
+            .into_iter()
+            .map(|entry| (entry.title, entry.page))
+            .collect(),
+    ))
 }
 
-/// Without the `pdf` feature there is no pdfium binding to ask, so a PDF offers no pages.
+/// Without the `pdf` feature there is no pdfium binding to ask, which is `accent-cli serve` on a
+/// host: the question goes back to the window ([`PdfPages`]).
 #[cfg(not(feature = "pdf"))]
-fn pdf_outline(_path: &Path) -> Result<Vec<(String, Option<usize>)>> {
-    Ok(Vec::new())
+pub(crate) fn pdf_outline(_path: &Path) -> Result<Option<Outline>> {
+    Ok(None)
 }
 
 /// The fields a note's completion never fills, so the interesting ones stay together above.
@@ -1077,6 +1107,27 @@ mod tests {
         assert_eq!(items[1].filter.as_deref(), Some("[[paper.pdf#Method"));
         // The anchor is the one the reader lands by: page 5 as written is index 4.
         assert_eq!(markdown::pdf_anchor("page=5"), Some((4, None)));
+    }
+
+    /// A side with no PDF reader — a host's `serve` — cannot list the bookmarks, so it answers with
+    /// the PDF and the link for whoever holds a copy of the file to list them from.
+    #[test]
+    fn a_pdf_nobody_here_can_read_is_left_to_the_side_with_a_copy() {
+        let pages = PdfPages {
+            rel: "Papers/paper.pdf".to_string(),
+            note: "paper.pdf".to_string(),
+            replace: Range::default(),
+        };
+        let unread = pages.clone().answer(None);
+        assert!(unread.items.is_empty());
+        assert_eq!(unread.pages.as_ref(), Some(&pages));
+
+        let read = pages.answer(Some(vec![("Intro".to_string(), Some(0))]));
+        assert_eq!(
+            read.pages, None,
+            "listed, so nothing is left for anyone else"
+        );
+        assert_eq!(read.items[0].insert, "[[paper.pdf#page=1]]");
     }
 
     /// A second `[[` to a note that is only linked to so far offers it, spelled the way the first
