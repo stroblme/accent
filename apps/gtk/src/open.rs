@@ -290,11 +290,15 @@ impl App {
             self,
             move |pdf, result| app.exported(pdf, result)
         ));
-        // The notes name pages by number, and so do the pane's places: both follow a page edit.
-        pdf.connect_repaged(glib::clone!(
+        // A page edit does not rewrite the notes that name pages by number (NOTEPAD), so the
+        // reader is told when it left some of them pointing at other pages.
+        pdf.connect_links_moved(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |pdf, edit, step| app.repaged(pdf, edit, step)
+            move |_, moved| app.toast(&match moved {
+                1 => "A highlight in a note now points at another page".to_string(),
+                n => format!("{n} highlights in notes now point at other pages"),
+            })
         ));
         pdf.connect_choice(glib::clone!(
             #[weak(rename_to = app)]
@@ -865,6 +869,10 @@ impl App {
     /// work with anything else: the PDF engine and an image. That is the file itself on a local
     /// vault and a copy fetched over ssh on a remote one, a transfer of however long the file
     /// takes, so the asking is on a worker; a loose key is already a path here.
+    ///
+    /// While a host's bytes come, the status bar counts them ("Downloading paper.pdf… 12.3/80.0
+    /// MB"), and a PDF's "Opening the document…" waits for them (`sync_opening`). A cached copy
+    /// that is current moves nothing and says nothing.
     pub(crate) fn local_copy(
         self: &Rc<Self>,
         key: &str,
@@ -872,16 +880,45 @@ impl App {
         landed: impl FnOnce(&Rc<App>, std::io::Result<PathBuf>) + 'static,
     ) {
         let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
+        let remote = vault.as_ref().is_some_and(|v| v.is_remote());
         let (key, path) = (key.to_string(), path.to_path_buf());
+        if remote {
+            self.fetching.borrow_mut().insert(key.clone());
+            self.sync_opening();
+        }
+        let bytes = Arc::new(statusbar::Bytes::default());
+        let what = format!("Downloading {}", accent_core::path::basename(&key));
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let copy = crate::work::off_thread("fetch", move || match vault {
-                Some(vault) => vault.fetch(&key),
-                None => Ok(path),
-            })
+            let work = crate::work::off_thread("fetch", {
+                let (key, bytes) = (key.clone(), bytes.clone());
+                move || match vault {
+                    Some(vault) => vault.fetch_with(&key, &|done, total| bytes.set(done, total)),
+                    None => Ok(path),
+                }
+            });
+            let (say, retell) = (weak.clone(), weak.clone());
+            let copy = statusbar::counting(
+                move |text, running| {
+                    if let Some(app) = say.upgrade() {
+                        app.statusbar.set_transfer(text, running);
+                    }
+                },
+                move |from, to| {
+                    if let Some(app) = retell.upgrade() {
+                        app.statusbar.retell_transfer(from, to);
+                    }
+                },
+                move || bytes.line(&what),
+                work,
+            )
             .await
             .unwrap_or_else(|| Err(std::io::Error::other("the fetch stopped")));
             if let Some(app) = weak.upgrade() {
+                if remote {
+                    app.fetching.borrow_mut().remove(&key);
+                    app.sync_opening();
+                }
                 landed(&app, copy);
             }
         });

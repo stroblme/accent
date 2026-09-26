@@ -31,6 +31,9 @@ use crate::{Event, VaultConfig};
 /// A call on the main thread that takes longer than this has cost the windows a frame.
 const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
+/// How much of a file a transfer moves between two reports of how far it has got.
+const CHUNK: usize = 256 * 1024;
+
 /// Where a call in flight leaves its request id, so a caller that gives up on the answer can
 /// cancel it at the server.
 pub type Asked = Mutex<Option<u64>>;
@@ -378,6 +381,12 @@ impl Remote {
     /// they need a real file, and the protocol deliberately carries no bytes. The etag decides —
     /// same as on disk, no transfer.
     pub fn fetch(&self, rel: &str) -> std::io::Result<PathBuf> {
+        self.fetch_with(rel, &|_, _| ())
+    }
+
+    /// [`fetch`](Self::fetch), telling `progress` the bytes received so far and how many there
+    /// are, as they arrive. Nothing is told when the cached copy is current.
+    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
@@ -408,8 +417,7 @@ impl Remote {
         for dir in [dest.parent(), stamp.parent()].into_iter().flatten() {
             std::fs::create_dir_all(dir)?;
         }
-        let out = self.ssh_output(&format!("cat {}", ssh::quote(&self.remote_path(rel))))?;
-        std::fs::write(&dest, out)?;
+        self.receive(rel, &dest, current.size, progress)?;
         let _ = std::fs::write(&stamp, serde_json::to_vec(&current).unwrap_or_default());
         Ok(dest)
     }
@@ -494,22 +502,104 @@ impl Remote {
 
     /// Copy a local file into the vault. The remote watcher indexes it as it lands.
     pub fn upload(&self, local: &Path, rel: &str) -> std::io::Result<()> {
-        self.write_file(rel, &std::fs::read(local)?)
+        self.upload_with(local, rel, &|_, _| ())
+    }
+
+    /// [`upload`](Self::upload), read and sent a chunk at a time, telling `progress` the bytes
+    /// sent so far and how many there are.
+    pub fn upload_with(
+        &self,
+        local: &Path,
+        rel: &str,
+        progress: &dyn Fn(u64, u64),
+    ) -> std::io::Result<()> {
+        let file = std::fs::File::open(local)?;
+        let total = file.metadata()?.len();
+        self.ssh_input(&self.cat_into(rel), file, total, progress)
     }
 
     /// Write `bytes` to `rel` over the master, the way an upload goes: the host's shell creates a
     /// new file with the mode its umask gives a new note there.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
-        self.ssh_input(
-            &format!("cat > {}", ssh::quote(&self.remote_path(rel))),
-            bytes,
-        )
+        self.ssh_input(&self.cat_into(rel), bytes, bytes.len() as u64, &|_, _| ())
+    }
+
+    fn cat_into(&self, rel: &str) -> String {
+        format!("cat > {}", ssh::quote(&self.remote_path(rel)))
     }
 
     /// Copy a file out of the vault to somewhere on this machine.
     pub fn download(&self, rel: &str, dest: &Path) -> std::io::Result<()> {
-        let out = self.ssh_output(&format!("cat {}", ssh::quote(&self.remote_path(rel))))?;
-        std::fs::write(dest, out)
+        self.download_with(rel, dest, &|_, _| ())
+    }
+
+    /// [`download`](Self::download), telling `progress` the bytes received so far and how many
+    /// there are, as they arrive.
+    pub fn download_with(
+        &self,
+        rel: &str,
+        dest: &Path,
+        progress: &dyn Fn(u64, u64),
+    ) -> std::io::Result<()> {
+        let size: Option<crate::Etag> = self
+            .call("stat", json!([rel]))
+            .map_err(RpcError::io_error)?;
+        let size = size.map_or(0, |etag| etag.size);
+        self.receive(rel, dest, size, progress)
+    }
+
+    /// Stream `rel` from the host into `dest` a chunk at a time, so a large file is never held
+    /// whole here, telling `progress` the bytes so far of `total`. The bytes go to a `.part` file
+    /// beside `dest` that takes its name once whole: a transfer cut off leaves the last good copy,
+    /// and a reader holding the old one open keeps reading what it opened.
+    fn receive(
+        &self,
+        rel: &str,
+        dest: &Path,
+        total: u64,
+        progress: &dyn Fn(u64, u64),
+    ) -> std::io::Result<()> {
+        let mut child = self
+            .ssh(&ssh::run(
+                &self.url,
+                &self.ctl,
+                &format!("cat {}", ssh::quote(&self.remote_path(rel))),
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut part = dest.as_os_str().to_owned();
+        part.push(".part");
+        let part = PathBuf::from(part);
+        let received = (|| {
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| std::io::Error::other("ssh has no stdout"))?;
+            let mut out = std::fs::File::create(&part)?;
+            let (mut buf, mut done) = (vec![0; CHUNK], 0);
+            loop {
+                let n = stdout.read(&mut buf)?;
+                if n == 0 {
+                    return Ok(());
+                }
+                out.write_all(&buf[..n])?;
+                done += n as u64;
+                progress(done, total);
+            }
+        })();
+        let out = child.wait_with_output()?;
+        let finished = received.and_then(|()| match out.status.success() {
+            true => std::fs::rename(&part, dest),
+            false => Err(std::io::Error::other(
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            )),
+        });
+        if finished.is_err() {
+            let _ = std::fs::remove_file(&part);
+        }
+        finished
     }
 
     fn remote_path(&self, rel: &str) -> String {
@@ -574,31 +664,38 @@ impl Remote {
         }
     }
 
-    fn ssh_output(&self, command: &str) -> std::io::Result<Vec<u8>> {
-        let out = self
-            .ssh(&ssh::run(&self.url, &self.ctl, command))
-            .stdin(Stdio::null())
-            .output()?;
-        match out.status.success() {
-            true => Ok(out.stdout),
-            false => Err(std::io::Error::other(
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            )),
-        }
-    }
-
-    fn ssh_input(&self, command: &str, bytes: &[u8]) -> std::io::Result<()> {
+    /// Run `command` on the host with `input` on its stdin, a chunk at a time, telling `progress`
+    /// the bytes written so far of `total`.
+    fn ssh_input(
+        &self,
+        command: &str,
+        mut input: impl Read,
+        total: u64,
+        progress: &dyn Fn(u64, u64),
+    ) -> std::io::Result<()> {
         let mut child = self
             .ssh(&ssh::run(&self.url, &self.ctl, command))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| std::io::Error::other("ssh has no stdin"))?
-            .write_all(bytes)?;
+        {
+            // Dropped at the end of the block, which closes the pipe: the host's `cat` ends there.
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| std::io::Error::other("ssh has no stdin"))?;
+            let (mut buf, mut done) = (vec![0; CHUNK], 0);
+            loop {
+                let n = input.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                stdin.write_all(&buf[..n])?;
+                done += n as u64;
+                progress(done, total);
+            }
+        }
         let out = child.wait_with_output()?;
         match out.status.success() {
             true => Ok(()),

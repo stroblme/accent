@@ -32,7 +32,8 @@ use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use files::{
     bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
-    bench_menu, bench_menu_press, bench_paths, bench_save_as, bench_templates, bench_watch,
+    bench_menu, bench_menu_press, bench_paths, bench_save_as, bench_templates, bench_transfer,
+    bench_watch,
 };
 use find::bench_find;
 use git::{
@@ -160,10 +161,8 @@ use tags::bench_tags;
 /// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
 /// page, and deletes the first through the window actions, which asks nothing, then walks
 /// all four back with Undo and forward again with Redo, and prints the page being read and each
-/// page's text on disk after every step, with the pages a note written first links to (a
-/// highlight, a jump and a markdown link into pages 1 to 3) and what the toast said; then the
-/// items of the page's own menu without and with a selection, and of the status bar's page
-/// count's menu.
+/// page's text on disk after every step; then the items of the page's own menu without and with a
+/// selection, and of the status bar's page count's menu.
 /// Point it at a scratch copy of the generated vault's `Attachments/pages.pdf`.
 /// `=strip:<rel_path>` is the pointer's half, held for XTEST: it opens the document with the
 /// Outline pane up and prints the same every two seconds for 40 s, so a hover and a drag along the
@@ -235,6 +234,8 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_CLIP=outside:<dir>` pastes a folder and a file made on this machine into `<dir>`
 /// ("" is the root) as GNOME Files would, and prints what landed and the toast
 /// (`files::bench_clip_outside`).
+/// `ACCENT_BENCH_TRANSFER=<rel_pdf>` opens, downloads and uploads over a remote vault and prints
+/// the status bar's byte counts for each (`files::bench_transfer`).
 /// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
 /// note and prints the text and the files they left (`attach::bench_attach`).
 /// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
@@ -333,6 +334,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let collapse = std::env::var("ACCENT_BENCH_COLLAPSE").is_ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
+    let transfer = std::env::var("ACCENT_BENCH_TRANSFER").ok();
     let menu = std::env::var("ACCENT_BENCH_MENU").ok();
     let drop = std::env::var("ACCENT_BENCH_DROP").ok();
     let watch = std::env::var("ACCENT_BENCH_WATCH").ok();
@@ -352,6 +354,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !replace
         && search.is_none()
         && clip.is_none()
+        && transfer.is_none()
         && menu.is_none()
         && drop.is_none()
         && watch.is_none()
@@ -438,6 +441,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if drawing {
             return bench_drawing(&app);
+        }
+        if let Some(rel) = transfer {
+            return bench_transfer(&app, &rel);
         }
         if let Some(rel) = clip {
             if let Some(dir) = rel.strip_prefix("outside:") {

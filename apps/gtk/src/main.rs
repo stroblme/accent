@@ -45,7 +45,6 @@ mod preview;
 mod recall;
 mod reconnect;
 mod references;
-mod relink;
 mod ring;
 mod save;
 mod session;
@@ -327,6 +326,9 @@ struct App {
     /// Whether a reconcile has finished, so the index can be trusted for backlinks. A real flag
     /// rather than the status label, which is also hidden before the first `Progress` arrives.
     reconciled: Cell<bool>,
+    /// The keys whose bytes are on their way from a host ([`App::local_copy`]). Their count is the
+    /// status bar's line meanwhile, so a PDF among them is not yet "Opening the document…".
+    fetching: RefCell<HashSet<String>>,
     /// Whether the stored tabs have been put back. A remote vault answers nothing until it is
     /// connected, so its window waits for `Event::Connected` to restore them, and this is what
     /// keeps a later reconnect from restoring them a second time over the tabs already open.
@@ -1228,7 +1230,7 @@ impl App {
         let opening = self
             .active_doc()
             .and_then(|doc| doc.pdf().cloned())
-            .is_some_and(|pdf| pdf.opening());
+            .is_some_and(|pdf| pdf.opening() && !self.fetching.borrow().contains(&pdf.key()));
         if opening {
             self.statusbar.set_progress(Some("Opening the document…"));
             return;
