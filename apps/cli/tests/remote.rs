@@ -407,6 +407,14 @@ fn a_remote_vault_connects_indexes_and_answers() {
         vault.read("e.md").unwrap().0,
         "[[paper.pdf#page=2]] [t](paper.pdf#page=1)\n"
     );
+    // Save As's copy in another folder has its paths pointed back by the host's index.
+    assert_eq!(
+        vault
+            .relink_copy("e.md", "x/copy.md", "[t](paper.pdf#page=1) [[paper.pdf]]\n")
+            .unwrap()
+            .as_deref(),
+        Some("[t](../paper.pdf#page=1) [[paper.pdf]]\n")
+    );
 
     // Closing the vault takes the server and every forward it still has off the host. The master
     // is left its ControlPersist minute on purpose, so it is not what is asserted on.

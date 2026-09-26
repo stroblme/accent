@@ -373,6 +373,35 @@ impl Local {
         Ok(true)
     }
 
+    /// `text`, the note at `from`, as its copy at `to` has to read for every relative link,
+    /// reference definition and HTML `src`/`href` in it to name the file it named: what Save As
+    /// writes, the original left as it is. `None` when no path needs it. The text is the caller's,
+    /// unsaved edits and all, so its paths are resolved here rather than read from what the index
+    /// holds for `from`.
+    pub fn relink_copy(&self, from: &str, to: &str, text: &str) -> Result<Option<String>> {
+        let targets = self.path_targets(from, text)?;
+        Ok(markdown::rewrite_moved(
+            text,
+            from,
+            to,
+            &targets,
+            &HashMap::new(),
+        ))
+    }
+
+    /// What every path `text` spells from the note at `rel` resolves to
+    /// ([`markdown::path_link_keys`]), asked of the index one by one.
+    fn path_targets(&self, rel: &str, text: &str) -> Result<HashMap<String, String>> {
+        let index = self.index();
+        let mut out = HashMap::new();
+        for key in markdown::path_link_keys(text, rel) {
+            if let Some(file) = index.resolve_target(&key)? {
+                out.insert(key, file);
+            }
+        }
+        Ok(out)
+    }
+
     /// Point every note link into the PDF `rel` at where `edit` took the page it names, each note
     /// read, rewritten and written back through the etag gate as a rename's are.
     ///
@@ -761,6 +790,35 @@ mod tests {
                 .any(|b| b.src_rel_path == "a.md"),
             BUDGET
         ));
+    }
+
+    /// Save As's copy in another folder points its paths back at what the note's pointed at, the
+    /// unsaved `<img>` included, and leaves the wikilink and the original alone.
+    #[test]
+    fn a_copy_elsewhere_keeps_its_relative_links() {
+        let note = "[x](../b.md) ![](img.png) [r][r] [[b]]\n\n[r]: sub/c.md\n";
+        let f = vault_of(&[
+            ("a/n.md", note),
+            ("b.md", "b\n"),
+            ("a/img.png", "png"),
+            ("a/sub/c.md", "c\n"),
+        ]);
+        let typed = format!("{note}<img src=\"img.png\">\n");
+        assert_eq!(
+            f.vault
+                .relink_copy("a/n.md", "x/y/copy.md", &typed)
+                .unwrap()
+                .as_deref(),
+            Some(concat!(
+                "[x](../../b.md) ![](../../a/img.png) [r][r] [[b]]\n\n",
+                "[r]: ../../a/sub/c.md\n<img src=\"../../a/img.png\">\n"
+            ))
+        );
+        assert_eq!(
+            f.vault.relink_copy("a/n.md", "a/m.md", &typed).unwrap(),
+            None
+        );
+        assert_eq!(f.read("a/n.md"), note);
     }
 
     /// A page edit carries every link into the PDF with it, in every note, and the Undo of a

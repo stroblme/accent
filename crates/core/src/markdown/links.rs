@@ -275,8 +275,8 @@ pub fn path_keys(rel: &str) -> Vec<String> {
 /// note's folder, percent-encoded, its `#anchor` untouched.
 ///
 /// Two path forms the parser does not hand over as links are scanned for as well: reference-style
-/// `[ref]: path "title"` definitions ([`definition_edits`]) and the `src`/`href` of the HTML a
-/// note holds ([`html_edits`]).
+/// `[ref]: path "title"` definitions and the `src`/`href` of the HTML a note holds
+/// ([`scanned_paths`]).
 pub fn rewrite_moved(
     text: &str,
     src_old: &str,
@@ -311,8 +311,9 @@ pub fn rewrite_moved(
         };
         edits.extend(edit);
     }
-    edits.extend(definition_edits(text, &analysis, &m));
-    edits.extend(html_edits(text, &analysis, &m));
+    for at in scanned_paths(text, &analysis) {
+        edits.extend(m.edit(text, at));
+    }
     // Back to front, so the earlier offsets stay valid. Links nest (an image inside a link), but
     // the bytes rewritten for each never overlap.
     edits.sort_by_key(|(at, _)| std::cmp::Reverse(at.start));
@@ -352,14 +353,11 @@ impl Moved<'_> {
     /// index resolved it to a file *before* the move, which is what leaves an `https://` URL, a
     /// bare `#anchor` and a `../..` past the root alone.
     fn repoint(&self, written: &str) -> Option<String> {
-        let rooted = written.starts_with('/');
-        if written.is_empty() || !(rooted || path::stays_inside(self.dir_old, written)) {
-            return None;
-        }
-        let key = link_key(&path::resolve(self.dir_old, written));
+        let key = path_key(self.dir_old, written)?;
         let (old, new) = moved(&key, self.targets, self.moves)?;
         // A path, so it still finds the file only if it spells that file's path from the note's
         // new folder: the index's by-name fallback is not something a markdown reader shares.
+        let rooted = written.starts_with('/');
         let now = link_key(&path::resolve(self.dir_new, written));
         if (rooted || path::stays_inside(self.dir_new, written))
             && [link_key(new), link_key(&strip_ext(new))].contains(&now)
@@ -390,25 +388,59 @@ fn markdown_edit(text: &str, link: &Link, m: &Moved) -> Option<(Range<usize>, St
     Some((destination(text, link)?, percent_encode(&to)))
 }
 
-/// The reference-style definitions a move leaves stale: `[ref]: path "title"` on a line of its own.
+/// The key a path written in a note in `dir` is looked up by — from that folder, or from the vault
+/// root when it starts with `/` — or `None` for an empty one and one that climbs out of the vault.
+fn path_key(dir: &str, written: &str) -> Option<String> {
+    let rooted = written.starts_with('/');
+    (!written.is_empty() && (rooted || path::stays_inside(dir, written)))
+        .then(|| link_key(&path::resolve(dir, written)))
+}
+
+/// The key of every path the note at `src` spells in `text` — a markdown link's, a reference
+/// definition's, an HTML `src` or `href` — as [`rewrite_moved`] and [`repage_links`] look them up
+/// in their `targets`. For a caller that resolves them itself, the text not being what the index
+/// holds for the note: Save As writes a tab's unsaved edits too.
+pub fn path_link_keys(text: &str, src: &str) -> Vec<String> {
+    let dir = parent_dir(src);
+    let a = analyze(text);
+    let links = a
+        .links
+        .iter()
+        .filter(|l| l.kind == LinkKind::Markdown)
+        .map(|l| l.target.clone());
+    let scanned = scanned_paths(text, &a)
+        .into_iter()
+        .filter_map(|at| Some(percent_decode(split_anchor(text.get(at)?).0)));
+    links
+        .chain(scanned)
+        .filter_map(|written| path_key(dir, &written))
+        .collect()
+}
+
+/// Where the two path forms the parser does not hand over as links sit in `text`, each with its
+/// `#anchor`: the destination of every reference-style definition, then every `src` and `href` of
+/// the HTML the note holds.
+fn scanned_paths(text: &str, a: &Analysis) -> Vec<Range<usize>> {
+    let mut out = definitions(text, a);
+    out.extend(html_values(text, a));
+    out
+}
+
+/// The destinations of the reference-style definitions: `[ref]: path "title"` on a line of its own.
 ///
 /// pulldown-cmark resolves a definition into the links that use it and never says where the
 /// definition itself sits, so this is a scan of its own: a line indented at most three spaces —
 /// four would make it code — whose `[label]` is closed by `]:`, outside anything verbatim. A
 /// footnote's `[^1]:` is a definition of another kind and its text is no path. The destination is
-/// read to the next space; a title after it, and a `<…>` destination's brackets, are left as
-/// written.
-fn definition_edits(text: &str, a: &Analysis, m: &Moved) -> Vec<(Range<usize>, String)> {
+/// read to the next space; a title after it, and a `<…>` destination's brackets, are left out.
+fn definitions(text: &str, a: &Analysis) -> Vec<Range<usize>> {
     let skip = verbatim(a);
     let mut out = Vec::new();
     let mut start = 0;
     for line in text.split_inclusive('\n') {
         let at = definition_destination(line).map(|r| start + r.start..start + r.end);
         start += line.len();
-        match at {
-            Some(at) if !skip.iter().any(|r| r.contains(&at.start)) => out.extend(m.edit(text, at)),
-            _ => {}
-        }
+        out.extend(at.filter(|at| !skip.iter().any(|r| r.contains(&at.start))));
     }
     out
 }
@@ -435,14 +467,17 @@ fn definition_destination(line: &str) -> Option<Range<usize>> {
     (len > 0).then_some(start..start + len)
 }
 
-/// The `src` and `href` a move leaves stale in the HTML a note holds — a block of it, or an inline
-/// tag. pulldown-cmark hands HTML over as opaque text, so these are scanned too.
-fn html_edits(text: &str, a: &Analysis, m: &Moved) -> Vec<(Range<usize>, String)> {
+/// The `src` and `href` values in the HTML a note holds — a block of it, or an inline tag.
+/// pulldown-cmark hands HTML over as opaque text, so these are scanned too.
+fn html_values(text: &str, a: &Analysis) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     for span in a.spans.iter().filter(|s| s.style == Style::Html) {
-        for at in attribute_values(&text[span.range.clone()]) {
-            out.extend(m.edit(text, span.range.start + at.start..span.range.start + at.end));
-        }
+        let base = span.range.start;
+        out.extend(
+            attribute_values(&text[span.range.clone()])
+                .into_iter()
+                .map(|at| base + at.start..base + at.end),
+        );
     }
     out
 }
