@@ -166,6 +166,32 @@ internal const val MARK_ALPHA = 0.3f
 internal const val CURRENT_MARK_ALPHA = 0.6f
 
 /**
+ * The sides of a conflict block git left in a note, as the desktop's editor and preview tint them
+ * (`diff::tint`, `conflict::tints`): VS Code's green for the current side and blue for the incoming
+ * one, each 65 % hue to 35 % ink, so it darkens on the light page and lightens on the dark one, over
+ * the page at 16 % and under a caption at 35 %; a diff3 base is the ink alone at half of each. The
+ * hues are the desktop's weights, kept as floats because a [Color] would round them to a byte.
+ */
+private val CurrentHue = floatArrayOf(0.15f, 0.70f, 0.35f)
+private val IncomingHue = floatArrayOf(0.20f, 0.50f, 0.90f)
+private const val HUE_MIX = 0.65f
+private const val SIDE_ALPHA = 0.16f
+private const val CAPTION_ALPHA = 0.35f
+
+/** Each side's tint and its caption's — current, base, incoming — over a page inked in [ink]. */
+internal fun conflictTints(ink: Color): List<Pair<Color, Color>> {
+    fun tint(hue: FloatArray, alpha: Float) = Color(
+        hue[0] * HUE_MIX + ink.red * (1 - HUE_MIX),
+        hue[1] * HUE_MIX + ink.green * (1 - HUE_MIX),
+        hue[2] * HUE_MIX + ink.blue * (1 - HUE_MIX),
+        alpha,
+    )
+    fun side(hue: FloatArray) = tint(hue, SIDE_ALPHA) to tint(hue, CAPTION_ALPHA)
+    val base = ink.copy(alpha = SIDE_ALPHA / 2) to ink.copy(alpha = CAPTION_ALPHA / 2)
+    return listOf(side(CurrentHue), base, side(IncomingHue))
+}
+
+/**
  * Hierarchy by size and weight, not by colour or rule. The body is the system's own size, which
  * is what the reader set; the rest is measured against it.
  */

@@ -65,6 +65,12 @@ impl Block {
 /// `conflict-marker-size` — then the line's end or a space and a label.
 const SIZE: usize = 7;
 
+/// What the marker line `marker` (one of [`Block::markers`]) names: `HEAD` for
+/// `<<<<<<< HEAD`, the branch for `>>>>>>> side`, and nothing where git wrote no label.
+pub fn label(text: &str, marker: Range<usize>) -> &str {
+    text[marker][SIZE..].trim()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Marker {
     Start,
@@ -199,6 +205,8 @@ mod tests {
         let b = &blocks(text)[0];
         let markers: Vec<&str> = b.markers().into_iter().map(|r| &text[r]).collect();
         assert_eq!(markers, ["<<<<<<< HEAD\n", "=======\n", ">>>>>>> side\n"]);
+        let labels: Vec<&str> = b.markers().into_iter().map(|r| label(text, r)).collect();
+        assert_eq!(labels, ["HEAD", "", "side"]);
     }
 
     #[test]

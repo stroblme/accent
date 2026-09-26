@@ -37,8 +37,10 @@ import io.github.stroblme.accent.ffi.analyzeUtf16
 import io.github.stroblme.accent.ffi.toHtml
 import java.io.File
 import java.net.URLDecoder
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToInt
 
 /**
  * One note, read or written.
@@ -395,10 +397,30 @@ ${if (diagrams(body)) mermaid(if (bg.dark()) "dark" else "neutral") else ""}
   th, td { padding: 4px 10px 4px 0; text-align: left; }
   math[display="block"] { margin: 1.2em 0; }
   hr { border: 0; border-top: 1px solid ${fg.css()}; opacity: 0.15; }
+  .conflict { margin: 1em 0; border-radius: 6px; overflow: auto; }
+  .conflict > div { display: flow-root; padding: 0 12px; }
+  .conflict-label { margin: 0 -12px; padding: 2px 12px; font-size: 0.85em; font-weight: 700; }
+${conflictCss(fg)}
 </style></head><body>$body</body></html>
 """
 
+/**
+ * A conflict block's boxes (`to_html`), in the desktop's tints of its sides and each caption in
+ * its marker line's ([conflictTints]).
+ */
+private fun conflictCss(ink: Color): String =
+    listOf("current", "base", "incoming").zip(conflictTints(ink)).joinToString("\n") { (side, tint) ->
+        "  .conflict-$side { background: ${tint.first.rgba()}; }\n" +
+            "  .conflict-$side > .conflict-label { background: ${tint.second.rgba()}; }"
+    }
+
 internal fun Color.css(): String = String.format("#%06X", 0xFFFFFF and toArgb())
+
+/** A colour with its alpha, which [css] drops. */
+internal fun Color.rgba(): String = String.format(
+    Locale.ROOT, "rgba(%d, %d, %d, %.2f)",
+    (red * 255).roundToInt(), (green * 255).roundToInt(), (blue * 255).roundToInt(), alpha,
+)
 
 /** Whether rendered HTML holds a mermaid fence: pulldown-cmark's class on a fence's code. */
 internal fun diagrams(html: String): Boolean = "<code class=\"language-mermaid\">" in html

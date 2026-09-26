@@ -147,7 +147,9 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 /// `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` shows a note in the split view and prints, for every
 /// image on the page, the pixel WebKit painted two in from its corner and at its centre, with how
 /// many requests the page has made so far: after the first render, after a render of the same
-/// text, under Light, Dark and Solarized, and then with every image on it inverted.
+/// text, under Light, Dark and Solarized, and then with every image on it inverted. Each side of a
+/// conflict block gets a line too: its class, caption, height and the tints the two are painted
+/// in. With `ACCENT_BENCH_SHOTS=<dir>` each step's whole page is saved there as a PNG.
 ///
 /// `=hold:<rel_note>` instead prints where each image is on screen and stays up for 40 s, printing
 /// the inverted images and the page's requests every two seconds, for an XTEST right-click on an
@@ -262,6 +264,28 @@ async fn preview_look(app: &Rc<App>, when: &str) {
             pixel(x + 2.0, y + 2.0),
             pixel(x + w / 2.0, y + h / 2.0),
         );
+    }
+    let script = "JSON.stringify(Array.from(document.querySelectorAll('.conflict > div')) \
+        .map(function (d) { var l = d.firstElementChild, s = getComputedStyle; \
+        return [d.className, l.textContent, d.offsetHeight, s(d).backgroundColor, \
+                s(l).backgroundColor]; }))";
+    let sides: Vec<(String, String, f64, String, String)> = view
+        .evaluate_javascript_future(script, None, None)
+        .await
+        .ok()
+        .and_then(|v| serde_json::from_str(&v.to_str()).ok())
+        .unwrap_or_default();
+    for (class, label, h, body, caption) in sides {
+        println!(
+            "bench preview_look {when} dark={} {class} label={label:?} h={h} body={body} \
+             caption={caption}",
+            adw::StyleManager::default().is_dark(),
+        );
+    }
+    if let Ok(dir) = std::env::var("ACCENT_BENCH_SHOTS")
+        && let Err(e) = shot.save_to_png(Path::new(&dir).join(format!("preview-{when}.png")))
+    {
+        println!("bench preview_look {when} shot_error {e}");
     }
 }
 
