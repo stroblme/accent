@@ -3,6 +3,7 @@ package io.github.stroblme.accent
 import android.content.Context
 import android.system.Os
 import android.util.Log
+import io.github.stroblme.accent.ffi.uniffiEnsureInitialized
 import java.io.File
 
 /**
@@ -32,6 +33,12 @@ object Native {
         // `dlopen` afterwards, which finds what the app has already loaded.
         runCatching { System.loadLibrary("pdfium") }
             .onFailure { Log.e(TAG, "libpdfium did not load; PDFs will not open", it) }
+
+        // The core, bound now rather than on the first call, and checked against the bindings
+        // it was built with: a library that does not match them throws here, once, at launch,
+        // where it would otherwise fail on whichever call reached a changed function first.
+        // Not caught, because without the core there is no app to run.
+        uniffiEnsureInitialized()
     }
 
     private fun setEnv(name: String, dir: File) {
