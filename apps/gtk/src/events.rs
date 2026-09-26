@@ -154,6 +154,16 @@ impl App {
                 }
             }
             Event::FileChanged(rel) => {
+                // WebKit answers a render with what it was served, so an image the preview was
+                // served goes from its cache before the note is rendered again.
+                if self
+                    .preview
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|p| p.holds(&rel))
+                {
+                    self.reshow_preview_images();
+                }
                 let Some(doc) = self.doc_for(&rel) else {
                     return;
                 };

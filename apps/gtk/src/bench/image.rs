@@ -168,7 +168,13 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 /// `=hold:<rel_note>` instead prints where each image is on screen and stays up for 40 s, printing
 /// the inverted images and the page's requests every two seconds, for an XTEST right-click on an
 /// image and a pick from its menu.
+///
+/// `=change:<rel_note>,<rel_img>,<rel_other>` instead copies `<rel_other>` over `<rel_img>` once
+/// the note shows, a figure exported again under the preview, and prints the page either side.
 pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
+    if let Some(arg) = rel.strip_prefix("change:") {
+        return change_preview(app, arg);
+    }
     let (hold, rel) = match rel.strip_prefix("hold:") {
         Some(rel) => (true, rel),
         None => (false, rel),
@@ -301,6 +307,30 @@ async fn preview_look(app: &Rc<App>, when: &str) {
     {
         println!("bench preview_look {when} shot_error {e}");
     }
+}
+
+/// See `=change:` on [`bench_preview_look`].
+fn change_preview(app: &Rc<App>, arg: &str) {
+    let [rel, image, other] = arg.split(',').collect::<Vec<_>>()[..] else {
+        println!("bench preview_look change needs <rel_note>,<rel_img>,<rel_other>");
+        return bench_quit(app);
+    };
+    app.open_path(rel);
+    let (app, image, other) = (app.clone(), image.to_string(), other.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(400)).await;
+        app.set_mode(Mode::Split);
+        preview_look(&app, "before").await;
+        let root = app.root();
+        if let Err(e) = std::fs::copy(root.join(&other), root.join(&image)) {
+            println!("bench preview_look cannot_replace {e}");
+            return bench_quit(&app);
+        }
+        // The watcher's event, and the render it asks for.
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        preview_look(&app, "changed").await;
+        bench_quit(&app);
+    });
 }
 
 /// See `=hold:` on [`bench_preview_look`].
