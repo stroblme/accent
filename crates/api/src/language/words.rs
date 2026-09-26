@@ -161,6 +161,7 @@ impl Words {
             return Completions {
                 items: Vec::new(),
                 incomplete: true,
+                pages: None,
             };
         };
         let prefix = typed.to_lowercase();
@@ -216,6 +217,7 @@ impl Words {
                 })
                 .collect(),
             incomplete,
+            pages: None,
         }
     }
 }

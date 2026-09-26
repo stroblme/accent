@@ -222,6 +222,7 @@ fn completions_of(
             .filter_map(|raw| completion_of(raw, text, pos, enc, resolvable))
             .collect(),
         incomplete,
+        pages: None,
     }
 }
 
