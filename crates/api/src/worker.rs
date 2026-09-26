@@ -122,13 +122,12 @@ struct Worker {
     paused: bool,
 }
 
-/// What one batch has accumulated: the directories whose children changed, the paths it took out
-/// of the index, and whether anything happened that link resolution has to see.
+/// What one batch has accumulated: the directories whose children changed, and the paths it took
+/// out of the index.
 #[derive(Default)]
 struct Batch {
     dirs: BTreeSet<String>,
     removed: BTreeSet<String>,
-    resolve: bool,
     /// A directory was added, so the watch set — one watch per directory — is short one entry.
     rewatch: bool,
 }
@@ -234,14 +233,6 @@ impl Worker {
                 Msg::Update { rel, own } => self.update(&rel, own, &mut batched),
                 Msg::Fs(ev) => self.apply(ev, &mut batched),
             }
-        }
-        // Once for the batch, not once per file: resolution is a whole-vault pass (225 ms at the
-        // 56k links of `testvault/`), so a Syncthing pull of 100 notes would otherwise hold the
-        // worker — and anyone closing the window, which joins it — for twenty seconds.
-        if batched.resolve
-            && let Err(e) = self.index.resolve_links()
-        {
-            self.fail("resolving links", e);
         }
         // A new directory is watched from now on, not from the next reconcile: watches are
         // per-directory, so `mkdir Ideas` followed by a write into it would otherwise be silent.
@@ -420,7 +411,6 @@ impl Worker {
                     if let Err(e) = self.index.remove_file_batched(&from) {
                         self.fail(&format!("removing {from}"), e);
                     }
-                    b.resolve = true;
                     b.removed.insert(from.clone());
                     self.update(&to, false, b);
                     b.dirs.insert(parent_dir(&from).to_string());
@@ -446,7 +436,6 @@ impl Worker {
         if let Err(e) = self.index.remove_file_batched(rel) {
             self.fail(&format!("removing {rel}"), e);
         }
-        b.resolve = true;
         b.removed.insert(rel.to_string());
         b.dirs.insert(parent_dir(rel).to_string());
         self.seen_conflicts.remove(rel);
@@ -459,10 +448,11 @@ impl Worker {
         if rel.is_empty() {
             return;
         }
-        match self.index.update_file_batched(&self.root, rel) {
+        // The links the file holds and the ones its names answer to are resolved as it goes, in a
+        // few index lookups: a pass over every link is 0.1–0.35 s a batch at `make vault`.
+        match self.index.update_file(&self.root, rel) {
             Ok(Change::Added(kind)) => {
                 b.dirs.insert(parent_dir(rel).to_string());
-                b.resolve = true;
                 b.rewatch |= kind == FileKind::Dir;
                 // A path this batch removed and is seeing again was rewritten, not created:
                 // whoever has it open has to reload it.
@@ -473,10 +463,8 @@ impl Worker {
             Ok(Change::Removed) => {
                 b.dirs.insert(parent_dir(rel).to_string());
                 b.removed.insert(rel.to_string());
-                b.resolve = true;
             }
             Ok(Change::Updated(kind)) => {
-                b.resolve = true;
                 // Every kind but a directory reports: a PDF rebuilt by a tool or a source file
                 // edited in another editor has to refresh in the UI just like a note does.
                 if kind != FileKind::Dir && !own {
@@ -859,7 +847,6 @@ mod tests {
     }
 
     /// A Syncthing pull is one batch of files; the links in all of them still have to resolve.
-    /// That the batch resolves once rather than once per file is pinned in `index`.
     #[test]
     fn a_burst_of_writes_resolves_the_links_in_all_of_them() {
         let f = Fixture::open(VaultConfig::default());
@@ -870,6 +857,60 @@ mod tests {
 
         assert!(poll_until(
             || f.vault.backlinks("Target.md").unwrap().len() == 10,
+            BUDGET
+        ));
+    }
+
+    /// A vault opened on `files`, each `(rel, text)`.
+    fn open_with(files: &[(&str, &str)]) -> Fixture {
+        let root = tempfile::tempdir().unwrap();
+        for (rel, text) in files {
+            std::fs::write(root.path().join(rel), text).unwrap();
+        }
+        Fixture::open_dir(root, VaultConfig::default())
+    }
+
+    /// A batch resolves only what its files can have changed, so each kind of change is pinned
+    /// here: an edit moves the note's own links.
+    #[test]
+    fn an_edit_points_its_links_at_their_new_targets() {
+        let f = open_with(&[("A.md", "a\n"), ("B.md", "b\n"), ("n.md", "see [[A]]\n")]);
+        assert_eq!(f.vault.backlinks("A.md").unwrap().len(), 1);
+
+        f.vault.save("n.md", "see [[B]]\n", None).unwrap();
+
+        assert!(poll_until(
+            || f.vault.backlinks("B.md").unwrap().len() == 1,
+            BUDGET
+        ));
+        assert!(f.vault.backlinks("A.md").unwrap().is_empty());
+    }
+
+    /// A new note takes the links other notes wrote to it before it existed.
+    #[test]
+    fn a_new_note_takes_the_links_that_were_waiting_for_it() {
+        let f = open_with(&[("n.md", "see [[Later]]\n")]);
+        assert_eq!(f.vault.missing_notes().unwrap(), ["Later.md"]);
+
+        f.vault.save("Later.md", "here\n", None).unwrap();
+
+        assert!(poll_until(
+            || f.vault.backlinks("Later.md").unwrap().len() == 1,
+            BUDGET
+        ));
+        assert!(f.vault.missing_notes().unwrap().is_empty());
+    }
+
+    /// A deleted note leaves the links to it dangling, offered again as a note to write.
+    #[test]
+    fn a_deleted_note_leaves_the_links_to_it_dangling() {
+        let f = open_with(&[("Gone.md", "soon\n"), ("n.md", "see [[Gone]]\n")]);
+        assert!(f.vault.missing_notes().unwrap().is_empty());
+
+        f.vault.delete("Gone.md").unwrap();
+
+        assert!(poll_until(
+            || f.vault.missing_notes().unwrap() == ["Gone.md"],
             BUDGET
         ));
     }
