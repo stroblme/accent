@@ -86,8 +86,9 @@ Compose widget stands in for which desktop one.
 - An image file — from the files, the switcher, a link, or a tap on it in a note — opens on a screen
   of its own rather than as a note: the image fitted whole to the screen on the page colour, under
   the document's bar. A pinch zooms it, the WebView's own.
-- It is drawn by the note's rule (Colour), and the bar's one action is Invert, which flips that rule
-  for this file for as long as the app runs, as a long press on the image in a note does.
+- It is drawn by the note's rule (Colour), and the bar's one action is Invert, which sends this file
+  to the other theme's page for as long as the app runs, as a long press on the image in a note
+  does.
 
 ### Message
 
@@ -232,8 +233,9 @@ exist as a visible control.
 - So is an image that reads as a document — a scan, a plot, a diagram, a screenshot of text — in a
   note and on the image screen alike; a photo is left alone, an SVG is always a drawing, a GIF is
   never touched (the decoder takes its first frame, and an animation would stop), and past 64 MP an
-  image is not looked at. Inverting one flips the rule for that file: in a light theme it goes onto
-  the dark page, in a dark one it shows as it is. Per file, until the app's process ends, never
+  image is not looked at. Inverting one sends it to the other theme's page whatever it shows, as it
+  does a PDF: in a light theme onto the dark page, with that page under its transparent parts as a
+  PDF page's paper is, and in a dark one as it is. Per file, until the app's process ends, never
   written anywhere — the desktop's Invert, for a figure the classifier got wrong or a PDF that reads
   better the other way.
 
