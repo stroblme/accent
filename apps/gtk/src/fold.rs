@@ -40,6 +40,7 @@ const ALPHA: f32 = 0.4;
 pub fn install_tag(buffer: &sourceview5::Buffer) {
     let tag = gtk::TextTag::builder().name(TAG).invisible(true).build();
     buffer.tag_table().add(&tag);
+    buffer.connect_changed(|buffer| whole_lines(buffer.upcast_ref()));
 }
 
 fn tag(buffer: &gtk::TextBuffer) -> Option<gtk::TextTag> {
@@ -127,11 +128,64 @@ pub fn reveal(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
 
 /// The tags hiding `iter`: a fold's, a comparison's collapsed run's, both or neither.
 pub fn hiding(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> Vec<gtk::TextTag> {
+    hiders(buffer).filter(|tag| iter.has_tag(tag)).collect()
+}
+
+/// The tags that hide text in an editor's buffer: its folds' and a comparison's collapsed runs'.
+fn hiders(buffer: &gtk::TextBuffer) -> impl Iterator<Item = gtk::TextTag> {
     [tag(buffer), buffer.tag_table().lookup(crate::diff::TAG_GAP)]
         .into_iter()
         .flatten()
-        .filter(|tag| iter.has_tag(tag))
-        .collect()
+}
+
+/// Where `tag` lies in `buffer`, as character offsets: taking a tag off is a change to the
+/// buffer, which iterators do not outlive.
+fn runs(buffer: &gtk::TextBuffer, tag: &gtk::TextTag) -> Vec<(i32, i32)> {
+    let mut runs = Vec::new();
+    let mut at = buffer.start_iter();
+    while at.starts_tag(Some(tag)) || at.forward_to_tag_toggle(Some(tag)) {
+        let mut end = at;
+        end.forward_to_tag_toggle(Some(tag));
+        runs.push((at.offset(), end.offset()));
+        at = end;
+    }
+    runs
+}
+
+/// Show whatever part of a line an edit has left hidden, so hidden text keeps to whole lines.
+///
+/// Deleting the newline at either edge of a hidden run joins a visible line to a hidden one:
+/// Delete at the end of a folded heading, Backspace at the start of the line after the fold, and
+/// the same at a comparison's collapsed run. GTK 4.22 aborts on such a line. Asked for the iter at
+/// a point in the line's pixels-below-lines — which GtkSourceView asks at the top and bottom of
+/// the screen on every frame, for its annotations — `gtk_text_layout_get_iter_at_position` hands
+/// `gtk_text_iter_set_visible_line_index` the line's whole byte count, hidden bytes included; that
+/// walks on into the lines after and dies with "Byte index … is off the end of the line". So the
+/// joined text shows, and the rest of the run stays hidden.
+fn whole_lines(buffer: &gtk::TextBuffer) {
+    for tag in hiders(buffer) {
+        let mut cuts = Vec::new();
+        for (start, end) in runs(buffer, &tag) {
+            let (from, to) = (buffer.iter_at_offset(start), buffer.iter_at_offset(end));
+            if !from.starts_line() {
+                let mut next = from;
+                next.forward_line();
+                cuts.push((start, next.offset().min(end)));
+            }
+            if !to.starts_line() && !to.is_end() {
+                let mut first = to;
+                first.set_line_offset(0);
+                cuts.push((first.offset().max(start), end));
+            }
+        }
+        for (start, end) in cuts {
+            buffer.remove_tag(
+                &tag,
+                &buffer.iter_at_offset(start),
+                &buffer.iter_at_offset(end),
+            );
+        }
+    }
 }
 
 /// Show everything.
@@ -154,16 +208,7 @@ pub fn resync(buffer: &gtk::TextBuffer, folds: &[Fold]) {
     let Some(tag) = tag(buffer) else {
         return;
     };
-    // By offset: taking a tag off is a change to the buffer, which iterators do not outlive.
-    let mut runs = Vec::new();
-    let mut at = buffer.start_iter();
-    while at.starts_tag(Some(&tag)) || at.forward_to_tag_toggle(Some(&tag)) {
-        let mut end = at;
-        end.forward_to_tag_toggle(Some(&tag));
-        runs.push((at.offset(), end.offset()));
-        at = end;
-    }
-    for (start, end) in runs {
+    for (start, end) in runs(buffer, &tag) {
         let (start, end) = (buffer.iter_at_offset(start), buffer.iter_at_offset(end));
         let block_end = folds
             .iter()

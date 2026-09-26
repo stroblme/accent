@@ -188,6 +188,74 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// Delete at the end of a folded heading and Backspace at the start of the line after its fold,
+/// each of which joins a visible line to a hidden one, then ask for the iter at every pixel row of
+/// the note, as GtkSourceView asks at the top and bottom of the screen on every frame. A line left
+/// partly hidden aborts the process there (GTK's "Byte index … is off the end of the line"); kept
+/// to whole lines, each case prints what is hidden and what the joined line reads.
+pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
+    // Short lines after the fold: GTK's walk past the joined line lands in a line too short for
+    // the bytes it carried along, which is what aborts.
+    const FOLDED: &str = "# One\na hidden line\nhidden\nbody\n# Two\nplain line\n";
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        for case in ["delete", "backspace"] {
+            tab.set_text(FOLDED);
+            let fold = accent_api::Fold {
+                start_line: 0,
+                end_line: 3,
+            };
+            crate::fold::fold(tab.buffer.upcast_ref(), fold);
+            // The keys themselves, from where each one stands: GTK deletes the character next to
+            // the caret whether it is hidden or not.
+            match case {
+                "delete" => {
+                    tab.buffer.place_cursor(&line_end(&tab.buffer, 0));
+                    tab.view.emit_delete_from_cursor(gtk::DeleteType::Chars, 1);
+                }
+                _ => {
+                    let at = FOLDED.find("# Two").expect("bench needle") as i32;
+                    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(at));
+                    tab.view.emit_backspace();
+                }
+            }
+            // A frame, so the lines are measured as they are drawn.
+            glib::timeout_future(Duration::from_millis(200)).await;
+            let (y, height) = tab.view.line_yrange(&tab.buffer.end_iter());
+            for y in 0..y + height {
+                tab.view.iter_at_location(0, y);
+            }
+            let hidden: String = tab
+                .text()
+                .chars()
+                .enumerate()
+                .filter(|(i, _)| {
+                    !crate::fold::hiding(
+                        tab.buffer.upcast_ref(),
+                        &tab.buffer.iter_at_offset(*i as i32),
+                    )
+                    .is_empty()
+                })
+                .map(|(_, c)| c)
+                .collect();
+            let caret = crate::editor::caret(&tab.buffer).line();
+            let line = tab
+                .text()
+                .lines()
+                .nth(caret as usize)
+                .unwrap_or_default()
+                .to_string();
+            println!("bench seam case={case} hidden={hidden:?} line={line:?}");
+        }
+        bench_quit(&app);
+    });
+}
+
 /// Fill `tab` with `chars` of body, then type `# Heading` on a line of its own, one character at a
 /// time the way a keyboard delivers it.
 fn bench_style_typing(tab: &Rc<Tab>, chars: usize) {
