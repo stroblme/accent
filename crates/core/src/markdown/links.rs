@@ -1,7 +1,7 @@
 //! Link targets: what a `[[wikilink]]` or `[text](target)` points at, the keys a file answers
 //! to, and rewriting the links a move leaves pointing at the wrong place.
 
-use super::{Analysis, Heading, Link, LinkKind, Pending, Style, analyze};
+use super::{Analysis, Heading, Link, LinkKind, Pending, Style, analyze, block_ids};
 use crate::path::{self, basename, parent_dir};
 use pulldown_cmark::LinkType;
 use std::collections::{HashMap, HashSet};
@@ -128,6 +128,18 @@ pub fn heading_for<'a>(headings: &'a [Heading], anchor: &str) -> Option<&'a Head
                 .iter()
                 .find(|h| h.text.trim().eq_ignore_ascii_case(anchor))
         })
+}
+
+/// Where an anchor lands in a note: from the block a `^id` marks through its id, or else the
+/// heading [`heading_for`] finds. Go to Definition and a click in the preview both land here.
+pub fn anchor_range(text: &str, anchor: &str) -> Option<Range<usize>> {
+    match anchor.trim().strip_prefix('^') {
+        Some(id) => block_ids(text)
+            .into_iter()
+            .find(|b| b.id.eq_ignore_ascii_case(id))
+            .map(|b| b.start..b.marker.end),
+        None => heading_for(&analyze(text).headings, anchor).map(|h| h.range.clone()),
+    }
 }
 
 /// `scheme:` or `//host` — anything with an authority is not a vault path.
@@ -676,6 +688,18 @@ mod tests {
         );
         assert_eq!(start("intro"), Some(0));
         assert_eq!(start("nowhere"), None);
+    }
+
+    /// `#^id` lands on the block its id marks, in whatever case the link spells it; any other
+    /// anchor on a heading.
+    #[test]
+    fn an_anchor_lands_on_a_block_or_a_heading() {
+        let text = "# Intro\nSome prose.\nMore of it. ^Para-1\n";
+        let at = |anchor: &str| anchor_range(text, anchor).map(|r| &text[r]);
+        assert_eq!(at("^para-1"), Some("Some prose.\nMore of it. ^Para-1"));
+        assert_eq!(at("intro"), Some("# Intro"));
+        assert_eq!(at("^gone"), None);
+        assert_eq!(at("Para-1"), None, "an id is only named with its caret");
     }
 
     #[test]

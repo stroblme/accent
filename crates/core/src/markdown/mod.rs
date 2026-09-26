@@ -5,15 +5,17 @@
 //! reads delimiters back from the source, `links` classifies and rewrites targets, `frontmatter`
 //! scans tags and the YAML block, `html` renders the preview.
 
+mod blocks;
 mod frontmatter;
 mod html;
 mod links;
 mod spans;
 
+pub use blocks::{BlockId, block_ids};
 pub use html::{math_errors, mathml, to_html};
 pub use links::{
-    heading_for, is_image, is_url, link_key, path_keys, pdf_anchor, percent_decode, percent_encode,
-    rewrite_moved, slugs, strip_ext,
+    anchor_range, heading_for, is_image, is_url, link_key, path_keys, pdf_anchor, percent_decode,
+    percent_encode, rewrite_moved, slugs, strip_ext,
 };
 
 use frontmatter::{frontmatter, scan_tags};

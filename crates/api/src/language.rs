@@ -57,7 +57,7 @@ pub struct Location {
     pub path: String,
     pub range: Range,
     /// A link's `#anchor` where `range` cannot place it: a PDF's `page=3&selection=…`, or a
-    /// heading the file does not have, `range` then being the top of the file.
+    /// heading or a `^block` the file does not have, `range` then being the top of the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
     /// Nothing is there yet: `path` is the file following the link would create.
