@@ -719,6 +719,46 @@ fn lineart_png() -> Vec<u8> {
     png_of(w, h, 4, &px)
 }
 
+/// A note holding one of each thing print and export must carry: a heading, math inline and on
+/// its own lines, a diagram, a code line too long for the page, a table, a PNG and an SVG from
+/// the vault and one from the web, links into the vault, out of it and to its own heading, and a
+/// script that must never run or leave with it.
+const EXPORT_NOTE: &str = r#"# Export
+
+Inline math, $e^{i\pi} + 1 = 0$, and a formula on its own lines:
+
+$$
+\int_0^1 x^2 \, dx = \frac{1}{3}
+$$
+
+```mermaid
+graph LR
+  A[Write] --> B[Print]
+  B --> C[Share]
+```
+
+```rust
+fn main() {
+    println!("a line of code long enough that it has to wrap on paper rather than run off the page it is printed on");
+}
+```
+
+| Column | Value |
+|---|---|
+| one | 1 |
+| two | 2 |
+
+![[Attachments/figure.png]]
+
+![[Attachments/figure.svg]]
+
+![from the web](https://www.gnome.org/wp-content/themes/gnome-grass/images/gnome-logo.svg)
+
+A link into the vault, [[Figures]], one out of it, [GNOME](https://www.gnome.org), and one back to [the top](#export).
+
+<script>document.body.textContent = 'scripted';</script>
+"#;
+
 /// The SVG one: black strokes and a label on a transparent canvas.
 const FIGURE_SVG: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">
@@ -1421,6 +1461,8 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
           ![[Attachments/figure.svg]]\n\n\
           ![[Attachments/img-0.png]]\n",
     )?;
+    // Print and export's drill input: one of everything a page has to carry off the screen.
+    g.write("Notes-QC/Export.md", EXPORT_NOTE.as_bytes())?;
     g.mkdir("Attachments/Excalidraw")?;
     for i in 0..excal {
         let n = g.rng.range(8 * 1024, 40 * 1024);

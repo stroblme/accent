@@ -266,7 +266,8 @@ use tags::bench_tags;
 /// note and prints the text and the files they left (`attach::bench_attach`).
 /// `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>` exports a PDF that a note highlights into `$TMPDIR` and
 /// copies it for printing, and prints what each copy holds against the source
-/// (`export::bench_export_pdf`).
+/// (`export::bench_export_pdf`); `=note:<rel_note>` exports a note as PDF and as HTML into
+/// `$TMPDIR` and reads both back, then opens its print dialog (`export::bench_export_note`).
 /// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
 /// another in a folder not there yet, and a note also onto a folder, onto a file open in another
 /// tab and as `.txt` (`bench_save_as`).
