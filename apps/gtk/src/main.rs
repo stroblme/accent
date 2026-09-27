@@ -1000,9 +1000,11 @@ impl App {
             let remote = self.vault().and_then(|v| v.remote());
             remote.map(|r| r.url().clone())
         });
+        let recent = self.config.borrow().recent_vaults.clone();
         start::connect_dialog(
             &self.window,
             at.as_ref(),
+            &recent,
             "New Remote Terminal",
             "Open",
             glib::clone!(

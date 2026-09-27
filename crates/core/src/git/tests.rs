@@ -1530,3 +1530,47 @@ fn only_an_asked_for_transfer_may_ask_for_a_passphrase() {
     // The user's own ssh brings its own askpass with it.
     assert_eq!(env(&own, true, "SSH_ASKPASS"), None);
 }
+
+#[test]
+fn a_typed_branch_name_becomes_one_git_accepts() {
+    assert_eq!(branch_name("my new branch"), "my-new-branch");
+    assert_eq!(
+        branch_name("feature/topic"),
+        "feature/topic",
+        "a valid name is kept"
+    );
+    assert_eq!(branch_name("  fix: the ~bug^ ?*[x]\\ "), "fix-the-bug-x]");
+    assert_eq!(branch_name("feature//a..b/"), "feature/a-b");
+    assert_eq!(branch_name(".hidden/x.lock"), "hidden/x-lock");
+    assert_eq!(branch_name("v1.@{x}."), "v1.-{x}");
+    assert_eq!(branch_name("?*"), "", "nothing left to name a branch");
+    // Every answer is one git itself accepts, which is the whole claim.
+    if !have_git() {
+        return;
+    }
+    for typed in [
+        "my new branch",
+        " fix: the ~bug^ ?*[x]\\ ",
+        "feature//a..b/",
+        ".hidden/x.lock",
+        "v1.@{x}.",
+        "-lead",
+        "a/.b/c.lock/d.",
+        "tab\there",
+        "@",
+        "x...y",
+    ] {
+        let name = branch_name(typed);
+        if name.is_empty() {
+            continue;
+        }
+        let out = Command::new("git")
+            .args(["check-ref-format", "--branch", &name])
+            .output()
+            .expect("git should be runnable");
+        assert!(
+            out.status.success(),
+            "{typed:?} became {name:?}, which git refuses"
+        );
+    }
+}

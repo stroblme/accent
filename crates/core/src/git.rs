@@ -1177,6 +1177,63 @@ pub fn create_branch(repo: &Repo, name: &str, checkout: bool) -> Result<(), Erro
     switch(repo, &[args, &[name]].concat())
 }
 
+/// `typed` as a branch name git takes, made the way VS Code makes one: whatever `git
+/// check-ref-format --branch` refuses — whitespace and control characters, `~ ^ : ? * [ \`, `..`,
+/// `@{`, an empty component, one starting with `.` or ending in `.lock`, a trailing `.` — becomes
+/// a dash, a run of dashes one dash, and the name neither starts nor ends with one. Empty where
+/// nothing in `typed` can name a branch.
+pub fn branch_name(typed: &str) -> String {
+    // One pass can uncover another refusal (`a.-` loses its dash and ends in a dot), so it runs
+    // until nothing moves. Each change shortens the name or turns a character into a dash, and
+    // none undoes either, so it ends.
+    let mut name = typed.to_string();
+    loop {
+        let next = branch_name_pass(&name);
+        if next == name {
+            return name;
+        }
+        name = next;
+    }
+}
+
+fn branch_name_pass(name: &str) -> String {
+    let dashed: String = name
+        .chars()
+        .map(|c| match c {
+            '~' | '^' | ':' | '?' | '*' | '[' | '\\' => '-',
+            c if c.is_whitespace() || c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    let dashed = dashed.replace("..", "-").replace("@{", "-{");
+    let mut joined = dashed
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let part = match part.strip_prefix('.') {
+                Some(rest) => format!("-{rest}"),
+                None => part.to_string(),
+            };
+            match part.strip_suffix(".lock") {
+                Some(stem) => format!("{stem}-lock"),
+                None => part,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    if joined.ends_with('.') || joined == "@" {
+        joined.pop();
+        joined.push('-');
+    }
+    let mut out = String::with_capacity(joined.len());
+    for c in joined.chars() {
+        if !(c == '-' && out.ends_with('-')) {
+            out.push(c);
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
 /// One of the commands above, bounded like the commit: checking files out runs the user's own
 /// programs too, a `post-checkout` hook and smudge filters such as LFS's, which download.
 fn switch(repo: &Repo, args: &[&str]) -> Result<(), Error> {

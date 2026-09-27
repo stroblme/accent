@@ -162,6 +162,8 @@ pub struct Panel {
     sync: gtk::Button,
     /// The Sync button, or the spinner standing in for it while a sync runs.
     sync_slot: gtk::Stack,
+    /// Sync All beside the repository chooser, likewise.
+    sync_all_slot: gtk::Stack,
     message: gtk::TextView,
     placeholder: gtk::Label,
     commit: gtk::Button,
@@ -195,7 +197,7 @@ pub struct Panel {
     /// follows is not read as the user picking a repository.
     syncing: Cell<bool>,
     /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
-    /// filled: this is the transfer [`Panel::sync_slot`] spins for.
+    /// filled: this is the transfer [`Panel::sync_slot`] or [`Panel::sync_all_slot`] spins for.
     sync_busy: Cell<bool>,
     /// The sync in flight has pulled and is pushing: raised by the worker between the two calls,
     /// so a closing window knows which half it has caught ([`Panel::busy`]), on a host as here.
@@ -250,6 +252,7 @@ impl Panel {
         let chooser = gtk::DropDown::builder()
             .model(&names)
             .visible(false)
+            .hexpand(true)
             // A repository is named after its directory, and the button's default label asks for
             // the whole name however long it is: measured at 345 px for a 43-character one, which
             // is the sidebar's real floor whenever a vault has more than one repository. The
@@ -297,6 +300,25 @@ impl Panel {
         // `install_chrome_css` takes the margin off; the breathing room moves onto the text.
         log_view.add_css_class("git-log");
 
+        // Beside the chooser and only with it, being about the repositories it lists: every one of
+        // them pulled and pushed in turn.
+        let sync_all = gtk::Button::builder()
+            .icon_name(SYNC_ICON)
+            .tooltip_text("Sync All Repositories")
+            .valign(gtk::Align::Center)
+            .build();
+        sync_all.add_css_class("flat");
+        let sync_all_slot = spinner_slot(&sync_all);
+        let repo_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        repo_row.append(&chooser);
+        repo_row.append(&sync_all_slot);
+        // The chooser hides itself where there is one repository (`Panel::apply`), and the row
+        // goes with it.
+        chooser
+            .bind_property("visible", &repo_row, "visible")
+            .sync_create()
+            .build();
+
         let divider = gtk::Paned::builder()
             .orientation(gtk::Orientation::Vertical)
             .start_child(&scroller(&changes_view))
@@ -318,7 +340,7 @@ impl Panel {
             .margin_top(6)
             .margin_bottom(6)
             .build();
-        column.append(&chooser);
+        column.append(&repo_row);
         column.append(&branch_row);
         column.append(&commit_box);
         column.append(&divider);
@@ -347,6 +369,7 @@ impl Panel {
             counts,
             sync,
             sync_slot,
+            sync_all_slot,
             message,
             placeholder,
             commit,
@@ -379,7 +402,7 @@ impl Panel {
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&create, &merge);
+        panel.wire_header(&create, &merge, &sync_all);
         panel.wire_autofetch();
         panel.wire_commit();
         panel.wire_changes(&changes_view);
@@ -423,6 +446,12 @@ impl Panel {
 
     pub fn select_repo(&self, at: u32) {
         self.chooser.set_selected(at);
+    }
+
+    /// The repositories the chooser lists, by name. `ACCENT_BENCH_COMPARE=pick:` and nothing else.
+    pub fn repo_names(&self) -> Vec<String> {
+        let state = self.state.borrow();
+        state.repos.iter().map(|repo| repo.name.clone()).collect()
     }
 
     /// How many rows the changes list holds. `ACCENT_BENCH_GIT` prints it either side of a
@@ -472,8 +501,9 @@ impl Panel {
         self.schedule_refresh(Depth::Discover);
     }
 
-    fn wire_header(self: &Rc<Self>, create: &gtk::Button, merge: &gtk::Button) {
+    fn wire_header(self: &Rc<Self>, create: &gtk::Button, merge: &gtk::Button, all: &gtk::Button) {
         on_click(self, &self.sync, |panel| panel.sync(None));
+        on_click(self, all, |panel| panel.sync_all());
         on_click(self, create, |panel| panel.create_branch());
         on_click(self, merge, |panel| panel.merge_branch());
         let weak = Rc::downgrade(self);
@@ -499,6 +529,12 @@ impl Panel {
             // The history on screen is the other repository's until the refresh lands, and a
             // commit or a file under it clicked meanwhile would be read in this one.
             panel.clear_log();
+            // So are the changes, and a row clicked meanwhile compared its path in this one: an
+            // empty Index side and the whole file drawn as added. They are drawn again at once
+            // from the status the last refresh read of this repository, every refresh reading
+            // every repository's; the submodules it reads for the selected one alone.
+            panel.state.borrow_mut().submodules.clear();
+            panel.rebuild_changes();
             panel.refresh(Depth::Everything);
             // And ask its remote what it has, rather than leaving the first look at a second
             // repository up to five minutes stale. One round trip per pick, which is what makes
@@ -1154,17 +1190,7 @@ fn build_branch_row() -> BranchRow {
         .valign(gtk::Align::Center)
         .build();
     sync.add_css_class("flat");
-    // While a sync runs, a spinner stands where the button was. A stack is as big as its
-    // biggest child, so the spinner keeps the button's footprint and the row does not move.
-    let sync_slot = gtk::Stack::new();
-    sync_slot.add_named(&sync, Some("button"));
-    sync_slot.add_named(
-        &adw::Spinner::builder()
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::Center)
-            .build(),
-        Some("spinner"),
-    );
+    let sync_slot = spinner_slot(&sync);
 
     let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     branch_row.append(&branch);
@@ -1195,6 +1221,22 @@ fn build_branch_row() -> BranchRow {
         sync_slot,
         commit,
     }
+}
+
+/// `button` in a stack with the spinner that stands where it was while its sync runs. A stack is
+/// as big as its biggest child, so the spinner keeps the button's footprint and the row does not
+/// move.
+fn spinner_slot(button: &gtk::Button) -> gtk::Stack {
+    let slot = gtk::Stack::new();
+    slot.add_named(button, Some("button"));
+    slot.add_named(
+        &adw::Spinner::builder()
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build(),
+        Some("spinner"),
+    );
+    slot
 }
 
 /// The commit message box: the container the panel hides and shows in one call, the view the

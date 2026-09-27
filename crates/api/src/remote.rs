@@ -515,17 +515,19 @@ impl Remote {
     ) -> std::io::Result<()> {
         let file = std::fs::File::open(local)?;
         let total = file.metadata()?.len();
-        self.ssh_input(&self.cat_into(rel), file, total, progress)
+        link::send(&self.cat_into(rel), file, total, progress)
     }
 
     /// Write `bytes` to `rel` over the master, the way an upload goes: the host's shell creates a
     /// new file with the mode its umask gives a new note there.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
-        self.ssh_input(&self.cat_into(rel), bytes, bytes.len() as u64, &|_, _| ())
+        link::send(&self.cat_into(rel), bytes, bytes.len() as u64, &|_, _| ())
     }
 
-    fn cat_into(&self, rel: &str) -> String {
-        format!("cat > {}", ssh::quote(&self.remote_path(rel)))
+    /// The command line that writes its stdin to `rel` on the host.
+    fn cat_into(&self, rel: &str) -> Vec<String> {
+        let command = format!("cat > {}", ssh::quote(&self.remote_path(rel)));
+        ssh::run(&self.url, &self.ctl, &command)
     }
 
     /// Copy a file out of the vault to somewhere on this machine.
@@ -661,47 +663,6 @@ impl Remote {
                 "" => "ssh refused".to_string(),
                 why => why.to_string(),
             }),
-        }
-    }
-
-    /// Run `command` on the host with `input` on its stdin, a chunk at a time, telling `progress`
-    /// the bytes written so far of `total`.
-    fn ssh_input(
-        &self,
-        command: &str,
-        mut input: impl Read,
-        total: u64,
-        progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<()> {
-        let mut child = self
-            .ssh(&ssh::run(&self.url, &self.ctl, command))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        {
-            // Dropped at the end of the block, which closes the pipe: the host's `cat` ends there.
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| std::io::Error::other("ssh has no stdin"))?;
-            let (mut buf, mut done) = (vec![0; CHUNK], 0);
-            loop {
-                let n = input.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                stdin.write_all(&buf[..n])?;
-                done += n as u64;
-                progress(done, total);
-            }
-        }
-        let out = child.wait_with_output()?;
-        match out.status.success() {
-            true => Ok(()),
-            false => Err(std::io::Error::other(
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            )),
         }
     }
 

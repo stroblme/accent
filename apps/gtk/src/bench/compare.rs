@@ -987,3 +987,51 @@ fn pads_texts() -> (String, String) {
     );
     (index, work)
 }
+
+/// A Changes row clicked right after another repository is picked (`=pick:<rel>`). Point it at a
+/// vault whose root repository has `<rel>` changed and a second repository beside it: the drill
+/// picks the second one in the chooser and activates `<rel>`'s row at once, before the refresh
+/// the pick asks for has landed, and prints whether that row was still listed and, for whatever
+/// comparison opened, both sides' line counts. The list used to go on showing the root's rows
+/// until then, and the row compared its path in the repository just picked, where git has no
+/// such file: an empty Index side and the whole file drawn as added, deletions and all. Then it
+/// picks the root again, lets the refresh land, and prints the same for a click on the row.
+pub(super) fn bench_compare_pick(app: &Rc<App>, rel: &str) {
+    app.show_pane("git");
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        // Discovery finds the second repository after the first refresh.
+        for _ in 0..120 {
+            wait(250).await;
+            if app.git.get().is_some_and(|git| git.repo_names().len() > 1) {
+                break;
+            }
+        }
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        println!("bench compare_pick repos={:?}", git.repo_names());
+        for (at, settle) in [(1, 0), (0, 2500)] {
+            git.select_repo(at);
+            wait(settle).await;
+            let listed = git.activate_change(&rel).is_some();
+            wait(1500).await;
+            let sides = app
+                .open_tabs()
+                .into_iter()
+                .find(|tab| tab.rel() == rel)
+                .and_then(|tab| tab.comparison())
+                .map(|compare| {
+                    let lines =
+                        |end| pane_view(compare.widget(), end).map(|v| v.buffer().line_count());
+                    format!("old_lines={:?} new_lines={:?}", lines(false), lines(true))
+                });
+            println!("bench compare_pick picked={at} listed={listed} {sides:?}");
+            if let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) {
+                tab.leave_compare();
+            }
+        }
+        bench_quit(&app);
+    });
+}

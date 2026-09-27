@@ -943,3 +943,126 @@ pub(super) fn bench_git_markers(app: &Rc<App>, rel: &str) {
         bench_quit(&app);
     });
 }
+
+/// Create Branch… with names git would refuse typed in (`=branch`): for each, what the line under
+/// the field says, whether it shows, and whether Create is live. Then `my new branch` is created
+/// by answering the dialog, a second after it was typed in (for a screenshot), and the branch HEAD
+/// ends up on is printed: `my-new-branch` is the claim.
+pub(super) fn bench_git_branch(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        git.create_branch();
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let Some(dialog) = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>()
+        else {
+            println!("bench git_branch no_dialog");
+            return bench_quit(&app);
+        };
+        let root = dialog.clone().upcast::<gtk::Widget>();
+        let entry = find_widget(&root, &|w| w.is::<gtk::Entry>()).and_downcast::<gtk::Entry>();
+        let label = find_widget(&root, &|w| {
+            w.downcast_ref::<gtk::Label>()
+                .is_some_and(|l| l.has_css_class("dim-label"))
+        })
+        .and_downcast::<gtk::Label>();
+        let (Some(entry), Some(label)) = (entry, label) else {
+            println!("bench git_branch no_field");
+            return bench_quit(&app);
+        };
+        for typed in ["", "topic", "my new branch", "fix: ~bug^ ?", "?*"] {
+            entry.set_text(typed);
+            println!(
+                "bench git_branch typed={typed:?} shown={} says={:?} create={}",
+                label.is_visible(),
+                label.label(),
+                dialog.is_response_enabled(crate::dialogs::CONFIRM)
+            );
+        }
+        entry.set_text("my new branch");
+        // A second for a screenshot of the dialog as it stands.
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+        dialog.close();
+        wait_for(|| !git.busy(), 20000).await;
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(app.root())
+            .args(["branch", "--show-current"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default();
+        println!("bench git_branch head={head:?}");
+        bench_quit(&app);
+    });
+}
+
+/// Sync All (`=syncall`): whether its button is on screen beside the repository chooser, then a
+/// click on it, the spinner standing in for it while it runs, and the one toast it ends with.
+/// Point it at a vault of several repositories — one whose push goes through, one whose remote is
+/// unreachable and one stopped in a merge — and read each repository's `git status -sb` after it.
+pub(super) fn bench_git_sync_all(app: &Rc<App>) {
+    app.show_pane("git");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
+        // The first refresh finds the vault root's repository; discovery adds the nested ones.
+        glib::timeout_future(Duration::from_millis(3000)).await;
+        app.show_pane("git");
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        let button = row_button(app.window.upcast_ref(), "Sync All Repositories");
+        println!(
+            "bench git_sync_all shown={}",
+            button.as_ref().is_some_and(|b| b.is_mapped())
+        );
+        let Some(button) = button else {
+            return bench_quit(&app);
+        };
+        // The first index's toast would hold the one this ends with back in the queue.
+        wait_for(|| super::compare::bench_toast(&app).is_none(), 10000).await;
+        let said = app.toasted.get();
+        button.emit_clicked();
+        glib::timeout_future(Duration::from_millis(50)).await;
+        println!(
+            "bench git_sync_all spinning={} busy={}",
+            !button.is_mapped(),
+            git.busy()
+        );
+        wait_for(|| !git.busy(), 60000).await;
+        wait_for(|| app.toasted.get() > said, 5000).await;
+        println!(
+            "bench git_sync_all said={:?}",
+            super::compare::bench_toast(&app)
+        );
+        // A second and a half for a screenshot of the toast.
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        println!("bench git_sync_all back={}", button.is_mapped());
+        let root = app.root();
+        for dir in ["", "lib", "docs"] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root.join(dir))
+                .args(["status", "-sb", "--untracked-files=no"])
+                .output()
+                .map(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            println!("bench git_sync_all repo={dir:?} {status}");
+        }
+        bench_quit(&app);
+    });
+}

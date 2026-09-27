@@ -464,9 +464,11 @@ impl Shell {
         {
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
             let (from, here) = (app.window.downgrade(), vault.key().to_owned());
+            let recent = self.config.borrow().recent_vaults.clone();
             start::connect_dialog(
                 &app.window,
                 Some(remote.url()),
+                &recent,
                 "Open Remote Vault",
                 "Connect",
                 move |address| {
@@ -499,9 +501,11 @@ impl Shell {
             return;
         };
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+        let recent = self.config.borrow().recent_vaults.clone();
         start::connect_dialog(
             &window,
             None,
+            &recent,
             "Open Remote Vault",
             "Connect",
             move |address| {

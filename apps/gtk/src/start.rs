@@ -474,9 +474,11 @@ pub(crate) fn other_vaults(recent: &[PathBuf], current: Option<&Path>) -> Vec<St
 /// `at` fills the form in with a remote window's own address, for Open Folder… there: the host
 /// is the one the window is on, and the path is the one it was opened at, ready to be corrected.
 /// `title` and `verb` say what the address is for: a vault to open, or a shell to start there.
+/// `recent` is the recent vaults, which order the config's hosts in the host menu.
 pub(crate) fn connect_dialog(
     window: &impl IsA<gtk::Widget>,
     at: Option<&ssh::Url>,
+    recent: &[PathBuf],
     title: &str,
     verb: &str,
     on_open_remote: impl Fn(String) + 'static,
@@ -530,7 +532,7 @@ pub(crate) fn connect_dialog(
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .build();
-    form.append(&host_field(&host));
+    form.append(&host_field(&host, recent));
     form.append(&path_row);
     form.append(&why);
 
@@ -761,8 +763,8 @@ fn typed_dir(typed: &str) -> Option<String> {
 /// `GtkEntryCompletion` and put nothing in its place: a `GtkDropDown` either closes the field to
 /// what is listed or needs a factory of its own to stay editable. These are a shortcut for typing,
 /// not the only way in, so the cheap shape is the right one. Nothing to suggest, no button.
-fn host_field(entry: &gtk::Entry) -> gtk::Widget {
-    let hosts = ssh_hosts(&ssh_config());
+fn host_field(entry: &gtk::Entry, recent: &[PathBuf]) -> gtk::Widget {
+    let hosts = by_use(ssh_hosts(&ssh_config()), recent);
     if hosts.is_empty() {
         return entry.clone().upcast();
     }
@@ -828,6 +830,19 @@ fn ssh_hosts(config: &str) -> Vec<String> {
         .filter(|name| !name.contains(['*', '?', '!']))
         .map(str::to_string)
         .collect()
+}
+
+/// `hosts` in the order a vault on each was last opened, newest first, as the recent vaults are
+/// kept; a host no recent vault is on keeps its place in the config, after them.
+fn by_use(mut hosts: Vec<String>, recent: &[PathBuf]) -> Vec<String> {
+    let used: Vec<String> = recent
+        .iter()
+        .filter_map(|key| ssh::parse(&key.to_string_lossy()).ok())
+        .map(|url| url.host)
+        .collect();
+    // Stable, so the hosts that tie at the end stay as the config lists them.
+    hosts.sort_by_key(|host| used.iter().position(|u| u == host).unwrap_or(usize::MAX));
+    hosts
 }
 
 /// The address the two fields make, or why they do not make one yet.
@@ -997,6 +1012,21 @@ mod tests {
         );
         assert_eq!(ssh_hosts(config), ["box", "tunnel", "lowercase"]);
         assert!(ssh_hosts("").is_empty());
+    }
+
+    #[test]
+    fn the_hosts_last_opened_come_first_and_the_rest_keep_the_configs_order() {
+        let hosts = ["alpha", "beta", "gamma", "delta"]
+            .map(String::from)
+            .to_vec();
+        let recent = [
+            "ssh://gamma/srv/a",
+            "/home/me/Notes",
+            "ssh://me@alpha:2222/srv",
+            "ssh://gamma/srv/b",
+        ]
+        .map(PathBuf::from);
+        assert_eq!(by_use(hosts, &recent), ["gamma", "alpha", "beta", "delta"]);
     }
 
     #[test]
