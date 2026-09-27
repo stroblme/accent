@@ -1,5 +1,6 @@
-//! A `sourceview5::View` that can hold extra carets: VS Code's Add Cursor Above / Below and
-//! Select All Occurrences, and JetBrains' Add Caret at Next Occurrence.
+//! A `sourceview5::View` that can hold extra carets: VS Code's Add Cursor Above / Below, Select
+//! All Occurrences and box selection by `Shift+Alt` drag, and JetBrains' Add Caret at Next
+//! Occurrence.
 //!
 //! GtkTextView has exactly one insert mark and no notion of a second one, so each secondary caret
 //! is a pair of plain right-gravity `TextMark`s, the caret and the anchor its selection was
@@ -14,8 +15,8 @@
 //!
 //! What it deliberately does not do:
 //!
-//! * no mouse-added carets: any click, selection or find-bar jump moves the primary caret, which
-//!   drops the secondaries;
+//! * no caret added by a click: any click, selection or find-bar jump moves the primary caret,
+//!   which drops the secondaries, and the one way to a column by pointer is a box ([`box_drag`]);
 //! * while secondaries exist the key controller runs ahead of the input method, so dead keys and
 //!   CJK preedit go to the primary caret only, once the secondaries are cleared;
 //! * while a column of carets exists this widget paints every caret, the primary one included,
@@ -417,11 +418,13 @@ mod imp {
 
     /// A secondary caret: the mark that rides the text, the anchor its selection was started
     /// from, and the column vertical movement aims for, which is what a caret keeps while it
-    /// crosses a shorter line.
+    /// crosses a shorter line. `below` is which way Add Caret Above / Below grew the column with
+    /// it, `true` for below, and `None` for a caret made any other way.
     pub struct Caret {
         pub mark: gtk::TextMark,
         pub anchor: gtk::TextMark,
         pub goal: Option<i32>,
+        pub below: Option<bool>,
     }
 
     impl Caret {
@@ -432,6 +435,7 @@ mod imp {
                 mark: buffer.create_mark(None, at, false),
                 anchor: buffer.create_mark(None, from, false),
                 goal: None,
+                below: None,
             }
         }
 
@@ -502,6 +506,7 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj().clone();
+            box_drag(&obj);
 
             // The buffer arrives after construction. Every `mark-set` on it that we did not
             // cause is the user moving the primary caret — a click, a selection, a find-bar
@@ -789,8 +794,21 @@ impl View {
     }
 
     /// Put a caret one line below (or above) the outermost caret in that direction, so repeating
-    /// the action grows the column away from the primary caret.
+    /// the action grows the column away from the primary caret. Where the caret added last grew
+    /// the column the other way, it is taken back instead, as JetBrains' Clone Caret does, so the
+    /// opposite key undoes the column one caret at a time and adds again from the primary.
     pub fn add_caret(&self, below: bool) {
+        // Out of the cell before the marks go: `delete_mark` emits `mark-deleted`.
+        let newest = self
+            .imp()
+            .carets
+            .borrow_mut()
+            .pop_if(|caret| caret.below == Some(!below));
+        if let Some(caret) = newest {
+            caret.delete(&self.buffer());
+            self.show_column();
+            return;
+        }
         let buffer = self.buffer();
         let from = self.outermost(below);
         let line = from.line() + if below { 1 } else { -1 };
@@ -811,7 +829,7 @@ impl View {
         {
             return;
         }
-        self.push_caret(&target, &target, Some(goal));
+        self.push_caret(&target, &target, Some(goal), Some(below));
         // One landing inside a selection is part of it.
         self.collapse();
         self.show_column();
@@ -836,7 +854,7 @@ impl View {
             return;
         };
         let at = |offset| buffer.iter_at_offset(offset);
-        self.push_caret(&at(from), &at(to), None);
+        self.push_caret(&at(from), &at(to), None, None);
         self.show_column();
         if let Some(caret) = self.imp().carets.borrow().last() {
             self.scroll_mark_onscreen(&caret.mark);
@@ -858,32 +876,87 @@ impl View {
         let at = |offset| buffer.iter_at_offset(offset);
         for (from, to) in occurrences(&text, &needle) {
             if !taken.iter().any(|&(s, e)| from < e && s < to) {
-                self.push_caret(&at(from), &at(to), None);
+                self.push_caret(&at(from), &at(to), None, None);
             }
         }
         self.show_column();
     }
 
     /// Add a secondary caret at `at` whose selection runs from `from`, aiming for column `goal`
-    /// on its way up and down.
-    fn push_caret(&self, from: &gtk::TextIter, at: &gtk::TextIter, goal: Option<i32>) {
-        // A new column: the steps an earlier one recorded are not its to put back, and a popup
-        // still up at the primary caret would take the keys meant for all of them.
+    /// on its way up and down; `below` is [`imp::Caret::below`].
+    fn push_caret(
+        &self,
+        from: &gtk::TextIter,
+        at: &gtk::TextIter,
+        goal: Option<i32>,
+        below: Option<bool>,
+    ) {
         if !self.has_carets() {
-            self.imp().undo.take();
-            self.imp().redo.take();
-            self.completion().hide();
+            self.start_column();
         }
         let mut caret = imp::Caret::new(&self.buffer(), from, at);
         caret.goal = goal;
+        caret.below = below;
         self.imp().carets.borrow_mut().push(caret);
     }
 
-    /// Paint the column after carets were added: GTK's caret hands the blink over while there is
-    /// one.
+    /// A new column: the steps an earlier one recorded are not its to put back, and a popup
+    /// still up at the primary caret would take the keys meant for all of them.
+    fn start_column(&self) {
+        self.imp().undo.take();
+        self.imp().redo.take();
+        self.completion().hide();
+    }
+
+    /// Box selection, what a `Shift+Alt` drag makes: a caret on every line of the document from
+    /// the one at `from` to the one at `to`, both in buffer coordinates, selecting what lies
+    /// between their two x positions on that line. A line ending short of the box gets an empty
+    /// caret at its end and one ending inside it is selected to its end, as nothing is padded;
+    /// a wrapped line gets one caret, on its row nearest `from`. The caret at `from` is the
+    /// primary and the one at `to` the newest, and the box replaces whatever column there was.
+    pub(crate) fn select_box(&self, from: (i32, i32), to: (i32, i32)) {
+        let buffer = self.buffer();
+        let first = self.line_at_y(from.1).0.line();
+        let last = self.line_at_y(to.1).0.line();
+        let lines: Vec<i32> = match first <= last {
+            true => (first..=last).collect(),
+            false => (last..=first).rev().collect(),
+        };
+        let view = self.upcast_ref::<sourceview5::View>();
+        let spans: Vec<Span> = lines
+            .into_iter()
+            .filter_map(|line| {
+                let start = buffer.iter_at_line(line)?;
+                let top = self.iter_location(&start);
+                let bottom = self.iter_location(&line_end(&buffer, line));
+                let y = from.1.clamp(top.y(), bottom.y() + bottom.height() - 1);
+                let at = |x| crate::editor::pressed_at(view, x, y).offset();
+                Some(Span {
+                    anchor: at(from.0),
+                    caret: at(to.0),
+                })
+            })
+            .collect();
+        if spans == self.spans() {
+            return;
+        }
+        if spans.len() > 1 && !self.has_carets() {
+            self.start_column();
+        }
+        self.imp().goal.set(None);
+        self.put_carets(&spans);
+        self.collapse();
+        self.show_column();
+        let newest = self.imp().carets.borrow().last().map(|c| c.mark.clone());
+        self.scroll_mark_onscreen(&newest.unwrap_or_else(|| buffer.get_insert()));
+    }
+
+    /// Paint the column after carets were added or taken back: GTK's caret hands the blink over
+    /// while there is one, and takes it back once there is none.
     fn show_column(&self) {
-        if self.has_carets() {
-            self.blink_on();
+        match self.has_carets() {
+            true => self.blink_on(),
+            false => self.blink_off(),
         }
         self.queue_draw();
     }
@@ -1614,6 +1687,43 @@ impl View {
             }
         })
     }
+}
+
+/// Box selection by `Shift+Alt` and a drag of the primary button, VS Code's chord for it
+/// ([`View::select_box`]). In the capture phase and claimed at the press, so GTK's own click and
+/// drag never see the sequence and the press is not a Shift+click extending the selection; a press
+/// without the chord is let go at once. The box is measured from where the press was in the
+/// buffer, so a scroll during the drag leaves its first corner where it was.
+fn box_drag(view: &View) {
+    let drag = gtk::GestureDrag::builder()
+        .button(gdk::BUTTON_PRIMARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    let from = std::rc::Rc::new(std::cell::Cell::new((0, 0)));
+    let pressed = from.clone();
+    drag.connect_drag_begin(move |drag, x, y| {
+        let chord = gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::ALT_MASK;
+        let view = drag.widget().and_downcast::<View>();
+        let Some(view) = view.filter(|_| drag.current_event_state().contains(chord)) else {
+            drag.set_state(gtk::EventSequenceState::Denied);
+            return;
+        };
+        drag.set_state(gtk::EventSequenceState::Claimed);
+        view.grab_focus();
+        let at = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+        pressed.set(at);
+        view.select_box(at, at);
+    });
+    drag.connect_drag_update(move |drag, dx, dy| {
+        let (Some(view), Some((x, y))) = (drag.widget().and_downcast::<View>(), drag.start_point())
+        else {
+            return;
+        };
+        let (x, y) = ((x + dx) as i32, (y + dy) as i32);
+        let to = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x, y);
+        view.select_box(from.get(), to);
+    });
+    view.add_controller(drag);
 }
 
 fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {

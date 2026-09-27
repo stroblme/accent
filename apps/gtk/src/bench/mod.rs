@@ -42,7 +42,8 @@ use git::{
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
 use keys::{
-    bench_hold, bench_keys, bench_list, bench_occurrence_keys, bench_shell_keys, bench_term,
+    bench_box_drag, bench_hold, bench_keys, bench_list, bench_occurrence_keys, bench_shell_keys,
+    bench_term,
 };
 use outline::bench_outline;
 use panes::{
@@ -85,8 +86,10 @@ use tags::bench_tags;
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
 /// plus the width one indent is worth there, then Tab on lines that already have text on them.
-/// `=occur:<rel>` asks for XTEST presses of `Alt+J` and `Ctrl+Shift+L` with typing after them, and
-/// prints every selection and the buffer after each (see `keys::bench_occurrence_keys`).
+/// `=occur:<rel>` asks for XTEST presses of `Alt+J`, `Ctrl+Shift+L` and `Shift+Alt+Up` / `Down`
+/// with typing after them, and prints every selection and the buffer after each (see
+/// `keys::bench_occurrence_keys`). `=box:<rel>` asks for XTEST drags and a press with `Shift+Alt`
+/// and without, and prints the carets and the selection after each (see `keys::bench_box_drag`).
 /// It opens with the completion popup: whether "a popup is up" reads true against a real one,
 /// that Return at the end of a list item under it continues the list while no row is selected and
 /// is the popup's once one is, that "up" reads false against both a view taken off screen under
@@ -569,6 +572,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(arg) = keys {
             if let Some(rel) = arg.strip_prefix("occur:") {
                 return bench_occurrence_keys(&app, rel);
+            }
+            if let Some(rel) = arg.strip_prefix("box:") {
+                return bench_box_drag(&app, rel);
             }
             return match arg.as_str() {
                 "1" => bench_keys(&app),
