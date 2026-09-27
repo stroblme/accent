@@ -1002,3 +1002,67 @@ pub(super) fn bench_git_branch(app: &Rc<App>) {
         bench_quit(&app);
     });
 }
+
+/// Sync All (`=syncall`): whether its button is on screen beside the repository chooser, then a
+/// click on it, the spinner standing in for it while it runs, and the one toast it ends with.
+/// Point it at a vault of several repositories — one whose push goes through, one whose remote is
+/// unreachable and one stopped in a merge — and read each repository's `git status -sb` after it.
+pub(super) fn bench_git_sync_all(app: &Rc<App>) {
+    app.show_pane("git");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
+        // The first refresh finds the vault root's repository; discovery adds the nested ones.
+        glib::timeout_future(Duration::from_millis(3000)).await;
+        app.show_pane("git");
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        let button = row_button(app.window.upcast_ref(), "Sync All Repositories");
+        println!(
+            "bench git_sync_all shown={}",
+            button.as_ref().is_some_and(|b| b.is_mapped())
+        );
+        let Some(button) = button else {
+            return bench_quit(&app);
+        };
+        // The first index's toast would hold the one this ends with back in the queue.
+        wait_for(|| super::compare::bench_toast(&app).is_none(), 10000).await;
+        let said = app.toasted.get();
+        button.emit_clicked();
+        glib::timeout_future(Duration::from_millis(50)).await;
+        println!(
+            "bench git_sync_all spinning={} busy={}",
+            !button.is_mapped(),
+            git.busy()
+        );
+        wait_for(|| !git.busy(), 60000).await;
+        wait_for(|| app.toasted.get() > said, 5000).await;
+        println!(
+            "bench git_sync_all said={:?}",
+            super::compare::bench_toast(&app)
+        );
+        // A second and a half for a screenshot of the toast.
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        println!("bench git_sync_all back={}", button.is_mapped());
+        let root = app.root();
+        for dir in ["", "lib", "docs"] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root.join(dir))
+                .args(["status", "-sb", "--untracked-files=no"])
+                .output()
+                .map(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            println!("bench git_sync_all repo={dir:?} {status}");
+        }
+        bench_quit(&app);
+    });
+}

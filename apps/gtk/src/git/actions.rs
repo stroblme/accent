@@ -33,15 +33,17 @@ impl Panel {
         on_err: Fail,
         job: impl FnOnce(&Vault, &Repo) -> anyhow::Result<String> + Send + 'static,
     ) {
-        self.command_then(what, sync, on_err, job, |_| ());
+        let spin = sync.then(|| self.sync_slot.clone());
+        self.command_then(what, spin, on_err, job, |_| ());
     }
 
     /// [`Panel::command`] with something to do back on the main thread once it worked, which only
-    /// the commit box needs: a widget cannot be touched from the worker the job runs on.
+    /// the commit box needs: a widget cannot be touched from the worker the job runs on. A sync
+    /// names the slot of the button that asked for it, Sync or Sync All, as `spin`.
     fn command_then(
         self: &Rc<Self>,
         what: String,
-        sync: bool,
+        spin: Option<gtk::Stack>,
         on_err: Fail,
         job: impl FnOnce(&Vault, &Repo) -> anyhow::Result<String> + Send + 'static,
         then: impl FnOnce(&Rc<Panel>) + 'static,
@@ -53,8 +55,8 @@ impl Panel {
                 None => return,
             }
         };
-        if sync {
-            self.sync_slot.set_visible_child_name("spinner");
+        if let Some(slot) = &spin {
+            slot.set_visible_child_name("spinner");
             self.sync_busy.set(true);
             (self.hooks.syncing)(true);
         }
@@ -72,8 +74,8 @@ impl Panel {
             }
             // The button comes back as `sync_state` last left it, which the refresh below
             // brings up to date.
-            if sync {
-                panel.sync_slot.set_visible_child_name("button");
+            if let Some(slot) = &spin {
+                slot.set_visible_child_name("button");
                 panel.sync_busy.set(false);
                 panel.pushing.store(false, Ordering::Relaxed);
                 (panel.hooks.syncing)(false);
@@ -190,7 +192,7 @@ impl Panel {
         // where it was written rather than make the user type it again.
         self.command_then(
             "commit".to_string(),
-            false,
+            None,
             Fail::Say,
             move |vault, repo| {
                 vault
@@ -245,6 +247,61 @@ impl Panel {
                 (pulled, pushed) => format!("Synced · {pulled} pulled, {pushed} pushed"),
             })
         });
+    }
+
+    /// Pull and then push every repository, one after another, carrying on past one that fails,
+    /// and name in one toast at the end each that did not sync and why. One stopped in a merge or
+    /// a rebase is left alone and named with them: its pull would only be refused.
+    pub fn sync_all(self: &Rc<Self>) {
+        if self.sync_busy.get() {
+            return;
+        }
+        let repos: Vec<(Repo, Option<&str>)> = {
+            let state = self.state.borrow();
+            let stopped = |status: &Status| match (status.merging, status.rebasing) {
+                (true, _) => Some("a merge is in progress"),
+                (_, true) => Some("a rebase is in progress"),
+                _ => None,
+            };
+            let statuses = state.statuses.iter().map(stopped);
+            state.repos.iter().cloned().zip(statuses).collect()
+        };
+        let (fetch_lock, pushing) = (self.fetch_lock.clone(), self.pushing.clone());
+        let slot = Some(self.sync_all_slot.clone());
+        let what = "sync every repository".to_string();
+        self.command_then(
+            what,
+            slot,
+            Fail::Say,
+            move |vault, _| {
+                let _fetched = fetch_lock.lock();
+                let mut left = Vec::new();
+                for (repo, stopped) in &repos {
+                    if let Some(why) = stopped {
+                        left.push(format!("{} ({why})", repo.name));
+                        continue;
+                    }
+                    // Down again before each pull: a close waits for a pull, and stops a push.
+                    pushing.store(false, Ordering::Relaxed);
+                    let synced = vault
+                        .git_pull(repo)
+                        .map_err(|e| why_not(&format!("{e:#}"), "the pull"))
+                        .and_then(|_| {
+                            pushing.store(true, Ordering::Relaxed);
+                            let pushed = vault.git_push(repo);
+                            pushed.map_err(|e| why_not(&format!("{e:#}"), "the push"))
+                        });
+                    if let Err(why) = synced {
+                        left.push(format!("{} ({why})", repo.name));
+                    }
+                }
+                match left.is_empty() {
+                    true => Ok(format!("Synced {} repositories", repos.len())),
+                    false => Err(anyhow::anyhow!(left.join(", "))),
+                }
+            },
+            |_| (),
+        );
     }
 
     /// Switch the selected repository to a local branch.
@@ -762,6 +819,22 @@ fn reason(message: &str) -> &str {
         .trim_end_matches(':')
 }
 
+/// Why one repository of a Sync All did not sync, short enough to share a toast with the others:
+/// git's last `error:` or `fatal:` line, which is where a refused push or an unreachable remote
+/// says so; a one-line refusal of our own, such as a timeout, as it is; otherwise which `half`
+/// stopped — a pull stopped by conflicts says so on stdout only, and stderr has just the fetch.
+fn why_not(message: &str, half: &str) -> String {
+    let said = message.lines().rev().find_map(|l| {
+        l.strip_prefix("error: ")
+            .or_else(|| l.strip_prefix("fatal: "))
+    });
+    match said {
+        Some(said) => said.to_string(),
+        None if message.lines().count() == 1 => message.to_string(),
+        None => format!("{half} stopped"),
+    }
+}
+
 fn files(n: usize) -> String {
     match n {
         1 => "1 file".to_string(),
@@ -797,6 +870,22 @@ mod tests {
             "3 files go back to what the index holds and 2 untracked files move to the trash. \
              This cannot be undone."
         );
+    }
+
+    #[test]
+    fn a_repository_sync_all_left_behind_is_said_in_a_few_words() {
+        let rejected = "To example.org:r.git\n ! [rejected]        main -> main (fetch first)\n\
+                        error: failed to push some refs to 'example.org:r.git'\n\
+                        hint: Updates were rejected because the remote contains work";
+        assert_eq!(
+            why_not(rejected, "the push"),
+            "failed to push some refs to 'example.org:r.git'"
+        );
+        // A pull stopped by conflicts: its stderr is the fetch alone.
+        let conflicts = "From ../remote\n * branch            main       -> FETCH_HEAD";
+        assert_eq!(why_not(conflicts, "the pull"), "the pull stopped");
+        let timeout = "the pull did not finish within 60 seconds";
+        assert_eq!(why_not(timeout, "the pull"), timeout);
     }
 
     #[test]

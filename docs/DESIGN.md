@@ -149,6 +149,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Git pane
 
 - One repository at a time, from a `GtkDropDown` that hides itself when there is only one and ellipsizes the name, which would otherwise set how narrow the sidebar can be dragged.
+- Beside the chooser, and only with it, Sync All: Sync's pull and push for every repository, one after another, carrying on past one that fails. One toast at the end names each that did not sync and why — git's own `error:` or `fatal:` line — and one stopped in a merge or a rebase is left alone and named with them. Its spinner takes its place while it runs, as Sync's does.
 - A branch row: a `GtkMenuButton` labelled with HEAD's branch, or `Detached at abc1234` (the status bar's string). Its popover lists the local branches, then under a dim Remote heading the remote-tracking branches no local branch shares a name with, then Create Branch… and Merge Branch…: the readout is every branch operation the pane offers.
 - Picking a row is `git switch`, a remote row `git switch --track`; whether it is safe is git's call, its first line coming back as a toast and the label returning to the real HEAD where git refuses.
 - Every row but the checked-out one carries a trash button on hover: git refuses to delete HEAD's branch, and a control that cannot work is dead chrome. Deleting is `git branch -d`, escalating to `-D` only after an `AdwAlertDialog` naming what would be lost — no guess of ours at a default branch. Delete Branch… in the palette is the same by keyboard. A remote row has no trash: deleting a remote branch is a push, a terminal job.
@@ -620,7 +621,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Git
 
-- Sync (unbound): pull then push, from the pane's button, the status bar's branch or the palette — one action, syncing the repository the active document sits in.
+- Sync (unbound): pull then push, from the pane's button, the status bar's branch or the palette — one action, syncing the repository the active document sits in. Sync All Repositories (unbound) is the chooser's Sync All.
 - Accept Current Change, Accept Incoming Change and Accept Both Changes (unbound) resolve the conflict block holding the caret, Next Conflict and Previous Conflict (unbound) put the caret on the next block's `<<<<<<<` line, going round at the ends; each says so in a toast when there is none.
 - Merge Branch…, Abort Merge and Delete Branch… (unbound) act on the repository the pane shows, the one whose conflicts it lists. Merge Branch… is also the branch popover's last button and puts the pane on screen; Abort Merge is the merge banner's Abort and says so when there is no merge to abort; Delete Branch… is the popover's trash buttons by keyboard and puts the pane on screen.
 

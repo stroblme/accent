@@ -38,7 +38,7 @@ use files::{
 use find::bench_find;
 use git::{
     bench_git, bench_git_branch, bench_git_close, bench_git_focus, bench_git_init,
-    bench_git_markers, bench_git_press, bench_git_rebase, bench_git_switch,
+    bench_git_markers, bench_git_press, bench_git_rebase, bench_git_switch, bench_git_sync_all,
     bench_git_sync_over_fetch,
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
@@ -84,7 +84,9 @@ use tags::bench_tags;
 /// at once, and prints what that asked for. `=markers:<rel>` resolves the conflict blocks a merge
 /// left in a note through their buttons and the palette (see `git::bench_git_markers`). `=branch`
 /// types names git would refuse into Create Branch… and prints the name the dialog says it will
-/// create, then creates one and prints the branch HEAD is on.
+/// create, then creates one and prints the branch HEAD is on. `=syncall` presses Sync All and
+/// prints its spinner, its toast and each repository's state after it (see
+/// `git::bench_git_sync_all`).
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
@@ -599,6 +601,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 (None, "focus") => bench_git_focus(&app),
                 (None, "switch") => bench_git_switch(&app),
                 (None, "branch") => bench_git_branch(&app),
+                (None, "syncall") => bench_git_sync_all(&app),
                 _ => bench_git(&app),
             };
         }
