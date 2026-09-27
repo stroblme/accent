@@ -217,6 +217,22 @@ impl Shell {
             link,
         })
     }
+
+    /// What prints the last copy a program in shell `id` made ([`take_copies`]), run on this
+    /// machine: `accent-cli clip`, here or over the master on the host.
+    fn clip(&self, id: &str) -> Option<Vec<String>> {
+        match self {
+            Shell::Local(_) => {
+                let cli = cli()?.to_string_lossy().into_owned();
+                Some(vec![cli, "clip".to_string(), id.to_string()])
+            }
+            Shell::Remote { at, link, .. } => {
+                let server = ssh::server_path(&accent_api::link::server().ok()?.hash);
+                let ctl = ssh::control_path(link);
+                Some(ssh::run(at, &ctl, &ssh::clip_cmd(&server, id)))
+            }
+        }
+    }
 }
 
 /// Open a shell as a tab of `tabs`, and start it.
@@ -280,6 +296,7 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
         ended: Cell::new(false),
     });
     reattach_on_key(&term);
+    take_copies(&term);
     start(&term);
     term
 }
@@ -325,6 +342,61 @@ fn start(term: &Rc<Term>) {
 
 /// Back to the start of the line, and the line cleared.
 const CLEAR_LINE: &[u8] = b"\r\x1b[2K";
+
+/// The termprop `accent-cli attach` raises when a program in the shell has copied something with
+/// OSC 52, which VTE does not do itself (`hold::clip` in `accent-cli`).
+const CLIPBOARD: &str = "vte.ext.accent.clipboard";
+
+/// Make [`CLIPBOARD`] known to VTE, which takes a termprop only before the first terminal exists.
+pub fn install_termprops() {
+    let name = std::ffi::CString::new(CLIPBOARD).unwrap_or_default();
+    // SAFETY: a NUL-terminated name under VTE's `vte.ext.` prefix, a type and no flags, from
+    // `main` before any window, so before any `VteTerminal`, as VTE requires.
+    unsafe {
+        vte4::ffi::vte_install_termprop(
+            name.as_ptr(),
+            vte4::ffi::VTE_PROPERTY_VALUELESS,
+            vte4::ffi::VTE_PROPERTY_FLAG_NONE,
+        );
+    }
+}
+
+/// Put what a program in the shell copied on the clipboard: `attach` has kept the copy beside the
+/// holder, here or on the host, and raised [`CLIPBOARD`]; `accent-cli clip` hands it over as
+/// base64, off the main loop since on a host it is a round trip. Weak, for the reason [`on_exit`]
+/// is. Without `accent-cli` there is no `attach` to raise it.
+fn take_copies(term: &Rc<Term>) {
+    let weak = Rc::downgrade(term);
+    let signal = format!("termprop-changed::{CLIPBOARD}");
+    term.view.connect_local(&signal, false, move |_| {
+        let term = weak.upgrade()?;
+        let argv = term.shell.clip(id(&term.key))?;
+        let clipboard = term.view.clipboard();
+        glib::spawn_future_local(async move {
+            let copy = crate::work::attempt("take the terminal's copy", move || {
+                let out = std::process::Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .stdin(std::process::Stdio::null())
+                    .output()?;
+                match out.status.success() {
+                    true => Ok(out.stdout),
+                    false => Err(std::io::Error::other(
+                        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                    )),
+                }
+            })
+            .await;
+            match copy {
+                Ok(base64) => {
+                    let text = glib::base64_decode(&String::from_utf8_lossy(&base64));
+                    clipboard.set_text(&String::from_utf8_lossy(&text));
+                }
+                Err(why) => tracing::warn!("{why}"),
+            }
+        });
+        None
+    });
+}
 
 /// Draw one of [`start`]'s progress lines over the last, from the worker making the host ready:
 /// through the main loop, as `pdf::render` hands a page back, and not once `over` is set.

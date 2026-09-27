@@ -145,6 +145,7 @@ fn main() -> glib::ExitCode {
     if let Ok(exe) = std::env::current_exe() {
         accent_core::git::set_askpass(exe);
     }
+    terminal::install_termprops();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
