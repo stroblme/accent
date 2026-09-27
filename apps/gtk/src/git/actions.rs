@@ -295,9 +295,10 @@ impl Panel {
                         left.push(format!("{} ({why})", repo.name));
                     }
                 }
-                match left.is_empty() {
-                    true => Ok(format!("Synced {} repositories", repos.len())),
-                    false => Err(anyhow::anyhow!(left.join(", "))),
+                match (left.is_empty(), repos.len()) {
+                    (true, 1) => Ok("Synced 1 repository".to_string()),
+                    (true, n) => Ok(format!("Synced {n} repositories")),
+                    (false, _) => Err(anyhow::anyhow!(left.join(", "))),
                 }
             },
             |_| (),
