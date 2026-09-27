@@ -472,7 +472,9 @@ fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
             cwd.as_deref().and_then(Path::to_str),
             &args,
             &[],
-            glib::SpawnFlags::DEFAULT,
+            // A remote shell's `ssh` from `$PATH`, as the link's own is: without it VTE looks in
+            // `/bin:/usr/bin` only, and an ssh installed elsewhere ran the master but not the tab.
+            glib::SpawnFlags::SEARCH_PATH,
             || {},
             -1,
             gio::Cancellable::NONE,
