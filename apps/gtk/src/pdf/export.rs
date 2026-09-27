@@ -12,48 +12,65 @@ use crate::App;
 
 /// Export as PDF… once the destination is chosen: the copy written to `dest`, and a toast.
 pub fn export_to(app: &Rc<App>, pdf: &Rc<PdfTab>, dest: PathBuf) {
-    let (app, pdf) = (app.clone(), pdf.clone());
-    let name = crate::doc::file_name(&pdf.key()).to_string();
-    let written = dest.file_name().map(|n| n.to_string_lossy().into_owned());
-    glib::spawn_future_local(async move {
-        match copied(&pdf, dest).await {
-            Ok(()) => app.toast(&format!("Exported {}", written.unwrap_or(name))),
-            Err(why) => app.cannot(&format!("export {name}"), why),
-        }
-    });
+    let name = dest
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let (pdf, done) = (pdf.clone(), format!("Exported {name}"));
+    busy_with(
+        app,
+        format!("Exporting {name}…"),
+        format!("export {name}"),
+        async move { copied(&pdf, dest).await.map(|()| Some(done)) },
+    );
 }
 
 /// Print…: the copy made in the cache and handed to the print dialog, which sends the file on as
 /// it is — vector pages, the print system doing ranges and copies. The copy goes once the dialog
 /// is done with it.
 pub fn print(app: &Rc<App>, pdf: &Rc<PdfTab>) {
-    let (app, pdf) = (app.clone(), pdf.clone());
     let name = crate::doc::file_name(&pdf.key()).to_string();
-    glib::spawn_future_local(async move {
-        let file = match print_copy(&pdf).await {
-            Ok(file) => file,
-            Err(why) => return app.cannot(&format!("print {name}"), why),
-        };
-        let dialog = gtk::PrintDialog::builder()
-            .title(name.as_str())
-            .modal(true)
-            .build();
-        let window = app.window.clone();
-        dialog.print_file(
-            Some(&window),
-            None,
-            &gio::File::for_path(&file),
-            gio::Cancellable::NONE,
-            move |result| {
-                let _ = std::fs::remove_file(&file);
+    let (window, pdf, title) = (app.window.clone(), pdf.clone(), name.clone());
+    busy_with(
+        app,
+        format!("Printing {name}…"),
+        format!("print {name}"),
+        async move {
+            let file = print_copy(&pdf).await?;
+            let dialog = gtk::PrintDialog::builder()
+                .title(title.as_str())
+                .modal(true)
+                .build();
+            let printed = dialog
+                .print_file_future(Some(&window), None, &gio::File::for_path(&file))
+                .await;
+            let _ = std::fs::remove_file(&file);
+            match printed {
                 // Closing the dialog is an answer, not a failure.
-                if let Err(e) = result
-                    && !e.matches(gtk::DialogError::Dismissed)
-                {
-                    app.cannot(&format!("print {name}"), e);
-                }
-            },
-        );
+                Err(e) if !e.matches(gtk::DialogError::Dismissed) => Err(e.to_string()),
+                _ => Ok(None),
+            }
+        },
+    );
+}
+
+/// Run `work` while the status bar says `busy`, then say how it went: the toast it asks for, or
+/// that the window cannot `what`, with its reason — as a note's Print and Export say it.
+fn busy_with(
+    app: &Rc<App>,
+    busy: String,
+    what: String,
+    work: impl Future<Output = Result<Option<String>, String>> + 'static,
+) {
+    app.statusbar.set_transfer(&busy, true);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let said = work.await;
+        app.statusbar.set_transfer(&busy, false);
+        match said {
+            Ok(Some(done)) => app.toast(&done),
+            Ok(None) => {}
+            Err(why) => app.cannot(&what, why),
+        }
     });
 }
 
