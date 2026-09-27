@@ -541,6 +541,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 - Commands `Ctrl+P` (also `Ctrl+Shift+P`), Go to File `Ctrl+E`, Find `Ctrl+F`, Replace `Ctrl+H`, Replace in Files `Ctrl+Shift+H`, Search Ignored Files (unbound), Find Next / Previous `F3` / `Shift+F3`, Go to Line `Ctrl+G`.
 - Find, Replace, Find Next / Previous and Go to Line act on the focused pane's own bar. Replace over a selection starts in the replacement box, the selection being the query already.
+- Search `Ctrl+Shift+F` and Replace in Files `Ctrl+Shift+H` do the same in the Search pane: the editor's selection, where there is one, is the query, and the box that takes the keyboard has all it holds selected, so what is typed next replaces it.
 - `Up` / `Down` in a query or replacement box, the find bar's or the Search pane's, walk back through the ones used earlier in this run and forward again to what was being typed, as a shell does; each kind of box shares one list, not saved.
 - Search Ignored Files is the Search pane's `All` button by another route.
 
