@@ -453,7 +453,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 - The status bar's progress text; never a modal, never a blocked window.
 - A background query whose answer replaces a list gets a `GtkProgressBar` across the top of that list, faded rather than hidden so nothing shifts, and only after 160 ms: a bar that appears and goes in one breath reads as a flash. Between queries its place says what the answer holds — "12 results in 3 files", `+` on a number the cap may have cut — in `.caption` `.dim-label`.
-- **A bar belongs to the surface it is about to fill**, which allows one more: a remote vault's first connection, across the top of the document column, since that wait makes the whole column usable and can take seconds. It measures the upload of the server binary and pulses through the rest; a local vault's window never shows it.
+- **A bar belongs to the surface it is about to fill**, which allows one more: a remote vault's first connection, across the top of the document column and inset from its edges as the tab bar insets its tabs, since that wait makes the whole column usable and can take seconds. It measures the upload of the server binary and pulses through the rest; a local vault's window never shows it.
 - Elsewhere a 16 px `AdwSpinner` beside the control that started the work, unless that would move the layout: a sync's spinner takes the Sync button's place at its size, so the branch row keeps its width. The status bar's branch, the same action, greys out meanwhile.
 
 ## Typography
