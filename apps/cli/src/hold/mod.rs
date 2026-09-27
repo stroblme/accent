@@ -12,6 +12,7 @@
 //! for the same reason.
 
 pub mod client;
+pub mod clip;
 pub mod daemon;
 mod protocol;
 mod screen;

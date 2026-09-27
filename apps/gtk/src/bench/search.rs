@@ -48,6 +48,9 @@ const LOOK: Duration = Duration::from_millis(2);
 /// All off again (`all_off`). `RUST_LOG=accent=debug` prints one `sidebar pass` line per pass for
 /// the whole query, not one per character.
 pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
+    if let Some(rel) = arg.strip_prefix("seed:") {
+        return bench_seed(app, rel);
+    }
     let more = (arg.strip_prefix("more:").map(|rest| (rest, false)))
         .or_else(|| arg.strip_prefix("click:").map(|rest| (rest, true)));
     if let Some((rest, click)) = more {
@@ -91,6 +94,102 @@ pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
     };
     bench_search_indexed(app.clone(), Instant::now(), move |app| {
         bench_search_run(app, query, count)
+    });
+}
+
+/// Ctrl+Shift+F and Ctrl+Shift+H against what the find bar's Ctrl+F and Ctrl+H do: the box that
+/// takes the keyboard holds the editor's selection where there is one, and has all it holds
+/// selected, so what is typed next replaces it. Fired as the chords' actions over the note at
+/// `rel`, each printing which box has the keyboard and what it has selected, at once and again
+/// once the query's delayed search has run. Last, `bench seed focus_window` and then
+/// `bench seed_ready <steps>` for `build-aux/xtest.py :N` to run, the real chord and two letters,
+/// and what the box then holds. `Tab::set_text` leaves the tab clean and the note's own text goes
+/// back at the end, so nothing is written.
+fn bench_seed(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(600)).await;
+        let (Some(tab), Some(boxes)) = (
+            app.active(),
+            app.sidebar.get().and_then(|s| s.search_boxes()),
+        ) else {
+            println!("bench seed no_tab");
+            return bench_quit(&app);
+        };
+        let show = |step: &str| {
+            let focus = gtk::prelude::GtkWindowExt::focus(&app.window);
+            let has = |entry: &gtk::Editable| {
+                focus
+                    .as_ref()
+                    .is_some_and(|f| f == entry.upcast_ref::<gtk::Widget>() || f.is_ancestor(entry))
+            };
+            let at = match boxes.iter().position(has) {
+                Some(0) => "query",
+                Some(_) => "replace",
+                None => "elsewhere",
+            };
+            let selected = boxes
+                .iter()
+                .find(|entry| has(entry))
+                .map(|entry| (entry.text().to_string(), entry.selection_bounds()));
+            println!("bench seed {step} focus={at} {selected:?}");
+        };
+        let press = |action: &str| {
+            let _ = WidgetExt::activate_action(&app.window, action, None);
+        };
+        let settle = || glib::timeout_future(Duration::from_millis(500));
+        // A query left in the box and nothing selected in the note: the box keeps it, selected.
+        if let Some(sidebar) = app.sidebar.get() {
+            sidebar.set_search_text("old query");
+        }
+        tab.view.grab_focus();
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        press("win.pane-search");
+        show("f");
+        settle().await;
+        show("f_settled");
+        // Again with the box already holding the keyboard, its caret at the end of the text.
+        // Pressed a moment later, as a hand would: a deselect and a select in one turn of the
+        // main loop hand the X primary selection over twice, and GTK takes the box's selection
+        // away when the first handover lands.
+        boxes[0].select_region(-1, -1);
+        settle().await;
+        press("win.pane-search");
+        settle().await;
+        show("f_again");
+        // A selection in the note is the query, selected.
+        let own = tab.text();
+        tab.set_text("alpha beta gamma\n");
+        tab.view.grab_focus();
+        let (start, end) = (tab.buffer.iter_at_offset(6), tab.buffer.iter_at_offset(10));
+        tab.buffer.select_range(&start, &end);
+        press("win.pane-search");
+        settle().await;
+        show("f_selection");
+        // Ctrl+H with a query: the replacement box, all it holds selected.
+        boxes[1].set_text("new");
+        tab.view.grab_focus();
+        press("win.replace-in-files");
+        settle().await;
+        show("h");
+        // The real chord and the real keys after it, once the window has the X input focus
+        // (`build-aux/xtest.py :N "move 700 400; focus"`): what is typed replaces the query.
+        println!("bench seed focus_window");
+        for _ in 0..50 {
+            if app.window.is_active() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        tab.view.grab_focus();
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        settle().await;
+        println!("bench seed_ready key ctrl+shift+f; type zz");
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        println!("bench seed typed {:?}", boxes[0].text());
+        tab.set_text(&own);
+        bench_quit(&app);
     });
 }
 

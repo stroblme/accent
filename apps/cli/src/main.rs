@@ -1,7 +1,7 @@
 //! accent-cli: index | scan | search | backlinks | tags | stats. Works without the GUI.
 //! Read-only with respect to the vault — the only thing it writes is the cache db.
 //! Also what runs behind the window: `serve` on a remote host, and `hold`, `attach`, `kill`,
-//! `held`, which keep the terminal tabs' shells alive between windows.
+//! `held` and `clip`, which keep the terminal tabs' shells alive between windows.
 
 mod hold;
 
@@ -146,6 +146,8 @@ enum Cmd {
     Kill { id: String },
     /// List the held shells, one JSON object per line.
     Held,
+    /// Print the last copy (OSC 52) held shell ID made, as base64, and forget it.
+    Clip { id: String },
 }
 
 fn main() -> Result<()> {
@@ -275,6 +277,7 @@ fn main() -> Result<()> {
         Cmd::Attach { cwd, id } => std::process::exit(hold::client::attach(&id, cwd)),
         Cmd::Kill { id } => hold::client::kill(&id)?,
         Cmd::Held => hold::client::held()?,
+        Cmd::Clip { id } => hold::clip::take(&id)?,
     }
     Ok(())
 }

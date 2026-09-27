@@ -483,6 +483,11 @@ pub fn kill_cmd(server: &str, id: &str) -> String {
     format!("{server} kill {}", quote(id))
 }
 
+/// The command that prints the last copy (OSC 52) the shell `id` made on the host, for [`run`].
+pub fn clip_cmd(server: &str, id: &str) -> String {
+    format!("{server} clip {}", quote(id))
+}
+
 // --------------------------------------------------------------------- cache
 
 /// The musl-static `accent-cli` this machine uploads to a host.
@@ -960,11 +965,13 @@ mod tests {
                 &format!("{server} attach --cwd '/srv/my vault' '{id}'"),
             ])
         );
-        // Ending it is a one-shot command over the same master, which never prompts.
+        // Ending it is a one-shot command over the same master, which never prompts, and so is
+        // taking the copy a program in it made.
         assert_eq!(
             run(&spaced, ctl(), &kill_cmd(&server, id)).last(),
             Some(&format!("{server} kill '{id}'"))
         );
+        assert_eq!(clip_cmd(&server, id), format!("{server} clip '{id}'"));
     }
 
     #[test]

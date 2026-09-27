@@ -316,6 +316,7 @@ pub fn build_window(
         reconciled: Cell::new(false),
         fetching: RefCell::new(HashSet::new()),
         restored: Cell::new(false),
+        reloading: Cell::new(false),
         menu_page: RefCell::new(None),
         pinned: RefCell::new(Vec::new()),
         tree_painted: Cell::new(0),

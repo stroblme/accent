@@ -488,6 +488,9 @@ fn bench_wrap_cost(tab: &Rc<Tab>) {
 /// vault a drill runs against holds notes rather than code. A bare URL underlines in any text
 /// file, so pointed at a `.txt` the drill still underlines it, and only it.
 pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
+    if let Some(rel) = rel.strip_prefix("hover:") {
+        return bench_hover(app, rel);
+    }
     app.open_path(rel);
     let app = app.clone();
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
@@ -528,6 +531,112 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
             tab.buffer.place_cursor(&caret);
             glib::spawn_future_local(bench_dangling(app, tab));
         });
+    });
+}
+
+/// The hover over the first wikilink of the note at `rel`, zoomed in twice, through the real
+/// pointer: prints `bench hover_aim <x> <y>` for `build-aux/xtest.py :N "move <x> <y>"`, then, once
+/// the hover is up, its font beside the note's, its size beside the window's, a line of it beside
+/// one of the note's and how tall its whole text is. Then `bench hover_scroll_aim <x> <y>`, the
+/// middle of the hover, for the pointer to be walked into (a jump there dismisses it) and a wheel
+/// turned, and what the hover's scroll came to. Held on screen 5 s in all, long enough for
+/// `import -window root -display :N shot.png`.
+fn bench_hover(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        let Some(tab) = app.active() else {
+            return bench_quit(&app);
+        };
+        // Zoomed, as a reader who finds the text small has it.
+        for _ in 0..2 {
+            let _ = WidgetExt::activate_action(&app.window, "win.zoom-in", None);
+        }
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let text = tab.text();
+        let link = text
+            .match_indices("[[")
+            .map(|(at, _)| at)
+            .find(|&at| !text[..at].ends_with('!'));
+        let Some(link) = link else {
+            println!("bench hover no_link");
+            return bench_quit(&app);
+        };
+        let iter = tab
+            .buffer
+            .iter_at_offset(text[..link + 3].chars().count() as i32);
+        tab.view
+            .scroll_to_iter(&mut iter.clone(), 0.0, true, 0.5, 0.5);
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let rect = tab.view.iter_location(&iter);
+        let (x, y) = tab.view.buffer_to_window_coords(
+            gtk::TextWindowType::Widget,
+            rect.x() + 4,
+            rect.y() + rect.height() / 2,
+        );
+        let point = graphene::Point::new(x as f32, y as f32);
+        let point = tab.view.compute_point(&app.window, &point).unwrap_or(point);
+        println!("bench hover_aim {:.0} {:.0}", point.x(), point.y());
+        let mut popover = None;
+        for _ in 0..50 {
+            glib::timeout_future(Duration::from_millis(100)).await;
+            popover = find_widget(tab.view.upcast_ref(), &|w| {
+                w.is_mapped() && w.type_().name() == "GtkSourceHoverAssistant"
+            });
+            if popover.is_some() {
+                break;
+            }
+        }
+        let Some(popover) = popover else {
+            println!("bench hover none");
+            return bench_quit(&app);
+        };
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let label = find_widget(&popover, &|w| w.is::<gtk::Label>()).and_downcast::<gtk::Label>();
+        let font = |w: &gtk::Widget| w.pango_context().font_description().map(|d| d.to_string());
+        println!(
+            "bench hover fonts label={:?} view={:?}",
+            label.as_ref().and_then(|l| font(l.upcast_ref())),
+            font(tab.view.upcast_ref())
+        );
+        let line = label.as_ref().map_or(0, |label| {
+            let layout = label.layout();
+            layout.pixel_size().1 / layout.line_count().max(1)
+        });
+        println!(
+            "bench hover size={}x{} window={}x{} line_px={line} note_line_px={} text_px={}",
+            popover.width(),
+            popover.height(),
+            app.window.width(),
+            app.window.height(),
+            rect.height(),
+            label.as_ref().map_or(0, |label| label.height()),
+        );
+        // A wheel over the hover scrolls what did not fit, and the hover stays up. The popup's
+        // surface is placed against the window's, which under Xvfb sits at the screen's origin.
+        let scroller = find_widget(&popover, &|w| w.is::<gtk::ScrolledWindow>())
+            .and_downcast::<gtk::ScrolledWindow>();
+        let popup = popover
+            .native()
+            .and_then(|n| n.surface())
+            .and_downcast::<gdk::Popup>();
+        if let Some(popup) = popup {
+            let surface = popup.upcast_ref::<gdk::Surface>();
+            println!(
+                "bench hover_scroll_aim {} {}",
+                popup.position_x() + surface.width() / 2,
+                popup.position_y() + surface.height() / 2
+            );
+            glib::timeout_future(Duration::from_millis(2000)).await;
+            println!(
+                "bench hover scrolled={:?} up={}",
+                scroller.map(|s| s.vadjustment().value()),
+                popover.is_mapped()
+            );
+        }
+        glib::timeout_future(Duration::from_secs(3)).await;
+        bench_quit(&app);
     });
 }
 

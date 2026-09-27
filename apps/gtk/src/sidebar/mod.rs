@@ -474,7 +474,8 @@ impl Sidebar {
 
     /// Show a pane by name: "files", "search", "tags", "references", "git", "ports", "outline"
     /// or "properties",
-    /// focusing its entry where there is one.
+    /// focusing its entry where there is one, all it holds selected, as the find bar's Ctrl+F
+    /// leaves its box: what is typed next is a new query.
     pub fn show_pane(&self, name: &str) {
         // A pane this sidebar does not have leaves it where it was, which for a window with no
         // vault means the outline stays up whatever chord was pressed.
@@ -483,7 +484,9 @@ impl Sidebar {
         }
         self.stack.set_visible_child_name(name);
         if let (Some(panes), "search") = (self.panes.as_ref(), name) {
+            // `GtkSearchEntry` selects nothing when it takes the keyboard, where `GtkEntry` does.
             panes.search_entry.grab_focus();
+            panes.search_entry.select_region(0, -1);
         }
     }
 
@@ -497,6 +500,7 @@ impl Sidebar {
         panes.replace_toggle.set_active(true);
         if !panes.search_entry.text().is_empty() {
             panes.replace_entry.grab_focus();
+            panes.replace_entry.select_region(0, -1);
         }
     }
 
@@ -543,6 +547,15 @@ impl Sidebar {
             Some(panes) => (panes.search_state)(),
             None => (String::new(), Vec::new(), String::new()),
         }
+    }
+
+    /// The Search pane's query and replace boxes, for `ACCENT_BENCH_SEARCH=seed:`.
+    pub fn search_boxes(&self) -> Option<[gtk::Editable; 2]> {
+        let panes = self.panes.as_ref()?;
+        Some([
+            panes.search_entry.clone().upcast(),
+            panes.replace_entry.clone().upcast(),
+        ])
     }
 
     /// The Search pane's list of rows, for `ACCENT_BENCH_SEARCH=more:`.

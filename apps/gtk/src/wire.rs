@@ -523,10 +523,9 @@ pub fn wire_window(app: &Rc<App>) {
                 let Err(e) = app.flush_tab(tab) else {
                     continue;
                 };
-                app.ask_unsaved(tab, &e, |app, close| {
-                    if close {
-                        app.window.close();
-                    }
+                app.ask_unsaved(tab, &e, |app, close| match close {
+                    true => app.window.close(),
+                    false => app.keep_open(),
                 });
                 return glib::Propagation::Stop;
             }
@@ -538,10 +537,9 @@ pub fn wire_window(app: &Rc<App>) {
                 let Err(e) = app.flush_diagram(diagram) else {
                     continue;
                 };
-                app.ask_unsaved_diagram(diagram, &e, |app, close| {
-                    if close {
-                        app.window.close();
-                    }
+                app.ask_unsaved_diagram(diagram, &e, |app, close| match close {
+                    true => app.window.close(),
+                    false => app.keep_open(),
                 });
                 return glib::Propagation::Stop;
             }
@@ -966,9 +964,12 @@ fn close_after_git(app: &Rc<App>, git: &Rc<git::Panel>) {
     );
     let (weak, git) = (Rc::downgrade(app), git.clone());
     dialogs::choose(&dialog, Some(&app.window), move |response| {
-        let Some(app) = weak.upgrade().filter(|_| response == "wait") else {
+        let Some(app) = weak.upgrade() else {
             return;
         };
+        if response != "wait" {
+            return app.keep_open();
+        }
         app.statusbar.set_transfer(CLOSING_AFTER_GIT, true);
         let weak = Rc::downgrade(&app);
         git.when_done(move |ok| {
@@ -976,8 +977,9 @@ fn close_after_git(app: &Rc<App>, git: &Rc<git::Panel>) {
                 return;
             };
             app.statusbar.set_transfer(CLOSING_AFTER_GIT, false);
-            if ok {
-                app.window.close();
+            match ok {
+                true => app.window.close(),
+                false => app.keep_open(),
             }
         });
     });

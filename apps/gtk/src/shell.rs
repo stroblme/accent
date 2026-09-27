@@ -84,6 +84,29 @@ pub enum Loose {
     Documents,
 }
 
+/// What Reload Window opens again: the key the window was on, the session it had, which only a
+/// window without a state file needs handed over, and its size and state, which no state file
+/// keeps. GTK 4 cannot place a window, so where it appears is the compositor's to say.
+struct Reopen {
+    key: WindowKey,
+    session: Session,
+    size: (i32, i32),
+    maximized: bool,
+    fullscreen: bool,
+}
+
+impl Reopen {
+    fn of(app: &App) -> Self {
+        Reopen {
+            key: app.key.borrow().clone(),
+            session: app.current_session(),
+            size: app.window.default_size(),
+            maximized: app.window.is_maximized(),
+            fullscreen: app.window.is_fullscreen(),
+        }
+    }
+}
+
 /// What an `app.` action does, given the shell and the application it was fired at.
 type AppAction = fn(&Rc<Shell>, &adw::Application);
 
@@ -627,16 +650,58 @@ impl Shell {
         // the close (an unsaved buffer that will not write), and GTK stops emitting as soon as one
         // handler does, so this one only ever sees a close that is really happening.
         app.window.connect_close_request({
-            let shell = Rc::downgrade(self);
+            let (shell, gtk_app) = (Rc::downgrade(self), gtk_app.clone());
             move |window| {
                 if let Some(shell) = shell.upgrade() {
+                    // Read while the window is still whole: what a reload opens again.
+                    let again = shell
+                        .app_at(window.upcast_ref())
+                        .filter(|app| app.reloading())
+                        .map(|app| Reopen::of(&app));
                     shell.forget(window);
+                    if let Some(again) = again {
+                        shell.reopen_soon(&gtk_app, again);
+                    }
                 }
                 glib::Propagation::Proceed
             }
         });
         self.windows.borrow_mut().push(app.clone());
         Some(app)
+    }
+
+    /// Open what a window being reloaded showed in a window of its own, once the old one has gone
+    /// and taken its vault's watcher and worker with it ([`Self::forget`]). The application is
+    /// held meanwhile: the old window may have been its last.
+    fn reopen_soon(self: &Rc<Self>, gtk_app: &adw::Application, again: Reopen) {
+        let hold = gtk_app.hold();
+        let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+        glib::idle_add_local_once(move || {
+            shell.reopen(&gtk_app, again);
+            drop(hold);
+        });
+    }
+
+    fn reopen(self: &Rc<Self>, gtk_app: &adw::Application, again: Reopen) {
+        let Some(app) = self.add_window(gtk_app, again.key.clone(), None) else {
+            // Nothing to open again, a vault gone from under it: the start screen, as Close Vault
+            // leaves the reader on.
+            return self.start_screen(gtk_app);
+        };
+        let (width, height) = again.size;
+        app.window.set_default_size(width, height);
+        if again.maximized {
+            app.window.maximize();
+        }
+        if again.fullscreen {
+            app.window.fullscreen();
+        }
+        // A vault and a named session restore from the state file the close has just written. The
+        // other windows keep none, so theirs is handed over, after the window's own start, which
+        // restores nothing for them.
+        if again.key.saved_as().is_none() {
+            glib::idle_add_local_once(move || app.restore(&again.session));
+        }
     }
 
     /// The window a page belongs to, and what it holds. libadwaita's tab drag hands a page to any

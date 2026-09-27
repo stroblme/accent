@@ -7,7 +7,7 @@
 //! terminal goes away it just exits, and the shell stays with the holder.
 
 use super::protocol::{self, DETACHED, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT, RESIZE};
-use super::{FAILED, SOCKET, lock};
+use super::{FAILED, SOCKET, clip, lock};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::unix::net::UnixStream;
@@ -66,6 +66,7 @@ fn holder() -> io::Result<Option<UnixStream>> {
 fn relay(id: &str, cwd: &Path, winch: libc::sigset_t) -> i32 {
     let to = Arc::new(Mutex::new(None));
     let mut out = io::stdout().lock();
+    let mut copies = clip::Scanner::default();
     let (mut forwarding, mut shown, mut silent) = (false, false, 0);
     while silent < 3 {
         let mut conn = match connect() {
@@ -105,6 +106,12 @@ fn relay(id: &str, cwd: &Path, winch: libc::sigset_t) -> i32 {
                     // The terminal went away: that is a detach.
                     if out.write_all(&bytes).and_then(|()| out.flush()).is_err() {
                         return 0;
+                    }
+                    // A copy the terminal will not make itself: see `clip`.
+                    if let Some(copy) = copies.feed(&bytes)
+                        && clip::keep(id, &copy).is_ok()
+                    {
+                        let _ = out.write_all(clip::SIGNAL).and_then(|()| out.flush());
                     }
                 }
                 Ok(Some((EXIT, code))) => {
