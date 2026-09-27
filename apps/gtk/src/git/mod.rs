@@ -448,6 +448,12 @@ impl Panel {
         self.chooser.set_selected(at);
     }
 
+    /// The repositories the chooser lists, by name. `ACCENT_BENCH_COMPARE=pick:` and nothing else.
+    pub fn repo_names(&self) -> Vec<String> {
+        let state = self.state.borrow();
+        state.repos.iter().map(|repo| repo.name.clone()).collect()
+    }
+
     /// How many rows the changes list holds. `ACCENT_BENCH_GIT` prints it either side of a
     /// [`Panel::set_tree`], which is how the grouping is proven without a pointer.
     pub fn changes_rows(&self) -> u32 {
@@ -523,6 +529,12 @@ impl Panel {
             // The history on screen is the other repository's until the refresh lands, and a
             // commit or a file under it clicked meanwhile would be read in this one.
             panel.clear_log();
+            // So are the changes, and a row clicked meanwhile compared its path in this one: an
+            // empty Index side and the whole file drawn as added. They are drawn again at once
+            // from the status the last refresh read of this repository, every refresh reading
+            // every repository's; the submodules it reads for the selected one alone.
+            panel.state.borrow_mut().submodules.clear();
+            panel.rebuild_changes();
             panel.refresh(Depth::Everything);
             // And ask its remote what it has, rather than leaving the first look at a second
             // repository up to five minutes stale. One round trip per pick, which is what makes
