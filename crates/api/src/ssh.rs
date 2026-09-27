@@ -295,9 +295,17 @@ pub fn exit(url: &Url, ctl: &Path) -> Vec<String> {
 }
 
 /// Ask whether a master is up behind `ctl`. It only talks to the socket, so it answers at once
-/// and never dials out: the question to settle before paying for a handshake.
+/// and never dials out: the question to settle before paying for a handshake. It is not asked
+/// whether the host still opens sessions on that connection, which only a command over it can
+/// tell.
 pub fn check(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "check")
+}
+
+/// Retire the master behind `ctl`: it takes no new sessions and gives up its socket for another
+/// master, but the sessions it carries, a shell's, keep going until they end, and then so does it.
+pub fn stop(url: &Url, ctl: &Path) -> Vec<String> {
+    control(url, ctl, "stop")
 }
 
 /// Which machine listens for a forward's connections.
@@ -429,9 +437,15 @@ pub fn hash_of(bytes: &[u8]) -> String {
 /// Test for the server, `size` bytes of it, so a second connection skips the upload. The size is
 /// counted too because a host may still hold a short file under the final name from before
 /// [`install_server_cmd`] counted its bytes; failing this, the next install replaces it.
+///
+/// The answer is `yes` or `no` on stdout rather than an exit status, so that a session which never
+/// ran the test — refused by the host, or cut off — is not taken for a server that is missing.
 pub fn have_server_cmd(hash: &str, size: usize) -> String {
     let installed = server_path(hash);
-    format!("test -x {installed} && [ \"$(wc -c < {installed})\" -eq {size} ]")
+    format!(
+        "if test -x {installed} && [ \"$(wc -c < {installed})\" -eq {size} ]; \
+         then echo yes; else echo no; fi"
+    )
 }
 
 /// Read the binary, `size` bytes of it, from stdin and install it.
@@ -787,6 +801,17 @@ mod tests {
                 "me@box",
             ])
         );
+        assert_eq!(
+            stop(&plain(), ctl()),
+            words(&[
+                "ssh",
+                "-o",
+                "ControlPath=/run/user/1000/accent/0123456789abcdef",
+                "-O",
+                "stop",
+                "box",
+            ])
+        );
     }
 
     #[test]
@@ -955,11 +980,15 @@ mod tests {
             server_path(hash),
             "$HOME/.local/share/accent/server/accent-cli-0123456789abcdef"
         );
-        // A short leftover under the final name is found as missing, so it is uploaded again.
+        // A short leftover under the final name is found as missing, so it is uploaded again, and
+        // the answer is a word: a session that never ran the test prints neither.
         let installed = server_path(hash);
         assert_eq!(
             have_server_cmd(hash, 8_300_000),
-            format!("test -x {installed} && [ \"$(wc -c < {installed})\" -eq 8300000 ]")
+            format!(
+                "if test -x {installed} && [ \"$(wc -c < {installed})\" -eq 8300000 ]; \
+                 then echo yes; else echo no; fi"
+            )
         );
     }
 

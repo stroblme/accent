@@ -10,7 +10,7 @@
 //! making its own, so the three tabs of a restored terminal session cost one handshake, one check
 //! and at most one upload between them.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,16 +81,42 @@ pub fn prepare(
     once(&url.authority(), ctl, quiet, || {
         // A live master skips the handshake and the round trip `ssh::master` would make to adopt
         // it. A stale socket fails the check, and `ControlMaster=auto` replaces it.
-        if run(&ssh::check(url, ctl)).is_err() {
-            if let Some(dir) = ctl.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            }
-            run(&ssh::master(url, ctl, quiet)).map_err(|why| match why.is_empty() {
-                true => format!("cannot connect to {}", url.host),
-                false => why,
-            })?;
+        let adopted = run(&ssh::check(url, ctl)).is_ok();
+        if !adopted {
+            dial(url, ctl, quiet, say)?;
         }
-        provision(url, ctl, say)
+        let server = server()?;
+        let installed = match installed(url, ctl, &server, say) {
+            // Up is not usable: the host may no longer open a session on that connection — one
+            // too many, or a login that has lapsed since, as a cluster's key unlocked for hours
+            // does — and every command over it then falls back to a connection of its own, which
+            // `BatchMode` refuses at the first prompt. Adopting it again would repeat that on
+            // every attempt, so it is retired and a fresh master dials in its place, asking for
+            // the passphrase where this attempt may.
+            Err(why) if adopted => {
+                tracing::debug!("the master for {} opens no session: {why}", url.host);
+                let _ = run(&ssh::stop(url, ctl));
+                dial(url, ctl, quiet, say)?;
+                installed(url, ctl, &server, say)?
+            }
+            answer => answer?,
+        };
+        match installed {
+            true => Ok(()),
+            false => upload(url, ctl, &server, say),
+        }
+    })
+}
+
+/// Start the background master behind `ctl`, which is where a prompt can come up.
+fn dial(url: &Url, ctl: &Path, quiet: bool, say: &dyn Fn(&str, Option<f64>)) -> Result<(), String> {
+    say(&format!("Connecting to {}", url.host), None);
+    if let Some(dir) = ctl.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    run(&ssh::master(url, ctl, quiet)).map_err(|why| match why.is_empty() {
+        true => format!("cannot connect to {}", url.host),
+        false => why,
     })
 }
 
@@ -125,21 +151,40 @@ fn run(argv: &[String]) -> Result<(), String> {
     }
 }
 
-/// Put the right server binary on the host, if it is not already there.
-fn provision(url: &Url, ctl: &Path, say: &dyn Fn(&str, Option<f64>)) -> Result<(), String> {
+/// Whether the host holds this build's server, or why a command over the master could not say.
+fn installed(
+    url: &Url,
+    ctl: &Path,
+    server: &Server,
+    say: &dyn Fn(&str, Option<f64>),
+) -> Result<bool, String> {
     say("Checking the remote server", None);
-    let server = server()?;
-    let total = server.size;
-    if run(&ssh::run(
+    let out = command(&ssh::run(
         url,
         ctl,
-        &ssh::have_server_cmd(&server.hash, total),
+        &ssh::have_server_cmd(&server.hash, server.size),
     ))
-    .is_ok()
-    {
-        return Ok(());
+    .stdin(Stdio::null())
+    .output()
+    .map_err(|e| format!("cannot run ssh: {e}"))?;
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "yes" => Ok(true),
+        "no" => Ok(false),
+        _ => Err(match String::from_utf8_lossy(&out.stderr).trim() {
+            "" => format!("cannot run a command on {}", url.host),
+            why => why.to_string(),
+        }),
     }
+}
 
+/// Put this build's server on the host.
+fn upload(
+    url: &Url,
+    ctl: &Path,
+    server: &Server,
+    say: &dyn Fn(&str, Option<f64>),
+) -> Result<(), String> {
+    let total = server.size;
     let bytes =
         std::fs::read(&server.path).map_err(|e| format!("{}: {e}", server.path.display()))?;
     // Rebuilt since it was hashed: these bytes would go up under another build's name.
@@ -150,41 +195,64 @@ fn provision(url: &Url, ctl: &Path, say: &dyn Fn(&str, Option<f64>)) -> Result<(
         &format!("Uploading the server (0 / {} MB)", mb(total)),
         Some(0.0),
     );
-    let mut child = command(&ssh::run(
-        url,
-        ctl,
-        &ssh::install_server_cmd(&server.hash, total),
-    ))
-    .stdin(Stdio::piped())
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped())
-    .spawn()
-    .map_err(|e| format!("cannot run ssh: {e}"))?;
-    {
-        let mut stdin = child.stdin.take().ok_or("ssh has no stdin")?;
-        for (n, chunk) in bytes.chunks(CHUNK).enumerate() {
-            stdin
-                .write_all(chunk)
-                .map_err(|e| format!("uploading the server: {e}"))?;
-            let done = ((n + 1) * CHUNK).min(total);
-            say(
-                &format!("Uploading the server ({} / {} MB)", mb(done), mb(total)),
+    let argv = ssh::run(url, ctl, &ssh::install_server_cmd(&server.hash, total));
+    send(&argv, bytes.as_slice(), total as u64, &|done, total| {
+        match done < total {
+            true => say(
+                &format!(
+                    "Uploading the server ({} / {} MB)",
+                    mb(done as usize),
+                    mb(total as usize)
+                ),
                 Some(done as f64 / total as f64),
-            );
+            ),
+            // The bytes are all written, and the host is still unpacking them: without this the
+            // bar would sit full for seconds under a message saying the upload had finished.
+            false => say("Installing the server", None),
         }
-    }
-    // The bytes are all written, and the host is still unpacking them: without this the bar
-    // would sit full for seconds under a message saying the upload had finished.
-    say("Installing the server", None);
-    let out = child
-        .wait_with_output()
-        .map_err(|e| format!("uploading the server: {e}"))?;
-    match out.status.success() {
-        true => Ok(()),
-        false => Err(format!(
-            "cannot install the server: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
+    })
+    .map_err(|e| format!("cannot install the server: {e}"))
+}
+
+/// Run `argv` with `input` on its stdin, a chunk at a time, telling `progress` the bytes written
+/// so far of `total`.
+///
+/// A write that fails is ssh having ended already, so what it said on stderr is the reason, not
+/// the broken pipe the write found.
+pub(crate) fn send(
+    argv: &[String],
+    mut input: impl Read,
+    total: u64,
+    progress: &dyn Fn(u64, u64),
+) -> std::io::Result<()> {
+    let mut child = command(argv)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let written = (|| {
+        // Dropped on the way out, which closes the pipe: the host's `cat` ends there.
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("ssh has no stdin"))?;
+        let (mut buf, mut done) = (vec![0; CHUNK], 0);
+        loop {
+            let n = input.read(&mut buf)?;
+            if n == 0 {
+                return Ok(());
+            }
+            stdin.write_all(&buf[..n])?;
+            done += n as u64;
+            progress(done, total);
+        }
+    })();
+    let out = child.wait_with_output()?;
+    let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    match (written, out.status.success()) {
+        (Ok(()), true) => Ok(()),
+        (Err(e), _) if said.is_empty() => Err(e),
+        _ => Err(std::io::Error::other(said)),
     }
 }
 
@@ -296,6 +364,20 @@ mod tests {
         });
         running.recv().unwrap();
         (release, attempt)
+    }
+
+    /// ssh that has ended before its input is written — refused by the host, as a lapsed login is
+    /// — leaves a broken pipe to write into; the reason is what it said.
+    #[test]
+    fn a_refused_transfer_says_why_rather_than_broken_pipe() {
+        let argv = [
+            "sh",
+            "-c",
+            "echo 'Permission denied (publickey).' >&2; exit 255",
+        ]
+        .map(String::from);
+        let err = send(&argv, &[0u8; 1 << 20][..], 1 << 20, &|_, _| ()).unwrap_err();
+        assert_eq!(err.to_string(), "Permission denied (publickey).");
     }
 
     #[test]
