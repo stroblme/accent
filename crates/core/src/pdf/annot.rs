@@ -170,6 +170,19 @@ impl PdfDoc {
         Ok(added)
     }
 
+    /// The document as it now stands with `highlights` written in, as the bytes of a file of its
+    /// own: what Export as PDF writes and Print prints. This document gains nothing — the
+    /// highlights go into a second one read from its bytes.
+    pub fn copy_with_highlights(&self, highlights: &[Highlight]) -> Result<Vec<u8>> {
+        let bytes = self.save()?;
+        if highlights.is_empty() {
+            return Ok(bytes);
+        }
+        let mut copy = PdfDoc::from_bytes(bytes)?;
+        copy.add_highlights(highlights)?;
+        copy.save()
+    }
+
     /// Draw one free-hand stroke onto a page as an `/Ink` annotation.
     ///
     /// `points` are in this module's top-left-origin page points, `width` is the stroke width in

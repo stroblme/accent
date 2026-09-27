@@ -5,9 +5,10 @@
 //! sizes and then answers [`Request`]s until the tab drops its sender.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, TryRecvError, channel};
 
+use accent_api::PdfLink;
 use accent_core::pdf::{self, Ink, PdfDoc};
 use anyhow::{Result, anyhow};
 use gtk::glib;
@@ -381,18 +382,7 @@ fn render_loop(
                             Some((*page, area))
                         })
                         .collect();
-                    let highlights: Vec<pdf::Highlight> = quads
-                        .into_iter()
-                        .flat_map(|(page, found)| {
-                            found.into_iter().map(move |(quads, at)| (page, quads, at))
-                        })
-                        .map(|(page, quads, at)| pdf::Highlight {
-                            page,
-                            quads,
-                            color: [color[0], color[1], color[2], 255],
-                            contents: links.get(at).and_then(|l| l.alias.clone()),
-                        })
-                        .collect();
+                    let highlights = as_highlights(quads, &links, color);
                     let written = doc
                         .add_highlights(&highlights)
                         .and_then(|added| match added {
@@ -411,6 +401,17 @@ fn render_loop(
                         })
                         .map_err(|e| format!("{e:#}"));
                     send(&view, Reply::Exported(written));
+                }
+                Request::Copy {
+                    links,
+                    color,
+                    dest,
+                    done,
+                } => {
+                    let quads = pdf::highlight_quads(&doc, &mut glyphs, &links);
+                    let highlights = as_highlights(quads, &links, color);
+                    let copied = copy(&doc, &highlights, &path, &dest);
+                    let _ = done.send(copied.map_err(|e| format!("{e:#}")));
                 }
                 Request::Reload => {
                     // Swapped only on success: a half-written PDF fails to open often while a
@@ -447,6 +448,34 @@ fn render_loop(
             }
         }
     }
+}
+
+/// Where the note links land, as `/Highlight` annotations in `color`, each carrying the text its
+/// link quotes.
+fn as_highlights(quads: Highlights, links: &[PdfLink], color: [u8; 3]) -> Vec<pdf::Highlight> {
+    quads
+        .into_iter()
+        .flat_map(|(page, found)| found.into_iter().map(move |(quads, at)| (page, quads, at)))
+        .map(|(page, quads, at)| pdf::Highlight {
+            page,
+            quads,
+            color: [color[0], color[1], color[2], 255],
+            contents: links.get(at).and_then(|l| l.alias.clone()),
+        })
+        .collect()
+}
+
+/// The document with `highlights` in it, written to `dest`. Never onto `path`, the file this
+/// thread reads: the copy is what leaves that file as it is.
+fn copy(doc: &PdfDoc, highlights: &[pdf::Highlight], path: &Path, dest: &Path) -> Result<()> {
+    if let (Ok(from), Ok(to)) = (path.canonicalize(), dest.canonicalize())
+        && from == to
+    {
+        return Err(anyhow!("that is the file being exported"));
+    }
+    let bytes = doc.copy_with_highlights(highlights)?;
+    accent_core::fs::write_bytes(dest, &bytes, None)?;
+    Ok(())
 }
 
 /// The pages were edited, or an edit taken back: the glyphs read of each page follow it to its

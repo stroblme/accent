@@ -240,6 +240,42 @@ fn exported_highlights_read_back_after_a_reopen() {
     assert!(back.highlights_on(1).unwrap().is_empty());
 }
 
+/// Export as PDF: the copy carries the ink and the note highlights, and the document it was made
+/// from gains nothing.
+#[test]
+fn a_copy_carries_the_highlights_and_leaves_the_document_alone() {
+    let Some((_dir, mut doc)) = open_tiny_with(true) else {
+        return;
+    };
+    let pen = InkStyle {
+        width: 2.0,
+        rgba: [0, 0, 255, 255],
+        multiply: false,
+    };
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], pen).unwrap();
+    let hl = Highlight {
+        page: 1,
+        quads: vec![Rect {
+            left: 18.0,
+            top: 50.0,
+            right: 120.0,
+            bottom: 66.0,
+        }],
+        color: [53, 132, 228, 255],
+        contents: None,
+    };
+
+    let copy = PdfDoc::from_bytes(doc.copy_with_highlights(&[hl]).unwrap()).unwrap();
+    assert_eq!(copy.page_count(), doc.page_count());
+    assert_eq!(copy.highlights().unwrap().len(), 2);
+    assert_eq!(copy.ink_paths(0).unwrap().len(), 1);
+    assert_eq!(doc.highlights().unwrap().len(), 1);
+    // Nothing to add is the document as it stands (not byte for byte: each save draws a new /ID).
+    let plain = PdfDoc::from_bytes(doc.copy_with_highlights(&[]).unwrap()).unwrap();
+    assert_eq!(plain.highlights().unwrap().len(), 1);
+    assert_eq!(plain.ink_paths(0).unwrap().len(), 1);
+}
+
 #[test]
 fn ink_round_trips_through_save() {
     let Some((dir, mut doc)) = open_tiny() else {

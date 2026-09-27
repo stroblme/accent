@@ -252,20 +252,17 @@ impl Index {
     /// ponytail: no `(dev, ino)` dedup here, so a note linked in twice gets a row per path until
     /// the next full reconcile collapses them. Aliases are rare and never wrong, only duplicated.
     pub fn update_file(&mut self, root: &Path, rel: &str) -> Result<Change> {
-        let change = self.update_file_batched(root, rel)?;
-        // The file's own links were just written unresolved, and a new note can be what a link
-        // written long before it existed was waiting for — or a shorter path for one that
-        // resolved deeper. Both are the links its keys name, and nothing else moved.
-        if matches!(change, Change::Added(_) | Change::Updated(_)) {
-            self.resolve_links_of(rel)?;
-        }
-        Ok(change)
+        self.update_one(root, rel, true)
     }
 
     /// [`update_file`](Self::update_file) without the link resolution: the file's own links are
     /// written unresolved, and links into it stay as they were until
     /// [`resolve_links`](Self::resolve_links) runs.
     pub fn update_file_batched(&mut self, root: &Path, rel: &str) -> Result<Change> {
+        self.update_one(root, rel, false)
+    }
+
+    fn update_one(&mut self, root: &Path, rel: &str, resolve: bool) -> Result<Change> {
         let meta = match walk::stat_one(root, rel) {
             Ok(Some(meta)) => meta,
             Ok(None) => return Ok(Change::Ignored),
@@ -292,6 +289,14 @@ impl Index {
         let existing_id = existing.map(|(id, ..)| id);
         let tx = self.write_tx()?;
         upsert(&tx, &meta, existing_id, &mut ReconcileStats::default())?;
+        // The file's own links were just written unresolved, and a new note can be what a link
+        // written long before it existed was waiting for — or a shorter path for one that
+        // resolved deeper. Both are the links its keys name, and nothing else moved. In the same
+        // transaction, or a reader in between sees the note link to nothing: a page edit asking
+        // for the backlinks of a PDF right after the last one rewrote a note would skip it.
+        if resolve {
+            resolve_links_of(&tx, rel)?;
+        }
         tx.commit()?;
         Ok(match existing_id {
             Some(_) => Change::Updated(meta.kind),

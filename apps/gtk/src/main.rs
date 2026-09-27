@@ -21,6 +21,7 @@ mod diff;
 mod doc;
 mod editor;
 mod events;
+mod export;
 mod fade;
 mod fileops;
 mod find;
