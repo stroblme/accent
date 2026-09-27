@@ -50,7 +50,7 @@ make apk               # cross-builds the core, generates the bindings, packs th
 
 The desktop app needs Rust ≥ 1.92 ([rustup](https://rustup.rs)), a C compiler, pkg-config, and the
 development files of GTK ≥ 4.18, libadwaita ≥ 1.7, GtkSourceView ≥ 5.18, WebKitGTK 6.0, VTE for
-GTK 4 ≥ 0.76 and libspelling. Debian 13 and Ubuntu 24.04 are too old for these; Debian testing,
+GTK 4 ≥ 0.78 and libspelling. Debian 13 and Ubuntu 24.04 are too old for these; Debian testing,
 Ubuntu 26.04, Fedora 43, Arch and Tumbleweed have them all.
 
 Optional, each for one feature: libpdfium for PDFs (`make pdfium`, which uses `curl`), `git` for

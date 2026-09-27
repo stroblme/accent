@@ -21,6 +21,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vte4",
+ "vte4-sys",
  "webkit6",
 ]
 

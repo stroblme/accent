@@ -225,6 +225,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Opening one focuses the shell, so it can be typed into without a click.
 - A secondary click: Copy and Paste; New Terminal and Close Tab; Open Link and Copy Link Address, the last pair only over a URL.
 - `http`, `https` and `mailto` URLs in the output, OSC 8 hyperlinks included, are drawn as links and `Ctrl`+click opens one (a plain click is VTE's selection). The three schemes are an allowlist: a shell's output is untrusted, so a `file:` or `javascript:` URL is neither drawn nor launched.
+- A program's OSC 52 copy (Codex, Claude Code, Vim over ssh) reaches the clipboard, which VTE does not do itself: `accent-cli attach`, which every shell's output passes through here and on a host alike, keeps the copy beside the holder and raises the valueless `vte.ext.accent.clipboard` termprop, and the tab takes the copy with `accent-cli clip`, over the master on a host. A termprop cannot carry the copy (2 KiB at most, and a burst keeps only its last value). Writes only: a query (`?`) is never answered, and a copy past 16 MiB of base64 is dropped.
 - `accent --terminal [PATH]` opens a shell in a vault-less window at PATH or `$HOME` — a path that is not a directory is reported and falls back, and an `ssh://` address is a shell on that host. `accent terminal://NAME [PATH]` opens the terminal session NAME, made if new, and adds a shell at PATH.
 
 ### Status bar
