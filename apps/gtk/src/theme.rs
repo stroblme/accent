@@ -156,6 +156,13 @@ pub fn view_fg(dark: bool) -> &'static str {
     }
 }
 
+/// The page a note is printed or exported onto, and its ink: Light's view whatever the theme on
+/// screen, since paper is white and a printout or a shared file is read away from the window. The
+/// ink is the pre-composited one, so text reaches the page solid rather than as translucent black.
+pub fn paper() -> (&'static str, gdk::RGBA) {
+    (VIEW_LIGHT, rgba(rgb(VIEW_LIGHT_TEXT), 1.0))
+}
+
 /// The sixteen ANSI colours for that theme.
 pub fn terminal_palette(dark: bool) -> &'static [&'static str; 16] {
     match (CHOICE.get(), dark) {

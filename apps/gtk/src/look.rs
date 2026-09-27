@@ -41,6 +41,15 @@ impl Look {
         }
     }
 
+    /// The look of a printout or an export: every image as its file is, whatever the theme on
+    /// screen and whatever the reader inverted.
+    pub fn paper() -> Look {
+        Look {
+            theme: None,
+            opposite: None,
+        }
+    }
+
     /// The paper and ink to recolour an image onto, or `None` to show it as it is.
     ///
     /// The PDF's rule (`PdfTab::restyle`): the theme recolours a document and leaves a photo
@@ -456,6 +465,10 @@ mod tests {
                 got, want,
                 "{look:?} document={document} inverted={inverted}"
             );
+        }
+        // Paper shows every image as its file, inverted or not.
+        for (document, inverted) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(Look::paper().palette(document, inverted), None);
         }
         // Only a theme's own recolouring turns on what the image shows.
         assert!(!light.asks(false) && dark.asks(false) && cream.asks(false));
