@@ -101,7 +101,7 @@ gtk:
 # An optional item only warns: the app runs without it and lacks the feature it names.
 RUST_MIN := 1.92
 GTK_LIBS := gtk4:4.18 libadwaita-1:1.7 gtksourceview-5:5.18 webkitgtk-6.0:2.40 \
-            vte-2.91-gtk4:0.76 libspelling-1:0.1
+            vte-2.91-gtk4:0.78 libspelling-1:0.1
 requirements:
 	@missing=0; \
 	for tool in cargo cc pkg-config glib-compile-resources; do \
