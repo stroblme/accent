@@ -121,6 +121,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
             bench_column(&view).await;
             bench_selections(&view).await;
             bench_lines(&view).await;
+            bench_box(&view).await;
             window.close();
             bench_quit(&app);
         });
@@ -259,6 +260,50 @@ async fn bench_column(view: &multicaret::View) {
         view.caret_positions()
     );
     view.clear_carets();
+}
+
+/// Box selection as a `Shift+Alt` drag makes it ([`multicaret::View::select_box`]), from a press
+/// on one line to the pointer on another, in pixels: every line between gets a caret selecting
+/// what lies between the two, a line ending short of the box an empty caret at its end, one
+/// ending inside it its text to the end, and a wrapped line one caret, on its row nearest the
+/// press. A press that does not move is a caret. Prints every caret, the primary first.
+async fn bench_box(view: &multicaret::View) {
+    let buffer = view.buffer();
+    view.clear_carets();
+    // Monospace, so a column is the same number of pixels on every line.
+    view.set_monospace(true);
+    let wrapped = "wide ".repeat(80);
+    buffer.set_text(&format!(
+        "0123456789\n0\n0123\n\n0123456789\n{wrapped}\n0123456789"
+    ));
+    // Laid out first, or the lines' heights are still estimates.
+    glib::timeout_future(Duration::from_millis(200)).await;
+    // A pixel inside the character at `column` of `line`, on its first row, in buffer coordinates.
+    let point = |line: i32, column: i32| {
+        let mut at = buffer.iter_at_line(line).unwrap_or(buffer.end_iter());
+        at.set_line_offset(column);
+        let rect = view.iter_location(&at);
+        (rect.x() + 1, rect.y() + rect.height() / 2)
+    };
+    let show = |step: &str| {
+        println!(
+            "bench box_{step} {:?} carets={}",
+            view.caret_positions(),
+            view.has_carets()
+        )
+    };
+    view.select_box(point(0, 2), point(4, 6));
+    show("down");
+    view.select_box(point(4, 6), point(0, 2));
+    show("up_left");
+    // Line 5 is the wrapped one: its first row going down, its last going up.
+    view.select_box(point(4, 2), point(6, 6));
+    show("wrap_down");
+    view.select_box(point(6, 2), point(4, 6));
+    show("wrap_up");
+    view.select_box(point(2, 1), point(2, 1));
+    show("click");
+    view.set_monospace(false);
 }
 
 /// Three carets down column 1 of `text`, or as many as it has lines for, the primary on top.
@@ -955,6 +1000,76 @@ fn bench_held() -> String {
         Ok(out) => format!("failed:{}", out.status),
         Err(e) => format!("failed:{e}"),
     }
+}
+
+/// Box selection through the real pointer: a plain drag, which stays GTK's own selection, a
+/// `Shift+Alt` drag, and a `Shift+Alt` press that does not move, which leaves one caret there.
+/// The file at `rel` is given a text of its own, and for each the drill prints
+/// `bench box_ready <steps>` for `build-aux/xtest.py :N "<steps>"` to run, in the window's
+/// coordinates, which under Xvfb are the screen's, then every caret and the primary selection. It
+/// first prints `bench box focus_window`, as [`bench_occurrence_keys`] does.
+pub(super) fn bench_box_drag(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        println!("bench box focus_window");
+        for _ in 0..100 {
+            if app.window.is_active() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(tab) = app.active() else {
+            println!("bench box no_tab");
+            return bench_quit(&app);
+        };
+        let own = tab.text();
+        tab.set_text("0123456789\n0\n0123\n\n0123456789\n");
+        tab.view.grab_focus();
+        // Laid out first, or the lines' heights are still estimates.
+        glib::timeout_future(Duration::from_millis(300)).await;
+        // The middle of the character at `column` of `line`'s first row, in the window.
+        let aim = |line: i32, column: i32| {
+            let buffer = &tab.buffer;
+            let mut at = buffer.iter_at_line(line).unwrap_or(buffer.end_iter());
+            at.set_line_offset(column);
+            let rect = tab.view.iter_location(&at);
+            let (x, y) = tab.view.buffer_to_window_coords(
+                gtk::TextWindowType::Widget,
+                rect.x() + 2,
+                rect.y() + rect.height() / 2,
+            );
+            let point = graphene::Point::new(x as f32, y as f32);
+            let point = tab.view.compute_point(&app.window, &point).unwrap_or(point);
+            format!("{:.0} {:.0}", point.x(), point.y())
+        };
+        let chord = |steps: String| {
+            format!("keydown Shift_L; keydown Alt_L; {steps}; keyup Alt_L; keyup Shift_L")
+        };
+        let parts = [
+            ("plain", format!("drag {} {}", aim(0, 2), aim(4, 6))),
+            ("box", chord(format!("drag {} {}", aim(0, 2), aim(4, 6)))),
+            // Resting first: under Xvfb a press straight after a move reaches no widget, with or
+            // without the chord.
+            (
+                "click",
+                chord(format!("move {}; sleep 0.2; down; up", aim(2, 1))),
+            ),
+        ];
+        for (step, steps) in parts {
+            println!("bench box_ready {steps}");
+            glib::timeout_future(Duration::from_millis(2500)).await;
+            let carets = tab.ghost_view().map(|view| view.caret_positions());
+            let selection = tab
+                .buffer
+                .selection_bounds()
+                .map(|(start, end)| (start.offset(), end.offset()));
+            println!("bench box {step} {carets:?} selection={selection:?}");
+        }
+        tab.set_text(&own);
+        bench_quit(&app);
+    });
 }
 
 /// Add Caret at Next Occurrence, Select All Occurrences and Add Caret Above / Below through the
