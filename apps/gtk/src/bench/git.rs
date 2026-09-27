@@ -943,3 +943,62 @@ pub(super) fn bench_git_markers(app: &Rc<App>, rel: &str) {
         bench_quit(&app);
     });
 }
+
+/// Create Branch… with names git would refuse typed in (`=branch`): for each, what the line under
+/// the field says, whether it shows, and whether Create is live. Then `my new branch` is created
+/// by answering the dialog, a second after it was typed in (for a screenshot), and the branch HEAD
+/// ends up on is printed: `my-new-branch` is the claim.
+pub(super) fn bench_git_branch(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        git.create_branch();
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let Some(dialog) = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>()
+        else {
+            println!("bench git_branch no_dialog");
+            return bench_quit(&app);
+        };
+        let root = dialog.clone().upcast::<gtk::Widget>();
+        let entry = find_widget(&root, &|w| w.is::<gtk::Entry>()).and_downcast::<gtk::Entry>();
+        let label = find_widget(&root, &|w| {
+            w.downcast_ref::<gtk::Label>()
+                .is_some_and(|l| l.has_css_class("dim-label"))
+        })
+        .and_downcast::<gtk::Label>();
+        let (Some(entry), Some(label)) = (entry, label) else {
+            println!("bench git_branch no_field");
+            return bench_quit(&app);
+        };
+        for typed in ["", "topic", "my new branch", "fix: ~bug^ ?", "?*"] {
+            entry.set_text(typed);
+            println!(
+                "bench git_branch typed={typed:?} shown={} says={:?} create={}",
+                label.is_visible(),
+                label.label(),
+                dialog.is_response_enabled(crate::dialogs::CONFIRM)
+            );
+        }
+        entry.set_text("my new branch");
+        // A second for a screenshot of the dialog as it stands.
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+        dialog.close();
+        wait_for(|| !git.busy(), 20000).await;
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(app.root())
+            .args(["branch", "--show-current"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default();
+        println!("bench git_branch head={head:?}");
+        bench_quit(&app);
+    });
+}

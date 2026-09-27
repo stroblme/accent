@@ -290,19 +290,41 @@ impl Panel {
     /// Branch from HEAD and switch to it in one step, which is `git switch -c`: no base picker,
     /// because the base a reader means is the state they are looking at.
     ///
-    /// The name is git's to validate — a bad ref name, one already taken and a worktree the
-    /// switch would clobber are all its refusals, and they come back through [`Panel::command`],
-    /// which also brings the refresh.
-    pub(super) fn create_branch(self: &Rc<Self>) {
+    /// What git would refuse in a name becomes a dash, as VS Code makes it one
+    /// ([`git::branch_name`]), and the line under the field says what will be created whenever
+    /// that is not what was typed. One already taken and a worktree the switch would clobber are
+    /// git's refusals, and they come back through [`Panel::command`], which also brings the
+    /// refresh.
+    pub fn create_branch(self: &Rc<Self>) {
         self.branch_menu.popdown();
         let entry = dialogs::name_entry("Branch name", "");
+        let named = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(pango::EllipsizeMode::Middle)
+            .build();
+        named.add_css_class("dim-label");
         let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
         form.append(&entry);
+        form.append(&named);
         let dialog = dialogs::name_dialog("Create Branch", "Create", &form);
+        // Weak: the entry is the dialog's own child, and its handler holding the dialog would be
+        // a cycle.
+        let asked = dialog.downgrade();
+        let show = move |entry: &gtk::Entry| {
+            let typed = entry.text();
+            let name = git::branch_name(&typed);
+            named.set_label(&format!("Will be created as {name}"));
+            named.set_visible(!name.is_empty() && name != typed.trim());
+            if let Some(dialog) = asked.upgrade() {
+                dialog.set_response_enabled(dialogs::CONFIRM, !name.is_empty());
+            }
+        };
+        show(&entry);
+        entry.connect_changed(show);
 
         let (panel, field) = (self.clone(), entry.clone());
         dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
-            let name = field.text().trim().to_string();
+            let name = git::branch_name(&field.text());
             if response != dialogs::CONFIRM || name.is_empty() {
                 return;
             }
