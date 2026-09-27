@@ -9,6 +9,7 @@ mod chrome;
 mod compare;
 mod diagnostics;
 mod diagram;
+mod export;
 mod files;
 mod find;
 mod git;
@@ -30,6 +31,7 @@ use compare::{
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
+use export::bench_export;
 use files::{
     bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
     bench_menu, bench_menu_press, bench_paths, bench_save_as, bench_templates, bench_transfer,
@@ -262,6 +264,9 @@ use tags::bench_tags;
 /// the status bar's byte counts for each (`files::bench_transfer`).
 /// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
 /// note and prints the text and the files they left (`attach::bench_attach`).
+/// `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>` exports a PDF that a note highlights into `$TMPDIR` and
+/// copies it for printing, and prints what each copy holds against the source
+/// (`export::bench_export_pdf`).
 /// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
 /// another in a folder not there yet, and a note also onto a folder, onto a file open in another
 /// tab and as `.txt` (`bench_save_as`).
@@ -374,8 +379,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
     let save_as = std::env::var("ACCENT_BENCH_SAVE_AS").ok();
     let attach = std::env::var("ACCENT_BENCH_ATTACH").ok();
+    let export = std::env::var("ACCENT_BENCH_EXPORT").ok();
     if expand.is_none()
         && attach.is_none()
+        && export.is_none()
         && save_as.is_none()
         && find.is_none()
         && diag.is_none()
@@ -488,6 +495,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = save_as {
             return bench_save_as(&app, &rel);
+        }
+        if let Some(arg) = export {
+            return bench_export(&app, &arg);
         }
         if let Some(arg) = attach {
             return bench_attach(&app, &arg);

@@ -119,6 +119,15 @@ pub enum Request {
         links: Vec<PdfLink>,
         color: [u8; 3],
     },
+    /// Write the document as it now stands, with those links as `/Highlight` annotations in
+    /// `color`, to `dest`: a copy, the file this thread reads left as it is. `done` hears how it
+    /// went.
+    Copy {
+        links: Vec<PdfLink>,
+        color: [u8; 3],
+        dest: PathBuf,
+        done: Sender<Result<(), String>>,
+    },
     /// One free-hand stroke, in that page's own points, drawn the way its tool draws.
     Ink {
         page: usize,
