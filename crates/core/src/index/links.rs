@@ -53,14 +53,6 @@ impl Index {
         Ok(resolved as usize)
     }
 
-    /// [`resolve_links_of`] in a transaction of its own.
-    pub(super) fn resolve_links_of(&mut self, rel: &str) -> Result<()> {
-        let tx = self.write_tx()?;
-        resolve_links_of(&tx, rel)?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// The file one link target points at, by the rules of [`resolve_links`](Self::resolve_links).
     /// `None` means the link dangles, which is what the UI offers to create.
     pub fn resolve_target(&self, target: &str) -> Result<Option<String>> {
