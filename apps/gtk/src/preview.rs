@@ -123,7 +123,8 @@ const MERMAID: &str = concat!(
   var rgb = getComputedStyle(document.documentElement).backgroundColor.match(/\d+/g) || [255, 255, 255];
   var luma = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
   mermaid.initialize({ startOnLoad: false, theme: luma < 0.5 ? 'dark' : 'neutral', suppressErrorRendering: true });
-  mermaid.run({ nodes: nodes }).catch(function () {}).then(function () {
+  // Kept where a print or an export can wait for the diagrams before taking the page.
+  window.__accentDrawn = mermaid.run({ nodes: nodes }).catch(function () {}).then(function () {
     // suppressErrorRendering empties a fence it cannot parse rather than drawing an error graphic,
     // so its source goes back in and a broken diagram stays readable, as a rejected formula does.
     for (var j = 0; j < nodes.length; j++) {
@@ -287,7 +288,7 @@ fn matches_label(at: u32, total: u32) -> String {
 /// key) and that file on *this* machine out, `None` when there is none. Every window passes
 /// `Vault::fetch`, which is the file itself for a local vault and a copy fetched over ssh for a
 /// remote one — so a call can block on the network.
-type Resolve = dyn Fn(&str) -> Option<(String, PathBuf)> + Send + Sync;
+pub type Resolve = dyn Fn(&str) -> Option<(String, PathBuf)> + Send + Sync;
 
 /// What the `accent:` scheme serves from.
 struct Assets {
@@ -300,6 +301,8 @@ struct Assets {
     /// The keys served since WebKit's memory cache was last cleared, whose bytes it may answer a
     /// render with even after the file has changed.
     served: RefCell<HashSet<String>>,
+    /// A page for print or export ([`Preview::for_paper`]): white paper, images as their files.
+    paper: bool,
 }
 
 /// Where the find readout goes; see [`Preview::connect_found`].
@@ -327,15 +330,33 @@ impl Preview {
         on_open: impl Fn(&str) + 'static,
         on_invert: impl Fn(&str) + 'static,
     ) -> Preview {
+        Self::build(Arc::new(resolve), inverted, on_open, on_invert, false)
+    }
+
+    /// A page to print or export a note from, never shown: the note on the light theme's white
+    /// paper whatever the window's theme, its images as their files are, its diagrams in mermaid's
+    /// `neutral` theme, and nothing in it followed anywhere.
+    pub fn for_paper(resolve: Arc<Resolve>) -> Preview {
+        Self::build(resolve, Rc::default(), |_| {}, |_| {}, true)
+    }
+
+    fn build(
+        resolve: Arc<Resolve>,
+        inverted: Rc<RefCell<HashSet<String>>>,
+        on_open: impl Fn(&str) + 'static,
+        on_invert: impl Fn(&str) + 'static,
+        paper: bool,
+    ) -> Preview {
         // `register_uri_scheme` asks only for `'static` and calls back on the main loop, so an `Rc`
         // would be enough to hold the resolver there — but every request hands it to a
         // `gio::spawn_blocking` worker, and crossing a thread needs `Send`. Hence `Arc`, and the
         // `Send + Sync` bound that an `Arc` of a shared closure requires.
         let assets = Rc::new(Assets {
-            resolve: Arc::new(resolve),
+            resolve,
             inverted,
             requests: Cell::new(0),
             served: RefCell::default(),
+            paper,
         });
 
         let context = webkit6::WebContext::new();
@@ -514,30 +535,16 @@ impl Preview {
     }
 
     fn apply_style(inner: &Inner) {
-        let style = adw::StyleManager::default();
         // WebKit cannot resolve `var(--view-bg-color)`, so `theme` hands out the literal the
         // rest of the window resolves to under the current theme (DESIGN.md, Colour).
-        let bg = theme::view_bg(style.is_dark());
-        // The editor's own font, not the GNOME document font: DESIGN.md's Typography section
-        // gives prose Adwaita Mono at the *size* of the document font, and the two panes are
-        // meant to agree by construction. Asked of `editor::default_font`, which is where that
-        // decision is made, so a change there reaches the preview without a second edit.
-        let font = pango::FontDescription::from_string(&crate::editor::default_font());
-        let family = font
-            .family()
-            .map(|f| f.to_string())
-            .unwrap_or_else(|| "Adwaita Mono".to_string());
-        let size = match font.size() as f64 / pango::SCALE as f64 {
-            pt if pt > 0.0 => pt,
-            _ => 11.0,
+        let (bg, fg) = match inner.assets.paper {
+            true => theme::paper(),
+            false => (
+                theme::view_bg(adw::StyleManager::default().is_dark()),
+                inner.view.color(),
+            ),
         };
-        let css = theme_css(
-            inner.view.color(),
-            bg,
-            style.accent_color_rgba(),
-            &family,
-            size,
-        );
+        let css = stylesheet(fg, bg);
 
         if let Some(old) = inner.sheet.borrow_mut().take() {
             inner.content.remove_style_sheet(&old);
@@ -810,7 +817,11 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     };
     // The look and the inverted set live on this thread; the worker gets a copy of each.
     let (resolve, request) = (assets.resolve.clone(), request.clone());
-    let (look, inverted) = (Look::now(), assets.inverted.borrow().clone());
+    let look = match assets.paper {
+        true => Look::paper(),
+        false => Look::now(),
+    };
+    let inverted = assets.inverted.borrow().clone();
     let assets = assets.clone();
     glib::spawn_future_local(async move {
         let answer = crate::work::off_thread("asset", move || {
@@ -875,6 +886,15 @@ fn resolve_asset(resolve: &Resolve, rel: &str) -> Option<(String, PathBuf)> {
     resolve(rel)
 }
 
+/// The file on this machine an `accent://file/` address on the page names, held to the vault as
+/// every request the page makes is.
+pub(crate) fn asset(resolve: &Resolve, uri: &str) -> Option<PathBuf> {
+    let Some(("file", rel)) = accent_uri(uri) else {
+        return None;
+    };
+    resolve_asset(resolve, &rel).map(|(_, path)| path)
+}
+
 /// Split `accent://<host>/<path>` into host and percent-decoded path, dropping `?query` and
 /// `#fragment`. `None` for anything that is not an `accent:` URI.
 fn accent_uri(uri: &str) -> Option<(&str, String)> {
@@ -914,6 +934,32 @@ fn css_rgba(c: gdk::RGBA) -> String {
         byte(c.blue()),
         c.alpha()
     )
+}
+
+/// [`theme_css`] for `fg` on `bg`, in the editor's font and the system accent.
+fn stylesheet(fg: gdk::RGBA, bg: &str) -> String {
+    // The editor's own font, not the GNOME document font: DESIGN.md's Typography section gives
+    // prose Adwaita Mono at the *size* of the document font, and the two panes are meant to agree
+    // by construction. Asked of `editor::default_font`, which is where that decision is made, so a
+    // change there reaches the preview without a second edit.
+    let font = pango::FontDescription::from_string(&crate::editor::default_font());
+    let family = font
+        .family()
+        .map(|f| f.to_string())
+        .unwrap_or_else(|| "Adwaita Mono".to_string());
+    let size = match font.size() as f64 / pango::SCALE as f64 {
+        pt if pt > 0.0 => pt,
+        _ => 11.0,
+    };
+    let accent = adw::StyleManager::default().accent_color_rgba();
+    theme_css(fg, bg, accent, &family, size)
+}
+
+/// The sheet a paper preview is given, for an export that carries it in the file: WebKit applies
+/// it as a user stylesheet, which the page's own DOM does not hold.
+pub(crate) fn paper_css() -> String {
+    let (bg, fg) = theme::paper();
+    stylesheet(fg, bg)
 }
 
 /// The foreground at `alpha`, as CSS: the same colour the editor dims with.
@@ -981,7 +1027,15 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) 
          .conflict > div {{ display: flow-root; padding: 0 12px; }}\n\
          .conflict-label {{ margin: 0 -12px; padding: 2px 12px; font-size: 0.85em; \
          font-weight: 700; }}\n\
-         {tints}"
+         {tints}\
+         /* On paper the page's margins are the print settings', a line of code has no sideways\n\
+            scroll to hide in, and a heading or a figure is not cut from what it belongs to. */\n\
+         @media print {{\n\
+         body {{ max-width: none; padding: 0; }}\n\
+         pre {{ white-space: pre-wrap; overflow-wrap: anywhere; }}\n\
+         h1, h2, h3, h4, h5, h6 {{ break-after: avoid; }}\n\
+         pre, table, img, svg, .conflict, math[display=\"block\"] {{ break-inside: avoid; }}\n\
+         }}\n"
     )
 }
 
@@ -1048,6 +1102,27 @@ mod tests {
         for bg in [theme::view_bg(false), theme::view_bg(true)] {
             let css = theme_css(FG, bg, ACCENT, "Cantarell", 11.0);
             assert_eq!(hex_literals(&css), vec![bg], "stray hex with {bg}");
+        }
+        // Paper is white whatever the theme on screen.
+        let (bg, ink) = theme::paper();
+        assert_eq!(bg, theme::view_bg(false));
+        let css = theme_css(ink, bg, ACCENT, "Cantarell", 11.0);
+        assert_eq!(hex_literals(&css), vec![bg]);
+    }
+
+    /// On paper the page is the paper's width, a long code line wraps rather than running off it,
+    /// and no heading is left at the foot of a page away from what it heads.
+    #[test]
+    fn theme_css_lays_the_note_out_for_print() {
+        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0);
+        let print = css.split_once("@media print").expect("a print block").1;
+        for rule in [
+            "body { max-width: none; padding: 0; }",
+            "pre { white-space: pre-wrap; overflow-wrap: anywhere; }",
+            "h1, h2, h3, h4, h5, h6 { break-after: avoid; }",
+            "pre, table, img, svg, .conflict, math[display=\"block\"] { break-inside: avoid; }",
+        ] {
+            assert!(print.contains(rule), "{rule} in {print}");
         }
     }
 

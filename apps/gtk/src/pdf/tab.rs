@@ -17,7 +17,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 /// How long after the last stroke the document is written out.
 const INK_SAVE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -482,6 +482,21 @@ impl PdfTab {
     pub fn export_highlights(self: &Rc<Self>, color: [u8; 3]) {
         let links = self.notes.borrow().clone();
         self.ask(Request::Export { links, color });
+    }
+
+    /// The document as it now stands, strokes not yet saved included, with those highlights in
+    /// `color`, written to `dest`; the file itself is left as it is. The receiver hears once how
+    /// that went, or finds its sender gone when there is no document to copy.
+    pub fn copy_to(&self, dest: PathBuf, color: [u8; 3]) -> Receiver<Result<(), String>> {
+        let (done, answer) = channel();
+        let links = self.notes.borrow().clone();
+        self.ask(Request::Copy {
+            links,
+            color,
+            dest,
+            done,
+        });
+        answer
     }
 
     /// Go to a page, and show the selection a link names as if it had just been dragged.

@@ -119,7 +119,11 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             // tab and on no other. One model per pane, which is the one asked for here.
             if let Some(menu) = tabs.menu_model().and_downcast::<gio::Menu>() {
                 let pinned = page.is_some_and(|page| app.is_pinned(page));
-                actions::fill_tab_menu(&menu, app.menu_file().is_some(), pinned);
+                let prints = page
+                    .and_then(|page| app.doc_for_page(page))
+                    .as_ref()
+                    .and_then(export::printable);
+                actions::fill_tab_menu(&menu, app.menu_file().is_some(), pinned, prints);
             }
         }
     ));

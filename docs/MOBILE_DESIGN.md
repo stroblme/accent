@@ -331,4 +331,5 @@ The decisions under the Android app, each with its reason; the shared ones are i
   this one. The test for any feature: does it help someone read their vault, make a small edit, or
   read and mark up a PDF.
 - Deferred rather than refused: templates and the daily note, a native Compose renderer in place
-  of the WebView, exporting highlights, and the PDF shapes and Adjust tool.
+  of the WebView, exporting highlights, the PDF shapes and Adjust tool, and printing or exporting
+  a note or a PDF (the desktop's Print… and Export as…; NOTEPAD says what it would take).

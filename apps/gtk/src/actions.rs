@@ -2,6 +2,7 @@
 //! force and the menus that name the actions.
 
 use super::*;
+use crate::export::Export;
 use accent_core::conflict::Take;
 
 /// Every user-facing action: the name it answers to, the label the menu and the palette show, and
@@ -17,6 +18,10 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.new-drawing", "New Drawing", &[]),
     ("win.upload", "Upload Files…", &[]),
+    // No chords: `Ctrl+P`, the HIG's Print, is the palette (DESIGN.md, Deviations).
+    ("win.print", "Print…", &[]),
+    ("win.export-pdf", "Export as PDF…", &[]),
+    ("win.export-html", "Export as HTML…", &[]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
     // Most-recently-used order, so one press is the note before this one. Both spellings of the
     // backwards chord, because X11 delivers Shift+Tab as `ISO_Left_Tab` and which of the two a
@@ -300,6 +305,9 @@ impl App {
         match name {
             "save" => self.save(),
             "save-as" => self.save_as(),
+            "print" => self.print(),
+            "export-pdf" => self.export(Export::Pdf),
+            "export-html" => self.export(Export::Html),
             "save-session" => self.save_shells(),
             "close-session" => self.close_session(),
             "reload-window" => self.reload(),
@@ -991,10 +999,11 @@ pub fn primary_menu(key: &crate::shell::WindowKey) -> gio::Menu {
 }
 
 /// The tab's own context menu, as a pane is built with it: nothing yet known about which page
-/// will show it, so without the two items that name a file, and offering Pin Tab.
+/// will show it, so without the two items that name a file or the ones that print it, and
+/// offering Pin Tab.
 pub fn tab_menu() -> gio::Menu {
     let menu = gio::Menu::new();
-    fill_tab_menu(&menu, false, false);
+    fill_tab_menu(&menu, false, false, None);
     menu
 }
 
@@ -1006,12 +1015,15 @@ pub fn tab_menu() -> gio::Menu {
 /// Rename and Move to Trash need and nothing else here does: a shell and a comparison are no
 /// file, and a loose one is outside the vault those two act in. On such a tab the two are not on
 /// the menu at all rather than on it and refusing (DESIGN.md, Principle 1). `pinned` says which
-/// of Pin Tab and Unpin Tab it offers.
+/// of Pin Tab and Unpin Tab it offers, and `prints` what the tab can be printed and exported as
+/// (`export::printable`): a note Print…, Export as PDF… and Export as HTML…, a PDF the first two,
+/// anything else none, in a section of their own after Reveal, since they make something of the
+/// file rather than name it.
 ///
 /// Filled in place rather than built afresh, because `AdwTabView` holds one model per pane and a
 /// `GtkPopoverMenu` follows the model it was made from: the page about to show the menu is what
 /// decides what it says (`wire::wire_pane`, `setup-menu`).
-pub fn fill_tab_menu(menu: &gio::Menu, file: bool, pinned: bool) {
+pub fn fill_tab_menu(menu: &gio::Menu, file: bool, pinned: bool, prints: Option<Kind>) {
     menu.remove_all();
     let split = gio::Menu::new();
     for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
@@ -1045,6 +1057,18 @@ pub fn fill_tab_menu(menu: &gio::Menu, file: bool, pinned: bool) {
         Some("win.reveal-in-sidebar"),
     );
     menu.append_section(None, &reveal);
+    let prints: &[&str] = match prints {
+        Some(Kind::Note) => &["win.print", "win.export-pdf", "win.export-html"],
+        Some(Kind::Pdf) => &["win.print", "win.export-pdf"],
+        _ => &[],
+    };
+    if !prints.is_empty() {
+        let section = gio::Menu::new();
+        for action in prints {
+            section.append(Some(label_of(action)), Some(action));
+        }
+        menu.append_section(None, &section);
+    }
     if file {
         // The tree's own arrangement, which is what "tree rows and tabs share the shape" means:
         // the name first, and the one destructive item alone at the end so it is never next to
@@ -1158,7 +1182,15 @@ mod tests {
                 );
             }
         }
-        for action in ["win.rename", "win.trash", "win.pin-tab", "win.unpin-tab"] {
+        for action in [
+            "win.rename",
+            "win.trash",
+            "win.pin-tab",
+            "win.unpin-tab",
+            "win.print",
+            "win.export-pdf",
+            "win.export-html",
+        ] {
             assert!(
                 ACTIONS.iter().any(|(name, _, _)| *name == action),
                 "{action} is on the tab menu but not in ACTIONS"
@@ -1264,7 +1296,7 @@ mod tests {
     fn the_tab_menu_names_a_file_only_where_there_is_one() {
         let sections = |file| {
             let menu = gio::Menu::new();
-            fill_tab_menu(&menu, file, false);
+            fill_tab_menu(&menu, file, false, None);
             menu.n_items()
         };
         assert_eq!(sections(true), sections(false) + 2);
@@ -1276,7 +1308,7 @@ mod tests {
     fn the_tab_menu_offers_the_pin_the_page_does_not_have() {
         let last_move = |pinned| {
             let menu = gio::Menu::new();
-            fill_tab_menu(&menu, false, pinned);
+            fill_tab_menu(&menu, false, pinned, None);
             let moves = menu.item_link(1, "section").expect("the move section");
             let last = moves.n_items() - 1;
             moves
@@ -1285,6 +1317,49 @@ mod tests {
         };
         assert_eq!(last_move(false).as_deref(), Some("win.pin-tab"));
         assert_eq!(last_move(true).as_deref(), Some("win.unpin-tab"));
+    }
+
+    /// Every action a menu names, its sections' included, in the order it shows them.
+    fn menu_actions(menu: &gio::MenuModel) -> Vec<String> {
+        (0..menu.n_items())
+            .flat_map(|i| match menu.item_link(i, "section") {
+                Some(section) => menu_actions(&section),
+                None => menu
+                    .item_attribute_value(i, "action", None)
+                    .and_then(|action| action.get::<String>())
+                    .into_iter()
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// A note is printed and exported three ways and a PDF two, right after Reveal in Sidebar; a
+    /// shell, a comparison or any other tab is offered none.
+    #[test]
+    fn the_tab_menu_prints_what_can_be_printed() {
+        let after_reveal = |prints| {
+            let menu = gio::Menu::new();
+            fill_tab_menu(&menu, true, false, prints);
+            let actions = menu_actions(menu.upcast_ref());
+            let at = actions
+                .iter()
+                .position(|a| a == "win.reveal-in-sidebar")
+                .expect("Reveal in Sidebar");
+            actions[at + 1..].to_vec()
+        };
+        let [print, pdf, html, rename, trash] = [
+            "win.print",
+            "win.export-pdf",
+            "win.export-html",
+            "win.rename",
+            "win.trash",
+        ];
+        assert_eq!(
+            after_reveal(Some(Kind::Note)),
+            [print, pdf, html, rename, trash]
+        );
+        assert_eq!(after_reveal(Some(Kind::Pdf)), [print, pdf, rename, trash]);
+        assert_eq!(after_reveal(None), [rename, trash]);
     }
 
     /// Same guard for the mouse: a side button fires an action by name, so the name has to be one

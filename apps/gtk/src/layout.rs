@@ -325,36 +325,9 @@ impl App {
         if self.preview.borrow().is_some() {
             return;
         }
-        // The preview's assets come through the vault, so a note's images load whether the file
-        // is on this disk or on a host. A window with no vault has only absolute keys, which the
-        // resolver hands straight back.
-        let vault = self.vault().cloned();
-        let root = self.root();
+        let resolve = self.asset_resolver();
         let preview = preview::Preview::new(
-            move |rel: &str| match &vault {
-                // `fetch` refuses a `rel` that climbs out lexically, on either backend. What it
-                // cannot see is a symlink *inside* the vault pointing outside it, and the answer
-                // here is handed to a WebView, so that is worth one `canonicalize`: a note
-                // linking `escape.png -> ~/.ssh/id_rsa` must not render it.
-                // `asset` first, because `![[img.png]]` names the file the way a wikilink does
-                // and the index is what knows it lives in `Attachments/`.
-                Some(vault) => {
-                    let key = vault.asset(rel)?;
-                    let path = vault.fetch(&key).ok()?;
-                    let inside = match (path.canonicalize(), vault.root().canonicalize()) {
-                        (Ok(real), Ok(root)) => real.starts_with(root),
-                        // A remote vault's copy lives in the cache, not under the root, and the
-                        // host already refused anything that escapes it there.
-                        _ => vault.is_remote(),
-                    };
-                    inside.then_some((key, path))
-                }
-                // A loose file's key is its path, as its tab's is.
-                None => {
-                    let path = root.join(rel);
-                    Some((path.to_string_lossy().into_owned(), path))
-                }
-            },
+            move |rel: &str| resolve(rel),
             self.inverted_images.clone(),
             glib::clone!(
                 #[weak(rename_to = app)]
@@ -387,6 +360,39 @@ impl App {
             move |label| app.pane().find.set_matches_text(label)
         ));
         *self.preview.borrow_mut() = Some(preview);
+    }
+
+    /// What a preview may read: a note's asset path to the vault file it names and that file on
+    /// this machine. The assets come through the vault, so a note's images load whether the file
+    /// is on this disk or on a host. A window with no vault has only absolute keys, which it hands
+    /// straight back.
+    pub(crate) fn asset_resolver(&self) -> Arc<preview::Resolve> {
+        let vault = self.vault().cloned();
+        let root = self.root();
+        Arc::new(move |rel: &str| match &vault {
+            // `fetch` refuses a `rel` that climbs out lexically, on either backend. What it
+            // cannot see is a symlink *inside* the vault pointing outside it, and the answer
+            // here is handed to a WebView, so that is worth one `canonicalize`: a note
+            // linking `escape.png -> ~/.ssh/id_rsa` must not render it.
+            // `asset` first, because `![[img.png]]` names the file the way a wikilink does
+            // and the index is what knows it lives in `Attachments/`.
+            Some(vault) => {
+                let key = vault.asset(rel)?;
+                let path = vault.fetch(&key).ok()?;
+                let inside = match (path.canonicalize(), vault.root().canonicalize()) {
+                    (Ok(real), Ok(root)) => real.starts_with(root),
+                    // A remote vault's copy lives in the cache, not under the root, and the
+                    // host already refused anything that escapes it there.
+                    _ => vault.is_remote(),
+                };
+                inside.then_some((key, path))
+            }
+            // A loose file's key is its path, as its tab's is.
+            None => {
+                let path = root.join(rel);
+                Some((path.to_string_lossy().into_owned(), path))
+            }
+        })
     }
 
     /// Serve the preview's images again, after their look changed: WebKit keeps what it was

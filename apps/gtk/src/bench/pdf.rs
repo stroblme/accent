@@ -360,7 +360,7 @@ fn links_read(app: &Rc<App>, pdf: &pdftab::PdfTab, note: &str, said: &Cell<usize
 /// Both halves wait: a remote window is up and taking commands well before its host has answered,
 /// and the pages are measured on the render thread after a fetch that takes as long as the link
 /// does. A local vault passes straight through both.
-async fn opened(app: &Rc<App>, rel: &str) -> Option<Rc<pdftab::PdfTab>> {
+pub(super) async fn opened(app: &Rc<App>, rel: &str) -> Option<Rc<pdftab::PdfTab>> {
     for _ in 0..150 {
         if !app.offline() {
             break;
