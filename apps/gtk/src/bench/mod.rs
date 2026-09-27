@@ -26,7 +26,7 @@ use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_gutter,
-    bench_compare_lines, bench_compare_pads, bench_compare_row,
+    bench_compare_lines, bench_compare_pads, bench_compare_pick, bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -38,7 +38,7 @@ use files::{
 use find::bench_find;
 use git::{
     bench_git, bench_git_branch, bench_git_close, bench_git_focus, bench_git_init,
-    bench_git_markers, bench_git_press, bench_git_rebase, bench_git_switch,
+    bench_git_markers, bench_git_press, bench_git_rebase, bench_git_switch, bench_git_sync_all,
     bench_git_sync_over_fetch,
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
@@ -84,7 +84,9 @@ use tags::bench_tags;
 /// at once, and prints what that asked for. `=markers:<rel>` resolves the conflict blocks a merge
 /// left in a note through their buttons and the palette (see `git::bench_git_markers`). `=branch`
 /// types names git would refuse into Create Branch… and prints the name the dialog says it will
-/// create, then creates one and prints the branch HEAD is on.
+/// create, then creates one and prints the branch HEAD is on. `=syncall` presses Sync All and
+/// prints its spinner, its toast and each repository's state after it (see
+/// `git::bench_git_sync_all`).
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
@@ -125,7 +127,9 @@ use tags::bench_tags;
 /// and `=row:commit:<repo_rel>` are the same shape for the two that open a tab of their own: a
 /// Staged row unstaged behind the pane's back, and the file at HEAD against HEAD~1 where HEAD did
 /// not touch it; where HEAD did, the tab it opens says whether its first change is on screen and
-/// where the shared scrollbar is. `=diag:<rel_text_file>`
+/// where the shared scrollbar is. `=pick:<repo_rel>` picks a second repository in the chooser and
+/// clicks the root's row at once, printing both sides' line counts of what opened (see
+/// `compare::bench_compare_pick`). `=diag:<rel_text_file>`
 /// collapses a run with warnings in it and prints how many end-of-line messages and gutter marks
 /// each state drew: the messages of a hidden run go, the icons stay. It then folds a block over
 /// the same file, which hides lines the same way, and reads the two numbers again without
@@ -429,6 +433,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = rel.strip_prefix("row:") {
                 return bench_compare_row(&app, rel);
             }
+            if let Some(rel) = rel.strip_prefix("pick:") {
+                return bench_compare_pick(&app, rel);
+            }
             if let Some(rel) = rel.strip_prefix("diag:") {
                 return bench_compare_diag(&app, rel);
             }
@@ -599,6 +606,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 (None, "focus") => bench_git_focus(&app),
                 (None, "switch") => bench_git_switch(&app),
                 (None, "branch") => bench_git_branch(&app),
+                (None, "syncall") => bench_git_sync_all(&app),
                 _ => bench_git(&app),
             };
         }

@@ -165,6 +165,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
     ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
     ("win.git-sync", "Sync", &[]),
+    ("win.git-sync-all", "Sync All Repositories", &[]),
     ("win.git-merge", "Merge Branch…", &[]),
     ("win.git-merge-abort", "Abort Merge", &[]),
     ("win.git-delete-branch", "Delete Branch…", &[]),
@@ -537,6 +538,11 @@ impl App {
                         .filter(|d| !d.is_transient())
                         .map(|d| d.key());
                     git.sync(key.as_deref());
+                }
+            }
+            "git-sync-all" => {
+                if let Some(git) = self.git.get() {
+                    git.sync_all();
                 }
             }
             // The pane's selected repository, like the branch popover's own button: the pane is
