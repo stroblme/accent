@@ -6,7 +6,7 @@ members = ["crates/core", "crates/lsp", "crates/api", "crates/drawio", "apps/cli
 default-members = ["crates/core", "crates/lsp", "crates/api", "crates/drawio", "apps/cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "2.0.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/stroblme/accent"

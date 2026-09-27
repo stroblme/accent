@@ -84,6 +84,19 @@ pub(super) fn bench_keys(app: &Rc<App>) {
         println!("bench caret_columns {:?}", view.caret_positions());
         view.clear_carets();
 
+        // Add Caret Above after two Add Caret Below takes the newest caret back rather than
+        // adding one above; once only the primary is left, it adds above again.
+        buffer.set_text("a\nb\nc\nd\ne");
+        buffer.place_cursor(&buffer.iter_at_offset(4));
+        view.add_caret(true);
+        view.add_caret(true);
+        view.add_caret(false);
+        println!("bench caret_take_back {:?}", view.caret_positions());
+        view.add_caret(false);
+        view.add_caret(false);
+        println!("bench caret_turn {:?}", view.caret_positions());
+        view.clear_carets();
+
         // Tab at every caret is what the view says it is, from the column each caret is in.
         view.set_tab_width(4);
         for spaces in [true, false] {
@@ -108,6 +121,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
             bench_column(&view).await;
             bench_selections(&view).await;
             bench_lines(&view).await;
+            bench_box(&view).await;
             window.close();
             bench_quit(&app);
         });
@@ -246,6 +260,50 @@ async fn bench_column(view: &multicaret::View) {
         view.caret_positions()
     );
     view.clear_carets();
+}
+
+/// Box selection as a `Shift+Alt` drag makes it ([`multicaret::View::select_box`]), from a press
+/// on one line to the pointer on another, in pixels: every line between gets a caret selecting
+/// what lies between the two, a line ending short of the box an empty caret at its end, one
+/// ending inside it its text to the end, and a wrapped line one caret, on its row nearest the
+/// press. A press that does not move is a caret. Prints every caret, the primary first.
+async fn bench_box(view: &multicaret::View) {
+    let buffer = view.buffer();
+    view.clear_carets();
+    // Monospace, so a column is the same number of pixels on every line.
+    view.set_monospace(true);
+    let wrapped = "wide ".repeat(80);
+    buffer.set_text(&format!(
+        "0123456789\n0\n0123\n\n0123456789\n{wrapped}\n0123456789"
+    ));
+    // Laid out first, or the lines' heights are still estimates.
+    glib::timeout_future(Duration::from_millis(200)).await;
+    // A pixel inside the character at `column` of `line`, on its first row, in buffer coordinates.
+    let point = |line: i32, column: i32| {
+        let mut at = buffer.iter_at_line(line).unwrap_or(buffer.end_iter());
+        at.set_line_offset(column);
+        let rect = view.iter_location(&at);
+        (rect.x() + 1, rect.y() + rect.height() / 2)
+    };
+    let show = |step: &str| {
+        println!(
+            "bench box_{step} {:?} carets={}",
+            view.caret_positions(),
+            view.has_carets()
+        )
+    };
+    view.select_box(point(0, 2), point(4, 6));
+    show("down");
+    view.select_box(point(4, 6), point(0, 2));
+    show("up_left");
+    // Line 5 is the wrapped one: its first row going down, its last going up.
+    view.select_box(point(4, 2), point(6, 6));
+    show("wrap_down");
+    view.select_box(point(6, 2), point(4, 6));
+    show("wrap_up");
+    view.select_box(point(2, 1), point(2, 1));
+    show("click");
+    view.set_monospace(false);
 }
 
 /// Three carets down column 1 of `text`, or as many as it has lines for, the primary on top.
@@ -944,11 +1002,82 @@ fn bench_held() -> String {
     }
 }
 
-/// Add Caret at Next Occurrence and Select All Occurrences through the real key path. The note at
-/// `rel` is given a text of its own for each part, and the drill prints `bench occur_ready <chord>`
-/// for an XTEST press of each chord in turn (`build-aux/xtest.py :N "key <chord>"`), then every
-/// caret's selection and the buffer. It first prints `bench occur focus_window` and waits for the
-/// window to have the X input focus, which under Xvfb is `xtest.py :N "move 700 400; focus"`.
+/// Box selection through the real pointer: a plain drag, which stays GTK's own selection, a
+/// `Shift+Alt` drag, and a `Shift+Alt` press that does not move, which leaves one caret there.
+/// The file at `rel` is given a text of its own, and for each the drill prints
+/// `bench box_ready <steps>` for `build-aux/xtest.py :N "<steps>"` to run, in the window's
+/// coordinates, which under Xvfb are the screen's, then every caret and the primary selection. It
+/// first prints `bench box focus_window`, as [`bench_occurrence_keys`] does.
+pub(super) fn bench_box_drag(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        println!("bench box focus_window");
+        for _ in 0..100 {
+            if app.window.is_active() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(tab) = app.active() else {
+            println!("bench box no_tab");
+            return bench_quit(&app);
+        };
+        let own = tab.text();
+        tab.set_text("0123456789\n0\n0123\n\n0123456789\n");
+        tab.view.grab_focus();
+        // Laid out first, or the lines' heights are still estimates.
+        glib::timeout_future(Duration::from_millis(300)).await;
+        // The middle of the character at `column` of `line`'s first row, in the window.
+        let aim = |line: i32, column: i32| {
+            let buffer = &tab.buffer;
+            let mut at = buffer.iter_at_line(line).unwrap_or(buffer.end_iter());
+            at.set_line_offset(column);
+            let rect = tab.view.iter_location(&at);
+            let (x, y) = tab.view.buffer_to_window_coords(
+                gtk::TextWindowType::Widget,
+                rect.x() + 2,
+                rect.y() + rect.height() / 2,
+            );
+            let point = graphene::Point::new(x as f32, y as f32);
+            let point = tab.view.compute_point(&app.window, &point).unwrap_or(point);
+            format!("{:.0} {:.0}", point.x(), point.y())
+        };
+        let chord = |steps: String| {
+            format!("keydown Shift_L; keydown Alt_L; {steps}; keyup Alt_L; keyup Shift_L")
+        };
+        let parts = [
+            ("plain", format!("drag {} {}", aim(0, 2), aim(4, 6))),
+            ("box", chord(format!("drag {} {}", aim(0, 2), aim(4, 6)))),
+            // Resting first: under Xvfb a press straight after a move reaches no widget, with or
+            // without the chord.
+            (
+                "click",
+                chord(format!("move {}; sleep 0.2; down; up", aim(2, 1))),
+            ),
+        ];
+        for (step, steps) in parts {
+            println!("bench box_ready {steps}");
+            glib::timeout_future(Duration::from_millis(2500)).await;
+            let carets = tab.ghost_view().map(|view| view.caret_positions());
+            let selection = tab
+                .buffer
+                .selection_bounds()
+                .map(|(start, end)| (start.offset(), end.offset()));
+            println!("bench box {step} {carets:?} selection={selection:?}");
+        }
+        tab.set_text(&own);
+        bench_quit(&app);
+    });
+}
+
+/// Add Caret at Next Occurrence, Select All Occurrences and Add Caret Above / Below through the
+/// real key path. The note at `rel` is given a text of its own for each part, and the drill prints
+/// `bench occur_ready <chord>` for an XTEST press of each chord in turn
+/// (`build-aux/xtest.py :N "key <chord>"`), then every caret's selection and the buffer. It first
+/// prints `bench occur focus_window` and waits for the window to have the X input focus, which
+/// under Xvfb is `xtest.py :N "move 700 400; focus"`.
 ///
 /// Before any key it prints what claims the two chords: the application's accelerators, and the
 /// view's own shortcuts, GtkTextView's and GtkSourceView's class bindings among them. `Tab::set_text`
@@ -971,7 +1100,7 @@ pub(super) fn bench_occurrence_keys(app: &Rc<App>, rel: &str) {
         bench_occurrence_claims(&app, &tab);
         let own = tab.text();
         tab.view.clipboard().set_text("Q");
-        let parts: [(&str, i32, &[&str]); 4] = [
+        let parts: [(&str, i32, &[&str]); 5] = [
             // Three presses: the word under the caret, then the two after it; then typing,
             // Backspace and Escape at every one of them.
             (
@@ -993,6 +1122,19 @@ pub(super) fn bench_occurrence_keys(app: &Rc<App>, rel: &str) {
             ),
             // A paste lands at every one of them too.
             ("foo foo\nfoo\n", 1, &["alt+j", "alt+j", "ctrl+v", "Escape"]),
+            // Add Caret Below twice, then Above takes both back and adds one above.
+            (
+                "a\nb\nc\nd\ne\n",
+                4,
+                &[
+                    "shift+alt+Down",
+                    "shift+alt+Down",
+                    "shift+alt+Up",
+                    "shift+alt+Up",
+                    "shift+alt+Up",
+                    "Escape",
+                ],
+            ),
         ];
         for (text, at, chords) in parts {
             tab.set_text(text);
