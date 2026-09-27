@@ -49,7 +49,7 @@ use keys::{
 use outline::bench_outline;
 use panes::{
     bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window,
-    bench_pins_restored, bench_tabs,
+    bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_pages, bench_pdf_stale,
@@ -198,6 +198,10 @@ use tags::bench_tags;
 /// unpinned and pinned again, `a` and then `b` moved across the pinned ones as a drag along the
 /// bar ends, and `d` and then `c` moved right with Move Tab. It quits the way Ctrl+Q does, which
 /// writes the session; `=pins` on the same scratch state prints what the restore brought back.
+/// `=reload:<key>,…` opens those files, types into the one in front, resizes the window and fires
+/// Reload Window, then prints the panes, the size and whether the typing was written, before and
+/// in the window that comes back (see `panes::bench_reload`); any window will do: a vault's, one
+/// opened on a file, `--terminal` or `terminal://<name>`.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
@@ -209,7 +213,9 @@ use tags::bench_tags;
 /// `[[#Elsewhere]]`; `[[#^blk]]` followed both ways, which must land on the block it marks; and a
 /// link typed at the end of a note past 16 K characters and followed at once, which must offer New
 /// File as well. Any text file will do for the underline: a `.txt` has no wikilinks, and its URL
-/// underlines all the same.
+/// underlines all the same. `=hover:<rel_note>` instead aims the real pointer at the note's first
+/// wikilink and prints the hover's font and size beside the note's and the window's, and whether a
+/// wheel scrolls it (see `style::bench_hover`).
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a
@@ -295,6 +301,9 @@ use tags::bench_tags;
 /// under Not Indexed. `=more:<query>[:<n>]` opens a note's "+N more in this file" row, printing
 /// the rows, the count, the tabs and the scroll before and after, and again after the same query
 /// is asked again and a new one; `=click:` waits for a real XTEST press on it instead.
+/// `=seed:<rel_note>` fires Ctrl+Shift+F and Ctrl+Shift+H over the note and prints which box has
+/// the keyboard and what it has selected, then types after the real chord through XTEST (see
+/// `search::bench_seed`).
 ///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
@@ -522,6 +531,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rels) = rels.strip_prefix("pinwin:") {
                 return bench_pin_window(&app, rels);
+            }
+            if let Some(keys) = rels.strip_prefix("reload:") {
+                return bench_reload(&app, keys);
             }
             return bench_tabs(&app, &rels);
         }

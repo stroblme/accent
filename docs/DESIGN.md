@@ -306,10 +306,10 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### Primary menu
 
-- Four sections, by what an item changes: the files in this vault (New File, New Folder, Open File…); which vault the window is on (Open Folder…, Open Remote…, Open Recent…, then Close Vault); what the window shows (New Terminal, Presentation Mode); the application (Preferences, About accent, Quit).
+- Four sections, by what an item changes: the files in this vault (New File, New Folder, Open File…); which vault the window is on (Open Folder…, Open Remote…, Open Recent…, Reload Window, then Close Vault); what the window shows (New Terminal, Presentation Mode); the application (Preferences, About accent, Quit).
 - It holds what the window does whichever tab is in front: a command acting on the document (Save, Save As…, Find, Toggle Preview) keeps its chord and palette entry and has no item here.
 - Labels come from the action table, so the menu and the palette cannot disagree.
-- The sections are cut to what the window can do: without a vault, no New File, New Folder or Close Vault, which could only toast. A window of shells adds Save Session after Open Recent… (a focused shell keeps `Ctrl+S`) and, once named, Close Session after it. A remote vault's window has New Local Terminal beside New Remote Terminal….
+- The sections are cut to what the window can do: without a vault, no New File, New Folder or Close Vault, which could only toast. A window of shells adds Save Session after Reload Window (a focused shell keeps `Ctrl+S`) and, once named, Close Session after it. A remote vault's window has New Local Terminal beside New Remote Terminal….
 
 ### New Window
 
@@ -410,6 +410,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A markdown link's destination, `[text](` or `![alt](`, offers every file by its percent-encoded path from the note's folder — how the index resolves it; the row reads the name, and what was typed matches anywhere in the vault. `[text](#` and `[text](Other.md#` offer headings by their GitHub slug, and block ids after `#^`; a link written with the heading text still resolves.
 - `#` offers tags, at the start of a line only once a letter follows a single `#`: writing a heading must not open a list.
 - **Hover** is the server's markdown as Pango markup, then every diagnostic at that position, all four severities: a hint shows nowhere else.
+- It is set in the editor's font at the tab's zoom, wraps at what fits between the hovered word, where GtkSourceView starts it, and the window's right edge (80 characters at most, 30 at least), and grows to half the window's height, scrolling past that: GTK fits a popover into the room beside the text by shrinking it, which cut a long note's preview off mid-line.
 - **Signature help** is a popover over the caret's line, the active parameter in bold, taking no grab so the call goes on being typed.
 - **Diagnostics** underline the text, mark the gutter and print errors and warnings at the ends of their lines, cut with an ellipsis to the room the text column leaves; the hover and the gutter icon carry the whole message.
 - The status bar counts them where a note counts words, and pressing the count takes the underlines, marks and line-end messages out of the text and back, the count and hover staying. Per tab, and not kept across a restart: a way past something in the way, not a preference.
@@ -532,14 +533,16 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Files
 
-- Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Folder `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
+- Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Folder `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Reload Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
 - Open Folder…, Open Remote…, Close Vault and Quit are `app.` actions, since each outlives the window that fired it; they still enter the palette's recently-run list.
+- **Reload Window** closes the window the way closing it does — every edit written or asked about, the session saved — and opens what it showed again: the same vault (a remote one connecting afresh), the same files from outside a vault, the same terminal session, with its tabs, panes and shells, at its size and maximized or fullscreen as it was. The shells are detached rather than ended, an unnamed window's too, and taken up again. A close given up at a question leaves the window as it was. It is a new window, since the vault, its worker and its WebKit process go with the old one; GTK 4 cannot place a window, so where it appears is the compositor's to say.
 - **Save As…** is Rename's dialog with Save as its verb, so it names a path in the vault: the tab's content is written there and the tab follows it, while the original keeps what was last written to it (a PDF's strokes are written first, then the file copied; an image is copied as it is). A file already there asks Replace, saying so when a tab has it open, which then closes unsaved; a folder is refused; a new extension reopens the tab as what the file now is. A note's relative paths — markdown links, reference definitions, HTML `src`/`href` — are pointed back at what they named from the copy's folder, where the index is (the host, on a remote vault), in the tab's text, unsaved edits and all, and the tab reloads what was written, as a rename's notes do; a wikilink resolves by name and stays as written. Over a loose tab, a window without a vault or anything that is no file it does nothing.
 
 ### Palette and find
 
 - Commands `Ctrl+P` (also `Ctrl+Shift+P`), Go to File `Ctrl+E`, Find `Ctrl+F`, Replace `Ctrl+H`, Replace in Files `Ctrl+Shift+H`, Search Ignored Files (unbound), Find Next / Previous `F3` / `Shift+F3`, Go to Line `Ctrl+G`.
 - Find, Replace, Find Next / Previous and Go to Line act on the focused pane's own bar. Replace over a selection starts in the replacement box, the selection being the query already.
+- Search `Ctrl+Shift+F` and Replace in Files `Ctrl+Shift+H` do the same in the Search pane: the editor's selection, where there is one, is the query, and the box that takes the keyboard has all it holds selected, so what is typed next replaces it.
 - `Up` / `Down` in a query or replacement box, the find bar's or the Search pane's, walk back through the ones used earlier in this run and forward again to what was being typed, as a shell does; each kind of box shares one list, not saved.
 - Search Ignored Files is the Search pane's `All` button by another route.
 

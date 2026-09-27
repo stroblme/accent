@@ -627,6 +627,71 @@ fn bench_pins_line(app: &Rc<App>) -> String {
     panes.join(" ")
 }
 
+thread_local! {
+    /// Whether `ACCENT_BENCH_TABS=reload:` has reloaded its window, so the window that comes back,
+    /// which runs the bench hooks again, prints rather than reloading once more.
+    static RELOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// See `ACCENT_BENCH_TABS=reload:` above. The typing goes at the end of the tab in front, which
+/// the close writes and the window that comes back reads again. A shell is given a variable
+/// before and asked for it after, which only the same shell, detached and taken up again, knows.
+pub(super) fn bench_reload(app: &Rc<App>, keys: &str) {
+    use vte4::TerminalExt as _;
+    let app = app.clone();
+    if RELOADED.replace(true) {
+        let landed = app.clone();
+        return bench_layout_when(
+            move || landed.restored.get() && landed.awaiting.borrow().is_empty(),
+            move || {
+                glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+                    let term = app.terminals().first().cloned();
+                    if let Some(term) = &term {
+                        term.view.feed_child(b"echo \"[$m]\"\n");
+                    }
+                    glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+                        let kept = term.map(|term| {
+                            let text = term.view.text_format(vte4::Format::Text);
+                            text.is_some_and(|text| text.contains("[kept]"))
+                        });
+                        println!(
+                            "bench reload after {} shell_kept={kept:?}",
+                            bench_reload_line(&app)
+                        );
+                        bench_quit(&app);
+                    });
+                });
+            },
+        );
+    }
+    for key in keys.split(',').filter(|key| !key.is_empty()) {
+        app.open_path(key);
+    }
+    app.window.set_default_size(900, 640);
+    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+        if let Some(tab) = app.active() {
+            tab.buffer.insert(&mut tab.buffer.end_iter(), "reloaded\n");
+        }
+        if let Some(term) = app.terminals().first() {
+            term.view.feed_child(b"m=kept\n");
+        }
+        println!("bench reload before {}", bench_reload_line(&app));
+        let _ = WidgetExt::activate_action(&app.window, "win.reload-window", None);
+    });
+}
+
+/// The window's title, its size and panes, and whether the tab in front ends in the drill's typing.
+fn bench_reload_line(app: &Rc<App>) -> String {
+    let typed = app.active().map(|tab| tab.text().ends_with("reloaded\n"));
+    format!(
+        "title={:?} size={}x{} panes={} typed={typed:?}",
+        app.window.title().unwrap_or_default(),
+        app.window.width(),
+        app.window.height(),
+        bench_pins_line(app)
+    )
+}
+
 /// See `ACCENT_BENCH_TABS=pins` above: the panes once every restored tab has landed.
 pub(super) fn bench_pins_restored(app: &Rc<App>) {
     let (app, landing) = (app.clone(), app.clone());

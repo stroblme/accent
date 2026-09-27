@@ -234,6 +234,12 @@ impl App {
         if !self.keeps_session() {
             return;
         }
+        self.write_session(&self.current_session());
+    }
+
+    /// The session as this window stands, over the one it last wrote: what a save writes, and
+    /// what Reload Window carries into the window that takes this one's place.
+    pub(crate) fn current_session(&self) -> Session {
         let stored = self.stored_session();
         let (sidebar, width) = self.sidebar_saved();
         let session = Session {
@@ -285,11 +291,10 @@ impl App {
                 .map(|d| d.key())
                 .collect(),
         };
-        let session = match self.restored.get() {
+        match self.restored.get() {
             true => session,
             false => unrestored(stored, session),
-        };
-        self.write_session(&session);
+        }
     }
 
     /// Whether this window writes a session down and puts it back: a vault's does, and a named
@@ -422,6 +427,26 @@ impl App {
         *self.key.borrow_mut() = key;
     }
 
+    /// Reload Window: close this window the way closing it always does — each edit written or
+    /// asked about, the session saved, the shells detached rather than ended — and, once it has
+    /// gone, open what it showed again in its place (`Shell::reopen`). A close stopped to ask is
+    /// still the reload's; one given up there leaves the window as it was ([`App::keep_open`]).
+    pub(crate) fn reload(&self) {
+        self.reloading.set(true);
+        self.window.close();
+    }
+
+    /// A close was given up — a question about unsaved edits cancelled, git left to finish or
+    /// failed — so the window stays, and a reload that asked for the close is off.
+    pub(crate) fn keep_open(&self) {
+        self.reloading.set(false);
+    }
+
+    /// Whether the close under way is a reload's.
+    pub(crate) fn reloading(&self) -> bool {
+        self.reloading.get()
+    }
+
     /// Close Session: end the session for good — its shells, its state file and its row in the
     /// recent list — and leave for the start screen, as Close Vault does. Asked first, since the
     /// shells are running.
@@ -470,8 +495,9 @@ impl App {
     /// Let go of this window's shells as it closes. A window that keeps a session only detaches
     /// them, and its next opening takes them up again; one that does not has nothing to take them
     /// up again, so they end with it.
+    /// A window reloading keeps them too, for the window taking its place ([`App::reload`]).
     pub(crate) fn release_shells(&self) {
-        if !self.keeps_session() {
+        if !self.keeps_session() && !self.reloading.get() {
             for term in self.terminals() {
                 term.kill();
             }
@@ -590,12 +616,18 @@ impl App {
             return;
         }
         self.sync_placeholder();
-        let session = self.stored_session();
+        self.restore(&self.stored_session());
+    }
+
+    /// Put `session` back into this window: its tabs, panes, shells, sidebar, zoom and view. What
+    /// a window restores from its state file, and what one reloaded without a state file is handed
+    /// ([`App::reload`]).
+    pub(crate) fn restore(self: &Rc<Self>, session: &Session) {
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
         self.set_zoom(session.zoom);
         if let Some(layout) = session.panes() {
-            self.restore_panes(layout, &session);
+            self.restore_panes(layout, session);
         }
         // Which pane was showing is deliberately not restored: Files is where a vault is opened,
         // every time. A window that came back on Search or Git left the reader looking at the
