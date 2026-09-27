@@ -21,6 +21,10 @@ use std::time::Duration;
 /// reason as the search pane's pulse (DESIGN.md, Motion): GTK4 has no indeterminate mode.
 const PULSE: Duration = Duration::from_millis(80);
 
+/// How far in from the column's edges the bar stops: where libadwaita's tab bar under it puts its
+/// first and last tab, measured, so the bar lines up with the tabs rather than the window's edge.
+const TAB_INSET: i32 = 6;
+
 pub struct Bar {
     bar: gtk::ProgressBar,
     pulse: Pulse,
@@ -28,7 +32,11 @@ pub struct Bar {
 
 impl Bar {
     pub fn new() -> Bar {
-        let bar = gtk::ProgressBar::builder().opacity(0.0).build();
+        let bar = gtk::ProgressBar::builder()
+            .opacity(0.0)
+            .margin_start(TAB_INSET)
+            .margin_end(TAB_INSET)
+            .build();
         Bar {
             pulse: Pulse::new(&bar),
             bar,
