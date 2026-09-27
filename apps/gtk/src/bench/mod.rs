@@ -209,7 +209,9 @@ use tags::bench_tags;
 /// `[[#Elsewhere]]`; `[[#^blk]]` followed both ways, which must land on the block it marks; and a
 /// link typed at the end of a note past 16 K characters and followed at once, which must offer New
 /// File as well. Any text file will do for the underline: a `.txt` has no wikilinks, and its URL
-/// underlines all the same.
+/// underlines all the same. `=hover:<rel_note>` instead aims the real pointer at the note's first
+/// wikilink and prints the hover's font and size beside the note's and the window's, and whether a
+/// wheel scrolls it (see `style::bench_hover`).
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a

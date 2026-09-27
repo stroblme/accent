@@ -11,8 +11,8 @@
 //! it, not a document.
 
 use crate::editor::Tab;
-use gtk::glib;
 use gtk::subclass::prelude::*;
+use gtk::{glib, graphene, pango};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
 use std::rc::Rc;
@@ -20,6 +20,39 @@ use std::rc::Rc;
 /// How wide a hover or a signature is let grow before it wraps. A signature is the longest thing
 /// in either and 80 characters is where one stops being read left to right.
 pub const WIDTH: i32 = 80;
+
+/// The fewest characters a hover wraps at. A link near the window's right edge would otherwise get
+/// a ribbon a few words wide; this one leaves the window instead, and GTK keeps it on the screen.
+const NARROWEST: i32 = 30;
+
+/// How many characters wide and how many pixels tall a hover may grow, given the room from where
+/// its text starts to the window's right edge and the window's height, where a character is
+/// `char_width` wide: what fits in the room, less two characters of the hover's own padding, within
+/// [`NARROWEST`] and [`WIDTH`]; and half the window, past which it scrolls. Half, because the hover
+/// sits above or below the text it is about, and one of the two has that much room wherever the
+/// text is.
+fn bounds((room, window): (i32, i32), char_width: i32) -> (i32, i32) {
+    let chars = room / char_width.max(1) - 2;
+    (chars.clamp(NARROWEST, WIDTH), window / 2)
+}
+
+/// [`bounds`] for a hover over `view` about the text from `start`, measured in the view's font,
+/// which the hover's text inherits. GtkSourceView starts the hover's text where the hovered word
+/// starts, so that is where the room is measured from.
+fn limits(view: &sourceview5::View, start: &gtk::TextIter) -> (i32, i32) {
+    // Unbounded off screen, where nothing is hovered anyway.
+    let Some(root) = view.root() else {
+        return (WIDTH, -1);
+    };
+    let at = view.iter_location(start);
+    let (x, y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, at.x(), at.y());
+    let x = view
+        .compute_point(&root, &graphene::Point::new(x as f32, y as f32))
+        .map_or(0, |point| point.x() as i32);
+    let metrics = view.pango_context().metrics(None, None);
+    let char_width = metrics.approximate_char_width() / pango::SCALE;
+    bounds((root.width() - x, root.height()), char_width)
+}
 
 /// `md` as Pango markup. Every run of text is escaped, so a C++ signature full of `<` and `&`
 /// cannot turn the label into a parse error and blank the hover.
@@ -98,7 +131,7 @@ mod provider_imp {
     use sourceview5::subclass::prelude::*;
     use sourceview5::{HoverContext, HoverDisplay};
 
-    use super::{WIDTH, diagnostic_markup, markup_of};
+    use super::{diagnostic_markup, limits, markup_of};
     use crate::editor::Tab;
     use crate::{diagnostics, lang};
 
@@ -157,15 +190,26 @@ mod provider_imp {
                     }
                     markup.push_str(&diagnostic_markup(item));
                 }
+                let (chars, height) = limits(&tab.view, &start);
                 let label = gtk::Label::builder()
                     .use_markup(true)
                     .wrap(true)
                     .wrap_mode(pango::WrapMode::WordChar)
-                    .max_width_chars(WIDTH)
+                    .max_width_chars(chars)
                     .xalign(0.0)
                     .build();
                 label.set_markup(&markup);
-                display.append(&label);
+                // Scrolled past its bound rather than cut off: GTK fits a popover into the room
+                // beside the text by shrinking it, and a label given less than its height lost
+                // its last lines mid-line, which is most of a long note's preview.
+                let scroller = gtk::ScrolledWindow::builder()
+                    .hscrollbar_policy(gtk::PolicyType::Never)
+                    .propagate_natural_width(true)
+                    .propagate_natural_height(true)
+                    .max_content_height(height)
+                    .child(&label)
+                    .build();
+                display.append(&scroller);
                 Ok(())
             })
         }
@@ -187,6 +231,16 @@ pub fn install(tab: &Rc<Tab>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What fits to the window's edge, within `NARROWEST` and `WIDTH` characters, and half the
+    /// window's height.
+    #[test]
+    fn a_hover_is_bounded_by_the_room_the_window_leaves() {
+        assert_eq!(bounds((1400, 900), 10), (WIDTH, 450));
+        assert_eq!(bounds((540, 500), 10), (52, 250));
+        assert_eq!(bounds((100, 500), 10), (NARROWEST, 250));
+        assert_eq!(bounds((540, 500), 0), (WIDTH, 250), "no metrics yet");
+    }
 
     #[test]
     fn inline_markup_becomes_pango_and_the_rest_is_escaped() {
