@@ -95,6 +95,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("app.open-remote", "Open Remote…", &[]),
     ("win.open-recent", "Open Recent…", &["<Control>r"]),
     ("app.close-vault", "Close Vault", &[]),
+    ("win.reload-window", "Reload Window", &[]),
     // Save's session half, for the primary menu of a window of shells: a focused shell keeps
     // `Ctrl+S`, and Save over a note in front saves the note.
     ("win.save-session", "Save Session", &[]),
@@ -301,6 +302,7 @@ impl App {
             "save-as" => self.save_as(),
             "save-session" => self.save_shells(),
             "close-session" => self.close_session(),
+            "reload-window" => self.reload(),
             "open-file" => self.open_file_dialog(),
             "new-file" => {
                 let Some(vault) = self.vault() else {
@@ -940,8 +942,14 @@ fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
         false => Vec::new(),
     };
     files.push("win.open-file");
-    // What changes which vault this window is on: the three ways in, then the way out.
-    let mut vaults = vec!["app.open-vault", "app.open-remote", "win.open-recent"];
+    // What changes which vault this window is on: the three ways in, then this one again, then
+    // the way out.
+    let mut vaults = vec![
+        "app.open-vault",
+        "app.open-remote",
+        "win.open-recent",
+        "win.reload-window",
+    ];
     if vault {
         vaults.push("app.close-vault");
     }
@@ -1173,6 +1181,7 @@ mod tests {
                 "app.open-vault",
                 "app.open-remote",
                 "win.open-recent",
+                "win.reload-window",
                 "app.close-vault"
             ]
         );
@@ -1190,6 +1199,7 @@ mod tests {
                 "app.open-vault",
                 "app.open-remote",
                 "win.open-recent",
+                "win.reload-window",
                 "win.save-session",
                 "win.close-session"
             ]
@@ -1200,6 +1210,7 @@ mod tests {
                 "app.open-vault",
                 "app.open-remote",
                 "win.open-recent",
+                "win.reload-window",
                 "win.save-session"
             ]
         );
@@ -1207,7 +1218,12 @@ mod tests {
         assert_eq!(documents[0], ["win.open-file"]);
         assert_eq!(
             documents[1],
-            ["app.open-vault", "app.open-remote", "win.open-recent"]
+            [
+                "app.open-vault",
+                "app.open-remote",
+                "win.open-recent",
+                "win.reload-window"
+            ]
         );
         // New Terminal in a remote vault's window opens a shell on the host, so there a shell on
         // this machine is an item of its own.

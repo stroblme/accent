@@ -306,10 +306,10 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### Primary menu
 
-- Four sections, by what an item changes: the files in this vault (New File, New Folder, Open File…); which vault the window is on (Open Folder…, Open Remote…, Open Recent…, then Close Vault); what the window shows (New Terminal, Presentation Mode); the application (Preferences, About accent, Quit).
+- Four sections, by what an item changes: the files in this vault (New File, New Folder, Open File…); which vault the window is on (Open Folder…, Open Remote…, Open Recent…, Reload Window, then Close Vault); what the window shows (New Terminal, Presentation Mode); the application (Preferences, About accent, Quit).
 - It holds what the window does whichever tab is in front: a command acting on the document (Save, Save As…, Find, Toggle Preview) keeps its chord and palette entry and has no item here.
 - Labels come from the action table, so the menu and the palette cannot disagree.
-- The sections are cut to what the window can do: without a vault, no New File, New Folder or Close Vault, which could only toast. A window of shells adds Save Session after Open Recent… (a focused shell keeps `Ctrl+S`) and, once named, Close Session after it. A remote vault's window has New Local Terminal beside New Remote Terminal….
+- The sections are cut to what the window can do: without a vault, no New File, New Folder or Close Vault, which could only toast. A window of shells adds Save Session after Reload Window (a focused shell keeps `Ctrl+S`) and, once named, Close Session after it. A remote vault's window has New Local Terminal beside New Remote Terminal….
 
 ### New Window
 
@@ -533,8 +533,9 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Files
 
-- Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Folder `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
+- Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Folder `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Reload Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
 - Open Folder…, Open Remote…, Close Vault and Quit are `app.` actions, since each outlives the window that fired it; they still enter the palette's recently-run list.
+- **Reload Window** closes the window the way closing it does — every edit written or asked about, the session saved — and opens what it showed again: the same vault (a remote one connecting afresh), the same files from outside a vault, the same terminal session, with its tabs, panes and shells, at its size and maximized or fullscreen as it was. The shells are detached rather than ended, an unnamed window's too, and taken up again. A close given up at a question leaves the window as it was. It is a new window, since the vault, its worker and its WebKit process go with the old one; GTK 4 cannot place a window, so where it appears is the compositor's to say.
 - **Save As…** is Rename's dialog with Save as its verb, so it names a path in the vault: the tab's content is written there and the tab follows it, while the original keeps what was last written to it (a PDF's strokes are written first, then the file copied; an image is copied as it is). A file already there asks Replace, saying so when a tab has it open, which then closes unsaved; a folder is refused; a new extension reopens the tab as what the file now is. A note's relative paths — markdown links, reference definitions, HTML `src`/`href` — are pointed back at what they named from the copy's folder, where the index is (the host, on a remote vault), in the tab's text, unsaved edits and all, and the tab reloads what was written, as a rename's notes do; a wikilink resolves by name and stays as written. Over a loose tab, a window without a vault or anything that is no file it does nothing.
 
 ### Palette and find

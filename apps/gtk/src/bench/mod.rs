@@ -49,7 +49,7 @@ use keys::{
 use outline::bench_outline;
 use panes::{
     bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window,
-    bench_pins_restored, bench_tabs,
+    bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_pages, bench_pdf_stale,
@@ -198,6 +198,10 @@ use tags::bench_tags;
 /// unpinned and pinned again, `a` and then `b` moved across the pinned ones as a drag along the
 /// bar ends, and `d` and then `c` moved right with Move Tab. It quits the way Ctrl+Q does, which
 /// writes the session; `=pins` on the same scratch state prints what the restore brought back.
+/// `=reload:<key>,…` opens those files, types into the one in front, resizes the window and fires
+/// Reload Window, then prints the panes, the size and whether the typing was written, before and
+/// in the window that comes back (see `panes::bench_reload`); any window will do: a vault's, one
+/// opened on a file, `--terminal` or `terminal://<name>`.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
@@ -527,6 +531,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rels) = rels.strip_prefix("pinwin:") {
                 return bench_pin_window(&app, rels);
+            }
+            if let Some(keys) = rels.strip_prefix("reload:") {
+                return bench_reload(&app, keys);
             }
             return bench_tabs(&app, &rels);
         }

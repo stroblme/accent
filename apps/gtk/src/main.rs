@@ -335,6 +335,9 @@ struct App {
     /// connected, so its window waits for `Event::Connected` to restore them, and this is what
     /// keeps a later reconnect from restoring them a second time over the tabs already open.
     restored: Cell<bool>,
+    /// Whether the close under way is Reload Window's, which opens what this window showed again
+    /// once it has gone ([`App::reload`]).
+    reloading: Cell<bool>,
     /// The tab `setup-menu` named, so the tab context menu acts on the page that was
     /// right-clicked rather than on the selected one. `None` once the popup is gone, which is
     /// what makes the same actions work from the palette.
