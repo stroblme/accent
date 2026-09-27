@@ -1,5 +1,10 @@
 # Accent
 
+<p align="center">
+<img src="https://raw.githubusercontent.com/stroblme/accent/refs/heads/main/data/icons/logo.svg" width="200" title="Logo">
+</p>
+<br/>
+
 An opinionated text editor which can serve as a knowledge management system and IDE in one software as a result of my personal frustration with other software.
 The core engine is written in [Rust](https://rust-lang.org/) ensuring that Accent never takes longer than a second to start and stays stable even when being faced with huge vaults.
 UI and UX focus on efficiency paired with a aggressively minimal design aimed to remove all the clutter.
