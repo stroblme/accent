@@ -9,13 +9,14 @@ Some features:
 - PDF viewer and editor with Pen support
 - Light/Dark/Solarized theming, including images and PDFs
 - Language server and autocompletion based on [Merl](https://github.com/stroblme/merl)
+- Multi-caret selection and edit
+- Customizable shortcuts and command palette
 - Git management and diff. view for resolving file conflicts
 - Remote vaults via dedicated ssh server
 - Integrated terminal and terminal emulator (tmux-like)
 - Multi-pane support, Android app and much more
 
 This project was formally known as "UNote" (PDF Editor) and is now rewritten from scratch.
-Accent can do everything UNote did (and much more) and I didn't saw a reason for having two times the same app.
 
 ## Installation
 
