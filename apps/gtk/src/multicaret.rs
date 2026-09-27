@@ -417,11 +417,13 @@ mod imp {
 
     /// A secondary caret: the mark that rides the text, the anchor its selection was started
     /// from, and the column vertical movement aims for, which is what a caret keeps while it
-    /// crosses a shorter line.
+    /// crosses a shorter line. `below` is which way Add Caret Above / Below grew the column with
+    /// it, `true` for below, and `None` for a caret made any other way.
     pub struct Caret {
         pub mark: gtk::TextMark,
         pub anchor: gtk::TextMark,
         pub goal: Option<i32>,
+        pub below: Option<bool>,
     }
 
     impl Caret {
@@ -432,6 +434,7 @@ mod imp {
                 mark: buffer.create_mark(None, at, false),
                 anchor: buffer.create_mark(None, from, false),
                 goal: None,
+                below: None,
             }
         }
 
@@ -789,8 +792,21 @@ impl View {
     }
 
     /// Put a caret one line below (or above) the outermost caret in that direction, so repeating
-    /// the action grows the column away from the primary caret.
+    /// the action grows the column away from the primary caret. Where the caret added last grew
+    /// the column the other way, it is taken back instead, as JetBrains' Clone Caret does, so the
+    /// opposite key undoes the column one caret at a time and adds again from the primary.
     pub fn add_caret(&self, below: bool) {
+        // Out of the cell before the marks go: `delete_mark` emits `mark-deleted`.
+        let newest = self
+            .imp()
+            .carets
+            .borrow_mut()
+            .pop_if(|caret| caret.below == Some(!below));
+        if let Some(caret) = newest {
+            caret.delete(&self.buffer());
+            self.show_column();
+            return;
+        }
         let buffer = self.buffer();
         let from = self.outermost(below);
         let line = from.line() + if below { 1 } else { -1 };
@@ -811,7 +827,7 @@ impl View {
         {
             return;
         }
-        self.push_caret(&target, &target, Some(goal));
+        self.push_caret(&target, &target, Some(goal), Some(below));
         // One landing inside a selection is part of it.
         self.collapse();
         self.show_column();
@@ -836,7 +852,7 @@ impl View {
             return;
         };
         let at = |offset| buffer.iter_at_offset(offset);
-        self.push_caret(&at(from), &at(to), None);
+        self.push_caret(&at(from), &at(to), None, None);
         self.show_column();
         if let Some(caret) = self.imp().carets.borrow().last() {
             self.scroll_mark_onscreen(&caret.mark);
@@ -858,15 +874,21 @@ impl View {
         let at = |offset| buffer.iter_at_offset(offset);
         for (from, to) in occurrences(&text, &needle) {
             if !taken.iter().any(|&(s, e)| from < e && s < to) {
-                self.push_caret(&at(from), &at(to), None);
+                self.push_caret(&at(from), &at(to), None, None);
             }
         }
         self.show_column();
     }
 
     /// Add a secondary caret at `at` whose selection runs from `from`, aiming for column `goal`
-    /// on its way up and down.
-    fn push_caret(&self, from: &gtk::TextIter, at: &gtk::TextIter, goal: Option<i32>) {
+    /// on its way up and down; `below` is [`imp::Caret::below`].
+    fn push_caret(
+        &self,
+        from: &gtk::TextIter,
+        at: &gtk::TextIter,
+        goal: Option<i32>,
+        below: Option<bool>,
+    ) {
         // A new column: the steps an earlier one recorded are not its to put back, and a popup
         // still up at the primary caret would take the keys meant for all of them.
         if !self.has_carets() {
@@ -876,14 +898,16 @@ impl View {
         }
         let mut caret = imp::Caret::new(&self.buffer(), from, at);
         caret.goal = goal;
+        caret.below = below;
         self.imp().carets.borrow_mut().push(caret);
     }
 
-    /// Paint the column after carets were added: GTK's caret hands the blink over while there is
-    /// one.
+    /// Paint the column after carets were added or taken back: GTK's caret hands the blink over
+    /// while there is one, and takes it back once there is none.
     fn show_column(&self) {
-        if self.has_carets() {
-            self.blink_on();
+        match self.has_carets() {
+            true => self.blink_on(),
+            false => self.blink_off(),
         }
         self.queue_draw();
     }

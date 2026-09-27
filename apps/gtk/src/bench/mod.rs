@@ -85,8 +85,9 @@ use tags::bench_tags;
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
 /// plus the width one indent is worth there, then Tab on lines that already have text on them.
-/// `=occur:<rel>` asks for XTEST presses of `Alt+J` and `Ctrl+Shift+L` with typing after them, and
-/// prints every selection and the buffer after each (see `keys::bench_occurrence_keys`).
+/// `=occur:<rel>` asks for XTEST presses of `Alt+J`, `Ctrl+Shift+L` and `Shift+Alt+Up` / `Down`
+/// with typing after them, and prints every selection and the buffer after each (see
+/// `keys::bench_occurrence_keys`).
 /// It opens with the completion popup: whether "a popup is up" reads true against a real one,
 /// that Return at the end of a list item under it continues the list while no row is selected and
 /// is the popup's once one is, that "up" reads false against both a view taken off screen under

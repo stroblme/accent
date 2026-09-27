@@ -84,6 +84,19 @@ pub(super) fn bench_keys(app: &Rc<App>) {
         println!("bench caret_columns {:?}", view.caret_positions());
         view.clear_carets();
 
+        // Add Caret Above after two Add Caret Below takes the newest caret back rather than
+        // adding one above; once only the primary is left, it adds above again.
+        buffer.set_text("a\nb\nc\nd\ne");
+        buffer.place_cursor(&buffer.iter_at_offset(4));
+        view.add_caret(true);
+        view.add_caret(true);
+        view.add_caret(false);
+        println!("bench caret_take_back {:?}", view.caret_positions());
+        view.add_caret(false);
+        view.add_caret(false);
+        println!("bench caret_turn {:?}", view.caret_positions());
+        view.clear_carets();
+
         // Tab at every caret is what the view says it is, from the column each caret is in.
         view.set_tab_width(4);
         for spaces in [true, false] {
@@ -944,11 +957,12 @@ fn bench_held() -> String {
     }
 }
 
-/// Add Caret at Next Occurrence and Select All Occurrences through the real key path. The note at
-/// `rel` is given a text of its own for each part, and the drill prints `bench occur_ready <chord>`
-/// for an XTEST press of each chord in turn (`build-aux/xtest.py :N "key <chord>"`), then every
-/// caret's selection and the buffer. It first prints `bench occur focus_window` and waits for the
-/// window to have the X input focus, which under Xvfb is `xtest.py :N "move 700 400; focus"`.
+/// Add Caret at Next Occurrence, Select All Occurrences and Add Caret Above / Below through the
+/// real key path. The note at `rel` is given a text of its own for each part, and the drill prints
+/// `bench occur_ready <chord>` for an XTEST press of each chord in turn
+/// (`build-aux/xtest.py :N "key <chord>"`), then every caret's selection and the buffer. It first
+/// prints `bench occur focus_window` and waits for the window to have the X input focus, which
+/// under Xvfb is `xtest.py :N "move 700 400; focus"`.
 ///
 /// Before any key it prints what claims the two chords: the application's accelerators, and the
 /// view's own shortcuts, GtkTextView's and GtkSourceView's class bindings among them. `Tab::set_text`
@@ -971,7 +985,7 @@ pub(super) fn bench_occurrence_keys(app: &Rc<App>, rel: &str) {
         bench_occurrence_claims(&app, &tab);
         let own = tab.text();
         tab.view.clipboard().set_text("Q");
-        let parts: [(&str, i32, &[&str]); 4] = [
+        let parts: [(&str, i32, &[&str]); 5] = [
             // Three presses: the word under the caret, then the two after it; then typing,
             // Backspace and Escape at every one of them.
             (
@@ -993,6 +1007,19 @@ pub(super) fn bench_occurrence_keys(app: &Rc<App>, rel: &str) {
             ),
             // A paste lands at every one of them too.
             ("foo foo\nfoo\n", 1, &["alt+j", "alt+j", "ctrl+v", "Escape"]),
+            // Add Caret Below twice, then Above takes both back and adds one above.
+            (
+                "a\nb\nc\nd\ne\n",
+                4,
+                &[
+                    "shift+alt+Down",
+                    "shift+alt+Down",
+                    "shift+alt+Up",
+                    "shift+alt+Up",
+                    "shift+alt+Up",
+                    "Escape",
+                ],
+            ),
         ];
         for (text, at, chords) in parts {
             tab.set_text(text);
