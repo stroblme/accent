@@ -186,6 +186,7 @@ fn many(label: &str, action: &str, marked: &[(String, bool)]) -> gio::MenuItem {
 
 /// Every label a menu model offers, sections walked through, for the drills and the tests: a
 /// `GtkPopoverMenu` keeps its model, so what is on screen can be read back out of it.
+#[cfg(any(test, feature = "bench"))]
 pub fn labels(menu: &gio::MenuModel) -> Vec<String> {
     let mut out = Vec::new();
     for i in 0..menu.n_items() {

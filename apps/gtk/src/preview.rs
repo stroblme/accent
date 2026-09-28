@@ -297,6 +297,7 @@ struct Assets {
     inverted: Rc<RefCell<HashSet<String>>>,
     /// How many requests the page has made, for the drills: whether WebKit asks again for an
     /// image it was served before.
+    #[cfg(feature = "bench")]
     requests: Cell<u32>,
     /// The keys served since WebKit's memory cache was last cleared, whose bytes it may answer a
     /// render with even after the file has changed.
@@ -354,6 +355,7 @@ impl Preview {
         let assets = Rc::new(Assets {
             resolve,
             inverted,
+            #[cfg(feature = "bench")]
             requests: Cell::new(0),
             served: RefCell::default(),
             paper,
@@ -525,6 +527,7 @@ impl Preview {
     }
 
     /// How many requests the page has made so far.
+    #[cfg(feature = "bench")]
     pub fn requests(&self) -> u32 {
         self.inner.assets.requests.get()
     }
@@ -810,6 +813,7 @@ fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
 /// worker also decides how an image is shown in the look in force, which may mean recolouring it
 /// ([`look::serve`]).
 fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
+    #[cfg(feature = "bench")]
     assets.requests.set(assets.requests.get() + 1);
     let uri = request.uri().unwrap_or_default();
     let Some(("file", rel)) = accent_uri(&uri) else {

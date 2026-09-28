@@ -313,6 +313,7 @@ impl Tree {
     }
 
     /// What a Ctrl+click on the row `rel` does: mark it, or take the mark off it again.
+    #[cfg(feature = "bench")]
     pub fn toggle_mark(&self, rel: &str) {
         let row = find_row(&self.model, rel).and_then(|row| row.item());
         let Some(row) = row.as_ref().and_then(decode) else {
@@ -326,6 +327,7 @@ impl Tree {
     /// What a Shift+click on the row `to` does with `from` as the last row clicked without Shift:
     /// mark every row between them, replacing the marks, or with Ctrl held too (`add`) adding
     /// to them.
+    #[cfg(feature = "bench")]
     pub fn mark_range(&self, from: &str, to: &str, add: bool) {
         let mut marked = self.marked.borrow_mut();
         mark_range(&mut marked, &self.model, from, to, add);

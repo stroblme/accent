@@ -305,6 +305,7 @@ impl Nav {
 
     /// How many places are behind and ahead. What the `ACCENT_BENCH_LAYOUT` drill reads to say
     /// that a restore wrote none of its own steps into the history.
+    #[cfg(feature = "bench")]
     pub fn depth(&self) -> (usize, usize) {
         (self.back.len(), self.forward.len())
     }

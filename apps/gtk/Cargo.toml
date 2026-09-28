@@ -8,6 +8,11 @@ license.workspace = true
 name = "accent"
 path = "src/main.rs"
 
+[features]
+# The `ACCENT_BENCH_*` drills (`src/bench/`) and what only they call. Off in a shipped build;
+# `make smoke`, `make check` and CI turn it on.
+bench = []
+
 [dependencies]
 # The library is dlopen()ed at runtime and its absence degrades to a status page, so this
 # does not make libpdfium a build requirement (see accent_core::pdf::available).

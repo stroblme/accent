@@ -206,6 +206,7 @@ impl Bar {
 
     /// What the busy line says now, for the drills: nothing while it is hidden, which keeps the
     /// last text it had.
+    #[cfg(feature = "bench")]
     pub fn progress_text(&self) -> String {
         match self.progress.is_visible() {
             true => self.progress.label().to_string(),

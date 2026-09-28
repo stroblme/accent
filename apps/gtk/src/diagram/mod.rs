@@ -754,12 +754,14 @@ impl DiagramTab {
     }
 
     /// The cell whose label is being edited, if one is.
+    #[cfg(feature = "bench")]
     pub fn editing_label(&self) -> Option<CellId> {
         self.label.borrow().as_ref().map(|e| e.cell.clone())
     }
 
     /// Where the label editor sits on the canvas, how big its text is there and whether it holds
     /// the keyboard, for the drills that move the page under it.
+    #[cfg(feature = "bench")]
     pub fn label_at(&self) -> Option<(f64, f64, f64, bool)> {
         let editor = self.label.borrow().clone()?;
         let (x, y, px) = editor.at();
@@ -777,25 +779,30 @@ impl DiagramTab {
     }
 
     /// A page rectangle in the canvas's own coordinates.
+    #[cfg(feature = "bench")]
     pub fn to_widget(&self, r: &accent_drawio::Rect) -> accent_drawio::Rect {
         self.view.to_widget(r)
     }
 
+    #[cfg(feature = "bench")]
     pub fn scale(&self) -> f64 {
         self.view.scale()
     }
 
     /// Whether formulas are still being typeset.
+    #[cfg(feature = "bench")]
     pub fn typesetting(&self) -> bool {
         self.view.typesetting()
     }
 
     /// A cell's frame on the page: what the selection box is drawn around.
+    #[cfg(feature = "bench")]
     pub fn frame_of(&self, id: &str) -> Option<accent_drawio::Rect> {
         self.view.sheet()?.frame_of(id)
     }
 
     /// A cell's label as the label editor would show it.
+    #[cfg(feature = "bench")]
     pub fn label_markdown(&self, id: &str) -> Option<String> {
         let editor = self.editor.borrow();
         let cell = editor.page(self.page_index.get()).ok()?.cell(id)?;

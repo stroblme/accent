@@ -160,6 +160,7 @@ impl Panel {
 
     /// Activate the row `path` is listed on, as a click on it does, and say which section it was
     /// in. `ACCENT_BENCH_COMPARE=row:` and nothing else: the headless image has no pointer.
+    #[cfg(feature = "bench")]
     pub fn activate_change(self: &Rc<Self>, path: &str) -> Option<&'static str> {
         let row = (0..self.changes.n_items())
             .filter_map(|i| boxed::<Row>(self.changes.item(i)))

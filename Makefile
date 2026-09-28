@@ -78,7 +78,7 @@ DISPLAY_NUM ?= 99
 XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals
 
 .DEFAULT_GOAL := all
-.PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
+.PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke vault validate icons flatpak cargo-sources pdfium server help requirements \
         android android-check android-test android-tools apk apk-release pdfium-android bindings
 
@@ -92,6 +92,12 @@ core:
 ## gtk: build the desktop app (needs gtk4, libadwaita, gtksourceview5, webkitgtk-6.0, libspelling, vte-2.91-gtk4 dev packages)
 gtk:
 	$(CARGO) build $(CARGO_PROFILE_FLAG) -p accent
+
+## gtk-bench: build the desktop app with the ACCENT_BENCH_* drills in, which a shipped build leaves out
+#
+# Same path as `gtk`'s binary: cargo keeps both builds and puts back whichever was asked for last.
+gtk-bench:
+	$(CARGO) build $(CARGO_PROFILE_FLAG) -p accent --features bench
 
 ## requirements: check what building and running the desktop app needs (installs nothing)
 #
@@ -233,8 +239,11 @@ fmt-check:
 	$(CARGO) fmt --all --check
 
 ## clippy: lint everything, warnings are errors
+#
+# The desktop app twice: without its drills, as it ships, and with them.
 clippy:
 	$(CARGO) clippy --workspace --all-targets --locked --features accent-core/pdf -- -D warnings
+	$(CARGO) clippy -p accent --all-targets --locked --features bench -- -D warnings
 
 ## check: the pre-flight gate, what CI runs
 #
@@ -265,7 +274,7 @@ $(VAULT): $(GEN_VAULT)
 		$(VAULT) --notes $(VAULT_NOTES) --files $(VAULT_FILES) --force
 
 ## smoke: headless start-up check, fails on any GTK critical
-smoke: gtk vault
+smoke: gtk-bench vault
 	@command -v Xvfb >/dev/null || { echo "Xvfb is not installed"; exit 1; }
 	@# The display's socket, not `pgrep -f "Xvfb :N"`: that pattern matches the shell running it.
 	@test -S /tmp/.X11-unix/X$(DISPLAY_NUM) || (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &)

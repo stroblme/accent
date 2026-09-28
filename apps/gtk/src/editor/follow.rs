@@ -199,6 +199,7 @@ impl Tab {
     }
 
     /// What the underline covers right now, for the drill that checks it.
+    #[cfg(feature = "bench")]
     pub(crate) fn follow_shown(&self) -> Option<(i32, i32)> {
         self.follow.borrow().shown.clone().map(|r| (r.start, r.end))
     }
