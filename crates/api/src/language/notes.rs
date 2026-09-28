@@ -796,12 +796,8 @@ impl Notes {
                     range,
                 }));
             }
-            let note = self.text_of(&target)?;
-            let title = markdown::analyze(&note)
-                .title
-                .unwrap_or_else(|| stem(&target));
             return Ok(Some(Hover {
-                text: format!("**{title}**\n\n{}", preview(&note)),
+                text: preview(&self.text_of(&target)?, &target),
                 range,
             }));
         }
@@ -1022,19 +1018,31 @@ fn empty_item() -> Completion {
     }
 }
 
-/// The first lines of a note that say something, with the frontmatter skipped.
-fn preview(note: &str) -> String {
-    let body = markdown::analyze(note)
+/// The note `rel` holds as a hover shows it: its title in bold, then its first lines that say
+/// something, with the frontmatter skipped, and the opening heading too when it is the title.
+fn preview(note: &str, rel: &str) -> String {
+    let a = markdown::analyze(note);
+    let title = a.title.unwrap_or_else(|| stem(rel));
+    let mut body = a
         .spans
         .iter()
         .find(|s| s.style == markdown::Style::Frontmatter)
-        .map_or(0, |s| s.range.end);
-    note[body.min(note.len())..]
+        .map_or(0, |s| s.range.end)
+        .min(note.len());
+    if let Some(h) = a.headings.first()
+        && h.text == title
+        && note
+            .get(body..h.range.start)
+            .is_some_and(|s| s.trim().is_empty())
+    {
+        body = h.range.end;
+    }
+    let lines: Vec<&str> = note[body..]
         .lines()
         .filter(|l| !l.trim().is_empty())
         .take(HOVER_LINES)
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    format!("**{title}**\n\n{}", lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -1117,6 +1125,21 @@ mod tests {
         assert_eq!(checked[..2], want.map(|t| t.map(String::from)));
         // URLs, pure anchors and paths that leave the vault are not the index's to judge.
         assert!(checked[2..].iter().all(Option::is_none), "{checked:?}");
+    }
+
+    /// A note opening on its title says it once, in bold above the excerpt; a title that is not
+    /// the note's opening line leaves the excerpt whole.
+    #[test]
+    fn a_hover_says_the_title_once() {
+        assert_eq!(
+            preview("---\ntags: [x]\n---\n\n# Title\n\nBody.\n", "a.md"),
+            "**Title**\n\nBody."
+        );
+        assert_eq!(
+            preview("Intro.\n# Title\n", "a.md"),
+            "**Title**\n\nIntro.\n# Title"
+        );
+        assert_eq!(preview("Body.\n", "sub/a.md"), "**a**\n\nBody.");
     }
 
     #[test]
