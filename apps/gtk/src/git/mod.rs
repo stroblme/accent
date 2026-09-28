@@ -1457,7 +1457,7 @@ fn ignored_key(vault_root: &Path, repo: &Repo, path: &str) -> String {
 /// A path split into the directory and the file name, both borrowed. A file at the top level has
 /// an empty directory rather than a `.`, because the row shows the string as it is.
 ///
-/// git reports a wholly untracked directory as one entry ending in `/`. That slash belongs to the
+/// git reports an untracked nested repository as one entry ending in `/`. That slash belongs to the
 /// name — it is what tells the row apart from a file — so the split ignores it and the name keeps
 /// it; otherwise the name would come out empty and the whole row would read as its dimmed
 /// directory label.
@@ -1691,7 +1691,7 @@ mod tests {
     fn split_name_leaves_a_top_level_file_without_a_directory() {
         assert_eq!(split_name("note.md"), ("", "note.md"));
         assert_eq!(split_name("a/b/note.md"), ("a/b", "note.md"));
-        // A wholly untracked directory is one entry with a trailing slash, and the slash is the
+        // An untracked nested repository is one entry with a trailing slash, and the slash is the
         // only thing on the row that says so, so it stays with the name.
         assert_eq!(split_name("newdir/"), ("", "newdir/"));
         assert_eq!(split_name("a/b/c/"), ("a/b", "c/"));
