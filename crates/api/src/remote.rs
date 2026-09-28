@@ -14,7 +14,7 @@
 //! `~/.ssh/config`, ProxyJump and the agent; a passphrase prompt comes back to us through
 //! `SSH_ASKPASS`, which the app answers with a dialog.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -140,6 +140,9 @@ pub struct Remote {
     /// that tab was closed and opened again. Kept here rather than in the façade because this is
     /// the only place that knows a connection has been replaced.
     docs: Mutex<HashMap<String, (String, String)>>,
+    /// The unindexed folders the window asked to have watched, which a new server has to be
+    /// asked again for the same reason. See [`Vault::watch_unindexed`](crate::Vault::watch_unindexed).
+    unindexed: Mutex<BTreeSet<String>>,
     /// The forwards the window started and has not stopped. They live in the ssh master, so a
     /// link that drops takes them with it and the master a reconnect makes has none of them;
     /// [`connect`](Self::connect) puts them back. Nothing outlives the vault: closing it cancels
@@ -163,6 +166,7 @@ impl Remote {
             ghost: Mutex::new(true),
             client: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
+            unindexed: Mutex::new(BTreeSet::new()),
             forwards: Mutex::new(Vec::new()),
             state: Arc::new(Mutex::new(State::Connecting)),
             child: Mutex::new(None),
@@ -292,6 +296,20 @@ impl Remote {
     /// Recorded whether or not the call lands: a document opened while the link was down is one
     /// the window has open, and the reconnect is exactly when the server has to hear about it.
     fn remember(&self, method: &str, params: &serde_json::Value) {
+        if method.ends_with("watch_unindexed") {
+            let dirs: Vec<String> = params
+                .get(0)
+                .and_then(|d| serde_json::from_value(d.clone()).ok())
+                .unwrap_or_default();
+            let mut watched = self.locked(&self.unindexed);
+            for dir in dirs {
+                match method {
+                    "watch_unindexed" => watched.insert(dir),
+                    _ => watched.remove(&dir),
+                };
+            }
+            return;
+        }
         if !method.ends_with("_document") {
             return;
         }
@@ -318,11 +336,18 @@ impl Remote {
         }
     }
 
-    /// Tell a freshly started server about the documents the window still has open.
+    /// Tell a freshly started server about the documents the window still has open, and the
+    /// folders it is watching.
     ///
     /// All at once, a thread each: the server answers every request on a thread of its own, so
     /// ten tabs cost the reconnect one round trip rather than ten.
     fn reopen(&self, client: &Client) {
+        let unindexed: Vec<String> = self.locked(&self.unindexed).iter().cloned().collect();
+        if !unindexed.is_empty()
+            && let Err(e) = client.call::<serde_json::Value>("watch_unindexed", json!([unindexed]))
+        {
+            tracing::warn!("watching the unindexed folders on the new server: {e}");
+        }
         let open: Vec<(String, String, String)> = self
             .locked(&self.docs)
             .iter()

@@ -67,9 +67,11 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         crate::Event::FileRenamed { from, to } => Event::FileRenamed { from, to },
         crate::Event::Conflict { original, conflict } => Event::Conflict { original, conflict },
         crate::Event::Error(message) => Event::Error { message },
-        // Git, the remote connection, language servers and their background jobs: none of them
-        // run on a phone, so nothing here ever has to match them.
+        // Git, the remote connection, language servers and their background jobs, and the watch
+        // on unindexed folders: none of them run on a phone, so nothing here ever has to match
+        // them.
         crate::Event::GitChanged
+        | crate::Event::UnindexedChanged(_)
         | crate::Event::Connecting { .. }
         | crate::Event::Connected
         | crate::Event::Disconnected(_)

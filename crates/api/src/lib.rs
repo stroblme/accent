@@ -67,6 +67,10 @@ pub enum Event {
     /// The direct children of these directories changed ("" is the vault root). The tree refills
     /// exactly these levels instead of dropping its whole cache.
     DirsChanged(Vec<String>),
+    /// The direct children of these folders changed: folders the index does not walk, watched
+    /// because the window lists them ([`Vault::watch_unindexed`]). Nothing the index holds moved,
+    /// so listing them again is all there is to do.
+    UnindexedChanged(Vec<String>),
     /// Someone else changed this note's content. Never fires for our own saves.
     FileChanged(String),
     FileRemoved(String),
