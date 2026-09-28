@@ -128,6 +128,20 @@ fn a_remote_vault_connects_indexes_and_answers() {
         std::fs::read(&got).unwrap() == bytes,
         "the download differs"
     );
+    // Two readers asking for one file at once, as a burst of watcher events does, take turns
+    // rather than writing one cached copy together.
+    let (one, two) = std::thread::scope(|s| {
+        let (a, b) = (
+            s.spawn(|| vault.fetch("blob.bin")),
+            s.spawn(|| vault.fetch("blob.bin")),
+        );
+        (a.join().unwrap().unwrap(), b.join().unwrap().unwrap())
+    });
+    assert_eq!(one, two);
+    assert!(
+        std::fs::read(&one).unwrap() == bytes,
+        "the cached copy differs"
+    );
 
     // A file that lands in a folder reaches the window as that folder changing, which is what
     // refreshes its rows in the tree, however it got there: made by the app, uploaded, or written
