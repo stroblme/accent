@@ -348,7 +348,7 @@ impl App {
     /// until this runs the document on the host has none of the ink. Blocking ssh I/O, so it is a
     /// worker like every other remote call, and one at a time per tab — the strokes that land
     /// while it is out collapse into one more upload after it.
-    fn push_pdf(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
+    pub(crate) fn push_pdf(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
         let key = pdf.key();
         let Some(remote) = self
             .vault()
@@ -405,7 +405,8 @@ impl App {
                     }
                 }
                 // The link went: the banner says so, as it does for a note that cannot save.
-                Some(Err(e)) if e.kind() == std::io::ErrorKind::NotConnected => {}
+                // It goes again on `Event::Connected`.
+                Some(Err(e)) if e.kind() == std::io::ErrorKind::NotConnected => pdf.lost_upload(),
                 // It did not reach the host at all. Said once, as a refusal is: every stroke after
                 // it fails the same way until one lands.
                 Some(Err(e)) => {

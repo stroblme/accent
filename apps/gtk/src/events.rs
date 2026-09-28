@@ -300,6 +300,12 @@ impl App {
                 self.refresh_corpus();
                 self.restore_session();
                 self.sync_active();
+                // What was drawn while the link was down reached only the file here.
+                for pdf in self.docs().iter().filter_map(Doc::pdf) {
+                    if pdf.unsent() {
+                        self.push_pdf(pdf);
+                    }
+                }
                 // A remote shell the drop ended kept its tab, and starts again in it.
                 for term in self.terminals() {
                     term.reopen();

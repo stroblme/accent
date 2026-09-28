@@ -121,9 +121,12 @@ pub struct PdfTab {
     /// The conflict copy that refusal left beside the document, for the next one to write again
     /// rather than leaving one numbered copy per stroke.
     pub(super) conflict_copy: RefCell<Option<String>>,
-    /// The last upload did not reach the far end at all — the link, a folder it may not write —
-    /// and the reader has been told once. See [`PdfTab::told_failure`].
+    /// The last upload did not reach the far end at all — a folder it may not write, a full
+    /// disk — and the reader has been told once. See [`PdfTab::told_failure`].
     pub(super) failure_told: Cell<bool>,
+    /// The last upload did not reach the far end, for whatever reason, so what the file here
+    /// holds has yet to go. See [`PdfTab::unsent`].
+    pub(super) unsent: Cell<bool>,
     /// The etag of the last write *this tab* made, so a watcher report of our own save is
     /// recognised and not answered with a reload. See [`PdfTab::refresh`].
     pub(super) saved: Cell<Option<accent_core::fs::Etag>>,
@@ -243,6 +246,7 @@ pub fn open(
         conflict_told: Cell::new(false),
         conflict_copy: RefCell::new(None),
         failure_told: Cell::new(false),
+        unsent: Cell::new(false),
         saved: Cell::new(None),
         history: Cell::new((false, false)),
         outline: RefCell::new(Vec::new()),
@@ -759,10 +763,21 @@ impl PdfTab {
     }
 
     /// An upload of this document failed. `true` the first time, which is the one the reader is
-    /// told about: the saves after it fail the same way until one lands, and drawing through a
-    /// dropped link would otherwise be a toast a second.
+    /// told about: the saves after it fail the same way until one lands.
     pub fn told_failure(&self) -> bool {
+        self.unsent.set(true);
         !self.failure_told.replace(true)
+    }
+
+    /// An upload the dropped link stopped: nothing to tell, the banner says the link went.
+    pub fn lost_upload(&self) {
+        self.unsent.set(true);
+    }
+
+    /// Whether the last upload failed, so the file here has to go again once it can: when the
+    /// link is back.
+    pub fn unsent(&self) -> bool {
+        self.unsent.get()
     }
 
     /// The conflict is over — an upload landed, or the document was re-read from what the far end
@@ -771,6 +786,7 @@ impl PdfTab {
     pub fn clear_conflict(&self) {
         self.conflict_told.set(false);
         self.failure_told.set(false);
+        self.unsent.set(false);
         *self.conflict_copy.borrow_mut() = None;
     }
 

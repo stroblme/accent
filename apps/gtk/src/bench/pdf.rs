@@ -633,9 +633,10 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
         app.connection_refused("the drill holds the link down");
         written(&app).await;
         println!(
-            "bench pdf dropped down ended={ended} offline={} pages={} said={} {:?}",
+            "bench pdf dropped down ended={ended} offline={} pages={} unsent={} said={} {:?}",
             app.offline(),
             pdf.page_count(),
+            pdf.unsent(),
             app.toasted.get(),
             bench_said(&app)
         );
@@ -648,9 +649,10 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
         }
         written(&app).await;
         println!(
-            "bench pdf dropped back offline={} pages={} in_vault {} said={}",
+            "bench pdf dropped back offline={} pages={} unsent={} in_vault {} said={}",
             app.offline(),
             pdf.page_count(),
+            pdf.unsent(),
             vault_pages(&app, &key),
             app.toasted.get()
         );
