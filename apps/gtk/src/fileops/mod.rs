@@ -416,7 +416,7 @@ fn new_from_template_with(ops: &Rc<Ops>, templates: Vec<String>) {
     if templates.is_empty() {
         let dir = ops.vault.config().templates_dir;
         return (ops.toast)(&format!(
-            "No template says where its notes go. Add `accent-target:` to one in {dir}"
+            "No template has a destination. Add `accent-target:` to one in {dir}"
         ));
     }
 
@@ -443,7 +443,7 @@ fn new_from_template_with(ops: &Rc<Ops>, templates: Vec<String>) {
             match made {
                 Ok(Some((rel, stops))) => (ops.open)(&rel, &stops),
                 // The file changed under the dialog; nothing was created, so nothing to undo.
-                Ok(None) => (ops.toast)(&format!("{name} no longer says where its notes go")),
+                Ok(None) => (ops.toast)(&format!("{name} no longer has a destination")),
                 Err(why) => (ops.toast)(&why),
             }
         });

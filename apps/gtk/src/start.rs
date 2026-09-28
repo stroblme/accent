@@ -146,7 +146,7 @@ pub fn present(
             let status = adw::StatusPage::builder()
                 .icon_name(crate::APP_ID)
                 .title("Accent")
-                .description("Open a folder of markdown notes to start writing.")
+                .description("Choose a folder of Markdown notes and start writing.")
                 .child(&column)
                 .build();
             toolbar.set_content(Some(&status));
@@ -866,7 +866,7 @@ fn address(host: &str, path: &str, home: Option<&str>) -> Result<String, String>
             Some(home) => format!("{}{}", home.trim_end_matches('/'), &path[1..]),
             None => {
                 return Err(
-                    "~ needs the host, which has not answered; type the full path".to_string(),
+                    "The host has not answered. Enter the full path instead of ~.".to_string(),
                 );
             }
         },

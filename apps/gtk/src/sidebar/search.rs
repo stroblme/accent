@@ -1161,7 +1161,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         &status_page(
             "system-search-symbolic",
             "Search Files",
-            "Type to search this vault. Ignored files are left out; All puts them back.",
+            "Search across this vault. Turn on All to include ignored files.",
         ),
         Some("prompt"),
     );
@@ -1247,7 +1247,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         (".*", "Use Regular Expression"),
         (
             "All",
-            "Search Ignored Files, and List Skipped Folders Under Not Indexed",
+            "Include ignored files and list skipped folders under Not Indexed",
         ),
     ]
     .map(|(label, tooltip)| {

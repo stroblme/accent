@@ -226,7 +226,7 @@ fn references_empty(doc: Option<&Doc>) -> (&'static str, &'static str) {
             "Nothing refers to the symbol under the caret, and no note links to this file.",
         ),
         Some(doc) if !doc.is_transient() && !doc.is_loose() => {
-            ("No Backlinks", "No note links to the open file.")
+            ("No Backlinks", "No notes link to this file yet.")
         }
         // A diff, a shell, a file from outside the vault, or nothing open at all.
         _ => (

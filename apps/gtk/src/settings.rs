@@ -289,7 +289,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     // would stop meaning anything.
     let width = adw::SpinRow::with_range(30.0, 100.0, 5.0);
     width.set_title("Column Width");
-    width.set_subtitle("Percentage of the editor the document column fills");
+    width.set_subtitle("Width of the document column, as a percentage of the editor");
     width.set_value(f64::from(config.borrow().column_width));
     width.connect_value_notify({
         let (config, save) = (config.clone(), save.clone());
@@ -304,7 +304,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     // screen, and a language whose house style is three of them is not ours to rule out.
     let indent = adw::SpinRow::with_range(1.0, 16.0, 1.0);
     indent.set_title("Indent Width");
-    indent.set_subtitle("Columns one indent is worth");
+    indent.set_subtitle("Number of columns per indent");
     indent.set_value(f64::from(config.borrow().indent_width));
     indent.connect_value_notify({
         let (config, save) = (config.clone(), save.clone());
@@ -331,7 +331,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
 
     let ghost = adw::SwitchRow::builder()
         .title("Ghost Text")
-        .subtitle("Suggest the rest of the line from what the vault already says; Tab accepts")
+        .subtitle("Suggest the rest of a line from your vault; press Tab to accept")
         .active(config.borrow().ghost_text)
         .build();
     ghost.connect_active_notify({
@@ -345,7 +345,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
 
     let numbers = adw::SwitchRow::builder()
         .title("Line Numbers")
-        .subtitle("Number every line in a gutter of its own, left of the page")
+        .subtitle("Show line numbers beside the document")
         .active(config.borrow().line_numbers)
         .build();
     numbers.connect_active_notify({
@@ -396,7 +396,7 @@ fn files_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefer
     // palette toggles the same value.
     let hidden = adw::SwitchRow::builder()
         .title("Show Hidden Files")
-        .subtitle("List dot-named files and folders in the Files pane")
+        .subtitle("Include files and folders whose names begin with a dot")
         .active(config.borrow().show_hidden)
         .build();
     hidden.connect_active_notify({
@@ -418,7 +418,7 @@ fn git_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Preferen
 
     let tree = adw::SwitchRow::builder()
         .title("Group Changes by Folder")
-        .subtitle("Show the Git pane's changed files as a tree instead of a flat list")
+        .subtitle("Show changed files by folder in the Git pane")
         .active(config.borrow().git_tree)
         .build();
     tree.connect_active_notify({
@@ -490,7 +490,7 @@ fn vault_group(
     // Kept as typed but for spaces at the ends: `/` is the vault root and `./` the note's folder.
     group.add(&entry_row(
         "Attachments Folder",
-        Some("Where pasted and dropped images go. Empty means beside the note, ./name a folder beside it"),
+        Some("Where pasted and dropped images go. Leave empty for the note's folder; use ./name for a subfolder beside it"),
         &vault.attachment_folder,
         config,
         root,

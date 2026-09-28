@@ -97,7 +97,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome) {
 @Composable
 private fun ConflictBanner(conflict: String, onMine: () -> Unit, onTheirs: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 8.dp)) {
-        Text("This note was edited on two devices.", style = MaterialTheme.typography.bodyMedium)
+        Text("This note has edits from another device.", style = MaterialTheme.typography.bodyMedium)
         Row {
             TextButton(onClick = onMine) { Text("Keep mine") }
             TextButton(onClick = onTheirs) { Text("Keep theirs") }
@@ -110,7 +110,7 @@ private fun ConflictBanner(conflict: String, onMine: () -> Unit, onTheirs: () ->
 private fun ChangedBanner(onKeep: () -> Unit, onReload: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 8.dp)) {
         Text(
-            "This note changed on disk. Saving is paused so your edits are not lost.",
+            "This note changed on disk. Saving is paused to protect your edits.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Row {
@@ -136,7 +136,7 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
         onDismissRequest = { onAnswer(null) },
         title = { Text("Unsaved edits") },
         text = {
-            Text("\"$name\" changed on disk while you were editing it, so your edits have not been saved.")
+            Text("\"$name\" changed on disk while you were editing. Your edits have not been saved.")
         },
         confirmButton = {
             Column(horizontalAlignment = Alignment.End) {
