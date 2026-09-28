@@ -141,6 +141,47 @@ struct State {
     /// git dir → the branch oid the last refresh saw.
     heads: HashMap<PathBuf, String>,
     head_moved: bool,
+    /// What the pane last held about every repository but the selected one, by git dir.
+    seen: HashMap<PathBuf, Seen>,
+}
+
+/// The part of [`State`] only the selected repository has, set aside while another is picked:
+/// a pick draws it again at once, and the refresh the pick asks for replaces it once it lands.
+#[derive(Default)]
+struct Seen {
+    commits: Vec<Commit>,
+    branches: git::Branches,
+    incoming: HashSet<String>,
+    submodules: Vec<Submodule>,
+}
+
+impl State {
+    /// Make `at` the selected repository, setting aside what is held about the one it replaces
+    /// and bringing back what was set aside for `at`: nothing, the first time. The history keeps
+    /// its first page alone, which is what a refresh reads.
+    fn pick(&mut self, at: usize) {
+        let mut commits = std::mem::take(&mut self.commits);
+        commits.truncate(PAGE);
+        let held = Seen {
+            commits,
+            branches: std::mem::take(&mut self.branches),
+            incoming: std::mem::take(&mut self.incoming),
+            submodules: std::mem::take(&mut self.submodules),
+        };
+        if let Some(repo) = self.repos.get(self.selected) {
+            self.seen.insert(repo.git_dir.clone(), held);
+        }
+        self.selected = at;
+        let back = self
+            .repos
+            .get(at)
+            .and_then(|repo| self.seen.remove(&repo.git_dir))
+            .unwrap_or_default();
+        self.commits = back.commits;
+        self.branches = back.branches;
+        self.incoming = back.incoming;
+        self.submodules = back.submodules;
+    }
 }
 
 pub struct Panel {
@@ -454,6 +495,12 @@ impl Panel {
         self.chooser.set_selected(at);
     }
 
+    /// What the branch button reads. `ACCENT_BENCH_GIT=switch` and nothing else.
+    #[cfg(feature = "bench")]
+    pub fn shown_branch(&self) -> String {
+        self.branch_label.text().to_string()
+    }
+
     /// The repositories the chooser lists, by name. `ACCENT_BENCH_COMPARE=pick:` and nothing else.
     #[cfg(feature = "bench")]
     pub fn repo_names(&self) -> Vec<String> {
@@ -534,16 +581,15 @@ impl Panel {
             if panel.syncing.get() {
                 return;
             }
-            panel.state.borrow_mut().selected = chooser.selected() as usize;
-            // The history on screen is the other repository's until the refresh lands, and a
-            // commit or a file under it clicked meanwhile would be read in this one.
-            panel.clear_log();
-            // So are the changes, and a row clicked meanwhile compared its path in this one: an
-            // empty Index side and the whole file drawn as added. They are drawn again at once
-            // from the status the last refresh read of this repository, every refresh reading
-            // every repository's; the submodules it reads for the selected one alone.
-            panel.state.borrow_mut().submodules.clear();
-            panel.rebuild_changes();
+            // Everything on screen is the other repository's, and a row clicked before the
+            // refresh lands would be asked of this one: a commit answers `fatal: bad object`, a
+            // changed file compares its path here, an empty Index side against the whole file.
+            // So the whole pane is drawn again at once from what it holds about this repository —
+            // the status every refresh reads for every one, the rest from the last time it was
+            // picked — and the refresh replaces that once it lands.
+            panel.state.borrow_mut().pick(chooser.selected() as usize);
+            panel.draw();
+            panel.redraw_log();
             panel.refresh(Depth::Everything);
             // And ask its remote what it has, rather than leaving the first look at a second
             // repository up to five minutes stale. One round trip per pick, which is what makes
@@ -682,27 +728,6 @@ impl Panel {
             })
             .collect();
 
-        let head = statuses.get(selected).and_then(|s| branch_parts(&s.branch));
-        let counts = head.as_ref().map_or("", |(_, counts)| counts.as_str());
-        self.counts.set_text(counts);
-        // Hidden rather than empty: the box spends its spacing on an empty label too, which made
-        // the Sync button wider than its icon and put the icon off its centre.
-        self.counts.set_visible(!counts.is_empty());
-        let branches = match fetched.branches {
-            Some(branches) => branches,
-            None => self.state.borrow().branches.clone(),
-        };
-        let name = statuses
-            .get(selected)
-            .and_then(|s| head_name(s, Some(&branches)));
-        let (rows, at) = branch_model(name, &branches);
-        self.set_branches(&rows, at);
-        tracing::debug!(
-            repos = repos.len(),
-            status_kept,
-            branch = %self.branch_label.text(),
-            "git refresh landed"
-        );
         // Most refreshes read back the history that is already on screen — a save, a watcher
         // event and a `.git` write each schedule one — and splicing then costs an expanded commit
         // its file list and flashes every row, so only a real difference is drawn. A page that
@@ -735,7 +760,9 @@ impl Panel {
             if let (true, Some(commits)) = (moved, fetched.commits) {
                 state.commits = commits;
             }
-            state.branches = branches;
+            if let Some(branches) = fetched.branches {
+                state.branches = branches;
+            }
             if let Some(submodules) = fetched.submodules {
                 state.submodules = submodules;
             }
@@ -743,7 +770,48 @@ impl Panel {
                 state.incoming = incoming;
             }
             state.selected = selected;
+            let State { repos, seen, .. } = &mut *state;
+            seen.retain(|dir, _| repos.iter().any(|repo| repo.git_dir == *dir));
         }
+        // git has answered for the first time since the window opened this vault, so there is a
+        // repository to fetch at last. Everything after this is the timer's.
+        if !self.state.borrow().repos.is_empty() && !self.fetched_once.replace(true) {
+            self.autofetch();
+        }
+        self.draw();
+        tracing::debug!(
+            repos = self.state.borrow().repos.len(),
+            status_kept,
+            branch = %self.branch_label.text(),
+            "git refresh landed"
+        );
+        if let Some(page) = page {
+            self.has_more.set(page.len() >= PAGE);
+            self.fill_log(page, 0);
+        }
+        (self.hooks.changed)();
+        self.reload_diffs();
+    }
+
+    /// Put the selected repository on screen as the state has it, bar the history: the branch
+    /// row, the banner, the commit box and the changes. After the state is written, so that the
+    /// tree toggle and a folder's chevron redraw the same rows without a `git status` of their own.
+    fn draw(self: &Rc<Self>) {
+        let (counts, (rows, at)) = {
+            let state = self.state.borrow();
+            let status = state.statuses.get(state.selected);
+            let counts = status
+                .and_then(|s| branch_parts(&s.branch))
+                .map(|(_, counts)| counts)
+                .unwrap_or_default();
+            let name = status.and_then(|s| head_name(s, Some(&state.branches)));
+            (counts, branch_model(name, &state.branches))
+        };
+        self.counts.set_text(&counts);
+        // Hidden rather than empty: the box spends its spacing on an empty label too, which made
+        // the Sync button wider than its icon and put the icon off its centre.
+        self.counts.set_visible(!counts.is_empty());
+        self.set_branches(&rows, at);
         self.sync_state();
         let rebasing = self.rebasing();
         self.banner.set_title(match rebasing {
@@ -751,21 +819,8 @@ impl Panel {
             false => "A merge is in progress",
         });
         self.banner.set_revealed(rebasing || self.merging());
-        // git has answered for the first time since the window opened this vault, so there is a
-        // repository to fetch at last. Everything after this is the timer's.
-        if !self.state.borrow().repos.is_empty() && !self.fetched_once.replace(true) {
-            self.autofetch();
-        }
-        // After the state is written: the changes list is drawn from it, so that the tree toggle
-        // and a folder's chevron redraw the same rows without a `git status` of their own.
         self.rebuild_changes();
-        if let Some(page) = page {
-            self.has_more.set(page.len() >= PAGE);
-            self.fill_log(page, 0);
-        }
         self.sync_commit();
-        (self.hooks.changed)();
-        self.reload_diffs();
     }
 
     /// What the Sync button says it will do, and whether it can. Both read from the last refresh,
@@ -1652,6 +1707,51 @@ mod tests {
             ahead,
             behind,
         }
+    }
+
+    fn commit(id: &str) -> Commit {
+        Commit {
+            id: id.to_string(),
+            parents: Vec::new(),
+            refs: Vec::new(),
+            author: String::new(),
+            time: 0,
+            summary: String::new(),
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_pick_brings_back_what_that_repository_last_showed_and_never_another_ones() {
+        let mut state = State {
+            repos: vec![repo("/v"), repo("/v/sub")],
+            commits: (0..PAGE + 5).map(|i| commit(&format!("a{i}"))).collect(),
+            submodules: vec![Submodule {
+                path: "lib".to_string(),
+                oid: "0".to_string(),
+                state: ' ',
+                describe: None,
+            }],
+            ..State::default()
+        };
+        state.pick(1);
+        assert_eq!(state.selected, 1);
+        assert!(
+            state.commits.is_empty(),
+            "never picked, so nothing to show yet"
+        );
+        assert!(state.submodules.is_empty());
+
+        state.commits = vec![commit("b0")];
+        state.pick(0);
+        // The first page is what a refresh reads, so Load More's pages are not kept.
+        assert_eq!(state.commits.len(), PAGE);
+        assert_eq!(state.commits[0].id, "a0");
+        assert_eq!(state.submodules.len(), 1);
+
+        state.pick(1);
+        assert_eq!(state.commits, [commit("b0")]);
+        assert!(state.submodules.is_empty());
     }
 
     #[test]
