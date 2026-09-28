@@ -558,7 +558,12 @@ impl Worker {
                 }
             }
             // `Unchanged` is the watcher echoing our own save back at us.
-            Ok(Change::Unchanged | Change::Ignored) => {}
+            Ok(Change::Unchanged) => {}
+            // Out of the index, but not out of the tree, which lists a gitignored folder or a
+            // `node_modules` beside the notes: its folder's listing changed all the same.
+            Ok(Change::Ignored) => {
+                b.dirs.insert(parent_dir(rel).to_string());
+            }
             Err(e) => self.fail(&format!("indexing {rel}"), e),
         }
     }
@@ -830,6 +835,29 @@ mod tests {
             f.wait(|e| matches!(e, Event::DirsChanged(d) if d.iter().any(|d| d == "sub")))
                 .is_some(),
             "a file written into the folder made again was not seen"
+        );
+    }
+
+    /// The tree lists what the index leaves out, so a gitignored folder made empty beside the
+    /// notes changes its parent's listing although nothing reaches the index.
+    #[test]
+    fn an_empty_ignored_folder_made_in_an_indexed_one_reports_its_parent() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "out/\n").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+
+        std::fs::create_dir(f.vault.root().join("out")).unwrap();
+
+        assert!(
+            f.wait(|e| matches!(e, Event::DirsChanged(d) if d.iter().any(|d| d.is_empty())))
+                .is_some(),
+            "the root's listing was not reported changed"
+        );
+        assert!(
+            !f.vault
+                .file_paths(true)
+                .unwrap()
+                .contains(&"out".to_string())
         );
     }
 
