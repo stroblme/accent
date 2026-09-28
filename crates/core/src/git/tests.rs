@@ -141,6 +141,35 @@ fn parse_status_reads_headers_changes_untracked_and_ignored() {
 }
 
 #[test]
+fn untracked_names_a_folder_holding_nothing_tracked_as_the_folder() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init(dir);
+    write_file(dir, "mixed/t.md", "t\n");
+    commit_all(dir, "first");
+    write_file(dir, "mixed/u.md", "u\n");
+    write_file(dir, "mixed/sub/deep/x.md", "x\n");
+    write_file(dir, "new/deep/z.md", "z\n");
+    write_file(dir, "new/q.md", "q\n");
+    write_file(dir, "src/deep/w.md", "w\n");
+
+    let repo = open(dir);
+    let asked = |under: &str| {
+        let mut found = untracked(&repo, under).unwrap();
+        found.sort();
+        found
+    };
+    assert_eq!(asked("new"), ["new/"]);
+    assert_eq!(asked("mixed"), ["mixed/sub/", "mixed/u.md"]);
+    // Never above what was asked about, although `src` holds nothing tracked either.
+    assert_eq!(asked("src/deep"), ["src/deep/"]);
+    assert_eq!(asked(""), ["mixed/sub/", "mixed/u.md", "new/", "src/"]);
+}
+
+#[test]
 fn a_rename_carries_its_original_path() {
     if !have_git() {
         return;

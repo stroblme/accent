@@ -430,6 +430,24 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
     })
 }
 
+/// The untracked paths under the folder `dir` (`""` for the whole repository) as git's default
+/// mode names them: a folder holding nothing tracked is one `dir/` entry, whatever is inside it.
+/// What Discard trashes for a folder, so an untracked one goes whole rather than file by file,
+/// leaving its emptied folders behind.
+pub fn untracked(repo: &Repo, dir: &str) -> Result<Vec<String>, Error> {
+    let mut args = vec!["status", "--porcelain=v2", "-z", "--untracked-files=normal"];
+    if !dir.is_empty() {
+        args.extend(["--", dir]);
+    }
+    let out = run(&repo.root, &args, true)?;
+    Ok(parse_status(&out)
+        .entries
+        .into_iter()
+        .filter(|e| e.x == '?')
+        .map(|e| e.path)
+        .collect())
+}
+
 /// Whether a merge is under way, which porcelain does not say: git keeps `MERGE_HEAD` for exactly
 /// as long as one is waiting to be committed or aborted.
 fn merging(repo: &Repo) -> bool {
