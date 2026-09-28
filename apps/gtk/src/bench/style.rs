@@ -11,9 +11,9 @@ use sourceview5::prelude::BufferExt as _;
 /// come from the synchronous path — which is the whole question this bench answers.
 pub(super) fn bench_style(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         for chars in [2 * 1024, 32 * 1024] {
@@ -144,10 +144,10 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
 pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
     const FOLDED: &str = "# One\nhidden body\n# Two\nplain line\n";
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(800)).await;
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         tab.set_text(FOLDED);
@@ -198,10 +198,10 @@ pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
     // the bytes it carried along, which is what aborts.
     const FOLDED: &str = "# One\na hidden line\nhidden\nbody\n# Two\nplain line\n";
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(800)).await;
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         for case in ["delete", "backspace"] {
@@ -492,9 +492,9 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
         return bench_hover(app, rel);
     }
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         // ASCII throughout, so `find` gives the character offset the buffer counts in.
@@ -770,10 +770,10 @@ async fn bench_new_file(app: &Rc<App>, case: &str) {
 /// a colour nothing on screen is drawn in.
 pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(400)).await;
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         tab.set_text("plain prose\n- item\n> quote\n[link](x) `code`\n");
@@ -942,9 +942,9 @@ fn bench_theme_colours(tab: &Rc<Tab>) -> String {
 
 pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         // ASCII throughout, so the byte offset `find` gives is also the character offset the
@@ -1044,7 +1044,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
     let app = app.clone();
     let rel = rel.to_string();
     glib::timeout_add_local_once(Duration::from_millis(600), move || {
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         let under = |ranges: &[(i32, i32)]| {
