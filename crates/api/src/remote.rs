@@ -601,18 +601,19 @@ impl Remote {
     ) -> std::io::Result<()> {
         let file = std::fs::File::open(local)?;
         let total = file.metadata()?.len();
-        link::send(&self.cat_into(rel), file, total, progress)
+        link::send(&self.put_into(rel, total), file, total, progress)
     }
 
     /// Write `bytes` to `rel` over the master, the way an upload goes: the host's shell creates a
     /// new file with the mode its umask gives a new note there.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
-        link::send(&self.cat_into(rel), bytes, bytes.len() as u64, &|_, _| ())
+        let size = bytes.len() as u64;
+        link::send(&self.put_into(rel, size), bytes, size, &|_, _| ())
     }
 
-    /// The command line that writes its stdin to `rel` on the host.
-    fn cat_into(&self, rel: &str) -> Vec<String> {
-        let command = format!("cat > {}", ssh::quote(&self.remote_path(rel)));
+    /// The command line that writes its stdin, `size` bytes of it, to `rel` on the host.
+    fn put_into(&self, rel: &str, size: u64) -> Vec<String> {
+        let command = ssh::put_cmd(&self.remote_path(rel), size);
         ssh::run(&self.url, &self.ctl, &command)
     }
 

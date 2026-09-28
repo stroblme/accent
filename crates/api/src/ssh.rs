@@ -471,6 +471,29 @@ pub fn install_server_cmd(hash: &str, size: usize) -> String {
     )
 }
 
+/// Read a file, `size` bytes of it, from stdin into `path`, the way a save here writes one.
+///
+/// `cat >` straight onto the file emptied it first, so a link that dropped half way through an
+/// upload left the host a torn copy and nothing of the original. The bytes go to an `.accent-`
+/// file beside it instead, which the watcher never reports, and are counted before it is renamed
+/// over the file, as [`install_server_cmd`] does for the server. A symlink is written through to
+/// its target and an existing file keeps its mode; a new one gets the umask's, as `cat >` gave it.
+/// A folder that takes no new file is named as the reason, rather than the shell's complaint
+/// about a temporary the reader never heard of.
+pub fn put_cmd(path: &str, size: u64) -> String {
+    let path = quote(path);
+    format!(
+        "p=$(readlink -f -- {path}) || p={path}; t=\"${{p%/*}}/.accent-$$\"; \
+         trap 'rm -f \"$t\"' EXIT; trap 'exit 1' HUP INT TERM; \
+         true 2>/dev/null > \"$t\" || {{ echo \"cannot write in ${{p%/*}}\" >&2; exit 1; }}; \
+         cat > \"$t\" || exit 1; \
+         if [ \"$(wc -c < \"$t\")\" -ne {size} ]; then \
+         echo 'the upload was cut short' >&2; exit 1; fi; \
+         m=$(stat -c %a \"$p\" 2>/dev/null) && chmod \"$m\" \"$t\"; \
+         mv -f \"$t\" \"$p\""
+    )
+}
+
 /// The command that starts the headless server on a vault. `server` is a path expression from
 /// [`server_path`]; the root is a literal, so it is quoted.
 pub fn serve_cmd(server: &str, root: &Path) -> String {
@@ -1018,6 +1041,42 @@ mod tests {
         // The sweep spares what was just installed.
         assert!(cmd.contains("accent-cli-*"));
         assert!(cmd.contains(&format!("[ \"$f\" = {installed} ] || rm -f \"$f\"")));
+    }
+
+    /// The command run by the shell here, as the host's runs it: a file replaced only once every
+    /// byte is there, keeping its mode and its symlink, and one cut short left as it was.
+    #[test]
+    fn an_upload_lands_whole_or_not_at_all() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let dir = tempfile::tempdir().unwrap();
+        let put = |path: &Path, bytes: &[u8], size: u64| {
+            let mut sh = Command::new("sh")
+                .arg("-c")
+                .arg(put_cmd(&path.to_string_lossy(), size))
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            sh.stdin.take().unwrap().write_all(bytes).unwrap();
+            sh.wait_with_output().unwrap().status.success()
+        };
+        let (file, link) = (dir.path().join("a b.pdf"), dir.path().join("link.pdf"));
+        std::fs::write(&file, "old").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+
+        assert!(!put(&file, b"ne", 3));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "old");
+        assert!(put(&link, b"new", 3));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        assert!(link.is_symlink());
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
+        // A file nothing held yet, and no temporary left beside any of them.
+        assert!(put(&dir.path().join("new.png"), b"png", 3));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 
     #[test]
