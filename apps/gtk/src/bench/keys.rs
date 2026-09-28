@@ -11,7 +11,8 @@ use vte4::TerminalExt as _;
 /// A view of its own in a window of its own, so nothing is written into a vault and the drills do
 /// not depend on a document being open. It needs a display, which is why this is a bench hook and
 /// not a unit test, but it needs no key press and no pointer: the signals are actions, and
-/// [`multicaret::View::press`] is the key controller's own handler.
+/// [`multicaret::View::press`] is the key controller's own handler. `make drills` holds what it
+/// prints against `keys.expected` beside this file, line for line, and fails on any difference.
 pub(super) fn bench_keys(app: &Rc<App>) {
     let view = multicaret::View::new();
     // The drills are about the code flavours, which is where the logical-line moves are wanted.
@@ -25,6 +26,19 @@ pub(super) fn bench_keys(app: &Rc<App>) {
         .default_height(240)
         .child(&gtk::ScrolledWindow::builder().child(&view).build())
         .build();
+    // The buffer off the primary selection while the view is up: GTK lets the primary caret's
+    // selection go whenever another widget takes that selection, which the window starting up
+    // beside this one may do mid-drill, and `make drills` wants the same printout every run.
+    // Realizing puts the buffer on it before this runs, and it is put back before unrealizing
+    // takes it off again.
+    view.connect_realize(|view| {
+        view.buffer()
+            .remove_selection_clipboard(&view.primary_clipboard());
+    });
+    view.connect_unrealize(|view| {
+        view.buffer()
+            .add_selection_clipboard(&view.primary_clipboard());
+    });
     window.present();
     let app = app.clone();
     // After a frame, so the view has a size and its lines have been laid out.
@@ -253,12 +267,15 @@ async fn bench_column(view: &multicaret::View) {
     glib::timeout_future(Duration::from_millis(200)).await;
     view.press(gdk::Key::Page_Down, none);
     glib::timeout_future(Duration::from_millis(200)).await;
-    // The view scrolls by the same page, so the top line on screen is the primary's again.
+    // The view scrolls by the same page, so the top line on screen is the primary's again. Lines
+    // counted from that top, because how many a page holds is the font's.
     let top = view.line_at_y(view.visible_rect().y()).0.line();
-    println!(
-        "bench column_page_down {:?} top={top}",
-        view.caret_positions()
-    );
+    let carets: Vec<_> = view
+        .caret_positions()
+        .into_iter()
+        .map(|(line, column)| (line - top, column))
+        .collect();
+    println!("bench column_page_down {carets:?} scrolled={}", top > 0);
     view.clear_carets();
 }
 

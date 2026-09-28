@@ -79,8 +79,9 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 
 .DEFAULT_GOAL := all
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
-        clippy doc run smoke vault validate icons flatpak cargo-sources pdfium server help requirements \
-        android android-check android-test android-tools apk apk-release pdfium-android bindings
+        clippy doc run smoke drills xvfb vault validate icons flatpak cargo-sources pdfium server \
+        help requirements android android-check android-test android-tools apk apk-release \
+        pdfium-android bindings
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -250,7 +251,7 @@ clippy:
 # The PDF tests run only when libpdfium is already there, so a fresh clone is not forced into a
 # 7 MB download by the gate; `make pdfium` or `make test-pdf` fetches it, and CI does both.
 # The skip is loud on purpose: the tests skip themselves silently without the library.
-check: fmt-check clippy test
+check: fmt-check clippy test drills
 	@if test -f $(PDFIUM_LIB); then $(MAKE) test-pdf; else \
 		echo "SKIPPED the PDF tests: no $(PDFIUM_LIB). Run \`make pdfium\` (or \`make test-pdf\`) to fetch it."; \
 	fi
@@ -273,24 +274,38 @@ $(VAULT): $(GEN_VAULT)
 	$(CARGO) run $(CARGO_PROFILE_FLAG) -p accent-core --example gen-vault -- \
 		$(VAULT) --notes $(VAULT_NOTES) --files $(VAULT_FILES) --force
 
-## smoke: headless start-up check, fails on any GTK critical
-smoke: gtk-bench vault
+# The start of a headless launch's command line. A private session bus per run: accent is a
+# single-instance GApplication, so without one a second invocation forwards its arguments to
+# whatever instance is already up and exits 0, which makes a check pass while proving nothing.
+# The XDG dirs point at a scratch directory, set outside the bus so whatever it activates sees
+# them too: a check must neither read the user's config nor write a session and an index.
+# TMPDIR as well, where the terminal holder listens and every start sweeps for orphaned shells;
+# under /tmp whatever the caller's is, because a unix socket path is at most 108 bytes.
+HEADLESS = xdg=$$(mktemp -d /tmp/accent-headless-XXXXXX) && trap 'rm -rf "$$xdg"' EXIT && \
+	mkdir "$$xdg/tmp" "$$xdg/vault" && \
+	env XDG_CONFIG_HOME="$$xdg/config" XDG_CACHE_HOME="$$xdg/cache" \
+		XDG_STATE_HOME="$$xdg/state" XDG_DATA_HOME="$$xdg/data" TMPDIR="$$xdg/tmp" \
+	dbus-run-session -- env $(XVFB_ENV)
+
+## xvfb: start the X server the headless checks draw on, unless it is already up
+xvfb:
 	@command -v Xvfb >/dev/null || { echo "Xvfb is not installed"; exit 1; }
 	@# The display's socket, not `pgrep -f "Xvfb :N"`: that pattern matches the shell running it.
 	@test -S /tmp/.X11-unix/X$(DISPLAY_NUM) || (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &)
 	@sleep 2
-	@# A private session bus per run: accent is a single-instance GApplication, so without one a
-	@# second invocation forwards its arguments to whatever instance is already up and exits 0,
-	@# which makes this check pass while proving nothing.
-	@# The XDG dirs point at a scratch directory, set outside the bus so whatever it activates sees
-	@# them too: a check must neither read the user's config nor write a session and an index.
-	@# TMPDIR as well, where the terminal holder listens and every start sweeps for orphaned
-	@# shells; under /tmp whatever the caller's is, because a unix socket path is at most 108 bytes.
-	xdg=$$(mktemp -d /tmp/accent-smoke-XXXXXX) && trap 'rm -rf "$$xdg"' EXIT && \
-	mkdir "$$xdg/tmp" && \
-	env XDG_CONFIG_HOME="$$xdg/config" XDG_CACHE_HOME="$$xdg/cache" \
-		XDG_STATE_HOME="$$xdg/state" XDG_DATA_HOME="$$xdg/data" TMPDIR="$$xdg/tmp" \
-	dbus-run-session -- env $(XVFB_ENV) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
+
+## smoke: headless start-up check, fails on any GTK critical
+smoke: gtk-bench vault xvfb
+	$(HEADLESS) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
+
+## drills: run the drills that assert under Xvfb, each against the lines kept beside it
+#
+# `ACCENT_BENCH_KEYS=1` is multi-caret's regression cover: the key semantics, the carets and the
+# selections, in a view of its own, so an empty scratch vault is all it needs. Written to a file
+# first, so a run that crashes or times out fails on its exit status as well.
+drills: gtk-bench xvfb
+	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
+	grep '^bench ' "$$xdg/keys" | diff -u apps/gtk/src/bench/keys.expected -
 
 ## server: build the static accent-cli that gets uploaded to a remote host
 #
