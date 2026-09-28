@@ -387,13 +387,16 @@ async fn written(app: &Rc<App>) {
 }
 
 /// The same document under a new name: rename it the way a dropped row does, then add another
-/// page and read the file back.
+/// page and read the file back, then write a one-page document over it from outside.
 ///
 /// The render thread owns the path it reloads from and saves to, so a rename it was never told
 /// about shows up here as a page count on disk that did not grow — the save going to a name that
-/// is no longer there.
+/// is no longer there. On a remote vault the cached copy has to move with the file, or the page
+/// goes up beside it as `(edited)` and the reader keeps a copy nothing refreshes.
 async fn bench_pdf_renamed(app: &Rc<App>) {
-    let (Some(pdf), Some(ops)) = (app.active_pdf(), app.ops().cloned()) else {
+    let (Some(pdf), Some(ops), Some(vault)) =
+        (app.active_pdf(), app.ops().cloned(), app.vault().cloned())
+    else {
         println!("bench pdf no_tab");
         return bench_quit(app);
     };
@@ -421,12 +424,31 @@ async fn bench_pdf_renamed(app: &Rc<App>) {
     let sizes = accent_core::pdf::PdfDoc::open(pdf.path())
         .and_then(|doc| doc.page_sizes())
         .unwrap_or_default();
+    // On a remote vault a push that found no stamp under the new name put the page beside the
+    // file instead, as `(edited)`.
     println!(
-        "bench pdf renamed_added pages={} on_disk={} in_vault {}",
+        "bench pdf renamed_added pages={} on_disk={} in_vault {} edited={}",
         pdf.page_count(),
         sizes.len(),
-        vault_pages(app, &pdf.key())
+        vault_pages(app, &pdf.key()),
+        vault.exists(&accent_api::remote::edited_name(&pdf.key(), 1))
     );
+    // Rebuilt by something else, as a LaTeX run does: a one-page document written over the new
+    // name, which the reader must follow rather than the copy it had.
+    let blank = std::env::temp_dir().join(format!("accent-bench-{}-blank.pdf", std::process::id()));
+    let rebuilt = accent_core::pdf::blank_pdf((595.0, 842.0))
+        .and_then(|bytes| Ok(std::fs::write(&blank, bytes)?))
+        .and_then(|()| Ok(vault.upload(&blank, &pdf.key())?));
+    let started = std::time::Instant::now();
+    while rebuilt.is_ok() && pdf.page_count() != 1 && started.elapsed() < Duration::from_secs(15) {
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    println!(
+        "bench pdf renamed_rebuilt pages={} after_ms={} {rebuilt:?}",
+        pdf.page_count(),
+        started.elapsed().as_millis()
+    );
+    let _ = std::fs::remove_file(&blank);
     bench_quit(app);
 }
 

@@ -168,7 +168,8 @@ use tags::bench_tags;
 /// the save has run, and what the vault itself then holds — on a remote vault the host's own copy,
 /// which is the only witness that the write was uploaded. It then renames the file the way a
 /// dropped row does and adds another page to it, which is the render thread following the new
-/// name. It writes to the document and moves it, so point it at a scratch copy; and point it at a
+/// name, and writes a one-page document over the new name from outside, which the reader must
+/// follow. It writes to the document and moves it, so point it at a scratch copy; and point it at a
 /// document of several pages, since a one-page PDF is wholly on screen whatever the scroll offset
 /// was. `=stale:<rel_path>` is the remote vault's etag gate: it stamps the cached copy with an
 /// etag the host never had, adds a page and prints whether the host's copy is untouched and
