@@ -117,18 +117,24 @@ pub fn slugs<'a>(headings: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     out
 }
 
-/// The heading an anchor names: by its slug first, as `[text](#my-section)` writes it, then by
-/// its text, as `[[Note#My Section]]` and an older `[text](#My%20Section)` do.
+/// The heading an anchor names, as [`heading_named`] finds it.
 pub fn heading_for<'a>(headings: &'a [Heading], anchor: &str) -> Option<&'a Heading> {
+    let texts: Vec<&str> = headings.iter().map(|h| h.text.as_str()).collect();
+    heading_named(&texts, anchor).map(|i| &headings[i])
+}
+
+/// Which of the headings, given by their texts in note order, an anchor names: by its slug
+/// first, as `[text](#my-section)` writes it, then by its text, as `[[Note#My Section]]` and an
+/// older `[text](#My%20Section)` do.
+pub(super) fn heading_named(texts: &[&str], anchor: &str) -> Option<usize> {
     let anchor = anchor.trim();
-    slugs(headings.iter().map(|h| h.text.as_str()))
+    slugs(texts.iter().copied())
         .iter()
         .position(|s| s.eq_ignore_ascii_case(anchor))
-        .map(|i| &headings[i])
         .or_else(|| {
-            headings
+            texts
                 .iter()
-                .find(|h| h.text.trim().eq_ignore_ascii_case(anchor))
+                .position(|t| t.trim().eq_ignore_ascii_case(anchor))
         })
 }
 

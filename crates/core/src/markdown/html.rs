@@ -2,7 +2,7 @@
 //! block carries the source line it starts on, and a conflict block its sides in boxes.
 
 use super::blocks::block_ids;
-use super::links::{is_image, percent_encode, slugs, split_anchor};
+use super::links::{heading_named, is_image, percent_decode, percent_encode, slugs, split_anchor};
 use super::options;
 use crate::conflict::{self, Block};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
@@ -105,7 +105,8 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
 ///
 /// Each block opens with an empty `<span data-line="N">`, so the preview can scroll to the line
 /// the editor's cursor is on, and each heading gets its [`slugs`] anchor as its `id`, so an
-/// in-note `[text](#slug)` scrolls there. A block with a [`block_ids`] id carries it on that
+/// in-note `[text](#slug)` scrolls there; `[text](#My%20Section)`, naming the heading by its text,
+/// is pointed at that `id`. A block with a [`block_ids`] id carries it on that
 /// span, as `^id`, which is how `[text](#^id)` names it, and the `^id` itself is not shown.
 ///
 /// A conflict block git left in the note ([`conflict::blocks`]) is shown as its sides, each in a
@@ -113,9 +114,13 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
 /// with no marker shown: read as markdown, `=======` would make the current side a heading and
 /// `>>>>>>>` a quote. The note is cut at the blocks and every stretch parsed on its own, so each
 /// side is the markdown it says whatever the other leaves open, and every line marker is the
-/// note's own.
+/// note's own. Each stretch is given the note's [`definitions`], so a reference link or a
+/// footnote finds its definition across a block's edge.
 pub fn to_html(text: &str) -> String {
-    let mut page = Page::default();
+    let mut page = Page {
+        defs: definitions(text),
+        ..Page::default()
+    };
     let mut at = 0;
     for block in conflict::blocks(text) {
         page.markdown(text, at..block.range.start);
@@ -126,6 +131,29 @@ pub fn to_html(text: &str) -> String {
     page.finish()
 }
 
+/// Every reference and footnote definition of a note with a conflict block, as written, each
+/// after a blank line; empty for any other note. A stretch parsed on its own knows only the
+/// definitions in it, so [`to_html`] parses each with these after it.
+fn definitions(text: &str) -> String {
+    let Some(blank) = conflict::blank_markers(text) else {
+        return String::new();
+    };
+    let parser = Parser::new_ext(&blank, options());
+    let mut defs: Vec<Range<usize>> = parser
+        .reference_definitions()
+        .iter()
+        .map(|(_, d)| d.span.clone())
+        .collect();
+    defs.extend(
+        parser.into_offset_iter().filter_map(|(ev, r)| {
+            matches!(ev, Event::Start(Cm::FootnoteDefinition(_))).then_some(r)
+        }),
+    );
+    defs.into_iter()
+        .map(|r| format!("\n\n{}", &text[r]))
+        .collect()
+}
+
 /// What [`to_html`] has gathered so far, a stretch of the note at a time.
 #[derive(Default)]
 struct Page<'a> {
@@ -134,6 +162,10 @@ struct Page<'a> {
     /// `Heading::text` — every text and code event inside, an embed's too — so the `id` is the
     /// anchor the editor resolves.
     headings: Vec<(usize, String)>,
+    /// The place in `evts` of each link to `#…` on the page itself.
+    anchors: Vec<usize>,
+    /// The note's [`definitions`], parsed after every stretch.
+    defs: String,
     /// How far into the note the lines are counted, and the newlines up to there: block starts
     /// arrive in source order, so one forward pass counts every marker's line.
     counted: usize,
@@ -169,7 +201,21 @@ impl<'a> Page<'a> {
         let mut skip = 0usize;
         let mut in_heading = false;
 
-        for (ev, r) in Parser::new_ext(src, opts).into_offset_iter() {
+        // The definitions go on after the stretch, where the parser finds them; nothing of them
+        // is shown, their events all starting past its end.
+        let joined;
+        let events: Box<dyn Iterator<Item = (Event<'a>, Range<usize>)>> = if self.defs.is_empty() {
+            Box::new(Parser::new_ext(src, opts).into_offset_iter())
+        } else {
+            joined = format!("{src}{}", self.defs);
+            Box::new(
+                Parser::new_ext(&joined, opts)
+                    .into_offset_iter()
+                    .filter(|(_, r)| r.start < src.len())
+                    .map(|(ev, r)| (ev.into_static(), r)),
+            )
+        };
+        for (ev, r) in events {
             match &ev {
                 Event::Start(Cm::Heading { .. }) => {
                     in_heading = true;
@@ -220,7 +266,10 @@ impl<'a> Page<'a> {
                     ));
                     link_wiki.push(true);
                 }
-                Event::Start(Cm::Link { .. }) => {
+                Event::Start(Cm::Link { ref dest_url, .. }) => {
+                    if dest_url.starts_with('#') {
+                        self.anchors.push(self.evts.len());
+                    }
                     link_wiki.push(false);
                     self.evts.push(ev);
                 }
@@ -316,7 +365,17 @@ impl<'a> Page<'a> {
     }
 
     fn finish(mut self) -> String {
-        let ids = slugs(self.headings.iter().map(|(_, h)| h.as_str()));
+        let texts: Vec<&str> = self.headings.iter().map(|(_, h)| h.as_str()).collect();
+        let ids = slugs(texts.iter().copied());
+        // A link to a heading of the page goes to its `id`, which is all WebKit scrolls to, even
+        // when it names the heading by its text, as the editor lets it.
+        for at in &self.anchors {
+            if let Event::Start(Cm::Link { dest_url, .. }) = &mut self.evts[*at]
+                && let Some(i) = heading_named(&texts, &percent_decode(&dest_url[1..]))
+            {
+                *dest_url = format!("#{}", ids[i]).into();
+            }
+        }
         for ((at, _), slug) in self.headings.iter().zip(ids) {
             if let Event::Start(Cm::Heading { id, .. }) = &mut self.evts[*at] {
                 *id = Some(slug.into());
@@ -461,6 +520,23 @@ mod tests {
         assert_eq!(ids, ["notes", "notes-1", "c-and-logopng"]);
     }
 
+    /// A same-page link written with a heading's text, as the editor resolves it, points at that
+    /// heading's `id`, which is where WebKit scrolls; one naming no heading is left as written.
+    #[test]
+    fn html_points_a_text_anchor_at_its_heading() {
+        let h = bare(
+            "[a](#My%20Section) [b](<#my section>) [c](#MY-SECTION) [d](#nowhere)\n\n\
+             ## My Section\n",
+        );
+        for text in ["a", "b", "c"] {
+            assert!(
+                h.contains(&format!("<a href=\"#my-section\">{text}</a>")),
+                "{h}"
+            );
+        }
+        assert!(h.contains("<a href=\"#nowhere\">d</a>"), "{h}");
+    }
+
     /// A block with an id carries it on its line marker, so an in-note `[text](#^id)` scrolls to
     /// it, and the `^id` itself is not shown, as Obsidian's reading view shows none.
     #[test]
@@ -532,6 +608,24 @@ mod tests {
         for marker in ["<<<", "|||", "===", "&gt;&gt;", "blockquote"] {
             assert!(!h.contains(marker), "{marker} in {h}");
         }
+    }
+
+    /// Each stretch of a conflicted note is parsed with the whole note's definitions, so a
+    /// reference link and a footnote find theirs across a block's edge, and the footnote is shown
+    /// once, where it is written.
+    #[test]
+    fn html_resolves_definitions_across_a_conflict_block() {
+        let src = "See [the docs][d] and a note[^n].\n\
+                   <<<<<<< HEAD\n[^n]: The note.\n=======\n[d] too\n>>>>>>> side\n\n\
+                   [d]: docs.md\n";
+        let h = bare(src);
+        assert_eq!(h.matches("<a href=\"docs.md\">").count(), 2, "{h}");
+        assert!(
+            h.contains("<sup class=\"footnote-reference\"><a href=\"#n\">1</a>"),
+            "{h}"
+        );
+        assert_eq!(h.matches("class=\"footnote-definition\"").count(), 1, "{h}");
+        assert!(!h.contains('['), "{h}");
     }
 
     /// The preview markers are tested on their own; strip them so the older assertions stay
