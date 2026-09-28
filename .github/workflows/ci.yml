@@ -67,6 +67,9 @@ jobs:
       # and the scratch XDG dirs. It reuses the vault above, which is newer than its generator.
       - name: Headless smoke run
         run: make smoke
+      # Multi-caret's regression cover, on the Xvfb and the build the smoke run left behind.
+      - name: Asserting drills
+        run: make drills
 
   android:
     name: android app
