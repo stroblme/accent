@@ -85,6 +85,11 @@ pub(super) fn bench_git_init(app: &Rc<App>) {
 /// refresh that reads the new one's has landed. Point it at a vault holding two repositories with
 /// a commit each. The row used to be the old repository's, asked of the new one, which toasted
 /// `Cannot list the commit's files: fatal: bad object …`; now the history is empty until then.
+///
+/// Then it picks every repository twice over, the second round all seen before, and prints what
+/// each pick drew at once — history rows and the branch button — how long until the history was
+/// on screen, and the toasts a click on its first row at once raised: a repository seen before is
+/// drawn from what the pane held about it, and its rows are its own.
 pub(super) fn bench_git_switch(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -108,6 +113,21 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
             bench_said(&app),
             git.log_rows()
         );
+        app.show_pane("git");
+        let names = git.repo_names();
+        for (at, name) in names.iter().enumerate().chain(names.iter().enumerate()) {
+            let (t, said) = (Instant::now(), app.toasted.get());
+            git.select_repo(at as u32);
+            let (rows, branch) = (git.log_rows(), git.shown_branch());
+            git.activate_log_row(0);
+            wait_for(|| git.log_rows() > 0, 10000).await;
+            let shown = t.elapsed().as_millis();
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            println!(
+                "bench git_switch repo={name} rows={rows} branch={branch} shown_ms={shown} toasts={}",
+                app.toasted.get() - said
+            );
+        }
         bench_quit(&app);
     });
 }
