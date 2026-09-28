@@ -173,6 +173,7 @@ pub struct Panel {
     changes: gio::ListStore,
     log: gio::ListStore,
     /// The history list, so the bench can activate a row without a pointer.
+    #[cfg(feature = "bench")]
     log_view: gtk::ListView,
     /// Whether git has history the store does not hold, which is what puts the Load More row at
     /// the end of the log. Also the re-entrancy guard: it is cleared while a page is in flight.
@@ -377,6 +378,7 @@ impl Panel {
             divider,
             changes,
             log,
+            #[cfg(feature = "bench")]
             log_view: log_view.clone(),
             has_more: Cell::new(false),
             state: RefCell::new(State::default()),
@@ -428,10 +430,12 @@ impl Panel {
     /// How many rows the history list holds, and activating its last one. Only `ACCENT_BENCH_GIT`
     /// calls these: the headless image has no pointer, and the Load More row is only worth
     /// anything if activating the end of the list really pages the next chunk in.
+    #[cfg(feature = "bench")]
     pub fn log_rows(&self) -> u32 {
         self.log.n_items()
     }
 
+    #[cfg(feature = "bench")]
     pub fn activate_last_log_row(&self) {
         if let Some(last) = self.log.n_items().checked_sub(1) {
             self.activate_log_row(last);
@@ -440,15 +444,18 @@ impl Panel {
 
     /// Activate the history's row `at`, and pick the repository `at` in the chooser, as a click
     /// does. `ACCENT_BENCH_GIT=switch` and nothing else.
+    #[cfg(feature = "bench")]
     pub fn activate_log_row(&self, at: u32) {
         self.log_view.emit_by_name::<()>("activate", &[&at]);
     }
 
+    #[cfg(feature = "bench")]
     pub fn select_repo(&self, at: u32) {
         self.chooser.set_selected(at);
     }
 
     /// The repositories the chooser lists, by name. `ACCENT_BENCH_COMPARE=pick:` and nothing else.
+    #[cfg(feature = "bench")]
     pub fn repo_names(&self) -> Vec<String> {
         let state = self.state.borrow();
         state.repos.iter().map(|repo| repo.name.clone()).collect()
@@ -456,6 +463,7 @@ impl Panel {
 
     /// How many rows the changes list holds. `ACCENT_BENCH_GIT` prints it either side of a
     /// [`Panel::set_tree`], which is how the grouping is proven without a pointer.
+    #[cfg(feature = "bench")]
     pub fn changes_rows(&self) -> u32 {
         self.changes.n_items()
     }
@@ -463,6 +471,7 @@ impl Panel {
     /// Whether the changes list is grouped by folder, and putting it either way. The one surface
     /// is the Preferences switch, which reaches every window's pane through `App::apply_config`,
     /// so nothing here writes the config back; only a move really redraws.
+    #[cfg(feature = "bench")]
     pub fn tree(&self) -> bool {
         self.tree.get()
     }
@@ -977,18 +986,21 @@ impl Panel {
 
     /// What the Sync button says it will do. `ACCENT_BENCH_GIT` and nothing else: the button is
     /// otherwise a pair of arrows and a count, and a tooltip cannot be read from a screenshot.
+    #[cfg(feature = "bench")]
     pub fn sync_hint(&self) -> Option<String> {
         self.sync.tooltip_text().map(|t| t.to_string())
     }
 
     /// How many local and remote-tracking branches the last refresh listed. `ACCENT_BENCH_GIT`
     /// and nothing else.
+    #[cfg(feature = "bench")]
     pub fn branch_counts(&self) -> (usize, usize) {
         let branches = &self.state.borrow().branches;
         (branches.local.len(), branches.remote.len())
     }
 
     /// Whether Commit can be pressed, and its tooltip. `ACCENT_BENCH_GIT` and nothing else.
+    #[cfg(feature = "bench")]
     pub fn commit_hint(&self) -> (bool, Option<String>) {
         let tip = self.commit.tooltip_text().map(|t| t.to_string());
         (self.commit.is_sensitive(), tip)
@@ -996,6 +1008,7 @@ impl Panel {
 
     /// The banner's title while it is up, and what the commit button reads. `ACCENT_BENCH_GIT`
     /// and nothing else.
+    #[cfg(feature = "bench")]
     pub fn banner_hint(&self) -> (Option<String>, String) {
         let title = self
             .banner
@@ -1010,6 +1023,7 @@ impl Panel {
     }
 
     /// Press the commit button, whatever it reads. `ACCENT_BENCH_GIT` and nothing else.
+    #[cfg(feature = "bench")]
     pub fn press_commit(&self) {
         self.commit.emit_clicked();
     }

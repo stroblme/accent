@@ -37,14 +37,15 @@ mod text;
 pub use banner::Alert;
 use compare::Comparing;
 pub use compare::{companion, overlay_view, restyle_companion, style_companion};
+#[cfg(feature = "bench")]
 pub(crate) use drag::content as drag_content;
 use follow::Follow;
+#[cfg(feature = "bench")]
 pub(crate) use keys::press;
 use lines::primary_paste;
-pub(crate) use lines::{
-    delete_line, duplicate_line, line_clipboard, newline_below, paste_primary, pressed_at,
-    toggle_comment,
-};
+#[cfg(feature = "bench")]
+pub(crate) use lines::{delete_line, duplicate_line, newline_below, paste_primary, toggle_comment};
+pub(crate) use lines::{line_clipboard, pressed_at};
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
 pub(crate) use page::{font_css, install_font, next_view_name, set_margins};
@@ -1157,6 +1158,7 @@ impl Tab {
     }
 
     /// How many end-of-line messages the last paint put up. `ACCENT_BENCH_COMPARE=diag:` only.
+    #[cfg(feature = "bench")]
     pub fn annotated(&self) -> usize {
         self.annotated.get()
     }

@@ -589,23 +589,27 @@ impl Bar {
     }
 
     /// What the query box says. Only `ACCENT_BENCH_REVEAL` reads it.
+    #[cfg(feature = "bench")]
     pub fn query_text(&self) -> String {
         self.query.text().to_string()
     }
 
     /// The query box itself, to type into and to read what is selected in. Only
     /// `ACCENT_BENCH_FIND` touches it.
+    #[cfg(feature = "bench")]
     pub fn query_box(&self) -> &gtk::SearchEntry {
         &self.query
     }
 
     /// The replacement box, for the same reason as [`Bar::query_box`].
+    #[cfg(feature = "bench")]
     pub fn replace_box(&self) -> &gtk::Entry {
         &self.replace
     }
 
     /// The go-to box, so a drill can type a line number into it. Only `ACCENT_BENCH_REVEAL`
     /// touches it.
+    #[cfg(feature = "bench")]
     pub fn line_box(&self) -> &gtk::Entry {
         &self.line
     }

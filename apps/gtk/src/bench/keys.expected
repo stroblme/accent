@@ -1,0 +1,85 @@
+bench ctrl_delete "a b"
+bench ctrl_backspace "ab"
+bench wraps true
+bench down_line 1 3
+bench end_line 0 400
+bench caret_delete "ab\ncd"
+bench caret_words [(0, 5), (1, 2), (2, 5)]
+bench caret_down [(1, 2), (2, 2), (3, 5)]
+bench caret_columns [(0, 5), (1, 2), (2, 5)]
+bench caret_take_back [(2, 0), (3, 0)]
+bench caret_turn [(2, 0), (1, 0)]
+bench caret_tab spaces=true "a   b\nc   d"
+bench caret_tab spaces=false "a\tb\nc\td"
+bench caret_blink true
+bench caret_blink false
+bench column_modifiers "a@Qb\nc@Qd\ne@Qf" [(0, 3), (1, 3), (2, 3)]
+bench column_undo "a@b\nc@d\ne@f" [(0, 2), (1, 2), (2, 2)]
+bench column_undo "ab\ncd\nef" [(0, 1), (1, 1), (2, 1)]
+bench column_redo "a@b\nc@d\ne@f" [(0, 2), (1, 2), (2, 2)]
+bench column_delete "ac\ndf\ngi" [(0, 1), (1, 1), (2, 1)]
+bench column_delete_undo "abc\ndef\nghi" [(0, 1), (1, 1), (2, 1)]
+bench column_f4 true
+bench column_escape "abc\ndef\nghi" [(0, 1)]
+bench column_dead_key false
+bench column_select_all passed=true carets=false selection=Some((0, 8))
+bench column_foreign_edit false
+bench column_paste "1\n2\n3\n" "a1b\nc2d\ne3f" [(0, 2), (1, 2), (2, 2)]
+bench column_paste_undo "ab\ncd\nef" [(0, 1), (1, 1), (2, 1)]
+bench column_paste "x\ny" "ax\nyb\ncx\nyd\nex\nyf" [(1, 1), (3, 1), (5, 1)]
+bench column_paste_undo "ab\ncd\nef" [(0, 1), (1, 1), (2, 1)]
+bench column_duplicate "ab\nab\ncd\ncd\nef\nef\ngh" [(1, 1), (3, 1), (5, 1)]
+bench column_duplicate_undo "ab\ncd\nef\ngh" [(0, 1), (1, 1), (2, 1)]
+bench column_newline_below "  ab\n  \n  cd\n  " [(1, 2), (3, 2)]
+bench column_newline_below_undo "  ab\n  cd" [(0, 1), (1, 1)]
+bench column_delete_line "gh" [(0, 0)]
+bench column_copy Ok(Some("ab\ncd\nef\n")) carets=true
+bench column_cut "gh" [(0, 0)]
+bench column_joined "acd" [(0, 1), (0, 0)]
+bench column_joined_undo "ab\ncd" [(1, 0), (0, 0)]
+bench column_page_down [(0, 1), (1, 1), (2, 1)] scrolled=true
+bench selection_extend "abcd\nefgh\nijkl" [(1, 3), (6, 8), (11, 13)]
+bench selection_type_over "aXd\neXh\niXl" [(2, 2), (6, 6), (10, 10)]
+bench selection_undo "abcd\nefgh\nijkl" [(1, 3), (6, 8), (11, 13)]
+bench selection_redo "aXd\neXh\niXl" [(2, 2), (6, 6), (10, 10)]
+bench selection_backspace "ad\neh\nil" [(1, 1), (4, 4), (7, 7)]
+bench selection_left "abcd\nefgh\nijkl\nmnop" [(1, 1), (6, 6), (11, 11)]
+bench selection_right "abcd\nefgh\nijkl\nmnop" [(3, 3), (8, 8), (13, 13)]
+bench selection_down "abcd\nefgh\nijkl\nmnop" [(8, 8), (13, 13), (18, 18)]
+bench selection_copy Ok(Some("bc\nfg\njk"))
+bench selection_cut "ad\neh\nil" [(1, 1), (4, 4), (7, 7)]
+bench selection_cut_clipboard Ok(Some("bc\nfg\njk"))
+bench selection_paste "a1d\ne2h\ni3l" [(2, 2), (6, 6), (10, 10)]
+bench selection_meet "ab\ncd\nef\ngh" [(1, 4), (4, 7), (7, 10)]
+bench selection_merge "ab\ncd\nef\ngh" [(1, 10)]
+bench selection_merge_carets false
+bench selection_duplicate "ab\nab\ncd\ncd\nef\nef\ngh" [(4, 5), (10, 11), (16, 17)]
+bench selection_duplicate_run "ab\ncd\nef\ngh\nab\ncd\nef\ngh\nij" [(13, 16), (16, 19), (19, 22)]
+bench selection_delete_run "ij" [(0, 0)]
+bench selection_newline_below_run "ab\ncd\nef\ngh\n\nij" [(12, 12)]
+bench selection_escape stopped=true carets=false primary=Some((1, 3))
+bench selection_fade_up "ab\ncd\nef\ngh\nij" [(1, 4), (4, 7), (7, 10)]
+bench selection_fade_span 0..=3
+bench selection_colour Adwaita rgba(53,132,228,0.3)
+bench selection_colour solarized-light rgba(147,161,161,0.3)
+bench lines_delete_selected "ef\ngh" [(0, 0)]
+bench lines_delete_to_line_start "cd\nef\ngh" [(0, 0)]
+bench lines_language true
+bench lines_comment "    // a();\n    b();\n    c();" [(0, 9)]
+bench lines_uncomment "    a();\n    b();\n    c();" [(0, 6)]
+bench lines_comment_selection "    // a();\n    // b();\n    c();" [(0, 0)]
+bench lines_comment_selection Some((0, 23))
+bench lines_comment_column_carets true
+bench lines_comment_column "    // a();\n    // b();\n    // c();" [(0, 1), (1, 1), (2, 1)]
+bench lines_uncomment_column_carets true
+bench lines_uncomment_column "    a();\n    b();\n    c();" [(0, 1), (1, 1), (2, 1)]
+bench lines_shift_delete passed=true
+bench lines_shift_delete "ab\ncd\nef" [(0, 1), (1, 1), (2, 1)]
+bench lines_shift_delete_cut "" [(0, 0)]
+bench lines_read_only "ab\ncd\nef" [(0, 1), (1, 1), (2, 1)]
+bench lines_read_only_moved "ab\ncd\nef" [(0, 2), (1, 2), (2, 2)]
+bench box_down [(0, 6), (1, 1), (2, 4), (3, 0), (4, 6)] carets=true
+bench box_up_left [(4, 2), (3, 0), (2, 2), (1, 1), (0, 2)] carets=true
+bench box_wrap_down [(4, 6), (5, 6), (6, 6)] carets=true
+bench box_wrap_up [(6, 6), (5, 391), (4, 6)] carets=true
+bench box_click [(2, 1)] carets=false

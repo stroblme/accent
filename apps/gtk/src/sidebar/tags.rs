@@ -42,7 +42,9 @@ pub(super) struct Pane {
     pub(super) refill: Rc<dyn Fn()>,
     /// The tag names on screen and the one picked, which is what `ACCENT_BENCH_TAGS` reads:
     /// nothing else can say whether a refill landed, or whether it kept the reader's place.
+    #[cfg(feature = "bench")]
     pub(super) names: Rc<dyn Fn() -> Vec<String>>,
+    #[cfg(feature = "bench")]
     pub(super) picked: Rc<dyn Fn() -> Option<String>>,
 }
 
@@ -266,6 +268,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     column.append(&filter);
     column.append(&paned);
 
+    #[cfg(feature = "bench")]
     let names: Rc<dyn Fn() -> Vec<String>> = Rc::new({
         let tags = tags.clone();
         move || {
@@ -275,6 +278,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         }
     });
 
+    #[cfg(feature = "bench")]
     let picked: Rc<dyn Fn() -> Option<String>> = Rc::new({
         let selection = selection.clone();
         move || selected_name(&selection)
@@ -287,7 +291,9 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         dirty: Rc::new(Cell::new(true)),
         select,
         refill,
+        #[cfg(feature = "bench")]
         names,
+        #[cfg(feature = "bench")]
         picked,
     }
 }

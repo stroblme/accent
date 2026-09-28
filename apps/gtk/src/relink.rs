@@ -92,6 +92,7 @@ impl App {
         if let Some(old) = pdf.relinks.borrow_mut().toast.replace(toast.clone()) {
             old.dismiss();
         }
+        #[cfg(feature = "bench")]
         self.toasted.set(self.toasted.get() + 1);
         self.toasts.add_toast(toast);
     }

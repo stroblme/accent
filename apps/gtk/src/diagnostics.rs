@@ -224,6 +224,7 @@ fn out_of_sight(at: &gtk::TextIter) -> bool {
 
 /// How much of `buffer` the diagnostics are painted over: how many underlined runs it carries and
 /// how many gutter marks. Only `ACCENT_BENCH_DIAG` reads it.
+#[cfg(feature = "bench")]
 pub fn painted(buffer: &sourceview5::Buffer) -> (usize, usize) {
     let table = buffer.tag_table();
     let runs = |tag: gtk::TextTag| {

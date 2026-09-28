@@ -789,9 +789,9 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 Ten mechanical checks before shipping a UI change; none needs judgement.
 
 1. `cargo fmt --all --check`
-2. `cargo clippy -p accent --all-targets --locked -- -D warnings`
+2. `cargo clippy -p accent --all-targets --locked -- -D warnings`, and again with `--features bench`, which compiles the drills in
 3. `cargo test --locked && cargo test -p accent --locked`
-4. Headless smoke run: `make smoke` (its `XVFB_ENV` carries `GDK_BACKEND=x11` and `GTK_A11Y=none` as well as `G_DEBUG=fatal-criticals`; the comment above it in the Makefile says why each is load-bearing)
+4. Headless smoke run and the asserting drills: `make smoke drills` (their `XVFB_ENV` carries `GDK_BACKEND=x11` and `GTK_A11Y=none` as well as `G_DEBUG=fatal-criticals`; the comment above it in the Makefile says why each is load-bearing)
 5. Dark: `gsettings set org.gnome.desktop.interface color-scheme prefer-dark`, look, then set it back to `default`
 6. Accent: `gsettings set org.gnome.desktop.interface accent-color teal`, look, then set it back to `blue`
 7. No stray colours: `grep -rnE '#[0-9a-fA-F]{3,8}' apps/gtk/src | grep -v theme.rs` returns nothing

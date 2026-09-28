@@ -416,6 +416,7 @@ impl Scaled {
     }
 
     /// The texture as drawn, for a drill.
+    #[cfg(feature = "bench")]
     pub fn texture(&self) -> gdk::Texture {
         self.imp().texture.get().cloned().expect("set in `new`")
     }

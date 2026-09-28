@@ -55,9 +55,12 @@ jobs:
       # accent enables accent-core's `pdf` feature, which dlopen()s the library at runtime, so
       # the smoke run needs it present to exercise anything but the degraded path.
       - run: make pdfium
+      # Twice: as it ships, and with the `ACCENT_BENCH_*` drills compiled in.
       - run: cargo clippy -p accent --locked -- -D warnings
+      - run: cargo clippy -p accent --locked --features bench -- -D warnings
       - run: cargo test -p accent --locked --no-fail-fast
-      - run: cargo build --release --locked -p accent -p accent-cli
+      # With the drills, which is the build `make smoke` runs.
+      - run: cargo build --release --locked -p accent -p accent-cli --features accent/bench
       # The generator is a core example, not a CLI subcommand; `make vault` is its only caller.
       - run: make vault VAULT_NOTES=200 VAULT_FILES=2000
       # The Makefile is the one definition of the gate's environment: XVFB_ENV, the private bus
