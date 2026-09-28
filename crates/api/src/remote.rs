@@ -509,6 +509,10 @@ impl Remote {
     /// event does not pull our bytes back over a page that is still being drawn on. On a mismatch
     /// it goes [beside](Self::push_beside) the original instead.
     ///
+    /// A file no longer on the host — moved or deleted there, while the copy was being written or
+    /// was on its way — is `NotFound`, and nothing goes up: under the old name it would come back.
+    /// The reader that follows a rename sends it again under the new one.
+    ///
     /// `edited` is the copy an earlier refusal of this same document already left on the host, so
     /// that a reader who keeps drawing writes that one again rather than a numbered copy per
     /// stroke.
@@ -526,10 +530,16 @@ impl Remote {
         let current: Option<crate::Etag> = self
             .call("stat", json!([rel]))
             .map_err(RpcError::io_error)?;
-        if current != stamp.etag() {
+        let Some(current) = current else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{rel} was moved or deleted"),
+            ));
+        };
+        if Some(current) != stamp.etag() {
             return Ok(self.push_beside(&dest, rel, edited));
         }
-        self.upload(&dest, rel)?;
+        self.send(&dest, rel, true, &|_, _| ())?;
         if let Ok(Some(now)) = self.call::<Option<crate::Etag>>("stat", json!([rel])) {
             let _ = stamp.set(&now);
         }
@@ -599,21 +609,33 @@ impl Remote {
         rel: &str,
         progress: &dyn Fn(u64, u64),
     ) -> std::io::Result<()> {
+        self.send(local, rel, false, progress)
+    }
+
+    /// A local file to `rel` on the host, replacing only a file still there when `replace` is
+    /// set: see [`ssh::put_cmd`].
+    fn send(
+        &self,
+        local: &Path,
+        rel: &str,
+        replace: bool,
+        progress: &dyn Fn(u64, u64),
+    ) -> std::io::Result<()> {
         let file = std::fs::File::open(local)?;
         let total = file.metadata()?.len();
-        link::send(&self.put_into(rel, total), file, total, progress)
+        link::send(&self.put_into(rel, total, replace), file, total, progress)
     }
 
     /// Write `bytes` to `rel` over the master, the way an upload goes: the host's shell creates a
     /// new file with the mode its umask gives a new note there.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
         let size = bytes.len() as u64;
-        link::send(&self.put_into(rel, size), bytes, size, &|_, _| ())
+        link::send(&self.put_into(rel, size, false), bytes, size, &|_, _| ())
     }
 
     /// The command line that writes its stdin, `size` bytes of it, to `rel` on the host.
-    fn put_into(&self, rel: &str, size: u64) -> Vec<String> {
-        let command = ssh::put_cmd(&self.remote_path(rel), size);
+    fn put_into(&self, rel: &str, size: u64, replace: bool) -> Vec<String> {
+        let command = ssh::put_cmd(&self.remote_path(rel), size, replace);
         ssh::run(&self.url, &self.ctl, &command)
     }
 

@@ -55,7 +55,7 @@ use panes::{
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_dropped, bench_pdf_failed,
-    bench_pdf_pages, bench_pdf_stale, bench_pdf_strip,
+    bench_pdf_pages, bench_pdf_renaming, bench_pdf_stale, bench_pdf_strip,
 };
 use replace::bench_replace;
 use search::bench_search;
@@ -181,7 +181,9 @@ use tags::bench_tags;
 /// which is said again; each `chmod` adds the host's "Indexed …" toast to the count.
 /// `=dropped:<rel_path>` adds a page and ends the vault's ssh master at once, holds the link down
 /// while the save lands, and prints what was said, then reconnects and prints whether the page
-/// reached the host.
+/// reached the host. `=renaming:<rel_path>` adds a page and renames the document while its
+/// upload is still out (point it at a PDF of a few megabytes on a remote vault), then prints
+/// whether the old name came back on the host and where the page landed.
 /// `=pages:<rel_path>` moves the first page below the third as
 /// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
 /// page, and deletes the first through the window actions, which asks nothing, then walks
@@ -492,6 +494,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("dropped:") {
                 return bench_pdf_dropped(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("renaming:") {
+                return bench_pdf_renaming(&app, rel);
             }
             return match rel.strip_prefix("stale:") {
                 Some(rel) => bench_pdf_stale(&app, rel),
