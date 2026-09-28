@@ -2,7 +2,7 @@
 //! block carries the source line it starts on, and a conflict block its sides in boxes.
 
 use super::blocks::block_ids;
-use super::links::{is_image, percent_encode, slugs, split_anchor};
+use super::links::{heading_named, is_image, percent_decode, percent_encode, slugs, split_anchor};
 use super::options;
 use crate::conflict::{self, Block};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
@@ -105,7 +105,8 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
 ///
 /// Each block opens with an empty `<span data-line="N">`, so the preview can scroll to the line
 /// the editor's cursor is on, and each heading gets its [`slugs`] anchor as its `id`, so an
-/// in-note `[text](#slug)` scrolls there. A block with a [`block_ids`] id carries it on that
+/// in-note `[text](#slug)` scrolls there; `[text](#My%20Section)`, naming the heading by its text,
+/// is pointed at that `id`. A block with a [`block_ids`] id carries it on that
 /// span, as `^id`, which is how `[text](#^id)` names it, and the `^id` itself is not shown.
 ///
 /// A conflict block git left in the note ([`conflict::blocks`]) is shown as its sides, each in a
@@ -134,6 +135,8 @@ struct Page<'a> {
     /// `Heading::text` — every text and code event inside, an embed's too — so the `id` is the
     /// anchor the editor resolves.
     headings: Vec<(usize, String)>,
+    /// The place in `evts` of each link to `#…` on the page itself.
+    anchors: Vec<usize>,
     /// How far into the note the lines are counted, and the newlines up to there: block starts
     /// arrive in source order, so one forward pass counts every marker's line.
     counted: usize,
@@ -220,7 +223,10 @@ impl<'a> Page<'a> {
                     ));
                     link_wiki.push(true);
                 }
-                Event::Start(Cm::Link { .. }) => {
+                Event::Start(Cm::Link { ref dest_url, .. }) => {
+                    if dest_url.starts_with('#') {
+                        self.anchors.push(self.evts.len());
+                    }
                     link_wiki.push(false);
                     self.evts.push(ev);
                 }
@@ -316,7 +322,17 @@ impl<'a> Page<'a> {
     }
 
     fn finish(mut self) -> String {
-        let ids = slugs(self.headings.iter().map(|(_, h)| h.as_str()));
+        let texts: Vec<&str> = self.headings.iter().map(|(_, h)| h.as_str()).collect();
+        let ids = slugs(texts.iter().copied());
+        // A link to a heading of the page goes to its `id`, which is all WebKit scrolls to, even
+        // when it names the heading by its text, as the editor lets it.
+        for at in &self.anchors {
+            if let Event::Start(Cm::Link { dest_url, .. }) = &mut self.evts[*at]
+                && let Some(i) = heading_named(&texts, &percent_decode(&dest_url[1..]))
+            {
+                *dest_url = format!("#{}", ids[i]).into();
+            }
+        }
         for ((at, _), slug) in self.headings.iter().zip(ids) {
             if let Event::Start(Cm::Heading { id, .. }) = &mut self.evts[*at] {
                 *id = Some(slug.into());
@@ -459,6 +475,23 @@ mod tests {
         let headings = crate::markdown::analyze(src).headings;
         assert_eq!(ids, slugs(headings.iter().map(|h| h.text.as_str())), "{h}");
         assert_eq!(ids, ["notes", "notes-1", "c-and-logopng"]);
+    }
+
+    /// A same-page link written with a heading's text, as the editor resolves it, points at that
+    /// heading's `id`, which is where WebKit scrolls; one naming no heading is left as written.
+    #[test]
+    fn html_points_a_text_anchor_at_its_heading() {
+        let h = bare(
+            "[a](#My%20Section) [b](<#my section>) [c](#MY-SECTION) [d](#nowhere)\n\n\
+             ## My Section\n",
+        );
+        for text in ["a", "b", "c"] {
+            assert!(
+                h.contains(&format!("<a href=\"#my-section\">{text}</a>")),
+                "{h}"
+            );
+        }
+        assert!(h.contains("<a href=\"#nowhere\">d</a>"), "{h}");
     }
 
     /// A block with an id carries it on its line marker, so an in-note `[text](#^id)` scrolls to

@@ -203,7 +203,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Preview
 
 - A read-only WebKitGTK 6 view, the same clamp width, its stylesheet generated from `AdwStyleManager`; its images in the look their tabs have (Image).
-- A block's `^id` is not shown: its block carries it as its anchor, so `[text](#^id)` scrolls there as `[text](#slug)` does to a heading.
+- A block's `^id` is not shown: its block carries it as its anchor, so `[text](#^id)` scrolls there as `[text](#slug)` does to a heading. A link naming the heading by its text, `[text](#My%20Section)`, is pointed at its slug and scrolls there too, as the editor resolves it — WebKit's own fragment scroll, with no Back entry, like every same-page link.
 - A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`), and only on a click — a redirect the page makes on its own opens nothing.
 - A conflict block (Editor) shows as its sides, one box each and no marker: current, a diff3 base, incoming, in the editor's tints (`conflict::tints`), each under its marker's label — `HEAD`, the branch — in the marker line's stronger tint. The note has to read as conflicted, and blanking the markers as the analysis does would run the two sides together as one text.
 - Each side is the markdown it holds: `to_html` cuts the note at the blocks and parses every stretch alone, so a fence or a list one side leaves open ends with its box, and every line marker is still the note's own line. The cost is a reference link or footnote whose definition is across a block's edge, which shows as its source.
