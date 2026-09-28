@@ -184,12 +184,15 @@ fn target_of(rel: &str, link: &markdown::Link) -> String {
 }
 
 /// What a hint asks the index about a link in `rel`, or `None` when it is not the index's to
-/// judge: a URL, a pure `#anchor`, and a markdown link that points out of the vault — absolute,
-/// or climbing past the root — which [`path::resolve`] would otherwise fold back into it.
+/// judge: a URL, a pure `#anchor`, and a markdown link that climbs past the root, which
+/// [`path::resolve`] would otherwise fold back into the vault. A leading `/` is the vault root,
+/// as the index, Go to Definition and the preview read it.
 fn checked_target(rel: &str, link: &markdown::Link) -> Option<String> {
     let judged = match link.kind {
         LinkKind::Wiki | LinkKind::Embed => true,
-        LinkKind::Markdown => path::stays_inside(parent_dir(rel), &link.target),
+        LinkKind::Markdown => {
+            link.target.starts_with('/') || path::stays_inside(parent_dir(rel), &link.target)
+        }
         LinkKind::External => false,
     };
     (judged && !link.target.is_empty()).then(|| target_of(rel, link))
@@ -1124,7 +1127,9 @@ mod tests {
         let want = [Some("Beta"), Some("Beta Two.md")];
         assert_eq!(checked[..2], want.map(|t| t.map(String::from)));
         // URLs, pure anchors and paths that leave the vault are not the index's to judge.
-        assert!(checked[2..].iter().all(Option::is_none), "{checked:?}");
+        assert!(checked[2..7].iter().all(Option::is_none), "{checked:?}");
+        // A leading `/` is the vault root, as the index and the preview read it.
+        assert_eq!(checked[7].as_deref(), Some("x.md"));
     }
 
     /// A note opening on its title says it once, in bold above the excerpt; a title that is not
