@@ -218,7 +218,8 @@ fn upload(
 /// so far of `total`.
 ///
 /// A write that fails is ssh having ended already, so what it said on stderr is the reason, not
-/// the broken pipe the write found.
+/// the broken pipe the write found. ssh's own failure, exit status 255 rather than the command's,
+/// is the link that went: `NotConnected`, as a call over a dead link is.
 pub(crate) fn send(
     argv: &[String],
     mut input: impl Read,
@@ -251,6 +252,9 @@ pub(crate) fn send(
     let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
     match (written, out.status.success()) {
         (Ok(()), true) => Ok(()),
+        _ if out.status.code() == Some(255) => {
+            Err(std::io::Error::new(std::io::ErrorKind::NotConnected, said))
+        }
         (Err(e), _) if said.is_empty() => Err(e),
         _ => Err(std::io::Error::other(said)),
     }
@@ -337,6 +341,30 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// ssh ending on its own (255) is the link that went; the command failing is the host
+    /// refusing, and a call that never reached the host is the link too.
+    #[test]
+    fn a_transfer_the_link_dropped_is_not_connected() {
+        let kind = |script: &str| {
+            let argv = ["sh", "-c", script].map(String::from);
+            send(&argv, &b"bytes"[..], 5, &|_, _| ())
+                .unwrap_err()
+                .kind()
+        };
+        let gone = std::io::ErrorKind::NotConnected;
+        assert_eq!(kind("cat >/dev/null; echo lost >&2; exit 255"), gone);
+        assert_eq!(
+            kind("cat >/dev/null; echo no >&2; exit 1"),
+            std::io::ErrorKind::Other
+        );
+        let never = crate::rpc::RpcError {
+            code: crate::rpc::DISCONNECTED,
+            message: "Lost the connection".to_string(),
+            data: None,
+        };
+        assert_eq!(never.io_error().kind(), gone);
+    }
 
     /// Long enough for a caller spawned now to be queued behind the attempt that is running.
     const QUEUED: Duration = Duration::from_millis(100);

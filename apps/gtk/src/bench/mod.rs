@@ -54,8 +54,8 @@ use panes::{
     bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
-    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_failed, bench_pdf_pages,
-    bench_pdf_stale, bench_pdf_strip,
+    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_dropped, bench_pdf_failed,
+    bench_pdf_pages, bench_pdf_stale, bench_pdf_strip,
 };
 use replace::bench_replace;
 use search::bench_search;
@@ -179,6 +179,9 @@ use tags::bench_tags;
 /// read-only on the host, adds two pages and prints the toast count after each (one failure said,
 /// the second quiet), then makes them writable, adds a page that goes up, and fails once more,
 /// which is said again; each `chmod` adds the host's "Indexed …" toast to the count.
+/// `=dropped:<rel_path>` adds a page and ends the vault's ssh master at once, holds the link down
+/// while the save lands, and prints what was said, then reconnects and prints whether the page
+/// reached the host.
 /// `=pages:<rel_path>` moves the first page below the third as
 /// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
 /// page, and deletes the first through the window actions, which asks nothing, then walks
@@ -486,6 +489,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("failed:") {
                 return bench_pdf_failed(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("dropped:") {
+                return bench_pdf_dropped(&app, rel);
             }
             return match rel.strip_prefix("stale:") {
                 Some(rel) => bench_pdf_stale(&app, rel),

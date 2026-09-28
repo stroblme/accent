@@ -135,8 +135,12 @@ impl RpcError {
     ///
     /// The kind travels in `data` because callers branch on it — the open path treats `NotFound`
     /// as "offer to create it" rather than as a failure — and everything used to arrive as
-    /// `Other`, so the same file missing matched one way locally and another way remotely.
+    /// `Other`, so the same file missing matched one way locally and another way remotely. No
+    /// link at all is `NotConnected`, which the window already shows rather than reports.
     pub fn io_error(self) -> std::io::Error {
+        if self.is_offline() {
+            return std::io::Error::new(std::io::ErrorKind::NotConnected, self.message);
+        }
         match self.data.as_ref().and_then(Value::as_str).and_then(kind_of) {
             Some(kind) => std::io::Error::new(kind, self.message),
             None => std::io::Error::other(self.message),
