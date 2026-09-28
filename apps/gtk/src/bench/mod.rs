@@ -116,6 +116,7 @@ use tags::bench_tags;
 /// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
 /// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK.
+/// Every form of it runs only on a scratch vault under `/tmp` (`scratch_only`).
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
@@ -227,7 +228,7 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
-/// they are painted with.
+/// they are painted with. Only on a scratch vault under `/tmp`, as `ACCENT_BENCH_STYLE`.
 ///
 /// `ACCENT_BENCH_NUMBERS=<rel_note>,<rel_code>,<rel_note>` opens the first two and flips the Line
 /// Numbers switch in the preferences three times, printing after each step whether every open tab
@@ -549,6 +550,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_tabs(&app, &rels);
         }
         if let Some(rel) = occur {
+            scratch_only(&app, "ACCENT_BENCH_OCCUR");
             return bench_occurrences(&app, &rel);
         }
         if let Some(rel) = theme {
@@ -634,6 +636,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(rel) = style {
+            scratch_only(&app, "ACCENT_BENCH_STYLE");
             if let Some(rel) = rel.strip_prefix("dragfold:") {
                 return bench_drag_fold(&app, rel);
             }
@@ -777,6 +780,19 @@ fn bench_pump() {
         if !context.iteration(false) {
             return;
         }
+    }
+}
+
+/// End the run with status 2 unless the vault is a scratch copy under `/tmp`, as `make vault
+/// VAULT=/tmp/<name>` makes one. For the drills that type into a note: an autosave, or the save a
+/// quit makes, writes what they typed, and `testvault/` or a real vault must never get it.
+fn scratch_only(app: &Rc<App>, drill: &str) {
+    let root = app.root();
+    if !root.starts_with("/tmp") {
+        eprintln!(
+            "{drill} types into its note: run it on a scratch vault under /tmp, not {root:?}"
+        );
+        std::process::exit(2);
     }
 }
 
