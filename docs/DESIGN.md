@@ -87,7 +87,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 **Files**
 
 - The vault's name sits above the tree as a plain label with a folder icon: it is what the listing is of, and a root drop zone that stays on screen however deep the tree is scrolled.
-- Every folder is listed, the ones the index does not walk included (`node_modules`, a `.venv`, a cargo `target/`): a listing that silently leaves a folder out cannot be trusted. Those rows are read off the disk one level per expansion, stay out of the index, the watcher and every query, and are dimmed, search not reaching them.
+- Every folder is listed, the ones the index does not walk included (`node_modules`, a `.venv`, a cargo `target/`): a listing that silently leaves a folder out cannot be trusted. Those rows are read off the disk one level per expansion, stay out of the index and every query, and are dimmed, search not reaching them.
 - A dependency tree (`node_modules`, a `.venv`, a marked `target/`) lists and opens but is never changed — no menu, marking, drag or drop: it is somebody else's. A gitignored folder is the reader's own and gets the whole menu: being out of the index stops a file being searched, not edited.
 - A gitignored folder is watched while the tree holds its listing, one level deep, by the vault's own watcher — on the host for a remote vault, the one place its files can be watched from — and what happens in it re-lists it and reaches nothing else (`Event::UnindexedChanged`); a dependency tree is not — 40 000 files is the tree that must not be watched — and is as fresh as its last expansion.
 - `.git` and `.trash` are out of reach here as everywhere. A remote vault lists the same way, the merge happening on the host.
