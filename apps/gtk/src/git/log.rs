@@ -248,6 +248,7 @@ impl Panel {
 
     /// How many history rows are drawn as not pulled yet. `ACCENT_BENCH_GIT` and nothing else:
     /// the marking is otherwise only visible as a faded row.
+    #[cfg(feature = "bench")]
     pub fn not_pulled_rows(&self) -> usize {
         let incoming = &self.state.borrow().incoming;
         (0..self.log.n_items())

@@ -775,6 +775,7 @@ impl View {
     }
 
     /// Whether the line fade is on, for the headless check that cannot see it.
+    #[cfg(feature = "bench")]
     pub(crate) fn fading(&self) -> bool {
         self.imp().fade_on.get()
     }

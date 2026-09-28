@@ -369,7 +369,9 @@ enum Anchor {
 /// the shared column.
 #[derive(Default)]
 struct Grid {
+    #[cfg(feature = "bench")]
     heights: [Vec<Option<i32>>; 2],
+    #[cfg(feature = "bench")]
     extra: Vec<i32>,
     tops: Vec<i32>,
 }
@@ -1377,7 +1379,9 @@ impl Compare {
             view.move_overlay(widget, x.max(0), y);
         }
         *self.grid.borrow_mut() = Grid {
+            #[cfg(feature = "bench")]
             heights,
+            #[cfg(feature = "bench")]
             extra,
             tops,
         };
@@ -1422,6 +1426,7 @@ impl Compare {
 
     /// How many pixels lower the right column starts than the left one in the window: 0 is the
     /// claim, and what [`Compare::misaligned`] cannot see, being in buffer coordinates.
+    #[cfg(feature = "bench")]
     pub fn skew(&self) -> i32 {
         let top = |side: Side| {
             self.pane(side)
@@ -1434,6 +1439,7 @@ impl Compare {
 
     /// Whether the first hunk's first line is inside its view right now, on the first side that
     /// has a line in it: what a comparison has to open on.
+    #[cfg(feature = "bench")]
     pub fn first_hunk_on_screen(&self) -> bool {
         let Some((side, at)) = self.first_hunk_line() else {
             return false;
@@ -1447,6 +1453,7 @@ impl Compare {
     }
 
     /// Where the first hunk starts, in characters, on the first side with a line in it.
+    #[cfg(feature = "bench")]
     fn first_hunk_line(&self) -> Option<(Side, i32)> {
         let (lines, rows, starts) = (
             self.lines.borrow(),
@@ -1464,6 +1471,7 @@ impl Compare {
 
     /// Where the first hunk's lines and the ones after it start, as GTK lays them out: the row,
     /// then the old and the new side's `y`, `None` where a side has no visible line in the row.
+    #[cfg(feature = "bench")]
     pub fn first_hunk_tops(&self) -> Vec<(usize, Option<i32>, Option<i32>)> {
         let hunk = {
             let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
@@ -1480,16 +1488,19 @@ impl Compare {
     }
 
     /// The shared vertical scrollbar, for the bench to read and to move as a reader would.
+    #[cfg(feature = "bench")]
     pub fn vadjustment(&self) -> gtk::Adjustment {
         self.panes[0].scroller.vadjustment()
     }
 
     /// Whether row `r` is in a hidden run right now.
+    #[cfg(feature = "bench")]
     pub fn hides_row(&self, r: usize) -> bool {
         self.hidden.borrow().iter().any(|(gap, _)| gap.contains(&r))
     }
 
     /// Where the first change starts on the editor's side, in characters.
+    #[cfg(feature = "bench")]
     pub fn opens_at(&self) -> Option<i32> {
         let side = self.editable?;
         let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
@@ -1498,6 +1509,7 @@ impl Compare {
 
     /// How many rows GTK lays out at a different height than the last relayout meant them to
     /// have, on either side: the number the alignment stands or falls on, and 0 is the claim.
+    #[cfg(feature = "bench")]
     pub fn misaligned(&self) -> usize {
         let rows = self.rows.borrow().len();
         if self.grid.borrow().tops.len() != rows {
@@ -1514,6 +1526,7 @@ impl Compare {
 
     /// The first row [`Compare::misaligned`] counts, spelled out: which row and side, what the
     /// relayout expected, what GTK laid out, and the line. For the bench to print.
+    #[cfg(feature = "bench")]
     pub fn first_misaligned(&self) -> Option<String> {
         let rows = self.rows.borrow().len();
         (0..rows)
@@ -1534,6 +1547,7 @@ impl Compare {
 
     /// Row `r`'s line on `side` as laid out: where the last relayout meant it to start, where GTK
     /// put it, its own height and its row's, in buffer pixels. `None` where the side has no line.
+    #[cfg(feature = "bench")]
     fn laid(&self, r: usize, side: Side) -> Option<(i32, i32, i32, i32)> {
         let (lines, rows, starts) = (
             self.lines.borrow(),
@@ -1554,6 +1568,7 @@ impl Compare {
     }
 
     /// What the `Take` (or, with `keep_own`, the `Both`) button on the `i`th hunk does.
+    #[cfg(feature = "bench")]
     pub fn take_hunk(&self, i: usize, keep_own: bool) {
         let hunk = {
             let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
@@ -1565,6 +1580,7 @@ impl Compare {
     }
 
     /// What the button on the `i`th hidden run does.
+    #[cfg(feature = "bench")]
     pub fn open_gap(&self, i: usize) {
         let key = self.hidden.borrow().get(i).map(|(_, key)| *key);
         if let Some(key) = key {

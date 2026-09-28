@@ -271,6 +271,7 @@ impl DiagramView {
     }
 
     /// Whether formulas are still being typeset: the drill waits for them.
+    #[cfg(feature = "bench")]
     pub fn typesetting(&self) -> bool {
         self.imp()
             .typesetter

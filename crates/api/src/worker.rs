@@ -49,6 +49,7 @@ pub(crate) fn spawn(
         seen_conflicts: BTreeSet::new(),
         reported: BTreeSet::new(),
         git_dirs: Vec::new(),
+        unindexed: BTreeSet::new(),
         held: Vec::new(),
         stop,
         paused: false,
@@ -76,6 +77,9 @@ pub(crate) enum Msg {
     /// The git directories to watch, as `repos()` last found them. The walk hard-skips `.git`,
     /// so these are never in the index's directory list and the watcher has to be told.
     WatchGit(Vec<PathBuf>),
+    /// Folders the index does not walk to start (`true`) or stop watching. See
+    /// [`Local::watch_unindexed`](crate::local::Local::watch_unindexed).
+    WatchUnindexed(Vec<String>, bool),
     /// What search leaves out, and where to say it has been written. See
     /// [`Local::set_excluded`]: the worker holds the only writing connection.
     SetExcluded(Vec<String>, Sender<Result<()>>),
@@ -110,6 +114,9 @@ struct Worker {
     /// Every watched repository's git directory, absolute. A change under one of these is news
     /// for the git pane and nothing else: `.git` is not indexed and must never be.
     git_dirs: Vec<PathBuf>,
+    /// The folders the index does not walk that the window lists, vault-relative: each watched
+    /// one level deep, and what happens in one re-lists it without touching the index.
+    unindexed: BTreeSet<String>,
     /// What the inbox held that a walk read between its batches and could not answer there. See
     /// [`Worker::reconcile`].
     held: Vec<Msg>,
@@ -195,6 +202,31 @@ impl Worker {
                 self.rebuild_watcher();
             }
         }
+        let mut rewatch = false;
+        for msg in &batch {
+            if let Msg::WatchUnindexed(dirs, on) = msg {
+                for dir in dirs {
+                    rewatch |= match on {
+                        true => self.unindexed.insert(dir.clone()),
+                        false => self.unindexed.remove(dir),
+                    };
+                }
+            }
+        }
+        if rewatch {
+            self.rebuild_watcher();
+        }
+        // News from inside an unindexed folder is that folder's listing and nothing else: kept
+        // from the index, and from the rescan test below — a directory moved into a build output
+        // is no reason to walk the vault.
+        let mut listed = BTreeSet::new();
+        let batch: Vec<Msg> = batch
+            .into_iter()
+            .filter(|m| !self.unindexed_news(m, &mut listed))
+            .collect();
+        if !listed.is_empty() {
+            self.emit(Event::UnindexedChanged(listed.into_iter().collect()));
+        }
         // Before the rescan test below, which returns early: a caller is waiting for this answer
         // and would otherwise be told the worker had gone. A walk in the same batch costs the
         // order nothing: the rows it adds take their parent directory's flag (`upsert`).
@@ -228,6 +260,7 @@ impl Worker {
                 | Msg::Resume
                 | Msg::Shutdown
                 | Msg::WatchGit(_)
+                | Msg::WatchUnindexed(..)
                 | Msg::SetExcluded(..)
                 | Msg::Settled(_) => {}
                 Msg::Update { rel, own } => self.update(&rel, own, &mut batched),
@@ -287,6 +320,7 @@ impl Worker {
             events,
             watcher,
             git_dirs,
+            unindexed,
             held,
             stop,
             ..
@@ -305,7 +339,8 @@ impl Worker {
                             if dirs != *git_dirs {
                                 *git_dirs = dirs;
                                 // A failure is left to the rebuild after the walk, which reports it.
-                                if let Err(e) = watch(watcher, index, root, git_dirs, tx) {
+                                if let Err(e) = watch(watcher, index, root, git_dirs, unindexed, tx)
+                                {
                                     tracing::warn!("watching the vault: {e:#}");
                                 }
                             }
@@ -377,10 +412,48 @@ impl Worker {
             &self.index,
             &self.root,
             &self.git_dirs,
+            &self.unindexed,
             &self.tx,
         ) {
             self.fail("watching the vault", e);
         }
+    }
+
+    /// Whether `msg` is news from directly inside the unindexed folders alone, adding each folder
+    /// whose listing it changed to `listed`.
+    ///
+    /// A folder the news names itself was removed or made anew, so its own listing changed too,
+    /// and one made anew is watched again: the kernel dropped the watch with the old directory. A
+    /// folder the walk has entered since — its `.gitignore` line went — is the index's again.
+    fn unindexed_news(&mut self, msg: &Msg, listed: &mut BTreeSet<String>) -> bool {
+        let paths = match msg {
+            Msg::Fs(
+                VaultEvent::Changed(p) | VaultEvent::Removed(p) | VaultEvent::ConflictAppeared(p),
+            ) => vec![p],
+            Msg::Fs(VaultEvent::Renamed { from, to }) => vec![from, to],
+            _ => return false,
+        };
+        let mut inside = true;
+        for path in paths {
+            let Some(rel) = self.rel(path) else {
+                return false;
+            };
+            if self.unindexed.contains(&rel) {
+                listed.insert(rel.clone());
+                if path.is_dir()
+                    && let Some(watcher) = &mut self.watcher
+                {
+                    watcher.rewatch(path);
+                }
+            }
+            let parent = parent_dir(&rel);
+            if self.unindexed.contains(parent) && matches!(self.index.get_file(parent), Ok(None)) {
+                listed.insert(parent.to_string());
+            } else {
+                inside = false;
+            }
+        }
+        inside
     }
 
     fn apply(&mut self, ev: VaultEvent, b: &mut Batch) {
@@ -512,13 +585,15 @@ impl Worker {
     }
 }
 
-/// Watch the directories the index holds, plus the git directories: the watcher there is, given
-/// the new set ([`Watcher::set_dirs`], which keeps what it has not reported yet), or a new one.
+/// Watch the directories the index holds, plus the git directories and the unindexed folders the
+/// window lists: the watcher there is, given the new set ([`Watcher::set_dirs`], which keeps what
+/// it has not reported yet), or a new one.
 fn watch(
     watcher: &mut Option<Watcher>,
     index: &Index,
     root: &Path,
     git_dirs: &[PathBuf],
+    unindexed: &BTreeSet<String>,
     tx: &Sender<Msg>,
 ) -> Result<()> {
     // The watch set is what the walk kept, one watch per directory: a `.venv` the walk refused
@@ -534,6 +609,8 @@ fn watch(
         dirs.push(git_dir.clone());
         dirs.push(git_dir.join("refs/heads"));
     }
+    // One level each, as every other directory here: never the tree under one.
+    dirs.extend(unindexed.iter().map(|rel| root.join(rel)));
     if let Some(w) = watcher
         && w.set_dirs(&dirs)
     {
@@ -1086,6 +1163,80 @@ mod tests {
                 .contains(&"late.md".to_string())
         };
         assert!(poll_until(indexed, BUDGET), "the write was lost");
+        tx.send(Msg::Shutdown).unwrap();
+        worker.join().unwrap();
+    }
+
+    /// A gitignored folder the tree lists is watched one level deep once asked, on a host as much
+    /// as here, and what happens inside it re-lists it and nothing else: no index row, and no walk
+    /// for a directory moved in whole. Removed and made anew, it is watched again.
+    #[test]
+    fn a_watched_unindexed_folder_is_relisted_and_never_indexed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        std::fs::write(root_path.join(".gitignore"), "build/\n").unwrap();
+        std::fs::create_dir_all(root_path.join("build/sub")).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("index.db");
+        let (tx, rx) = channel();
+        let (events, event_rx) = channel();
+        let worker = spawn(
+            root_path.clone(),
+            Index::open(&db).unwrap(),
+            rx,
+            tx.clone(),
+            events,
+            true,
+            Arc::new(AtomicU8::new(RUN)),
+        )
+        .unwrap();
+        assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+        let dirs = vec!["build".to_string(), "build/sub".to_string()];
+        tx.send(Msg::WatchUnindexed(dirs, true)).unwrap();
+        let (reply, armed) = channel();
+        tx.send(Msg::Settled(reply)).unwrap();
+        armed.recv().unwrap();
+        let relisted = |dir: &str| {
+            wait_for(
+                &event_rx,
+                |e| matches!(e, Event::UnindexedChanged(d) if d.iter().any(|d| d == dir)),
+                BUDGET,
+            )
+            .is_some()
+        };
+
+        std::fs::write(root_path.join("build/new.md"), "new\n").unwrap();
+        assert!(
+            relisted("build"),
+            "a file made in the folder was not reported"
+        );
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("x.md"), "x\n").unwrap();
+        std::fs::rename(outside.path(), root_path.join("build/moved")).unwrap();
+        let next = wait_for(
+            &event_rx,
+            |e| matches!(e, Event::UnindexedChanged(_) | Event::Reconciled(_)),
+            BUDGET,
+        );
+        assert!(
+            matches!(next, Some(Event::UnindexedChanged(_))),
+            "a directory moved into the folder walked the vault: {next:?}"
+        );
+        let paths = Index::open(&db).unwrap().file_paths(true).unwrap();
+        assert!(
+            !paths.iter().any(|p| p.starts_with("build")),
+            "the folder reached the index: {paths:?}"
+        );
+
+        std::fs::remove_dir(root_path.join("build/sub")).unwrap();
+        std::fs::create_dir(root_path.join("build/sub")).unwrap();
+        assert!(
+            relisted("build/sub"),
+            "the folder made anew was not reported"
+        );
+        std::fs::write(root_path.join("build/sub/again.md"), "again\n").unwrap();
+        assert!(relisted("build/sub"), "the folder made anew is not watched");
+
         tx.send(Msg::Shutdown).unwrap();
         worker.join().unwrap();
     }

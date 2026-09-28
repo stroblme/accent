@@ -462,6 +462,7 @@ impl PdfTab {
     /// The reading view's geometry and the page the strip frames, for `ACCENT_BENCH_PDF` and
     /// nothing else: the headless image has no pointer and no window manager, so the numbers a fit
     /// produced are the only way to see that it fitted.
+    #[cfg(feature = "bench")]
     pub fn geometry(&self) -> String {
         format!("{} framed={}", self.view.geometry(), self.thumbs.framed())
     }

@@ -20,7 +20,7 @@ type Step = Box<dyn Fn(&Rc<App>, &Rc<Bar>)>;
 /// all three cases.
 pub(super) fn bench_find(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::timeout_add_local_once(Duration::from_millis(600), move || {
         let bar = app.pane().find.clone();
         let steps: Vec<Step> = vec![
@@ -41,11 +41,11 @@ pub(super) fn bench_find(app: &Rc<App>, rel: &str) {
                 typed(bar, "alpha");
             }),
             Box::new(|_, bar| press(bar, Mode::Find, "recalled")),
-            Box::new(|app, bar| {
+            Box::new(move |app, bar| {
                 state("recalled_settled", bar);
                 // Ctrl+H over a word the reader selected: the replacement box is the one that
                 // takes the keyboard, and its select-all is in the way of the same step.
-                if let Some(tab) = app.open_tabs().into_iter().next() {
+                if let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) {
                     let word = tab.buffer.iter_at_offset(8);
                     tab.buffer
                         .select_range(&word, &tab.buffer.iter_at_offset(13));

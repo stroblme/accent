@@ -170,10 +170,10 @@ impl Index {
         }
 
         let mut done = 0usize;
-        // The files whose content really changed: a touched one kept its links and its keys.
-        let mut changed: Vec<usize> = Vec::new();
         for chunk in jobs.chunks(BATCH) {
             let tx = self.write_tx()?;
+            // The files whose content really changed: a touched one kept its links and its keys.
+            let mut changed = Vec::new();
             for job in chunk {
                 // Per file rather than per batch: a batch is 500 files, and one of 500 large ones
                 // measured 2.5 s on the bench vault — a Stop that waits that long is not a Stop.
@@ -185,9 +185,18 @@ impl Index {
                 let touched = stats.touched;
                 upsert(&tx, &scan.files[job.idx], job.existing_id, &mut stats)?;
                 if stats.touched == touched {
-                    changed.push(job.idx);
+                    changed.push(&scan.files[job.idx].rel_path);
                 }
                 done += 1;
+            }
+            // What these files can have changed is resolved in the transaction that wrote them, so
+            // no reader between two batches sees a changed note link to nothing. A note a later
+            // batch adds takes the links waiting for it then: they are the ones its keys name.
+            // The cold build has no earlier answer to keep and resolves once, at the end.
+            if !cold {
+                for rel in changed {
+                    resolve_links_of(&tx, rel)?;
+                }
             }
             tx.commit()?;
             on_progress(
@@ -216,19 +225,10 @@ impl Index {
             }
             tx.commit()?;
         }
-        // A removed file re-pointed its incoming links as it went; what is left is the changed
-        // files' own links and the links their names answer to. A Syncthing pass that rewrote
-        // every note with the same bytes changed nothing and resolves nothing.
+        // A removed file re-pointed its incoming links as it went, and a warm walk's batches
+        // resolved their own.
         if cold {
             self.resolve_links()?;
-        } else if !changed.is_empty() {
-            let tx = self.write_tx()?;
-            for idx in &changed {
-                resolve_links_of(&tx, &scan.files[*idx].rel_path)?;
-            }
-            tx.commit()?;
-        }
-        if cold || !changed.is_empty() {
             on_progress(
                 self,
                 Progress {
@@ -624,6 +624,40 @@ mod tests {
             "what was written is not written again"
         );
         assert_eq!(ix.file_paths(false).unwrap().len(), notes);
+    }
+
+    /// A walk over an index that is already there resolves each batch's links as it commits it,
+    /// so no reader between two batches sees a changed note link to nothing; a link to a note a
+    /// later batch adds still resolves when that note arrives.
+    #[test]
+    fn a_warm_walk_resolves_each_batch_as_it_commits_it() {
+        let vault = tempfile::tempdir().unwrap();
+        let write = |rel: &str, text: &str| fs::write(vault.path().join(rel), text).unwrap();
+        write("old.md", "old\n");
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // Sorted by name, `a.md` opens the first batch and `z.md` closes the second.
+        write("a.md", "[[old]] [[z]]\n");
+        for i in 0..BATCH {
+            write(&format!("n{i:04}.md"), "n\n");
+        }
+        write("z.md", "z\n");
+        let mut between = None;
+        ix.reconcile_with(vault.path(), &ScanOptions::default(), &|| false, |ix, p| {
+            if p.phase == Phase::Index && between.is_none() {
+                between = Some(ix.backlinks("old.md").unwrap().len());
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            between,
+            Some(1),
+            "a.md's link was unresolved between batches"
+        );
+        assert_eq!(ix.backlinks("z.md").unwrap().len(), 1);
     }
 
     /// A scan cut short is short of files the vault holds, and the diff would read every one of

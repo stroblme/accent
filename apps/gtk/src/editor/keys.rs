@@ -78,6 +78,7 @@ pub(super) fn install(tab: &Rc<Tab>) {
 }
 
 /// One press, driven from a drill rather than from the keyboard: what the controller above calls.
+#[cfg(feature = "bench")]
 pub(crate) fn press(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
     dispatch(tab, key, state)
 }

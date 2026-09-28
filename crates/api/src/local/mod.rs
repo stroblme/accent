@@ -160,6 +160,17 @@ impl Local {
         self.post(Msg::Resume);
     }
 
+    /// See [`Vault::watch_unindexed`](crate::Vault::watch_unindexed).
+    pub fn watch_unindexed(&self, dirs: &[String]) -> Result<()> {
+        self.post(Msg::WatchUnindexed(dirs.to_vec(), true));
+        Ok(())
+    }
+
+    pub fn unwatch_unindexed(&self, dirs: &[String]) -> Result<()> {
+        self.post(Msg::WatchUnindexed(dirs.to_vec(), false));
+        Ok(())
+    }
+
     /// Join `rel` to the vault root, refusing anything that would land outside it. Every
     /// path-taking method goes through this: the GTK app sanitises its own input, but an
     /// `accent-target:` of `../Outside/x.md` arrives here straight from a template, and Phase 2's MCP

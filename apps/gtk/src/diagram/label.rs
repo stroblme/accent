@@ -147,6 +147,7 @@ impl LabelEditor {
 
     /// Where the editor is on the canvas and how big its text is there: what the drills watch
     /// while the page moves under it.
+    #[cfg(feature = "bench")]
     pub fn at(&self) -> (f64, f64, f64) {
         let (x, y) = self.layer.child_position(&self.frame);
         (x, y, self.px.get())

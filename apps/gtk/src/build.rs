@@ -272,6 +272,7 @@ pub fn build_window(
         active_pane: RefCell::new(first.clone()),
         title,
         toasts,
+        #[cfg(feature = "bench")]
         toasted: Cell::new(0),
         connection,
         retry: Default::default(),
@@ -398,6 +399,7 @@ pub fn build_window(
             }
         }
     ));
+    #[cfg(feature = "bench")]
     bench::install_bench_hooks(&app);
     if let Some(events) = events {
         start_events(&app, events);

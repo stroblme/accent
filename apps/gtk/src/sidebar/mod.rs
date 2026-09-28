@@ -109,8 +109,11 @@ struct VaultPanes {
     /// And its half of `tags_dirty`: the vault moved while another pane was in front.
     search_dirty: Rc<Cell<bool>>,
     /// The Replace All button and what the body is showing, for `ACCENT_BENCH_REPLACE`.
+    #[cfg(feature = "bench")]
     apply_replace: gtk::Button,
+    #[cfg(feature = "bench")]
     search_state: Rc<dyn Fn() -> (String, Vec<String>, String)>,
+    #[cfg(feature = "bench")]
     search_view: gtk::ListView,
     references: gtk::StringList,
     references_stack: gtk::Stack,
@@ -119,7 +122,9 @@ struct VaultPanes {
     references_empty: adw::StatusPage,
     tags_dirty: Rc<Cell<bool>>,
     tags_refill: Rc<dyn Fn()>,
+    #[cfg(feature = "bench")]
     tags_names: Rc<dyn Fn() -> Vec<String>>,
+    #[cfg(feature = "bench")]
     tags_picked: Rc<dyn Fn() -> Option<String>>,
     /// Holds a refill of the pane on screen back by [`INDEX_SETTLE`], and swallows a burst of
     /// watcher events into one query.
@@ -261,15 +266,20 @@ impl Sidebar {
                         restart_search: search.restart,
                         search_settle: Debounce::new(INDEX_SETTLE),
                         search_dirty: search.dirty,
+                        #[cfg(feature = "bench")]
                         apply_replace: search.apply,
+                        #[cfg(feature = "bench")]
                         search_state: search.state,
+                        #[cfg(feature = "bench")]
                         search_view: search.view,
                         references,
                         references_stack,
                         references_empty,
                         tags_dirty: tags.dirty,
                         tags_refill: tags.refill,
+                        #[cfg(feature = "bench")]
                         tags_names: tags.names,
+                        #[cfg(feature = "bench")]
                         tags_picked: tags.picked,
                         tags_settle: Debounce::new(INDEX_SETTLE),
                         tags_divider: tags.divider,
@@ -435,6 +445,7 @@ impl Sidebar {
 
     /// What the Outline pane is showing, which is what `ACCENT_BENCH_TABS` reads to say whether a
     /// closed document left its outline behind.
+    #[cfg(feature = "bench")]
     pub fn outline_child(&self) -> Option<gtk::Widget> {
         self.outline_bin.child()
     }
@@ -461,6 +472,7 @@ impl Sidebar {
 
     /// The tag names the Tags pane is showing, and the one selected: what `ACCENT_BENCH_TAGS`
     /// reads, a refill being invisible from anywhere else.
+    #[cfg(feature = "bench")]
     pub fn tag_names(&self) -> Vec<String> {
         match self.panes.as_ref() {
             Some(panes) => (panes.tags_names)(),
@@ -468,6 +480,7 @@ impl Sidebar {
         }
     }
 
+    #[cfg(feature = "bench")]
     pub fn selected_tag(&self) -> Option<String> {
         self.panes.as_ref().and_then(|panes| (panes.tags_picked)())
     }
@@ -525,6 +538,7 @@ impl Sidebar {
 
     /// Put `text` in the Search pane's replace box, which re-runs the query with the preview.
     /// The counterpart of [`set_search_text`](Self::set_search_text), for `ACCENT_BENCH_REPLACE`.
+    #[cfg(feature = "bench")]
     pub fn set_replace_text(&self, text: &str) {
         if let Some(panes) = self.panes.as_ref() {
             panes.replace_entry.set_text(text);
@@ -533,6 +547,7 @@ impl Sidebar {
 
     /// Press Replace All, as a click on the button does. Headless, that is the only way in: the
     /// button is in the sidebar and Xvfb has nothing to click it with.
+    #[cfg(feature = "bench")]
     pub fn press_replace_all(&self) {
         if let Some(panes) = self.panes.as_ref() {
             panes.apply_replace.emit_clicked();
@@ -542,6 +557,7 @@ impl Sidebar {
     /// Which page the Search pane's body is showing — "prompt", "results", "empty" or
     /// "invalid" — the rows on it by name, and its result count. What `ACCENT_BENCH_REPLACE`
     /// and `ACCENT_BENCH_SEARCH` read.
+    #[cfg(feature = "bench")]
     pub fn search_state(&self) -> (String, Vec<String>, String) {
         match self.panes.as_ref() {
             Some(panes) => (panes.search_state)(),
@@ -550,6 +566,7 @@ impl Sidebar {
     }
 
     /// The Search pane's query and replace boxes, for `ACCENT_BENCH_SEARCH=seed:`.
+    #[cfg(feature = "bench")]
     pub fn search_boxes(&self) -> Option<[gtk::Editable; 2]> {
         let panes = self.panes.as_ref()?;
         Some([
@@ -559,12 +576,14 @@ impl Sidebar {
     }
 
     /// The Search pane's list of rows, for `ACCENT_BENCH_SEARCH=more:`.
+    #[cfg(feature = "bench")]
     pub fn search_view(&self) -> Option<gtk::ListView> {
         self.panes.as_ref().map(|panes| panes.search_view.clone())
     }
 
     /// What the Replace All button says and whether it can be pressed. What
     /// `ACCENT_BENCH_SEARCH` reads beside the rows.
+    #[cfg(feature = "bench")]
     pub fn replace_all_state(&self) -> (String, bool) {
         match self.panes.as_ref() {
             Some(panes) => (

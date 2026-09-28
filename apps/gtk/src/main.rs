@@ -8,6 +8,7 @@
 mod actions;
 mod askpass;
 mod attach;
+#[cfg(feature = "bench")]
 mod bench;
 mod build;
 mod comment;
@@ -90,6 +91,7 @@ pub(crate) use pdf::tab as pdftab;
 use references::{PdfAnchor, char_range, reference_target};
 use session::Corpus;
 use shell::Shell;
+#[cfg(feature = "bench")]
 use sourceview5::prelude::ViewExt as _;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -237,6 +239,7 @@ struct App {
     toasts: adw::ToastOverlay,
     /// How many toasts this window has put up. For the drills: libadwaita will not say what the
     /// overlay is showing, and "it says so once rather than once a save" is a count.
+    #[cfg(feature = "bench")]
     toasted: Cell<usize>,
     /// Raised across the window when a remote vault stops answering, with a way back. A banner
     /// rather than a toast because it is a state that persists and needs a decision, and one
@@ -426,12 +429,14 @@ impl App {
     }
 
     fn toast(&self, text: &str) {
+        #[cfg(feature = "bench")]
         self.toasted.set(self.toasted.get() + 1);
         self.toasts.add_toast(adw::Toast::new(text));
     }
 
     /// A [`toast`](Self::toast) with a button on it, which runs `act` when pressed.
     fn toast_with(&self, text: &str, button: &str, act: impl Fn() + 'static) {
+        #[cfg(feature = "bench")]
         self.toasted.set(self.toasted.get() + 1);
         let toast = adw::Toast::builder()
             .title(text)

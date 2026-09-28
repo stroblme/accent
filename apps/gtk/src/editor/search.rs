@@ -151,6 +151,7 @@ impl Tab {
 
     /// What the muted highlight is showing, and the tag it paints it with. Only
     /// `ACCENT_BENCH_OCCUR` reads them.
+    #[cfg(feature = "bench")]
     pub fn occurrence_highlight(&self) -> (Option<String>, gtk::TextTag) {
         (
             self.occurrence_query.borrow().clone(),
@@ -161,6 +162,7 @@ impl Tab {
     /// The two match backgrounds, the find bar's first: what `ACCENT_BENCH_OCCUR` prints to show
     /// the hint really is the weaker of the pair. The find bar's context has no match style of
     /// its own, so its colour is the scheme's `search-match`.
+    #[cfg(feature = "bench")]
     pub fn match_colours(&self) -> (Option<String>, Option<String>) {
         let text = |colour: gdk::RGBA| colour.to_str().to_string();
         (
@@ -445,6 +447,7 @@ impl Tab {
     }
 
     /// Whether the reveal is up, and the tag it paints with. Only `ACCENT_BENCH_REVEAL` reads it.
+    #[cfg(feature = "bench")]
     pub fn reveal_highlight(&self) -> (bool, gtk::TextTag) {
         (self.revealed.get(), self.reveal_tag.clone())
     }

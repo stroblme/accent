@@ -22,9 +22,9 @@ use accent_api::{Fold, Severity};
 /// view has room to scroll.
 pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         let body: String = (1..=50).map(|i| format!("line {i}\n")).collect();
@@ -427,11 +427,11 @@ pub(super) fn bench_toast(app: &Rc<App>) -> Option<String> {
 /// would replace what it hands over.
 pub(super) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
         let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
         wait(400).await;
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         let body: String = (1..=50).map(|i| format!("line {i}\n")).collect();
@@ -508,11 +508,11 @@ pub(super) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
 /// two seconds before it quits, for the screenshot.
 pub(super) fn bench_compare_gutter(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
         let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
         wait(400).await;
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         let long = ["a long paragraph that wraps"; 8].join(" ");
@@ -748,7 +748,7 @@ pub(super) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
     glib::spawn_future_local(async move {
         let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
         wait(400).await;
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         let base: String = (1..=12).map(|i| format!("line {i}\n")).collect();
@@ -909,9 +909,9 @@ const CONTROL: i32 = 21;
 
 pub(super) fn bench_compare_pads(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         let (index, work) = pads_texts();

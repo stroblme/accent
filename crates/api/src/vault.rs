@@ -394,6 +394,12 @@ methods! {
 
     // ------------------------------------------------------------ index reads
     any list_dir(rel: ref str) -> Vec<FileRow>;
+    /// Keep the listings of these folders, which the index does not walk, fresh until
+    /// [`unwatch_unindexed`](Vault::unwatch_unindexed): a file made, removed or renamed directly
+    /// inside one comes back as [`Event::UnindexedChanged`]. Watched where the files are, one
+    /// level each, never the tree under one.
+    any watch_unindexed(dirs: ref [String]) -> ();
+    any unwatch_unindexed(dirs: ref [String]) -> ();
     any search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
     /// A host whose `accent-cli serve` predates it answers "no such method", which the Search
     /// pane takes as no mid-word matches.

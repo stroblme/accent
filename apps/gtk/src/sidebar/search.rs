@@ -1051,10 +1051,13 @@ pub(super) struct Pane {
     /// its name, or a tail row by its dim line — and what the count says. What
     /// `ACCENT_BENCH_REPLACE` presses and reads: nothing else can say whether the rows left
     /// standing after a rewrite are the new text's.
+    #[cfg(feature = "bench")]
     pub(super) apply: gtk::Button,
+    #[cfg(feature = "bench")]
     pub(super) state: Rc<dyn Fn() -> (String, Vec<String>, String)>,
     /// The list of rows, which `ACCENT_BENCH_SEARCH=more:` activates a row of and reads the
     /// scroll of.
+    #[cfg(feature = "bench")]
     pub(super) view: gtk::ListView,
 }
 
@@ -1437,8 +1440,11 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             move || search.start()
         }),
         dirty: Rc::new(Cell::new(false)),
+        #[cfg(feature = "bench")]
         apply,
+        #[cfg(feature = "bench")]
         view,
+        #[cfg(feature = "bench")]
         state: Rc::new({
             let search = search.clone();
             move || {

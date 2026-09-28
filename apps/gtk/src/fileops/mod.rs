@@ -16,9 +16,13 @@ mod paths;
 mod transfer;
 
 pub use clipboard::Clip;
-pub use menu::{context_menu, labels, row_dir};
+#[cfg(feature = "bench")]
+pub use menu::labels;
+pub use menu::{context_menu, row_dir};
 pub use paths::{move_dest, topmost};
-pub use transfer::{download, download_to, import, upload};
+#[cfg(feature = "bench")]
+pub use transfer::download_to;
+pub use transfer::{download, import, upload};
 
 use self::paths::{
     already_exists, is_markdown, levels, renamed_part, renamed_path, split_typed, typed_path, verb,

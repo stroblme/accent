@@ -154,7 +154,7 @@ impl App {
                     }
                 });
             }
-            Event::DirsChanged(dirs) => {
+            Event::DirsChanged(dirs) | Event::UnindexedChanged(dirs) => {
                 if let Some(tree) = self.tree.get() {
                     tree.invalidate(&dirs);
                 }

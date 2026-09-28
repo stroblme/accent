@@ -143,6 +143,7 @@ pub(super) fn line_numbers(
 
 /// Which line `renderer` last drew the caret's highlight on — what `ACCENT_BENCH_DIAG` prints
 /// beside the line the caret is really on.
+#[cfg(feature = "bench")]
 pub(super) fn painted_cursor(renderer: &sourceview5::GutterRendererText) -> Option<u32> {
     renderer
         .downcast_ref::<numbers::Numbers>()
@@ -172,6 +173,7 @@ mod numbers {
     impl Numbers {
         /// The line the last pass over the gutter drew as the caret's, or `None` where the caret
         /// was not among the lines it drew.
+        #[cfg(feature = "bench")]
         pub(super) fn painted_cursor(&self) -> Option<u32> {
             use gtk::subclass::prelude::ObjectSubclassIsExt;
             self.imp().cursor.get()
@@ -192,6 +194,7 @@ mod numbers {
 
     mod imp {
         use super::*;
+        #[cfg(feature = "bench")]
         use std::cell::Cell;
 
         #[derive(Default)]
@@ -199,6 +202,7 @@ mod numbers {
             /// Which line this renderer last drew as the caret's. Read by `ACCENT_BENCH_DIAG`,
             /// where the point is that a gutter nothing invalidated still says the line the
             /// caret has left.
+            #[cfg(feature = "bench")]
             pub cursor: Cell<Option<u32>>,
         }
 
@@ -215,6 +219,7 @@ mod numbers {
         impl GutterRendererImpl for Numbers {
             /// Once per pass over the gutter, before any line is drawn: the caret's line as this
             /// pass sees it, which is the one the parent paints its background under.
+            #[cfg(feature = "bench")]
             fn begin(&self, lines: &sourceview5::GutterLines) {
                 self.cursor
                     .set((lines.first()..=lines.last()).find(|&line| lines.is_cursor(line)));
@@ -427,6 +432,7 @@ impl Tab {
 
     /// Whether the line numbers are on, and the width the gutter gave them. Only
     /// `ACCENT_BENCH_NUMBERS` reads it.
+    #[cfg(feature = "bench")]
     pub fn line_numbers(&self) -> (bool, i32) {
         (self.numbers.is_visible(), self.numbers.width())
     }
@@ -434,6 +440,7 @@ impl Tab {
     /// Which line the gutter drew the caret's highlight on when it last painted, 0-based. Beside
     /// the caret's own line this says whether the column is following it; `ACCENT_BENCH_DIAG`
     /// prints the pair.
+    #[cfg(feature = "bench")]
     pub fn gutter_cursor(&self) -> Option<u32> {
         painted_cursor(&self.numbers)
     }

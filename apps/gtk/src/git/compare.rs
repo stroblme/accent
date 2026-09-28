@@ -141,16 +141,19 @@ impl Panel {
 
     /// The working-tree comparison of `key`, for the bench: the vault root is the repository,
     /// so the key is the path git knows.
+    #[cfg(feature = "bench")]
     pub fn compare_worktree(self: &Rc<Self>, key: &str) {
         self.compare(key, key, Sides::Worktree);
     }
 
     /// The staged comparison of `key`, HEAD against the index, likewise.
+    #[cfg(feature = "bench")]
     pub fn compare_staged(self: &Rc<Self>, key: &str) {
         self.compare(key, key, Sides::Staged { orig: None });
     }
 
     /// The comparison a file under a history row opens: `oid` against `parent`, likewise.
+    #[cfg(feature = "bench")]
     pub fn compare_commit(self: &Rc<Self>, key: &str, oid: &str, parent: &str) {
         let sides = Sides::Commit {
             oid: oid.to_string(),

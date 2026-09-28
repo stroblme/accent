@@ -361,6 +361,7 @@ impl Conflicts {
 
     /// Each block's row as laid, in the view's own coordinates: the top of its line, the row's
     /// top and bottom, and where the line's text starts. `None` for a block showing no row.
+    #[cfg(feature = "bench")]
     pub fn laid(&self) -> Vec<Option<[i32; 4]>> {
         let (starts, rows) = (self.starts.borrow(), self.rows.borrow());
         let window = |y: i32| {
@@ -386,6 +387,7 @@ impl Conflicts {
     }
 
     /// The `i`th block's row of buttons.
+    #[cfg(feature = "bench")]
     pub fn row(&self, i: usize) -> Option<gtk::Widget> {
         self.rows.borrow().get(i).cloned()
     }

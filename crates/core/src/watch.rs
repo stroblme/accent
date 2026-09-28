@@ -172,6 +172,14 @@ impl Watcher {
         self.dirs = next;
         true
     }
+
+    /// Watch `dir` again, although the set already holds it: a directory removed and made anew
+    /// is a new one, and the kernel dropped the watch along with the old.
+    pub fn rewatch(&mut self, dir: &Path) {
+        if let Err(e) = self.backend.watch(dir) {
+            tracing::debug!(dir = %dir.display(), error = %e, "not watching");
+        }
+    }
 }
 
 impl Backend {
