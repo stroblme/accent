@@ -212,18 +212,18 @@ private fun Empty(
             when {
                 // Ahead of the lines below, which are about a walk still running: a stopped one
                 // may have read nothing at all.
-                paused && ready -> "What it has read so far is kept."
-                paused -> "It stopped before reading any files."
+                paused && ready -> "Files read so far are ready to browse."
+                paused -> "No files read yet. Resume when you're ready."
                 // A first walk of a large vault takes minutes over shared storage, so it says how
                 // far it has got. Nothing can be opened while it is still finding the files;
                 // once it starts reading them, what it has read is already there to open — which
                 // is [ready], and is the same moment the Browse button turns up.
                 !ready && scanned > 0 -> "Found %,d files so far.".format(scanned)
-                !ready -> "Looking through your files."
+                !ready -> "Looking through your files…"
                 indexing && scanned > 0 -> "%,d files read. You can start now.".format(scanned)
                 // A walk over an index that already has files: the rescan a resume starts.
-                indexing -> "Reading what it found."
-                else -> "Browse your files, or search straight to a note."
+                indexing -> "Reading your files…"
+                else -> "Your notes are ready. Browse or search to find one."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

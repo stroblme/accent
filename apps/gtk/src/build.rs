@@ -736,9 +736,7 @@ fn retired_daily_keys(app: &Rc<App>) {
             .unwrap_or(t),
         None => format!("a template in {dir}"),
     };
-    let say = format!(
-        "Daily notes are a template directive now: add `accent-target: {target}` to {file}"
-    );
+    let say = format!("Daily notes now use templates. Add `accent-target: {target}` to {file}");
     tracing::warn!("{say}");
     app.toast(&say);
 }

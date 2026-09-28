@@ -61,7 +61,7 @@ private enum class Mode { Search, Files, Tags, Backlinks, Command }
  * itself with (`NoteScreen`). A row picked off the tree or the switcher hands over nothing and
  * so lands at the top of its note, which is where a file somebody chose by name belongs.
  *
- * The three are pages of one pager rather than three states of one list, so the swipe between them
+ * The five modes are pages of one pager, so the swipe between them
  * is the platform's own: the surface follows the thumb and settles at the speed it was thrown, and
  * the drag is claimed by the direction it is going in rather than by whichever node saw the finger
  * first — a page turn and a scroll down cannot be taken for each other, and neither can steal the
@@ -174,7 +174,7 @@ fun BrowseScreen(
                         rows = placesIn(tagged),
                         onBack = { tag = null },
                     ) { onOpen(it, null) }
-                    all?.isEmpty() == true -> Quiet("No note in this vault carries a tag.")
+                    all?.isEmpty() == true -> Quiet("No tags yet. Add #tags to your notes to find them here.")
                     all != null -> Tags(all, placesIn(all)) {
                         tag = it
                         query = ""
@@ -186,8 +186,8 @@ fun BrowseScreen(
                 val to = front
                 when {
                     to == null -> Quiet("Open a file from this vault to see what links to it.")
-                    linked?.isEmpty() == true -> Quiet("No note links to ${title(to)}.")
-                    else -> Notes("Linked from ${title(to)}", linked, placesIn(linked)) {
+                    linked?.isEmpty() == true -> Quiet("No notes link to ${title(to)} yet.")
+                    else -> Notes("Links to ${title(to)}", linked, placesIn(linked)) {
                         model.openFile(it, back = Back.File(to))
                         onClose()
                     }
