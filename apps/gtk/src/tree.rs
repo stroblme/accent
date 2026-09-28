@@ -428,7 +428,10 @@ impl Tree {
                     Some(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir, None),
                     Some(Ok(None)) => {
                         cache.borrow_mut().remove(&dir);
-                        watches.borrow_mut().remove(&dir);
+                        if watches.borrow_mut().remove(&dir) {
+                            let dirs = vec![dir];
+                            gio::spawn_blocking(move || vault.unwatch_unindexed(&dirs));
+                        }
                     }
                     // No answer is not an answer that it is gone. A reconnect's reindex arrives
                     // while the link is still being made, and taking that as gone left each
@@ -735,58 +738,40 @@ pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRo
     })
 }
 
-/// One `GFileMonitor` per folder the index does not walk but the tree keeps a listing of.
-type Watches = Rc<RefCell<HashMap<String, gio::FileMonitor>>>;
+/// The folders the index does not walk whose listings the tree keeps, which the vault watches for
+/// it.
+type Watches = Rc<RefCell<HashSet<String>>>;
 
 /// Keep `dir`'s listing in step with the disk for as long as the tree holds it.
 ///
 /// The index never walks a gitignored folder, so nothing in the vault's own watch set reports a
 /// file written into one: a build filling the folder whose row is open, or a training run writing
-/// into an `mlruns/`, showed nothing new until the row was collapsed and opened again. One
-/// monitor per such folder answers for exactly the listings the tree keeps — a child model is
-/// built and cached the first time its row is bound and lives as long as the window, so the watch
-/// has the same lifetime as the rows it keeps honest, and collapsing one throws neither away. The
-/// listing it stands beside is already paid for, which is what makes this the cheap answer rather
-/// than a budget of its own.
+/// into an `mlruns/`, showed nothing new until the row was collapsed and opened again. One watch
+/// per such folder answers for exactly the listings the tree keeps — a child model is built and
+/// cached the first time its row is bound and lives as long as the window, so the watch has the
+/// same lifetime as the rows it keeps honest, and collapsing one throws neither away. The listing
+/// it stands beside is already paid for, which is what makes this the cheap answer rather than a
+/// budget of its own.
+///
+/// The vault's own watcher keeps it, one level deep, where the files are: on the host for a remote
+/// vault, which is the one place they can be watched from. Its news is
+/// [`Event::UnindexedChanged`](accent_api::Event::UnindexedChanged), which lists the folder again,
+/// once per debounced burst rather than per file.
 ///
 /// The dependency trees get none: a `node_modules` is opened to look at, and 40 000 files is the
-/// one tree this must not start watching. `GFileMonitor` rate-limits itself, so a directory
-/// written to in a burst is re-listed once rather than per file.
-///
-/// Local vaults only: a remote vault's files are on the host, where this machine cannot watch
-/// them. There the host's own watcher is the only answer, and it does not walk these folders
-/// either.
-fn watch_unindexed(
-    watches: &Watches,
-    vault: &Arc<Vault>,
-    asked: &Asked,
-    show_hidden: &ShowHidden,
-    store: &gio::ListStore,
-    dir: &str,
-) {
-    if vault.is_remote() || watches.borrow().contains_key(dir) {
+/// one tree this must not start watching.
+fn watch_unindexed(watches: &Watches, vault: &Arc<Vault>, dir: &str) {
+    if !watches.borrow_mut().insert(dir.to_string()) {
         return;
     }
-    let monitor = gio::File::for_path(vault.root().join(dir))
-        .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE);
-    let monitor = match monitor {
-        Ok(monitor) => monitor,
-        // A folder that cannot be watched still lists; it is only as fresh as its last expansion,
-        // which is what every one of them used to be.
-        Err(e) => return tracing::debug!(dir, "watching an unindexed folder: {e}"),
-    };
-    let (store, vault, asked, show_hidden, dir) = (
-        store.clone(),
-        vault.clone(),
-        asked.clone(),
-        show_hidden.clone(),
-        dir.to_string(),
-    );
-    monitor.connect_changed({
-        let dir = dir.clone();
-        move |_, _, _, _| fill(&store, &vault, &asked, &show_hidden, &dir, None)
+    // A round trip on a remote vault, from a row being bound: sent from a worker and not waited
+    // for. One that cannot be sent yet is kept, and asked of the host once it answers.
+    let (vault, dirs) = (vault.clone(), vec![dir.to_string()]);
+    gio::spawn_blocking(move || {
+        if let Err(e) = vault.watch_unindexed(&dirs) {
+            tracing::debug!("watching an unindexed folder: {e:#}");
+        }
     });
-    watches.borrow_mut().insert(dir, monitor);
 }
 
 fn children_model(
@@ -1124,7 +1109,7 @@ pub fn build(
             // A gitignored folder is one the reader opened on purpose and one the index does not
             // walk, so its listing has nothing keeping it fresh but this.
             if !row.indexed && !row.dependency {
-                watch_unindexed(&watches, &vault, &asked, &show_hidden, &store, &row.rel);
+                watch_unindexed(&watches, &vault, &row.rel);
             }
             Some(store.upcast())
         }
