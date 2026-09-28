@@ -213,8 +213,14 @@ impl Worker {
                 }
             }
         }
-        if rewatch {
-            self.rebuild_watcher();
+        // A removed directory took its watch with it, so the set must stop naming it: then the
+        // rebuild that brings it back — a new directory, a walk — watches it again.
+        for msg in &batch {
+            if let Msg::Fs(VaultEvent::Removed(p) | VaultEvent::Renamed { from: p, .. }) = msg
+                && let Some(watcher) = &mut self.watcher
+            {
+                watcher.forget(p);
+            }
         }
         // News from inside an unindexed folder is that folder's listing and nothing else: kept
         // from the index, and from the rescan test below — a directory moved into a build output
@@ -222,8 +228,11 @@ impl Worker {
         let mut listed = BTreeSet::new();
         let batch: Vec<Msg> = batch
             .into_iter()
-            .filter(|m| !self.unindexed_news(m, &mut listed))
+            .filter(|m| !self.unindexed_news(m, &mut listed, &mut rewatch))
             .collect();
+        if rewatch {
+            self.rebuild_watcher();
+        }
         if !listed.is_empty() {
             self.emit(Event::UnindexedChanged(listed.into_iter().collect()));
         }
@@ -423,9 +432,14 @@ impl Worker {
     /// whose listing it changed to `listed`.
     ///
     /// A folder the news names itself was removed or made anew, so its own listing changed too,
-    /// and one made anew is watched again: the kernel dropped the watch with the old directory. A
-    /// folder the walk has entered since — its `.gitignore` line went — is the index's again.
-    fn unindexed_news(&mut self, msg: &Msg, listed: &mut BTreeSet<String>) -> bool {
+    /// and it is watched afresh (`rewatch`): one made anew is a new directory. A folder the walk
+    /// has entered since — its `.gitignore` line went — is the index's again.
+    fn unindexed_news(
+        &mut self,
+        msg: &Msg,
+        listed: &mut BTreeSet<String>,
+        rewatch: &mut bool,
+    ) -> bool {
         let paths = match msg {
             Msg::Fs(
                 VaultEvent::Changed(p) | VaultEvent::Removed(p) | VaultEvent::ConflictAppeared(p),
@@ -440,11 +454,10 @@ impl Worker {
             };
             if self.unindexed.contains(&rel) {
                 listed.insert(rel.clone());
-                if path.is_dir()
-                    && let Some(watcher) = &mut self.watcher
-                {
-                    watcher.rewatch(path);
+                if let Some(watcher) = &mut self.watcher {
+                    watcher.forget(path);
                 }
+                *rewatch = true;
             }
             let parent = parent_dir(&rel);
             if self.unindexed.contains(parent) && matches!(self.index.get_file(parent), Ok(None)) {
@@ -789,6 +802,34 @@ mod tests {
             f.wait(|e| matches!(e, Event::FileChanged(p) if p == "Projects/Plan.md"))
                 .is_some(),
             "an edit inside an indexed subdirectory must reach the UI"
+        );
+    }
+
+    /// A folder removed and made again under its old name is a new directory, whose watch the set
+    /// still naming the path must not stand in for: what is written into it has to be seen.
+    #[test]
+    fn a_folder_removed_and_made_again_is_watched_again() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        std::fs::write(root.path().join("sub/a.md"), "a").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+        let sub = f.vault.root().join("sub");
+
+        // Each step waits for the batch before it to end, so the three land in three batches.
+        std::fs::remove_dir_all(&sub).unwrap();
+        assert!(
+            f.wait(|e| matches!(e, Event::FileRemoved(p) if p == "sub"))
+                .is_some()
+        );
+        assert!(f.wait(|e| matches!(e, Event::DirsChanged(_))).is_some());
+        std::fs::create_dir(&sub).unwrap();
+        assert!(f.wait(|e| matches!(e, Event::DirsChanged(_))).is_some());
+        f.write("sub/b.md", "b");
+
+        assert!(
+            f.wait(|e| matches!(e, Event::DirsChanged(d) if d.iter().any(|d| d == "sub")))
+                .is_some(),
+            "a file written into the folder made again was not seen"
         );
     }
 
