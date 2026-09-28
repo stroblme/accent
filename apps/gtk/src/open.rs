@@ -404,6 +404,8 @@ impl App {
                         );
                     }
                 }
+                // The link went: the banner says so, as it does for a note that cannot save.
+                Some(Err(e)) if e.kind() == std::io::ErrorKind::NotConnected => {}
                 // It did not reach the host at all. Said once, as a refusal is: every stroke after
                 // it fails the same way until one lands.
                 Some(Err(e)) => {
