@@ -438,6 +438,7 @@ methods! {
     // The repositories belong to the machine the files are on, so every one of these runs there —
     // the `git` binary the user configured, with their hooks and their credential helper.
     git git_status = status(repo: ref Repo) -> Status;
+    git git_untracked = untracked(repo: ref Repo, dir: ref str) -> Vec<String>;
     /// One page of history. The graph itself is computed where it is drawn: [`git::lanes`] is a
     /// forward pass over every commit so far, so the pane keeps the list and re-lanes it, and
     /// there is nothing in it for a remote host to do.

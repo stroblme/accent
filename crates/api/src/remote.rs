@@ -120,6 +120,22 @@ fn keep(dest: &Path, why: String) -> Pushed {
     }
 }
 
+/// Move a cached file or folder to where the host moved its original, making the folders it goes
+/// into. Nothing cached there is nothing to move, and a move that fails costs the next fetch a
+/// download.
+fn carry(from: &Path, to: &Path) {
+    if !from.exists() {
+        return;
+    }
+    let moved = to
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::rename(from, to));
+    if let Err(e) = moved {
+        tracing::debug!("moving the cached {}: {e}", from.display());
+    }
+}
+
 /// The stamp of one cached copy, locked for as long as this is held: the etag the host reported
 /// when the copy was last fetched or pushed.
 ///
@@ -520,6 +536,18 @@ impl Remote {
         Ok(Pushed::Sent)
     }
 
+    /// The cached copy of `from` and its stamp go to `to`, where the host has just moved the file
+    /// or folder. A rename keeps the host's etag, so the copy is as current under the new name as
+    /// under the old: a reader that follows the rename reads it there, and its next push finds the
+    /// stamp rather than taking the renamed file for somebody else's change.
+    pub fn moved(&self, from: &str, to: &str) {
+        for place in [ssh::cache_path, ssh::stamp_path] {
+            if let (Some(from), Some(to)) = (place(&self.url, from), place(&self.url, to)) {
+                carry(&from, &to);
+            }
+        }
+    }
+
     /// The refusal's other half: the written-on copy goes up as `<name> (edited).pdf` in the same
     /// folder, the way a note's conflict copy lands in the vault, and the original is not touched.
     /// It is then a file like any other — the tree lists it, it opens and it syncs — so the reader
@@ -573,18 +601,19 @@ impl Remote {
     ) -> std::io::Result<()> {
         let file = std::fs::File::open(local)?;
         let total = file.metadata()?.len();
-        link::send(&self.cat_into(rel), file, total, progress)
+        link::send(&self.put_into(rel, total), file, total, progress)
     }
 
     /// Write `bytes` to `rel` over the master, the way an upload goes: the host's shell creates a
     /// new file with the mode its umask gives a new note there.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
-        link::send(&self.cat_into(rel), bytes, bytes.len() as u64, &|_, _| ())
+        let size = bytes.len() as u64;
+        link::send(&self.put_into(rel, size), bytes, size, &|_, _| ())
     }
 
-    /// The command line that writes its stdin to `rel` on the host.
-    fn cat_into(&self, rel: &str) -> Vec<String> {
-        let command = format!("cat > {}", ssh::quote(&self.remote_path(rel)));
+    /// The command line that writes its stdin, `size` bytes of it, to `rel` on the host.
+    fn put_into(&self, rel: &str, size: u64) -> Vec<String> {
+        let command = ssh::put_cmd(&self.remote_path(rel), size);
         ssh::run(&self.url, &self.ctl, &command)
     }
 
@@ -931,9 +960,25 @@ fn drain(stream: impl Read + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Stamp, edited_name, kept_path};
+    use super::{Stamp, carry, edited_name, kept_path};
     use std::path::Path;
     use std::time::Duration;
+
+    /// A renamed file's cached copy goes where the host put the file, into a folder the cache
+    /// does not have yet; nothing cached is nothing to move.
+    #[test]
+    fn a_cached_copy_follows_a_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("a.pdf"), dir.path().join("new/b.pdf"));
+        std::fs::write(&from, "pdf").unwrap();
+        carry(&from, &to);
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "pdf");
+        assert!(!from.exists());
+
+        let never = dir.path().join("elsewhere/c.pdf");
+        carry(&from, &never);
+        assert!(!never.parent().unwrap().exists());
+    }
 
     /// A second fetch or push of one file waits for the first to write its stamp, and then reads
     /// that stamp rather than the one before it.

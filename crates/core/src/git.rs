@@ -430,6 +430,24 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
     })
 }
 
+/// The untracked paths under the folder `dir` (`""` for the whole repository) as git's default
+/// mode names them: a folder holding nothing tracked is one `dir/` entry, whatever is inside it.
+/// What Discard trashes for a folder, so an untracked one goes whole rather than file by file,
+/// leaving its emptied folders behind.
+pub fn untracked(repo: &Repo, dir: &str) -> Result<Vec<String>, Error> {
+    let mut args = vec!["status", "--porcelain=v2", "-z", "--untracked-files=normal"];
+    if !dir.is_empty() {
+        args.extend(["--", dir]);
+    }
+    let out = run(&repo.root, &args, true)?;
+    Ok(parse_status(&out)
+        .entries
+        .into_iter()
+        .filter(|e| e.x == '?')
+        .map(|e| e.path)
+        .collect())
+}
+
 /// Whether a merge is under way, which porcelain does not say: git keeps `MERGE_HEAD` for exactly
 /// as long as one is waiting to be committed or aborted.
 fn merging(repo: &Repo) -> bool {
@@ -1467,10 +1485,19 @@ pub fn stage_text(repo: &Repo, path: &str, text: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// `--` keeps a note called `-f`, or one whose name matches a branch, from being read as an option.
+/// The paths go in over stdin, NUL-separated, rather than on the command line, which the kernel
+/// caps at 2 MB: a Stage All over an untracked tree of 60 000 files was refused before git ran.
+/// Nor can a note called `-f` be read as an option there.
 fn write(repo: &Repo, verb: &[&str], paths: &[&str]) -> Result<(), Error> {
-    let args = [verb, &["--"][..], paths].concat();
-    run(&repo.root, &args, false)?;
+    let args = [verb, &["--pathspec-from-file=-", "--pathspec-file-nul"]].concat();
+    let mut child = command(&repo.root, &args, false)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    let (pipe, list) = (child.stdin.take(), paths.join("\0"));
+    // On a thread, so that git's output is read while the list goes in: either pipe may fill.
+    // The pipe closing as the thread ends is what tells git the list is complete.
+    std::thread::spawn(move || pipe.map(|mut pipe| pipe.write_all(list.as_bytes())));
+    checked(child.wait_with_output()?)?;
     Ok(())
 }
 

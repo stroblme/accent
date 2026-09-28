@@ -10,6 +10,11 @@ impl App {
     /// does this, and so does a move of our own before it reloads the notes it rewrote: those
     /// are named by where they are now, which their tabs are not until they follow.
     pub(crate) fn follow_rename(self: &Rc<Self>, from: &str, to: &str) {
+        // On a remote vault a PDF reads and writes its cached copy, which has to be under the
+        // new name before the tab is pointed there.
+        if let Some(remote) = self.vault().and_then(|v| v.remote()) {
+            remote.moved(from, to);
+        }
         let prefix = format!("{from}/");
         for doc in self.docs() {
             let key = doc.key();

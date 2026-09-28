@@ -387,13 +387,16 @@ async fn written(app: &Rc<App>) {
 }
 
 /// The same document under a new name: rename it the way a dropped row does, then add another
-/// page and read the file back.
+/// page and read the file back, then write a one-page document over it from outside.
 ///
 /// The render thread owns the path it reloads from and saves to, so a rename it was never told
 /// about shows up here as a page count on disk that did not grow — the save going to a name that
-/// is no longer there.
+/// is no longer there. On a remote vault the cached copy has to move with the file, or the page
+/// goes up beside it as `(edited)` and the reader keeps a copy nothing refreshes.
 async fn bench_pdf_renamed(app: &Rc<App>) {
-    let (Some(pdf), Some(ops)) = (app.active_pdf(), app.ops().cloned()) else {
+    let (Some(pdf), Some(ops), Some(vault)) =
+        (app.active_pdf(), app.ops().cloned(), app.vault().cloned())
+    else {
         println!("bench pdf no_tab");
         return bench_quit(app);
     };
@@ -421,12 +424,31 @@ async fn bench_pdf_renamed(app: &Rc<App>) {
     let sizes = accent_core::pdf::PdfDoc::open(pdf.path())
         .and_then(|doc| doc.page_sizes())
         .unwrap_or_default();
+    // On a remote vault a push that found no stamp under the new name put the page beside the
+    // file instead, as `(edited)`.
     println!(
-        "bench pdf renamed_added pages={} on_disk={} in_vault {}",
+        "bench pdf renamed_added pages={} on_disk={} in_vault {} edited={}",
         pdf.page_count(),
         sizes.len(),
-        vault_pages(app, &pdf.key())
+        vault_pages(app, &pdf.key()),
+        vault.exists(&accent_api::remote::edited_name(&pdf.key(), 1))
     );
+    // Rebuilt by something else, as a LaTeX run does: a one-page document written over the new
+    // name, which the reader must follow rather than the copy it had.
+    let blank = std::env::temp_dir().join(format!("accent-bench-{}-blank.pdf", std::process::id()));
+    let rebuilt = accent_core::pdf::blank_pdf((595.0, 842.0))
+        .and_then(|bytes| Ok(std::fs::write(&blank, bytes)?))
+        .and_then(|()| Ok(vault.upload(&blank, &pdf.key())?));
+    let started = std::time::Instant::now();
+    while rebuilt.is_ok() && pdf.page_count() != 1 && started.elapsed() < Duration::from_secs(15) {
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    println!(
+        "bench pdf renamed_rebuilt pages={} after_ms={} {rebuilt:?}",
+        pdf.page_count(),
+        started.elapsed().as_millis()
+    );
+    let _ = std::fs::remove_file(&blank);
     bench_quit(app);
 }
 
@@ -505,6 +527,70 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
             vault.exists(&second)
         );
         let _ = std::fs::remove_file(&kept);
+        bench_quit(&app);
+    });
+}
+
+/// The write-back's failure arm: the host will not take the upload at all, which is neither the
+/// etag refusal nor a conflict copy. The document and its folder are made read-only on the host
+/// behind the app's back, and a page is added twice: both saves fail, and only the first says so.
+/// Then the host takes writes again, a third page goes up and says nothing, and a failure after
+/// that one is news again. Each `chmod` of the folder also sets off a rescan on the host, whose
+/// "Indexed …" toast is in the count: +2, +0, +1, +2 is one failure said per streak.
+pub(super) fn bench_pdf_failed(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let (Some(pdf), Some(vault)) = (opened(&app, &rel).await, app.vault().cloned()) else {
+            println!("bench pdf failed no_tab");
+            return bench_quit(&app);
+        };
+        let (key, Some(remote)) = (pdf.key(), vault.remote().cloned()) else {
+            println!("bench pdf failed not_remote");
+            return bench_quit(&app);
+        };
+        let path = vault.resolve(&key).unwrap_or_default();
+        let (file, dir) = (
+            accent_api::ssh::quote(&path.to_string_lossy()),
+            accent_api::ssh::quote(&path.parent().unwrap_or(&path).to_string_lossy()),
+        );
+        let host = |mode: &str| {
+            let argv = accent_api::ssh::run(
+                remote.url(),
+                remote.control_path(),
+                &format!("chmod {mode} {file} {dir}"),
+            );
+            std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let add = || WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        let step = |name: &str| {
+            println!(
+                "bench pdf failed {name} pages={} in_vault {} said={} {:?}",
+                pdf.page_count(),
+                vault_pages(&app, &key),
+                app.toasted.get(),
+                bench_said(&app)
+            )
+        };
+        step("opened");
+        println!("bench pdf failed read_only={}", host("a-w"));
+        let _ = add();
+        written(&app).await;
+        step("refused");
+        let _ = add();
+        written(&app).await;
+        step("again");
+        println!("bench pdf failed writable={}", host("u+w"));
+        let _ = add();
+        written(&app).await;
+        step("sent");
+        println!("bench pdf failed read_only={}", host("a-w"));
+        let _ = add();
+        written(&app).await;
+        step("refused_after");
+        println!("bench pdf failed writable={}", host("u+w"));
         bench_quit(&app);
     });
 }

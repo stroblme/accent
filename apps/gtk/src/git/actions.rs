@@ -730,7 +730,8 @@ impl Panel {
     /// `""` for the Changes header's Discard All and every entry of the section; a file's own row
     /// passes `None` and itself. An untracked file has nothing in the index to go back to, so what
     /// "discard" means for it is that the file itself goes — to the trash, which is at least
-    /// recoverable, and all of a folder's in one go.
+    /// recoverable, and all of a folder's in one go: a folder holding nothing tracked goes whole
+    /// ([`Panel::trash_untracked`]).
     pub(super) fn discard(self: &Rc<Self>, folder: Option<&str>, entries: Vec<Entry>) {
         let Some(repo) = ({
             let state = self.state.borrow();
@@ -746,11 +747,8 @@ impl Panel {
             (None, Some(entry)) => split_name(&entry.path).1.to_string(),
         };
         let body = discard_body(&what, folder.is_some(), tracked.len(), untracked.len());
-        let root = self.hooks.vault.root();
-        let keys: Vec<String> = untracked
-            .iter()
-            .map(|e| vault_key(&root, &repo, &e.path))
-            .collect();
+        let listed: Vec<String> = untracked.into_iter().map(|e| e.path).collect();
+        let under = folder.map(str::to_string);
         let paths: Vec<String> = tracked.into_iter().map(|e| e.path).collect();
         let done = match folder {
             Some(_) => format!("Discarded {}", files(paths.len())),
@@ -762,15 +760,57 @@ impl Panel {
         };
         let panel = self.clone();
         dialogs::confirm(&self.hooks.window, heading, &body, verb, true, move || {
-            if !keys.is_empty() {
-                (panel.hooks.trash)(&keys);
-                panel.schedule_refresh(Depth::Status);
+            if !listed.is_empty() {
+                panel.trash_untracked(repo, under, listed);
             }
             panel.write("discard", paths, move |vault, repo, paths| {
                 vault.git_discard(repo, paths).map(|()| done)
             });
         });
     }
+
+    /// Trash the untracked files `listed`: a file's own, as it is, and a folder's as git names
+    /// them under the folder, so that a folder holding nothing tracked goes whole — one trash
+    /// operation, one undo — and a folder beside tracked ones is not left behind emptied.
+    fn trash_untracked(self: &Rc<Self>, repo: Repo, folder: Option<String>, listed: Vec<String>) {
+        let panel = self.clone();
+        glib::spawn_future_local(async move {
+            let named = match folder {
+                None => listed,
+                Some(dir) => {
+                    let (vault, asked) = (panel.hooks.vault.clone(), repo.clone());
+                    let found = crate::work::attempt("list the untracked files", move || {
+                        vault.git_untracked(&asked, &dir)
+                    });
+                    match found.await {
+                        Ok(named) => to_trash(named, &listed),
+                        Err(why) => return (panel.hooks.toast)(&why),
+                    }
+                }
+            };
+            let root = panel.hooks.vault.root();
+            let keys: Vec<String> = named
+                .iter()
+                .map(|path| vault_key(&root, &repo, path.trim_end_matches('/')))
+                .collect();
+            (panel.hooks.trash)(&keys);
+            panel.schedule_refresh(Depth::Status);
+        });
+    }
+}
+
+/// What a folder's Discard trashes of git's answer for the folder ([`git::untracked`]): a folder
+/// git names whole where a `listed` file is inside it, and a file where it was listed itself, so
+/// nothing the question did not count goes with them — a file made since the refresh, say.
+fn to_trash(named: Vec<String>, listed: &[String]) -> Vec<String> {
+    named
+        .into_iter()
+        .filter(|path| {
+            listed
+                .iter()
+                .any(|l| l == path || (path.ends_with('/') && l.starts_with(path.as_str())))
+        })
+        .collect()
 }
 
 /// What the Discard confirmation says will happen. A file's own row names the file; a folder's
@@ -846,6 +886,17 @@ fn files(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_discard_trashes_an_untracked_folder_whole_and_only_what_was_listed() {
+        let listed =
+            ["new/deep/z.md", "new/q.md", "mixed/u.md", "mixed/sub/x.md"].map(String::from);
+        let named = ["new/", "mixed/u.md", "mixed/sub/", "mixed/made-since.md"].map(String::from);
+        assert_eq!(
+            to_trash(named.to_vec(), &listed),
+            ["new/", "mixed/u.md", "mixed/sub/"]
+        );
+    }
 
     #[test]
     fn a_folder_discard_says_how_many_files_go_where() {

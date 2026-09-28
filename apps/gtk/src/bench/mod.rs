@@ -54,8 +54,8 @@ use panes::{
     bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
-    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_pages, bench_pdf_stale,
-    bench_pdf_strip,
+    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_failed, bench_pdf_pages,
+    bench_pdf_stale, bench_pdf_strip,
 };
 use replace::bench_replace;
 use search::bench_search;
@@ -168,13 +168,18 @@ use tags::bench_tags;
 /// the save has run, and what the vault itself then holds — on a remote vault the host's own copy,
 /// which is the only witness that the write was uploaded. It then renames the file the way a
 /// dropped row does and adds another page to it, which is the render thread following the new
-/// name. It writes to the document and moves it, so point it at a scratch copy; and point it at a
+/// name, and writes a one-page document over the new name from outside, which the reader must
+/// follow. It writes to the document and moves it, so point it at a scratch copy; and point it at a
 /// document of several pages, since a one-page PDF is wholly on screen whatever the scroll offset
 /// was. `=stale:<rel_path>` is the remote vault's etag gate: it stamps the cached copy with an
 /// etag the host never had, adds a page and prints whether the host's copy is untouched and
 /// what `<name> (edited).pdf` beside it holds, then adds another and prints the same again —
 /// the second refusal must write that same copy rather than a numbered one, and must leave the
-/// toast count where the first put it. `=pages:<rel_path>` moves the first page below the third as
+/// toast count where the first put it. `=failed:<rel_path>` makes the document and its folder
+/// read-only on the host, adds two pages and prints the toast count after each (one failure said,
+/// the second quiet), then makes them writable, adds a page that goes up, and fails once more,
+/// which is said again; each `chmod` adds the host's "Indexed …" toast to the count.
+/// `=pages:<rel_path>` moves the first page below the third as
 /// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
 /// page, and deletes the first through the window actions, which asks nothing, then walks
 /// all four back with Undo and forward again with Redo, and prints the page being read and each
@@ -478,6 +483,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("strip:") {
                 return bench_pdf_strip(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("failed:") {
+                return bench_pdf_failed(&app, rel);
             }
             return match rel.strip_prefix("stale:") {
                 Some(rel) => bench_pdf_stale(&app, rel),

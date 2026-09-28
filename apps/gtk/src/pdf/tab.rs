@@ -121,6 +121,9 @@ pub struct PdfTab {
     /// The conflict copy that refusal left beside the document, for the next one to write again
     /// rather than leaving one numbered copy per stroke.
     pub(super) conflict_copy: RefCell<Option<String>>,
+    /// The last upload did not reach the far end at all — the link, a folder it may not write —
+    /// and the reader has been told once. See [`PdfTab::told_failure`].
+    pub(super) failure_told: Cell<bool>,
     /// The etag of the last write *this tab* made, so a watcher report of our own save is
     /// recognised and not answered with a reload. See [`PdfTab::refresh`].
     pub(super) saved: Cell<Option<accent_core::fs::Etag>>,
@@ -239,6 +242,7 @@ pub fn open(
         upload_again: Cell::new(false),
         conflict_told: Cell::new(false),
         conflict_copy: RefCell::new(None),
+        failure_told: Cell::new(false),
         saved: Cell::new(None),
         history: Cell::new((false, false)),
         outline: RefCell::new(Vec::new()),
@@ -754,10 +758,19 @@ impl PdfTab {
         self.conflict_copy.borrow().clone()
     }
 
+    /// An upload of this document failed. `true` the first time, which is the one the reader is
+    /// told about: the saves after it fail the same way until one lands, and drawing through a
+    /// dropped link would otherwise be a toast a second.
+    pub fn told_failure(&self) -> bool {
+        !self.failure_told.replace(true)
+    }
+
     /// The conflict is over — an upload landed, or the document was re-read from what the far end
-    /// now holds — so the next refusal is news again and takes a name of its own.
+    /// now holds — so the next refusal or failure is news again, and a refusal takes a name of its
+    /// own.
     pub fn clear_conflict(&self) {
         self.conflict_told.set(false);
+        self.failure_told.set(false);
         *self.conflict_copy.borrow_mut() = None;
     }
 
