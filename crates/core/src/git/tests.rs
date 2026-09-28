@@ -170,6 +170,32 @@ fn untracked_names_a_folder_holding_nothing_tracked_as_the_folder() {
 }
 
 #[test]
+fn untracked_never_names_a_repository_of_its_own_nor_a_folder_holding_one() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init(dir);
+    write_file(dir, "a.md", "a\n");
+    write_file(dir, ".gitignore", "cache/\n");
+    commit_all(dir, "first");
+    init(&dir.join("sub"));
+    write_file(dir, "new/x.md", "x\n");
+    init(&dir.join("new/inner"));
+    // One git lists nowhere, being under an ignored folder.
+    write_file(dir, "box/y.md", "y\n");
+    init(&dir.join("box/cache/deep"));
+    // A worktree's `.git` is a file.
+    write_file(dir, "wt/.git", "gitdir: /nowhere\n");
+    write_file(dir, "wt/z.md", "z\n");
+
+    let mut found = untracked(&open(dir), "").unwrap();
+    found.sort();
+    assert_eq!(found, ["box/y.md", "new/x.md", "wt/z.md"]);
+}
+
+#[test]
 fn a_rename_carries_its_original_path() {
     if !have_git() {
         return;

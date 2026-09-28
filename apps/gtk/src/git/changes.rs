@@ -545,8 +545,18 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             };
             let icon = crate::doc::icon_for(&e.path);
             bind_file_line(&entry, icon, status_letter(&e, section), &e.path, directory);
-            stack.set_tooltip_text(Some(&e.path));
-            actions.set_visible(true);
+            // A repository of its own offers nothing, and says so where its path would be: the
+            // chooser lists it under its own name.
+            let own = own_repository(&e.path);
+            let tip = match own {
+                true => {
+                    let name = split_name(e.path.trim_end_matches('/')).1;
+                    format!("{name} is a repository of its own")
+                }
+                false => e.path.clone(),
+            };
+            stack.set_tooltip_text(Some(&tip));
+            actions.set_visible(!own);
             offer(&actions, section, discardable(&e, &key));
         }
         Row::Submodule(sub) => {
@@ -592,7 +602,17 @@ fn offer(actions: &gtk::Box, section: Section, discardable: bool) {
 /// either. `git clean` is the upgrade, and it wants a confirmation naming the files it removes
 /// for good.
 fn discardable(entry: &Entry, key: &str) -> bool {
-    entry.x != '?' || !Path::new(key).is_absolute()
+    !own_repository(&entry.path) && (entry.x != '?' || !Path::new(key).is_absolute())
+}
+
+/// Whether a folder's or a section's Discard has something to take and can take all of it. A
+/// repository of its own under it is skipped, not counted against it ([`own_repository`]).
+fn discards(entries: &[&Entry], key: &dyn Fn(&str) -> String) -> bool {
+    let mut taken = entries
+        .iter()
+        .filter(|e| !own_repository(&e.path))
+        .peekable();
+    taken.peek().is_some() && taken.all(|e| discardable(e, &key(&e.path)))
 }
 
 /// The changes list: the four sections in order, each behind a header, empty ones dropped.
@@ -622,8 +642,7 @@ fn rows_of(
         if entries.is_empty() {
             continue;
         }
-        let discardable =
-            section == Section::Changes && entries.iter().all(|e| discardable(e, &key(&e.path)));
+        let discardable = section == Section::Changes && discards(&entries, key);
         rows.push(Row::Header {
             title,
             all,
@@ -718,7 +737,7 @@ fn group_level(
             depth,
             path: path.clone(),
             open,
-            discardable: group.iter().all(|e| discardable(e, &key(&e.path))),
+            discardable: discards(&group, key),
         });
         if open {
             let under = format!("{path}/");
@@ -952,6 +971,14 @@ mod tests {
         };
         assert!(offered(&identity), "trashed, being in the vault");
         assert!(!offered(&outside), "nowhere to go outside it");
+
+        // A repository of its own is skipped by its folder's Discard, and offers none itself.
+        let held = [entry("src/a.md", '.', 'M'), entry("src/sub/", '?', '?')];
+        let refs: Vec<&Entry> = held.iter().collect();
+        let rows = grouped(&refs, Section::Changes, &HashSet::new(), &identity);
+        assert!(matches!(rows[0], Row::Folder { discardable, .. } if discardable));
+        assert!(!discardable(&held[1], "src/sub/"));
+        assert!(!discards(&refs[1..], &identity), "nothing left to take");
     }
 
     #[test]
