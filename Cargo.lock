@@ -76,6 +76,7 @@ dependencies = [
  "chrono",
  "ignore",
  "libc",
+ "memchr",
  "notify",
  "notify-debouncer-full",
  "nucleo-matcher",

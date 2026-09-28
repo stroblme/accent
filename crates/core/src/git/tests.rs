@@ -1447,6 +1447,37 @@ fn a_repo_without_submodules_lists_none() {
 }
 
 #[test]
+fn a_gitlink_with_no_gitmodules_is_still_listed() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init(dir);
+    write_file(dir, "a.md", "one\n");
+    let lib = dir.join("lib");
+    init(&lib);
+    write_file(&lib, "l.md", "l\n");
+    commit_all(&lib, "lib");
+    ok(dir, &["add", "a.md", "lib"]);
+    // One nobody has checked out: its folder holds no repository.
+    let gone = format!("160000,{},gone", head(&lib));
+    ok(dir, &["update-index", "--add", "--cacheinfo", &gone]);
+    ok(dir, &["commit", "-qm", "first"]);
+
+    let subs = submodules(&open(dir)).unwrap();
+    let seen: Vec<(&str, char, &str)> = subs
+        .iter()
+        .map(|s| (s.path.as_str(), s.state, s.oid.as_str()))
+        .collect();
+    let oid = head(&lib);
+    assert_eq!(
+        seen,
+        [("gone", '-', oid.as_str()), ("lib", ' ', oid.as_str())]
+    );
+}
+
+#[test]
 fn parse_submodule_reads_state_oid_path_and_describe() {
     let line = " 1234567890abcdef1234567890abcdef12345678 vendor/lib (v1.2-3-gabc)";
     let sub = parse_submodule(line).unwrap();
