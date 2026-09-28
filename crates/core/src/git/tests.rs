@@ -103,6 +103,7 @@ fn parse_status_reads_headers_changes_untracked_and_ignored() {
     write_file(dir, "b.md", "b\n");
     ok(dir, &["add", "b.md"]);
     write_file(dir, "c d.md", "c\n");
+    write_file(dir, "new/deep/x.md", "x\n");
     write_file(dir, "build/out.txt", "x\n");
 
     let st = status(&open(dir)).unwrap();
@@ -125,7 +126,8 @@ fn parse_status_reads_headers_changes_untracked_and_ignored() {
     assert_eq!(st.ignored, ["build/"], "a whole ignored tree is one entry");
 
     assert_eq!(paths(st.staged()), ["b.md"]);
-    assert_eq!(paths(st.changes()), ["a.md", "c d.md"]);
+    // An untracked folder is its files, as VS Code lists them, not one `new/` row.
+    assert_eq!(paths(st.changes()), ["a.md", "c d.md", "new/deep/x.md"]);
     assert_eq!(st.conflicts().count(), 0);
     assert!(st.dirty());
 
