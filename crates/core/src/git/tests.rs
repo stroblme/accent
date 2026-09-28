@@ -1053,6 +1053,43 @@ fn changed_files_reads_a_commit_a_root_a_merge_and_a_rename() {
 }
 
 #[test]
+fn stage_unstage_and_discard_take_more_paths_than_a_command_line_holds() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init(dir);
+    // 3 000 paths of some 800 bytes: 2.4 MB, past the 2 MB a command line holds by default.
+    let deep = vec!["d".repeat(200); 3].join("/");
+    let paths: Vec<String> = (0..3000)
+        .map(|i| format!("{deep}/{}{i}.md", "f".repeat(200)))
+        .collect();
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    for path in &paths {
+        write_file(dir, path, "one\n");
+    }
+    let repo = open(dir);
+    let staged = || status(&repo).unwrap().staged().count();
+
+    stage(&repo, &refs).unwrap();
+    assert_eq!(staged(), 3000);
+    unstage(&repo, &refs).unwrap();
+    assert_eq!(staged(), 0, "unstaged with no commit yet");
+    stage(&repo, &refs).unwrap();
+    ok(dir, &["commit", "-qm", "all"]);
+
+    for path in &paths {
+        write_file(dir, path, "two\n");
+    }
+    stage(&repo, &refs).unwrap();
+    unstage(&repo, &refs).unwrap();
+    assert_eq!(staged(), 0, "unstaged back to HEAD");
+    discard(&repo, &refs).unwrap();
+    assert!(status(&repo).unwrap().entries.is_empty());
+}
+
+#[test]
 fn commit_all_takes_tracked_changes_and_leaves_untracked_files_alone() {
     if !have_git() {
         return;

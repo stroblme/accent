@@ -1485,10 +1485,19 @@ pub fn stage_text(repo: &Repo, path: &str, text: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// `--` keeps a note called `-f`, or one whose name matches a branch, from being read as an option.
+/// The paths go in over stdin, NUL-separated, rather than on the command line, which the kernel
+/// caps at 2 MB: a Stage All over an untracked tree of 60 000 files was refused before git ran.
+/// Nor can a note called `-f` be read as an option there.
 fn write(repo: &Repo, verb: &[&str], paths: &[&str]) -> Result<(), Error> {
-    let args = [verb, &["--"][..], paths].concat();
-    run(&repo.root, &args, false)?;
+    let args = [verb, &["--pathspec-from-file=-", "--pathspec-file-nul"]].concat();
+    let mut child = command(&repo.root, &args, false)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    let (pipe, list) = (child.stdin.take(), paths.join("\0"));
+    // On a thread, so that git's output is read while the list goes in: either pipe may fill.
+    // The pipe closing as the thread ends is what tells git the list is complete.
+    std::thread::spawn(move || pipe.map(|mut pipe| pipe.write_all(list.as_bytes())));
+    checked(child.wait_with_output()?)?;
     Ok(())
 }
 
