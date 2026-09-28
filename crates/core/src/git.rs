@@ -430,12 +430,33 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
     })
 }
 
-/// The untracked paths under the folder `dir` (`""` for the whole repository) as git's default
-/// mode names them: a folder holding nothing tracked is one `dir/` entry, whatever is inside it.
-/// What Discard trashes for a folder, so an untracked one goes whole rather than file by file,
-/// leaving its emptied folders behind.
+/// What Discard trashes of the untracked paths under the folder `dir` (`""` for the whole
+/// repository): the names git's default mode gives them, so a folder holding nothing tracked
+/// goes whole rather than file by file, leaving its emptied folders behind.
+///
+/// Never a repository of its own, nor a folder holding one anywhere below — an ignored folder
+/// included, where no status lists it: such a folder goes file by file instead (`-uall`), and
+/// the repository, its history with it, stays. A `.git` file counts as much as a directory,
+/// which is what a worktree has.
 pub fn untracked(repo: &Repo, dir: &str) -> Result<Vec<String>, Error> {
-    let mut args = vec!["status", "--porcelain=v2", "-z", "--untracked-files=normal"];
+    let mut found = Vec::new();
+    for path in untracked_as(repo, dir, "normal")? {
+        match path.ends_with('/') && holds_git(&repo.root.join(&path)) {
+            false => found.push(path),
+            true => found.extend(
+                untracked_as(repo, &path, "all")?
+                    .into_iter()
+                    .filter(|p| !p.ends_with('/')),
+            ),
+        }
+    }
+    Ok(found)
+}
+
+/// The untracked paths under `dir` as `--untracked-files=<mode>` names them.
+fn untracked_as(repo: &Repo, dir: &str, mode: &str) -> Result<Vec<String>, Error> {
+    let mode = format!("--untracked-files={mode}");
+    let mut args = vec!["status", "--porcelain=v2", "-z", &mode];
     if !dir.is_empty() {
         args.extend(["--", dir]);
     }
@@ -446,6 +467,19 @@ pub fn untracked(repo: &Repo, dir: &str) -> Result<Vec<String>, Error> {
         .filter(|e| e.x == '?')
         .map(|e| e.path)
         .collect())
+}
+
+/// Whether a `.git` lies in `dir` or anywhere below it. Symlinks are not followed: trashing one
+/// takes the link, not what it points at.
+fn holds_git(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            e.file_name() == ".git"
+                || (e.file_type().is_ok_and(|t| t.is_dir()) && holds_git(&e.path()))
+        })
 }
 
 /// Whether a merge is under way, which porcelain does not say: git keeps `MERGE_HEAD` for exactly
