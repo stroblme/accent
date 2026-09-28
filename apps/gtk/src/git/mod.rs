@@ -1509,6 +1509,14 @@ fn ignored_key(vault_root: &Path, repo: &Repo, path: &str) -> String {
     }
 }
 
+/// Whether a changed path is a repository of its own inside the selected one — a nested one, or a
+/// worktree: under `--untracked-files=all` git names a directory, `dir/`, only where it has a
+/// `.git` of its own. Its row is listed and does nothing: staging it would record an embedded
+/// gitlink, and discarding it would trash its history.
+fn own_repository(path: &str) -> bool {
+    path.ends_with('/')
+}
+
 /// A path split into the directory and the file name, both borrowed. A file at the top level has
 /// an empty directory rather than a `.`, because the row shows the string as it is.
 ///

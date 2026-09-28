@@ -57,7 +57,7 @@ fun VaultPickerScreen(model: VaultModel) {
             Text("Accent", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
-                "Open the folder your notes are in.",
+                "Choose the folder that holds your notes.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -65,8 +65,8 @@ fun VaultPickerScreen(model: VaultModel) {
 
             if (!granted) {
                 Text(
-                    "Accent reads your notes where they already are, so it needs access to all " +
-                        "files. Nothing leaves the device.",
+                    "Accent reads notes where you keep them, so it needs access to all files. " +
+                        "Accent doesn't upload them.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -81,7 +81,7 @@ fun VaultPickerScreen(model: VaultModel) {
 
             if (recents.isNotEmpty()) {
                 Spacer(Modifier.height(32.dp))
-                Text("Recent", style = MaterialTheme.typography.labelMedium,
+                Text("Recent vaults", style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 LazyColumn {
                     items(recents) { path ->

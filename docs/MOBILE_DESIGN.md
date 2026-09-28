@@ -1,11 +1,10 @@
 # accent on Android — design rules
 
-What DESIGN.md says still holds: the note is the UI, one accent taken from the system, light and
-dark are one design, and the system owns fonts, colours, motion and scaling. This file is the part
-that cannot be carried across, because a phone is not a small desktop. Where these rules and
-Material 3 disagree, these win: the reference is the content-first, flat, typographic style of apps
-like Trade Republic, not Material's cards and elevation. DESIGN.md's Material 3 table says which
-Compose widget stands in for which desktop one.
+The desktop principles in DESIGN.md still apply: the note is the UI, the accent comes from the
+system, light and dark share one design, and the system owns fonts, colours, motion and scaling.
+This document covers the choices specific to a phone. Where these rules and Material 3 disagree,
+follow these rules: the reference is the flat, typographic style of apps like Trade Republic.
+DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterparts.
 
 ## Principles, restated for a phone
 
@@ -51,7 +50,7 @@ Compose widget stands in for which desktop one.
   query ranking them as it ranks names. A tap opens the tag on the same page: its notes by name and
   folder, from the top, under `#tag · N` in the accent, which a tap or Back takes back to the tags.
 - Backlinks is the notes linking to the document in front — a note, a PDF or an image — once each,
-  by name and folder under "Linked from …", the desktop's References for a note. One opened from
+  by name and folder under "Links to …", the desktop's References for a note. One opened from
   here is one step from where the reader was: Back from it opens that document again, at its top,
   since where a reader was in a page is the screen's to know. With nothing in front, or nothing
   linking, the page says so in a line where the rows would be.

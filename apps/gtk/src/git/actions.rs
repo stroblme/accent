@@ -645,7 +645,10 @@ impl Panel {
         );
     }
 
-    pub(super) fn stage(self: &Rc<Self>, paths: Vec<String>) {
+    /// A repository of its own among `paths` is left out: `git add` would record it as an
+    /// embedded gitlink, with no more than a warning on stderr.
+    pub(super) fn stage(self: &Rc<Self>, mut paths: Vec<String>) {
+        paths.retain(|path| !own_repository(path));
         let n = paths.len();
         self.write("stage", paths, move |vault, repo, paths| {
             vault
@@ -739,6 +742,9 @@ impl Panel {
         }) else {
             return;
         };
+        // A repository of its own is never trashed: skipped, and counted in the question.
+        let (kept, entries): (Vec<Entry>, Vec<Entry>) =
+            entries.into_iter().partition(|e| own_repository(&e.path));
         let (untracked, tracked): (Vec<Entry>, Vec<Entry>) =
             entries.into_iter().partition(|e| e.x == '?');
         let what = match (folder, tracked.first().or(untracked.first())) {
@@ -746,7 +752,13 @@ impl Panel {
             (Some(folder), _) => folder.to_string(),
             (None, Some(entry)) => split_name(&entry.path).1.to_string(),
         };
-        let body = discard_body(&what, folder.is_some(), tracked.len(), untracked.len());
+        let body = discard_body(
+            &what,
+            folder.is_some(),
+            tracked.len(),
+            untracked.len(),
+            kept.len(),
+        );
         let listed: Vec<String> = untracked.into_iter().map(|e| e.path).collect();
         let under = folder.map(str::to_string);
         let paths: Vec<String> = tracked.into_iter().map(|e| e.path).collect();
@@ -815,9 +827,9 @@ fn to_trash(named: Vec<String>, listed: &[String]) -> Vec<String> {
 
 /// What the Discard confirmation says will happen. A file's own row names the file; a folder's
 /// names the folder and how many files of each kind it takes, the ones that go back to the index
-/// and the untracked ones that go to the trash, and Discard All, the folder `""`, says the same
-/// of the whole section.
-fn discard_body(what: &str, folder: bool, tracked: usize, untracked: usize) -> String {
+/// and the untracked ones that go to the trash, and how many repositories of their own it leaves
+/// alone; Discard All, the folder `""`, says the same of the whole section.
+fn discard_body(what: &str, folder: bool, tracked: usize, untracked: usize, kept: usize) -> String {
     let undone = match tracked {
         0 => "",
         _ => " This cannot be undone.",
@@ -843,9 +855,14 @@ fn discard_body(what: &str, folder: bool, tracked: usize, untracked: usize) -> S
         .chain(trashed)
         .collect::<Vec<_>>()
         .join(" and ");
+    let kept = match kept {
+        0 => String::new(),
+        1 => " 1 repository of its own is left as it is.".to_string(),
+        n => format!(" {n} repositories of their own are left as they are."),
+    };
     match what {
-        "" => format!("{parts}.{undone}"),
-        _ => format!("In {what}, {parts}.{undone}"),
+        "" => format!("{parts}.{kept}{undone}"),
+        _ => format!("In {what}, {parts}.{kept}{undone}"),
     }
 }
 
@@ -901,26 +918,30 @@ mod tests {
     #[test]
     fn a_folder_discard_says_how_many_files_go_where() {
         assert_eq!(
-            discard_body("a.md", false, 1, 0),
+            discard_body("a.md", false, 1, 0, 0),
             "a.md goes back to what the index holds. This cannot be undone."
         );
         assert_eq!(
-            discard_body("new.md", false, 0, 1),
+            discard_body("new.md", false, 0, 1, 0),
             "new.md is not tracked, so it moves to the trash."
         );
         assert_eq!(
-            discard_body("src", true, 3, 1),
+            discard_body("src", true, 3, 1, 0),
             "In src, 3 files go back to what the index holds and 1 untracked file moves to the \
              trash. This cannot be undone."
         );
         assert_eq!(
-            discard_body("src", true, 0, 2),
+            discard_body("src", true, 0, 2, 0),
             "In src, 2 untracked files move to the trash."
         );
         assert_eq!(
-            discard_body("", true, 3, 2),
+            discard_body("", true, 3, 2, 0),
             "3 files go back to what the index holds and 2 untracked files move to the trash. \
              This cannot be undone."
+        );
+        assert_eq!(
+            discard_body("", true, 0, 2, 1),
+            "2 untracked files move to the trash. 1 repository of its own is left as it is."
         );
     }
 

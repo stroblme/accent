@@ -28,6 +28,9 @@ pulldown-latex = "0.8"
 # regex-automata and regex-syntax are already compiled in for `ignore`/`globset`, so the front end
 # is the only new code this pulls: it is what gives search its Regular Expression mode.
 regex = "1"
+# Already compiled in for `regex`; its `memmem` is what looks for a gitlink's mode in the index
+# (`git::may_hold_gitlink`) without a process.
+memchr = "2"
 blake3.workspace = true
 toml = "1"
 similar = { version = "3", default-features = false, features = ["text", "inline"] }

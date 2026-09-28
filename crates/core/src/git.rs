@@ -430,12 +430,33 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
     })
 }
 
-/// The untracked paths under the folder `dir` (`""` for the whole repository) as git's default
-/// mode names them: a folder holding nothing tracked is one `dir/` entry, whatever is inside it.
-/// What Discard trashes for a folder, so an untracked one goes whole rather than file by file,
-/// leaving its emptied folders behind.
+/// What Discard trashes of the untracked paths under the folder `dir` (`""` for the whole
+/// repository): the names git's default mode gives them, so a folder holding nothing tracked
+/// goes whole rather than file by file, leaving its emptied folders behind.
+///
+/// Never a repository of its own, nor a folder holding one anywhere below — an ignored folder
+/// included, where no status lists it: such a folder goes file by file instead (`-uall`), and
+/// the repository, its history with it, stays. A `.git` file counts as much as a directory,
+/// which is what a worktree has.
 pub fn untracked(repo: &Repo, dir: &str) -> Result<Vec<String>, Error> {
-    let mut args = vec!["status", "--porcelain=v2", "-z", "--untracked-files=normal"];
+    let mut found = Vec::new();
+    for path in untracked_as(repo, dir, "normal")? {
+        match path.ends_with('/') && holds_git(&repo.root.join(&path)) {
+            false => found.push(path),
+            true => found.extend(
+                untracked_as(repo, &path, "all")?
+                    .into_iter()
+                    .filter(|p| !p.ends_with('/')),
+            ),
+        }
+    }
+    Ok(found)
+}
+
+/// The untracked paths under `dir` as `--untracked-files=<mode>` names them.
+fn untracked_as(repo: &Repo, dir: &str, mode: &str) -> Result<Vec<String>, Error> {
+    let mode = format!("--untracked-files={mode}");
+    let mut args = vec!["status", "--porcelain=v2", "-z", &mode];
     if !dir.is_empty() {
         args.extend(["--", dir]);
     }
@@ -446,6 +467,19 @@ pub fn untracked(repo: &Repo, dir: &str) -> Result<Vec<String>, Error> {
         .filter(|e| e.x == '?')
         .map(|e| e.path)
         .collect())
+}
+
+/// Whether a `.git` lies in `dir` or anywhere below it. Symlinks are not followed: trashing one
+/// takes the link, not what it points at.
+fn holds_git(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            e.file_name() == ".git"
+                || (e.file_type().is_ok_and(|t| t.is_dir()) && holds_git(&e.path()))
+        })
 }
 
 /// Whether a merge is under way, which porcelain does not say: git keeps `MERGE_HEAD` for exactly
@@ -972,16 +1006,74 @@ fn free_slot(lanes: &mut Vec<Option<Lane>>) -> usize {
 ///
 /// A repository with no `.gitmodules` has none, and that is a stat rather than a process: the
 /// command costs about as much as `git status` (30 ms on a 40 000-file repository) and the Git
-/// pane asks on every refresh, so the common case must not pay for it.
+/// pane asks on every refresh, so the common case must not pay for it. Where the index may still
+/// hold a gitlink — broken, with no `.gitmodules` to say where it comes from, and refused by
+/// `git submodule status` for it — the index is asked instead ([`gitlinks`]).
 pub fn submodules(repo: &Repo) -> Result<Vec<Submodule>, Error> {
     if !repo.root.join(".gitmodules").exists() {
-        return Ok(Vec::new());
+        return match may_hold_gitlink(&repo.git_dir) {
+            true => gitlinks(repo),
+            false => Ok(Vec::new()),
+        };
     }
     let out = run(&repo.root, &["submodule", "status"], true)?;
     Ok(String::from_utf8_lossy(&out)
         .lines()
         .filter_map(parse_submodule)
         .collect())
+}
+
+/// Whether the index may hold a gitlink: its mode, 0o160000, is stored as the four bytes
+/// `00 00 e0 00` in every index version, so where they appear nowhere in the index — nor in the
+/// shared index a split one keeps the rest of its entries in — there is none. A match elsewhere
+/// in an entry costs no more than the `ls-files` it would otherwise spare. For 40 000 files, a
+/// 2.8 MB index, this is 1–3 ms of reading, where `ls-files` and its answer take 20.
+fn may_hold_gitlink(git_dir: &Path) -> bool {
+    let gitlink = [0, 0, 0xe0, 0];
+    std::fs::read_dir(git_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name();
+            name == "index" || name.to_string_lossy().starts_with("sharedindex.")
+        })
+        .any(|e| {
+            std::fs::read(e.path()).is_ok_and(|b| memchr::memmem::find(&b, &gitlink).is_some())
+        })
+}
+
+/// The gitlinks the index holds, as `git submodule status` lists submodules: ` ` where the folder
+/// holds its repository, `-` where nobody has checked it out, `U` while it is conflicted.
+fn gitlinks(repo: &Repo) -> Result<Vec<Submodule>, Error> {
+    let out = run(&repo.root, &["ls-files", "--stage", "-z"], true)?;
+    let mut subs = out
+        .split(|b| *b == 0)
+        .filter_map(|record| {
+            let record = String::from_utf8_lossy(record);
+            // `<mode> <oid> <stage>\t<path>`
+            let (meta, path) = record.split_once('\t')?;
+            let mut fields = meta.split(' ');
+            let (mode, oid, stage) = (fields.next()?, fields.next()?, fields.next()?);
+            if mode != "160000" {
+                return None;
+            }
+            let state = match (stage, repo.root.join(path).join(".git").exists()) {
+                ("0", true) => ' ',
+                ("0", false) => '-',
+                _ => 'U',
+            };
+            Some(Submodule {
+                path: path.to_string(),
+                oid: oid.to_string(),
+                state,
+                describe: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    // A conflicted one is a record per stage.
+    subs.dedup_by(|a, b| a.path == b.path);
+    Ok(subs)
 }
 
 /// `<state><oid> <path>` with an optional ` (<describe>)` tail.

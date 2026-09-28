@@ -1433,8 +1433,8 @@ pub fn build(
     body.add_named(
         &status_page(
             "folder-symbolic",
-            "Empty Vault",
-            "Create a note to start writing.",
+            "No Files Yet",
+            "A blank slate—create a note to get started.",
         ),
         Some("empty"),
     );
@@ -1444,7 +1444,7 @@ pub fn build(
             &status_page(
                 "network-server-symbolic",
                 &format!("Waiting for {host}"),
-                "Its files will show here when it answers.",
+                "Files will appear here when the host responds.",
             ),
             Some("waiting"),
         );

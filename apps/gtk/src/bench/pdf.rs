@@ -595,6 +595,120 @@ pub(super) fn bench_pdf_failed(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// The link dropped mid-draw: a page is added and the vault's ssh master ended at once, so the
+/// save lands while the link is down. The automatic reconnect is called off, as a refusal calls it
+/// off, to keep the link down for as long as that takes. The banner says the link went, so
+/// nothing more is said; then Reconnect Now brings the vault back, and the page must reach the
+/// host without another stroke.
+pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let (Some(pdf), Some(vault)) = (opened(&app, &rel).await, app.vault().cloned()) else {
+            println!("bench pdf dropped no_tab");
+            return bench_quit(&app);
+        };
+        let (key, Some(remote)) = (pdf.key(), vault.remote().cloned()) else {
+            println!("bench pdf dropped not_remote");
+            return bench_quit(&app);
+        };
+        println!(
+            "bench pdf dropped opened pages={} in_vault {} said={}",
+            pdf.page_count(),
+            vault_pages(&app, &key),
+            app.toasted.get()
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        let argv = accent_api::ssh::exit(remote.url(), remote.control_path());
+        let ended = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .status()
+            .is_ok_and(|s| s.success());
+        // The banner is up once the window has heard; that is when its countdown can go.
+        for _ in 0..50 {
+            if app.connection.is_revealed() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        app.connection_refused("the drill holds the link down");
+        written(&app).await;
+        println!(
+            "bench pdf dropped down ended={ended} offline={} pages={} unsent={} said={} {:?}",
+            app.offline(),
+            pdf.page_count(),
+            pdf.unsent(),
+            app.toasted.get(),
+            bench_said(&app)
+        );
+        app.reconnect_now();
+        for _ in 0..200 {
+            if !app.offline() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        written(&app).await;
+        println!(
+            "bench pdf dropped back offline={} pages={} unsent={} in_vault {} said={}",
+            app.offline(),
+            pdf.page_count(),
+            pdf.unsent(),
+            vault_pages(&app, &key),
+            app.toasted.get()
+        );
+        bench_quit(&app);
+    });
+}
+
+/// A remote PDF renamed while its upload is still on the way: a page is added, and the file is
+/// renamed two seconds later, which is inside the upload for a document of a few megabytes. The
+/// upload must not bring the old name back on the host, and the page must end up in the renamed
+/// file, not beside it as `(edited)`.
+pub(super) fn bench_pdf_renaming(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let (Some(pdf), Some(vault), Some(ops)) = (
+            opened(&app, &rel).await,
+            app.vault().cloned(),
+            app.ops().cloned(),
+        ) else {
+            println!("bench pdf renaming no_tab");
+            return bench_quit(&app);
+        };
+        let from = pdf.key();
+        let Some(to) = from
+            .strip_suffix(".pdf")
+            .map(|stem| format!("{stem}-renamed.pdf"))
+        else {
+            println!("bench pdf renaming not_a_pdf {from}");
+            return bench_quit(&app);
+        };
+        println!(
+            "bench pdf renaming opened pages={} in_vault {}",
+            pdf.page_count(),
+            vault_pages(&app, &from)
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        glib::timeout_future(Duration::from_secs(2)).await;
+        crate::fileops::move_all(&ops, vec![(from.clone(), to.clone())]);
+        glib::timeout_future(Duration::from_secs(20)).await;
+        let edited = [&from, &to]
+            .into_iter()
+            .any(|key| vault.exists(&accent_api::remote::edited_name(key, 1)));
+        println!(
+            "bench pdf renaming settled key={:?} pages={} in_vault {} old_back={} edited={edited} \
+             unsent={} said={}",
+            pdf.key(),
+            pdf.page_count(),
+            vault_pages(&app, &to),
+            vault.exists(&from),
+            pdf.unsent(),
+            app.toasted.get()
+        );
+        bench_quit(&app);
+    });
+}
+
 /// New Drawing end to end, as far as a headless run reaches: fire the window action, read what
 /// the dialog came up with, pick the last size and answer it, then say what reached the disk and
 /// what the tab it opened is holding.

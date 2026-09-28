@@ -760,9 +760,10 @@ impl App {
                     "No Language Server",
                     format!("Symbols need a language server for {language}."),
                 ),
-                None if tab.flavour().is_note() => {
-                    ("No Headings", "This note has no headings yet.".to_string())
-                }
+                None if tab.flavour().is_note() => (
+                    "No Headings",
+                    "Add a heading to help navigate this note.".to_string(),
+                ),
                 None => (
                     "No Symbols",
                     "Nothing in this file has a name to list.".to_string(),
