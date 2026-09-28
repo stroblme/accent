@@ -531,6 +531,70 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// The write-back's failure arm: the host will not take the upload at all, which is neither the
+/// etag refusal nor a conflict copy. The document and its folder are made read-only on the host
+/// behind the app's back, and a page is added twice: both saves fail, and only the first says so.
+/// Then the host takes writes again, a third page goes up and says nothing, and a failure after
+/// that one is news again. Each `chmod` of the folder also sets off a rescan on the host, whose
+/// "Indexed …" toast is in the count: +2, +0, +1, +2 is one failure said per streak.
+pub(super) fn bench_pdf_failed(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let (Some(pdf), Some(vault)) = (opened(&app, &rel).await, app.vault().cloned()) else {
+            println!("bench pdf failed no_tab");
+            return bench_quit(&app);
+        };
+        let (key, Some(remote)) = (pdf.key(), vault.remote().cloned()) else {
+            println!("bench pdf failed not_remote");
+            return bench_quit(&app);
+        };
+        let path = vault.resolve(&key).unwrap_or_default();
+        let (file, dir) = (
+            accent_api::ssh::quote(&path.to_string_lossy()),
+            accent_api::ssh::quote(&path.parent().unwrap_or(&path).to_string_lossy()),
+        );
+        let host = |mode: &str| {
+            let argv = accent_api::ssh::run(
+                remote.url(),
+                remote.control_path(),
+                &format!("chmod {mode} {file} {dir}"),
+            );
+            std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let add = || WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        let step = |name: &str| {
+            println!(
+                "bench pdf failed {name} pages={} in_vault {} said={} {:?}",
+                pdf.page_count(),
+                vault_pages(&app, &key),
+                app.toasted.get(),
+                bench_said(&app)
+            )
+        };
+        step("opened");
+        println!("bench pdf failed read_only={}", host("a-w"));
+        let _ = add();
+        written(&app).await;
+        step("refused");
+        let _ = add();
+        written(&app).await;
+        step("again");
+        println!("bench pdf failed writable={}", host("u+w"));
+        let _ = add();
+        written(&app).await;
+        step("sent");
+        println!("bench pdf failed read_only={}", host("a-w"));
+        let _ = add();
+        written(&app).await;
+        step("refused_after");
+        println!("bench pdf failed writable={}", host("u+w"));
+        bench_quit(&app);
+    });
+}
+
 /// New Drawing end to end, as far as a headless run reaches: fire the window action, read what
 /// the dialog came up with, pick the last size and answer it, then say what reached the disk and
 /// what the tab it opened is holding.

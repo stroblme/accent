@@ -404,8 +404,18 @@ impl App {
                         );
                     }
                 }
-                Some(Err(e)) => app.cannot(&what, e),
-                None => app.cannot(&what, "the upload stopped"),
+                // It did not reach the host at all. Said once, as a refusal is: every stroke after
+                // it fails the same way until one lands.
+                Some(Err(e)) => {
+                    if pdf.told_failure() {
+                        app.cannot(&what, e);
+                    }
+                }
+                None => {
+                    if pdf.told_failure() {
+                        app.cannot(&what, "the upload stopped");
+                    }
+                }
             }
             // Drawn on while it was out, and still the same file: once more, however many saves
             // landed meanwhile.
