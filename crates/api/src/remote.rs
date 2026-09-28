@@ -120,6 +120,43 @@ fn keep(dest: &Path, why: String) -> Pushed {
     }
 }
 
+/// The stamp of one cached copy, locked for as long as this is held: the etag the host reported
+/// when the copy was last fetched or pushed.
+///
+/// A fetch and a push each hold it from the `stat` that decides what to do until the stamp is
+/// written, so two of one file take turns. Two fetches racing on a burst of watcher events could
+/// otherwise land the older bytes under the newer stamp, and the fetch the host's report of a push
+/// sets off could pull the pushed bytes back over a page still being drawn on.
+struct Stamp(std::fs::File);
+
+impl Stamp {
+    fn hold(path: &Path) -> std::io::Result<Stamp> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        file.lock()?;
+        Ok(Stamp(file))
+    }
+
+    /// `None` for a copy never fetched. Read once per hold: it reads from the file's position.
+    fn etag(&self) -> Option<crate::Etag> {
+        serde_json::from_reader(&self.0).ok()
+    }
+
+    /// Written in place: a file renamed over it would be one the next holder is not waiting on.
+    fn set(&self, etag: &crate::Etag) -> std::io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        self.0.set_len(0)?;
+        self.0.write_all_at(&serde_json::to_vec(etag)?, 0)
+    }
+}
+
 /// One vault on a remote host.
 pub struct Remote {
     url: Url,
@@ -421,6 +458,7 @@ impl Remote {
                 format!("{rel} is outside the vault"),
             ));
         };
+        let stamp = Stamp::hold(&stamp)?;
         let current: Option<crate::Etag> = self
             .call("stat", json!([rel]))
             .map_err(RpcError::io_error)?;
@@ -432,18 +470,15 @@ impl Remote {
         };
         // The remote etag against the one the cached copy was written with. Size and mtime are
         // enough here: the inode is the remote's, and it is in the etag we stored.
-        let cached = std::fs::read(&stamp)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<crate::Etag>(&b).ok());
-        if cached == Some(current) && dest.exists() {
+        if stamp.etag() == Some(current) && dest.exists() {
             return Ok(dest);
         }
 
-        for dir in [dest.parent(), stamp.parent()].into_iter().flatten() {
+        if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir)?;
         }
         self.receive(rel, &dest, current.size, progress)?;
-        let _ = std::fs::write(&stamp, serde_json::to_vec(&current).unwrap_or_default());
+        let _ = stamp.set(&current);
         Ok(dest)
     }
 
@@ -471,18 +506,16 @@ impl Remote {
                 format!("{rel} is outside the vault"),
             ));
         };
+        let stamp = Stamp::hold(&stamp)?;
         let current: Option<crate::Etag> = self
             .call("stat", json!([rel]))
             .map_err(RpcError::io_error)?;
-        let fetched = std::fs::read(&stamp)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<crate::Etag>(&b).ok());
-        if current != fetched {
+        if current != stamp.etag() {
             return Ok(self.push_beside(&dest, rel, edited));
         }
         self.upload(&dest, rel)?;
         if let Ok(Some(now)) = self.call::<Option<crate::Etag>>("stat", json!([rel])) {
-            let _ = std::fs::write(&stamp, serde_json::to_vec(&now).unwrap_or_default());
+            let _ = stamp.set(&now);
         }
         Ok(Pushed::Sent)
     }
@@ -898,8 +931,46 @@ fn drain(stream: impl Read + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::{edited_name, kept_path};
+    use super::{Stamp, edited_name, kept_path};
     use std::path::Path;
+    use std::time::Duration;
+
+    /// A second fetch or push of one file waits for the first to write its stamp, and then reads
+    /// that stamp rather than the one before it.
+    #[test]
+    fn a_stamp_is_held_by_one_transfer_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes/a.pdf");
+        let first = Stamp::hold(&path).unwrap();
+        assert_eq!(first.etag(), None);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiting = path.clone();
+        std::thread::spawn(move || {
+            let second = Stamp::hold(&waiting).unwrap();
+            tx.send(second.etag()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+
+        let long = crate::Etag {
+            mtime_ns: 1_000_000_000_000,
+            size: 1_000_000,
+            ino: 1_000_000,
+        };
+        let short = crate::Etag {
+            mtime_ns: 1,
+            size: 1,
+            ino: 1,
+        };
+        first.set(&long).unwrap();
+        // Written in place, so a shorter one leaves nothing of the longer behind.
+        first.set(&short).unwrap();
+        drop(first);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Some(short)
+        );
+    }
 
     /// The copy a refused upload leaves behind keeps its extension, so whatever reads that kind
     /// of file still opens it, and it never lands on the name a fetch writes.

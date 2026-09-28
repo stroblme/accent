@@ -173,11 +173,13 @@ impl Watcher {
         true
     }
 
-    /// Watch `dir` again, although the set already holds it: a directory removed and made anew
-    /// is a new one, and the kernel dropped the watch along with the old.
-    pub fn rewatch(&mut self, dir: &Path) {
-        if let Err(e) = self.backend.watch(dir) {
-            tracing::debug!(dir = %dir.display(), error = %e, "not watching");
+    /// Take `dir`, and everything under it, out of the set without unwatching: it was removed,
+    /// and the kernel dropped its watches with it. A directory made again under that name is a new
+    /// one, which the next [`set_dirs`](Self::set_dirs) naming it watches rather than takes for
+    /// the one already watched.
+    pub fn forget(&mut self, dir: &Path) {
+        if self.dirs.remove(dir) {
+            self.dirs.retain(|d| !d.starts_with(dir));
         }
     }
 }

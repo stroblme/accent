@@ -83,7 +83,8 @@ use tags::bench_tags;
 /// and `=sync` asks for a Sync during the fetch on opening and prints whether it waited for it.
 /// `=focus` clicks rows and walks the keyboard over them through XTEST, and prints whether each
 /// row's buttons are out. `=switch` picks the second repository and clicks the history's first row
-/// at once, and prints what that asked for. `=markers:<rel>` resolves the conflict blocks a merge
+/// at once, and prints what that asked for, then what each pick draws at once, every repository
+/// twice over (see `git::bench_git_switch`). `=markers:<rel>` resolves the conflict blocks a merge
 /// left in a note through their buttons and the palette (see `git::bench_git_markers`). `=branch`
 /// types names git would refuse into Create Branch… and prints the name the dialog says it will
 /// create, then creates one and prints the branch HEAD is on. `=syncall` presses Sync All and

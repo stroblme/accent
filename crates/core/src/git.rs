@@ -61,8 +61,8 @@ pub struct Entry {
 pub struct Status {
     pub branch: Branch,
     pub entries: Vec<Entry>,
-    /// Ignored paths, as git reports them: a wholly ignored directory is one entry with a
-    /// trailing slash rather than a row per file inside it.
+    /// Ignored paths, as git reports them: a directory an ignore pattern matches is one entry with
+    /// a trailing slash rather than a row per file inside it.
     pub ignored: Vec<String>,
     /// A merge stopped part way and is waiting for a commit or an abort.
     pub merging: bool,
@@ -402,10 +402,25 @@ fn repo(root: PathBuf, git_dir: PathBuf) -> Repo {
 
 // ---------------------------------------------------------------------- status
 
+/// Every untracked file on its own row (`-uall`), as VS Code lists them: git's default makes an
+/// untracked folder one `dir/` entry, which says nothing about what is in it and leaves nothing
+/// to open or stage one at a time. A nested repository stays one `dir/` entry either way.
+///
+/// `--ignored=matching` is what keeps that affordable: the default mode under `-uall` lists every
+/// file inside an ignored folder, a `target/` or an ignored `node_modules/` included, while this
+/// one reports a folder its pattern matches as one `dir/` entry without walking it. A file
+/// matched by a file pattern (`*.log`) comes one by one, never as its folder.
 pub fn status(repo: &Repo) -> Result<Status, Error> {
     let out = run(
         &repo.root,
-        &["status", "--porcelain=v2", "-z", "--branch", "--ignored"],
+        &[
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--branch",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
         true,
     )?;
     Ok(Status {
@@ -430,7 +445,7 @@ fn rebasing(repo: &Repo) -> bool {
         || (apply.exists() && !apply.join("applying").exists())
 }
 
-/// Parse `git status --porcelain=v2 -z --branch --ignored`.
+/// Parse `git status --porcelain=v2 -z --branch` with its `--ignored` records.
 ///
 /// Paths arrive as raw bytes under `-z` (no quoting), so one that is not UTF-8 comes through
 /// lossily rather than being dropped: a note the user can see must not go missing from the list.

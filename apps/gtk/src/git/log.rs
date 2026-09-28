@@ -117,14 +117,13 @@ impl Panel {
         }
     }
 
-    /// Take the whole history away until the next refresh reads one: what picking another
-    /// repository does. Every row on screen names a commit of the one it replaces, and a click
-    /// on one would be asked of the new one, which answers `fatal: bad object`.
-    pub(super) fn clear_log(&self) {
+    /// Draw the history the state holds from scratch, nothing expanded: what picking another
+    /// repository does, every row on screen naming a commit of the one it replaces.
+    pub(super) fn redraw_log(self: &Rc<Self>) {
         self.collapse();
-        self.has_more.set(false);
-        self.state.borrow_mut().commits.clear();
-        self.log.remove_all();
+        let commits = self.state.borrow().commits.clone();
+        self.has_more.set(commits.len() >= PAGE);
+        self.fill_log(commits, 0);
     }
 
     /// Show, or hide again, the files one commit changed.
@@ -209,10 +208,11 @@ impl Panel {
                 vault.git_log(&repo, skip, PAGE)
             })
             .await;
-            // Another repository was picked while git answered, and its history is not this.
+            // Another repository was picked while git answered, and its history is not this; or
+            // it was picked away and back, which leaves its first page alone to follow on from.
             let moved = {
                 let state = panel.state.borrow();
-                state.repos.get(state.selected) != Some(&asked)
+                state.repos.get(state.selected) != Some(&asked) || state.commits.len() != skip
             };
             if moved {
                 return;
