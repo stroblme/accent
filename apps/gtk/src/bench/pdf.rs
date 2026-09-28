@@ -660,6 +660,55 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// A remote PDF renamed while its upload is still on the way: a page is added, and the file is
+/// renamed two seconds later, which is inside the upload for a document of a few megabytes. The
+/// upload must not bring the old name back on the host, and the page must end up in the renamed
+/// file, not beside it as `(edited)`.
+pub(super) fn bench_pdf_renaming(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let (Some(pdf), Some(vault), Some(ops)) = (
+            opened(&app, &rel).await,
+            app.vault().cloned(),
+            app.ops().cloned(),
+        ) else {
+            println!("bench pdf renaming no_tab");
+            return bench_quit(&app);
+        };
+        let from = pdf.key();
+        let Some(to) = from
+            .strip_suffix(".pdf")
+            .map(|stem| format!("{stem}-renamed.pdf"))
+        else {
+            println!("bench pdf renaming not_a_pdf {from}");
+            return bench_quit(&app);
+        };
+        println!(
+            "bench pdf renaming opened pages={} in_vault {}",
+            pdf.page_count(),
+            vault_pages(&app, &from)
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        glib::timeout_future(Duration::from_secs(2)).await;
+        crate::fileops::move_all(&ops, vec![(from.clone(), to.clone())]);
+        glib::timeout_future(Duration::from_secs(20)).await;
+        let edited = [&from, &to]
+            .into_iter()
+            .any(|key| vault.exists(&accent_api::remote::edited_name(key, 1)));
+        println!(
+            "bench pdf renaming settled key={:?} pages={} in_vault {} old_back={} edited={edited} \
+             unsent={} said={}",
+            pdf.key(),
+            pdf.page_count(),
+            vault_pages(&app, &to),
+            vault.exists(&from),
+            pdf.unsent(),
+            app.toasted.get()
+        );
+        bench_quit(&app);
+    });
+}
+
 /// New Drawing end to end, as far as a headless run reaches: fire the window action, read what
 /// the dialog came up with, pick the last size and answer it, then say what reached the disk and
 /// what the tab it opened is holding.

@@ -372,6 +372,9 @@ impl App {
                 return;
             };
             let what = format!("save {}", doc::file_name(&key));
+            // Renamed while it was out: the tab has followed, and what did not reach the host goes
+            // again under the new name, below.
+            let renamed = pdf.key() != key;
             match sent {
                 Some(Ok(accent_api::remote::Pushed::Sent)) => pdf.clear_conflict(),
                 // The host's copy moved while this one was being changed. Overwriting it would
@@ -404,9 +407,12 @@ impl App {
                         );
                     }
                 }
-                // The link went: the banner says so, as it does for a note that cannot save.
-                // It goes again on `Event::Connected`.
-                Some(Err(e)) if e.kind() == std::io::ErrorKind::NotConnected => pdf.lost_upload(),
+                // The file was renamed while this was on its way, and it goes again below; or the
+                // link went, which the banner says as it does for a note that cannot save, and it
+                // goes again on `Event::Connected`.
+                Some(Err(e)) if renamed || e.kind() == std::io::ErrorKind::NotConnected => {
+                    pdf.lost_upload()
+                }
                 // It did not reach the host at all. Said once, as a refusal is: every stroke after
                 // it fails the same way until one lands.
                 Some(Err(e)) => {
@@ -420,9 +426,8 @@ impl App {
                     }
                 }
             }
-            // Drawn on while it was out, and still the same file: once more, however many saves
-            // landed meanwhile.
-            if pdf.upload_done() && pdf.key() == key {
+            // Drawn on while it was out: once more, however many saves landed meanwhile.
+            if pdf.upload_done() || (renamed && pdf.unsent()) {
                 app.push_pdf(&pdf);
             }
         });

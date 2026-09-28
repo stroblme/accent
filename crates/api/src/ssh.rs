@@ -480,8 +480,15 @@ pub fn install_server_cmd(hash: &str, size: usize) -> String {
 /// its target and an existing file keeps its mode; a new one gets the umask's, as `cat >` gave it.
 /// A folder that takes no new file is named as the reason, rather than the shell's complaint
 /// about a temporary the reader never heard of.
-pub fn put_cmd(path: &str, size: u64) -> String {
+///
+/// `replace` is for a file that is being written back: one moved or deleted on the host while the
+/// bytes were on their way is left gone, where the rename would bring it back under the old name.
+pub fn put_cmd(path: &str, size: u64, replace: bool) -> String {
     let path = quote(path);
+    let gone = match replace {
+        true => "[ -e \"$p\" ] || { echo \"${p##*/} was moved or deleted\" >&2; exit 1; }; ",
+        false => "",
+    };
     format!(
         "p=$(readlink -f -- {path}) || p={path}; t=\"${{p%/*}}/.accent-$$\"; \
          trap 'rm -f \"$t\"' EXIT; trap 'exit 1' HUP INT TERM; \
@@ -490,7 +497,7 @@ pub fn put_cmd(path: &str, size: u64) -> String {
          if [ \"$(wc -c < \"$t\")\" -ne {size} ]; then \
          echo 'the upload was cut short' >&2; exit 1; fi; \
          m=$(stat -c %a \"$p\" 2>/dev/null) && chmod \"$m\" \"$t\"; \
-         mv -f \"$t\" \"$p\""
+         {gone}mv -f \"$t\" \"$p\""
     )
 }
 
@@ -1051,10 +1058,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use std::process::{Command, Stdio};
         let dir = tempfile::tempdir().unwrap();
-        let put = |path: &Path, bytes: &[u8], size: u64| {
+        let put_as = |path: &Path, bytes: &[u8], size: u64, replace: bool| {
             let mut sh = Command::new("sh")
                 .arg("-c")
-                .arg(put_cmd(&path.to_string_lossy(), size))
+                .arg(put_cmd(&path.to_string_lossy(), size, replace))
                 .stdin(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -1062,6 +1069,7 @@ mod tests {
             sh.stdin.take().unwrap().write_all(bytes).unwrap();
             sh.wait_with_output().unwrap().status.success()
         };
+        let put = |path: &Path, bytes: &[u8], size: u64| put_as(path, bytes, size, false);
         let (file, link) = (dir.path().join("a b.pdf"), dir.path().join("link.pdf"));
         std::fs::write(&file, "old").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -1069,13 +1077,15 @@ mod tests {
 
         assert!(!put(&file, b"ne", 3));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "old");
-        assert!(put(&link, b"new", 3));
+        assert!(put_as(&link, b"new", 3, true));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
         assert!(link.is_symlink());
         let mode = std::fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o640);
-        // A file nothing held yet, and no temporary left beside any of them.
+        // A file nothing held yet, unless it is one to replace, which has gone meanwhile; and no
+        // temporary left beside any of them.
         assert!(put(&dir.path().join("new.png"), b"png", 3));
+        assert!(!put_as(&dir.path().join("moved.pdf"), b"pdf", 3, true));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 
