@@ -565,9 +565,10 @@ async fn bench_lines(view: &multicaret::View) {
 /// autosave a second later would write the drill's own text into the note.
 pub(super) fn bench_list(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
-    let app = app.clone();
+    let (app, rel) = (app.clone(), rel.to_string());
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
-        let Some(tab) = app.open_tabs().into_iter().next() else {
+        // The note asked for, not the first tab: a session restore may have put others first.
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
         bench_popup(&app, &tab, tab.text());
