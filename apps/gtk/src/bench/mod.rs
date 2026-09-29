@@ -344,10 +344,11 @@ use tags::bench_tags;
 /// folder that is not there yet, then tries the two moves it refuses, and prints the dialog, the
 /// toasts and where the files are (`files::bench_move`). Only on a scratch vault under `/tmp`.
 ///
-/// `ACCENT_BENCH_SCROLL=<rel_dir>` scrolls the Files tree and the Git pane's two lists half way
-/// down with the keyboard on a row, changes the vault and its repository under them, and prints
-/// where each list is after every change (`scroll::bench_scroll`). It makes the vault a
-/// repository, so only on a scratch vault under `/tmp`.
+/// `ACCENT_BENCH_SCROLL=<rel_dir>` scrolls the Files tree, the Git pane's two lists, the Search
+/// results and the Tags list half way down with the keyboard on a row, changes the vault and its
+/// repository under them, and prints where each list is after every change
+/// (`scroll::bench_scroll`). It makes the vault a repository, so only on a scratch vault under
+/// `/tmp`.
 ///
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram (a sample is written there if there is none) and
 /// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`.

@@ -147,6 +147,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A search result row is a match, not a file: each quotes its line with the match marked and the file and line dim beside it, and past five rows from one file the rest gather into a "+N more in this file" row, so no file takes the list. A hit opens on its place with the match marked.
 - The "+N more" row opens nothing: a click lists those matches in its place, the first where the row was, so the pointer rests on a match and the list does not move. A hundred come at a time, any rest behind a "+N more" row again, so a file with thousands of matches is walked rather than poured into the list. The file stays open through the vault changing under the same query, and a new query lists it shut; there is no collapse.
 - The marks are the tab's, not the bar's: they last until an edit moves them or that pane's bar replaces or clears the query.
+- A refill behind the reader — a save, a watcher event — leaves every list here and in Tags and Outline where it is, as the tree's does (Files): a row that goes with the keyboard on it hands it to the row now in its place.
 
 ### Git pane
 

@@ -35,10 +35,8 @@ pub(super) fn path_list(
         },
     );
 
-    let view = gtk::ListView::new(
-        Some(gtk::SingleSelection::new(Some(model.clone()))),
-        Some(factory),
-    );
+    let view = gtk::ListView::new(None::<gtk::SingleSelection>, Some(factory));
+    crate::widgets::set_model(&view, &gtk::SingleSelection::new(Some(model.clone())));
     view.add_css_class("navigation-sidebar");
     // Backlinks and the files under a tag are result lists too, and open on one click like the
     // rest of them.
