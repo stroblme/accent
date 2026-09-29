@@ -1210,9 +1210,12 @@ mod imp {
             self.adopt(1, adjustment);
         }
 
-        /// Follow an adjustment: redraw when it moves, and drop the handler on the old one.
+        /// Follow an adjustment: redraw when it moves, and drop the handler on the old one. The
+        /// handler holds the view weakly: the view holds the adjustment, and a scrolled window
+        /// going away leaves its child's adjustments set, so a strong one kept every closed PDF's
+        /// views and their rendered tiles alive.
         fn adopt(&self, slot: usize, adjustment: Option<gtk::Adjustment>) {
-            let obj = self.obj().clone();
+            let obj = self.obj().downgrade();
             let old = match slot {
                 0 => self.hadjustment.replace(adjustment.clone()),
                 _ => self.vadjustment.replace(adjustment.clone()),
@@ -1222,8 +1225,10 @@ mod imp {
             }
             if let Some(adjustment) = adjustment {
                 let id = adjustment.connect_value_changed(move |_| {
-                    obj.queue_draw();
-                    obj.imp().notice_page();
+                    if let Some(obj) = obj.upgrade() {
+                        obj.queue_draw();
+                        obj.imp().notice_page();
+                    }
                 });
                 self.adj_handlers.borrow_mut()[slot] = Some(id);
             }
