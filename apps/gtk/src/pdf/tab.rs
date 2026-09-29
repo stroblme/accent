@@ -514,6 +514,12 @@ impl PdfTab {
     }
 
     /// What the reading view and then the strip last painted without. Only drills ask.
+    /// The reading view and the thumbnail strip, to tell whether they went with the tab.
+    #[cfg(feature = "bench")]
+    pub fn views(&self) -> [gtk::Widget; 2] {
+        [self.view.clone().upcast(), self.thumbs.clone().upcast()]
+    }
+
     #[cfg(feature = "bench")]
     pub fn unrendered(&self) -> (Vec<String>, Vec<String>) {
         (self.view.unrendered(), self.thumbs.unrendered())

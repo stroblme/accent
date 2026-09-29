@@ -707,6 +707,10 @@ impl Pane {
         self.tabs.connect_page_detached(move |_, page, _| {
             if let Some(pane) = weak.upgrade() {
                 pane.keep(page);
+                // Out of the history now rather than at the next selection: a page holds its
+                // whole document, and the tab a close selects is picked while the page is still
+                // here, so a closed tab stayed in memory until the reader next switched tabs.
+                pane.history.borrow_mut().retain(|p| p != page);
             }
         });
     }
