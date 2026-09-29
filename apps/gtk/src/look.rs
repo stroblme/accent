@@ -201,9 +201,9 @@ pub enum Served {
     Bytes(glib::Bytes, &'static str),
 }
 
-/// [`show`] for the preview: only an image that is recoloured, or that its EXIF turns where WebKit
-/// would not, is decoded and encoded again, as a PNG; everything else, and anything that fails on
-/// the way, is served as the file.
+/// [`show`] for the preview: only an image that is recoloured, that its EXIF turns where WebKit
+/// would not, or that WebKit cannot draw (a TIFF), is decoded and encoded again, as a PNG;
+/// everything else, and anything that fails on the way, is served as the file.
 pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
     if svg(path) {
         return match look
@@ -214,11 +214,15 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
             None => Served::File,
         };
     }
-    // WebKit turns a JPEG the way its EXIF says, and no other image.
-    let turned = || !matches!(extension(path).as_str(), "jpg" | "jpeg") && tag(path) != 1;
+    // WebKit draws no TIFF, and turns a JPEG the way its EXIF says but no other image.
+    let converted = || match extension(path).as_str() {
+        "tif" | "tiff" => true,
+        "jpg" | "jpeg" => false,
+        _ => tag(path) != 1,
+    };
     match recoloured(path, look, inverted, || decode(path).ok()) {
         Some(texture) => Served::Bytes(texture.save_to_png_bytes(), "image/png"),
-        None if turned() => match decode(path) {
+        None if converted() => match decode(path) {
             Ok(texture) => Served::Bytes(texture.save_to_png_bytes(), "image/png"),
             Err(_) => Served::File,
         },
@@ -476,7 +480,7 @@ impl Scaled {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const DARK: Page = ([29, 29, 32], [235, 235, 235]);
@@ -529,46 +533,53 @@ mod tests {
         assert!(!light.asks(true) && !dark.asks(true) && !cream.asks(true));
     }
 
+    /// The shades of [`grey_tiff`]'s six pixels, row by row.
+    const SHADES: [u8; 6] = [10, 20, 30, 40, 50, 60];
+
+    /// A 3 × 2 grey TIFF, each pixel its own shade, stored the way `tag` says to turn it.
+    pub(crate) fn grey_tiff(tag: u16) -> Vec<u8> {
+        // Little-endian: the header, the pixels, then the directory.
+        let entries: [(u16, u16, u32); 10] = [
+            (256, 3, 3), // width
+            (257, 3, 2), // height
+            (258, 3, 8), // bits per sample
+            (259, 3, 1), // no compression
+            (262, 3, 1), // black is zero
+            (273, 4, 8), // the strip's offset
+            (274, 3, u32::from(tag)),
+            (277, 3, 1), // samples per pixel
+            (278, 3, 2), // rows per strip
+            (279, 4, 6), // the strip's length
+        ];
+        let mut file = [&b"II*\0"[..], &14u32.to_le_bytes(), &SHADES].concat();
+        file.extend(10u16.to_le_bytes());
+        for (id, kind, value) in entries {
+            file.extend(
+                [
+                    &id.to_le_bytes()[..],
+                    &kind.to_le_bytes(),
+                    &1u32.to_le_bytes(),
+                ]
+                .concat(),
+            );
+            file.extend(value.to_le_bytes());
+        }
+        file.extend(0u32.to_le_bytes());
+        file
+    }
+
     /// A TIFF comes out of [`decode`] upright whatever its tag, GDK having done part of the turn
-    /// ([`after_libtiff`]): a 3 × 2 grey image, each pixel its own shade.
+    /// ([`after_libtiff`]).
     #[test]
     fn a_tiff_is_decoded_upright() {
-        let shades = [10u8, 20, 30, 40, 50, 60];
         for tag in 1..=8u16 {
-            // Little-endian: the header, the pixels, then the directory.
-            let entries: [(u16, u16, u32); 10] = [
-                (256, 3, 3), // width
-                (257, 3, 2), // height
-                (258, 3, 8), // bits per sample
-                (259, 3, 1), // no compression
-                (262, 3, 1), // black is zero
-                (273, 4, 8), // the strip's offset
-                (274, 3, u32::from(tag)),
-                (277, 3, 1), // samples per pixel
-                (278, 3, 2), // rows per strip
-                (279, 4, 6), // the strip's length
-            ];
-            let mut file = [&b"II*\0"[..], &14u32.to_le_bytes(), &shades].concat();
-            file.extend(10u16.to_le_bytes());
-            for (id, kind, value) in entries {
-                file.extend(
-                    [
-                        &id.to_le_bytes()[..],
-                        &kind.to_le_bytes(),
-                        &1u32.to_le_bytes(),
-                    ]
-                    .concat(),
-                );
-                file.extend(value.to_le_bytes());
-            }
-            file.extend(0u32.to_le_bytes());
             let path =
                 std::env::temp_dir().join(format!("accent-{}-{tag}.tif", std::process::id()));
-            std::fs::write(&path, file).unwrap();
+            std::fs::write(&path, grey_tiff(tag)).unwrap();
             let decoded = pixels(&decode(&path).unwrap()).unwrap();
             std::fs::remove_file(&path).unwrap();
 
-            let grey: Vec<u8> = shades.iter().flat_map(|&v| [v, v, v, 255]).collect();
+            let grey: Vec<u8> = SHADES.iter().flat_map(|&v| [v, v, v, 255]).collect();
             let (want, width, height) = orientation::apply(&grey, 3, 2, tag as u8);
             let got = (decoded.data, decoded.width, decoded.height);
             assert_eq!(got, (want, width, height), "tag {tag}");

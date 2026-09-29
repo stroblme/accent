@@ -104,6 +104,9 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
 - It is drawn by the note's rule (Colour), and the bar's one action is Invert, which sends this file
   to the other theme's page for as long as the app runs, as a long press on the image in a note
   does.
+- A TIFF is not an image here (`imageKind`), unlike on the desktop: neither `BitmapFactory` nor
+  the WebView reads one, so it opens as any other file, and an embed of one in a note, which the
+  shared markdown makes an image, shows as one that did not load.
 
 ### Message
 
