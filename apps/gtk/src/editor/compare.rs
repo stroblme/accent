@@ -2,7 +2,7 @@
 //! other side of one is rendered in.
 
 use super::{Alert, Flavour, Tab, build, line_numbers, sync_scheme};
-use crate::{diff, highlight, wrap};
+use crate::{diff, fold, highlight, wrap};
 use adw::prelude::*;
 use gtk::glib;
 use sourceview5::prelude::*;
@@ -18,6 +18,9 @@ pub(super) struct Comparing {
     pub(super) label: String,
     /// The banner question this comparison is the answer to, see [`Tab::comparing_answers`].
     pub(super) answers: Option<Alert>,
+    /// The folds the comparison opened, as a mark on each header line and the header's text:
+    /// see [`Tab::open_folds`].
+    shut: Vec<(gtk::TextMark, String)>,
 }
 
 /// A read-only view over `text` for a comparison, built the way the editor builds its own so the
@@ -37,6 +40,15 @@ pub fn companion(
     line_numbers(&view, &buffer).set_visible(true);
     style_companion(flavour, &buffer, &view);
     (view, buffer)
+}
+
+/// The text of the line `at` starts, without its newline.
+fn line_text(at: &gtk::TextIter) -> String {
+    let mut end = *at;
+    if !end.ends_line() {
+        end.forward_to_line_end();
+    }
+    at.text(&end).to_string()
 }
 
 /// An editable note view over `text` that is not a tab: a diagram's label, edited as Markdown
@@ -89,6 +101,7 @@ impl Tab {
         label: &str,
     ) -> Rc<diff::Compare> {
         self.leave_compare();
+        let shut = self.open_folds();
         // A comparison is a merge of its own, with its own tints and buttons over these lines.
         self.conflicts.set_enabled(false);
         let close = gtk::Button::from_icon_name("window-close-symbolic");
@@ -149,7 +162,9 @@ impl Tab {
             holder,
             label: label.to_string(),
             answers: None,
+            shut,
         });
+        self.show_chevrons();
         self.set_clamp();
         self.page.set_title(&self.tab_title());
         compare
@@ -165,6 +180,8 @@ impl Tab {
             return;
         };
         self.with_map_unset(|| comparing.compare.leave());
+        self.shut_again(comparing.shut);
+        self.show_chevrons();
         // The gap tags went with it, so the messages the collapsed lines were keeping quiet about
         // belong back at the ends of their lines.
         self.paint_diagnostics();
@@ -178,6 +195,45 @@ impl Tab {
         self.page.set_title(&self.tab_title());
         // The banner's button comes back, if the comparison had taken it.
         self.render_banner();
+    }
+
+    /// Open every shut fold for a comparison, which hides lines of its own: see [`Tab::shut`].
+    /// Each header is kept as a mark, which follows it through the comparison's edits, and as its
+    /// text, which says whether it is still the same header when the comparison goes.
+    fn open_folds(&self) -> Vec<(gtk::TextMark, String)> {
+        let buffer = self.text_buffer();
+        let shut = self
+            .folds
+            .borrow()
+            .iter()
+            .filter(|f| fold::is_folded(buffer, f.start_line as i32))
+            .filter_map(|f| buffer.iter_at_line(f.start_line as i32))
+            .map(|at| (buffer.create_mark(None, &at, true), line_text(&at)))
+            .collect();
+        fold::unfold_all(buffer);
+        shut
+    }
+
+    /// Shut again what [`Tab::open_folds`] opened, where the header is still there and still opens
+    /// a block, to where the block ends now. One the caret is in stays open, as a collapsed run
+    /// does.
+    fn shut_again(&self, shut: Vec<(gtk::TextMark, String)>) {
+        let buffer = self.text_buffer();
+        let caret = self.caret_line() as u32;
+        for (mark, text) in shut {
+            let at = buffer.iter_at_mark(&mark);
+            buffer.delete_mark(&mark);
+            let line = at.line() as u32;
+            let found = self
+                .folds
+                .borrow()
+                .iter()
+                .find(|f| f.start_line == line && !(line < caret && caret <= f.end_line))
+                .copied();
+            if let Some(f) = found.filter(|_| at.starts_line() && line_text(&at) == text) {
+                self.shut(f);
+            }
+        }
     }
 
     /// Run `swap`, which may hand the editor's view another vertical adjustment, with the minimap

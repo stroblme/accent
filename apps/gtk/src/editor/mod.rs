@@ -1178,9 +1178,35 @@ impl Tab {
     /// the re-analysis, at wherever the line has moved to.
     pub fn set_folds(&self, folds: Vec<Fold>) {
         fold::resync(self.text_buffer(), &folds);
-        self.fold_renderer
-            .set_starts(folds.iter().map(|f| f.start_line as i32).collect());
         *self.folds.borrow_mut() = folds;
+        self.show_chevrons();
+    }
+
+    /// The chevrons beside the headers of the blocks the server knows, or none while a
+    /// comparison is shown, where nothing shuts (see [`Tab::shut`]).
+    fn show_chevrons(&self) {
+        let starts = match self.comparing.borrow().is_some() {
+            true => Default::default(),
+            false => self
+                .folds
+                .borrow()
+                .iter()
+                .map(|f| f.start_line as i32)
+                .collect(),
+        };
+        self.fold_renderer.set_starts(starts);
+    }
+
+    /// Hide `f`, unless a comparison is shown. Its collapsed runs hide lines too, and a line where
+    /// a run of one kind ends inside or beside a run of the other is laid out by GTK 4.22 as a
+    /// blank row: asked for the iter in that row's pixels-below-lines, as GtkSourceView asks at
+    /// the top and bottom of the screen on every frame, `gtk_text_layout_get_iter_at_position`
+    /// aborts ("Byte index … is off the end of the line"). So a comparison opens the folds and
+    /// shuts them again when it goes (`editor/compare.rs`).
+    fn shut(&self, f: Fold) {
+        if self.comparing.borrow().is_none() {
+            fold::fold(self.text_buffer(), f);
+        }
     }
 
     /// Open or shut the block whose header is `line`. What the gutter chevron does.
@@ -1217,7 +1243,7 @@ impl Tab {
             .find(|f| f.start_line as i32 == line)
             .copied();
         if let Some(f) = found {
-            fold::fold(self.text_buffer(), f);
+            self.shut(f);
         }
     }
 
@@ -1229,7 +1255,7 @@ impl Tab {
     pub fn fold_at_caret(&self) {
         let found = fold::containing(&self.folds.borrow(), self.caret_line() as u32).copied();
         if let Some(f) = found {
-            fold::fold(self.text_buffer(), f);
+            self.shut(f);
             self.folds_changed();
         }
     }
@@ -1249,7 +1275,7 @@ impl Tab {
         let mut folds = self.folds.borrow().clone();
         folds.sort_by_key(|f| f.start_line);
         for f in folds {
-            fold::fold(self.text_buffer(), f);
+            self.shut(f);
         }
         self.folds_changed();
     }
