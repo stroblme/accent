@@ -322,20 +322,18 @@ impl Panel {
         } = build_message_box();
 
         let changes = gio::ListStore::new::<glib::BoxedAnyObject>();
-        let changes_view = gtk::ListView::new(
-            Some(gtk::NoSelection::new(Some(changes.clone()))),
-            None::<gtk::SignalListItemFactory>,
-        );
+        let changes_view =
+            gtk::ListView::new(None::<gtk::NoSelection>, None::<gtk::SignalListItemFactory>);
+        crate::widgets::set_model(&changes_view, &gtk::NoSelection::new(Some(changes.clone())));
         changes_view.add_css_class("navigation-sidebar");
         // One click opens the diff, which is the rule the tree already follows: see
         // `set_single_click_activate` in `tree.rs`.
         changes_view.set_single_click_activate(true);
 
         let log = gio::ListStore::new::<glib::BoxedAnyObject>();
-        let log_view = gtk::ListView::new(
-            Some(gtk::NoSelection::new(Some(log.clone()))),
-            None::<gtk::SignalListItemFactory>,
-        );
+        let log_view =
+            gtk::ListView::new(None::<gtk::NoSelection>, None::<gtk::SignalListItemFactory>);
+        crate::widgets::set_model(&log_view, &gtk::NoSelection::new(Some(log.clone())));
         log_view.add_css_class("navigation-sidebar");
         // The lane a commit sits in is drawn per row, so the row's own vertical margin leaves a
         // gap between its line and the next one's and the graph comes out dashed. The rule in
