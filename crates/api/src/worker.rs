@@ -485,7 +485,10 @@ impl Worker {
                     // debouncer has that inode cached, which is what an external `sed -i` or a
                     // second accent looks like. Believe a removal only when the path is really
                     // gone, or the tab the user is typing in closes under them.
-                    if matches!(walk::stat_one(&self.root, &rel), Ok(Some(_))) {
+                    if let Ok(Some(meta)) = walk::stat_one(&self.root, &rel) {
+                        // A directory there again is a new one, made inside this batch: the
+                        // watch went with the old one (`Watcher::forget` in `process_batch`).
+                        b.rewatch |= meta.kind == FileKind::Dir;
                         self.update(&rel, false, b);
                     } else {
                         self.remove(&rel, b);
@@ -829,6 +832,30 @@ mod tests {
         assert!(f.wait(|e| matches!(e, Event::DirsChanged(_))).is_some());
         std::fs::create_dir(&sub).unwrap();
         assert!(f.wait(|e| matches!(e, Event::DirsChanged(_))).is_some());
+        f.write("sub/b.md", "b");
+
+        assert!(
+            f.wait(|e| matches!(e, Event::DirsChanged(d) if d.iter().any(|d| d == "sub")))
+                .is_some(),
+            "a file written into the folder made again was not seen"
+        );
+    }
+
+    /// The same, removed and made again inside one watcher batch, which reads as a folder that
+    /// changed rather than one that went: its watch went with the old directory all the same.
+    #[test]
+    fn a_folder_removed_and_made_again_in_one_batch_is_watched_again() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        std::fs::write(root.path().join("sub/a.md"), "a").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+        let sub = f.vault.root().join("sub");
+
+        std::fs::remove_dir_all(&sub).unwrap();
+        std::fs::create_dir(&sub).unwrap();
+        // The batch says nothing the UI hears — the folder is the one it was, to the index — so
+        // it is waited out: the watcher's debounce, with room to spare.
+        std::thread::sleep(std::time::Duration::from_secs(1));
         f.write("sub/b.md", "b");
 
         assert!(
