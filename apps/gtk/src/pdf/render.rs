@@ -104,6 +104,8 @@ fn render_loop(
     // The pages whose text has already been read, for the highlights, the selections and the
     // exports that all want the same glyphs.
     let mut glyphs = Glyphs::new();
+    // The tab has been told the file was written into under the document.
+    let mut changed = false;
     // The channel closing is the tab going away, which is the only way this thread ends.
     while let Ok(first) = rx.recv() {
         let mut queue = vec![first];
@@ -118,6 +120,21 @@ fn render_loop(
             let Some(current) = queue.pop() else {
                 break;
             };
+            // Written into in place, as pdflatex writes its output: every page pdfium has not
+            // read yet would come out blank, and be kept as rendered. Nothing more is read from
+            // this document; the tab is told once, and has the file read again. A save still
+            // runs, for the etag gate to refuse it out loud.
+            let exempt = matches!(
+                current,
+                Request::Reload | Request::Retarget(_) | Request::Save(_)
+            );
+            if !exempt && !doc.intact() {
+                if !changed {
+                    changed = true;
+                    send(&view, Reply::Changed);
+                }
+                continue;
+            }
             match current {
                 Request::Tiles {
                     from,
@@ -421,6 +438,7 @@ fn render_loop(
                     match PdfDoc::open(&path) {
                         Ok(fresh) => {
                             doc = fresh;
+                            changed = false;
                             etag = accent_core::fs::Etag::of(&path).ok();
                             // The ledger is of the document that just went: its ids mirror an
                             // `/Annots` array this one need not share, so a later Ctrl+Z would
