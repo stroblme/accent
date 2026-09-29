@@ -969,7 +969,7 @@ pub(super) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
 }
 
 /// The view of one pane of a comparison: the left one, or the right with `end`.
-fn pane_view(paned: &gtk::Widget, end: bool) -> Option<gtk::TextView> {
+pub(super) fn pane_view(paned: &gtk::Widget, end: bool) -> Option<gtk::TextView> {
     let paned = paned.downcast_ref::<gtk::Paned>()?;
     let pane = match end {
         true => paned.end_child(),

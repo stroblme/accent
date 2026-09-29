@@ -5,7 +5,7 @@ use super::*;
 
 /// A two-page diagram with a shape, an ellipse, an edge between them, a formula, and a bracket
 /// and a text turned a quarter each way.
-const SAMPLE: &str = r#"<mxfile host="accent">
+pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
   <diagram name="One" id="bench-one">
     <mxGraphModel grid="1" gridSize="10" page="1" pageWidth="800" pageHeight="500" math="1">
       <root>
