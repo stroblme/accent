@@ -203,6 +203,7 @@ mod tests {
             ("data.tsv", FileType::Table),
             ("shot.PNG", FileType::Image),
             ("logo.svg", FileType::Image),
+            ("scan.TIFF", FileType::Image),
             ("src/main.rs", FileType::Code),
             ("tool.py", FileType::Code),
             ("Makefile", FileType::Code),

@@ -6,6 +6,10 @@ use super::*;
 /// One press of Zoom In or Zoom Out, a tenth of the document font.
 const ZOOM_STEP: f64 = 0.1;
 
+/// How long an image's zoom is left alone before an SVG is drawn again at it, the drawing before
+/// enlarged meanwhile: a run of steps draws once, at the last.
+const ZOOM_SETTLE: Duration = Duration::from_millis(300);
+
 impl App {
     /// Step an image's zoom, or, with `None`, put it back to fitting the window.
     ///
@@ -13,7 +17,7 @@ impl App {
     /// rather than from the size it asked the picture for: a pixel width is a whole number, and a
     /// zoom read back out of one lands short of the tenth it was, which is enough for the next
     /// step to be the zoom the image is already at.
-    pub fn zoom_image(self: &Rc<Self>, image: &doc::Viewer, out: Option<bool>) {
+    pub fn zoom_image(self: &Rc<Self>, image: &Rc<doc::Viewer>, out: Option<bool>) {
         let Some(picture) = picture_of(&image.page) else {
             return;
         };
@@ -23,6 +27,21 @@ impl App {
         image.zoom.set(zoom);
         set_image_zoom(&picture, zoom);
         self.refresh_zoom();
+        // `show_image` draws an SVG at its zoom (`look::drawn_zoom`), and does nothing for an
+        // image the zoom leaves as it is drawn.
+        let image = Rc::downgrade(image);
+        glib::timeout_add_local_once(
+            ZOOM_SETTLE,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || {
+                    if let Some(image) = image.upgrade().filter(|i| i.zoom.get() == zoom) {
+                        app.show_image(&image, None);
+                    }
+                }
+            ),
+        );
     }
 
     /// Zoom is the document's, never the chrome's: DESIGN.md leaves the interface font to the

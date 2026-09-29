@@ -15,6 +15,7 @@ mod find;
 mod git;
 mod image;
 mod keys;
+mod memory;
 mod outline;
 mod panes;
 mod pdf;
@@ -150,8 +151,12 @@ use tags::bench_tags;
 /// copy's column is freed (see `compare::bench_compare_left`). `=folds:<rel>` compares a note
 /// whose folded section ends inside a collapsed run and asks for the iter at every pixel row
 /// (`compare::bench_compare_folds`).
+/// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
+/// comparison, the preview, a shell and a window, and prints what outlived its close and how the
+/// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
-/// another size, printing what the picture asks for and says either side of the reload.
+/// another size, printing what the picture asks for and says either side of the reload;
+/// `=zoom:<rel_svg>,…` steps an SVG in and back, printing what it is drawn from as the zoom settles.
 /// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` walks each image through the three themes, inverted and
 /// not, printing what the classifier said, the pixel the tab shows at (2,2) and the recolouring's
 /// cost (see `image::bench_image_look`). `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` does the same for
@@ -398,6 +403,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let image_look = std::env::var("ACCENT_BENCH_IMAGE_LOOK").ok();
     let preview_look = std::env::var("ACCENT_BENCH_PREVIEW_LOOK").ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
+    let memory = std::env::var("ACCENT_BENCH_MEMORY").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let drawing = std::env::var("ACCENT_BENCH_DRAWING").is_ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
@@ -450,6 +456,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && style.is_none()
         && panes.is_none()
         && compare.is_none()
+        && memory.is_none()
         && pdf.is_none()
         && !drawing
         && tabs.is_none()
@@ -492,6 +499,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if collapse {
             return bench_collapse(&app);
+        }
+        if let Some(arg) = memory {
+            return memory::bench_memory(&app, &arg);
         }
         if let Some(rel) = compare {
             if let Some(rel) = rel.strip_prefix("lines:") {

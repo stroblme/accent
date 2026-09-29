@@ -137,6 +137,9 @@ struct Batch {
     removed: BTreeSet<String>,
     /// A directory was added, so the watch set — one watch per directory — is short one entry.
     rewatch: bool,
+    /// The directories added, whose watches start at the end of the batch: what is written into
+    /// one before then reaches no watch, so whatever one holds by then is walked in.
+    made: Vec<String>,
 }
 
 impl Worker {
@@ -288,6 +291,13 @@ impl Worker {
         // per-directory, so `mkdir Ideas` followed by a write into it would otherwise be silent.
         if batched.rewatch {
             self.rebuild_watcher();
+        }
+        if batched
+            .made
+            .iter()
+            .any(|rel| has_children(&self.root.join(rel)))
+        {
+            let _ = self.tx.send(Msg::Rescan);
         }
         if !batched.dirs.is_empty() {
             self.emit(Event::DirsChanged(batched.dirs.into_iter().collect()));
@@ -497,14 +507,10 @@ impl Worker {
                         // A directory there again is a new one, made inside this batch, and the
                         // debouncer says nothing of what the old one held: that goes as for a
                         // removal across two batches, and the new one comes back as a directory
-                        // made, watched afresh (its watch went with the old one, `forget`).
-                        // What it holds already is walked in; a batch whose new folder held
-                        // something at its start has walked it already (`needs_rescan`).
+                        // made (`Batch::made`), watched afresh — its watch went with the old one
+                        // (`forget`).
                         if meta.kind == FileKind::Dir {
                             self.remove(&rel, b);
-                            if has_children(&p) {
-                                let _ = self.tx.send(Msg::Rescan);
-                            }
                         }
                         self.update(&rel, false, b);
                     } else {
@@ -559,7 +565,10 @@ impl Worker {
         match self.index.update_file(&self.root, rel) {
             Ok(Change::Added(kind)) => {
                 b.dirs.insert(parent_dir(rel).to_string());
-                b.rewatch |= kind == FileKind::Dir;
+                if kind == FileKind::Dir {
+                    b.rewatch = true;
+                    b.made.push(rel.to_string());
+                }
                 // A path this batch removed and is seeing again was rewritten, not created:
                 // whoever has it open has to reload it.
                 if kind != FileKind::Dir && !own && b.removed.remove(rel) {
@@ -882,12 +891,19 @@ mod tests {
             !paths.contains(&"sub/a.md".to_string()),
             "the old folder's note is still indexed: {paths:?}"
         );
-        // The end of the batch, by when the new folder is watched.
+        // The end of the batch, by when the new folder is watched. Under load the debouncer can
+        // hand the removal and the making to two batches, and a write landing between them is
+        // walked in rather than reported, so the index is what is asked, not the event.
         assert!(f.wait(|e| matches!(e, Event::DirsChanged(_))).is_some());
         f.write("sub/b.md", "b");
+        let seen = || {
+            f.vault
+                .file_paths(true)
+                .unwrap()
+                .contains(&"sub/b.md".to_string())
+        };
         assert!(
-            f.wait(|e| matches!(e, Event::DirsChanged(d) if d.iter().any(|d| d == "sub")))
-                .is_some(),
+            poll_until(seen, BUDGET),
             "a file written into the folder made again was not seen"
         );
     }

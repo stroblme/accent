@@ -520,10 +520,13 @@ impl Preview {
         );
     }
 
-    /// Whether WebKit may still hold `key`'s bytes as they were when it was served, so a change
-    /// of the file wants [`Preview::forget_images`].
+    /// Whether WebKit may still hold `key`'s bytes as they were when it was served, or those of a
+    /// file under the folder `key`, so a change, a removal or a rename of it wants
+    /// [`Preview::forget_images`].
     pub fn holds(&self, key: &str) -> bool {
-        self.inner.assets.served.borrow().contains(key)
+        let folder = format!("{key}/");
+        let served = self.inner.assets.served.borrow();
+        served.contains(key) || served.iter().any(|k| k.starts_with(&folder))
     }
 
     /// How many requests the page has made so far.

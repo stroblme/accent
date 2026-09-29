@@ -64,11 +64,7 @@ impl App {
     /// Bring whatever shows `rel` up to date with its file, which something other than this
     /// window has changed.
     fn changed_on_disk(self: &Rc<Self>, rel: &str) {
-        // WebKit answers a render with what it was served, so an image the preview was
-        // served goes from its cache before the note is rendered again.
-        if self.preview.borrow().as_ref().is_some_and(|p| p.holds(rel)) {
-            self.reshow_preview_images();
-        }
+        self.reshow_preview_image(rel);
         let Some(doc) = self.doc_for(rel) else {
             return;
         };
@@ -259,6 +255,7 @@ impl App {
             }
             Event::FileChanged(rel) => self.changed_on_disk(&rel),
             Event::FileRemoved(rel) => {
+                self.reshow_preview_image(&rel);
                 // A conflict copy is never a tab of its own; what its removal changes is the
                 // banner on the file it was a copy of.
                 if let Some(original) = accent_api::conflict_original_rel(&rel) {
@@ -283,7 +280,10 @@ impl App {
                     }
                 }
             }
-            Event::FileRenamed { from, to } => self.follow_rename(&from, &to),
+            Event::FileRenamed { from, to } => {
+                self.reshow_preview_image(&from);
+                self.follow_rename(&from, &to);
+            }
             Event::Conflict { original, .. } => self.sync_conflict_banner(&original, None),
             // A repository moved under us: a commit in a shell, a checkout, a rebase. The pane
             // asks git what changed; nothing else in the window is affected.

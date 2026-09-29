@@ -880,6 +880,49 @@ impl Shell {
     }
 }
 
+/// The flags [`Shell::command_line`] reads: every other option is turned away before the launch
+/// ([`local_command_line`]), and none of these is a path ([`terminal_cwd`]).
+const FLAGS: [&str; 3] = ["--terminal", "-t", "--new-window"];
+
+/// What `accent --help` prints: every form [`Shell::command_line`] takes.
+const USAGE: &str = "\
+Usage:
+  accent [PATH [NOTE]]          Open a vault or a file
+  accent -t, --terminal [DIR]   Open a shell at DIR, or at home
+  accent terminal://NAME [DIR]  Open terminal session NAME, and a shell at DIR
+  accent --new-window           Show the start screen
+  accent -h, --help             Print this help
+  accent --version              Print the version
+
+PATH is a folder, opened as a vault; an ssh://[USER@]HOST[:PORT]/PATH address,
+a vault on that host; or a file (a note, PDF, image, diagram or any text),
+opened in the window of the open vault that holds it, else in a window without
+a vault. NOTE, a path inside the vault, opens in a tab. Without PATH the last
+vault opens, or the start screen if there is none. DIR may be an ssh://
+address, for a shell on that host. A session NAME not seen before is made.
+";
+
+/// What the launching process answers itself, before `app.run` hands the arguments to the
+/// running instance, whose terminal is not the caller's: `--help`, `--version`, and an option
+/// nothing reads, which would otherwise be taken for a file name. `None` lets the launch go on.
+pub fn local_command_line(
+    args: impl Iterator<Item = std::ffi::OsString>,
+) -> Option<glib::ExitCode> {
+    for arg in args.skip(1) {
+        match arg.to_str() {
+            Some("-h" | "--help") => print!("{USAGE}"),
+            Some("--version") => println!("accent {}", env!("CARGO_PKG_VERSION")),
+            Some(option) if option.starts_with('-') && !FLAGS.contains(&option) => {
+                eprintln!("accent: unknown option {option}; see accent --help");
+                return Some(glib::ExitCode::FAILURE);
+            }
+            _ => continue,
+        }
+        return Some(glib::ExitCode::SUCCESS);
+    }
+    None
+}
+
 /// Where `accent --terminal` was pointed: the first argument that is not one of the flags, or
 /// `None` for the bare form. Pure, so the parsing is a test rather than a manual run; whether the
 /// path is a directory is the caller's question, because only it can resolve one.
@@ -887,7 +930,7 @@ fn terminal_cwd(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
     args.iter()
         .skip(1)
         .map(|arg| arg.as_os_str())
-        .find(|arg| !matches!(arg.to_str(), Some("--terminal" | "-t" | "--new-window")))
+        .find(|arg| !arg.to_str().is_some_and(|arg| FLAGS.contains(&arg)))
 }
 
 /// Where a shell was asked for on the command line: on a host, as an `ssh://` address read back
@@ -966,6 +1009,16 @@ mod tests {
         assert_eq!(cwd(&["accent"]), None);
         // The other flag a command line can carry is not a path either.
         assert_eq!(cwd(&["accent", "--new-window", "--terminal"]), None);
+    }
+
+    #[test]
+    fn the_help_names_every_option() {
+        let words: Vec<&str> = USAGE
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .collect();
+        for option in FLAGS.iter().chain(&["-h", "--help", "--version"]) {
+            assert!(words.contains(option), "--help does not name {option}");
+        }
     }
 
     #[test]

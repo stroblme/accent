@@ -24,7 +24,7 @@ make all             # build the GTK app and accent-cli
 target/release/accent /path/to/notes
 ```
 
-You can also launch `target/release/accent` without a path and choose a folder in the app. `make server` builds the static helper needed for remote vaults.
+You can also launch `target/release/accent` without a path and choose a folder in the app. `accent --help` lists the other launch forms: a file such as a PDF, a remote vault, a terminal. `make server` builds the static helper needed for remote vaults.
 
 For Android, install a JDK, the Android SDK and NDK, then build a debug APK:
 
