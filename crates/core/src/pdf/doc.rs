@@ -1,18 +1,23 @@
 //! The document: opening, page sizes, rendering, text, links, the outline, search and saving.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use pdfium_render::prelude::*;
 
 use super::{Glyph, Link, LinkTarget, Outline, Rect, RgbaImage, Theme, lock, pdfium};
+use crate::fs::Etag;
 use crate::recolour::recolour;
 
 pub struct PdfDoc {
     // `Option` only so that `Drop` can close the document while still holding `CALLS`; it is
     // `Some` for the whole life of the value.
     doc: Option<PdfDocument<'static>>,
+    /// A second handle on the file pdfium reads the document from, and what that file looked
+    /// like when it was opened; `None` for a document read from bytes. See [`PdfDoc::intact`].
+    file: Option<(File, Etag)>,
 }
 
 impl Drop for PdfDoc {
@@ -26,11 +31,32 @@ impl PdfDoc {
     pub fn open(path: impl AsRef<Path>) -> Result<PdfDoc> {
         let path = path.as_ref();
         let pdfium = pdfium()?;
+        let context = || format!("open pdf {}", path.display());
+        let file = File::open(path).with_context(context)?;
+        // The same open file, not the path again: a rename in between would hand back another.
+        let kept = file.try_clone().with_context(context)?;
+        let read = Etag::from_meta(&kept.metadata().with_context(context)?);
         let _guard = lock();
         let doc = pdfium
-            .load_pdf_from_file(path, None)
-            .with_context(|| format!("open pdf {}", path.display()))?;
-        Ok(PdfDoc { doc: Some(doc) })
+            .load_pdf_from_reader(file, None)
+            .with_context(context)?;
+        Ok(PdfDoc {
+            doc: Some(doc),
+            file: Some((kept, read)),
+        })
+    }
+
+    /// Whether the file this document is read from is still the one it was opened on.
+    ///
+    /// pdfium reads a file as it needs it, a page at a time, so a file written into in place —
+    /// which is how pdflatex writes its output — leaves every page not read yet rendering blank
+    /// and every search on it finding nothing. A file replaced by a rename, as every save here,
+    /// Syncthing and a remote fetch replace one, leaves the document reading the file it opened.
+    pub fn intact(&self) -> bool {
+        self.file.as_ref().is_none_or(|(file, read)| {
+            file.metadata()
+                .is_ok_and(|meta| Etag::from_meta(&meta) == *read)
+        })
     }
 
     /// A document read from bytes rather than a path: what Android gets from a `content://`
@@ -42,7 +68,10 @@ impl PdfDoc {
         let doc = pdfium
             .load_pdf_from_byte_vec(bytes, None)
             .context("open pdf from bytes")?;
-        Ok(PdfDoc { doc: Some(doc) })
+        Ok(PdfDoc {
+            doc: Some(doc),
+            file: None,
+        })
     }
 
     pub fn page_count(&self) -> usize {

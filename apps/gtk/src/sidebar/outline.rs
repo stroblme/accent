@@ -138,7 +138,8 @@ impl List {
         let selection = gtk::SingleSelection::new(Some(model.clone()));
         selection.set_autoselect(false);
         selection.set_can_unselect(true);
-        let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
+        let view = gtk::ListView::new(None::<gtk::SingleSelection>, Some(factory));
+        crate::widgets::set_model(&view, &selection);
         view.add_css_class("navigation-sidebar");
         view.set_single_click_activate(true);
         view.connect_activate({

@@ -610,7 +610,7 @@ fn change_row(list: &gtk::Widget, path: &str) -> Option<gtk::Widget> {
 }
 
 /// The button of `row` that `tooltip` names, where the row shows it.
-fn row_button(row: &gtk::Widget, tooltip: &str) -> Option<gtk::Button> {
+pub(super) fn row_button(row: &gtk::Widget, tooltip: &str) -> Option<gtk::Button> {
     find_widget(row, &|w| {
         w.is::<gtk::Button>() && w.is_visible() && w.tooltip_text().as_deref() == Some(tooltip)
     })

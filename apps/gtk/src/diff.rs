@@ -157,6 +157,17 @@ pub fn pane(
     }
 }
 
+/// Put `scroller` on `adjustment`. GTK 4.22's `set_vadjustment` leaves the overlay scrollbar's
+/// fade handler, which a realized scroller connects to its adjustment, on the one it leaves; once
+/// the scroller is freed, the next scroll of that adjustment runs the handler on freed memory.
+/// Overlay scrolling switched off and back on around the swap takes the handler along.
+fn swap_vadjustment(scroller: &gtk::ScrolledWindow, adjustment: &gtk::Adjustment) {
+    let overlay = scroller.is_overlay_scrolling();
+    scroller.set_overlay_scrolling(false);
+    scroller.set_vadjustment(Some(adjustment));
+    scroller.set_overlay_scrolling(overlay);
+}
+
 /// What one overlaid button is for right now.
 #[derive(Clone)]
 enum Role {
@@ -764,8 +775,7 @@ impl Compare {
         // Vertical is shared, so two views of the same rows cannot drift apart. Horizontal
         // stays per pane: everything wraps, so there is nothing to scroll sideways anyway.
         let own_vadjustment = new.scroller.vadjustment();
-        new.scroller
-            .set_vadjustment(Some(&old.scroller.vadjustment()));
+        swap_vadjustment(&new.scroller, &old.scroller.vadjustment());
         // One height for both title rows: the editor's carries Stop Comparing and would stand
         // taller, starting its column, and every row in it, that much lower. The group lives as
         // long as the rows do.
@@ -1196,9 +1206,7 @@ impl Compare {
         // freed stays connected to its adjustment, so one left on the adjustment the editor keeps
         // was called into after it was gone: a comparison left the moment it opened — a Changes
         // row git had outgrown — crashed the window on the editor's next scroll.
-        self.panes[1]
-            .scroller
-            .set_vadjustment(Some(&self.own_vadjustment));
+        swap_vadjustment(&self.panes[1].scroller, &self.own_vadjustment);
         // And the editor its page's bottom margin, should it have been the side with no line.
         if let Some(mine) = self.editable {
             self.set_bottom(mine, self.page_bottom(mine), 0);

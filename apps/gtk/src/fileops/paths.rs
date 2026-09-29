@@ -99,6 +99,28 @@ pub fn move_dest(from: &str, dir: &str) -> Option<String> {
     Some(moved_path(from, dir))
 }
 
+/// What Move to… moves into `dir`: each of `rels` that is not there already, keeping its name.
+/// `Err` with the folder asked to go into itself or into what is under it, which refuses the
+/// whole batch: moving the rest would be doing part of what was asked.
+pub(super) fn moves_to(rels: &[String], dir: &str) -> Result<Vec<(String, String)>, String> {
+    let mut moves = Vec::new();
+    for rel in rels {
+        if dir == rel || dir.starts_with(&format!("{rel}/")) {
+            return Err(rel.clone());
+        }
+        if let Some(to) = move_dest(rel, dir) {
+            moves.push((rel.clone(), to));
+        }
+    }
+    Ok(moves)
+}
+
+/// The folder a Move to… entry names, from the vault root, "" being the root itself: every
+/// segment is a folder, which [`split_typed`] reads as it reads the ones before a file's name.
+pub(super) fn typed_dir(typed: &str) -> Result<String, &'static str> {
+    split_typed("", &format!("{}/", typed.trim())).map(|(dir, _)| dir)
+}
+
 /// The paths no other one of them is inside, each with whether it is a folder, in their order.
 /// A folder takes what is under it along, so a batch acts on it alone rather than on it and then
 /// on files that have already gone with it.
@@ -346,5 +368,34 @@ mod tests {
         assert_eq!(moved_path("a/b/c.md", "x/y"), "x/y/c.md");
         assert_eq!(moved_path("a/b/c.md", ""), "c.md");
         assert_eq!(moved_path("c.md", "x"), "x/c.md");
+    }
+
+    #[test]
+    fn a_move_to_path_is_a_folder_from_the_vault_root() {
+        assert_eq!(typed_dir(""), Ok(String::new()));
+        // What the completion list puts in the entry ends in a slash.
+        assert_eq!(typed_dir("Notes/Daily/"), Ok("Notes/Daily".into()));
+        assert_eq!(typed_dir(" Notes//./Daily "), Ok("Notes/Daily".into()));
+        assert_eq!(typed_dir("Notes/../Inbox"), Ok("Inbox".into()));
+        assert!(typed_dir("../Elsewhere").is_err());
+        assert!(typed_dir("Notes/.git").is_err());
+    }
+
+    #[test]
+    fn move_to_leaves_out_what_is_there_already_and_refuses_a_folder_into_itself() {
+        let rels = ["Notes/a.md".to_string(), "Inbox/b.md".to_string()];
+        assert_eq!(
+            moves_to(&rels, "Inbox"),
+            Ok(vec![("Notes/a.md".to_string(), "Inbox/a.md".to_string())])
+        );
+        assert_eq!(moves_to(&rels[1..], "Inbox"), Ok(Vec::new()));
+        let folder = ["Notes".to_string()];
+        assert_eq!(moves_to(&folder, "Notes"), Err("Notes".to_string()));
+        assert_eq!(moves_to(&folder, "Notes/Sub"), Err("Notes".to_string()));
+        // A sibling whose name only starts the same is somewhere else.
+        assert_eq!(
+            moves_to(&folder, "Notes-old"),
+            Ok(vec![("Notes".to_string(), "Notes-old/Notes".to_string())])
+        );
     }
 }

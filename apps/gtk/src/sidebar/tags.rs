@@ -102,7 +102,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     selection.set_can_unselect(true);
     selection.set_selected(gtk::INVALID_LIST_POSITION);
 
-    let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
+    let view = gtk::ListView::new(None::<gtk::SingleSelection>, Some(factory));
+    crate::widgets::set_model(&view, &selection);
     view.add_css_class("navigation-sidebar");
 
     // Which tag the file list is answering for. The listing lands from a worker thread, so an

@@ -27,7 +27,7 @@ impl Etag {
         Ok(Etag::from_meta(&std::fs::metadata(path)?))
     }
 
-    fn from_meta(m: &std::fs::Metadata) -> Etag {
+    pub(crate) fn from_meta(m: &std::fs::Metadata) -> Etag {
         Etag {
             mtime_ns: m.mtime() * 1_000_000_000 + m.mtime_nsec(),
             size: m.size(),

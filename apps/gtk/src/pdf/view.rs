@@ -767,6 +767,19 @@ impl PdfView {
         )
     }
 
+    /// The tiles and stand-ins the last frame painted without, as `page` or `page:tx,ty`.
+    #[cfg(feature = "bench")]
+    pub fn unrendered(&self) -> Vec<String> {
+        let wants = self.imp().unrendered.borrow();
+        wants
+            .iter()
+            .map(|w| match w.is_lowres() {
+                true => w.page.to_string(),
+                false => format!("{}:{},{}", w.page, w.tx, w.ty),
+            })
+            .collect()
+    }
+
     /// Put the reader back where `anchor` says, or at the top of its page under
     /// [`PdfZoom::FitPage`]. See [`resume_at`].
     pub fn scroll_to(&self, anchor: Anchor) {
@@ -1103,6 +1116,9 @@ mod imp {
         /// presentation mode, a stroke or an erase on a part of the page the last change also
         /// touched — and without it the page keeps painting its old render and never asks again.
         pub asked_for: Cell<(u32, bool, u64)>,
+        /// What the last frame found missing, asked for or not: what a drill waits to see empty.
+        #[cfg(feature = "bench")]
+        pub unrendered: RefCell<Vec<Want>>,
         pub page: Cell<usize>,
         /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
         /// the same for every page of every frame until the theme changes.
@@ -1156,6 +1172,8 @@ mod imp {
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false, 0)),
+                #[cfg(feature = "bench")]
+                unrendered: RefCell::new(Vec::new()),
                 page: Cell::new(0),
                 paper: Cell::new(None),
                 on_wants: RefCell::new(None),
@@ -1701,6 +1719,8 @@ mod imp {
             // are part of "the same", because the same tiles at another scale, or after the page
             // changed, are a different render.
             let stamp = (scale_milli, dark, cache.borrow().generation());
+            #[cfg(feature = "bench")]
+            self.unrendered.replace(wanted.clone());
             if !wanted.is_empty()
                 && (self.asked_for.get() != stamp || *self.asked.borrow() != wanted)
             {

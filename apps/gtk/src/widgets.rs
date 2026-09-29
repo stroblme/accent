@@ -35,6 +35,48 @@ pub(crate) fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
         .build()
 }
 
+/// Give `view` its `model`, and keep the list where it is whenever the model takes away the row
+/// holding the keyboard focus.
+///
+/// GTK finds a removed widget's focus a new home after the next paint, from the top of the window
+/// (`GtkWindow`'s `TAB_FORWARD`), and in a list that is its first row, scrolled to: a Stage click,
+/// whose row leaves Changes, or a file made or removed around the row last clicked put the Git
+/// and Files lists back at their top. The focus goes instead to the row GTK now keeps in that
+/// place, which is where the reader was, so nothing scrolls; taking it cancels the window's own
+/// search.
+///
+/// Two handlers, one either side of the view's own, which `set_model` connects: the first sees
+/// whether a row has the focus while it is still there, the second whether it is there still.
+pub(crate) fn set_model(view: &gtk::ListView, model: &impl IsA<gtk::SelectionModel>) {
+    let (model, held) = (
+        model.upcast_ref::<gtk::SelectionModel>(),
+        Rc::new(Cell::new(false)),
+    );
+    let weak = view.downgrade();
+    model.connect_items_changed({
+        let (weak, held) = (weak.clone(), held.clone());
+        move |_, _, removed, _| {
+            held.set(removed > 0 && weak.upgrade().is_some_and(|view| has_focus(&view)));
+        }
+    });
+    view.set_model(Some(model));
+    model.connect_items_changed(move |_, _, _, _| {
+        if held.take()
+            && let Some(view) = weak.upgrade()
+            && !has_focus(&view)
+        {
+            view.grab_focus();
+        }
+    });
+}
+
+/// Whether the keyboard focus is on one of `view`'s rows.
+fn has_focus(view: &gtk::ListView) -> bool {
+    view.root()
+        .and_then(|root| root.focus())
+        .is_some_and(|focus| focus.is_ancestor(view))
+}
+
 /// A factory whose row `setup` builds and `bind` fills, each handed the row as its own type.
 ///
 /// The two downcasts every list factory was writing out: `GtkSignalListItemFactory` hands its

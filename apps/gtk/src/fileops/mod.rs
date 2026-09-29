@@ -25,7 +25,8 @@ pub use transfer::download_to;
 pub use transfer::{download, import, upload};
 
 use self::paths::{
-    already_exists, is_markdown, levels, renamed_part, renamed_path, split_typed, typed_path, verb,
+    already_exists, is_markdown, levels, moved_path, moves_to, renamed_part, renamed_path,
+    split_typed, typed_dir, typed_path, verb,
 };
 use crate::dialogs::{
     CONFIRM, alert, choose, confirm, focus_entry, form, labelled, name_dialog, name_entry,
@@ -663,6 +664,54 @@ pub fn move_all(ops: &Rc<Ops>, moves: Vec<(String, String)>) {
             None => (ops.toast)(&format!("Cannot move {}", several(&sources(&moves)))),
         }
     });
+}
+
+/// Move to…: `rels` (each with whether it is a folder) into a folder typed into the vault's path
+/// field, keeping their names — what a drop onto a folder does, for a folder that is not on screen
+/// or not there yet. It opens on the folder the first of them is in; one that does not exist is
+/// made with the move, once any Update Links? question is answered, as Rename makes the folders a
+/// typed path names. Through [`move_all`], so a name the folder already holds refuses the batch.
+pub fn move_to(ops: &Rc<Ops>, rels: Vec<(String, bool)>) {
+    let rels: Vec<String> = topmost(&rels).into_iter().map(|(rel, _)| rel).collect();
+    let Some(first) = rels.first().cloned() else {
+        return;
+    };
+    let entry = name_entry("Vault root", parent_dir(&first));
+    let form = form();
+    form.append(&vault_path_field(&entry, &ops.vault, ""));
+    let count = rels.len();
+    form.append(&name_preview(&entry, move |typed| {
+        typed_dir(typed).map(|dir| batch_to(&moved_path(&first, &dir), count))
+    }));
+    let title = match rels.as_slice() {
+        [one] => format!("Move {}", basename(one)),
+        many => format!("Move {} Items", many.len()),
+    };
+    let dialog = name_dialog(&title, "Move", &form);
+    let (ops, window) = (ops.clone(), ops.window.clone());
+    let typed = entry.clone();
+    choose(&dialog, Some(&window), move |response| {
+        if response != CONFIRM {
+            return;
+        }
+        let dir = match typed_dir(&typed.text()) {
+            Ok(dir) => dir,
+            Err(why) => return (ops.toast)(why),
+        };
+        match moves_to(&rels, &dir) {
+            Ok(moves) if moves.is_empty() => (ops.toast)(&format!(
+                "Already in {}",
+                match dir.as_str() {
+                    "" => "the vault root",
+                    dir => dir,
+                }
+            )),
+            Ok(moves) => move_all(&ops, moves),
+            Err(rel) => (ops.toast)(&format!("Cannot move {} into itself", basename(&rel))),
+        }
+    });
+    // The caret at the end, where a folder inside this one is typed on.
+    focus_entry(&entry, |entry| entry.set_position(-1));
 }
 
 /// Ask the vault what the moves would touch, then either do them or confirm the link rewrites

@@ -123,6 +123,25 @@ pub(super) fn open_tiny() -> Option<(tempfile::TempDir, PdfDoc)> {
     open_tiny_with(false)
 }
 
+/// pdfium reads a document from its file as it needs it, so a file written into in place — as
+/// pdflatex writes its output — is no longer the document that was opened, while one replaced by
+/// a rename, as every save here is, leaves it reading the file it opened.
+#[test]
+fn a_document_knows_when_its_file_is_written_into() {
+    let Some((dir, doc)) = open_tiny() else {
+        return;
+    };
+    let path = dir.path().join("tiny.pdf");
+    assert!(doc.intact());
+    let beside = dir.path().join("beside.pdf");
+    std::fs::write(&beside, tiny_pdf(true)).unwrap();
+    std::fs::rename(&beside, &path).unwrap();
+    assert!(doc.intact(), "a rename leaves the opened file alone");
+    let doc = PdfDoc::open(&path).unwrap();
+    std::fs::write(&path, tiny_pdf(false)).unwrap();
+    assert!(!doc.intact(), "written into in place");
+}
+
 #[test]
 fn opens_and_reports_geometry() {
     let Some((_d, doc)) = open_tiny() else { return };
