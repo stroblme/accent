@@ -151,7 +151,8 @@ use tags::bench_tags;
 /// whose folded section ends inside a collapsed run and asks for the iter at every pixel row
 /// (`compare::bench_compare_folds`).
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
-/// another size, printing what the picture asks for and says either side of the reload.
+/// another size, printing what the picture asks for and says either side of the reload;
+/// `=zoom:<rel_svg>,…` steps an SVG in and back, printing what it is drawn from as the zoom settles.
 /// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` walks each image through the three themes, inverted and
 /// not, printing what the classifier said, the pixel the tab shows at (2,2) and the recolouring's
 /// cost (see `image::bench_image_look`). `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` does the same for

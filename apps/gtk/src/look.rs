@@ -7,9 +7,10 @@
 //! decoding, the classifying and the recolouring run on a worker ([`show`], [`serve`]), with
 //! GDK's own decoders and `accent_core::recolour`.
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -79,33 +80,45 @@ impl Look {
 pub struct Shown {
     pub original: gdk::Texture,
     pub texture: gdk::Texture,
-    /// The texture's pixels to one of the picture's: the display's scale for an SVG, drawn that
-    /// much larger, and 1 for a raster, which has only its own pixels.
-    pub scale: i32,
+    /// The size an SVG is shown at, its own, which its texture has more pixels than: it is drawn
+    /// at the display's scale and at a zoom past 100 %. `None` for a raster, which has only its
+    /// own pixels.
+    pub size: Option<(i32, i32)>,
 }
 
 impl Shown {
     /// What the picture is handed: the texture, at its logical size.
     pub fn paintable(&self) -> gdk::Paintable {
-        match self.scale {
-            1 => self.texture.clone().upcast(),
-            scale => Scaled::new(&self.texture, scale).upcast(),
+        match self.size {
+            None => self.texture.clone().upcast(),
+            Some((width, height)) => Scaled::new(&self.texture, width, height).upcast(),
         }
     }
 }
 
+/// The zoom an image is drawn at while its picture is zoomed to `zoom`, `None` being fitted: an
+/// SVG's past 100 %, so a deep zoom stays sharp. A raster has only its own pixels, and anything
+/// fitted or zoomed out is drawn at its own size and shown smaller.
+pub fn drawn_zoom(path: &Path, zoom: Option<f64>) -> f64 {
+    match (svg(path), zoom) {
+        (true, Some(zoom)) => zoom.max(1.0),
+        _ => 1.0,
+    }
+}
+
 /// Decode `path`, unless `original` already holds it, and recolour it as `look` asks, an SVG drawn
-/// at `scale` (the display's). On a worker: a large scan takes a while to decode, and longer to
-/// recolour.
+/// at `scale` (the display's) and `zoom` ([`drawn_zoom`]). On a worker: a large scan takes a
+/// while to decode, and longer to recolour.
 pub fn show(
     path: &Path,
     original: Option<gdk::Texture>,
     look: Look,
     inverted: bool,
     scale: i32,
+    zoom: f64,
 ) -> Result<Shown, glib::Error> {
     if svg(path) {
-        return show_svg(path, look, inverted, scale);
+        return show_svg(path, look, inverted, scale, zoom);
     }
     let original = match original {
         Some(texture) => texture,
@@ -116,31 +129,53 @@ pub fn show(
     Ok(Shown {
         original,
         texture,
-        scale: 1,
+        size: None,
     })
 }
 
 /// [`show`] for an SVG, drawn again from its text every time, at the display's scale as GTK draws
 /// one: it is recoloured as a vector, through a filter, and a drawing costs little.
-fn show_svg(path: &Path, look: Look, inverted: bool, scale: i32) -> Result<Shown, glib::Error> {
+fn show_svg(
+    path: &Path,
+    look: Look,
+    inverted: bool,
+    scale: i32,
+    zoom: f64,
+) -> Result<Shown, glib::Error> {
     let (text, _) = gio::File::for_path(path).load_bytes(gio::Cancellable::NONE)?;
-    let original = rasterise(&text, scale)?;
+    let (original, size) = rasterise(&text, scale, zoom)?;
     let texture = look
         .palette(true, inverted)
         .and_then(|page| svg_filtered(path, page, look.fills(page)))
-        .and_then(|svg| rasterise(&svg, scale).ok())
-        .unwrap_or_else(|| original.clone());
+        .and_then(|svg| rasterise(&svg, scale, zoom).ok())
+        .map_or_else(|| original.clone(), |(texture, _)| texture);
     Ok(Shown {
         original,
         texture,
-        scale,
+        size: Some(size),
     })
 }
 
-/// An SVG drawn at `scale` times its own size, through gdk-pixbuf, as GTK draws a picture's.
-fn rasterise(svg: &[u8], scale: i32) -> Result<gdk::Texture, glib::Error> {
+/// The most pixels an SVG is drawn at for a zoom: 16 megapixels, 64 MB, about twice a 4K
+/// display's. A deeper zoom into a larger drawing enlarges that rather than drawing it at any
+/// size; the display's scale alone is never cut.
+const MAX_ZOOMED: f64 = 16e6;
+
+/// An SVG drawn at `scale` times its own size, through gdk-pixbuf, as GTK draws a picture's, and
+/// `zoom` times that as far as [`MAX_ZOOMED`] goes; with that own size.
+fn rasterise(svg: &[u8], scale: i32, zoom: f64) -> Result<(gdk::Texture, (i32, i32)), glib::Error> {
     let loader = gdk_pixbuf::PixbufLoader::new();
-    loader.connect_size_prepared(move |loader, w, h| loader.set_size(w * scale, h * scale));
+    let size = Rc::new(Cell::new((0, 0)));
+    let own = size.clone();
+    loader.connect_size_prepared(move |loader, w, h| {
+        own.set((w, h));
+        let (w, h, scale) = (f64::from(w), f64::from(h), f64::from(scale));
+        let zoom = zoom
+            .min((MAX_ZOOMED / (w * h * scale * scale)).sqrt())
+            .max(1.0);
+        let times = scale * zoom;
+        loader.set_size((w * times).round() as i32, (h * times).round() as i32);
+    });
     loader.write(svg)?;
     loader.close()?;
     let pixbuf = loader
@@ -150,14 +185,14 @@ fn rasterise(svg: &[u8], scale: i32) -> Result<gdk::Texture, glib::Error> {
         true => gdk::MemoryFormat::R8g8b8a8,
         false => gdk::MemoryFormat::R8g8b8,
     };
-    Ok(gdk::MemoryTexture::new(
+    let texture = gdk::MemoryTexture::new(
         pixbuf.width(),
         pixbuf.height(),
         format,
         &pixbuf.read_pixel_bytes(),
         pixbuf.rowstride() as usize,
-    )
-    .upcast())
+    );
+    Ok((texture.upcast(), size.get()))
 }
 
 /// What the preview hands WebKit for an image: the file as it is, or new bytes of a type.
@@ -386,7 +421,7 @@ mod imp {
     #[derive(Default)]
     pub struct Scaled {
         pub texture: OnceCell<gdk::Texture>,
-        pub scale: Cell<i32>,
+        pub size: Cell<(i32, i32)>,
     }
 
     #[glib::object_subclass]
@@ -404,15 +439,11 @@ mod imp {
         }
 
         fn intrinsic_width(&self) -> i32 {
-            self.texture
-                .get()
-                .map_or(0, |t| t.width() / self.scale.get())
+            self.size.get().0
         }
 
         fn intrinsic_height(&self) -> i32 {
-            self.texture
-                .get()
-                .map_or(0, |t| t.height() / self.scale.get())
+            self.size.get().1
         }
 
         fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
@@ -424,16 +455,16 @@ mod imp {
 }
 
 glib::wrapper! {
-    /// A texture drawn `scale` times larger than it is to be shown, sized as it is to be shown:
-    /// GTK's own `GtkScaler`, which it keeps private.
+    /// A texture of more pixels than it is to be shown at, sized as it is to be shown: GTK's own
+    /// `GtkScaler`, which it keeps private.
     pub struct Scaled(ObjectSubclass<imp::Scaled>) @implements gdk::Paintable;
 }
 
 impl Scaled {
-    fn new(texture: &gdk::Texture, scale: i32) -> Scaled {
+    fn new(texture: &gdk::Texture, width: i32, height: i32) -> Scaled {
         let scaled: Scaled = glib::Object::new();
         let _ = scaled.imp().texture.set(texture.clone());
-        scaled.imp().scale.set(scale);
+        scaled.imp().size.set((width, height));
         scaled
     }
 

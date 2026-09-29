@@ -12,7 +12,14 @@ use webkit6::prelude::*;
 ///
 /// A fitted image was already covered by the reload drills of 8facc35; what a zoom adds is the
 /// size request, which is worked out from the paintable and so is of the file that has gone.
+///
+/// `=zoom:<rel_svg>,<rel_svg>,…` instead steps each SVG in thirty times, then forty more, then
+/// back to the fit, printing the picture just after each run and once the zoom has settled, with
+/// how long the drawing at the new zoom took to land: it is drawn once per run, at the last step.
 pub(super) fn bench_image(app: &Rc<App>, arg: &str) {
+    if let Some(rels) = arg.strip_prefix("zoom:") {
+        return zoom_svgs(app, rels);
+    }
     let Some((rel, other)) = arg.split_once(',') else {
         println!("bench image needs <rel_png>,<rel_other_png>");
         return bench_quit(app);
@@ -41,8 +48,65 @@ pub(super) fn bench_image(app: &Rc<App>, arg: &str) {
     });
 }
 
+/// See `=zoom:` on [`bench_image`].
+fn zoom_svgs(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        for rel in rels {
+            app.open_path(&rel);
+            glib::timeout_future(Duration::from_millis(600)).await;
+            image_state(&app, "fitted");
+            for (action, steps) in [
+                ("win.zoom-in", 30),
+                ("win.zoom-in", 40),
+                ("win.zoom-reset", 1),
+            ] {
+                let before = drawn_pixels(&app);
+                for _ in 0..steps {
+                    let _ = WidgetExt::activate_action(&app.window, action, None);
+                }
+                let t = Instant::now();
+                image_state(&app, "stepped");
+                while drawn_pixels(&app) == before && t.elapsed() < Duration::from_secs(5) {
+                    glib::timeout_future(Duration::from_millis(5)).await;
+                }
+                let landed = ms_since(t);
+                glib::timeout_future(Duration::from_millis(600)).await;
+                image_state(&app, &format!("settled landed_ms={landed:.0}"));
+            }
+        }
+        bench_quit(&app);
+    });
+}
+
+/// The pixels of the texture the picture in front draws, an SVG's inside its paintable.
+fn drawn_pixels(app: &Rc<App>) -> (i32, i32) {
+    let Some(Doc::Image(image)) = app.active_doc() else {
+        return (0, 0);
+    };
+    picture_of(&image.page)
+        .and_then(|p| p.paintable())
+        .as_ref()
+        .and_then(texture_of)
+        .map_or((0, 0), |t| (t.width(), t.height()))
+}
+
+/// The texture `paintable` draws: itself, or an SVG's inside [`crate::look::Scaled`].
+fn texture_of(paintable: &gdk::Paintable) -> Option<gdk::Texture> {
+    paintable
+        .downcast_ref::<gdk::Texture>()
+        .cloned()
+        .or_else(|| {
+            paintable
+                .downcast_ref::<crate::look::Scaled>()
+                .map(|s| s.texture())
+        })
+}
+
 /// What the picture in front holds: the file's own size, the size it asks the scroller for, the
-/// size it is drawn at, and the readout over it.
+/// size it is drawn at, the texture it is drawn from, the times it was sent to be drawn, and the
+/// readout over it.
 fn image_state(app: &Rc<App>, when: &str) {
     let Some(Doc::Image(image)) = app.active_doc() else {
         println!("bench image no_tab {when}");
@@ -53,15 +117,21 @@ fn image_state(app: &Rc<App>, when: &str) {
         return;
     };
     let paintable = picture.paintable();
-    let intrinsic = paintable.map_or((0, 0), |p| (p.intrinsic_width(), p.intrinsic_height()));
+    let intrinsic = paintable
+        .as_ref()
+        .map_or((0, 0), |p| (p.intrinsic_width(), p.intrinsic_height()));
+    let pixels = drawn_pixels(app);
     println!(
-        "bench image {when} file={}x{} request={}x{} drawn={}x{} label={:?}",
+        "bench image {when} file={}x{} request={}x{} drawn={}x{} pixels={}x{} shows={} label={:?}",
         intrinsic.0,
         intrinsic.1,
         picture.width_request(),
         picture.height_request(),
         picture.width(),
         picture.height(),
+        pixels.0,
+        pixels.1,
+        image.shows.get(),
         crate::zoom::image_zoom_label(&image),
     );
 }
@@ -120,11 +190,7 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
         None => "document=- paper=- colours=-".to_string(),
     };
     // An SVG's texture is drawn at the display's scale, inside a paintable of its logical size.
-    let texture = shown.downcast_ref::<gdk::Texture>().cloned().or_else(|| {
-        shown
-            .downcast_ref::<crate::look::Scaled>()
-            .map(|s| s.texture())
-    });
+    let texture = texture_of(&shown);
     let px = texture
         .as_ref()
         .map(|t| {
@@ -144,7 +210,8 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
     let recoloured = texture.as_ref() != Some(&original);
     let pixels = texture.map_or((0, 0), |t| (t.width(), t.height()));
     let t = Instant::now();
-    let _ = crate::look::show(&path, Some(original), Look::now(), inverted, scale);
+    let zoom = crate::look::drawn_zoom(&path, image.zoom.get());
+    let _ = crate::look::show(&path, Some(original), Look::now(), inverted, scale, zoom);
     println!(
         "bench image_look {rel} theme={theme:?} dark={} inverted={inverted} {verdict} \
          recoloured={recoloured} size={}x{} pixels={}x{} px(2,2)={px} type={} ms={:.1}",

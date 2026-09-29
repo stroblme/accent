@@ -823,11 +823,7 @@ impl App {
     /// Only the latest call's answer lands, and a read that lands under a look that has moved on
     /// since asks again, so a theme change or an inversion while a large file decodes is kept.
     pub(crate) fn show_image(self: &Rc<Self>, image: &Rc<doc::Viewer>, read: Option<PathBuf>) {
-        let wanted = (
-            look::Look::now(),
-            self.inverted_images.borrow().contains(&image.key()),
-            picture_of(&image.page).map_or(1, |p| p.scale_factor()),
-        );
+        let reading = read.is_some();
         let (path, original) = match read {
             // What is on screen is of the old contents, so a restyle meanwhile waits for these.
             Some(path) => {
@@ -835,20 +831,28 @@ impl App {
                 (path, None)
             }
             None => match image.image.borrow().clone() {
-                _ if image.look.get() == Some(wanted) => return,
                 Some((path, texture)) => (path, Some(texture)),
                 // Still being read, under a look its landing will find is not this one.
                 None => return,
             },
         };
+        let wanted = (
+            look::Look::now(),
+            self.inverted_images.borrow().contains(&image.key()),
+            picture_of(&image.page).map_or(1, |p| p.scale_factor()),
+            look::drawn_zoom(&path, image.zoom.get()),
+        );
+        if !reading && image.look.get() == Some(wanted) {
+            return;
+        }
         image.look.set(Some(wanted));
         let ticket = image.shows.get().wrapping_add(1);
         image.shows.set(ticket);
         let (app, image) = (Rc::downgrade(self), Rc::downgrade(image));
         glib::spawn_future_local(async move {
-            let ((look, inverted, scale), from) = (wanted, path.clone());
+            let ((look, inverted, scale, zoom), from) = (wanted, path.clone());
             let shown = work::off_thread("image", move || {
-                look::show(&from, original, look, inverted, scale)
+                look::show(&from, original, look, inverted, scale, zoom)
             })
             .await;
             let (Some(app), Some(image)) = (app.upgrade(), image.upgrade()) else {
