@@ -148,6 +148,10 @@ fn main() -> glib::ExitCode {
     if let Ok(exe) = std::env::current_exe() {
         accent_core::git::set_askpass(exe);
     }
+    // `--help` and the like are answered here, never reaching a running instance.
+    if let Some(code) = shell::local_command_line(std::env::args_os()) {
+        return code;
+    }
     terminal::install_termprops();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
