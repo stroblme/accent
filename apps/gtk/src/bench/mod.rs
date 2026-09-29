@@ -37,7 +37,7 @@ use export::bench_export;
 use files::{
     bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
     bench_menu, bench_menu_press, bench_move, bench_paths, bench_save_as, bench_templates,
-    bench_transfer, bench_watch,
+    bench_transfer, bench_unfold, bench_watch,
 };
 use find::bench_find;
 use git::{
@@ -340,6 +340,11 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
+/// `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…` opens those folders in the Files tree as clicks would and
+/// prints what it lists under each; `=race:<dir>`, `=renew:<dir>` and `=tab:<rel>` change a folder
+/// the index does not walk under the tree and a tab from outside accent and print whether they
+/// followed (`files::bench_unfold`). The last three write, so only on a scratch vault.
+///
 /// `ACCENT_BENCH_MOVE=<rel>,<rel>,…` moves those paths with Move to…, past its dialog, into a
 /// folder that is not there yet, then tries the two moves it refuses, and prints the dialog, the
 /// toasts and where the files are (`files::bench_move`). Only on a scratch vault under `/tmp`.
@@ -419,7 +424,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let export = std::env::var("ACCENT_BENCH_EXPORT").ok();
     let scroll = std::env::var("ACCENT_BENCH_SCROLL").ok();
     let moving = std::env::var("ACCENT_BENCH_MOVE").ok();
+    let unfold = std::env::var("ACCENT_BENCH_UNFOLD").ok();
     if expand.is_none()
+        && unfold.is_none()
         && scroll.is_none()
         && moving.is_none()
         && attach.is_none()
@@ -596,6 +603,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rels) = moving {
             return bench_move(&app, &rels);
+        }
+        if let Some(dirs) = unfold {
+            return bench_unfold(&app, &dirs);
         }
         if let Some(rels) = tabs {
             if let Some(rels) = rels.strip_prefix("pin:") {

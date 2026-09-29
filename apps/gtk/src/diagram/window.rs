@@ -127,6 +127,7 @@ impl App {
         }
         let page = tab.page.clone();
         self.mark_loose(&page, key);
+        self.watch_folder_of(key);
         self.docs.borrow_mut().push(Doc::Diagram(tab));
         self.select_new_page(&page, how);
         self.mark_opened(&page, how);

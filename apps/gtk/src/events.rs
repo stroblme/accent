@@ -1,6 +1,7 @@
 //! What the vault worker reports, and what the window does about it.
 
 use super::*;
+use accent_core::path::parent_dir;
 
 /// The vault worker is polled instead of woken; 120 ms is below what a progress label needs.
 const POLL: Duration = Duration::from_millis(120);
@@ -18,11 +19,13 @@ impl App {
         let prefix = format!("{from}/");
         for doc in self.docs() {
             let key = doc.key();
-            if key == from {
-                doc.retarget(&self.root(), to);
-            } else if let Some(rest) = key.strip_prefix(&prefix) {
-                doc.retarget(&self.root(), &format!("{to}/{rest}"));
-            }
+            let moved = match key.strip_prefix(&prefix) {
+                _ if key == from => to.to_string(),
+                Some(rest) => format!("{to}/{rest}"),
+                None => continue,
+            };
+            doc.retarget(&self.root(), &moved);
+            self.watch_folder_of(&moved);
         }
         accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), from, to);
         // The links a PDF's page delete left are found again by their note's path at its Undo.
@@ -32,6 +35,81 @@ impl App {
             }
         }
         self.sync_active();
+    }
+
+    /// Have the vault report on the folder `key` is in, which the walk may not enter: a file
+    /// in a gitignored folder or a dependency tree changes nothing the index hears, so its tab
+    /// would not follow an edit made outside accent. The news comes as
+    /// [`Event::UnindexedChanged`], as the tree's does for the folders it lists; the worker
+    /// leaves a folder it walks to the index. Watched for as long as the window is open, as the
+    /// tree's are: one folder per document, one level each.
+    pub(crate) fn watch_folder_of(&self, key: &str) {
+        let dir = parent_dir(key);
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        if dir.is_empty() || doc::is_loose_key(key) {
+            return;
+        }
+        let dirs = vec![dir.to_string()];
+        // A round trip on a remote vault, and one that cannot be sent yet is kept and asked of
+        // the host once it answers (`tree::watch_unindexed`).
+        gio::spawn_blocking(move || {
+            if let Err(e) = vault.watch_unindexed(&dirs) {
+                tracing::debug!("watching a document's folder: {e:#}");
+            }
+        });
+    }
+
+    /// Bring whatever shows `rel` up to date with its file, which something other than this
+    /// window has changed.
+    fn changed_on_disk(self: &Rc<Self>, rel: &str) {
+        // WebKit answers a render with what it was served, so an image the preview was
+        // served goes from its cache before the note is rendered again.
+        if self.preview.borrow().as_ref().is_some_and(|p| p.holds(rel)) {
+            self.reshow_preview_images();
+        }
+        let Some(doc) = self.doc_for(rel) else {
+            return;
+        };
+        match &doc {
+            Doc::Text(tab) => {
+                self.file_changed(tab);
+                if self.is_active(tab) {
+                    self.sync_active();
+                }
+            }
+            // Read the file again: the texture on screen is of the old contents, so
+            // redrawing alone would show them again. The file is found as opening it
+            // was, which on a remote vault fetches a fresh copy.
+            Doc::Image(image) => {
+                let image = Rc::downgrade(image);
+                self.local_copy(rel, &self.root().join(rel), move |app, copy| {
+                    match (image.upgrade(), copy) {
+                        (Some(image), Ok(copy)) => app.show_image(&image, Some(copy)),
+                        (Some(_), Err(e)) => app.cannot("reload", e),
+                        (None, _) => {}
+                    }
+                });
+            }
+            // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
+            // rather than sending the reader back to page one. On a remote vault the
+            // reader has a cached copy open, which is fetched again first.
+            Doc::Pdf(pdf) => {
+                let pdf = Rc::downgrade(pdf);
+                self.local_copy(rel, &self.root().join(rel), move |app, copy| {
+                    match (pdf.upgrade(), copy) {
+                        (Some(pdf), Ok(_)) => pdf.refresh(),
+                        (Some(_), Err(e)) => app.cannot("reload", e),
+                        (None, _) => {}
+                    }
+                });
+            }
+            Doc::Diagram(d) => self.diagram_changed(d),
+            // Neither a diff nor a shell is keyed by a path, so a file changing under one
+            // reaches none of these.
+            Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) => {}
+        }
     }
 
     fn on_event(self: &Rc<Self>, event: Event) {
@@ -159,64 +237,27 @@ impl App {
                     }
                 });
             }
-            Event::DirsChanged(dirs) | Event::UnindexedChanged(dirs) => {
+            Event::DirsChanged(dirs) => {
                 if let Some(tree) = self.tree.get() {
                     tree.invalidate(&dirs);
                 }
             }
-            Event::FileChanged(rel) => {
-                // WebKit answers a render with what it was served, so an image the preview was
-                // served goes from its cache before the note is rendered again.
-                if self
-                    .preview
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|p| p.holds(&rel))
-                {
-                    self.reshow_preview_images();
+            // The index hears nothing from these folders, so a document open on a file in one
+            // is told here instead, as `FileChanged` tells one the index holds: a text or a
+            // diagram tab reads again only a file that really changed (`check_disk`), and a PDF
+            // once its file has been left alone (`PdfTab::refresh`).
+            Event::UnindexedChanged(dirs) => {
+                if let Some(tree) = self.tree.get() {
+                    tree.invalidate(&dirs);
                 }
-                let Some(doc) = self.doc_for(&rel) else {
-                    return;
-                };
-                match &doc {
-                    Doc::Text(tab) => {
-                        self.file_changed(tab);
-                        if self.is_active(tab) {
-                            self.sync_active();
-                        }
+                for doc in self.docs() {
+                    let key = doc.key();
+                    if dirs.iter().any(|dir| dir == parent_dir(&key)) {
+                        self.changed_on_disk(&key);
                     }
-                    // Read the file again: the texture on screen is of the old contents, so
-                    // redrawing alone would show them again. The file is found as opening it
-                    // was, which on a remote vault fetches a fresh copy.
-                    Doc::Image(image) => {
-                        let image = Rc::downgrade(image);
-                        self.local_copy(&rel, &self.root().join(&rel), move |app, copy| {
-                            match (image.upgrade(), copy) {
-                                (Some(image), Ok(copy)) => app.show_image(&image, Some(copy)),
-                                (Some(_), Err(e)) => app.cannot("reload", e),
-                                (None, _) => {}
-                            }
-                        });
-                    }
-                    // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
-                    // rather than sending the reader back to page one. On a remote vault the
-                    // reader has a cached copy open, which is fetched again first.
-                    Doc::Pdf(pdf) => {
-                        let pdf = Rc::downgrade(pdf);
-                        self.local_copy(&rel, &self.root().join(&rel), move |app, copy| {
-                            match (pdf.upgrade(), copy) {
-                                (Some(pdf), Ok(_)) => pdf.refresh(),
-                                (Some(_), Err(e)) => app.cannot("reload", e),
-                                (None, _) => {}
-                            }
-                        });
-                    }
-                    Doc::Diagram(d) => self.diagram_changed(d),
-                    // Neither a diff nor a shell is keyed by a path, so a file changing under one
-                    // reaches none of these.
-                    Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) => {}
                 }
             }
+            Event::FileChanged(rel) => self.changed_on_disk(&rel),
             Event::FileRemoved(rel) => {
                 // A conflict copy is never a tab of its own; what its removal changes is the
                 // banner on the file it was a copy of.
