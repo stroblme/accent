@@ -27,9 +27,9 @@ mod tags;
 use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
-    bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_gutter,
-    bench_compare_left, bench_compare_lines, bench_compare_pads, bench_compare_pick,
-    bench_compare_row,
+    bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_folds,
+    bench_compare_gutter, bench_compare_left, bench_compare_lines, bench_compare_pads,
+    bench_compare_pick, bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -37,7 +37,7 @@ use export::bench_export;
 use files::{
     bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
     bench_menu, bench_menu_press, bench_move, bench_paths, bench_save_as, bench_templates,
-    bench_transfer, bench_watch,
+    bench_transfer, bench_unfold, bench_watch,
 };
 use find::bench_find;
 use git::{
@@ -147,7 +147,9 @@ use tags::bench_tags;
 /// `=conflict:<rel_text_file>` writes a sync conflict copy beside that file while its tab is open
 /// and prints what the banner stands for: live, after the tab is opened again, and once the copy
 /// is gone. `=left:<rel>` leaves a comparison with the disk copy and scrolls the editor once the
-/// copy's column is freed (see `compare::bench_compare_left`).
+/// copy's column is freed (see `compare::bench_compare_left`). `=folds:<rel>` compares a note
+/// whose folded section ends inside a collapsed run and asks for the iter at every pixel row
+/// (`compare::bench_compare_folds`).
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` walks each image through the three themes, inverted and
@@ -340,6 +342,12 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
+/// `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…` opens those folders in the Files tree as clicks would and
+/// prints what it lists under each; `=race:<dir>`, `=renew:<dir>`, `=again:<dir>` and
+/// `=tab:<rel>` change a folder the index does not walk under the tree and a tab from outside
+/// accent and print whether they followed (`files::bench_unfold`). Those write, so only on a
+/// scratch vault.
+///
 /// `ACCENT_BENCH_MOVE=<rel>,<rel>,…` moves those paths with Move to…, past its dialog, into a
 /// folder that is not there yet, then tries the two moves it refuses, and prints the dialog, the
 /// toasts and where the files are (`files::bench_move`). Only on a scratch vault under `/tmp`.
@@ -419,7 +427,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let export = std::env::var("ACCENT_BENCH_EXPORT").ok();
     let scroll = std::env::var("ACCENT_BENCH_SCROLL").ok();
     let moving = std::env::var("ACCENT_BENCH_MOVE").ok();
+    let unfold = std::env::var("ACCENT_BENCH_UNFOLD").ok();
     if expand.is_none()
+        && unfold.is_none()
         && scroll.is_none()
         && moving.is_none()
         && attach.is_none()
@@ -504,6 +514,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("left:") {
                 return bench_compare_left(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("folds:") {
+                return bench_compare_folds(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
@@ -596,6 +609,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rels) = moving {
             return bench_move(&app, &rels);
+        }
+        if let Some(dirs) = unfold {
+            return bench_unfold(&app, &dirs);
         }
         if let Some(rels) = tabs {
             if let Some(rels) = rels.strip_prefix("pin:") {

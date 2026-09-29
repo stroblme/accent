@@ -792,6 +792,75 @@ pub(super) fn bench_compare_left(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// A note with its first section folded, compared with its disk copy, which differs only at the
+/// end: the run the comparison collapses reaches over the fold's end. It asks for the iter at every
+/// pixel row of the editor, as GtkSourceView asks at the top and bottom of the screen on every
+/// frame, and prints whether the fold was open meanwhile and is shut again once the comparison
+/// has gone. With the fold left shut, the line where it ended was laid out as a blank row, and an
+/// iter asked in that row's pixels-below-lines aborted the process ("Byte index … is off the end of
+/// the line"). Writes the note, so point it at a scratch vault.
+pub(super) fn bench_compare_folds(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let section = |name: &str| -> String {
+            let body: String = (1..=10).map(|i| format!("{name} line {i}\n")).collect();
+            format!("# {name}\n{body}")
+        };
+        tab.set_text(&format!("{}{}", section("One"), section("Two")));
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_folds write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.set_folds(vec![
+            Fold {
+                start_line: 0,
+                end_line: 10,
+            },
+            Fold {
+                start_line: 11,
+                end_line: 21,
+            },
+        ]);
+        tab.toggle_fold(0);
+        let mut last = tab.buffer.end_iter();
+        last.backward_char();
+        tab.buffer.insert(&mut last, " changed");
+        let folded = |tab: &Tab| crate::fold::is_folded(tab.buffer.upcast_ref(), 0);
+        let before = folded(&tab);
+        app.compare_with_disk(&tab);
+        for _ in 0..40 {
+            wait(100).await;
+            if tab.comparison().is_some() {
+                break;
+            }
+        }
+        wait(500).await;
+        let Some(compare) = tab.comparison() else {
+            println!("bench compare_folds none");
+            return bench_quit(&app);
+        };
+        let during = folded(&tab);
+        let (y, height) = tab.view.line_yrange(&tab.buffer.end_iter());
+        for y in 0..y + height {
+            tab.view.iter_at_location(0, y);
+        }
+        println!(
+            "bench compare_folds shut_before={before} shut_during={during} {}",
+            bench_compare_line(&compare)
+        );
+        drop(compare);
+        tab.leave_compare();
+        println!("bench compare_folds shut_after={}", folded(&tab));
+        bench_quit(&app);
+    });
+}
+
 /// Stage Selected Lines and Unstage Selected Lines, end to end. It makes a repository in the
 /// vault root and commits the note as twelve lines, so point it at a throwaway vault. The tab then
 /// rewrites line 3 and adds a line under line 9, and the working tree is compared with the index;

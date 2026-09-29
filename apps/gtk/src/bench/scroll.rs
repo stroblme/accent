@@ -183,7 +183,7 @@ fn say(app: &Rc<App>, list: &str, step: &str, view: &gtk::ListView) {
 }
 
 /// Run `script` in the vault root: here with `sh`, or on the host over the vault's own master.
-fn in_vault(app: &Rc<App>, script: &str) -> bool {
+pub(super) fn in_vault(app: &Rc<App>, script: &str) -> bool {
     let Some(vault) = app.vault() else {
         return false;
     };

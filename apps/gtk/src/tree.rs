@@ -1160,6 +1160,25 @@ pub fn build(
     let drag_marked = marked.clone();
     let row_moves = moves.clone();
     let row_imports = imports.clone();
+    // A folder's listing is kept for as long as the window is open, which is what makes binding
+    // its row free, and it moves only when the vault says the folder changed. So each opening of
+    // a folder lists it again: a dependency tree is watched by nothing, and a folder whose news
+    // was missed — changed before its watch was in place, or with no watch to be had — would open
+    // onto what it held the first time, however often it was opened.
+    let relist: Rc<dyn Fn(&str)> = Rc::new({
+        let (vault, cache, asked, show_hidden) = (
+            vault.clone(),
+            cache.clone(),
+            asked.clone(),
+            show_hidden.clone(),
+        );
+        move |rel| {
+            let store = cache.borrow().get(rel).cloned();
+            if let Some(store) = store {
+                fill(&store, &vault, &asked, &show_hidden, rel, None);
+            }
+        }
+    });
     let factory = crate::widgets::factory(
         move |_| {
             let icon = gtk::Image::new();
@@ -1177,6 +1196,28 @@ pub fn build(
             // `set_tooltip_text` triggers a tooltip query on the whole window, and paying that per
             // bound row tripled the cost of expanding a 2 400-child directory (12 ms to 40 ms).
             expander.set_has_tooltip(true);
+            // The row this widget is bound to, and its handler: rows are recycled, so the handler
+            // moves with the binding rather than piling up on every row the widget has shown.
+            let opened: RefCell<Option<(gtk::TreeListRow, glib::SignalHandlerId)>> =
+                RefCell::default();
+            let relist = relist.clone();
+            expander.connect_list_row_notify(move |expander| {
+                if let Some((row, handler)) = opened.borrow_mut().take() {
+                    row.disconnect(handler);
+                }
+                let Some(row) = expander.list_row() else {
+                    return;
+                };
+                let relist = relist.clone();
+                let handler = row.connect_expanded_notify(move |row| {
+                    let item = row.item();
+                    if let Some(item) = item.as_ref().and_then(decode).filter(|_| row.is_expanded())
+                    {
+                        relist(&item.rel);
+                    }
+                });
+                *opened.borrow_mut() = Some((row, handler));
+            });
             let root_label = root_label.clone();
             expander.connect_query_tooltip(move |expander, _, _, _, tooltip| {
                 let row = expander.list_row().and_then(|row| row.item());
