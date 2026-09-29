@@ -494,9 +494,18 @@ impl Worker {
                     // second accent looks like. Believe a removal only when the path is really
                     // gone, or the tab the user is typing in closes under them.
                     if let Ok(Some(meta)) = walk::stat_one(&self.root, &rel) {
-                        // A directory there again is a new one, made inside this batch: the
-                        // watch went with the old one (`Watcher::forget` in `process_batch`).
-                        b.rewatch |= meta.kind == FileKind::Dir;
+                        // A directory there again is a new one, made inside this batch, and the
+                        // debouncer says nothing of what the old one held: that goes as for a
+                        // removal across two batches, and the new one comes back as a directory
+                        // made, watched afresh (its watch went with the old one, `forget`).
+                        // What it holds already is walked in; a batch whose new folder held
+                        // something at its start has walked it already (`needs_rescan`).
+                        if meta.kind == FileKind::Dir {
+                            self.remove(&rel, b);
+                            if has_children(&p) {
+                                let _ = self.tx.send(Msg::Rescan);
+                            }
+                        }
                         self.update(&rel, false, b);
                     } else {
                         self.remove(&rel, b);
@@ -849,10 +858,11 @@ mod tests {
         );
     }
 
-    /// The same, removed and made again inside one watcher batch, which reads as a folder that
-    /// changed rather than one that went: its watch went with the old directory all the same.
+    /// The same, removed and made again inside one watcher batch, which the debouncer reports as
+    /// the folder's removal and creation and nothing about what it held: what it held goes, as
+    /// for a removal across two batches, and the new folder is watched.
     #[test]
-    fn a_folder_removed_and_made_again_in_one_batch_is_watched_again() {
+    fn a_folder_removed_and_made_again_in_one_batch_drops_what_it_held() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("sub")).unwrap();
         std::fs::write(root.path().join("sub/a.md"), "a").unwrap();
@@ -861,15 +871,48 @@ mod tests {
 
         std::fs::remove_dir_all(&sub).unwrap();
         std::fs::create_dir(&sub).unwrap();
-        // The batch says nothing the UI hears — the folder is the one it was, to the index — so
-        // it is waited out: the watcher's debounce, with room to spare.
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        f.write("sub/b.md", "b");
 
+        assert!(
+            f.wait(|e| matches!(e, Event::FileRemoved(p) if p == "sub"))
+                .is_some(),
+            "the old folder's removal never reached the tabs"
+        );
+        let paths = f.vault.file_paths(true).unwrap();
+        assert!(
+            !paths.contains(&"sub/a.md".to_string()),
+            "the old folder's note is still indexed: {paths:?}"
+        );
+        // The end of the batch, by when the new folder is watched.
+        assert!(f.wait(|e| matches!(e, Event::DirsChanged(_))).is_some());
+        f.write("sub/b.md", "b");
         assert!(
             f.wait(|e| matches!(e, Event::DirsChanged(d) if d.iter().any(|d| d == "sub")))
                 .is_some(),
             "a file written into the folder made again was not seen"
+        );
+    }
+
+    /// And made again with files in it already, which are walked in.
+    #[test]
+    fn a_folder_made_again_in_one_batch_brings_back_what_it_holds() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        std::fs::write(root.path().join("sub/a.md"), "a").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+        let sub = f.vault.root().join("sub");
+
+        std::fs::remove_dir_all(&sub).unwrap();
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("a.md"), "again").unwrap();
+        std::fs::write(sub.join("c.md"), "c").unwrap();
+
+        let back = || {
+            let paths = f.vault.file_paths(true).unwrap();
+            paths.contains(&"sub/a.md".to_string()) && paths.contains(&"sub/c.md".to_string())
+        };
+        assert!(
+            poll_until(back, BUDGET),
+            "what the new folder holds is not indexed"
         );
     }
 

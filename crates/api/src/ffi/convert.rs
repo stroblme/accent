@@ -249,7 +249,8 @@ pub struct Analysis {
 
 // --------------------------------------------------------------------------------- pdf records
 
-/// A rendered piece of a page: tightly packed RGBA8, `width * height * 4` bytes.
+/// A rendered piece of a page, or an image turned upright: tightly packed RGBA8,
+/// `width * height * 4` bytes.
 #[derive(uniffi::Record)]
 pub struct Tile {
     pub width: u32,

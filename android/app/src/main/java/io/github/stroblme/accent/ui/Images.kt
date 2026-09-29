@@ -10,6 +10,7 @@ import io.github.stroblme.accent.ffi.Theme
 import io.github.stroblme.accent.ffi.looksLikeDocument
 import io.github.stroblme.accent.ffi.recolourImage
 import io.github.stroblme.accent.ffi.recolourSvg
+import io.github.stroblme.accent.ffi.uprightImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -144,10 +145,16 @@ private fun document(file: File): Boolean {
  * its transparency — unless it is to [fill] it with the paper. Decoded at a long side of
  * [RECOLOURED_SIDE] at most, which keeps a large scan's copies bounded. Null when the platform
  * cannot decode it into RGBA8, and it is then served as it is.
+ *
+ * Turned first the way the file's EXIF says, as the WebView shows the untouched file and the
+ * decoder ignores: a camera's JPEG is stored on its side. The turned pixels fill the same bitmap,
+ * its width and height swapped where the turn is a quarter.
  */
 private fun recoloured(file: File, theme: Theme, fill: Boolean): WebResourceResponse? {
     val bitmap = bounds(file)?.let { decode(file, it, RECOLOURED_SIDE) } ?: return null
-    bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(recolourImage(bitmap.rgba(), theme, fill)))
+    val turned = uprightImage(bitmap.rgba(), bitmap.width.toUInt(), bitmap.height.toUInt(), file.path)
+    bitmap.reconfigure(turned.width.toInt(), turned.height.toInt(), Bitmap.Config.ARGB_8888)
+    bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(recolourImage(turned.rgba, theme, fill)))
     val png = ByteArrayOutputStream()
     bitmap.compress(Bitmap.CompressFormat.PNG, 100, png)
     bitmap.recycle()
