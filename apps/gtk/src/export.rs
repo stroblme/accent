@@ -7,6 +7,7 @@
 //! HTML file. A PDF tab's print and export are `pdf::export`'s.
 
 use super::*;
+use crate::look::{self, Look, Served};
 use crate::preview::{self, Preview};
 use std::sync::Mutex;
 use webkit6::prelude::*;
@@ -335,11 +336,18 @@ fn dest_name(dest: &Path) -> String {
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
 
-/// `path` as a `data:` URI, typed by its name and its bytes.
+/// `path` as a `data:` URI, as the preview is served it on paper (`look::serve`): a TIFF, which
+/// no browser draws, and an image its EXIF turns as a PNG; anything else as the file, typed by
+/// its name and its bytes.
 fn data_uri(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let (kind, _) = gio::content_type_guess(Some(path), Some(bytes.as_slice()));
-    let mime = gio::content_type_get_mime_type(&kind)?;
+    let (bytes, mime) = match look::serve(path, Look::paper(), false) {
+        Served::Bytes(bytes, mime) => (bytes.to_vec(), mime.to_string()),
+        Served::File => {
+            let bytes = std::fs::read(path).ok()?;
+            let (kind, _) = gio::content_type_guess(Some(path), Some(bytes.as_slice()));
+            (bytes, gio::content_type_get_mime_type(&kind)?.to_string())
+        }
+    };
     Some(format!(
         "data:{mime};base64,{}",
         glib::base64_encode(&bytes)
@@ -389,6 +397,16 @@ fn standalone(title: &str, css: &str, html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A TIFF goes into the page as the PNG the preview is served: no browser draws one.
+    #[test]
+    fn a_tiff_is_exported_as_a_png() {
+        let path = std::env::temp_dir().join(format!("accent-export-{}.tif", std::process::id()));
+        std::fs::write(&path, look::tests::grey_tiff(1)).unwrap();
+        let uri = data_uri(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(uri.is_some_and(|u| u.starts_with("data:image/png;base64,")));
+    }
 
     #[test]
     fn an_exported_page_carries_its_images_and_nothing_of_the_app() {

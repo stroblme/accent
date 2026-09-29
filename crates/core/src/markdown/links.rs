@@ -222,9 +222,13 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
-const IMAGE_EXT: [&str; 8] = ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "avif"];
+const IMAGE_EXT: [&str; 10] = [
+    "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "avif", "tif", "tiff",
+];
 
 /// Whether a link target names an image, by extension: `![[x.png]]` embeds, `![[x.pdf]]` links.
+/// A TIFF is one, which no web view draws: the desktop serves it converted, and Android, which
+/// has no decoder for it, leaves it out of its own image kinds (`ui/Images.kt`).
 pub fn is_image(target: &str) -> bool {
     target
         .rsplit_once('.')
