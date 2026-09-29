@@ -322,6 +322,7 @@ impl App {
         let page = pdf.page.clone();
         self.mark_loose(&page, key);
         let reader = Rc::downgrade(&pdf);
+        self.watch_folder_of(key);
         self.docs.borrow_mut().push(Doc::Pdf(pdf));
         self.select_new_page(&page, how);
         self.mark_opened(&page, how);
@@ -1057,6 +1058,7 @@ impl App {
         page.set_icon(Some(&gio::ThemedIcon::new(icon)));
         self.mark_loose(&page, key);
         let viewer = doc::Viewer::new(key, page.clone());
+        self.watch_folder_of(key);
         self.docs.borrow_mut().push(wrap(viewer.clone()));
         self.select_new_page(&page, how);
         self.mark_opened(&page, how);
@@ -1469,6 +1471,7 @@ impl App {
         self.mark_loose(&tab.page, &tab.rel());
         let page = tab.page.clone();
         self.fetch_head(&tab);
+        self.watch_folder_of(&tab.rel());
         self.docs.borrow_mut().push(Doc::Text(tab.clone()));
         self.select_new_page(&page, how);
         self.mark_opened(&page, how);

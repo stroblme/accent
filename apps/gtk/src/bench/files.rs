@@ -1390,6 +1390,166 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
     });
 }
 
+/// `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: open each folder in the tree as clicks on the rows above
+/// it would, one level at a time, and print what the tree lists under it once it has.
+///
+/// `=race:<rel_ignored_dir>` is the folder a build fills while the tree opens it: a folder is made
+/// in the open gitignored `<rel_ignored_dir>` with one file, and opened as soon as the tree lists
+/// it, with the vault's worker busy on a walk; a second file is written the moment the first is
+/// listed, before the new folder's watch can be in place, and the folder's rows are printed once
+/// the worker has caught up. The files are written the way anything outside accent writes them,
+/// on the host for a remote vault.
+pub(super) fn bench_unfold(app: &Rc<App>, arg: &str) {
+    if arg.contains(':') {
+        scratch_only(app, "ACCENT_BENCH_UNFOLD");
+    }
+    if let Some(dir) = arg.strip_prefix("race:") {
+        return bench_unfold_race(app, dir);
+    }
+    if let Some(dir) = arg.strip_prefix("renew:") {
+        return bench_unfold_renew(app, dir);
+    }
+    if let Some(rel) = arg.strip_prefix("tab:") {
+        return bench_unfold_tab(app, rel);
+    }
+    let (app, dirs) = (
+        app.clone(),
+        arg.split(',').map(str::to_string).collect::<Vec<_>>(),
+    );
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        for dir in &dirs {
+            unfold(tree, dir).await;
+            let expanded = tree::find_row(tree.model(), dir).map(|row| row.is_expanded());
+            println!(
+                "bench unfold {dir} expanded={expanded:?} {:?}",
+                listed(tree, dir)
+            );
+        }
+        bench_quit(&app);
+    });
+}
+
+fn bench_unfold_race(app: &Rc<App>, dir: &str) {
+    let (Some(vault), app, dir) = (app.vault().cloned(), app.clone(), dir.to_string()) else {
+        return bench_quit(app);
+    };
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        unfold(tree, &dir).await;
+        let race = format!("{dir}/race");
+        let quoted = accent_api::ssh::quote(&race);
+        let made = scroll::in_vault(
+            &app,
+            &format!("mkdir {quoted} && echo 1 > {quoted}/first.md"),
+        );
+        until(|| tree::find_row(tree.model(), &race).is_some()).await;
+        let _ = vault.rescan();
+        if let Some(row) = tree::find_row(tree.model(), &race) {
+            row.set_expanded(true);
+        }
+        for _ in 0..300 {
+            if !listed(tree, &race).is_empty() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(10)).await;
+        }
+        let first = listed(tree, &race);
+        scroll::in_vault(&app, &format!("echo 2 > {quoted}/second.md"));
+        glib::timeout_future(Duration::from_secs(5)).await;
+        println!(
+            "bench unfold_race made={made} first={first:?} after={:?}",
+            listed(tree, &race)
+        );
+        bench_quit(&app);
+    });
+}
+
+/// `=renew:<rel_dir>`: the open folder removed and made again at once with a file in it, as a
+/// build cleaning its output does, then a second file written into it a little later; the tree's
+/// rows under it are printed after each.
+fn bench_unfold_renew(app: &Rc<App>, dir: &str) {
+    let (app, dir) = (app.clone(), dir.to_string());
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        unfold(tree, &dir).await;
+        println!("bench unfold_renew before {:?}", listed(tree, &dir));
+        let quoted = accent_api::ssh::quote(&dir);
+        scroll::in_vault(
+            &app,
+            &format!("rm -rf {quoted} && mkdir {quoted} && echo 1 > {quoted}/new.md"),
+        );
+        glib::timeout_future(Duration::from_secs(3)).await;
+        println!("bench unfold_renew made {:?}", listed(tree, &dir));
+        scroll::in_vault(&app, &format!("echo 2 > {quoted}/later.md"));
+        glib::timeout_future(Duration::from_secs(3)).await;
+        println!("bench unfold_renew later {:?}", listed(tree, &dir));
+        bench_quit(&app);
+    });
+}
+
+/// `=tab:<rel_file>`: the file opened in a tab, rewritten from outside accent, and what the tab
+/// holds printed either side — for a file in a folder the index does not walk, which only its
+/// folder's own watch reports on.
+fn bench_unfold_tab(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        // A remote vault opens nothing before its host has answered.
+        until(|| app.reconciled.get()).await;
+        app.open_path(&rel);
+        let mut tab = None;
+        for _ in 0..100 {
+            tab = app.open_tabs().into_iter().find(|t| t.rel() == rel);
+            if tab.is_some() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        let Some(tab) = tab else {
+            println!("bench unfold_tab no_tab");
+            return bench_quit(&app);
+        };
+        // Its folder's watch is asked for as it opens, and in place a moment later.
+        glib::timeout_future(Duration::from_secs(1)).await;
+        println!("bench unfold_tab before {:?}", tab.text());
+        let quoted = accent_api::ssh::quote(&rel);
+        scroll::in_vault(&app, &format!("printf 'edited outside\\n' > {quoted}"));
+        glib::timeout_future(Duration::from_secs(3)).await;
+        println!("bench unfold_tab after {:?}", tab.text());
+        bench_quit(&app);
+    });
+}
+
+/// Open `dir`'s row and every row above it, as clicks would, and give its listing a second.
+async fn unfold(tree: &tree::Tree, dir: &str) {
+    for _ in 0..50 {
+        if tree.reveal(dir) {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(200)).await;
+    }
+    if let Some(row) = tree::find_row(tree.model(), dir) {
+        row.set_expanded(true);
+    }
+    glib::timeout_future(Duration::from_millis(1000)).await;
+}
+
+/// The rows the tree lists directly under `dir`.
+fn listed(tree: &tree::Tree, dir: &str) -> Vec<String> {
+    let model = tree.model();
+    let prefix = format!("{dir}/");
+    (0..model.n_items())
+        .filter_map(|i| model.item(i).and_downcast::<gtk::TreeListRow>()?.item())
+        .filter_map(|item| tree::decode(&item))
+        .filter(|row| {
+            row.rel
+                .strip_prefix(&prefix)
+                .is_some_and(|r| !r.contains('/'))
+        })
+        .map(|row| row.rel)
+        .collect()
+}
+
 /// `ACCENT_BENCH_MOVE=<rel>,<rel>,…`: Move to… on those paths as a marked set, past its dialog.
 ///
 /// Prints what the dialog opens on — its heading, the folder in its entry and the line under it —

@@ -207,6 +207,14 @@ impl Worker {
             if let Msg::WatchUnindexed(dirs, on) = msg {
                 for dir in dirs {
                     rewatch |= match on {
+                        // The root and every folder the walk entered are watched already, and
+                        // their news is the index's: a tab asks for its file's folder without
+                        // knowing which kind it is.
+                        true if dir.is_empty()
+                            || matches!(self.index.get_file(dir), Ok(Some(_))) =>
+                        {
+                            false
+                        }
                         true => self.unindexed.insert(dir.clone()),
                         false => self.unindexed.remove(dir),
                     };
@@ -862,6 +870,24 @@ mod tests {
             f.wait(|e| matches!(e, Event::DirsChanged(d) if d.iter().any(|d| d == "sub")))
                 .is_some(),
             "a file written into the folder made again was not seen"
+        );
+    }
+
+    /// A tab asks for the folder of whatever file it opens to be watched, not knowing whether the
+    /// walk holds it: asked for the vault root, the worker must go on indexing the notes there.
+    #[test]
+    fn a_walked_folder_asked_to_be_watched_as_unindexed_stays_the_index_s() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "one").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+
+        f.vault.watch_unindexed(&[String::new()]).unwrap();
+        f.write("a.md", "two");
+
+        assert!(
+            f.wait(|e| matches!(e, Event::FileChanged(p) if p == "a.md"))
+                .is_some(),
+            "an edit of a note at the root was taken for news of an unindexed folder"
         );
     }
 
