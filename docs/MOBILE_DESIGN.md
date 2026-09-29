@@ -303,7 +303,9 @@ The decisions under the Android app, each with its reason; the shared ones are i
 - **Images are recoloured on their way into a WebView** (`ui/Images.kt`): the note's page and the
   image screen both take them from `served`, which classifies a raster from a copy decoded to a
   512 px long side (`looksLikeDocument` samples 65 k pixels whatever it is given; the verdict is
-  cached by path, size and date), recolours it at a 2048 px long side and serves a PNG, and hands
+  cached by path, size and date), recolours it at a 2048 px long side and serves a PNG, turned
+  first the way its EXIF says (the core's `orientation` through the ffi, as on the desktop:
+  `BitmapFactory` ignores the tag, where the WebView honours it in a JPEG left alone), and hands
   an SVG over with the core's filter in it — straight alpha throughout, `BitmapFactory` decoding
   without premultiplying. The rules are the core's (DESIGN.md, Recolouring); the image screen is a
   WebView too, because nothing else here draws an SVG, and a recoloured SVG is a filter only a
