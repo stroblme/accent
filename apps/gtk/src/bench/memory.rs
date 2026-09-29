@@ -7,10 +7,10 @@ use super::*;
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` runs each block `rounds` times (5 by
 /// default): a note, a source file, a PDF and a diagram (a sample with a formula, written to
 /// `memory.drawio`) opened and closed; the note compared with its disk copy and left; the note in
-/// Split view and back; a shell opened and closed; a second window with the note in it, closed.
-/// After each block it prints `bench memory <block>` with the resident size in kB before it and
-/// after each round (`rss=`), the same once malloc has handed its free pages back (`trimmed=`),
-/// the threads and the child processes by name, the processes with their resident size, and what
+/// Split view and back; a shell opened and closed; a second window showing the note in Split
+/// view, closed. After each block it prints `bench memory <block>` with the resident size in kB
+/// before it and after each round (`rss=`), the same once malloc has handed its free pages back
+/// (`trimmed=`), the threads by name, the child processes with their resident size, and what
 /// outlived its close (`alive=`): the tab's `Rc`, its page and widget, a diagram's WebKit view, a
 /// PDF's two views, a text tab's view and buffer, the comparison's other column, the window and
 /// its `App`. Writes, so only on a scratch vault.
@@ -133,6 +133,9 @@ pub(super) fn bench_memory(app: &Rc<App>, arg: &str) {
                 break;
             };
             other.open_path(&app.root().join(&note).to_string_lossy());
+            wait(800).await;
+            // With its own preview, which is its own WebKit process.
+            other.set_mode(Mode::Split);
             wait(1500).await;
             let watch = vec![object("window", &other.window), rc("app", &other)];
             other.window.close();
