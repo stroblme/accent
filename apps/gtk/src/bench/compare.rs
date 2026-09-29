@@ -735,6 +735,63 @@ fn bench_banner_button(tab: &Tab) -> Option<glib::GString> {
     tab.banner.button_label().filter(|label| !label.is_empty())
 }
 
+/// A note compared with its disk copy, which puts the copy's column on the editor's scrollbar,
+/// left once that column's overlay scrollbar has faded out, and the editor scrolled the moment the
+/// column has been freed: prints `gone=true` and the scroll. Handing the column its own scrollbar
+/// back used to leave GTK's fade handler for it on the editor's adjustment (see
+/// `diff::swap_vadjustment`), so this scroll ran the handler on freed memory: a critical here
+/// (fatal under the drills' `G_DEBUG`), a segfault in a real session, the window crash of
+/// 2026-09-28. Writes the note, so point it at a scratch vault.
+pub(super) fn bench_compare_left(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        // Enough lines to scroll, which the disk copy does not have.
+        tab.set_text(&(1..=200).map(|i| format!("line {i}\n")).collect::<String>());
+        app.compare_with_disk(&tab);
+        let mut column = None;
+        for _ in 0..40 {
+            wait(100).await;
+            column = tab
+                .comparison()
+                .and_then(|compare| pane_view(compare.widget(), true))
+                .and_then(|view| view.parent())
+                .map(|scroller| scroller.downgrade());
+            if column.is_some() {
+                break;
+            }
+        }
+        let Some(column) = column else {
+            println!("bench compare_left none");
+            return bench_quit(&app);
+        };
+        // Faded out two seconds after the last scroll, on a half-second tick.
+        wait(3000).await;
+        tab.leave_compare();
+        for _ in 0..200 {
+            if column.upgrade().is_none() {
+                break;
+            }
+            wait(10).await;
+        }
+        if let Some(adj) = tab.view.vadjustment() {
+            let from = adj.value();
+            adj.set_value(from + adj.page_size() / 2.0);
+            println!(
+                "bench compare_left gone={} scrolled={from}->{}",
+                column.upgrade().is_none(),
+                adj.value()
+            );
+        }
+        bench_quit(&app);
+    });
+}
+
 /// Stage Selected Lines and Unstage Selected Lines, end to end. It makes a repository in the
 /// vault root and commits the note as twelve lines, so point it at a throwaway vault. The tab then
 /// rewrites line 3 and adds a line under line 9, and the working tree is compared with the index;

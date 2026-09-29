@@ -28,7 +28,8 @@ use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_gutter,
-    bench_compare_lines, bench_compare_pads, bench_compare_pick, bench_compare_row,
+    bench_compare_left, bench_compare_lines, bench_compare_pads, bench_compare_pick,
+    bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -145,7 +146,8 @@ use tags::bench_tags;
 /// padded above, prints each one's cell and first row, and holds the window up for a screenshot.
 /// `=conflict:<rel_text_file>` writes a sync conflict copy beside that file while its tab is open
 /// and prints what the banner stands for: live, after the tab is opened again, and once the copy
-/// is gone.
+/// is gone. `=left:<rel>` leaves a comparison with the disk copy and scrolls the editor once the
+/// copy's column is freed (see `compare::bench_compare_left`).
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` walks each image through the three themes, inverted and
@@ -498,6 +500,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("conflict:") {
                 return bench_compare_conflict(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("left:") {
+                return bench_compare_left(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
