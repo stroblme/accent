@@ -171,6 +171,74 @@ pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// Every page renders however the reader gets to it. With the Outline pane up, both views of
+/// `rel` are scrolled for two seconds from each tenth of the document — past each other, or the
+/// reading view left where it jumped while the strip is browsed twenty pages on — then zoomed in
+/// four steps and out four; after each burst both views must come to paint everything they want.
+/// Each burst prints how long that took, or, when what is missing has not changed in five
+/// seconds, what it is.
+pub(super) fn bench_pdf_render(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench pdf render no_tab");
+            return bench_quit(&app);
+        };
+        app.show_pane("outline");
+        let pages = pdf.page_count();
+        let mut stuck = 0;
+        for burst in 0..10 {
+            let start = (burst * pages / 10) as f32;
+            for step in 0..120 {
+                let t = step as f32 / 20.0;
+                // Even bursts scroll the two past each other; odd ones leave the reading view on
+                // the page it jumped to while the strip is browsed twenty pages on.
+                match burst % 2 {
+                    0 => pdf.scroll_both(start + t, start + 6.0 - t),
+                    _ => pdf.scroll_both(start, start + 20.0 + t),
+                }
+                glib::timeout_future(Duration::from_millis(16)).await;
+            }
+            let what = format!("burst={burst} page={}", pdf.current_page() + 1);
+            stuck += usize::from(settled(&pdf, &what).await);
+        }
+        for out in [false, true] {
+            for _ in 0..4 {
+                pdf.zoom_step(out);
+                glib::timeout_future(Duration::from_millis(60)).await;
+            }
+            let what = format!("zoom_out={out} {:?}", pdf.zoom_label());
+            stuck += usize::from(settled(&pdf, &what).await);
+        }
+        println!("bench pdf render pages={pages} stuck={stuck}");
+        bench_quit(&app);
+    });
+}
+
+/// Wait for both views of `pdf` to have painted everything they want and print how long that
+/// took, or, once what is missing has not changed in five seconds, print it: true when it did not.
+async fn settled(pdf: &Rc<pdftab::PdfTab>, what: &str) -> bool {
+    let (t0, mut since) = (Instant::now(), Instant::now());
+    let mut last = pdf.unrendered();
+    loop {
+        glib::timeout_future(Duration::from_millis(100)).await;
+        let now = pdf.unrendered();
+        if now.0.is_empty() && now.1.is_empty() {
+            println!("bench pdf render {what} settled_ms={}", ms_since(t0) as u64);
+            return false;
+        }
+        if now != last {
+            (last, since) = (now, Instant::now());
+        } else if since.elapsed() > Duration::from_secs(5) {
+            println!(
+                "bench pdf render {what} stuck view={:?} strip={:?}",
+                now.0, now.1
+            );
+            return true;
+        }
+    }
+}
+
 /// The Outline pane following the reader: the bookmark the page is under as `rel` is scrolled
 /// through (a scroll, not a jump), then the list after a page edit, which must be the same list
 /// refilled; with `,<rel_diagram>` a diagram's pages as it turns to each. Every line says which

@@ -5,7 +5,7 @@
 //! given. `render.rs` is the other half, one thread per open document; this is the reader
 //! between them — the history, the search and the outline that make it more than a viewer.
 
-use super::protocol::Request;
+use super::protocol::{Asker, Request};
 use super::ring;
 use super::selection::pages_of;
 use super::{self as pdfview, Anchor, PdfView, PdfZoom, Reply, Span, render};
@@ -473,6 +473,23 @@ impl PdfTab {
     #[cfg(feature = "bench")]
     pub fn geometry(&self) -> String {
         format!("{} framed={}", self.view.geometry(), self.thumbs.framed())
+    }
+
+    /// What the reading view and then the strip last painted without. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn unrendered(&self) -> (Vec<String>, Vec<String>) {
+        (self.view.unrendered(), self.thumbs.unrendered())
+    }
+
+    /// Scroll the reading view and the strip to these places, in pages from the top: a reader
+    /// scrolling one while the other still moves. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn scroll_both(&self, view: f32, strip: f32) {
+        for (at, v) in [(view, &self.view), (strip, &self.thumbs)] {
+            let page = (at.max(0.0) as usize).min(self.page_count().saturating_sub(1));
+            let h = v.page_size(page).map_or(0.0, |(_, h)| h);
+            v.goto_page(page, Some(at.fract() * h));
+        }
     }
 
     /// The note links that highlight this document, as the index reports them. Painting them
@@ -1092,8 +1109,12 @@ impl PdfTab {
         view.connect_wants(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |_, scale, dark, wants| {
+            move |view, scale, dark, wants| {
                 tab.ask(Request::Tiles {
+                    from: match *view == tab.thumbs {
+                        true => Asker::Strip,
+                        false => Asker::Reader,
+                    },
                     scale,
                     dark,
                     theme: theme_of(dark),

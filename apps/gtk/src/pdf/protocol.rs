@@ -89,13 +89,26 @@ pub enum Reply {
     Failed(String),
 }
 
+/// Which part of a tab asked for tiles. Each asks again only when its own list changes, so a
+/// batch dropped for another asker's newer one was never asked for again: the reading view kept
+/// a page blank while the thumbnail strip was being scrolled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asker {
+    Reader,
+    Strip,
+    /// The Ctrl-hover link preview, for the stand-in of the page a link goes to.
+    Preview,
+}
+
 /// What the render thread is asked for.
 pub enum Request {
-    /// Visible tiles first, then one viewport of prefetch. A newer batch replaces an older one.
+    /// Visible tiles first, then one viewport of prefetch. A newer batch replaces an older one
+    /// from the same view.
     ///
     /// The colours are resolved by the caller, not here: `theme.rs` keeps the chosen theme in
     /// thread-local state, so a render thread asking it would always get the default.
     Tiles {
+        from: Asker,
         scale: f32,
         dark: bool,
         theme: pdf::Theme,

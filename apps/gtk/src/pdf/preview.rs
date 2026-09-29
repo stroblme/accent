@@ -6,7 +6,7 @@ use accent_core::pdf::LinkTarget;
 use adw::prelude::*;
 use gtk::glib;
 
-use super::protocol::Request;
+use super::protocol::{Asker, Request};
 use super::tab::PdfTab;
 use super::tab::theme_of;
 use super::{LOWRES_W, Want};
@@ -161,6 +161,7 @@ impl PdfTab {
         let ready = self.view.cache().borrow_mut().lowres(page as u32, dark);
         let Some(texture) = ready else {
             return self.ask(Request::Tiles {
+                from: Asker::Preview,
                 scale: 1.0,
                 dark,
                 theme: theme_of(dark),
