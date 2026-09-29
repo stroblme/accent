@@ -343,9 +343,10 @@ use tags::bench_tags;
 /// Show Hidden Files off and on again, printing them after each.
 ///
 /// `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…` opens those folders in the Files tree as clicks would and
-/// prints what it lists under each; `=race:<dir>`, `=renew:<dir>` and `=tab:<rel>` change a folder
-/// the index does not walk under the tree and a tab from outside accent and print whether they
-/// followed (`files::bench_unfold`). The last three write, so only on a scratch vault.
+/// prints what it lists under each; `=race:<dir>`, `=renew:<dir>`, `=again:<dir>` and
+/// `=tab:<rel>` change a folder the index does not walk under the tree and a tab from outside
+/// accent and print whether they followed (`files::bench_unfold`). Those write, so only on a
+/// scratch vault.
 ///
 /// `ACCENT_BENCH_MOVE=<rel>,<rel>,…` moves those paths with Move to…, past its dialog, into a
 /// folder that is not there yet, then tries the two moves it refuses, and prints the dialog, the
