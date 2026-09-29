@@ -87,6 +87,9 @@ pub enum Reply {
     SaveFailed(String),
     /// The document could not be opened at all, with the reason to show in its place.
     Failed(String),
+    /// The file was written into under the open document, which reads it as it goes: nothing
+    /// more comes from this one until the file is read again.
+    Changed,
 }
 
 /// Which part of a tab asked for tiles. Each asks again only when its own list changes, so a

@@ -1448,6 +1448,9 @@ impl PdfTab {
                 self.emit(&self.on_open);
             }
             Reply::Failed(message) => self.fail(&message),
+            // What the watcher says too, for a file it watches; this is the render thread
+            // finding out first, or for a file nothing watches.
+            Reply::Changed => self.refresh(),
             // Textures never reach here; `PdfView::deliver` keeps those.
             Reply::Tile(..) | Reply::Lowres { .. } => {}
         }

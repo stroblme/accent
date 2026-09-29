@@ -350,7 +350,8 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### PDF
 
-- A `GtkScrollable` widget painting cached tiles, sharp at any zoom, with a low-resolution stand-in under a page whose tiles have not arrived; one render thread per document, which also opens it, so a large file costs nothing at startup.
+- A `GtkScrollable` widget painting cached tiles, sharp at any zoom, with a low-resolution stand-in under a page whose tiles have not arrived; one render thread per document, which also opens it, so a large file costs nothing at startup. The reading view, the thumbnail strip and the link preview each ask it for what they lack, a newer list replacing only its own asker's: each asks again only when its list changes, so one dropping another's left pages blank.
+- pdfium reads a document from its file as it needs it, so a file written into in place under an open tab, which is how pdflatex writes, is no longer the document that was opened: every page not read yet would render blank. Nothing more is read from it, and the tab reads the file again (`PdfDoc::intact`). A file replaced by a rename, as a save here, Syncthing and a remote fetch replace one, leaves the document reading the file it opened.
 - Pages are recoloured onto the theme's paper and ink: light leaves them alone, dark and both Solarized halves remap them. A theme change renders every tile again, the colours being baked in.
 - A drag selects the text under it, across page breaks as readily as within a page.
 - A secondary click on the page: Copy and Copy Link to Selection while something is selected, then Add Page Before, Add Page After, Delete Page and Export Highlights — window actions in sections, the terminal's idiom, so the palette lists them and they can be rebound.
