@@ -22,6 +22,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 /// How long after the last stroke the document is written out.
 const INK_SAVE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long a changed file is left alone before it is read again. A PDF being written — a LaTeX
+/// run, a copy — changes every few hundred milliseconds until it is done, and read half-way it
+/// will not open, or opens with the pages written so far.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The page commands, each on the page being read: the page's own menu and the status bar's page
 /// count offer the same three.
 pub const PAGE_ACTIONS: [&str; 3] = [
@@ -92,8 +97,18 @@ pub struct PdfTab {
     /// The palette the cached tiles were rendered in, so a theme change can tell that they are
     /// of the old one. See [`PdfTab::restyle`].
     pub(super) theme: Cell<pdf::Theme>,
-    /// The document could not be opened, so it is not opening either.
+    /// The document could not be opened, so it is not opening either: the tab waits for the
+    /// file to change.
     pub(super) failed: Cell<bool>,
+    /// Where the reader was when the file stopped opening, for when it opens again.
+    pub(super) resume: Cell<Option<Anchor>>,
+    /// When the file was last reported changed, and whether a reload is waiting for it to
+    /// settle. See [`PdfTab::refresh`].
+    pub(super) changed: Cell<std::time::Instant>,
+    pub(super) reload_due: Cell<bool>,
+    /// How many times the render thread has answered an open, either way. Only drills read it.
+    #[cfg(feature = "bench")]
+    pub(super) opens: Cell<u32>,
     /// The zoom to restore when presentation mode ends.
     pub(super) presenting: Cell<Option<PdfZoom>>,
     pub(super) links: RefCell<std::collections::HashMap<usize, Vec<pdf::Link>>>,
@@ -231,6 +246,11 @@ pub fn open(
         inverted: Cell::new(false),
         theme: Cell::new(theme_of(adw::StyleManager::default().is_dark())),
         failed: Cell::new(false),
+        resume: Cell::new(None),
+        changed: Cell::new(std::time::Instant::now()),
+        reload_due: Cell::new(false),
+        #[cfg(feature = "bench")]
+        opens: Cell::new(0),
         presenting: Cell::new(None),
         pending: Cell::new(Some(place)),
         pending_select: Cell::new(None),
@@ -339,9 +359,15 @@ impl PdfTab {
         self.view.clone().upcast()
     }
 
+    /// Where the reader is, or, while the pages are not there, where they will be put back.
     pub fn place(&self) -> Place {
+        let page = match (self.pending.get(), self.resume.get()) {
+            (Some(place), _) => place.page,
+            (None, Some(anchor)) => anchor.page,
+            (None, None) => self.view.current_page(),
+        };
         Place {
-            page: self.view.current_page(),
+            page,
             zoom: self.view.zoom(),
         }
     }
@@ -473,6 +499,18 @@ impl PdfTab {
     #[cfg(feature = "bench")]
     pub fn geometry(&self) -> String {
         format!("{} framed={}", self.view.geometry(), self.thumbs.framed())
+    }
+
+    /// What the waiting page says while it is up in place of the pages, and how many times the
+    /// render thread has answered an open, either way. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn waiting(&self) -> (Option<String>, u32) {
+        let up = self
+            .stack
+            .visible_child_name()
+            .is_some_and(|name| name == "status");
+        let said = up.then(|| self.status.description().unwrap_or_default().to_string());
+        (said, self.opens.get())
     }
 
     /// What the reading view and then the strip last painted without. Only drills ask.
@@ -884,6 +922,9 @@ impl PdfTab {
     /// Re-read the file, keeping the page, the scroll and the zoom. A rebuilt PDF is the reason
     /// this exists: a LaTeX loop should not send the reader back to page one.
     ///
+    /// Once the file has been left alone for [`SETTLE`], not at once: every report of a change
+    /// pushes the reload back, so a file still being written is read once, when it is done.
+    ///
     /// A write of our own is not a reason: the document in memory *is* what was written, and
     /// re-reading it would drop annotations made since. There is no `own: true` to ride on the
     /// way a note's save has one, because the bytes never went through the vault — so the etag
@@ -894,7 +935,54 @@ impl PdfTab {
         {
             return;
         }
-        self.ask(Request::Reload);
+        self.changed.set(std::time::Instant::now());
+        if !self.reload_due.replace(true) {
+            self.reload_when_settled(SETTLE);
+        }
+    }
+
+    /// Ask for the file again `wait` from now, or later if it has been reported changed since.
+    fn reload_when_settled(self: &Rc<Self>, wait: std::time::Duration) {
+        glib::timeout_add_local_once(
+            wait,
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || match SETTLE.checked_sub(tab.changed.get().elapsed()) {
+                    Some(left) if !left.is_zero() => tab.reload_when_settled(left),
+                    _ => {
+                        tab.reload_due.set(false);
+                        tab.ask(Request::Reload);
+                    }
+                }
+            ),
+        );
+    }
+
+    /// Look at the file every [`SETTLE`] while it will not open, and read it again once it has
+    /// changed. The watcher reports a vault file's changes too; this is for a file no watcher
+    /// reports on — outside the vault, or in a folder git ignores — which would wait for good.
+    fn watch_while_failed(self: &Rc<Self>) {
+        let seen = Cell::new(accent_core::fs::Etag::of(&self.path()).ok());
+        glib::timeout_add_local(
+            SETTLE,
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    if !tab.failed.get() {
+                        return glib::ControlFlow::Break;
+                    }
+                    let now = accent_core::fs::Etag::of(&tab.path()).ok();
+                    if seen.replace(now) != now {
+                        tab.refresh();
+                    }
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
     }
 
     pub fn connect_zoom(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
@@ -947,7 +1035,16 @@ impl PdfTab {
 
     fn show_status(&self, message: &str) {
         let (title, body) = match pdf::available() {
-            true => ("Cannot Open This PDF", message.to_string()),
+            // The reason is pdfium's and says nothing a reader can act on; what they can do is
+            // fix the file, which is what the tab is waiting for.
+            true => {
+                tracing::debug!("cannot open {}: {message}", self.path().display());
+                let name = crate::doc::file_name(&self.key()).to_string();
+                (
+                    "Cannot Open This PDF",
+                    format!("Waiting for {name} to change."),
+                )
+            }
             false => (
                 "PDF Support Is Not Available",
                 format!(
@@ -962,10 +1059,23 @@ impl PdfTab {
     }
 
     /// The document will not open, whether the render thread could not start or could not read
-    /// it: say why in place of the pages, and tell the window, which is still showing it as
-    /// opening.
+    /// it: say so in place of the pages, wait for the file to change, and tell the window, which
+    /// is still showing it as opening or showing its pages.
+    ///
+    /// Pages that were showing go: they are of a file that is not there any more. Where the
+    /// reader was is kept for when it opens again.
     fn fail(self: &Rc<Self>, message: &str) {
-        self.failed.set(true);
+        if self.view.page_count() > 0 {
+            self.resume.set(Some(self.view.anchor()));
+            for view in [&self.view, &self.thumbs] {
+                view.forget_textures();
+                view.set_sizes(Vec::new());
+            }
+            self.forget_pages();
+        }
+        if !self.failed.replace(true) && pdf::available() {
+            self.watch_while_failed();
+        }
         self.show_status(message);
         self.emit(&self.on_open);
     }
@@ -1420,12 +1530,19 @@ impl PdfTab {
                 self.save_soon();
             }
             Reply::Reloaded(sizes) => {
+                #[cfg(feature = "bench")]
+                self.opens.set(self.opens.get() + 1);
                 // Whatever the far end had that we did not is in hand now, so a refusal after
                 // this is a new conflict and worth saying again.
                 self.clear_conflict();
+                if self.failed.replace(false) {
+                    self.stack.set_visible_child_name("view");
+                }
                 // The anchor is taken now rather than when the reload was asked for: the reader
-                // may have moved while the file was being re-read.
-                let anchor = self.view.anchor().clamped(sizes.len());
+                // may have moved while the file was being re-read. Or where they were when the
+                // file stopped opening, the pages having gone since.
+                let anchor = self.resume.take().unwrap_or_else(|| self.view.anchor());
+                let anchor = anchor.clamped(sizes.len());
                 self.view.forget_textures();
                 self.thumbs.forget_textures();
                 self.forget_pages();
@@ -1447,7 +1564,11 @@ impl PdfTab {
                 }
                 self.emit(&self.on_open);
             }
-            Reply::Failed(message) => self.fail(&message),
+            Reply::Failed(message) => {
+                #[cfg(feature = "bench")]
+                self.opens.set(self.opens.get() + 1);
+                self.fail(&message);
+            }
             // What the watcher says too, for a file it watches; this is the render thread
             // finding out first, or for a file nothing watches.
             Reply::Changed => self.refresh(),

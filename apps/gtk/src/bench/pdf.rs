@@ -215,6 +215,83 @@ pub(super) fn bench_pdf_render(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// A PDF that will not open waits for its file and opens once the file is whole. `arg`, relative
+/// to the vault or an absolute path outside it (which no watcher reports on), is cut in half in
+/// place and opened; then written back in six pieces a quarter of a second apart, the way a LaTeX
+/// run writes; then, open, left for a page five on, cut in half under the reader and mended at
+/// once. Each step prints the waiting page's words or the pages and the page being read, how long
+/// after the last write, and how many times the file has been opened or failed to: the six pieces
+/// must cost one open, not one each. It writes into `arg`, so point it at a scratch copy of a
+/// document of a dozen pages or more.
+pub(super) fn bench_pdf_broken(app: &Rc<App>, arg: &str) {
+    let (app, arg) = (app.clone(), arg.to_string());
+    glib::spawn_future_local(async move {
+        let file = match Path::new(&arg).is_absolute() {
+            true => PathBuf::from(&arg),
+            false => app.root().join(&arg),
+        };
+        let Ok(whole) = std::fs::read(&file) else {
+            println!("bench pdf broken unreadable");
+            return bench_quit(&app);
+        };
+        let half = &whole[..whole.len() / 2];
+        let say = |pdf: &pdftab::PdfTab, step: &str, since: Instant| {
+            let (waiting, opens) = pdf.waiting();
+            println!(
+                "bench pdf broken {step} waiting={waiting:?} pages={} page={} opens={opens} ms={}",
+                pdf.page_count(),
+                pdf.place().page + 1,
+                ms_since(since) as u64
+            );
+        };
+        let _ = std::fs::write(&file, half);
+        let t0 = Instant::now();
+        app.open_path(&arg);
+        let failed = || app.active_pdf().filter(|pdf| pdf.waiting().0.is_some());
+        let Some(pdf) = until(failed).await else {
+            println!("bench pdf broken never_waited");
+            return bench_quit(&app);
+        };
+        say(&pdf, "opened", t0);
+        // Truncated where it lies and written a piece at a time, the file staying half-written
+        // for longer than the tab waits for it to settle.
+        if let Ok(mut out) = std::fs::File::create(&file) {
+            for piece in whole.chunks(whole.len().div_ceil(6)) {
+                let _ = std::io::Write::write_all(&mut out, piece);
+                glib::timeout_future(Duration::from_millis(250)).await;
+            }
+        }
+        let written = Instant::now();
+        until(|| (pdf.page_count() > 0).then_some(())).await;
+        say(&pdf, "written", written);
+        pdf.goto_page(pdf.page_count() / 2);
+        glib::timeout_future(Duration::from_secs(1)).await;
+        let _ = std::fs::write(&file, half);
+        let broken = Instant::now();
+        // A reader still reading, whose next page is what finds the file changed under it where
+        // no watcher says so.
+        pdf.goto_page(pdf.current_page() + 5);
+        until(|| pdf.waiting().0.map(drop)).await;
+        say(&pdf, "broken", broken);
+        let _ = std::fs::write(&file, &whole);
+        let mended = Instant::now();
+        until(|| (pdf.page_count() > 0).then_some(())).await;
+        say(&pdf, "mended", mended);
+        bench_quit(&app);
+    });
+}
+
+/// What `ready` hands back, once it does, checked every 50 ms for ten seconds.
+async fn until<T>(ready: impl Fn() -> Option<T>) -> Option<T> {
+    for _ in 0..200 {
+        if let Some(found) = ready() {
+            return Some(found);
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    None
+}
+
 /// Wait for both views of `pdf` to have painted everything they want and print how long that
 /// took, or, once what is missing has not changed in five seconds, print it: true when it did not.
 async fn settled(pdf: &Rc<pdftab::PdfTab>, what: &str) -> bool {

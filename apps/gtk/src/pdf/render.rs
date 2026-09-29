@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 use accent_api::PdfLink;
 use accent_core::pdf::{self, Ink, PdfDoc};
@@ -21,6 +21,9 @@ use super::{Highlights, LOWRES_W, PdfView, Reply, TILE, TileKey, Want};
 /// The thread owns the `PdfDoc` for its whole life, opening included. Nothing else may touch
 /// pdfium while it runs: the library is serialised by one process-wide lock, and two threads
 /// inside it abort the process.
+///
+/// A file that will not open — a LaTeX run that failed, or has not finished writing it — does not
+/// end the thread: it says why and waits for the tab to ask for the file again.
 pub fn spawn(path: PathBuf, view: glib::SendWeakRef<PdfView>) -> Result<Sender<Request>, String> {
     if !pdf::available() {
         return Err("libpdfium was not found".to_string());
@@ -29,19 +32,49 @@ pub fn spawn(path: PathBuf, view: glib::SendWeakRef<PdfView>) -> Result<Sender<R
     std::thread::Builder::new()
         .name("accent-pdf".to_string())
         .spawn(move || {
-            let doc = match PdfDoc::open(&path) {
-                Ok(doc) => doc,
-                Err(e) => return send(&view, Reply::Failed(format!("{e:#}"))),
-            };
-            let sizes = page_sizes(&doc);
-            if sizes.is_empty() {
-                return send(&view, Reply::Failed("This file has no pages.".to_string()));
+            let mut path = path;
+            loop {
+                match open(&path) {
+                    Ok((doc, sizes)) => {
+                        send(&view, Reply::Reloaded(sizes));
+                        match render_loop(doc, path, &rx, &view) {
+                            Some(left) => path = left,
+                            None => return,
+                        }
+                    }
+                    Err(why) => send(&view, Reply::Failed(why)),
+                }
+                if !wait(&rx, &mut path) {
+                    return;
+                }
             }
-            send(&view, Reply::Reloaded(sizes));
-            render_loop(doc, path, rx, view);
         })
         .map_err(|e| format!("cannot start the renderer: {e}"))?;
     Ok(tx)
+}
+
+/// The document at `path` and its page sizes, or why there is none to show.
+fn open(path: &Path) -> Result<(PdfDoc, Vec<(f32, f32)>), String> {
+    let doc = PdfDoc::open(path).map_err(|e| format!("{e:#}"))?;
+    let sizes = page_sizes(&doc);
+    match sizes.is_empty() {
+        true => Err("This file has no pages.".to_string()),
+        false => Ok((doc, sizes)),
+    }
+}
+
+/// No document to answer from: drop every request until the tab asks for the file again, and
+/// say whether it did — false once the tab has gone. What is dropped answers itself: a save's
+/// or a copy's channel closing is what its waiter hears.
+fn wait(rx: &Receiver<Request>, path: &mut PathBuf) -> bool {
+    while let Ok(request) = rx.recv() {
+        match request {
+            Request::Reload => return true,
+            Request::Retarget(moved) => *path = moved,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The glyphs of the pages this thread has read, kept until the document is re-read.
@@ -84,12 +117,15 @@ fn page_sizes(doc: &PdfDoc) -> Vec<(f32, f32)> {
 /// list of tiles again only when that list changes, and the tab sends a query again only when the
 /// text does, so a tile nobody rendered stayed blurry and a search pushed aside reported the
 /// matches of the pages it had reached and no more.
+///
+/// It returns when the tab goes away, with `None`, or with the path it was reading once a reload
+/// finds the file will not open, the tab told so: the document goes with it.
 fn render_loop(
     mut doc: PdfDoc,
     mut path: PathBuf,
-    rx: std::sync::mpsc::Receiver<Request>,
-    view: glib::SendWeakRef<PdfView>,
-) {
+    rx: &Receiver<Request>,
+    view: &glib::SendWeakRef<PdfView>,
+) -> Option<PathBuf> {
     // What the file looked like when this document was read. Every write from here updates it,
     // which is how the tab tells its own save from someone else's and does not reload over it.
     let mut etag = accent_core::fs::Etag::of(&path).ok();
@@ -106,7 +142,7 @@ fn render_loop(
     let mut glyphs = Glyphs::new();
     // The tab has been told the file was written into under the document.
     let mut changed = false;
-    // The channel closing is the tab going away, which is the only way this thread ends.
+    // The channel closing is the tab going away.
     while let Ok(first) = rx.recv() {
         let mut queue = vec![first];
         loop {
@@ -115,7 +151,7 @@ fn render_loop(
             if ink.history() != told {
                 told = ink.history();
                 let (undo, redo) = told;
-                send(&view, Reply::History { undo, redo });
+                send(view, Reply::History { undo, redo });
             }
             let Some(current) = queue.pop() else {
                 break;
@@ -131,7 +167,7 @@ fn render_loop(
             if !exempt && !doc.intact() {
                 if !changed {
                     changed = true;
-                    send(&view, Reply::Changed);
+                    send(view, Reply::Changed);
                 }
                 continue;
             }
@@ -157,26 +193,26 @@ fn render_loop(
                                 interrupt(&mut queue, rest, newer);
                                 break;
                             }
-                            Err(TryRecvError::Disconnected) => return,
+                            Err(TryRecvError::Disconnected) => return None,
                             Err(TryRecvError::Empty) => {}
                         }
-                        render_want(&doc, &view, scale, dark, theme, wants[at]);
+                        render_want(&doc, view, scale, dark, theme, wants[at]);
                         at += 1;
                     }
                 }
                 Request::Links(page) => {
                     if let Ok(links) = doc.links(page) {
-                        send(&view, Reply::Links(page, links));
+                        send(view, Reply::Links(page, links));
                     }
                 }
                 Request::Text(page) => {
                     if let Some(found) = glyphs_of(&doc, &mut glyphs, page) {
-                        send(&view, Reply::Text(page, found.clone()));
+                        send(view, Reply::Text(page, found.clone()));
                     }
                 }
                 Request::Outline => {
                     if let Ok(outline) = doc.outline() {
-                        send(&view, Reply::Outline(outline));
+                        send(view, Reply::Outline(outline));
                     }
                 }
                 Request::Search { query, text, from } => {
@@ -203,12 +239,12 @@ fn render_loop(
                                 interrupt(&mut queue, rest, newer);
                                 break;
                             }
-                            Err(TryRecvError::Disconnected) => return,
+                            Err(TryRecvError::Disconnected) => return None,
                             Err(TryRecvError::Empty) => {}
                         }
                         match doc.search(at, &text) {
                             Ok(hits) if !hits.is_empty() => send(
-                                &view,
+                                view,
                                 Reply::Found {
                                     query,
                                     page: at,
@@ -230,7 +266,7 @@ fn render_loop(
                         Ok(area) => {
                             ink.drew(page, before);
                             ink.dirty = true;
-                            send(&view, Reply::PageChanged(page, area));
+                            send(view, Reply::PageChanged(page, area));
                         }
                         Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
                     }
@@ -241,14 +277,14 @@ fn render_loop(
                         Ok(area) => {
                             ink.drew(page, before);
                             ink.dirty = true;
-                            send(&view, Reply::PageChanged(page, area));
+                            send(view, Reply::PageChanged(page, area));
                         }
                         Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
                     }
                 }
                 Request::Inks(page) => {
                     let inks = ink.named(&doc, page);
-                    send(&view, Reply::Inks { page, inks, erases });
+                    send(view, Reply::Inks { page, inks, erases });
                 }
                 Request::Transform { page, id, matrix } => {
                     ink.note(page, doc.annotation_count(page).unwrap_or(0));
@@ -260,13 +296,13 @@ fn render_loop(
                         Ok((index, area)) => {
                             ink.moved(page, index, matrix);
                             ink.dirty = true;
-                            send(&view, Reply::PageChanged(page, area));
+                            send(view, Reply::PageChanged(page, area));
                         }
                         // Gone or refused, as for an erase below: the page's list goes back.
                         Err(e) => {
                             tracing::debug!("moving a stroke on page {page}: {e:#}");
                             let inks = ink.named(&doc, page);
-                            send(&view, Reply::Inks { page, inks, erases });
+                            send(view, Reply::Inks { page, inks, erases });
                         }
                     }
                 }
@@ -309,10 +345,10 @@ fn render_loop(
                             let left = names.into_iter().zip(cut.left).collect();
                             ink.erased(page, index, cut.was, left, joined);
                             ink.dirty = true;
-                            send(&view, Reply::PageChanged(page, cut.area));
+                            send(view, Reply::PageChanged(page, cut.area));
                             if behind {
                                 let inks = ink.named(&doc, page);
-                                send(&view, Reply::Inks { page, inks, erases });
+                                send(view, Reply::Inks { page, inks, erases });
                             }
                         }
                         // Gone already — the list the eraser aimed at had not caught up with an
@@ -322,7 +358,7 @@ fn render_loop(
                         Err(e) => {
                             tracing::debug!("erasing on page {page}: {e:#}");
                             let inks = ink.named(&doc, page);
-                            send(&view, Reply::Inks { page, inks, erases });
+                            send(view, Reply::Inks { page, inks, erases });
                         }
                     }
                 }
@@ -332,7 +368,7 @@ fn render_loop(
                         // in, taken out or moved is a change to the file and nothing else would
                         // save it.
                         ink.dirty = true;
-                        repaged(&doc, &mut glyphs, &view, edit, step);
+                        repaged(&doc, &mut glyphs, view, edit, step);
                     }
                     Err(e) => tracing::warn!("{edit:?}: {e:#}"),
                 },
@@ -342,10 +378,10 @@ fn render_loop(
                         ink.dirty = true;
                         match walked {
                             pdf::Walked::Ink(page, area) => {
-                                send(&view, Reply::PageChanged(page, area))
+                                send(view, Reply::PageChanged(page, area))
                             }
                             pdf::Walked::Pages(edit, step) => {
-                                repaged(&doc, &mut glyphs, &view, edit, step)
+                                repaged(&doc, &mut glyphs, view, edit, step)
                             }
                         }
                     }
@@ -366,7 +402,7 @@ fn render_loop(
                         Ok(written) => {
                             etag = Some(written);
                             ink.dirty = false;
-                            send(&view, Reply::Saved(written));
+                            send(view, Reply::Saved(written));
                         }
                         // Left dirty on purpose: the next stroke's save tries again, and the
                         // drawing is still in the document either way. A file that cannot be
@@ -376,7 +412,7 @@ fn render_loop(
                         // watcher's reload, which is what clears the ledger.
                         Err(e) => {
                             tracing::warn!("saving {}: {e}", path.display());
-                            send(&view, Reply::SaveFailed(e));
+                            send(view, Reply::SaveFailed(e));
                         }
                     }
                     // Dropping the sender is the signal: the receiver's `recv` returns either
@@ -385,7 +421,7 @@ fn render_loop(
                 }
                 Request::Highlights(links) => {
                     let quads: Highlights = pdf::highlight_quads(&doc, &mut glyphs, &links);
-                    send(&view, Reply::Highlights(quads));
+                    send(view, Reply::Highlights(quads));
                 }
                 Request::Export { links, color } => {
                     let quads = pdf::highlight_quads(&doc, &mut glyphs, &links);
@@ -411,15 +447,15 @@ fn render_loop(
                                 let bytes = doc.save()?;
                                 let written = accent_core::fs::write_bytes(&path, &bytes, etag)?;
                                 etag = Some(written);
-                                send(&view, Reply::Saved(written));
+                                send(view, Reply::Saved(written));
                                 for (page, area) in pages {
-                                    send(&view, Reply::PageChanged(page, area));
+                                    send(view, Reply::PageChanged(page, area));
                                 }
                                 Ok(added)
                             }
                         })
                         .map_err(|e| format!("{e:#}"));
-                    send(&view, Reply::Exported(written));
+                    send(view, Reply::Exported(written));
                 }
                 Request::Copy {
                     links,
@@ -433,10 +469,10 @@ fn render_loop(
                     let _ = done.send(copied.map_err(|e| format!("{e:#}")));
                 }
                 Request::Reload => {
-                    // Swapped only on success: a half-written PDF fails to open often while a
-                    // LaTeX run is going, and the next event tries again.
-                    match PdfDoc::open(&path) {
-                        Ok(fresh) => {
+                    // A file that will not open takes the document with it: what it showed is
+                    // of a file that is not there any more. The tab waits for the next write.
+                    match open(&path) {
+                        Ok((fresh, sizes)) => {
                             doc = fresh;
                             changed = false;
                             etag = accent_core::fs::Etag::of(&path).ok();
@@ -449,9 +485,12 @@ fn render_loop(
                             ink = Ink::default();
                             // The text moved with the document, so what was read of it goes.
                             glyphs.clear();
-                            send(&view, Reply::Reloaded(page_sizes(&doc)));
+                            send(view, Reply::Reloaded(sizes));
                         }
-                        Err(e) => tracing::debug!("reloading {}: {e:#}", path.display()),
+                        Err(why) => {
+                            send(view, Reply::Failed(why));
+                            return Some(path);
+                        }
                     }
                 }
                 Request::Retarget(moved) => {
@@ -468,6 +507,7 @@ fn render_loop(
             }
         }
     }
+    None
 }
 
 /// Where the note links land, as `/Highlight` annotations in `color`, each carrying the text its
@@ -669,6 +709,24 @@ mod tests {
             Request::Tiles { from, wants, .. } => Some((from, wants[0].page)),
             _ => None,
         }
+    }
+
+    /// With no document to answer from, the thread lets everything go but a reload, which is
+    /// what it waits for — a save's waiter hearing its channel close — and follows a rename.
+    #[test]
+    fn a_thread_without_a_document_waits_for_a_reload() {
+        let (tx, rx) = channel();
+        let (ack, acked) = channel();
+        tx.send(Request::Save(Some(ack))).unwrap();
+        tx.send(Request::Retarget(PathBuf::from("moved.pdf")))
+            .unwrap();
+        tx.send(Request::Reload).unwrap();
+        let mut path = PathBuf::from("paper.pdf");
+        assert!(wait(&rx, &mut path));
+        assert_eq!(path, PathBuf::from("moved.pdf"));
+        assert!(acked.recv().is_err(), "the save's waiter is let go");
+        drop(tx);
+        assert!(!wait(&rx, &mut path), "the tab went away");
     }
 
     /// The strip's batch is a detour for the reading view's, not its replacement: the reading

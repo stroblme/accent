@@ -55,8 +55,9 @@ use panes::{
     bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
-    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_dropped, bench_pdf_failed,
-    bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip,
+    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_dropped,
+    bench_pdf_failed, bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale,
+    bench_pdf_strip,
 };
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -206,6 +207,10 @@ use tags::bench_tags;
 /// long both took to paint everything they want, or what is still missing five seconds after the
 /// last tile landed, then `stuck=<bursts that never finished>` (`pdf::bench_pdf_render`); point
 /// it at a few hundred heavy pages, which is where one view's batch used to drop the other's.
+/// `=broken:<rel_path or absolute path>` cuts the PDF in half in place, opens it and writes it
+/// back slowly, then breaks and mends it again under the open tab, printing the waiting page or
+/// the pages after each step and how many opens that cost (`pdf::bench_pdf_broken`); it writes
+/// into the file, so point it at a scratch copy.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -504,6 +509,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("render:") {
                 return bench_pdf_render(&app, rel);
+            }
+            if let Some(arg) = rel.strip_prefix("broken:") {
+                return bench_pdf_broken(&app, arg);
             }
             if let Some(rel) = rel.strip_prefix("failed:") {
                 return bench_pdf_failed(&app, rel);
