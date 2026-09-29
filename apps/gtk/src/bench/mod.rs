@@ -303,8 +303,9 @@ use tags::bench_tags;
 /// and a Ctrl+click on one of them taking that one alone out. `=press:<rel_file>` instead
 /// reveals that row and prints where it and the row two below it are on screen, and stays up
 /// for an XTEST Ctrl+click or Shift+click — `build-aux/xtest.py :99 "move X Y; keydown ctrl;
-/// down; up; keyup ctrl"` — printing the marked rows and how many documents are open every five
-/// seconds, which is how the modifier half is driven at all.
+/// down; up; keyup ctrl"` — printing the rows drawn marked, how many documents are open and the
+/// colour the row above it, it and the two below are painted in every five seconds, which is how
+/// the modifier half is driven at all.
 ///
 /// `ACCENT_BENCH_TAGS=<rel_note>` writes a marker tag into a note and takes it away again with
 /// the Tags pane on screen, printing whether the pane's list holds the marker at each step.

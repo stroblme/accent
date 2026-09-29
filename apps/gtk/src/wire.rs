@@ -633,6 +633,15 @@ pub fn wire_window(app: &Rc<App>) {
             if matches!(key, gdk::Key::Control_L | gdk::Key::Control_R) {
                 app.end_cycle();
             }
+            // Either key let go also takes down the start of a set the Files tree draws while
+            // one is held over it.
+            if matches!(
+                key,
+                gdk::Key::Control_L | gdk::Key::Control_R | gdk::Key::Shift_L | gdk::Key::Shift_R
+            ) && let Some(tree) = app.tree.get()
+            {
+                tree.hide_start();
+            }
         }
     ));
     app.window.add_controller(keys);
@@ -644,6 +653,9 @@ pub fn wire_window(app: &Rc<App>) {
         move |window| {
             if !window.is_active() {
                 app.end_cycle();
+                if let Some(tree) = app.tree.get() {
+                    tree.hide_start();
+                }
             }
         }
     ));

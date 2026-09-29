@@ -939,9 +939,11 @@ async fn bench_range(tree: &tree::Tree, rel: &str) {
 
 /// Reveal a row, print where it is on screen and stay up, for an XTEST Ctrl+click held against
 /// it: the modifier is the one half no drill can fake, the mark being made in a gesture that
-/// reads the press's own state. Prints the marked rows and how many documents are open twice —
-/// before the press and after it — so one run says both what the Ctrl+click marked and that it
-/// opened nothing, and then that a plain click let the marks go again.
+/// reads the press's own state. Prints the rows drawn marked and how many documents are open
+/// three times, five seconds apart, so one run says both what the Ctrl+click marked and that it
+/// opened nothing, and then that a plain click let the marks go again; and the colour each of the
+/// rows about it is painted in, which is whether a mark shows at all, in whatever theme the
+/// scratch `config.toml` names.
 pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -973,6 +975,17 @@ pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
             ),
             None => println!("bench menu_press_to none"),
         }
+        // The row above as well, which is never marked: the colour a mark has to differ from.
+        let rows: Vec<String> = [-1, 0, 1, 2]
+            .into_iter()
+            .filter_map(|off| {
+                let at = tree::find_row(model, &rel)?
+                    .position()
+                    .checked_add_signed(off)?;
+                let row = model.item(at).and_downcast::<gtk::TreeListRow>()?.item()?;
+                Some(tree::decode(&row)?.rel)
+            })
+            .collect();
         for step in 0..3 {
             glib::timeout_future(Duration::from_secs(5)).await;
             println!(
@@ -980,9 +993,50 @@ pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
                 marked_rows(tree.view()),
                 app.docs().len()
             );
+            println!(
+                "bench menu_colours {step} {:?}",
+                row_colours(&app, tree, &rows)
+            );
         }
         bench_quit(&app);
     });
+}
+
+/// The colour each of `rels`' rows is painted in on screen at its left end, clear of its icon and
+/// name: whether a mark shows, which the style class alone does not say.
+fn row_colours(app: &App, tree: &tree::Tree, rels: &[String]) -> Vec<(String, String)> {
+    let window = app.window.upcast_ref::<gtk::Widget>();
+    let snapshot = gtk::Snapshot::new();
+    gtk::WidgetPaintable::new(Some(window)).snapshot(
+        &snapshot,
+        f64::from(window.width()),
+        f64::from(window.height()),
+    );
+    let (Some(node), Some(renderer)) = (
+        snapshot.to_node(),
+        window.native().and_then(|n| n.renderer()),
+    ) else {
+        return Vec::new();
+    };
+    let mut downloader = gdk::TextureDownloader::new(&renderer.render_texture(&node, None));
+    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+    let (bytes, stride) = downloader.download_bytes();
+    let expanders = tree::expanders(tree.view());
+    rels.iter()
+        .filter_map(|rel| {
+            let row = expanders.iter().find(|e| {
+                let item = e.list_row().and_then(|row| row.item());
+                item.as_ref()
+                    .and_then(tree::decode)
+                    .is_some_and(|r| r.rel == *rel)
+            })?;
+            let middle = graphene::Point::new(4.0, row.height() as f32 / 2.0);
+            let at = row.compute_point(window, &middle)?;
+            let i = at.y() as usize * stride + at.x() as usize * 4;
+            let rgb = bytes.get(i..i + 3)?;
+            Some((rel.clone(), format!("{},{},{}", rgb[0], rgb[1], rgb[2])))
+        })
+        .collect()
 }
 
 /// The middle of `rel`'s row in window coordinates, which under Xvfb are the screen's.
