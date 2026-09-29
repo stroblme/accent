@@ -238,9 +238,18 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 ///
 /// `=change:<rel_note>,<rel_img>,<rel_other>` instead copies `<rel_other>` over `<rel_img>` once
 /// the note shows, a figure exported again under the preview, and prints the page either side.
+/// `=gone:<rel_note>,<rel_img>[,<rel_to>]` removes `<rel_img>` instead, or renames it to
+/// `<rel_to>`. On a remote vault the file is changed on the host, over ssh.
 pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
     if let Some(arg) = rel.strip_prefix("change:") {
-        return change_preview(app, arg);
+        return change_preview(app, "cp", arg);
+    }
+    if let Some(arg) = rel.strip_prefix("gone:") {
+        let op = match arg.split(',').count() {
+            2 => "rm",
+            _ => "mv",
+        };
+        return change_preview(app, op, arg);
     }
     let (hold, rel) = match rel.strip_prefix("hold:") {
         Some(rel) => (true, rel),
@@ -376,21 +385,28 @@ async fn preview_look(app: &Rc<App>, when: &str) {
     }
 }
 
-/// See `=change:` on [`bench_preview_look`].
-fn change_preview(app: &Rc<App>, arg: &str) {
-    let [rel, image, other] = arg.split(',').collect::<Vec<_>>()[..] else {
-        println!("bench preview_look change needs <rel_note>,<rel_img>,<rel_other>");
-        return bench_quit(app);
-    };
-    app.open_path(rel);
-    let (app, image, other) = (app.clone(), image.to_string(), other.to_string());
+/// See `=change:` and `=gone:` on [`bench_preview_look`]: `arg` is the note, then the files
+/// `op` (`cp`, `rm` or `mv`) is run on, the copy's source last.
+fn change_preview(app: &Rc<App>, op: &'static str, arg: &str) {
+    let mut args = arg.split(',').map(str::to_string);
+    let rel = args.next().unwrap_or_default();
+    let mut files: Vec<String> = args.collect();
+    if op == "cp" {
+        files.reverse();
+    }
+    let app = app.clone();
     glib::spawn_future_local(async move {
+        // A remote vault opens nothing while it is still connecting.
+        let t = Instant::now();
+        while !app.reconciled.get() && t.elapsed() < Duration::from_secs(60) {
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        app.open_path(&rel);
         glib::timeout_future(Duration::from_millis(400)).await;
         app.set_mode(Mode::Split);
         preview_look(&app, "before").await;
-        let root = app.root();
-        if let Err(e) = std::fs::copy(root.join(&other), root.join(&image)) {
-            println!("bench preview_look cannot_replace {e}");
+        if let Err(e) = change_files(&app, op, &files) {
+            println!("bench preview_look cannot_change {e}");
             return bench_quit(&app);
         }
         // The watcher's event, and the render it asks for.
@@ -398,6 +414,26 @@ fn change_preview(app: &Rc<App>, arg: &str) {
         preview_look(&app, "changed").await;
         bench_quit(&app);
     });
+}
+
+/// Run `op` on the vault files `rels` where they are: on a remote vault's host over ssh, as a
+/// program there would, so the news comes from the host's watcher.
+fn change_files(app: &Rc<App>, op: &str, rels: &[String]) -> Result<(), String> {
+    let root = app.root();
+    let paths = rels.iter().map(|rel| root.join(rel));
+    let status = match app.vault().and_then(|v| v.remote()) {
+        Some(remote) => std::process::Command::new("ssh")
+            .arg(remote.url().destination())
+            .arg(op)
+            .args(paths)
+            .status(),
+        None => std::process::Command::new(op).args(paths).status(),
+    };
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(status.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// See `=hold:` on [`bench_preview_look`].

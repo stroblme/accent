@@ -395,6 +395,14 @@ impl App {
         })
     }
 
+    /// Serve the preview's images again if it was served `rel`, or a file under it, which has
+    /// changed, gone or moved: WebKit would answer the next render with what it holds.
+    pub fn reshow_preview_image(self: &Rc<Self>, rel: &str) {
+        if self.preview.borrow().as_ref().is_some_and(|p| p.holds(rel)) {
+            self.reshow_preview_images();
+        }
+    }
+
     /// Serve the preview's images again, after their look changed: WebKit keeps what it was
     /// served, so its cache goes first and the note is rendered again after it.
     pub fn reshow_preview_images(self: &Rc<Self>) {
