@@ -633,12 +633,9 @@ pub fn wire_window(app: &Rc<App>) {
             if matches!(key, gdk::Key::Control_L | gdk::Key::Control_R) {
                 app.end_cycle();
             }
-            // Either key let go also takes down the start of a set the Files tree draws while
-            // one is held over it.
-            if matches!(
-                key,
-                gdk::Key::Control_L | gdk::Key::Control_R | gdk::Key::Shift_L | gdk::Key::Shift_R
-            ) && let Some(tree) = app.tree.get()
+            // Shift let go takes down the start of a range the Files tree draws while it is held.
+            if matches!(key, gdk::Key::Shift_L | gdk::Key::Shift_R)
+                && let Some(tree) = app.tree.get()
             {
                 tree.hide_start();
             }

@@ -259,8 +259,8 @@ pub struct Tree {
     /// factory like [`cut`](Self::cut): a marked row scrolled out of view and back has to come
     /// back marked.
     marked: Rc<RefCell<Marks>>,
-    /// The row drawn as the start of a set while Ctrl or Shift is held over the list and nothing
-    /// is marked yet. See [`build`].
+    /// The row a Shift+click would range from, drawn marked while Shift is held over the list and
+    /// nothing is marked yet. See [`build`].
     start: Start,
     /// The open file, which the selection follows. Shared with the pointer-leave handler: the
     /// list selects rows on hover (see `build`), so the selection has to be put back whenever
@@ -349,8 +349,8 @@ impl Tree {
         true
     }
 
-    /// Take down the start of a set drawn while Ctrl or Shift was held over the list, the key
-    /// having been let go or the window left.
+    /// Take down the start of a range drawn while Shift was held over the list, the key having
+    /// been let go or the window left.
     pub fn hide_start(&self) {
         if self.start.borrow_mut().take().is_some() {
             redraw_marks(&self.view, &self.marked.borrow(), None);
@@ -584,9 +584,8 @@ fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<Row> {
 /// See [`Tree::start`].
 type Start = Rc<RefCell<Option<String>>>;
 
-/// The row a Ctrl+click or a Shift+click starts the set from while nothing is marked: the last row
-/// clicked without Shift while it is in the list, else the open file's row. Never one in a
-/// dependency tree, which is never marked.
+/// The row a Shift+click ranges from: the last row clicked without Shift while it is in the list,
+/// else the open file's row. Never one in a dependency tree, which is never marked.
 fn start_of(
     model: &gtk::TreeListModel,
     anchor: Option<String>,
@@ -1344,7 +1343,7 @@ pub fn build(
             let mut marks = marked.borrow_mut();
             match row {
                 Some(row) if shift => {
-                    // From where a set starts, else the row alone; Shift leaves the anchor
+                    // From where a range starts, else the row alone; Shift leaves the anchor
                     // where it is.
                     let from = start_of(&model, anchor.borrow().clone(), active.borrow().clone())
                         .map_or_else(|| row.rel.clone(), |from| from.rel);
@@ -1352,15 +1351,6 @@ pub fn build(
                     gesture.set_state(gtk::EventSequenceState::Claimed);
                 }
                 Some(row) if ctrl => {
-                    // The first one adds to the row chosen before it, as any multiple selection
-                    // does, rather than starting a set without it.
-                    if marks.is_empty()
-                        && let Some(from) =
-                            start_of(&model, anchor.borrow().clone(), active.borrow().clone())
-                                .filter(|from| from.rel != row.rel)
-                    {
-                        add_marks(&mut marks, [(from.rel.clone(), from.is_dir())]);
-                    }
                     toggle(&mut marks, &row, &cache);
                     *anchor.borrow_mut() = Some(row.rel);
                     gesture.set_state(gtk::EventSequenceState::Claimed);
@@ -1424,12 +1414,11 @@ pub fn build(
             select(view, row.as_deref());
         }
     };
-    // Holding Ctrl or Shift over the list draws the row a set would start from marked, while
-    // nothing is: the selection that shows the open file moves with the pointer, so the row a
-    // Shift+click ranges from, and the one a first Ctrl+click adds to, would otherwise be lit by
-    // nothing while the pointer is on its way to the other end. Shown as the pointer moves rather
-    // than on the key itself, so a capital typed with the pointer resting on the list lights
-    // nothing; `Tree::hide_start` takes it down when the key is let go.
+    // Holding Shift over the list draws the row a Shift+click would range from marked, while
+    // nothing is: the selection that shows the open file moves with the pointer, so that row
+    // would otherwise be lit by nothing while the pointer is on its way to the other end. Shown as
+    // the pointer moves rather than on the key itself, so a capital typed with the pointer resting
+    // on the list lights nothing; `Tree::hide_start` takes it down when the key is let go.
     let show_start = {
         let (marked, start, anchor, active, model) = (
             marked.clone(),
@@ -1457,7 +1446,7 @@ pub fn build(
     let held = |motion: &gtk::EventControllerMotion| {
         motion
             .current_event_state()
-            .intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
+            .contains(gdk::ModifierType::SHIFT_MASK)
     };
     let motion = gtk::EventControllerMotion::new();
     motion.connect_enter({
