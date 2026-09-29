@@ -1412,6 +1412,9 @@ pub(super) fn bench_unfold(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("tab:") {
         return bench_unfold_tab(app, rel);
     }
+    if let Some(dir) = arg.strip_prefix("again:") {
+        return bench_unfold_again(app, dir);
+    }
     let (app, dirs) = (
         app.clone(),
         arg.split(',').map(str::to_string).collect::<Vec<_>>(),
@@ -1484,6 +1487,30 @@ fn bench_unfold_renew(app: &Rc<App>, dir: &str) {
         scroll::in_vault(&app, &format!("echo 2 > {quoted}/later.md"));
         glib::timeout_future(Duration::from_secs(3)).await;
         println!("bench unfold_renew later {:?}", listed(tree, &dir));
+        bench_quit(&app);
+    });
+}
+
+/// `=again:<rel_dir>`: the folder opened, shut, given a file from outside accent while shut, and
+/// opened again, the tree's rows under it printed then — for a folder nothing watches, a
+/// dependency tree, the one thing that can bring the file in is the opening itself.
+fn bench_unfold_again(app: &Rc<App>, dir: &str) {
+    let (app, dir) = (app.clone(), dir.to_string());
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        unfold(tree, &dir).await;
+        println!("bench unfold_again before {:?}", listed(tree, &dir));
+        if let Some(row) = tree::find_row(tree.model(), &dir) {
+            row.set_expanded(false);
+        }
+        let quoted = accent_api::ssh::quote(&format!("{dir}/again.md"));
+        scroll::in_vault(&app, &format!("echo again > {quoted}"));
+        glib::timeout_future(Duration::from_secs(2)).await;
+        if let Some(row) = tree::find_row(tree.model(), &dir) {
+            row.set_expanded(true);
+        }
+        glib::timeout_future(Duration::from_secs(1)).await;
+        println!("bench unfold_again opened {:?}", listed(tree, &dir));
         bench_quit(&app);
     });
 }
