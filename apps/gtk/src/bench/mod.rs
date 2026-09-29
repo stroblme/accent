@@ -19,6 +19,7 @@ mod outline;
 mod panes;
 mod pdf;
 mod replace;
+mod scroll;
 mod search;
 mod style;
 mod tags;
@@ -55,9 +56,10 @@ use panes::{
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_dropped, bench_pdf_failed,
-    bench_pdf_pages, bench_pdf_renaming, bench_pdf_stale, bench_pdf_strip,
+    bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip,
 };
 use replace::bench_replace;
+use scroll::bench_scroll;
 use search::bench_search;
 use style::{
     bench_drag_fold, bench_follow, bench_numbers, bench_occurrences, bench_reveal, bench_seam,
@@ -199,7 +201,11 @@ use tags::bench_tags;
 /// file. `=bookmarks:<rel_path>[,<rel_diagram>]` scrolls through the document with the Outline pane
 /// up and prints the bookmark each page is under, whether it is in view and who has the keyboard,
 /// then the same after a page edit and whether the list is the one it was; with a diagram, the
-/// same for each of its pages (`pdf::bench_pdf_bookmarks`).
+/// same for each of its pages (`pdf::bench_pdf_bookmarks`). `=render:<rel_path>` scrolls the
+/// reading view and the thumbnail strip together in bursts and zooms, and after each prints how
+/// long both took to paint everything they want, or what is still missing five seconds after the
+/// last tile landed, then `stuck=<bursts that never finished>` (`pdf::bench_pdf_render`); point
+/// it at a few hundred heavy pages, which is where one view's batch used to drop the other's.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -326,6 +332,11 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
+/// `ACCENT_BENCH_SCROLL=<rel_dir>` scrolls the Files tree and the Git pane's two lists half way
+/// down with the keyboard on a row, changes the vault and its repository under them, and prints
+/// where each list is after every change (`scroll::bench_scroll`). It makes the vault a
+/// repository, so only on a scratch vault under `/tmp`.
+///
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram (a sample is written there if there is none) and
 /// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`.
 ///
@@ -393,7 +404,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let save_as = std::env::var("ACCENT_BENCH_SAVE_AS").ok();
     let attach = std::env::var("ACCENT_BENCH_ATTACH").ok();
     let export = std::env::var("ACCENT_BENCH_EXPORT").ok();
+    let scroll = std::env::var("ACCENT_BENCH_SCROLL").ok();
     if expand.is_none()
+        && scroll.is_none()
         && attach.is_none()
         && export.is_none()
         && save_as.is_none()
@@ -489,6 +502,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = rel.strip_prefix("strip:") {
                 return bench_pdf_strip(&app, rel);
             }
+            if let Some(rel) = rel.strip_prefix("render:") {
+                return bench_pdf_render(&app, rel);
+            }
             if let Some(rel) = rel.strip_prefix("failed:") {
                 return bench_pdf_failed(&app, rel);
             }
@@ -553,6 +569,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = diagram {
             return bench_diagram(&app, &arg);
+        }
+        if let Some(dir) = scroll {
+            return bench_scroll(&app, &dir);
         }
         if let Some(rels) = tabs {
             if let Some(rels) = rels.strip_prefix("pin:") {

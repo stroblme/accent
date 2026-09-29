@@ -76,9 +76,9 @@ fn page_sizes(doc: &PdfDoc) -> Vec<(f32, f32)> {
 ///
 /// One request at a time, with one twist: before every tile and every searched page it drains the
 /// queue, so a batch that has been overtaken is put aside rather than finished into a viewport
-/// nobody is looking at any more. Only a request of the same kind abandons it — see
-/// [`interrupt`] — and the queue is a stack, so the newest work is always what runs next and
-/// what is put aside resumes after it.
+/// nobody is looking at any more. Only a request of the same kind from the same asker abandons
+/// it — see [`interrupt`] — and the queue is a stack, so the newest work is always what runs next
+/// and what is put aside resumes after it.
 ///
 /// Dropping an interrupted batch instead loses it for good. Nothing re-asks: the widget sends a
 /// list of tiles again only when that list changes, and the tab sends a query again only when the
@@ -120,6 +120,7 @@ fn render_loop(
             };
             match current {
                 Request::Tiles {
+                    from,
                     scale,
                     dark,
                     theme,
@@ -130,6 +131,7 @@ fn render_loop(
                         match rx.try_recv() {
                             Ok(newer) => {
                                 let rest = Request::Tiles {
+                                    from,
                                     scale,
                                     dark,
                                     theme,
@@ -498,22 +500,32 @@ fn repaged(
 /// Put `newer` at the top of the queue, and `rest` — what the interrupted batch has left to do —
 /// under it or not at all.
 ///
-/// Only a request of the same kind takes a batch over: a newer viewport makes the old tiles
-/// pointless, and a newer query makes the old query's remaining pages pointless. It also drops
-/// any older remainder of that kind still waiting further down, which is the one a batch put
-/// aside earlier left there. Anything else — a link, a page's glyphs, an outline, a reload — is a
-/// short detour, and the batch resumes once it is done.
+/// Only a request of the same kind from the same asker takes a batch over: a newer viewport makes
+/// that view's old tiles pointless, and a newer query makes the old query's remaining pages
+/// pointless. It also drops any older remainder of its own still waiting further down, which is
+/// the one a batch put aside earlier left there. Anything else — a link, a page's glyphs, an
+/// outline, a reload, or the tiles another view of the document wants — is a short detour, and
+/// the batch resumes once it is done.
 fn interrupt(queue: &mut Vec<Request>, rest: Request, newer: Request) {
-    match same_kind(&rest, &newer) {
-        false => queue.push(rest),
-        true => queue.retain(|waiting| !same_kind(waiting, &newer)),
+    // Only a batch replaces anything waiting, and `rest` is always one: a newer link is no reason
+    // to drop an older one.
+    if std::mem::discriminant(&rest) == std::mem::discriminant(&newer) {
+        queue.retain(|waiting| !same_kind(waiting, &newer));
+    }
+    if !same_kind(&rest, &newer) {
+        queue.push(rest);
     }
     queue.push(newer);
 }
 
-/// Whether two requests are the same kind of work, whatever they are for.
+/// Whether two requests are the same kind of work, whatever they are for — and for tiles, from
+/// the same asker. The reading view and the thumbnail strip each send the whole list they still
+/// want, but only when that list changes, so one dropping the other's left its pages blank.
 fn same_kind(a: &Request, b: &Request) -> bool {
-    std::mem::discriminant(a) == std::mem::discriminant(b)
+    match (a, b) {
+        (Request::Tiles { from: x, .. }, Request::Tiles { from: y, .. }) => x == y,
+        _ => std::mem::discriminant(a) == std::mem::discriminant(b),
+    }
 }
 
 /// Render one wanted tile, or the low-resolution stand-in for a whole page.
@@ -581,6 +593,7 @@ fn send(view: &glib::SendWeakRef<PdfView>, reply: Reply) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::protocol::Asker;
     use super::*;
 
     fn search(query: u64, from: usize) -> Request {
@@ -619,6 +632,41 @@ mod tests {
             })
         ));
         assert!(matches!(queue.pop(), Some(Request::Outline)));
+        assert!(queue.is_empty());
+    }
+
+    fn tiles(from: Asker, page: u32) -> Request {
+        let want = Want { page, tx: 0, ty: 0 };
+        Request::Tiles {
+            from,
+            scale: 1.0,
+            dark: false,
+            theme: pdf::Theme::Plain,
+            wants: vec![want],
+        }
+    }
+
+    fn page_of(request: Option<Request>) -> Option<(Asker, u32)> {
+        match request? {
+            Request::Tiles { from, wants, .. } => Some((from, wants[0].page)),
+            _ => None,
+        }
+    }
+
+    /// The strip's batch is a detour for the reading view's, not its replacement: the reading
+    /// view asks again only when its own list changes, so what was dropped stayed blank.
+    #[test]
+    fn one_view_s_tiles_do_not_abandon_another_s() {
+        let mut queue = vec![Request::Outline];
+        interrupt(&mut queue, tiles(Asker::Reader, 7), tiles(Asker::Strip, 40));
+        assert_eq!(page_of(queue.pop()), Some((Asker::Strip, 40)));
+        assert_eq!(page_of(queue.pop()), Some((Asker::Reader, 7)));
+        assert!(matches!(queue.pop(), Some(Request::Outline)));
+        // A newer batch from the same view still replaces its own, the one waiting included.
+        let mut queue = vec![tiles(Asker::Reader, 7)];
+        interrupt(&mut queue, tiles(Asker::Strip, 40), tiles(Asker::Reader, 9));
+        assert_eq!(page_of(queue.pop()), Some((Asker::Reader, 9)));
+        assert_eq!(page_of(queue.pop()), Some((Asker::Strip, 40)));
         assert!(queue.is_empty());
     }
 }

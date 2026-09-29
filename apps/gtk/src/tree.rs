@@ -1268,7 +1268,8 @@ pub fn build(
     let selection = gtk::SingleSelection::new(Some(model.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ListView::new(Some(selection), Some(factory));
+    let view = gtk::ListView::new(None::<gtk::SingleSelection>, Some(factory));
+    crate::widgets::set_model(&view, &selection);
     view.add_css_class("navigation-sidebar");
     // One click opens, as GNOME's own sidebars do. A folder still toggles rather than opening,
     // so a click never costs anything you did not ask for.
