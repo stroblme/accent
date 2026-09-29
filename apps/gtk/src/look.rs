@@ -9,7 +9,6 @@
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
@@ -167,8 +166,9 @@ pub enum Served {
     Bytes(glib::Bytes, &'static str),
 }
 
-/// [`show`] for the preview: only an image that is recoloured is decoded, recoloured and encoded
-/// again, as a PNG; everything else, and anything that fails on the way, is served as the file.
+/// [`show`] for the preview: only an image that is recoloured, or that its EXIF turns where WebKit
+/// would not, is decoded and encoded again, as a PNG; everything else, and anything that fails on
+/// the way, is served as the file.
 pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
     if svg(path) {
         return match look
@@ -179,8 +179,14 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
             None => Served::File,
         };
     }
+    // WebKit turns a JPEG the way its EXIF says, and no other image.
+    let turned = || !matches!(extension(path).as_str(), "jpg" | "jpeg") && tag(path) != 1;
     match recoloured(path, look, inverted, || decode(path).ok()) {
         Some(texture) => Served::Bytes(texture.save_to_png_bytes(), "image/png"),
+        None if turned() => match decode(path) {
+            Ok(texture) => Served::Bytes(texture.save_to_png_bytes(), "image/png"),
+            Err(_) => Served::File,
+        },
         None => Served::File,
     }
 }
@@ -200,10 +206,10 @@ pub fn verdict(path: &Path) -> Option<Verdict> {
 /// too large to hold twice is left as it is, as the recolouring leaves it.
 fn decode(path: &Path) -> Result<gdk::Texture, glib::Error> {
     let texture = gdk::Texture::from_filename(path)?;
-    let mut head = Vec::new();
-    let tag = std::fs::File::open(path)
-        .and_then(|file| file.take(64 * 1024).read_to_end(&mut head))
-        .map_or(1, |_| orientation::read(&head));
+    let tag = match extension(path).as_str() {
+        "tif" | "tiff" => after_libtiff(tag(path)),
+        _ => tag(path),
+    };
     let Some(p) = (tag != 1).then(|| pixels(&texture)).flatten() else {
         return Ok(texture);
     };
@@ -215,6 +221,22 @@ fn decode(path: &Path) -> Result<gdk::Texture, glib::Error> {
     }
     .texture()
     .upcast())
+}
+
+/// The EXIF Orientation tag of the image at `path`, 1 where there is none.
+fn tag(path: &Path) -> u8 {
+    std::fs::File::open(path).map_or(1, |mut file| orientation::read(&mut file))
+}
+
+/// What is left of a TIFF's `tag` once GDK has decoded it. GDK hands a TIFF that is not upright
+/// to libtiff's `TIFFReadRGBAImageOriented`, which does the tag's mirroring but not its quarter
+/// turn: 2 to 4 come out upright, and 5 to 8 wanting a turn about one diagonal or the other.
+fn after_libtiff(tag: u8) -> u8 {
+    match tag {
+        5 | 7 => 5,
+        6 | 8 => 7,
+        _ => 1,
+    }
 }
 
 /// Straight RGBA8 pixels and their size.
@@ -474,5 +496,51 @@ mod tests {
         // Only a theme's own recolouring turns on what the image shows.
         assert!(!light.asks(false) && dark.asks(false) && cream.asks(false));
         assert!(!light.asks(true) && !dark.asks(true) && !cream.asks(true));
+    }
+
+    /// A TIFF comes out of [`decode`] upright whatever its tag, GDK having done part of the turn
+    /// ([`after_libtiff`]): a 3 × 2 grey image, each pixel its own shade.
+    #[test]
+    fn a_tiff_is_decoded_upright() {
+        let shades = [10u8, 20, 30, 40, 50, 60];
+        for tag in 1..=8u16 {
+            // Little-endian: the header, the pixels, then the directory.
+            let entries: [(u16, u16, u32); 10] = [
+                (256, 3, 3), // width
+                (257, 3, 2), // height
+                (258, 3, 8), // bits per sample
+                (259, 3, 1), // no compression
+                (262, 3, 1), // black is zero
+                (273, 4, 8), // the strip's offset
+                (274, 3, u32::from(tag)),
+                (277, 3, 1), // samples per pixel
+                (278, 3, 2), // rows per strip
+                (279, 4, 6), // the strip's length
+            ];
+            let mut file = [&b"II*\0"[..], &14u32.to_le_bytes(), &shades].concat();
+            file.extend(10u16.to_le_bytes());
+            for (id, kind, value) in entries {
+                file.extend(
+                    [
+                        &id.to_le_bytes()[..],
+                        &kind.to_le_bytes(),
+                        &1u32.to_le_bytes(),
+                    ]
+                    .concat(),
+                );
+                file.extend(value.to_le_bytes());
+            }
+            file.extend(0u32.to_le_bytes());
+            let path =
+                std::env::temp_dir().join(format!("accent-{}-{tag}.tif", std::process::id()));
+            std::fs::write(&path, file).unwrap();
+            let decoded = pixels(&decode(&path).unwrap()).unwrap();
+            std::fs::remove_file(&path).unwrap();
+
+            let grey: Vec<u8> = shades.iter().flat_map(|&v| [v, v, v, 255]).collect();
+            let (want, width, height) = orientation::apply(&grey, 3, 2, tag as u8);
+            let got = (decoded.data, decoded.width, decoded.height);
+            assert_eq!(got, (want, width, height), "tag {tag}");
+        }
     }
 }
