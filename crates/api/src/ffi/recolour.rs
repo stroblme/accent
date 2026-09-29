@@ -1,13 +1,14 @@
-//! Images recoloured like a PDF page, and the test for which ones want it.
+//! Images recoloured like a PDF page, the test for which ones want it, and turning them upright.
 //!
-//! The rules are the core's ([`accent_core::recolour`]): Android decodes with its own decoder and
-//! hands the pixels over as straight-alpha RGBA8, in the same [`Theme`] a PDF page is rendered
-//! in, so a figure and a page in one vault land on the same paper.
+//! The rules are the core's ([`accent_core::recolour`], [`accent_core::orientation`]): Android
+//! decodes with its own decoder and hands the pixels over as straight-alpha RGBA8, in the same
+//! [`Theme`] a PDF page is rendered in, so a figure and a page in one vault land on the same paper.
 
+use accent_core::orientation;
 use accent_core::pdf;
 use accent_core::recolour;
 
-use crate::ffi::convert::Theme;
+use crate::ffi::convert::{Theme, Tile};
 
 /// Whether `width` × `height` straight-alpha RGBA8 pixels read as a document — a scan, plot,
 /// diagram or screenshot of text — rather than a photo, and so want recolouring. A buffer that
@@ -29,6 +30,25 @@ pub fn recolour_image(mut rgba: Vec<u8>, theme: Theme, fill: bool) -> Vec<u8> {
         recolour::recolour(&mut rgba, paper, ink);
     }
     rgba
+}
+
+/// Straight-alpha RGBA8 pixels `width` × `height`, decoded from the image file at `path`, turned
+/// the way its EXIF Orientation tag says, which `BitmapFactory` ignores; they come back as they
+/// went in when the file has no tag, or when they do not match their size.
+#[uniffi::export]
+pub fn upright_image(rgba: Vec<u8>, width: u32, height: u32, path: String) -> Tile {
+    let tag = std::fs::File::open(path).map_or(1, |mut file| orientation::read(&mut file));
+    let (rgba, width, height) = match tag {
+        tag if tag != 1 && rgba.len() == width as usize * height as usize * 4 => {
+            orientation::apply(&rgba, width, height, tag)
+        }
+        _ => (rgba, width, height),
+    };
+    Tile {
+        width,
+        height,
+        rgba,
+    }
 }
 
 /// An SVG's text with the same recolouring as a filter, so it stays vector, on the paper when
@@ -90,6 +110,37 @@ mod tests {
             filled[4..],
             [0x1d, 0x1d, 0x20, 255],
             "the clear pixel is paper"
+        );
+    }
+
+    /// The reading and the turning are the core's and tested there; what is tested here is
+    /// that a file's tag reaches the pixels, and that they come back whole without one.
+    #[test]
+    fn an_image_is_turned_the_way_its_file_says() {
+        let dir = tempfile::tempdir().unwrap();
+        // A JPEG's first segments: an Exif APP1 whose one-entry directory says 6, a quarter turn
+        // clockwise.
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE1, 0, 34];
+        jpeg.extend(b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0");
+        jpeg.extend([0xFF, 0xDA, 0, 2]);
+        let path = dir.path().join("turned.jpg");
+        std::fs::write(&path, jpeg).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        // 3 × 2: a b c over d e f.
+        let rgba: Vec<u8> = b"abcdef".iter().flat_map(|&c| [c, 0, 0, 255]).collect();
+        let turned = upright_image(rgba.clone(), 3, 2, path.clone());
+        let firsts: Vec<u8> = turned.rgba.chunks(4).map(|p| p[0]).collect();
+        assert_eq!(
+            (turned.width, turned.height, &firsts[..]),
+            (2, 3, &b"daebfc"[..])
+        );
+
+        let missing = dir.path().join("none.jpg").to_string_lossy().into_owned();
+        assert_eq!(upright_image(rgba.clone(), 3, 2, missing).rgba, rgba);
+        assert_eq!(
+            upright_image(rgba.clone(), 2, 2, path).rgba,
+            rgba,
+            "short buffer"
         );
     }
 
