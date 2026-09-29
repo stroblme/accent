@@ -939,9 +939,11 @@ async fn bench_range(tree: &tree::Tree, rel: &str) {
 
 /// Reveal a row, print where it is on screen and stay up, for an XTEST Ctrl+click held against
 /// it: the modifier is the one half no drill can fake, the mark being made in a gesture that
-/// reads the press's own state. Prints the marked rows and how many documents are open twice —
-/// before the press and after it — so one run says both what the Ctrl+click marked and that it
-/// opened nothing, and then that a plain click let the marks go again.
+/// reads the press's own state. Prints the rows drawn marked and how many documents are open
+/// three times, five seconds apart, so one run says both what the Ctrl+click marked and that it
+/// opened nothing, and then that a plain click let the marks go again; and the colour each of the
+/// rows about it is painted in, which is whether a mark shows at all, in whatever theme the
+/// scratch `config.toml` names.
 pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -973,6 +975,17 @@ pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
             ),
             None => println!("bench menu_press_to none"),
         }
+        // The row above as well, which is never marked: the colour a mark has to differ from.
+        let rows: Vec<String> = [-1, 0, 1, 2]
+            .into_iter()
+            .filter_map(|off| {
+                let at = tree::find_row(model, &rel)?
+                    .position()
+                    .checked_add_signed(off)?;
+                let row = model.item(at).and_downcast::<gtk::TreeListRow>()?.item()?;
+                Some(tree::decode(&row)?.rel)
+            })
+            .collect();
         for step in 0..3 {
             glib::timeout_future(Duration::from_secs(5)).await;
             println!(
@@ -980,9 +993,50 @@ pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
                 marked_rows(tree.view()),
                 app.docs().len()
             );
+            println!(
+                "bench menu_colours {step} {:?}",
+                row_colours(&app, tree, &rows)
+            );
         }
         bench_quit(&app);
     });
+}
+
+/// The colour each of `rels`' rows is painted in on screen at its left end, clear of its icon and
+/// name: whether a mark shows, which the style class alone does not say.
+fn row_colours(app: &App, tree: &tree::Tree, rels: &[String]) -> Vec<(String, String)> {
+    let window = app.window.upcast_ref::<gtk::Widget>();
+    let snapshot = gtk::Snapshot::new();
+    gtk::WidgetPaintable::new(Some(window)).snapshot(
+        &snapshot,
+        f64::from(window.width()),
+        f64::from(window.height()),
+    );
+    let (Some(node), Some(renderer)) = (
+        snapshot.to_node(),
+        window.native().and_then(|n| n.renderer()),
+    ) else {
+        return Vec::new();
+    };
+    let mut downloader = gdk::TextureDownloader::new(&renderer.render_texture(&node, None));
+    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+    let (bytes, stride) = downloader.download_bytes();
+    let expanders = tree::expanders(tree.view());
+    rels.iter()
+        .filter_map(|rel| {
+            let row = expanders.iter().find(|e| {
+                let item = e.list_row().and_then(|row| row.item());
+                item.as_ref()
+                    .and_then(tree::decode)
+                    .is_some_and(|r| r.rel == *rel)
+            })?;
+            let middle = graphene::Point::new(4.0, row.height() as f32 / 2.0);
+            let at = row.compute_point(window, &middle)?;
+            let i = at.y() as usize * stride + at.x() as usize * 4;
+            let rgb = bytes.get(i..i + 3)?;
+            Some((rel.clone(), format!("{},{},{}", rgb[0], rgb[1], rgb[2])))
+        })
+        .collect()
 }
 
 /// The middle of `rel`'s row in window coordinates, which under Xvfb are the screen's.
@@ -1334,6 +1388,106 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
         }
         bench_quit(&app);
     });
+}
+
+/// `ACCENT_BENCH_MOVE=<rel>,<rel>,…`: Move to… on those paths as a marked set, past its dialog.
+///
+/// Prints what the dialog opens on — its heading, the folder in its entry and the line under it —
+/// then types `Moved/Here`, a folder that is not there yet, and prints the line again, presses
+/// Move, answers an Update Links? question if one comes and prints the toast and where each path
+/// is afterwards. Then the same set into the folder it is now in, and the folder `Moved` into its
+/// own `Here`, which are the two toasts that refuse. It moves files, so point it at a scratch copy.
+pub(super) fn bench_move(app: &Rc<App>, arg: &str) {
+    scratch_only(app, "ACCENT_BENCH_MOVE");
+    let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
+        return bench_quit(app);
+    };
+    let rels: Vec<String> = arg.split(',').map(str::to_string).collect();
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        // A move asks the index what links to it, which the first reconcile has to have filled.
+        until(|| app.reconciled.get()).await;
+        let set = |rels: &[String]| -> Vec<(String, bool)> {
+            rels.iter()
+                .map(|rel| {
+                    let folder = matches!(fileops::taken(&vault, rel), fileops::Taken::Folder);
+                    (rel.clone(), folder)
+                })
+                .collect()
+        };
+        fileops::move_to(&ops, set(&rels));
+        let moved: Vec<String> = rels
+            .iter()
+            .map(|rel| format!("Moved/Here/{}", accent_core::path::basename(rel)))
+            .collect();
+        println!(
+            "bench move_said {:?}",
+            move_through(&app, "Moved/Here").await
+        );
+        for (from, to) in rels.iter().zip(&moved) {
+            println!(
+                "bench move_landed {from} gone={} there={}",
+                !vault.exists(from),
+                vault.exists(to)
+            );
+        }
+        fileops::move_to(&ops, set(&moved));
+        println!(
+            "bench move_again {:?}",
+            move_through(&app, "Moved/Here").await
+        );
+        fileops::move_to(&ops, vec![("Moved".to_string(), true)]);
+        println!(
+            "bench move_itself {:?}",
+            move_through(&app, "Moved/Here").await
+        );
+        bench_quit(&app);
+    });
+}
+
+/// Answer the Move to… dialog that is up with `dir`, and any Update Links? question after it, and
+/// return the toast that says what came of it. Prints what the dialog showed on the way.
+async fn move_through(app: &Rc<App>, dir: &str) -> Option<String> {
+    glib::timeout_future(Duration::from_millis(500)).await;
+    let dialog = app
+        .window
+        .visible_dialog()
+        .and_downcast::<adw::AlertDialog>()?;
+    let form = dialog.extra_child()?;
+    let entry = find_widget(&form, &|w| w.is::<gtk::Entry>()).and_downcast::<gtk::Entry>()?;
+    let line = || {
+        find_widget(&form, &|w| w.has_css_class("dim-label"))
+            .and_downcast::<gtk::Label>()
+            .map(|l| l.label().to_string())
+    };
+    println!(
+        "bench move_dialog heading={:?} entry={:?} line={:?}",
+        dialog.heading().unwrap_or_default(),
+        entry.text(),
+        line()
+    );
+    entry.set_text(dir);
+    println!("bench move_typed line={:?}", line());
+    // What was said before would otherwise stay up in front of the answer, queued behind it.
+    app.toasts.dismiss_all();
+    let said = app.toasted.get();
+    dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+    dialog.close();
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    if let Some(update) = app
+        .window
+        .visible_dialog()
+        .and_downcast::<adw::AlertDialog>()
+    {
+        println!(
+            "bench move_update {:?}",
+            update.heading().unwrap_or_default()
+        );
+        update.emit_by_name::<()>("response", &[&"update"]);
+        update.close();
+    }
+    until(|| app.toasted.get() > said).await;
+    compare::bench_toast(app)
 }
 
 /// `ACCENT_BENCH_SAVE_AS=<rel>`: Save As on the file at `rel`, past the dialog, which is only the

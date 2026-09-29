@@ -259,6 +259,9 @@ pub struct Tree {
     /// factory like [`cut`](Self::cut): a marked row scrolled out of view and back has to come
     /// back marked.
     marked: Rc<RefCell<Marks>>,
+    /// The row a Shift+click would range from, drawn marked while Shift is held over the list and
+    /// nothing is marked yet. See [`build`].
+    start: Start,
     /// The open file, which the selection follows. Shared with the pointer-leave handler: the
     /// list selects rows on hover (see `build`), so the selection has to be put back whenever
     /// the pointer goes away again.
@@ -321,7 +324,7 @@ impl Tree {
         };
         let mut marked = self.marked.borrow_mut();
         toggle(&mut marked, &row, &self.cache);
-        redraw_marks(&self.view, &marked);
+        redraw_marks(&self.view, &marked, None);
     }
 
     /// What a Shift+click on the row `to` does with `from` as the last row clicked without Shift:
@@ -331,7 +334,7 @@ impl Tree {
     pub fn mark_range(&self, from: &str, to: &str, add: bool) {
         let mut marked = self.marked.borrow_mut();
         mark_range(&mut marked, &self.model, from, to, add);
-        redraw_marks(&self.view, &marked);
+        redraw_marks(&self.view, &marked, None);
     }
 
     /// Forget every mark, and say whether there was one to forget — which is what lets Escape
@@ -342,8 +345,16 @@ impl Tree {
             return false;
         }
         marked.clear();
-        redraw_marks(&self.view, &marked);
+        redraw_marks(&self.view, &marked, None);
         true
+    }
+
+    /// Take down the start of a range drawn while Shift was held over the list, the key having
+    /// been let go or the window left.
+    pub fn hide_start(&self) {
+        if self.start.borrow_mut().take().is_some() {
+            redraw_marks(&self.view, &self.marked.borrow(), None);
+        }
     }
 
     /// Show or hide the dot-named rows. Every level already listed is listed again, since a
@@ -570,6 +581,22 @@ fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<Row> {
     expander.list_row()?.item().as_ref().and_then(decode)
 }
 
+/// See [`Tree::start`].
+type Start = Rc<RefCell<Option<String>>>;
+
+/// The row a Shift+click ranges from: the last row clicked without Shift while it is in the list,
+/// else the open file's row. Never one in a dependency tree, which is never marked.
+fn start_of(
+    model: &gtk::TreeListModel,
+    anchor: Option<String>,
+    open: Option<String>,
+) -> Option<Row> {
+    [anchor, open].into_iter().flatten().find_map(|rel| {
+        let row = find_row(model, &rel)?.item().as_ref().and_then(decode)?;
+        (!row.dependency).then_some(row)
+    })
+}
+
 /// Whether `rel` is marked itself or inside a marked folder.
 fn is_marked(marks: &Marks, rel: &str) -> bool {
     !marks.is_empty()
@@ -657,7 +684,7 @@ fn mark_range(marks: &mut Marks, model: &gtk::TreeListModel, from: &str, to: &st
 /// with the widget pulled out from under it the note under a plain click stopped opening
 /// (`ACCENT_BENCH_MENU=press:<rel>` and an XTEST click, 2026-09-14). The factory reads the set on
 /// every bind all the same, which is what brings a mark back with a row scrolled out of view.
-fn redraw_marks(view: &gtk::ListView, marked: &Marks) {
+fn redraw_marks(view: &gtk::ListView, marked: &Marks, start: Option<&str>) {
     for expander in expanders(view) {
         let rel = expander
             .list_row()
@@ -668,7 +695,7 @@ fn redraw_marks(view: &gtk::ListView, marked: &Marks) {
         set_class(
             &expander,
             MARKED,
-            rel.is_some_and(|rel| is_marked(marked, &rel)),
+            rel.is_some_and(|rel| is_marked(marked, &rel) || start == Some(rel.as_str())),
         );
     }
 }
@@ -1091,6 +1118,7 @@ pub fn build(
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
     let cut: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
     let marked: Rc<RefCell<Marks>> = Rc::new(RefCell::new(Marks::new()));
+    let start = Start::default();
     let watches = Watches::default();
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
         let (vault, cache, asked, show_hidden, watches) = (
@@ -1128,7 +1156,7 @@ pub fn build(
     vault_row.add_controller(import_target(&imports, |_, _, _| Some(String::new())));
     let bind_ignored = ignored.clone();
     let bind_cut = cut.clone();
-    let bind_marked = marked.clone();
+    let (bind_marked, bind_start) = (marked.clone(), start.clone());
     let drag_marked = marked.clone();
     let row_moves = moves.clone();
     let row_imports = imports.clone();
@@ -1256,11 +1284,15 @@ pub fn build(
                 set_class(widget, "dim-label", dim);
             }
             // On the expander rather than on the label: a mark is about the row, not about its name,
-            // and the expander is the one widget here that spans the whole of it.
+            // and the expander is the one widget here that spans the whole of it (`file-tree` in
+            // `build::install_chrome_css`). Never on the row widget above it, which is not yet in
+            // the list the first time its row is bound, and which a reference taken to it then
+            // would finalise.
             set_class(
                 expander,
                 MARKED,
-                is_marked(&bind_marked.borrow(), &item.rel),
+                is_marked(&bind_marked.borrow(), &item.rel)
+                    || bind_start.borrow().as_deref() == Some(item.rel.as_str()),
             );
         },
     );
@@ -1271,6 +1303,7 @@ pub fn build(
     let view = gtk::ListView::new(None::<gtk::SingleSelection>, Some(factory));
     crate::widgets::set_model(&view, &selection);
     view.add_css_class("navigation-sidebar");
+    view.add_css_class("file-tree");
     // One click opens, as GNOME's own sidebars do. A folder still toggles rather than opening,
     // so a click never costs anything you did not ask for.
     view.set_single_click_activate(true);
@@ -1291,8 +1324,14 @@ pub fn build(
     let anchor = Rc::new(RefCell::new(None::<String>));
     let active = Rc::new(RefCell::new(None::<String>));
     marking.connect_pressed({
-        let (marked, active, cache, model) =
-            (marked.clone(), active.clone(), cache.clone(), model.clone());
+        let (marked, start, anchor, active, cache, model) = (
+            marked.clone(),
+            start.clone(),
+            anchor.clone(),
+            active.clone(),
+            cache.clone(),
+            model.clone(),
+        );
         move |gesture, _, x, y| {
             let Some(view) = gesture.widget().and_downcast::<gtk::ListView>() else {
                 return;
@@ -1304,12 +1343,10 @@ pub fn build(
             let mut marks = marked.borrow_mut();
             match row {
                 Some(row) if shift => {
-                    // From the anchor while it is on screen, else from the open file's row,
-                    // else the row alone; Shift leaves the anchor where it is.
-                    let shown = |rel: &String| find_row(&model, rel).is_some();
-                    let from = (anchor.borrow().clone().filter(shown))
-                        .or_else(|| active.borrow().clone().filter(shown))
-                        .unwrap_or_else(|| row.rel.clone());
+                    // From where a range starts, else the row alone; Shift leaves the anchor
+                    // where it is.
+                    let from = start_of(&model, anchor.borrow().clone(), active.borrow().clone())
+                        .map_or_else(|| row.rel.clone(), |from| from.rel);
                     mark_range(&mut marks, &model, &from, &row.rel, ctrl);
                     gesture.set_state(gtk::EventSequenceState::Claimed);
                 }
@@ -1332,7 +1369,8 @@ pub fn build(
                     marks.clear();
                 }
             }
-            redraw_marks(&view, &marks);
+            start.replace(None);
+            redraw_marks(&view, &marks, None);
         }
     });
     view.add_controller(marking);
@@ -1343,7 +1381,7 @@ pub fn build(
             let mut marks = activate_marked.borrow_mut();
             if !marks.is_empty() {
                 marks.clear();
-                redraw_marks(view, &marks);
+                redraw_marks(view, &marks, None);
             }
         }
         let Some(row) = view
@@ -1376,13 +1414,56 @@ pub fn build(
             select(view, row.as_deref());
         }
     };
+    // Holding Shift over the list draws the row a Shift+click would range from marked, while
+    // nothing is: the selection that shows the open file moves with the pointer, so that row
+    // would otherwise be lit by nothing while the pointer is on its way to the other end. Shown as
+    // the pointer moves rather than on the key itself, so a capital typed with the pointer resting
+    // on the list lights nothing; `Tree::hide_start` takes it down when the key is let go.
+    let show_start = {
+        let (marked, start, anchor, active, model) = (
+            marked.clone(),
+            start.clone(),
+            anchor.clone(),
+            active.clone(),
+            model.clone(),
+        );
+        move |motion: &gtk::EventControllerMotion, held: bool| {
+            let Some(view) = motion.widget().and_downcast::<gtk::ListView>() else {
+                return;
+            };
+            let marks = marked.borrow();
+            let want = held && marks.is_empty();
+            if want == start.borrow().is_some() {
+                return;
+            }
+            let row = want
+                .then(|| start_of(&model, anchor.borrow().clone(), active.borrow().clone()))
+                .flatten();
+            *start.borrow_mut() = row.map(|row| row.rel);
+            redraw_marks(&view, &marks, start.borrow().as_deref());
+        }
+    };
+    let held = |motion: &gtk::EventControllerMotion| {
+        motion
+            .current_event_state()
+            .contains(gdk::ModifierType::SHIFT_MASK)
+    };
     let motion = gtk::EventControllerMotion::new();
+    motion.connect_enter({
+        let show_start = show_start.clone();
+        move |motion, _, _| show_start(motion, held(motion))
+    });
+    motion.connect_motion({
+        let show_start = show_start.clone();
+        move |motion, _, _| show_start(motion, held(motion))
+    });
     motion.connect_leave({
         let highlight = highlight.clone();
         move |controller| {
             let Some(view) = controller.widget().and_downcast::<gtk::ListView>() else {
                 return;
             };
+            show_start(controller, false);
             highlight(&view);
         }
     });
@@ -1498,6 +1579,7 @@ pub fn build(
         ignored,
         cut,
         marked,
+        start,
         active,
         pinned,
     }

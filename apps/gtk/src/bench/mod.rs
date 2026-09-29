@@ -28,15 +28,16 @@ use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_gutter,
-    bench_compare_lines, bench_compare_pads, bench_compare_pick, bench_compare_row,
+    bench_compare_left, bench_compare_lines, bench_compare_pads, bench_compare_pick,
+    bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use export::bench_export;
 use files::{
     bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
-    bench_menu, bench_menu_press, bench_paths, bench_save_as, bench_templates, bench_transfer,
-    bench_watch,
+    bench_menu, bench_menu_press, bench_move, bench_paths, bench_save_as, bench_templates,
+    bench_transfer, bench_watch,
 };
 use find::bench_find;
 use git::{
@@ -55,8 +56,9 @@ use panes::{
     bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
-    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_dropped, bench_pdf_failed,
-    bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip,
+    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_dropped,
+    bench_pdf_failed, bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale,
+    bench_pdf_strip,
 };
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -144,7 +146,8 @@ use tags::bench_tags;
 /// padded above, prints each one's cell and first row, and holds the window up for a screenshot.
 /// `=conflict:<rel_text_file>` writes a sync conflict copy beside that file while its tab is open
 /// and prints what the banner stands for: live, after the tab is opened again, and once the copy
-/// is gone.
+/// is gone. `=left:<rel>` leaves a comparison with the disk copy and scrolls the editor once the
+/// copy's column is freed (see `compare::bench_compare_left`).
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` walks each image through the three themes, inverted and
@@ -206,6 +209,10 @@ use tags::bench_tags;
 /// long both took to paint everything they want, or what is still missing five seconds after the
 /// last tile landed, then `stuck=<bursts that never finished>` (`pdf::bench_pdf_render`); point
 /// it at a few hundred heavy pages, which is where one view's batch used to drop the other's.
+/// `=broken:<rel_path or absolute path>` cuts the PDF in half in place, opens it and writes it
+/// back slowly, then breaks and mends it again under the open tab, printing the waiting page or
+/// the pages after each step and how many opens that cost (`pdf::bench_pdf_broken`); it writes
+/// into the file, so point it at a scratch copy.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -298,8 +305,9 @@ use tags::bench_tags;
 /// and a Ctrl+click on one of them taking that one alone out. `=press:<rel_file>` instead
 /// reveals that row and prints where it and the row two below it are on screen, and stays up
 /// for an XTEST Ctrl+click or Shift+click — `build-aux/xtest.py :99 "move X Y; keydown ctrl;
-/// down; up; keyup ctrl"` — printing the marked rows and how many documents are open every five
-/// seconds, which is how the modifier half is driven at all.
+/// down; up; keyup ctrl"` — printing the rows drawn marked, how many documents are open and the
+/// colour the row above it, it and the two below are painted in every five seconds, which is how
+/// the modifier half is driven at all.
 ///
 /// `ACCENT_BENCH_TAGS=<rel_note>` writes a marker tag into a note and takes it away again with
 /// the Tags pane on screen, printing whether the pane's list holds the marker at each step.
@@ -332,10 +340,15 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
-/// `ACCENT_BENCH_SCROLL=<rel_dir>` scrolls the Files tree and the Git pane's two lists half way
-/// down with the keyboard on a row, changes the vault and its repository under them, and prints
-/// where each list is after every change (`scroll::bench_scroll`). It makes the vault a
-/// repository, so only on a scratch vault under `/tmp`.
+/// `ACCENT_BENCH_MOVE=<rel>,<rel>,…` moves those paths with Move to…, past its dialog, into a
+/// folder that is not there yet, then tries the two moves it refuses, and prints the dialog, the
+/// toasts and where the files are (`files::bench_move`). Only on a scratch vault under `/tmp`.
+///
+/// `ACCENT_BENCH_SCROLL=<rel_dir>` scrolls the Files tree, the Git pane's two lists, the Search
+/// results and the Tags list half way down with the keyboard on a row, changes the vault and its
+/// repository under them, and prints where each list is after every change
+/// (`scroll::bench_scroll`). It makes the vault a repository, so only on a scratch vault under
+/// `/tmp`.
 ///
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram (a sample is written there if there is none) and
 /// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`.
@@ -405,8 +418,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let attach = std::env::var("ACCENT_BENCH_ATTACH").ok();
     let export = std::env::var("ACCENT_BENCH_EXPORT").ok();
     let scroll = std::env::var("ACCENT_BENCH_SCROLL").ok();
+    let moving = std::env::var("ACCENT_BENCH_MOVE").ok();
     if expand.is_none()
         && scroll.is_none()
+        && moving.is_none()
         && attach.is_none()
         && export.is_none()
         && save_as.is_none()
@@ -487,6 +502,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = rel.strip_prefix("conflict:") {
                 return bench_compare_conflict(&app, rel);
             }
+            if let Some(rel) = rel.strip_prefix("left:") {
+                return bench_compare_left(&app, rel);
+            }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
                 None => bench_compare(&app, &rel),
@@ -504,6 +522,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("render:") {
                 return bench_pdf_render(&app, rel);
+            }
+            if let Some(arg) = rel.strip_prefix("broken:") {
+                return bench_pdf_broken(&app, arg);
             }
             if let Some(rel) = rel.strip_prefix("failed:") {
                 return bench_pdf_failed(&app, rel);
@@ -572,6 +593,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(dir) = scroll {
             return bench_scroll(&app, &dir);
+        }
+        if let Some(rels) = moving {
+            return bench_move(&app, &rels);
         }
         if let Some(rels) = tabs {
             if let Some(rels) = rels.strip_prefix("pin:") {

@@ -956,6 +956,10 @@ thread_local! {
 // outline or a negative margin, was measured: it only ever reaches the side rendered before the
 // handle, because the pane after it paints over the other. A 2 px shift while a divider is being
 // dragged is invisible, so it is the cheaper of the two.
+//
+// The Files tree's rows hand their padding to the expander inside, as libadwaita's own `sidebar`
+// rows do to their box, so the mark a Ctrl+click or a Shift+click puts on the expander has the
+// row's shape: it used to sit inside the grey of the open file's row, a pill within a pill.
 /// Registers the icons compiled into the binary and points the theme at them.
 ///
 /// A GResource rather than hicolor: the completion list and the file lists need their icons
@@ -1000,7 +1004,9 @@ fn install_chrome_css() {
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              .accent-drop-bar {{ background-color: var(--accent-bg-color); border-radius: 2px; }} \
              .accent-page-strip:drop(active) {{ box-shadow: none; }} \
-             .accent-marked {{ border-radius: 6px; \
+             .file-tree > row {{ padding: 0; }} \
+             .file-tree > row > treeexpander {{ padding: 0 8px; border-radius: 9px; }} \
+             .file-tree > row > treeexpander.accent-marked {{ \
                background-color: color-mix(in srgb, var(--accent-bg-color) 25%, transparent); }} \
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \

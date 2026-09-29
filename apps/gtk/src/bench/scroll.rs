@@ -14,8 +14,10 @@ use super::*;
 /// folder, so the tree's splice spans the row with the keyboard, edits one and removes all three.
 /// The Git half asks for a refresh that finds nothing new, stages a file below the rows on
 /// screen, clicks the Stage button of one on screen, whose row leaves Changes, and commits with
-/// the keyboard on a history row, which replaces the whole page. On a remote vault the changes
-/// are made on the host, over the vault's own ssh master.
+/// the keyboard on a history row, which replaces the whole page. Last the Search pane, with the
+/// keyboard on a result of `calibration` when a note holding the word is made, and the Tags pane,
+/// with it on a tag when a note with a new one is. On a remote vault the changes are made on the
+/// host, over the vault's own ssh master.
 pub(super) fn bench_scroll(app: &Rc<App>, dir: &str) {
     scratch_only(app, "ACCENT_BENCH_SCROLL");
     let (app, dir) = (app.clone(), dir.to_string());
@@ -110,6 +112,34 @@ pub(super) fn bench_scroll(app: &Rc<App>, dir: &str) {
         in_vault(&app, &format!("{git} commit -qm staged"));
         glib::timeout_future(Duration::from_secs(3)).await;
         both("commit");
+
+        // The Search pane asks its query again whenever the vault changes, and replaces its rows
+        // whole.
+        app.show_pane("search");
+        let sidebar = app.sidebar.get().expect("a sidebar");
+        sidebar.set_search_text("calibration");
+        let results = sidebar.search_view().expect("the results");
+        halfway(&results.vadjustment().expect("the results scroll")).await;
+        focus_row(&results);
+        say(&app, "search", "before", &results);
+        in_vault(&app, "echo calibration > scroll-calibration.md");
+        glib::timeout_future(Duration::from_secs(3)).await;
+        say(&app, "search", "made", &results);
+
+        // The Tags pane asks for every tag again once the vault has been still for a moment.
+        app.show_pane("tags");
+        let tags = find_widget(sidebar.widget(), &|w| w.is::<adw::ViewStack>())
+            .and_downcast::<adw::ViewStack>()
+            .and_then(|stack| stack.child_by_name("tags"))
+            .and_then(|pane| find_widget(&pane, &|w| w.is::<gtk::ListView>()))
+            .and_downcast::<gtk::ListView>()
+            .expect("the tag list");
+        halfway(&tags.vadjustment().expect("the tags scroll")).await;
+        focus_row(&tags);
+        say(&app, "tags", "before", &tags);
+        in_vault(&app, "echo '#aaaa-scroll' > scroll-tag.md");
+        glib::timeout_future(Duration::from_secs(4)).await;
+        say(&app, "tags", "made", &tags);
         bench_quit(&app);
     });
 }
