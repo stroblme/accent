@@ -765,6 +765,18 @@ pub struct Compare {
     laid: RefCell<Option<Box<dyn Fn()>>>,
 }
 
+impl Drop for Compare {
+    /// The read-only columns go with the comparison: see [`editor::release`]. The editor's view
+    /// is its tab's.
+    fn drop(&mut self) {
+        for (pane, side) in self.panes.iter().zip([Side::Old, Side::New]) {
+            if self.editable != Some(side) {
+                editor::release(&pane.view);
+            }
+        }
+    }
+}
+
 impl Compare {
     /// `editable` names the pane whose buffer is the user's; `hunk_buttons` puts Take / Keep Both
     /// on the other pane, which only means something when there is an editable side.

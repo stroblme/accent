@@ -1713,7 +1713,8 @@ impl Saves for Tab {
 
 impl Drop for Tab {
     /// A closed tab takes its font provider and its document on the language layer with it; the
-    /// three `Debounce`s cancel whatever they are holding as they drop.
+    /// three `Debounce`s cancel whatever they are holding as they drop. The view is let go of by
+    /// the minimap and then freed ([`release`]).
     fn drop(&mut self) {
         lang::detach(self);
         if let (Some(display), Some(provider)) =
@@ -1721,7 +1722,37 @@ impl Drop for Tab {
         {
             gtk::style_context_remove_provider_for_display(&display, &provider);
         }
+        self.map.set_property("view", None::<&sourceview5::View>);
+        release(&self.view);
     }
+}
+
+/// Free `view`, which nothing of ours uses any more, once it has left its window.
+///
+/// GtkSourceView 5.20's gutter keeps the view of its last paint (`GtkSourceGutterLines`) until it
+/// paints again, and a view that has left its window never does: view, gutter and buffer outlived
+/// every closed tab and every comparison's read-only column. Disposing the view drops its gutters
+/// and that reference with them. A widget is disposed only unparented, so the view is taken out
+/// of its scrolled parent first; one still in a window, or in a parent of another kind, is left
+/// alone. From an idle, because a tab goes while its page is still being closed.
+pub(crate) fn release(view: &sourceview5::View) {
+    let view = view.clone();
+    glib::idle_add_local_once(move || {
+        if view.root().is_some() {
+            return;
+        }
+        if let Some(parent) = view.parent() {
+            if let Some(clamp) = parent.downcast_ref::<adw::ClampScrollable>() {
+                clamp.set_child(None::<&gtk::Widget>);
+            } else if let Some(scroller) = parent.downcast_ref::<gtk::ScrolledWindow>() {
+                scroller.set_child(None::<&gtk::Widget>);
+            } else {
+                return;
+            }
+        }
+        // SAFETY: nothing of ours holds the view any more, and it is in no window and no parent.
+        unsafe { view.run_dispose() };
+    });
 }
 
 #[cfg(test)]
