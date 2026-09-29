@@ -2,7 +2,9 @@
 //! the action group its items resolve through.
 
 use super::clipboard::{self, can_paste};
-use super::{Ops, download, new_drawing, new_file, new_folder, rename, trash, trash_all, upload};
+use super::{
+    Ops, download, move_to, new_drawing, new_file, new_folder, rename, trash, trash_all, upload,
+};
 use super::{copy_absolute_path, copy_name, copy_relative_path, show_in_files};
 use accent_core::path::parent_dir;
 use gtk::prelude::*;
@@ -75,9 +77,9 @@ pub fn context_menu(
         menu.append_section(None, &clip_section(ops, None, dir));
         return crate::widgets::popup_menu(host, &menu, Some(anchor));
     };
-    // Rename is the move as well as the name: a path typed into it carries the file, which is
-    // what replaced Move to… when the tree learned to take a drop. A folder's is an action of its
-    // own because the dialog selects a folder's whole name and only a file's stem.
+    // Rename is the move as well as the name: a path typed into it carries the file. A folder's is
+    // an action of its own because the dialog selects a folder's whole name and only a file's
+    // stem.
     let rename = if is_dir { "rename-folder" } else { "rename" };
     menu.append_item(&item(GROUP, "Rename", rename, rel));
     // Only a directory can be left out: `[search] exclude` is a list of folders, and the path is
@@ -122,6 +124,7 @@ fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool) -> gio::Menu {
     let clip = gio::Menu::new();
     clip.append_item(&many("Cut", "cut-many", marked));
     clip.append_item(&many("Copy", "copy-many", marked));
+    clip.append_item(&many("Move to…", "move-to", marked));
     if paste {
         clip.append_item(&item(GROUP, "Paste", "paste", dir));
     }
@@ -133,9 +136,10 @@ fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool) -> gio::Menu {
     menu
 }
 
-/// Cut, Copy and Paste. `row` is the file the first two act on, `None` on a menu opened over
-/// nothing; `dir` is where a Paste puts what it holds, which is [`row_dir`]'s answer either way,
-/// so pasting and dropping and New File all agree on where "here" is.
+/// Cut, Copy, Move to… and Paste. `row` is the file the first three act on, `None` on a menu
+/// opened over nothing; `dir` is where a Paste puts what it holds, which is [`row_dir`]'s answer
+/// either way, so pasting and dropping and New File all agree on where "here" is. Move to… is
+/// the marked set's own item handed a set of one, as it acts on a set.
 ///
 /// Paste is drawn only where there is something to paste. The clipboard says what it holds
 /// without a read, so the question costs nothing and an item that could do nothing is never on
@@ -150,6 +154,7 @@ fn clip_section(ops: &Rc<Ops>, row: Option<(&str, bool)>, dir: &str) -> gio::Men
         };
         section.append_item(&item(GROUP, "Cut", &format!("cut{folder}"), rel));
         section.append_item(&item(GROUP, "Copy", &format!("copy{folder}"), rel));
+        section.append_item(&many("Move to…", "move-to", &[(rel.to_string(), is_dir)]));
     }
     if can_paste(ops) {
         section.append_item(&item(GROUP, "Paste", "paste", dir));
@@ -263,7 +268,8 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     add("trash", Box::new(trash));
     add("exclude", Box::new(|ops, rel| (ops.exclude)(rel)));
 
-    // The marked set's three, which take the whole list rather than one path.
+    // The marked set's four, which take the whole list rather than one path; Move to… takes a
+    // single row's as a list of one.
     let add_many = |name: &str, run: RunMany| {
         let ty = glib::VariantTy::new(PATHS).expect("a valid variant type");
         let action = gio::SimpleAction::new(name, Some(ty));
@@ -283,6 +289,7 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
         "copy-many",
         Box::new(|ops, marked| clipboard::copy_all(ops, &marked)),
     );
+    add_many("move-to", Box::new(move_to));
     add_many(
         "trash-many",
         Box::new(|ops, marked| trash_all(ops, marked.into_iter().map(|(rel, _)| rel).collect())),
@@ -308,12 +315,12 @@ mod tests {
         let marked = [("a.md".to_string(), false), ("Notes".to_string(), true)];
         assert_eq!(
             labels(marked_menu(&marked, "", true).upcast_ref()),
-            ["Cut", "Copy", "Paste", "Move to Trash"]
+            ["Cut", "Copy", "Move to…", "Paste", "Move to Trash"]
         );
         // Paste is drawn only where the clipboard holds something, as it is on the single-row menu.
         assert_eq!(
             labels(marked_menu(&marked, "", false).upcast_ref()),
-            ["Cut", "Copy", "Move to Trash"]
+            ["Cut", "Copy", "Move to…", "Move to Trash"]
         );
     }
 }

@@ -35,8 +35,8 @@ use diagram::bench_diagram;
 use export::bench_export;
 use files::{
     bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
-    bench_menu, bench_menu_press, bench_paths, bench_save_as, bench_templates, bench_transfer,
-    bench_watch,
+    bench_menu, bench_menu_press, bench_move, bench_paths, bench_save_as, bench_templates,
+    bench_transfer, bench_watch,
 };
 use find::bench_find;
 use git::{
@@ -338,6 +338,10 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
+/// `ACCENT_BENCH_MOVE=<rel>,<rel>,…` moves those paths with Move to…, past its dialog, into a
+/// folder that is not there yet, then tries the two moves it refuses, and prints the dialog, the
+/// toasts and where the files are (`files::bench_move`). Only on a scratch vault under `/tmp`.
+///
 /// `ACCENT_BENCH_SCROLL=<rel_dir>` scrolls the Files tree and the Git pane's two lists half way
 /// down with the keyboard on a row, changes the vault and its repository under them, and prints
 /// where each list is after every change (`scroll::bench_scroll`). It makes the vault a
@@ -411,8 +415,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let attach = std::env::var("ACCENT_BENCH_ATTACH").ok();
     let export = std::env::var("ACCENT_BENCH_EXPORT").ok();
     let scroll = std::env::var("ACCENT_BENCH_SCROLL").ok();
+    let moving = std::env::var("ACCENT_BENCH_MOVE").ok();
     if expand.is_none()
         && scroll.is_none()
+        && moving.is_none()
         && attach.is_none()
         && export.is_none()
         && save_as.is_none()
@@ -581,6 +587,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(dir) = scroll {
             return bench_scroll(&app, &dir);
+        }
+        if let Some(rels) = moving {
+            return bench_move(&app, &rels);
         }
         if let Some(rels) = tabs {
             if let Some(rels) = rels.strip_prefix("pin:") {

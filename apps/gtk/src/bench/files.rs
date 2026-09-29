@@ -1390,6 +1390,106 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
     });
 }
 
+/// `ACCENT_BENCH_MOVE=<rel>,<rel>,…`: Move to… on those paths as a marked set, past its dialog.
+///
+/// Prints what the dialog opens on — its heading, the folder in its entry and the line under it —
+/// then types `Moved/Here`, a folder that is not there yet, and prints the line again, presses
+/// Move, answers an Update Links? question if one comes and prints the toast and where each path
+/// is afterwards. Then the same set into the folder it is now in, and the folder `Moved` into its
+/// own `Here`, which are the two toasts that refuse. It moves files, so point it at a scratch copy.
+pub(super) fn bench_move(app: &Rc<App>, arg: &str) {
+    scratch_only(app, "ACCENT_BENCH_MOVE");
+    let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
+        return bench_quit(app);
+    };
+    let rels: Vec<String> = arg.split(',').map(str::to_string).collect();
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        // A move asks the index what links to it, which the first reconcile has to have filled.
+        until(|| app.reconciled.get()).await;
+        let set = |rels: &[String]| -> Vec<(String, bool)> {
+            rels.iter()
+                .map(|rel| {
+                    let folder = matches!(fileops::taken(&vault, rel), fileops::Taken::Folder);
+                    (rel.clone(), folder)
+                })
+                .collect()
+        };
+        fileops::move_to(&ops, set(&rels));
+        let moved: Vec<String> = rels
+            .iter()
+            .map(|rel| format!("Moved/Here/{}", accent_core::path::basename(rel)))
+            .collect();
+        println!(
+            "bench move_said {:?}",
+            move_through(&app, "Moved/Here").await
+        );
+        for (from, to) in rels.iter().zip(&moved) {
+            println!(
+                "bench move_landed {from} gone={} there={}",
+                !vault.exists(from),
+                vault.exists(to)
+            );
+        }
+        fileops::move_to(&ops, set(&moved));
+        println!(
+            "bench move_again {:?}",
+            move_through(&app, "Moved/Here").await
+        );
+        fileops::move_to(&ops, vec![("Moved".to_string(), true)]);
+        println!(
+            "bench move_itself {:?}",
+            move_through(&app, "Moved/Here").await
+        );
+        bench_quit(&app);
+    });
+}
+
+/// Answer the Move to… dialog that is up with `dir`, and any Update Links? question after it, and
+/// return the toast that says what came of it. Prints what the dialog showed on the way.
+async fn move_through(app: &Rc<App>, dir: &str) -> Option<String> {
+    glib::timeout_future(Duration::from_millis(500)).await;
+    let dialog = app
+        .window
+        .visible_dialog()
+        .and_downcast::<adw::AlertDialog>()?;
+    let form = dialog.extra_child()?;
+    let entry = find_widget(&form, &|w| w.is::<gtk::Entry>()).and_downcast::<gtk::Entry>()?;
+    let line = || {
+        find_widget(&form, &|w| w.has_css_class("dim-label"))
+            .and_downcast::<gtk::Label>()
+            .map(|l| l.label().to_string())
+    };
+    println!(
+        "bench move_dialog heading={:?} entry={:?} line={:?}",
+        dialog.heading().unwrap_or_default(),
+        entry.text(),
+        line()
+    );
+    entry.set_text(dir);
+    println!("bench move_typed line={:?}", line());
+    // What was said before would otherwise stay up in front of the answer, queued behind it.
+    app.toasts.dismiss_all();
+    let said = app.toasted.get();
+    dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+    dialog.close();
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    if let Some(update) = app
+        .window
+        .visible_dialog()
+        .and_downcast::<adw::AlertDialog>()
+    {
+        println!(
+            "bench move_update {:?}",
+            update.heading().unwrap_or_default()
+        );
+        update.emit_by_name::<()>("response", &[&"update"]);
+        update.close();
+    }
+    until(|| app.toasted.get() > said).await;
+    compare::bench_toast(app)
+}
+
 /// `ACCENT_BENCH_SAVE_AS=<rel>`: Save As on the file at `rel`, past the dialog, which is only the
 /// path field Rename has. It writes to `Saved As/`, a folder that is not there yet, and prints the
 /// tab's key after and what each file holds. A note is also given an edit it has not saved first,
