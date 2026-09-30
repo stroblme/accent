@@ -300,7 +300,7 @@ impl DiagramTab {
     pub fn reveal_cell(self: &Rc<Self>, page: usize, id: &str) {
         self.goto_page(page);
         self.select(vec![id.to_string()]);
-        if let Some(frame) = self.frame_of(id) {
+        if let Some(frame) = self.view.sheet().and_then(|sheet| sheet.frame_of(id)) {
             self.view.reveal(&frame);
         }
     }
