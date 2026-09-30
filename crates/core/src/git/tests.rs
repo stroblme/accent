@@ -474,8 +474,15 @@ fn parse_refs_types_each_decoration_and_puts_heads_first() {
         ],
         "a detached HEAD is a decoration of its own"
     );
-    assert!(parse_refs("refs/stash").is_empty(), "not a branch or a tag");
+    assert_eq!(
+        parse_refs("refs/stash"),
+        [r("stash", RefKind::Stash, false)],
+        "its commits are in `log --all` too"
+    );
     assert!(parse_refs("").is_empty());
+    let mut stash = node("s", &[], &[]);
+    stash.refs = parse_refs("refs/stash");
+    assert_eq!(lanes(vec![stash])[0].lane, None, "a stash is no branch");
 }
 
 /// A commit with local branches `refs` on it, for the graph tests that need no repository.
