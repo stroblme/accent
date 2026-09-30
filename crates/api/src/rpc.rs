@@ -632,6 +632,23 @@ pub(crate) fn arg<T: DeserializeOwned>(params: &Value, n: usize) -> Result<T, Rp
         .map_err(|e| RpcError::failed(format!("argument {n} is not what was expected: {e}")))
 }
 
+/// Bind each named argument to its position in `p`, in order, answering the dispatch with the
+/// first that does not read: what the tables in `vault.rs` and `language.rs` write for every
+/// method they carry. The position is counted by shadowing rather than by hand.
+macro_rules! args {
+    ($p:ident; $($arg:ident : $t:ty),*) => {
+        let _i = 0usize;
+        $(
+            let $arg: $t = match $crate::rpc::arg($p, _i) {
+                Ok(value) => value,
+                Err(e) => return Some(Err(e)),
+            };
+            let _i = _i + 1;
+        )*
+    };
+}
+pub(crate) use args;
+
 /// Whatever the method returned, as JSON.
 pub(crate) fn ok<T: serde::Serialize>(value: T) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|e| RpcError::failed(format!("cannot answer: {e}")))
@@ -661,18 +678,10 @@ pub(crate) fn git_result<T: serde::Serialize>(
 /// both is deliberately local: the session file, the config, and path arithmetic, all of which
 /// belong to the machine the window is on.
 fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
-    use accent_core::git;
     if let Some(answer) = crate::vault::dispatch(vault, method, p)
-        .or_else(|| crate::language::dispatch_requests(vault, method, p))
-        .or_else(|| crate::language::dispatch_notifications(vault, method, p))
+        .or_else(|| crate::language::dispatch(vault, method, p))
     {
         return answer;
-    }
-    let repo = |n: usize| arg::<git::Repo>(p, n);
-    // `git` takes `&[&str]`, the wire carries owned strings.
-    let paths = |n: usize| -> Result<Vec<String>, RpcError> { arg(p, n) };
-    fn refs(v: &[String]) -> Vec<&str> {
-        v.iter().map(String::as_str).collect()
     }
 
     match method {
@@ -687,8 +696,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
             })
         }
 
-        // A save has an error of its own, and the searches compile their pattern here rather
-        // than sending one: a `Regex` does not serialise.
+        // A save has an error of its own.
         "save" => match vault.save(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?, arg(p, 2)?) {
             Ok(etag) => ok(etag),
             Err(SaveError::ChangedOnDisk { current }) => Err(RpcError {
@@ -704,17 +712,9 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
             &arg::<String>(p, 0)?,
             arg::<Option<String>>(p, 1)?.as_deref(),
         )),
-        "replace_all" => {
-            let re = compile(p, 0, 1)?;
-            any(vault.replace_all(&re, &arg::<String>(p, 2)?, arg(p, 3)?, arg(p, 4)?))
-        }
-        "grep" => {
-            let re = compile(p, 0, 1)?;
-            any(vault.grep(&re, arg(p, 2)?, arg(p, 3)?))
-        }
+        // The caller's `stop` stays with the caller: the host's walk runs to its budget.
         "grep_unindexed" => {
-            let re = compile(p, 0, 1)?;
-            any(vault.grep_unindexed(&re, arg(p, 2)?, &|| false))
+            any(vault.grep_unindexed(&arg::<String>(p, 0)?, arg(p, 1)?, arg(p, 2)?, &|| false))
         }
         "rescan" => {
             vault.rescan();
@@ -742,10 +742,6 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         ))),
         "close_document" => any(block(vault.close_document(&arg::<String>(p, 0)?))),
 
-        "git_stage" => git_result(git::stage(&repo(0)?, &refs(&paths(1)?))),
-        "git_unstage" => git_result(git::unstage(&repo(0)?, &refs(&paths(1)?))),
-        "git_discard" => git_result(git::discard(&repo(0)?, &refs(&paths(1)?))),
-
         _ => Err(RpcError::failed(format!("no such method: {method}"))),
     }
 }
@@ -765,18 +761,6 @@ pub(crate) fn block<T>(task: crate::Task<T>) -> anyhow::Result<T> {
         locked(live).remove(id);
     }
     answer
-}
-
-/// The two arguments every exact-search method carries, compiled where the files are. A pattern
-/// that does not compile is the caller's mistake, not a broken connection, so it comes back as a
-/// plain failure with regex's own wording.
-fn compile(
-    p: &Value,
-    query: usize,
-    options: usize,
-) -> Result<accent_core::search::Regex, RpcError> {
-    let (q, o) = (arg::<String>(p, query)?, arg(p, options)?);
-    accent_core::search::pattern(&q, o).map_err(RpcError::failed)
 }
 
 #[cfg(test)]
@@ -971,6 +955,34 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.code, IO);
         assert_eq!(refused.io_error().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// An exact search crosses as what was typed plus its toggles and is compiled on the host, so
+    /// case-insensitivity survives the wire and a pattern that does not compile says why.
+    #[test]
+    fn a_search_pattern_is_compiled_where_the_files_are() {
+        let w = Wired::open();
+        assert!(w.wait(|e| matches!(e, Event::Reconciled(_))));
+
+        let (rows, total): (Vec<crate::Match>, usize) = w
+            .client
+            .call(
+                "grep",
+                json!(["HELLO", crate::Options::default(), 10, false]),
+            )
+            .unwrap();
+        assert_eq!((rows.len(), total), (1, 1));
+
+        let regex = crate::Options {
+            regex: true,
+            ..crate::Options::default()
+        };
+        let refused = w
+            .client
+            .call::<(Vec<crate::Match>, usize)>("grep", json!(["(", regex, 10, false]))
+            .unwrap_err();
+        assert_eq!(refused.code, FAILED);
+        assert!(refused.message.contains("unclosed group"), "{refused}");
     }
 
     /// A cancel is a notification: it is taken, nothing comes back for it, and the connection

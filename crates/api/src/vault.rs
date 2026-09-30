@@ -14,7 +14,6 @@ use anyhow::Result;
 use serde_json::json;
 
 use accent_core::path::linked_path;
-use accent_core::search;
 
 use crate::local::Local;
 use crate::{
@@ -270,8 +269,8 @@ pub(crate) fn remote_err(e: rpc::RpcError) -> anyhow::Error {
 /// merge whose hooks ran past ten seconds timed out here while the host carried on and landed it.
 ///
 /// What is *not* here is anything whose two sides differ: a save, which has an error of its own;
-/// the searches, which compile their pattern where the files are; the transfers, which carry
-/// bytes outside the protocol; and `repos`, which posts to the vault's own worker.
+/// the walk for unindexed matches, whose `stop` cannot cross; the transfers, which carry bytes
+/// outside the protocol; and `repos`, which posts to the vault's own worker.
 macro_rules! methods {
     // What one argument is, on the façade, on the wire, and at the call the host makes.
     (@fty ref $t:ty) => { &$t };
@@ -339,15 +338,7 @@ macro_rules! methods {
         ) -> Option<Result<serde_json::Value, rpc::RpcError>> {
             $(
                 if method == stringify!($name) {
-                    // One `arg` per position, counted by shadowing rather than by hand.
-                    let _i = 0usize;
-                    $(
-                        let $arg: methods!(@wty $kind $t) = match rpc::arg(p, _i) {
-                            Ok(value) => value,
-                            Err(e) => return Some(Err(e)),
-                        };
-                        let _i = _i + 1;
-                    )*
+                    rpc::args!(p; $($arg: methods!(@wty $kind $t)),*);
                     return Some(methods!(@serve vault $group $name $($core)?
                         ($(methods!(@pass $kind $arg)),*)));
                 }
@@ -388,6 +379,16 @@ methods! {
     /// The templates that name a target: one question for New from Template rather than one
     /// [`template_target`](Vault::template_target) per template, a round trip each when remote.
     any template_targets() -> Vec<String>;
+    /// Replace every match in every file whose indexed body has one: what
+    /// [`grep`](Vault::grep) counts under the same `include_ignored`. The pattern crosses as what
+    /// the user typed plus its toggles, and is compiled where the files are.
+    any replace_all(
+        query: ref str,
+        options: val Options,
+        replacement: ref str,
+        literal: val bool,
+        include_ignored: val bool,
+    ) -> ReplaceReport, bounded by REPLACE_BOUND;
     /// Put back what the last [`replace_all`](Vault::replace_all) rewrote. The text it needs
     /// stayed wherever the rewrite ran, the host on a remote vault, so only the report crosses.
     any undo_replace() -> UndoReport, bounded by REPLACE_BOUND;
@@ -409,6 +410,8 @@ methods! {
         include_ignored: val bool,
         skip: ref [String],
     ) -> Vec<SearchHit>;
+    any grep(query: ref str, options: val Options, limit: val usize, include_ignored: val bool)
+        -> (Vec<Match>, usize);
     any tags() -> Vec<(String, i64)>;
     any files_with_tag(tag: ref str) -> Vec<FileRow>;
     any backlinks(rel: ref str) -> Vec<Backlink>;
@@ -464,6 +467,9 @@ methods! {
     git git_rebase_continue = rebase_continue(repo: ref Repo) -> git::Rebase,
         bounded by git::TRANSFER_TIMEOUT;
     git git_rebase_abort = rebase_abort(repo: ref Repo) -> ();
+    git git_stage = stage(repo: ref Repo, paths: ref [String]) -> ();
+    git git_unstage = unstage(repo: ref Repo, paths: ref [String]) -> ();
+    git git_discard = discard(repo: ref Repo, paths: ref [String]) -> ();
     /// What Stage and Unstage Selected Lines write. A host whose `accent-cli serve` predates it
     /// answers "no such method".
     git git_stage_text = stage_text(repo: ref Repo, path: ref str, text: ref str) -> (),
@@ -574,56 +580,6 @@ impl Vault {
         }
     }
 
-    /// Replace every match in every file whose indexed body has one: what [`grep`](Self::grep)
-    /// counts under the same `include_ignored`.
-    ///
-    /// The pattern crosses as what the user typed plus the three toggles, not as a compiled
-    /// regex: a `Regex` cannot be serialised, and case-insensitivity lives in the builder rather
-    /// than in the pattern string, so sending the string alone would quietly change the search.
-    ///
-    /// Not in the table above for that reason, so its [`REPLACE_BOUND`] is spelled out here: the
-    /// host stops at the bound, and a remote caller waits for it plus a round trip rather than
-    /// giving up after [`rpc::DEADLINE`] while the host is still rewriting.
-    pub fn replace_all(
-        &self,
-        query: &str,
-        options: Options,
-        replacement: &str,
-        literal: bool,
-        include_ignored: bool,
-    ) -> Result<ReplaceReport> {
-        match &self.backend {
-            Backend::Local(v) => v.replace_all(
-                &search::pattern(query, options)?,
-                replacement,
-                literal,
-                include_ignored,
-            ),
-            Backend::Remote(r) => r
-                .call_within(
-                    "replace_all",
-                    json!([query, options, replacement, literal, include_ignored]),
-                    REPLACE_BOUND + rpc::DEADLINE,
-                )
-                .map_err(remote_err),
-        }
-    }
-
-    pub fn grep(
-        &self,
-        query: &str,
-        options: Options,
-        limit: usize,
-        include_ignored: bool,
-    ) -> Result<(Vec<Match>, usize)> {
-        match &self.backend {
-            Backend::Local(v) => v.grep(&search::pattern(query, options)?, limit, include_ignored),
-            Backend::Remote(r) => r
-                .call("grep", json!([query, options, limit, include_ignored]))
-                .map_err(remote_err),
-        }
-    }
-
     /// [`Local::grep_unindexed`], and nothing at all when there is no room for a row.
     ///
     /// The Search pane fills its row budget from the index first and asks here for the remainder,
@@ -645,7 +601,7 @@ impl Vault {
             return Ok(Vec::new());
         }
         match &self.backend {
-            Backend::Local(v) => v.grep_unindexed(&search::pattern(query, options)?, limit, stop),
+            Backend::Local(v) => v.grep_unindexed(query, options, limit, stop),
             Backend::Remote(r) => r
                 .call("grep_unindexed", json!([query, options, limit]))
                 .map_err(remote_err),
@@ -695,36 +651,6 @@ impl Vault {
         match &self.backend {
             Backend::Local(v) => Ok(v.repos()),
             Backend::Remote(r) => r.call("repos", json!([])).map_err(remote_err),
-        }
-    }
-
-    /// `git` takes its paths as `&[&str]` and the wire carries owned strings, so these three
-    /// borrow before they call rather than going through the table.
-    pub fn git_stage(&self, repo: &Repo, paths: &[String]) -> Result<()> {
-        self.git_paths("git_stage", git::stage, repo, paths)
-    }
-
-    pub fn git_unstage(&self, repo: &Repo, paths: &[String]) -> Result<()> {
-        self.git_paths("git_unstage", git::unstage, repo, paths)
-    }
-
-    pub fn git_discard(&self, repo: &Repo, paths: &[String]) -> Result<()> {
-        self.git_paths("git_discard", git::discard, repo, paths)
-    }
-
-    fn git_paths(
-        &self,
-        method: &str,
-        run: fn(&Repo, &[&str]) -> Result<(), git::Error>,
-        repo: &Repo,
-        paths: &[String],
-    ) -> Result<()> {
-        match &self.backend {
-            Backend::Local(_) => {
-                let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
-                run(repo, &borrowed).map_err(anyhow::Error::from)
-            }
-            Backend::Remote(r) => r.call(method, json!([repo, paths])).map_err(remote_err),
         }
     }
 }
