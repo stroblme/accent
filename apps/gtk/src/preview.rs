@@ -166,6 +166,9 @@ struct Inner {
     /// Whether the count handler is already on WebKit's find controller. The reporter itself is
     /// replaceable, the handler is not: connecting a second one would count every match twice.
     counting: Cell<bool>,
+    /// Whether WebKit's process died under the page since a page last finished loading; see
+    /// [`Preview::connect_lost`].
+    lost: Cell<bool>,
 }
 
 impl Inner {
@@ -420,6 +423,7 @@ impl Preview {
             at: Cell::new(0),
             report: RefCell::new(None),
             counting: Cell::new(false),
+            lost: Cell::new(false),
         });
 
         inner.view.connect_load_changed(glib::clone!(
@@ -428,6 +432,7 @@ impl Preview {
             move |_, event| {
                 if event == webkit6::LoadEvent::Finished {
                     inner.loaded.set(true);
+                    inner.lost.set(false);
                     if let Some(line) = inner.pending.take() {
                         inner.scroll(line);
                     }
@@ -538,6 +543,28 @@ impl Preview {
     /// The web view, for a drill that reads the page itself.
     pub fn view(&self) -> &webkit6::WebView {
         &self.inner.view
+    }
+
+    /// Call `f`, which renders the note again, when WebKit's process dies under the page — a
+    /// crash, or past its memory limit — which leaves the view on its last frame, scrolling and
+    /// following nothing, until something renders it again. Once until a page has finished
+    /// loading since: a note that brings the process down as it loads waits for its next render
+    /// rather than bringing it down again and again.
+    pub fn connect_lost(&self, f: impl Fn() + 'static) {
+        let inner = Rc::downgrade(&self.inner);
+        self.inner
+            .view
+            .connect_web_process_terminated(move |_, reason| {
+                tracing::warn!(target: PREVIEW, "the preview's web process ended: {reason:?}");
+                let Some(inner) = inner.upgrade() else {
+                    return;
+                };
+                if reason != webkit6::WebProcessTerminationReason::TerminatedByApi
+                    && !inner.lost.replace(true)
+                {
+                    f();
+                }
+            });
     }
 
     fn apply_style(inner: &Inner) {
