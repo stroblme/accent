@@ -361,9 +361,9 @@ struct App {
     /// The pending session write. First-wins ([`widgets::Debounce::call_once`]): a steady stream
     /// of edits must not push the write off indefinitely.
     session: widgets::Debounce,
-    /// Notes this window showed and commands it ran, most recent first. The palette leads with
-    /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
-    recent_notes: RefCell<Vec<String>>,
+    /// Files this window showed and commands it ran, most recent first. The palette leads with
+    /// them, so opening a file is remembered as well as editing it; the index only knows mtime.
+    recent_files: RefCell<Vec<String>>,
     recent_commands: RefCell<Vec<String>>,
     /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
     /// rebind has to rebuild it: see [`fill_captured`].
@@ -654,7 +654,7 @@ impl App {
                 None => doc.page().title().to_string(),
             }),
             false => {
-                self.note_used(&key);
+                self.file_used(&key);
                 let where_ = match doc.is_loose() {
                     true => fileops::display_path(&self.root(), &key),
                     false => key.clone(),

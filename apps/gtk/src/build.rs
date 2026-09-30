@@ -324,7 +324,7 @@ pub fn build_window(
         refresh: widgets::Debounce::new(RENDER),
         pdf_links: widgets::Debounce::new(PDF_LINKS),
         session: widgets::Debounce::new(session::SESSION),
-        recent_notes: RefCell::new(Vec::new()),
+        recent_files: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
         captured: gtk::ShortcutController::new(),
     });
