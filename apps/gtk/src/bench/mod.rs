@@ -29,8 +29,8 @@ use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_folds,
-    bench_compare_gutter, bench_compare_left, bench_compare_lines, bench_compare_pads,
-    bench_compare_page, bench_compare_pick, bench_compare_row,
+    bench_compare_gap, bench_compare_gutter, bench_compare_left, bench_compare_lines,
+    bench_compare_pads, bench_compare_page, bench_compare_pick, bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -150,7 +150,9 @@ use tags::bench_tags;
 /// is gone. `=left:<rel>` leaves a comparison with the disk copy and scrolls the editor once the
 /// copy's column is freed (see `compare::bench_compare_left`). `=folds:<rel>` compares a note
 /// whose folded section ends inside a collapsed run and asks for the iter at every pixel row
-/// (`compare::bench_compare_folds`). `=page:<rel>` prints the sticky title and the page the
+/// (`compare::bench_compare_folds`). `=gap:<rel>` opens hidden runs from their buttons in a long
+/// note, and then in a tab of two blobs, and prints where the rows around each button went
+/// (`compare::bench_compare_gap`). `=page:<rel>` prints the sticky title and the page the
 /// companion shares with the editor, across a zoom and a new Indent Width
 /// (`compare::bench_compare_page`).
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
@@ -529,6 +531,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("folds:") {
                 return bench_compare_folds(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("gap:") {
+                return bench_compare_gap(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("page:") {
                 return bench_compare_page(&app, rel);

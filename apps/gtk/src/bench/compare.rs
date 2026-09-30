@@ -859,6 +859,147 @@ pub(super) fn bench_compare_page(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// Hidden runs opened from their buttons, as a click does: the note is written as 400 lines, most
+/// of them wrapping to a few rows, and changed at every fortieth from line 20, so the comparison
+/// with its disk copy hides a run between each two and has pages of rows. The middle run's button
+/// is pressed, then the first run's, the one above the first change at the top of the note, each
+/// scrolled halfway down the view first. Prints for each where the scroll, the line above the
+/// button and the line under it were before and after, in the view's pixels, and the furthest the
+/// scroll strayed from where it was, read every 16 ms meanwhile (`value=a->b above=y0->y1
+/// below=y0->y1 strayed=0`: the rows above stay and the run opens downwards), then the middle run
+/// again in a tab of two blobs. Opening the first run used to scroll the view by twice the run's height, which
+/// both views took back from the scroll they share. Writes the note, so point it at a scratch
+/// vault.
+pub(super) fn bench_compare_gap(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let text = |changed: bool| -> String {
+            (1..=400)
+                .map(|i| match changed && i % 40 == 20 {
+                    true => format!("line {i} changed\n"),
+                    false => format!("line {i} {}\n", "wrapping words ".repeat(i % 7 * 5)),
+                })
+                .collect()
+        };
+        let (disk, edited) = (text(false), text(true));
+        tab.set_text(&disk);
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_gap write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.set_text(&edited);
+        app.compare_with_disk(&tab);
+        wait(1200).await;
+        let Some(compare) = tab.comparison() else {
+            println!("bench compare_gap none");
+            return bench_quit(&app);
+        };
+        let view: &gtk::TextView = tab.view.upcast_ref();
+        println!(
+            "bench compare_gap middle {}",
+            bench_gap(&compare, view, None).await
+        );
+        println!(
+            "bench compare_gap first {}",
+            bench_gap(&compare, view, Some(0)).await
+        );
+        tab.leave_compare();
+        let diff = app.open_diff(
+            "diff:gap",
+            "gap.md",
+            "gap",
+            ("old", &disk),
+            ("new", &edited),
+        );
+        wait(1200).await;
+        let compare = diff.comparison();
+        match pane_view(compare.widget(), true) {
+            Some(view) => println!(
+                "bench compare_gap blobs {}",
+                bench_gap(compare, &view, None).await
+            ),
+            None => println!("bench compare_gap blobs none"),
+        }
+        bench_quit(&app);
+    });
+}
+
+/// Scroll the button of the hidden run `pick` on `view` (the middle one for `None`) halfway down
+/// the view, as far as the view goes, press it as a pointer does, the focus and then `clicked`, and
+/// say where the scroll and the lines above and under the button were before and after, and how far
+/// the scroll strayed meanwhile.
+async fn bench_gap(compare: &diff::Compare, view: &gtk::TextView, pick: Option<usize>) -> String {
+    let adj = compare.vadjustment();
+    let mut buttons = Vec::new();
+    let mut stack = vec![view.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = stack.pop() {
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            if let Ok(button) = c.clone().downcast::<gtk::Button>()
+                && button.is_visible()
+                && button.label().is_some_and(|l| l.starts_with('⋯'))
+            {
+                buttons.push(button);
+            }
+            stack.push(c);
+        }
+    }
+    let top = |button: &gtk::Button| {
+        let at = button.compute_point(view, &gtk::graphene::Point::zero());
+        at.map_or(0, |p| p.y() as i32) + view.visible_rect().y()
+    };
+    buttons.sort_by_key(top);
+    let Some(button) = buttons.get(pick.unwrap_or(buttons.len() / 2)).cloned() else {
+        return format!("buttons={}", buttons.len());
+    };
+    let seen = view.visible_rect();
+    adj.set_value(adj.value() + f64::from(top(&button) - seen.y()) - adj.page_size() / 2.0);
+    glib::timeout_future(Duration::from_millis(500)).await;
+    // Kept as marks, since the click lays both buffers again. The button sits in the padding of
+    // the line under the run; the line above is the visible one before that, if there is one.
+    let buffer = view.buffer();
+    let (below, _) = view.line_at_y(top(&button));
+    let mut above = below;
+    let marks = [above.backward_visible_line().then_some(above), Some(below)]
+        .map(|at| at.map(|at| buffer.create_mark(None, &at, true)));
+    let ys = || {
+        marks.clone().map(|mark| {
+            mark.map(|mark| {
+                let y = view.iter_location(&buffer.iter_at_mark(&mark)).y();
+                view.buffer_to_window_coords(gtk::TextWindowType::Widget, 0, y)
+                    .1
+            })
+        })
+    };
+    let (value, before) = (adj.value(), ys());
+    button.grab_focus();
+    button.emit_clicked();
+    let mut strayed = 0.0_f64;
+    for _ in 0..50 {
+        glib::timeout_future(Duration::from_millis(16)).await;
+        strayed = strayed.max((adj.value() - value).abs());
+    }
+    let after = ys();
+    for mark in marks.into_iter().flatten() {
+        buffer.delete_mark(&mark);
+    }
+    format!(
+        "value={value}->{} above={:?}->{:?} below={:?}->{:?} strayed={strayed}",
+        adj.value(),
+        before[0],
+        after[0],
+        before[1],
+        after[1]
+    )
+}
+
 /// A note with its first section folded, compared with its disk copy, which differs only at the
 /// end: the run the comparison collapses reaches over the fold's end. It asks for the iter at every
 /// pixel row of the editor, as GtkSourceView asks at the top and bottom of the screen on every
