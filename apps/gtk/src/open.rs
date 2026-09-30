@@ -78,10 +78,11 @@ impl App {
     /// The old tab goes after the new one is in place, so the pane never stands empty and closes
     /// itself out from under the note arriving in it.
     pub(crate) fn mark_opened(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
-        if let Some(Doc::Diagram(tab)) = self.doc_for_page(page) {
-            let at = self.revealing.borrow_mut().remove(&tab.key());
-            if let Some(at) = at {
-                reveal_label(&tab, at);
+        // A label a search hit waits to show, which a file that turned out to be text drops.
+        if let Some(doc) = self.doc_for_page(page) {
+            let at = self.revealing.borrow_mut().remove(&doc.key());
+            if let (Some(at), Doc::Diagram(tab)) = (at, &doc) {
+                reveal_label(tab, at);
             }
         }
         if how == Opened::Pinned {
@@ -211,9 +212,12 @@ impl App {
             }
         };
         // An `.xml` that draw.io wrote is a diagram, whatever its name says: known by its bytes.
-        if doc::file_name(key).to_ascii_lowercase().ends_with(".xml") && diagram::sniff(&text.text)
-        {
-            self.drop_awaiting(key, "a diagram, not a text file");
+        // A search hit in it waits for the diagram instead of the text tab it asked for.
+        if accent_core::path::holds_diagram(key, &text.text) {
+            match self.revealing.borrow().contains_key(key) {
+                true => drop(self.awaiting.borrow_mut().remove(key)),
+                false => self.drop_awaiting(key, "a diagram, not a text file"),
+            }
             return self.open_diagram_text(key, text, how);
         }
         let prefs = self.prefs();
@@ -1117,6 +1121,20 @@ impl App {
         match at {
             Some(sidebar::Target::Range(bytes)) if doc::kind_of(rel) == Kind::Diagram => {
                 self.open_label(rel, bytes.start)
+            }
+            // Only its bytes say whether an `.xml` is a diagram: the hit lands on the label if it
+            // is one and on the text if it is not, whichever tab it opens as.
+            Some(sidebar::Target::Range(bytes)) if accent_core::path::may_be_diagram(rel) => {
+                match self.doc_for(rel) {
+                    Some(Doc::Diagram(_)) => self.open_label(rel, bytes.start),
+                    Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes)),
+                    None => {
+                        self.revealing
+                            .borrow_mut()
+                            .insert(rel.to_string(), bytes.start);
+                        self.select_when_open(rel, sidebar::Target::Range(bytes));
+                    }
+                }
             }
             Some(at) => self.select_when_open(rel, at),
             None => self.open_preview(rel),

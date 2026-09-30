@@ -98,6 +98,19 @@ pub fn is_diagram(rel: &str) -> bool {
         .any(|ext| name.len() > ext.len() && name.ends_with(ext))
 }
 
+/// Whether `rel` may be a draw.io diagram: named as one, or an `.xml`, which only its bytes can
+/// say ([`holds_diagram`]).
+pub fn may_be_diagram(rel: &str) -> bool {
+    is_diagram(rel) || basename(rel).to_ascii_lowercase().ends_with(".xml")
+}
+
+/// Whether the file `rel`, holding `text`, is a draw.io diagram: named as one, or an `.xml` whose
+/// first element is draw.io's. Search, Replace All and opening a hit all ask this, so an `.xml`
+/// diagram is one to each of them.
+pub fn holds_diagram(rel: &str, text: &str) -> bool {
+    is_diagram(rel) || (may_be_diagram(rel) && accent_drawio::text::sniff(text))
+}
+
 /// Where a link written inside the note at `dir` points, as a vault-relative path: `../a.md`
 /// from `sub/deep` is `sub/a.md`, `./a.md` from `sub` is `sub/a.md`. A `..` past the root is
 /// dropped rather than kept, and a leading `/` means the root, the way a site-absolute link does.

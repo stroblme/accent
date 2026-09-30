@@ -11,7 +11,7 @@ use crate::dialogs::confirm;
 use crate::recall::{self, QUERIES, REPLACEMENTS};
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
 use accent_core::index::{Index, MIN_INFIX, Match, SearchHit};
-use accent_core::path::{basename, is_diagram, parent_dir};
+use accent_core::path::{basename, holds_diagram, may_be_diagram, parent_dir};
 use accent_core::search::{self, Options, Regex};
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
@@ -328,11 +328,14 @@ fn answer_with_bodies(
         .filter(|rel| answer.cuts(rel))
         .filter_map(|rel| searchable(read, &rel).map(|body| (rel, body)))
         .collect();
-    let mut diagrams: Vec<&str> = answer.paths().filter(|rel| is_diagram(rel)).collect();
+    let mut diagrams: Vec<&str> = answer.paths().filter(|rel| may_be_diagram(rel)).collect();
     diagrams.dedup();
     let pages = diagrams
         .into_iter()
-        .filter_map(|rel| Some((rel.to_string(), diagram_text(&read(rel)?)?.1)))
+        .filter_map(|rel| {
+            let text = read(rel).filter(|text| holds_diagram(rel, text))?;
+            Some((rel.to_string(), diagram_text(&text)?.1))
+        })
         .collect();
     (answer, bodies, pages)
 }
@@ -341,7 +344,7 @@ fn answer_with_bodies(
 /// holds them, or the file itself.
 fn searchable(read: &dyn Fn(&str) -> Option<String>, rel: &str) -> Option<String> {
     let text = read(rel)?;
-    match is_diagram(rel) {
+    match holds_diagram(rel, &text) {
         true => diagram_text(&text).map(|(labels, _)| labels),
         false => Some(text),
     }
