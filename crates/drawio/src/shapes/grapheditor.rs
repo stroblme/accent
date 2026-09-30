@@ -1,7 +1,11 @@
 // Derived from draw.io js/grapheditor/Shapes.js and mxgraph/src/shape/mxArrowConnector.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
 //! The shapes draw.io adds to mxGraph's (`Shapes.js`).
 
-use super::{LINE_ARCSIZE, Part, add_points, quarter, rect};
+use super::mxgraph::{ellipse, rectangle};
+use super::{
+    Direction, Fill, LINE_ARCSIZE, Margins, Part, RECTANGLE_ROUNDING_FACTOR, add_points, polygon,
+    polyline, quarter, rect,
+};
 use crate::geom::{PathCmd, Point, Rect};
 use crate::style::Resolved;
 
@@ -129,28 +133,32 @@ fn arrow_head(
 }
 
 /// `note`: a sheet with its top-right corner folded down by `size` (`NoteShape`, Shapes.js
-/// 758-812): the outline, then the fold stroked over it.
-// ponytail: `darkOpacity`, a translucent fill of the fold, is ignored; its default 0 draws none.
+/// 758-812): the outline, the fold shaded by `darkOpacity`, then the fold stroked over it.
 pub(super) fn note(b: Rect, style: &Resolved) -> Vec<Part> {
     let s = style.num("size", 30.0).min(b.h).min(b.w).max(0.0);
     let (w, h) = (b.w, b.h);
     let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
-    vec![
-        Part::body(vec![
-            PathCmd::MoveTo(p(0.0, 0.0)),
-            PathCmd::LineTo(p(w - s, 0.0)),
-            PathCmd::LineTo(p(w, s)),
-            PathCmd::LineTo(p(w, h)),
-            PathCmd::LineTo(p(0.0, h)),
-            PathCmd::LineTo(p(0.0, 0.0)),
-            PathCmd::Close,
-        ]),
-        Part::line(vec![
-            PathCmd::MoveTo(p(w - s, 0.0)),
-            PathCmd::LineTo(p(w - s, s)),
-            PathCmd::LineTo(p(w, s)),
-        ]),
-    ]
+    let mut parts = vec![Part::body(vec![
+        PathCmd::MoveTo(p(0.0, 0.0)),
+        PathCmd::LineTo(p(w - s, 0.0)),
+        PathCmd::LineTo(p(w, s)),
+        PathCmd::LineTo(p(w, h)),
+        PathCmd::LineTo(p(0.0, h)),
+        PathCmd::LineTo(p(0.0, 0.0)),
+        PathCmd::Close,
+    ])];
+    let fold = [p(w - s, 0.0), p(w - s, s), p(w, s)];
+    parts.extend(shade(&fold, style, "darkOpacity"));
+    parts.push(Part::line(polyline(&fold)));
+    parts
+}
+
+/// The closed outline `pts` shaded by the style's `key` (`darkOpacity`), none when it is 0.
+fn shade(pts: &[Point], style: &Resolved, key: &str) -> Option<Part> {
+    let op = style.num(key, 0.0).clamp(-1.0, 1.0);
+    let mut path = polyline(pts);
+    path.push(PathCmd::Close);
+    (op != 0.0).then(|| Part::filled(path, Fill::Shade(op)))
 }
 
 /// `cylinder3`: a can whose top and bottom are half ellipses `size` high (`CylinderShape3`,
@@ -220,6 +228,403 @@ pub(super) fn curly_bracket(b: Rect, style: &Resolved) -> Vec<Part> {
     ))]
 }
 
+/// `size` as the fixed-size shapes read it: with `fixedSize=1` in page units (`fixed` by
+/// default) and at most `max`, otherwise a share of `extent` (`share` by default) no more than
+/// `limit` of it.
+fn inset(
+    style: &Resolved,
+    extent: f64,
+    (fixed, max): (f64, f64),
+    (share, limit): (f64, f64),
+) -> f64 {
+    match style.flag("fixedSize", false) {
+        true => style.num("size", fixed).min(max).max(0.0),
+        false => extent * style.num("size", share).min(limit).max(0.0),
+    }
+}
+
+/// `process`: a rectangle with a bar `size` of the width in at either side (`ProcessShape`,
+/// Shapes.js 1969-2057).
+pub(super) fn process(b: Rect, style: &Resolved) -> Vec<Part> {
+    // Whole units, as draw.io keeps the inner lines crisp.
+    let i = process_inset(b, style, false).round();
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    let mut bars = polyline(&[p(i, 0.0), p(i, b.h)]);
+    bars.extend(polyline(&[p(b.w - i, 0.0), p(b.w - i, b.h)]));
+    vec![Part::body(rectangle(b, style)), Part::line(bars)]
+}
+
+/// How far a process's bars are in: `size` of the width (page units with `fixedSize`), and at
+/// least a rounded corner.
+fn process_inset(b: Rect, style: &Resolved, label: bool) -> f64 {
+    let (w, h) = (b.w, b.h);
+    let size = style.num("size", 0.1);
+    let fixed = style.flag("fixedSize", false);
+    let mut inset = match fixed {
+        true => size.min(w).max(0.0),
+        false => w * size.clamp(0.0, 1.0),
+    };
+    // The label keeps a fixed bar's width alone (Shapes.js 1998-2012).
+    if style.flag("rounded", false) && !(label && fixed) {
+        let f = style.num("arcSize", RECTANGLE_ROUNDING_FACTOR * 100.0) / 100.0;
+        inset = inset.max((w * f).min(h * f));
+    }
+    inset
+}
+
+/// A process's label keeps between its bars, when it runs along them.
+pub(super) fn process_label(rect: Rect, style: &Resolved) -> Rect {
+    let along = !Direction::of(style).vertical();
+    if style.flag("horizontal", true) != along {
+        return rect;
+    }
+    let i = process_inset(rect, style, true);
+    Rect::new(
+        rect.x + i.round(),
+        rect.y,
+        rect.w - (2.0 * i).round(),
+        rect.h,
+    )
+}
+
+/// `parallelogram`: leaning right by `size` of the width (`ParallelogramShape`, Shapes.js
+/// 1578-1605).
+pub(super) fn parallelogram(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let dx = inset(style, w, (20.0, w), (0.2, 1.0));
+    let pts = [(0.0, h), (dx, 0.0), (w, 0.0), (w - dx, h)];
+    vec![Part::body(polygon(b, style, &pts, &[]))]
+}
+
+/// `trapezoid`: its top `size` of the width shorter at each end (`TrapezoidShape`, Shapes.js
+/// 1608-1635).
+pub(super) fn trapezoid(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let dx = inset(style, w, (20.0, w * 0.5), (0.2, 0.5));
+    let pts = [(0.0, h), (dx, 0.0), (w - dx, 0.0), (w, h)];
+    vec![Part::body(polygon(b, style, &pts, &[]))]
+}
+
+/// `step`: a chevron, `size` of the width deep (`StepShape`, Shapes.js 2283-2310).
+pub(super) fn step(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let s = inset(style, w, (20.0, w), (0.2, 1.0));
+    let pts = [
+        (0.0, 0.0),
+        (w - s, 0.0),
+        (w, h / 2.0),
+        (w - s, h),
+        (0.0, h),
+        (s, h / 2.0),
+    ];
+    vec![Part::body(polygon(b, style, &pts, &[]))]
+}
+
+/// `hexagon`: pointed left and right, its corners `size` of the width in (draw.io's
+/// `HexagonShape`, Shapes.js 2313-2338, in place of mxGraph's `mxHexagon`).
+pub(super) fn hexagon(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let s = inset(style, w, (20.0, w * 0.5), (0.25, 1.0));
+    let pts = [
+        (s, 0.0),
+        (w - s, 0.0),
+        (w, h / 2.0),
+        (w - s, h),
+        (s, h),
+        (0.0, h / 2.0),
+    ];
+    vec![Part::body(polygon(b, style, &pts, &[]))]
+}
+
+/// `document`: a sheet whose foot is a wave `size` of the height deep (`DocumentShape`,
+/// Shapes.js 1424-1459).
+pub(super) fn document(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let dy = h * style.num("size", 0.3).clamp(0.0, 1.0);
+    let fy = 1.4;
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    vec![Part::body(vec![
+        PathCmd::MoveTo(p(0.0, 0.0)),
+        PathCmd::LineTo(p(w, 0.0)),
+        PathCmd::LineTo(p(w, h - dy / 2.0)),
+        PathCmd::QuadTo(p(w * 3.0 / 4.0, h - dy * fy), p(w / 2.0, h - dy / 2.0)),
+        PathCmd::QuadTo(p(w / 4.0, h - dy * (1.0 - fy)), p(0.0, h - dy / 2.0)),
+        PathCmd::LineTo(p(0.0, dy / 2.0)),
+        PathCmd::Close,
+    ])]
+}
+
+/// With `boundedLbl=1` a document's label keeps above its wave.
+pub(super) fn document_margins(rect: Rect, style: &Resolved) -> Margins {
+    Margins {
+        bottom: style.num("size", 0.3) * rect.h,
+        ..Margins::default()
+    }
+}
+
+/// `internalStorage`: a rectangle with a line `dy` below its top and one `dx` in from its left
+/// (`InternalStorageShape`, Shapes.js 4059-4103).
+pub(super) fn internal_storage(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let round = match style.flag("rounded", false) {
+        true => {
+            let f = style.num("arcSize", RECTANGLE_ROUNDING_FACTOR * 100.0) / 100.0;
+            (w * f).min(h * f).max(0.0)
+        }
+        false => 0.0,
+    };
+    let dx = style.num("dx", 20.0).min(w).max(round);
+    let dy = style.num("dy", 20.0).min(h).max(round);
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    vec![
+        Part::body(rectangle(b, style)),
+        Part::line(polyline(&[p(0.0, dy), p(w, dy)])),
+        Part::line(polyline(&[p(dx, 0.0), p(dx, h)])),
+    ]
+}
+
+/// `cube`: a box seen from above and the left, its top and left sides `size` deep and shaded by
+/// `darkOpacity` and `darkOpacity2` (`CubeShape`, Shapes.js 460-545).
+pub(super) fn cube(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let s = style.num("size", 20.0).min(w.min(h)).max(0.0);
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    let body = [
+        p(0.0, 0.0),
+        p(w - s, 0.0),
+        p(w, s),
+        p(w, h),
+        p(s, h),
+        p(0.0, h - s),
+        p(0.0, 0.0),
+    ];
+    let mut outline = polyline(&body);
+    outline.push(PathCmd::Close);
+    let mut parts = vec![Part::body(outline)];
+    let top = [p(0.0, 0.0), p(w - s, 0.0), p(w, s), p(s, s)];
+    let side = [p(0.0, 0.0), p(s, s), p(s, h), p(0.0, h - s)];
+    parts.extend(shade(&top, style, "darkOpacity"));
+    parts.extend(shade(&side, style, "darkOpacity2"));
+    let mut edges = polyline(&[p(s, h), p(s, s), p(0.0, 0.0)]);
+    edges.extend(polyline(&[p(s, s), p(w, s)]));
+    parts.push(Part::line(edges));
+    parts
+}
+
+/// With `boundedLbl=1` a cube's label keeps off its top and left sides.
+pub(super) fn cube_margins(style: &Resolved) -> Margins {
+    let s = style.num("size", 20.0);
+    Margins {
+        left: s,
+        top: s,
+        ..Margins::default()
+    }
+}
+
+/// `tape`: a band whose top and bottom are waves `size` of the height deep (`TapeShape`,
+/// Shapes.js 1369-1421).
+pub(super) fn tape(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let dy = h * style.num("size", 0.4).clamp(0.0, 1.0);
+    let fy = 1.4;
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    vec![Part::body(vec![
+        PathCmd::MoveTo(p(0.0, dy / 2.0)),
+        PathCmd::QuadTo(p(w / 4.0, dy * fy), p(w / 2.0, dy / 2.0)),
+        PathCmd::QuadTo(p(w * 3.0 / 4.0, dy * (1.0 - fy)), p(w, dy / 2.0)),
+        PathCmd::LineTo(p(w, h - dy / 2.0)),
+        PathCmd::QuadTo(p(w * 3.0 / 4.0, h - dy * fy), p(w / 2.0, h - dy / 2.0)),
+        PathCmd::QuadTo(p(w / 4.0, h - dy * (1.0 - fy)), p(0.0, h - dy / 2.0)),
+        PathCmd::LineTo(p(0.0, dy / 2.0)),
+        PathCmd::Close,
+    ])]
+}
+
+/// With `boundedLbl=1` a tape's label keeps between its waves (Shapes.js 1394-1419).
+pub(super) fn tape_label(rect: Rect, style: &Resolved) -> Rect {
+    if !style.flag("boundedLbl", false) {
+        return rect;
+    }
+    let size = style.num("size", 0.4);
+    match Direction::of(style).vertical() {
+        false => {
+            let dy = rect.h * size;
+            Rect::new(rect.x, rect.y + dy, rect.w, rect.h - 2.0 * dy)
+        }
+        true => {
+            let dx = rect.w * size;
+            Rect::new(rect.x + dx, rect.y, rect.w - 2.0 * dx, rect.h)
+        }
+    }
+}
+
+/// `card`: its top-left corner cut off `size` deep (`CardShape`, Shapes.js 1343-1366).
+pub(super) fn card(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let s = style.num("size", 30.0).min(w.min(h)).max(0.0);
+    let pts = [(s, 0.0), (w, 0.0), (w, h), (0.0, h), (0.0, s)];
+    vec![Part::body(polygon(b, style, &pts, &[]))]
+}
+
+/// `callout`: a box over a tail `size` high whose base starts `position` of the width along,
+/// `base` wide, and whose tip is `position2` along (`CalloutShape`, Shapes.js 2081-2121); the tip
+/// stays sharp when the corners are rounded.
+pub(super) fn callout(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let s = style.num("size", 30.0).min(h).max(0.0);
+    let dx = w * style.num("position", 0.5).clamp(0.0, 1.0);
+    let dx2 = w * style.num("position2", 0.5).clamp(0.0, 1.0);
+    let base = style.num("base", 20.0).min(w).max(0.0);
+    let pts = [
+        (0.0, 0.0),
+        (w, 0.0),
+        (w, h - s),
+        (w.min(dx + base), h - s),
+        (dx2, h),
+        (dx.max(0.0), h - s),
+        (0.0, h - s),
+    ];
+    vec![Part::body(polygon(b, style, &pts, &[4]))]
+}
+
+/// A callout's label keeps above its tail, `boundedLbl` or not.
+pub(super) fn callout_margins(style: &Resolved) -> Margins {
+    Margins {
+        bottom: style.num("size", 30.0),
+        ..Margins::default()
+    }
+}
+
+/// `wedgeCallout`: a box with a tail to a tip at `tipX`/`tipY` (in widths and heights from the
+/// centre), out of the side the tip lies beyond, `base` wide; no tail while the tip is inside
+/// (`WedgeCalloutShape`, Shapes.js 2124-2280).
+pub(super) fn wedge_callout(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let rounded = style.flag("rounded", false);
+    // Kept within a hundred times the size, so the box around it stays finite.
+    let tx = style.num("tipX", -0.25).clamp(-100.0, 100.0);
+    let ty = style.num("tipY", 1.0).clamp(-100.0, 100.0);
+    let (dx, dy) = (tx * w, ty * h);
+    let mut pts = vec![(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
+    let mut exclude = Vec::new();
+    if dx.abs() > w / 2.0 || dy.abs() > h / 2.0 {
+        let base = style.num("base", 20.0).max(0.0);
+        let arc = if rounded {
+            style.num("arcSize", LINE_ARCSIZE) / 2.0
+        } else {
+            0.0
+        };
+        let tip = (w / 2.0 + dx, h / 2.0 + dy);
+        let (tail, at) = if dx.abs() * h >= dy.abs() * w && dx != 0.0 {
+            // Out of the left or right side.
+            let inset = arc.min(h / 2.0);
+            let hb = base.min(h - 2.0 * inset).max(0.0) / 2.0;
+            let ey = (h / 2.0 + dy * (w / 2.0) / dx.abs())
+                .min(h - inset - hb)
+                .max(inset + hb);
+            match dx > 0.0 {
+                true => ([(w, ey - hb), tip, (w, ey + hb)], 2),
+                false => ([(0.0, ey + hb), tip, (0.0, ey - hb)], 4),
+            }
+        } else {
+            // Out of the top or bottom.
+            let inset = arc.min(w / 2.0);
+            let hb = base.min(w - 2.0 * inset).max(0.0) / 2.0;
+            let ex = (w / 2.0 + dx * (h / 2.0) / dy.abs())
+                .min(w - inset - hb)
+                .max(inset + hb);
+            match dy > 0.0 {
+                true => ([(ex + hb, h), tip, (ex - hb, h)], 3),
+                false => ([(ex - hb, 0.0), tip, (ex + hb, 0.0)], 1),
+            }
+        };
+        pts.splice(at..at, tail);
+        exclude = vec![at, at + 1, at + 2];
+    }
+    vec![Part::body(polygon(b, style, &pts, &exclude))]
+}
+
+/// `umlActor`: a stick figure, its head filled (`UmlActorShape`, Shapes.js 2642-2678).
+pub(super) fn uml_actor(b: Rect) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    let head = Rect::new(b.x + w / 4.0, b.y, w / 2.0, h / 4.0);
+    let (neck, hips, arms) = (
+        p(w / 2.0, h / 4.0),
+        p(w / 2.0, 2.0 * h / 3.0),
+        p(w / 2.0, h / 3.0),
+    );
+    let mut limbs = polyline(&[neck, hips]);
+    limbs.extend(polyline(&[arms, p(0.0, h / 3.0)]));
+    limbs.extend(polyline(&[arms, p(w, h / 3.0)]));
+    limbs.extend(polyline(&[hips, p(0.0, h)]));
+    limbs.extend(polyline(&[hips, p(w, h)]));
+    vec![Part::body(ellipse(head)), Part::line(limbs)]
+}
+
+/// `or`: a logic gate's OR outline, flat at the left (`OrShape`, Shapes.js 4289-4305).
+pub(super) fn or(b: Rect) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    vec![Part::body(vec![
+        PathCmd::MoveTo(p(0.0, 0.0)),
+        PathCmd::QuadTo(p(w, 0.0), p(w, h / 2.0)),
+        PathCmd::QuadTo(p(w, h), p(0.0, h)),
+        PathCmd::Close,
+    ])]
+}
+
+/// `xor`: [`or`] with its left side bowed in (`XorShape`, Shapes.js 4308-4325).
+pub(super) fn xor(b: Rect) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    vec![Part::body(vec![
+        PathCmd::MoveTo(p(0.0, 0.0)),
+        PathCmd::QuadTo(p(w, 0.0), p(w, h / 2.0)),
+        PathCmd::QuadTo(p(w, h), p(0.0, h)),
+        PathCmd::QuadTo(p(w / 2.0, h / 2.0), p(0.0, 0.0)),
+        PathCmd::Close,
+    ])]
+}
+
+/// `dataStorage`: a drum lying on its side, its ends bowed left `size` of the width
+/// (`DataStorageShape`, Shapes.js 4260-4286).
+pub(super) fn data_storage(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let s = inset(style, w, (20.0, w), (0.1, 1.0));
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    vec![Part::body(vec![
+        PathCmd::MoveTo(p(s, 0.0)),
+        PathCmd::LineTo(p(w, 0.0)),
+        PathCmd::QuadTo(p(w - s * 2.0, h / 2.0), p(w, h)),
+        PathCmd::LineTo(p(s, h)),
+        PathCmd::QuadTo(p(s - s * 2.0, h / 2.0), p(s, 0.0)),
+        PathCmd::Close,
+    ])]
+}
+
+/// `message`: an envelope, its flap stroked over the box (`MessageShape`, Shapes.js 2613-2639,
+/// painted by `mxCylinder.paintVertexShape`).
+pub(super) fn message(b: Rect) -> Vec<Part> {
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    let flap = [p(0.0, 0.0), p(b.w / 2.0, b.h / 2.0), p(b.w, 0.0)];
+    vec![Part::body(rect(b)), Part::line(polyline(&flap))]
+}
+
+/// With `boundedLbl=1` a `cylinder3`'s label keeps below its lid and above its foot
+/// (Shapes.js 1489-1504).
+pub(super) fn cylinder_margins(rect: Rect, style: &Resolved) -> Margins {
+    let mut size = style.num("size", 15.0);
+    if !style.flag("lid", true) {
+        size /= 2.0;
+    }
+    Margins {
+        top: rect.h.min(size * 2.0),
+        bottom: (size * 0.3).max(0.0),
+        ..Margins::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,8 +640,8 @@ mod tests {
             &style("shape=note;", false),
         );
         assert_eq!(parts.len(), 2);
-        assert!(parts[0].fill && parts[0].stroke);
-        assert!(!parts[1].fill && parts[1].stroke);
+        assert!(parts[0].fill == Fill::Cell && parts[0].stroke);
+        assert!(parts[1].fill == Fill::None && parts[1].stroke);
         assert_eq!(
             parts[1].path,
             vec![
@@ -252,7 +657,7 @@ mod tests {
         let parts = vertex("cylinder3", BOX, &style("shape=cylinder3;size=10;", false));
         assert_eq!(parts.len(), 2);
         assert!(same_box(path_bounds(&parts[0].path).unwrap(), BOX));
-        assert!(!parts[1].fill && parts[1].stroke);
+        assert!(parts[1].fill == Fill::None && parts[1].stroke);
         let lid = path_bounds(&parts[1].path).unwrap();
         assert!(
             (lid.bottom() - (BOX.y + 20.0)).abs() < 1e-9,
@@ -266,7 +671,7 @@ mod tests {
     fn curly_bracket_is_unfilled() {
         let parts = vertex("curlyBracket", BOX, &style("shape=curlyBracket;", false));
         assert_eq!(parts.len(), 1);
-        assert!(!parts[0].fill && parts[0].stroke);
+        assert!(parts[0].fill == Fill::None && parts[0].stroke);
         assert!(
             same_box(path_bounds(&parts[0].path).unwrap(), BOX),
             "unrounded, the tip touches the left side"
@@ -278,7 +683,7 @@ mod tests {
         let pts = [Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
         let parts = flex_arrow(&pts, &style("shape=flexArrow;", true), 1.0);
         assert_eq!(parts.len(), 1);
-        assert!(parts[0].fill && parts[0].stroke);
+        assert!(parts[0].fill == Fill::Cell && parts[0].stroke);
         let path = &parts[0].path;
         assert!(matches!(path[0], PathCmd::MoveTo(_)));
         assert_eq!(path.last(), Some(&PathCmd::Close));
@@ -300,5 +705,150 @@ mod tests {
             on_path(Point::new(95.0, 5.0)) && on_path(Point::new(105.0, -5.0)),
             "both sides meet on the mitre: {path:?}"
         );
+    }
+
+    fn corners(path: &[PathCmd]) -> Vec<Point> {
+        path.iter()
+            .filter_map(|c| match c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => Some(*p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const R: Rect = Rect::new(0.0, 0.0, 100.0, 50.0);
+
+    #[test]
+    fn size_is_a_share_of_the_width_or_with_fixed_size_in_units() {
+        let first = |s: &str| corners(&vertex("parallelogram", R, &style(s, false))[0].path)[1];
+        assert_eq!(first("shape=parallelogram;"), Point::new(20.0, 0.0));
+        assert_eq!(
+            first("shape=parallelogram;size=0.3;"),
+            Point::new(30.0, 0.0)
+        );
+        let fixed = "shape=parallelogram;fixedSize=1;size=12;";
+        assert_eq!(first(fixed), Point::new(12.0, 0.0));
+        let trapezoid =
+            corners(&vertex("trapezoid", R, &style("shape=trapezoid;size=0.9;", false))[0].path);
+        assert_eq!(
+            trapezoid[2],
+            Point::new(50.0, 0.0),
+            "no more than half from each end"
+        );
+        let hexagon = corners(&vertex("hexagon", R, &style("shape=hexagon;", false))[0].path);
+        assert_eq!(hexagon[0], Point::new(25.0, 0.0));
+        let step = corners(&vertex("step", R, &style("shape=step;", false))[0].path);
+        assert_eq!(step[5], Point::new(20.0, 25.0));
+    }
+
+    #[test]
+    fn a_process_has_bars_its_label_keeps_between() {
+        let parts = vertex("process", R, &style("shape=process;", false));
+        let p = Point::new;
+        assert_eq!(
+            corners(&parts[1].path),
+            [p(10.0, 0.0), p(10.0, 50.0), p(90.0, 0.0), p(90.0, 50.0)]
+        );
+        let s = style("shape=process;", false);
+        assert_eq!(process_label(R, &s), Rect::new(10.0, 0.0, 80.0, 50.0));
+        let across = style("shape=process;horizontal=0;", false);
+        assert_eq!(process_label(R, &across), R);
+    }
+
+    #[test]
+    fn a_callouts_tip_stays_sharp_and_its_label_above_the_tail() {
+        let rounded = &vertex("callout", R, &style("shape=callout;rounded=1;", false))[0].path;
+        assert!(
+            rounded.contains(&PathCmd::LineTo(Point::new(50.0, 50.0))),
+            "the tip is a corner of its own: {rounded:?}"
+        );
+        assert_eq!(
+            rounded
+                .iter()
+                .filter(|c| matches!(c, PathCmd::QuadTo(..)))
+                .count(),
+            6
+        );
+        let s = style("shape=callout;", false);
+        assert_eq!(
+            super::super::label_bounds("callout", R, &s, false),
+            Rect::new(0.0, 0.0, 100.0, 20.0)
+        );
+    }
+
+    #[test]
+    fn a_wedge_callouts_tail_leaves_the_side_its_tip_is_beyond() {
+        let tail = |s: &str| {
+            let path = &vertex("wedgeCallout", R, &style(s, false))[0].path;
+            path_bounds(path).unwrap()
+        };
+        // The default tip is a quarter width left of the centre and a height below it.
+        assert_eq!(
+            tail("shape=wedgeCallout;"),
+            Rect::new(0.0, 0.0, 100.0, 75.0)
+        );
+        assert_eq!(
+            tail("shape=wedgeCallout;tipX=1;tipY=0;"),
+            Rect::new(0.0, 0.0, 150.0, 50.0)
+        );
+        assert_eq!(
+            tail("shape=wedgeCallout;tipX=0.2;tipY=0.2;"),
+            R,
+            "inside: no tail"
+        );
+    }
+
+    #[test]
+    fn a_cube_and_a_note_shade_their_sides_with_dark_opacity() {
+        let s = "shape=cube;darkOpacity=0.05;darkOpacity2=-0.1;";
+        let parts = vertex("cube", R, &style(s, false));
+        let shades: Vec<Fill> = parts.iter().map(|p| p.fill).collect();
+        assert_eq!(
+            shades,
+            [Fill::Cell, Fill::Shade(0.05), Fill::Shade(-0.1), Fill::None]
+        );
+        let plain = vertex("cube", R, &style("shape=cube;", false));
+        assert_eq!(plain.len(), 2, "no shading at 0");
+        let note = vertex("note", R, &style("shape=note;darkOpacity=0.05;", false));
+        assert_eq!(note[1].fill, Fill::Shade(0.05));
+        let s = style("shape=cube;boundedLbl=1;", false);
+        assert_eq!(
+            super::super::label_bounds("cube", R, &s, false),
+            Rect::new(20.0, 20.0, 80.0, 30.0)
+        );
+    }
+
+    #[test]
+    fn a_tapes_bounded_label_keeps_between_its_waves() {
+        let s = style("shape=tape;boundedLbl=1;", false);
+        assert_eq!(tape_label(R, &s), Rect::new(0.0, 20.0, 100.0, 10.0));
+        let s = style("shape=tape;boundedLbl=1;direction=south;", false);
+        assert_eq!(tape_label(R, &s), Rect::new(40.0, 0.0, 20.0, 50.0));
+    }
+
+    #[test]
+    fn the_general_palettes_outlines_fill_their_box() {
+        for shape in [
+            "document",
+            "internalStorage",
+            "card",
+            "tape",
+            "or",
+            "xor",
+            "dataStorage",
+            "message",
+            "umlActor",
+        ] {
+            let parts = vertex(shape, R, &style(&format!("shape={shape};"), false));
+            let body = path_bounds(&parts[0].path).unwrap();
+            let all = parts
+                .iter()
+                .filter_map(|p| path_bounds(&p.path))
+                .reduce(|a, b| a.union(&b))
+                .unwrap();
+            assert!(parts[0].fill == Fill::Cell, "{shape} has a body");
+            assert!(R.grow(1e-9).contains_rect(&all), "{shape}: {all:?}");
+            assert!(body.w > 0.0 && body.h > 0.0, "{shape}");
+        }
     }
 }
