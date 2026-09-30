@@ -132,19 +132,35 @@ impl DiagramView {
             return;
         };
         match drag {
-            // Too many cells to show live: their box moves, dashed as draw.io's preview shape is
-            // (`mxGraphHandler.createPreviewShape`).
             Drag::Move {
-                from, ids, origin, ..
-            } if matches!(*preview, Some(Preview::Boxed)) => {
-                let d = self.move_delta(*from, pointer, *origin, free);
+                from,
+                ids,
+                bounds,
+                guides,
+                ..
+            } => {
+                let (d, lines) = self.move_delta(*from, pointer, bounds, guides, free);
+                // Too many cells to show live: their box moves, dashed as draw.io's preview
+                // shape is (`mxGraphHandler.createPreviewShape`).
                 let moved = ids.iter().filter_map(|id| sheet.frame_of(id));
-                if let Some(r) = moved.reduce(|a, b| a.union(&b)) {
+                if matches!(*preview, Some(Preview::Boxed))
+                    && let Some(r) = moved.reduce(|a, b| a.union(&b))
+                {
                     let builder = gsk::PathBuilder::new();
                     builder.add_rect(&paint::grect(&frame.rect(&r.translate(d.x, d.y))));
                     let stroke = gsk::Stroke::new(1.0);
                     stroke.set_dash(&[3.0, 3.0]);
                     snapshot.append_stroke(&builder.to_path(), &stroke, &accent);
+                }
+                // The guides, a pixel wide whatever the zoom.
+                if !lines.is_empty() {
+                    let builder = gsk::PathBuilder::new();
+                    for (a, b) in lines {
+                        let (a, b) = (frame.to_content(a), frame.to_content(b));
+                        builder.move_to(a.x as f32, a.y as f32);
+                        builder.line_to(b.x as f32, b.y as f32);
+                    }
+                    snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
                 }
             }
             Drag::Band { from, .. } => {
@@ -176,7 +192,7 @@ impl DiagramView {
                 builder.line_to(b.x as f32, b.y as f32);
                 snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
             }
-            Drag::Move { .. } | Drag::Resize { .. } | Drag::Rotate { .. } | Drag::Pan { .. } => {}
+            Drag::Resize { .. } | Drag::Rotate { .. } | Drag::Pan { .. } => {}
         }
     }
 }

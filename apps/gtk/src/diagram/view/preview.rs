@@ -153,7 +153,8 @@ impl DiagramView {
                     from: accent_drawio::Point::default(),
                     ids: ids.to_vec(),
                     click: None,
-                    origin: accent_drawio::Point::default(),
+                    bounds: accent_drawio::Rect::default(),
+                    guides: Vec::new(),
                 });
                 imp.moved.set(true);
                 imp.free.set(true);

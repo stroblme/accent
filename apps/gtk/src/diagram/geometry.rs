@@ -357,6 +357,8 @@ pub struct Sheet {
     pub extent: Rect,
     /// The grid a drag snaps to, `None` where the page has it off.
     pub grid: Option<f64>,
+    /// Whether a move shows guides.
+    pub guides: bool,
     /// Each cell's parent, up to but not including its layer.
     parents: HashMap<CellId, CellId>,
     /// The rectangle of every vertex, absolute and unrotated: what resizing works on.
@@ -397,6 +399,7 @@ impl Sheet {
             bounds,
             extent,
             grid: page.grid(),
+            guides: page.guides(),
             ..Sheet::default()
         };
         for cell in &page.cells {
@@ -488,6 +491,78 @@ impl Sheet {
     /// paints.
     pub fn frame_of(&self, id: &str) -> Option<Rect> {
         self.rect(id).or_else(|| self.scene.bounds_of(id))
+    }
+
+    /// The box a move aligns cell `id` by (`mxGraphHandler.getStateBounds`): its frame, a
+    /// quarter-turned shape's extents swapped about its middle, as it shows.
+    pub fn guide_box(&self, id: &str) -> Option<Rect> {
+        let r = self.frame_of(id)?;
+        let quarter = self.rects.contains_key(id) && self.rotation(id).rem_euclid(180.0) == 90.0;
+        let c = r.centre();
+        Some(match quarter {
+            true => Rect::new(c.x - r.h / 2.0, c.y - r.w / 2.0, r.h, r.w),
+            false => r,
+        })
+    }
+
+    /// The boxes a move of `moving`, taken hold of at `pressed`, aligns to
+    /// (`mxGraphHandler.getGuideStates` and the `isStateIgnored` draw.io gives it): the shapes
+    /// shown on its layer that share its parent, the parent, and those an edge joins it to — or
+    /// all of them when the parent holds fewer than two cells — none of them moving along.
+    pub fn guide_boxes(&self, moving: &[CellId], pressed: &str) -> Vec<Rect> {
+        let page = &self.page;
+        let cells: HashMap<&str, &accent_drawio::Cell> =
+            page.cells.iter().map(|c| (c.id.as_str(), c)).collect();
+        let parent_of = |id: &str| cells.get(id).and_then(|c| c.parent.as_deref());
+        // A cell's layer: the parent of its outermost ancestor below one.
+        let layer_of = |id: &str| {
+            let mut top = id;
+            while let Some(p) = self.parent(top) {
+                top = p;
+            }
+            parent_of(top)
+        };
+        let (parent, layer) = (parent_of(pressed), layer_of(pressed));
+        let few = page
+            .cells
+            .iter()
+            .filter(|c| c.parent.as_deref() == parent)
+            .count()
+            < 2;
+        let joined: HashSet<&str> = page
+            .cells
+            .iter()
+            .filter(|c| c.edge)
+            .filter_map(|c| match (c.source.as_deref(), c.target.as_deref()) {
+                (Some(s), t) if s == pressed => t,
+                (s, Some(t)) if t == pressed => s,
+                _ => None,
+            })
+            .collect();
+        // Shown: it and everything above it, its layer included.
+        let shown = |id: &str| {
+            let mut at = cells.get(id).copied();
+            while let Some(cell) = at {
+                if !cell.is_visible() {
+                    return false;
+                }
+                at = cell.parent.as_deref().and_then(|p| cells.get(p).copied());
+            }
+            true
+        };
+        page.cells
+            .iter()
+            .filter(|c| c.vertex && c.geometry.as_ref().is_some_and(|g| !g.relative))
+            .filter(|c| shown(&c.id) && layer_of(&c.id) == layer)
+            .filter(|c| !moving.iter().any(|m| self.is_within(&c.id, m)))
+            .filter(|c| {
+                let id = Some(c.id.as_str());
+                few || id == parent
+                    || c.parent.as_deref() == parent
+                    || joined.contains(c.id.as_str())
+            })
+            .filter_map(|c| self.guide_box(&c.id))
+            .collect()
     }
 
     /// What a press at `p` is on, given what is selected already: the cell a click there
@@ -708,6 +783,35 @@ mod tests {
         assert_eq!(ends((70.0, 60.0), (270.0, 210.0)), (some("s"), some("t")));
         // From outside everything onto a shape.
         assert_eq!(ends((500.0, 500.0), (270.0, 210.0)), (None, some("t")));
+    }
+
+    #[test]
+    fn a_move_aligns_to_its_siblings_and_the_shapes_joined_to_it() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="a" parent="1" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="b" parent="1" vertex="1" style="rotation=90;"><mxGeometry x="20" y="0" width="10" height="30" as="geometry"/></mxCell>
+            <mxCell id="g" parent="1" vertex="1" style="group"><mxGeometry x="100" y="0" width="50" height="50" as="geometry"/></mxCell>
+            <mxCell id="c" parent="g" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="d" parent="g" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="e" parent="1" edge="1" source="a" target="c"><mxGeometry relative="1" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        // A quarter-turned shape aligns by its extents as they show.
+        let turned = Rect::new(10.0, 10.0, 30.0, 10.0);
+        assert_eq!(sheet.guide_box("b"), Some(turned));
+        // Moving a: its siblings b and g, and c at the edge's other end, not d inside g.
+        let group = Rect::new(100.0, 0.0, 50.0, 50.0);
+        let c = Rect::new(100.0, 0.0, 10.0, 10.0);
+        assert_eq!(sheet.guide_boxes(&ids(&["a"]), "a"), [turned, group, c]);
+        // Moving c inside g: a at the edge's other end, the group and its sibling d, not b.
+        let (a, d) = (
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            Rect::new(120.0, 0.0, 10.0, 10.0),
+        );
+        assert_eq!(sheet.guide_boxes(&ids(&["c"]), "c"), [a, group, d]);
     }
 
     #[test]

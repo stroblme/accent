@@ -172,6 +172,11 @@ impl Page {
         (self.model_attr("grid") != Some("0")).then(|| self.grid_size())
     }
 
+    /// Whether a move shows guides: on unless the page says `guides="0"` (Editor.js 1395).
+    pub fn guides(&self) -> bool {
+        self.model_attr("guides") != Some("0")
+    }
+
     pub fn cell(&self, id: &str) -> Option<&Cell> {
         self.cells.iter().find(|c| c.id == id)
     }
@@ -493,6 +498,9 @@ mod tests {
         assert_eq!(p.grid(), Some(20.0), "draw.io's default is on");
         p.set_model_attr("grid", Some("0"));
         assert_eq!(p.grid(), None);
+        assert!(p.guides());
+        p.set_model_attr("guides", Some("0"));
+        assert!(!p.guides());
     }
 
     #[test]
