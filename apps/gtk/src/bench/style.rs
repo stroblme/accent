@@ -561,10 +561,11 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
 /// The hover over the first wikilink of the note at `rel`, zoomed in twice, through the real
 /// pointer: prints `bench hover_aim <x> <y>` for `build-aux/xtest.py :N "move <x> <y>"`, then, once
 /// the hover is up, its font beside the note's, its size beside the window's, a line of it beside
-/// one of the note's and how tall its whole text is. Then `bench hover_scroll_aim <x> <y>`, the
-/// middle of the hover, for the pointer to be walked into (a jump there dismisses it) and a wheel
-/// turned, and what the hover's scroll came to. Held on screen 5 s in all, long enough for
-/// `import -window root -display :N shot.png`.
+/// one of the note's and how tall its whole text is, and `emptied`: the hover emptied while up, as
+/// GtkSourceView empties it before asking again, which aborted. Then `bench hover_scroll_aim <x>
+/// <y>`, the middle of the hover, for the pointer to be walked into (a jump there dismisses it)
+/// and a wheel turned, and what the hover's scroll came to. Held on screen 5 s in all, long enough
+/// for `import -window root -display :N shot.png`.
 fn bench_hover(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -637,6 +638,21 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
             rect.height(),
             label.as_ref().map_or(0, |label| label.height()),
         );
+        // GtkSourceView empties a hover that is up before asking the providers again, when the
+        // pointer settles on other text (`_gtk_source_hover_assistant_display`), and the view's
+        // allocations meanwhile present it as it is: emptied, it measured 0 wide, which
+        // `gdk_popup_present` refuses with a critical.
+        let display = find_widget(&popover, &|w| w.is::<sourceview5::HoverDisplay>())
+            .and_downcast::<sourceview5::HoverDisplay>();
+        let content = find_widget(&popover, &|w| w.is::<gtk::ScrolledWindow>());
+        if let (Some(display), Some(content)) = (display, content) {
+            display.remove(&content);
+            tab.view.queue_allocate();
+            glib::timeout_future(Duration::from_millis(300)).await;
+            println!("bench hover emptied up={}", popover.is_mapped());
+            display.append(&content);
+            glib::timeout_future(Duration::from_millis(300)).await;
+        }
         // A wheel over the hover scrolls what did not fit, and the hover stays up. The popup's
         // surface is placed against the window's, which under Xvfb sits at the screen's origin.
         let scroller = find_widget(&popover, &|w| w.is::<gtk::ScrolledWindow>())

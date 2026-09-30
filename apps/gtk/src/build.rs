@@ -961,6 +961,10 @@ thread_local! {
 // The Files tree's rows hand their padding to the expander inside, as libadwaita's own `sidebar`
 // rows do to their box, so the mark a Ctrl+click or a Shift+click puts on the expander has the
 // row's shape: it used to sit inside the grey of the open file's row, a pill within a pill.
+//
+// A GtkSourceView assistant is never narrower than 1 px: GtkSourceView empties a hover that is up
+// before asking the providers again, and the view's allocations present it meanwhile at what it
+// measures, 0 wide when empty, which `gdk_popup_present` refuses with a critical.
 /// Registers the icons compiled into the binary and points the theme at them.
 ///
 /// A GResource rather than hicolor: the completion list and the file lists need their icons
@@ -1048,6 +1052,7 @@ fn install_chrome_css() {
              GtkSourceAssistant {{ background-color: var(--popover-bg-color); \
                color: var(--popover-fg-color); \
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
+             GtkSourceAssistant > contents {{ min-width: 1px; min-height: 1px; }} \
              GtkSourceAssistant.completion {{ min-width: 240px; }} \
              GtkSourceAssistant.completion list row {{ padding: 3px 6px; }} \
              GtkSourceAssistant.completion list row cell.typed-text {{ margin-left: 12px; \
