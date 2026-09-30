@@ -61,6 +61,11 @@ pub enum Edit {
         source: bool,
         end: End,
     },
+    /// Put the label of edge `id` at `at`, in page units.
+    LabelAt {
+        id: CellId,
+        at: Point,
+    },
     /// Give edge `id` these waypoints, in page units.
     Points {
         id: CellId,

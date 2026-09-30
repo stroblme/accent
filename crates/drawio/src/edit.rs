@@ -189,6 +189,17 @@ impl Editor {
         self.edit(page, |p, _| set_end(p, id, source, on, constraint))
     }
 
+    /// [`move_label`] on page `page`.
+    pub fn move_label(
+        &mut self,
+        page: usize,
+        id: &str,
+        route: &[Point],
+        at: Point,
+    ) -> Result<(), Error> {
+        self.edit(page, |p, _| move_label(p, id, route, at))
+    }
+
     /// [`set_points`] on page `page`.
     pub fn set_points(&mut self, page: usize, id: &str, points: &[Point]) -> Result<(), Error> {
         self.edit(page, |p, _| set_points(p, id, points))
@@ -603,6 +614,94 @@ pub fn set_end(
     Ok(())
 }
 
+/// Put the label of edge `id`, routed along `route` (absolute), at `at` (`mxEdgeHandler.moveLabel`):
+/// a relative geometry keeps where along the edge the nearest point is and how far across, in
+/// its `x` and `y`, and the rest as its offset; any other keeps the offset from the middle of its
+/// ends.
+// mxEdgeHandler.moveLabel, mxEdgeHandler.js 1924-1966
+pub fn move_label(page: &mut Page, id: &str, route: &[Point], at: Point) -> Result<(), Error> {
+    check(page, [id])?;
+    let (Some(&first), Some(&last)) = (route.first(), route.last()) else {
+        return Err(Error::Refused("the edge is not drawn"));
+    };
+    let cell = cell_mut(page, id)?;
+    let Some(g) = cell.geometry.as_mut().filter(|_| cell.edge) else {
+        return Err(Error::Refused("only an edge's label moves along it"));
+    };
+    if g.relative {
+        let (x, y) = relative_point(route, at);
+        g.x = (x * 10000.0).round() / 10000.0;
+        g.y = y.round();
+        g.offset = None;
+        let on = crate::scene::edge_label_at(route, g);
+        g.offset = Some(Point::new((at.x - on.x).round(), (at.y - on.y).round()));
+    } else {
+        let middle = Point::new((first.x + last.x) / 2.0, (first.y + last.y) / 2.0);
+        g.offset = Some(Point::new(
+            (at.x - middle.x).round(),
+            (at.y - middle.y).round(),
+        ));
+        (g.x, g.y) = (0.0, 0.0);
+    }
+    Ok(())
+}
+
+/// Where along an edge routed through `points` the point nearest `p` is, from -1 at its start to
+/// 1 at its end, and how far `p` is across it, negative on its left.
+// mxGraphView.getRelativePoint, mxGraphView.js 2101-2193
+fn relative_point(points: &[Point], p: Point) -> (f64, f64) {
+    let segments: Vec<f64> = points.windows(2).map(|w| w[0].distance(w[1])).collect();
+    let total: f64 = segments.iter().sum();
+    // The segment nearest the point, the last of equals, and how far along the edge it starts.
+    let (mut index, mut length, mut walked) = (0, 0.0, 0.0);
+    let mut nearest = crate::geom::distance_to_segment(p, points[0], points[1]);
+    for i in 2..points.len() {
+        let d = crate::geom::distance_to_segment(p, points[i - 1], points[i]);
+        walked += segments[i - 2];
+        if d <= nearest {
+            (nearest, index, length) = (d, i - 1, walked);
+        }
+    }
+    let (p0, pe) = (points[index], points[index + 1]);
+    let (sx, sy) = (p0.x - pe.x, p0.y - pe.y);
+    let (px, py) = (sx - (p.x - pe.x), sy - (p.y - pe.y));
+    let dot = px * sx + py * sy;
+    let projected = match dot <= 0.0 {
+        true => 0.0,
+        false => (dot * dot / (sx * sx + sy * sy)).sqrt(),
+    };
+    let projected = projected.min(segments[index]);
+    let mut across = crate::geom::distance_to_segment(p, p0, pe);
+    if relative_ccw(p0, pe, p) == -1 {
+        across = -across;
+    }
+    let along = match total > 0.0 {
+        true => (total / 2.0 - length - projected) / total * -2.0,
+        false => 0.0,
+    };
+    (along, across)
+}
+
+/// Which side of the line from `a` to `b` point `p` is on (`mxUtils.relativeCcw`).
+fn relative_ccw(a: Point, b: Point, p: Point) -> i32 {
+    let (x2, y2) = (b.x - a.x, b.y - a.y);
+    let (mut px, mut py) = (p.x - a.x, p.y - a.y);
+    let mut ccw = px * y2 - py * x2;
+    if ccw == 0.0 {
+        ccw = px * x2 + py * y2;
+        if ccw > 0.0 {
+            px -= x2;
+            py -= y2;
+            ccw = (px * x2 + py * y2).max(0.0);
+        }
+    }
+    match ccw {
+        c if c < 0.0 => -1,
+        c if c > 0.0 => 1,
+        _ => 0,
+    }
+}
+
 /// Give edge `id` the waypoints `points`, absolute, none for an empty list
 /// (`mxEdgeHandler.changePoints`).
 pub fn set_points(page: &mut Page, id: &str, points: &[Point]) -> Result<(), Error> {
@@ -973,6 +1072,31 @@ mod tests {
         assert_eq!(geometry(&e, "e").points, Some(vec![Point::new(1.0, 2.0)]));
         e.set_points(0, "e", &[]).unwrap();
         assert_eq!(geometry(&e, "e").points, None);
+    }
+
+    #[test]
+    fn an_edge_label_moves_along_and_off_its_edge() {
+        let mut e = editor();
+        let route = [Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+        // A quarter of the way along, 10 below the line.
+        e.move_label(0, "e", &route, Point::new(25.0, 10.0))
+            .unwrap();
+        let g = geometry(&e, "e");
+        assert_eq!((g.x, g.y, g.offset), (-0.5, -10.0, Some(Point::default())));
+        assert_eq!(
+            crate::scene::edge_label_at(&route, g),
+            Point::new(25.0, 10.0)
+        );
+        // Beyond the end: at the end, as far across as it is away, the rest as offset.
+        e.move_label(0, "e", &route, Point::new(130.0, 0.0))
+            .unwrap();
+        let g = geometry(&e, "e");
+        assert_eq!((g.x, g.y), (1.0, 30.0));
+        assert_eq!(g.offset, Some(Point::new(30.0, 30.0)));
+        assert_eq!(
+            crate::scene::edge_label_at(&route, g),
+            Point::new(130.0, 0.0)
+        );
     }
 
     #[test]

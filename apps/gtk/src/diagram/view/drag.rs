@@ -21,6 +21,8 @@ enum Grip {
     End(bool),
     /// A handle between an edge's ends.
     Knob(Knob),
+    /// An edge's label, by its handle or its text.
+    Label,
 }
 
 /// A drag under way, in page units.
@@ -62,6 +64,12 @@ pub(super) enum Drag {
         ends: [Option<Terminal>; 2],
         waypoints: Vec<Point>,
     },
+    /// Dragging the label of edge `id`, routed along `route` between `ends`.
+    Label {
+        id: CellId,
+        route: Vec<Point>,
+        ends: [Option<Terminal>; 2],
+    },
     /// Turning shape `id`, whose unturned rectangle is `rect`, by its rotate handle.
     Rotate {
         id: CellId,
@@ -100,10 +108,8 @@ impl DiagramView {
         let tolerance = TOLERANCE / frame.scale;
         match imp.tool.get() {
             Tool::Select => {
-                if let [id] = selection.as_slice()
-                    && let Some(grip) = self.grip_at(&sheet, id, p)
-                {
-                    let (id, rotation) = (id.clone(), sheet.rotation(id));
+                if let Some((id, grip)) = self.grip_under(&sheet, &selection, p) {
+                    let rotation = sheet.rotation(&id);
                     let rect = sheet.rect(&id).unwrap_or_default();
                     return Some(match grip {
                         Grip::End(source) => {
@@ -124,6 +130,11 @@ impl DiagramView {
                             waypoints: sheet.waypoints(&id),
                             id,
                             knob,
+                        },
+                        Grip::Label => Drag::Label {
+                            route: sheet.scene.route(&id).unwrap_or_default().to_vec(),
+                            ends: sheet.terminals(&id),
+                            id,
                         },
                         Grip::Rotate => Drag::Rotate { id, rect },
                         Grip::Resize(handle) => Drag::Resize {
@@ -191,21 +202,45 @@ impl DiagramView {
         }
     }
 
-    /// The grip of the one selected cell `id` under page point `p`: an edge's ends; a shape's
-    /// rotate handle first, then a resize handle, found in the shape's own frame.
+    /// The selected cell whose handle is under page point `p`, and the handle: every selected
+    /// edge's, as draw.io gives each one a handler, and a shape's when it is selected alone.
+    fn grip_under(&self, sheet: &Sheet, selection: &[CellId], p: Point) -> Option<(CellId, Grip)> {
+        selection
+            .iter()
+            .filter(|id| selection.len() == 1 || sheet.is_edge(id))
+            .find_map(|id| Some((id.clone(), self.grip_at(sheet, id, p)?)))
+    }
+
+    /// The grip of selected cell `id` under page point `p`: an edge's ends, the handles between
+    /// them (a faded one last), and its label's handle or text; a shape's rotate handle first,
+    /// then a resize handle, found in the shape's own frame.
     fn grip_at(&self, sheet: &Sheet, id: &str, p: Point) -> Option<Grip> {
         let frame = self.imp().frame.get();
         if sheet.is_edge(id) && !sheet.is_pinned(id) {
             let route = sheet.scene.route(id)?;
-            let near = |q: &Point| frame.to_content(*q).distance(frame.to_content(p)) <= HANDLE;
-            // The ends, then the handles between them, a faded one last.
-            let mut knobs = sheet.knobs(id, route);
-            knobs.sort_by_key(|k| k.2);
-            return match (route.first(), route.last()) {
-                (Some(a), _) if near(a) => Some(Grip::End(true)),
-                (_, Some(b)) if near(b) => Some(Grip::End(false)),
-                _ => knobs.iter().find(|k| near(&k.1)).map(|k| Grip::Knob(k.0)),
-            };
+            // The nearest handle within reach, an end before a handle between the ends and a
+            // faded one last where two are as near; then the label's text.
+            let ends = [(route.first(), true), (route.last(), false)];
+            let ends = ends
+                .into_iter()
+                .filter_map(|(q, source)| Some((Grip::End(source), *q?, 0)));
+            let knobs = sheet.knobs(id, route).into_iter();
+            let knobs = knobs.map(|(k, at, dim)| (Grip::Knob(k), at, 1 + usize::from(dim)));
+            let label = self.label_handle(sheet, id, route);
+            let handles = ends
+                .chain(knobs)
+                .chain(label.map(|at| (Grip::Label, at, 3)));
+            let away = |q: Point| frame.to_content(q).distance(frame.to_content(p));
+            let nearest = handles
+                .map(|(grip, at, rank)| (away(at), rank, grip))
+                .filter(|h| h.0 <= HANDLE)
+                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            if let Some((.., grip)) = nearest {
+                return Some(grip);
+            }
+            let cache = &self.imp().cache;
+            let on_text = cache.label_at(&sheet.scene.prims, p) == Some(id);
+            return (label.is_some() && on_text).then_some(Grip::Label);
         }
         let r = sheet.rect(id).filter(|_| !sheet.is_pinned(id))?;
         let local = frame.to_content(rotate(p, r.centre(), -sheet.rotation(id)));
@@ -380,6 +415,10 @@ impl DiagramView {
                     points,
                 })
             }
+            Drag::Label { id, route, ends } => Some(Edit::LabelAt {
+                id: id.clone(),
+                at: self.aim(p, route, *ends, free),
+            }),
             Drag::End { id, source, other } => Some(Edit::End {
                 id: id.clone(),
                 source: *source,
@@ -387,6 +426,22 @@ impl DiagramView {
             }),
             _ => None,
         }
+    }
+
+    /// Where the handle of edge `id`'s label sits on screen, routed along `route`: moved off
+    /// any other handle of the edge it would cover, above or below it
+    /// (`mxEdgeHandler.checkLabelHandle`, draw.io's `manageLabelHandle`).
+    pub(super) fn label_handle(&self, sheet: &Sheet, id: &str, route: &[Point]) -> Option<Point> {
+        let mut at = sheet.label_handle(id, route)?;
+        let size = HANDLE / self.scale();
+        let ends = [route.first(), route.last()].into_iter().flatten().copied();
+        let knobs = sheet.knobs(id, route).into_iter().map(|k| k.1);
+        for h in knobs.chain(ends) {
+            if (h.x - at.x).abs() < size && (h.y - at.y).abs() < size {
+                at.y = if h.y < at.y { h.y + size } else { h.y - size };
+            }
+        }
+        Some(at)
     }
 
     /// The pointer as an edge's handle takes it: onto a shape's middle or the route's points
@@ -485,16 +540,13 @@ impl DiagramView {
         let p = self.page_at(x, y);
         let name = match imp.tool.get() {
             Tool::Select => {
-                let grip = match imp.selection.borrow().as_slice() {
-                    [id] => self.grip_at(&sheet, id, p).map(|g| (g, sheet.rotation(id))),
-                    _ => None,
-                };
-                let elbow = match imp.selection.borrow().as_slice() {
-                    [id] => sheet.edge_kind(id),
-                    _ => None,
-                };
+                let selection = imp.selection.borrow().clone();
+                let grip = self.grip_under(&sheet, &selection, p);
+                let elbow = grip.as_ref().and_then(|(id, _)| sheet.edge_kind(id));
+                let grip = grip.map(|(id, g)| (g, sheet.rotation(&id)));
                 match grip {
                     Some((Grip::End(_), _)) => Some("pointer"),
+                    Some((Grip::Label, _)) => Some("move"),
                     Some((Grip::Knob(knob), _)) => Some(knob_cursor(knob, elbow)),
                     Some((Grip::Rotate, _)) => Some("grab"),
                     // A turned handle shows the cursor of the way it now points.
