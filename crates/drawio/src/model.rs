@@ -166,6 +166,12 @@ impl Page {
             .unwrap_or(10.0)
     }
 
+    /// The grid a drag snaps to: `None` where the page has it off (`grid="0"`, draw.io's
+    /// `gridEnabled`, Editor.js 1379-1393).
+    pub fn grid(&self) -> Option<f64> {
+        (self.model_attr("grid") != Some("0")).then(|| self.grid_size())
+    }
+
     pub fn cell(&self, id: &str) -> Option<&Cell> {
         self.cells.iter().find(|c| c.id == id)
     }
@@ -476,6 +482,17 @@ mod tests {
         assert_eq!(p.grid_size(), 10.0);
         assert_eq!(p.background(), None);
         assert_eq!(p.name(), "Page-1");
+    }
+
+    #[test]
+    fn a_page_with_the_grid_off_snaps_to_nothing() {
+        let mut p = Page::blank("P", "x");
+        p.set_model_attr("gridSize", Some("20"));
+        assert_eq!(p.grid(), Some(20.0));
+        p.set_model_attr("grid", None);
+        assert_eq!(p.grid(), Some(20.0), "draw.io's default is on");
+        p.set_model_attr("grid", Some("0"));
+        assert_eq!(p.grid(), None);
     }
 
     #[test]

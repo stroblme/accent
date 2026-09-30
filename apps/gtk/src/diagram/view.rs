@@ -450,14 +450,14 @@ impl DiagramView {
     /// A move of the selection from `from` to `to`, on the grid unless `free`.
     fn move_delta(&self, from: Point, to: Point, origin: Point, free: bool) -> Point {
         let raw = Point::new(to.x - from.x, to.y - from.y);
-        match (free, self.sheet()) {
-            (false, Some(sheet)) => geometry::snap_move(origin, raw, sheet.grid),
-            _ => raw,
+        match self.grid(free) {
+            Some(grid) => geometry::snap_move(origin, raw, grid),
+            None => raw,
         }
     }
 
     fn grid(&self, free: bool) -> Option<f64> {
-        self.sheet().filter(|_| !free).map(|s| s.grid)
+        self.sheet().filter(|_| !free).and_then(|s| s.grid)
     }
 
     /// What a drag that ends at widget `(x, y)` asks for.

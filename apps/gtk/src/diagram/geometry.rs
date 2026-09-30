@@ -351,7 +351,8 @@ pub struct Sheet {
     pub bounds: Vec<Rect>,
     /// The page and the drawing together, which is what the canvas scrolls over.
     pub extent: Rect,
-    pub grid: f64,
+    /// The grid a drag snaps to, `None` where the page has it off.
+    pub grid: Option<f64>,
     /// Each cell's parent, up to but not including its layer.
     parents: HashMap<CellId, CellId>,
     /// The rectangle of every vertex, absolute and unrotated: what resizing works on.
@@ -389,7 +390,7 @@ impl Sheet {
             scene,
             bounds,
             extent,
-            grid: page.grid_size(),
+            grid: page.grid(),
             ..Sheet::default()
         };
         for cell in &page.cells {
