@@ -81,12 +81,12 @@ pub fn copy(page: &Page, ids: &[CellId], drawn: &Scene) -> String {
     xml::write_model(&out)
 }
 
-/// The diagram in clipboard text, as draw.io's Paste finds one (`EditorUi.pasteCells`,
-/// `extractGraphModelFromHtml`, `isCompatibleString`): the XML of a model, a page or a file —
-/// as written, URI-encoded as draw.io's own Copy leaves it, or escaped inside HTML. A file's
-/// first page. `None` for anything else, which pastes as text.
+/// The pages of the diagram in clipboard text, as draw.io's Paste finds one
+/// (`EditorUi.pasteCells`, `extractGraphModelFromHtml`, `isCompatibleString`): the XML of a
+/// model or a page (one page), or of a file (its pages) — as written, URI-encoded as draw.io's
+/// own Copy leaves it, or escaped inside HTML. None for anything else, which pastes as text.
 // diagramly/EditorUi.js 20600-20760, 1535-1575; grapheditor/EditorUi.js 6949-6975
-pub fn diagram_in(text: &str) -> Option<Page> {
+pub fn pages_in(text: &str) -> Vec<Page> {
     let text = xml::zap_gremlins(text.trim());
     let unescape = |t: &str| {
         t.replace("&gt;", ">")
@@ -110,7 +110,7 @@ pub fn diagram_in(text: &str) -> Option<Page> {
         .flatten()
         .filter(|t| t.starts_with('<'))
         .find_map(|t| xml::parse(t.as_bytes()).ok())
-        .and_then(|file| file.pages.into_iter().next())
+        .map_or(Vec::new(), |file| file.pages)
 }
 
 /// Plain text as the HTML label of the text cell it pastes as: what it says, each line its own.
@@ -153,7 +153,7 @@ mod tests {
         // a and the edge, not b: the edge lets go of b at its end.
         let xml = copy(&page, &["e".into(), "a".into()], &drawn);
         assert!(xml.starts_with("<mxGraphModel>"), "{xml}");
-        let back = diagram_in(&xml).expect("our own copy reads back");
+        let back = pages_in(&xml).pop().expect("our own copy reads back");
         let ids: Vec<&str> = back.cells.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["0", "1", "2", "3"]);
         let edge = back.cell("3").unwrap();
@@ -175,16 +175,16 @@ mod tests {
                 b => (b as char).to_string(),
             })
             .collect();
-        assert_eq!(diagram_in(&encoded).map(|p| p.cells.len()), Some(4));
+        assert_eq!(pages_in(&encoded)[0].cells.len(), 4);
         let html = format!(
             "<div>{}</div>",
             xml.replace("<mxGraphModel>", "<mxGraphModel dx=\"0\">")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;")
         );
-        assert_eq!(diagram_in(&html).map(|p| p.cells.len()), Some(4));
-        assert!(diagram_in("just words").is_none());
+        assert_eq!(pages_in(&html)[0].cells.len(), 4);
+        assert!(pages_in("just words").is_empty());
         assert_eq!(text_label("a < b\r\nc\n"), "a &lt; b<br>c");
-        assert!(diagram_in("<p>html</p>").is_none());
+        assert!(pages_in("<p>html</p>").is_empty());
     }
 }
