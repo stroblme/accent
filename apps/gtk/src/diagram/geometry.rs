@@ -695,10 +695,7 @@ impl Sheet {
         let cell = self.page.cell(id).filter(|c| c.edge)?;
         let style = cell.style.resolve(true);
         let is_loop = cell.source.is_some() && cell.source == cell.target;
-        let kind = handle::kind(&style, is_loop);
-        // ponytail: a straight edge's bends and virtual bends come with the next change.
-        let staged = !matches!(kind, Kind::Bends { .. });
-        (style.get("bendable") != Some("0") && staged).then_some(kind)
+        (style.get("bendable") != Some("0")).then(|| handle::kind(&style, is_loop))
     }
 
     /// Edge `id`'s waypoints, absolute.
