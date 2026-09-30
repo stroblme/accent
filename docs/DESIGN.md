@@ -184,7 +184,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Each lane is named after its first decorated commit and handed down first parents (the stash names none), and a commit where other named lanes end says "side branched here". That is the graph's own reading, with no git call of its own, so a branch that has not diverged shares its lane and forks nowhere.
 - A commit row carries Check Out Commit and Copy Commit ID on hover and `:focus-within`, so the summary has the pane's width otherwise; two actions are two buttons, not a menu. Check Out is `git switch --detach`, unasked, git refusing it where work would be lost; moving onto a branch is the popover's job.
 - Hovering a commit shows its decorations, short id, lane ("On main") and whole message, from what the log already fetched.
-- One commit is expanded at a time, and a refresh closes it only where the history moved, so an expanded commit and what Load More added survive the save that scheduled the refresh.
+- One commit is expanded at a time, and a refresh closes it only where the history moved, so an expanded commit and what Load More added survive the save that scheduled the refresh. A refresh reads as many commits as are shown, so what Load More added survives a history that moved too, at the price of a bigger `git log` on every save once it was used.
 - A refresh leaves both lists where they are, as the tree does (Files): a Stage click takes its row out of Changes and the keyboard to the row now in its place.
 
 ### Editor

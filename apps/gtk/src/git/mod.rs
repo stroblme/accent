@@ -56,7 +56,7 @@ pub enum Depth {
 /// The changes list gets the top half of the pane, the log the bottom.
 pub const GIT_SHARE: (i32, i32) = (1, 2);
 
-/// One page of history: what a refresh reads, and what Load More adds.
+/// One page of history: what Load More adds, and what a refresh reads until it has.
 const PAGE: usize = 200;
 
 /// How long the pane waits after being poked before asking git again. Long enough that a burst of
@@ -158,7 +158,7 @@ struct Seen {
 impl State {
     /// Make `at` the selected repository, setting aside what is held about the one it replaces
     /// and bringing back what was set aside for `at`: nothing, the first time. The history keeps
-    /// its first page alone, which is what a refresh reads.
+    /// its first page alone, so the refresh a pick asks for reads one page.
     fn pick(&mut self, at: usize) {
         let mut commits = std::mem::take(&mut self.commits);
         commits.truncate(PAGE);
@@ -661,14 +661,17 @@ impl Panel {
         }
         self.busy.set(true);
         let vault = self.hooks.vault.clone();
-        let (selected, known) = {
+        // As many commits as are shown, so the pages a Load More brought in outlive a history
+        // that moved: a bigger `git log` on every save, but only once Load More was used.
+        let (selected, known, rows) = {
             let state = self.state.borrow();
-            (state.selected, state.repos.clone())
+            let rows = state.commits.len().max(PAGE);
+            (state.selected, state.repos.clone(), rows)
         };
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let fetched = crate::work::off_thread("git", move || {
-                fetch::fetch(&vault, selected, depth, known)
+                fetch::fetch(&vault, selected, depth, known, rows)
             })
             .await;
             panel.busy.set(false);
@@ -784,7 +787,7 @@ impl Panel {
             "git refresh landed"
         );
         if let Some(page) = page {
-            self.has_more.set(page.len() >= PAGE);
+            self.has_more.set(page.len() >= fetched.rows);
             self.fill_log(page, 0);
         }
         (self.hooks.changed)();
@@ -1750,7 +1753,7 @@ mod tests {
 
         state.commits = vec![commit("b0")];
         state.pick(0);
-        // The first page is what a refresh reads, so Load More's pages are not kept.
+        // Load More's pages are not kept for a repository set aside.
         assert_eq!(state.commits.len(), PAGE);
         assert_eq!(state.commits[0].id, "a0");
         assert_eq!(state.submodules.len(), 1);
