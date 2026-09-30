@@ -1430,6 +1430,7 @@ impl App {
         for diagram in self.diagrams() {
             diagram.set_spellcheck(config.spellcheck);
             diagram.set_font(config.editor_font.as_deref());
+            diagram.set_options(config.diagram);
         }
         if let Some(git) = self.git.get() {
             git.set_tree(config.git_tree);

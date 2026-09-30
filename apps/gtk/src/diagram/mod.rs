@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use accent_core::config::DiagramPlace;
+use accent_core::config::{DiagramConfig, DiagramPlace};
 use accent_core::fs::Etag;
 use accent_drawio::{CellId, Editor, File, Point};
 use adw::prelude::*;
@@ -27,7 +27,7 @@ use gtk::{gdk, gio, glib};
 
 use crate::editor::{SaveState, Saves};
 use geometry::{Sheet, Zoom};
-pub use tools::{Options, Tool};
+pub use tools::Tool;
 use view::{DiagramView, Edit};
 
 /// How long after the last edit the file is written: a note's autosave.
@@ -72,7 +72,8 @@ pub struct DiagramTab {
     page_index: Cell<usize>,
     selection: RefCell<Vec<CellId>>,
     tool: Cell<Tool>,
-    options: Cell<Options>,
+    /// How the tools draw: the config's `[diagram]`, which the ring's outer orbit changes.
+    options: Cell<DiagramConfig>,
     /// What a note's tab keeps about its file, so the save path is the same one (`save.rs`).
     pub save: SaveState,
     save_pending: Cell<bool>,
@@ -90,6 +91,7 @@ pub struct DiagramTab {
     on_autosave: Hook,
     on_image: Hook,
     on_banner: Hook,
+    on_options: Hook,
 }
 
 /// A new tab of `tabs` showing `file` as it was read, at its etag, where the session last left
@@ -150,7 +152,7 @@ pub fn open(
         page_index: Cell::new(place.page.min(pages.saturating_sub(1))),
         selection: RefCell::new(Vec::new()),
         tool: Cell::new(Tool::Select),
-        options: Cell::new(Options::default()),
+        options: Cell::new(DiagramConfig::default()),
         save: SaveState::at(etag),
         save_pending: Cell::new(false),
         monitor: RefCell::new(None),
@@ -163,6 +165,7 @@ pub fn open(
         on_autosave: RefCell::new(None),
         on_image: RefCell::new(None),
         on_banner: RefCell::new(None),
+        on_options: RefCell::new(None),
     });
     if has_math {
         tab.view.set_typesetter(math::Typesetter::new(&tab.overlay));
@@ -202,7 +205,10 @@ pub fn open(
     tab.ring.connect_options(glib::clone!(
         #[weak]
         tab,
-        move |options| tab.options.set(options)
+        move |options| {
+            tab.options.set(options);
+            tab.emit(&tab.on_options);
+        }
     ));
     tab.banner.connect_button_clicked(glib::clone!(
         #[weak]
@@ -324,6 +330,16 @@ impl DiagramTab {
         self.tool.set(tool);
         self.view.set_tool(tool);
         self.ring.set_tool(tool);
+    }
+
+    pub fn options(&self) -> DiagramConfig {
+        self.options.get()
+    }
+
+    /// Draw with `options`: the config's, on opening and whenever a diagram's ring changed them.
+    pub fn set_options(&self, options: DiagramConfig) {
+        self.options.set(options);
+        self.ring.set_options(options);
     }
 
     pub fn ring_shown(&self) -> bool {
@@ -1059,6 +1075,11 @@ impl DiagramTab {
     /// The Image tool was picked: the window asks for a file.
     pub fn connect_image(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
         *self.on_image.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// The ring's outer orbit changed how the tools draw.
+    pub fn connect_options(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
+        *self.on_options.borrow_mut() = Some(Rc::new(f));
     }
 
     /// The changed-on-disk banner's button.
