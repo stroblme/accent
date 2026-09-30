@@ -98,7 +98,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 -- cache; the ranked path is what the sidebar takes on every keystroke, and it had to stay put:
 --
 --     index file                                  241.0 → 258.5 MiB
---     first index, whole vault                     13.6 → 31.3 s
+--     first index, whole vault                      7.5 → 12.1 s    (13.6 → 31.3 s, note by note)
 --     reconcile with nothing changed                172 → 187 ms
 --     ranked query, 1 / 2 / 5 characters        38/30/32 → 38/30/34 ms
 --     ranked query, two words                        62 → 61 ms
@@ -106,12 +106,14 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 --     mid-word query, a needle in 331 bodies          — → 142 ms
 --     a query nothing holds at all                    0 → 2 ms
 --
--- The 18 s is the whole of the price and it is CPU, not IO: 110 MB of body tokenized a second
--- time, three characters at a step. It is not the transaction size (500 files a batch measures
--- the same as 250) and not the page cache (64 MiB of it measures the same as the 2 MiB default),
--- so there is no knob left to turn — only the vault the walk decides to read. Growth is bounded
--- by the text and not by the vocabulary, which is why the index grows 7% where a term index of
--- the same bodies grows 30%.
+-- The 4.6 s is CPU, not IO: 110 MB of body tokenized a second time, three characters at a step.
+-- It was 18 s while every note's body was a statement of its own, FTS5 writing a segment per
+-- note at each statement savepoint and merging them back; a batch's bodies are one statement now
+-- (`reconcile::write_bodies`, 2026-09-30). Neither the transaction size (500 files a batch
+-- measures the same as 250), the page cache (64 MiB of it measures the same as the 2 MiB
+-- default), nor FTS5's `hashsize` or `automerge` moves what is left. Growth is bounded by the
+-- text and not by the vocabulary, which is why the index grows 7% where a term index of the same
+-- bodies grows 30%.
 CREATE VIRTUAL TABLE notes_tri USING fts5(
     body, title, content='notes', content_rowid='file_id',
     tokenize='trigram', detail='none', columnsize=0
@@ -148,6 +150,13 @@ CREATE INDEX idx_files_devino   ON files(dev, ino);
 CREATE INDEX idx_files_parent   ON files(parent_dir);
 CREATE INDEX idx_files_kind_mt  ON files(kind, mtime_ns DESC);
 CREATE INDEX idx_aliases_file   ON aliases(file_id);
+"#;
+
+/// The `notes` rows a transaction rewrites, waiting to be written together
+/// (`reconcile::write_bodies`): each file's new body, or `NULL` where it has none now. A temp
+/// table, so it is the connection's own and never in the file.
+pub(super) const BODIES: &str = r#"
+CREATE TEMP TABLE bodies(file_id INTEGER PRIMARY KEY, body TEXT, title TEXT);
 "#;
 
 pub(super) const DROP_ALL: &str = r#"
