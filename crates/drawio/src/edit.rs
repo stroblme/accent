@@ -163,11 +163,7 @@ impl Editor {
         })
     }
 
-    /// Move cells by (`dx`, `dy`): a vertex by its position, an edge by its waypoints and end
-    /// points. A cell inside another that moves goes with it, and so does an edge whose both
-    /// ends move. A label on an edge stays where it is along the edge. An edge moved without the
-    /// shape one of its ends is on lets go of that shape, the end staying where it is drawn and
-    /// moving with the rest, as mxGraph's `disconnectOnMove` has it.
+    /// [`move_cells`] on page `page`.
     pub fn move_cells(
         &mut self,
         page: usize,
@@ -175,40 +171,12 @@ impl Editor {
         dx: f64,
         dy: f64,
     ) -> Result<(), Error> {
-        self.edit(page, |p, _| {
-            check(p, ids)?;
-            let top: HashSet<CellId> = topmost(p, ids).into_iter().collect();
-            let moved = with_subtrees(p, top.iter().cloned());
-            disconnect(p, &top, &moved);
-            let moves = |end: &Option<CellId>| end.as_ref().is_some_and(|id| moved.contains(id));
-            for cell in &mut p.cells {
-                let between = cell.edge
-                    && !moved.contains(&cell.id)
-                    && moves(&cell.source)
-                    && moves(&cell.target);
-                if (top.contains(&cell.id) || between)
-                    && let Some(g) = &mut cell.geometry
-                {
-                    translate(g, dx, dy);
-                }
-            }
-            Ok(())
-        })
+        self.edit(page, |p, _| move_cells(p, ids, dx, dy))
     }
 
-    /// Give vertex `id` the absolute rectangle `rect`.
+    /// [`resize`] on page `page`.
     pub fn resize(&mut self, page: usize, id: &str, rect: Rect) -> Result<(), Error> {
-        self.edit(page, |p, _| {
-            check(p, [id])?;
-            p.absolute_rect(id)
-                .ok_or(Error::Refused("only a shape can be resized"))?;
-            let origin = p.origin_of(id);
-            if let Some(g) = p.cell_mut(id).and_then(|c| c.geometry.as_mut()) {
-                (g.x, g.y) = (rect.x - origin.x, rect.y - origin.y);
-                (g.width, g.height) = (rect.w, rect.h);
-            }
-            Ok(())
-        })
+        self.edit(page, |p, _| resize(p, id, rect))
     }
 
     /// Set (or with `None` remove) one style key on every cell in `ids`, as one step.
@@ -222,22 +190,14 @@ impl Editor {
         self.set_styles(page, ids, &[(key, value)])
     }
 
-    /// Several style keys at once, as one step: a connector's route is two of them.
+    /// [`set_styles`] on page `page`, as one step.
     pub fn set_styles(
         &mut self,
         page: usize,
         ids: &[CellId],
         pairs: &[(&str, Option<&str>)],
     ) -> Result<(), Error> {
-        self.edit(page, |p, _| {
-            for id in ids {
-                let style = &mut cell_mut(p, id)?.style;
-                for (key, value) in pairs {
-                    style.set(key, *value);
-                }
-            }
-            Ok(())
-        })
+        self.edit(page, |p, _| set_styles(p, ids, pairs))
     }
 
     /// Replace a cell's whole style string.
@@ -490,6 +450,91 @@ impl Editor {
             }
         }
     }
+}
+
+// The edits a drag previews, as functions of a page: the editor applies them to the page in
+// the file as one undo step, and the canvas to a copy of it while the drag is under way.
+
+/// Move cells by (`dx`, `dy`): a vertex by its position, an edge by its waypoints and end
+/// points. A cell inside another that moves goes with it, and so does an edge whose both ends
+/// move. A label on an edge stays where it is along the edge. An edge moved without the shape
+/// one of its ends is on lets go of that shape, the end staying where it is drawn and moving
+/// with the rest, as mxGraph's `disconnectOnMove` has it.
+pub fn move_cells(page: &mut Page, ids: &[CellId], dx: f64, dy: f64) -> Result<(), Error> {
+    start_move(page, ids)?.shift(page, dx, dy);
+    Ok(())
+}
+
+/// The first half of [`move_cells`], the part that does not depend on how far: check `ids` and
+/// let the edges among them go of the shapes they leave. Letting go routes the page, so a drag
+/// does it once and [`Moving::shift`]s a copy of the result on each frame.
+pub fn start_move(page: &mut Page, ids: &[CellId]) -> Result<Moving, Error> {
+    check(page, ids)?;
+    let top: HashSet<CellId> = topmost(page, ids).into_iter().collect();
+    let moved = with_subtrees(page, top.iter().cloned());
+    disconnect(page, &top, &moved);
+    let moves = |end: &Option<CellId>| end.as_ref().is_some_and(|id| moved.contains(id));
+    let between = page
+        .cells
+        .iter()
+        .filter(|c| c.edge && !moved.contains(&c.id) && moves(&c.source) && moves(&c.target));
+    let between: Vec<CellId> = between.map(|c| c.id.clone()).collect();
+    Ok(Moving {
+        count: moved.len(),
+        shifted: top.into_iter().chain(between).collect(),
+    })
+}
+
+/// A move [`start_move`] prepared.
+#[derive(Debug, Clone)]
+pub struct Moving {
+    /// The cells whose geometry a move shifts: the topmost moved cells, and the edges between
+    /// two of them.
+    shifted: HashSet<CellId>,
+    /// How many cells move, those inside the moved ones included.
+    pub count: usize,
+}
+
+impl Moving {
+    /// The second half of [`move_cells`]: shift the moved cells by (`dx`, `dy`).
+    pub fn shift(&self, page: &mut Page, dx: f64, dy: f64) {
+        for cell in &mut page.cells {
+            if self.shifted.contains(&cell.id)
+                && let Some(g) = &mut cell.geometry
+            {
+                translate(g, dx, dy);
+            }
+        }
+    }
+}
+
+/// Give vertex `id` the absolute rectangle `rect`.
+pub fn resize(page: &mut Page, id: &str, rect: Rect) -> Result<(), Error> {
+    check(page, [id])?;
+    page.absolute_rect(id)
+        .ok_or(Error::Refused("only a shape can be resized"))?;
+    let origin = page.origin_of(id);
+    if let Some(g) = page.cell_mut(id).and_then(|c| c.geometry.as_mut()) {
+        (g.x, g.y) = (rect.x - origin.x, rect.y - origin.y);
+        (g.width, g.height) = (rect.w, rect.h);
+    }
+    Ok(())
+}
+
+/// Set (or with `None` remove) several style keys on every cell in `ids`: a connector's route
+/// is two of them.
+pub fn set_styles(
+    page: &mut Page,
+    ids: &[CellId],
+    pairs: &[(&str, Option<&str>)],
+) -> Result<(), Error> {
+    for id in ids {
+        let style = &mut cell_mut(page, id)?.style;
+        for (key, value) in pairs {
+            style.set(key, *value);
+        }
+    }
+    Ok(())
 }
 
 /// `NoCell` for the first of `ids` that is not on `page`.
@@ -763,6 +808,26 @@ mod tests {
             (cell.source.as_deref(), cell.target.as_deref()),
             (Some("a"), None)
         );
+    }
+
+    #[test]
+    fn a_move_started_once_shifts_as_move_cells_does() {
+        let page = editor().page(0).unwrap().clone();
+        let ids = list(&["a", "e"]);
+        let (mut started, mut whole) = (page.clone(), page.clone());
+        let moving = start_move(&mut started, &ids).unwrap();
+        assert_eq!(moving.count, 2);
+        for (dx, dy) in [(10.0, 5.0), (-30.0, 20.0)] {
+            let mut shifted = started.clone();
+            moving.shift(&mut shifted, dx, dy);
+            let mut moved = page.clone();
+            move_cells(&mut moved, &ids, dx, dy).unwrap();
+            assert_eq!(shifted, moved);
+        }
+        assert!(matches!(
+            start_move(&mut whole, &list(&["nope"])),
+            Err(Error::NoCell(_))
+        ));
     }
 
     #[test]
