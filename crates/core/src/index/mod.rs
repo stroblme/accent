@@ -72,6 +72,12 @@ pub struct ReconcileStats {
     /// is in it is right, what is missing is still on disk. The next reconcile is a diff, so it
     /// finishes the remainder rather than starting over — which is why stopping is a pause.
     pub stopped: bool,
+    /// The files, directories aside, whose rows the walk wrote: what a tab open on one may have
+    /// read before the walk did. The watcher's news of such a change comes after the walk took
+    /// it in, and reads as no change, so this is the only word of it. Not serialized: the vault's
+    /// worker reports each as a `FileChanged` event of its own.
+    #[serde(skip)]
+    pub changed: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

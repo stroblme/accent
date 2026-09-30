@@ -445,7 +445,12 @@ impl Worker {
         }
         self.rebuild_watcher();
         match stats {
-            Ok(stats) => {
+            Ok(mut stats) => {
+                // What the walk took in before the watcher's news of it could arrive, which then
+                // reads as no change (`Worker::update`): an open tab hears of it here or never.
+                for rel in std::mem::take(&mut stats.changed) {
+                    self.emit(Event::FileChanged(rel));
+                }
                 // Emitted for a stopped walk too, carrying `stopped`: it is what tells the window
                 // it is looking at a partial index rather than a finished one.
                 self.emit(Event::Reconciled(stats));
@@ -626,7 +631,8 @@ impl Worker {
                     self.emit(Event::FileChanged(rel.to_string()));
                 }
             }
-            // `Unchanged` is the watcher echoing our own save back at us.
+            // `Unchanged` is the watcher echoing our own save back at us, or a change a walk took
+            // in first and reported itself (`ReconcileStats::changed`).
             Ok(Change::Unchanged) => {}
             // Out of the index, but not out of the tree, which lists a gitignored folder or a
             // `node_modules` beside the notes: its folder's listing changed all the same.
@@ -827,6 +833,35 @@ mod tests {
         };
         assert!(!stats.stopped);
         assert_eq!(vault.file_paths(false).unwrap().len(), notes);
+    }
+
+    /// A change a walk takes in before the watcher reports it reads as no change to the watcher,
+    /// so the walk itself tells whoever has the file open. Unwatched: only the walk can say it.
+    #[test]
+    fn a_file_a_walk_finds_changed_is_reported_as_changed() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Note.md"), "old\n").unwrap();
+        std::fs::write(root.path().join("Other.md"), "same\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let (vault, events) = crate::Vault::open_unwatched_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        assert!(wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+
+        std::fs::write(root.path().join("Note.md"), "new text\n").unwrap();
+        vault.rescan().unwrap();
+        let mut changed = Vec::new();
+        loop {
+            match events.recv_timeout(BUDGET).expect("no reconcile") {
+                Event::FileChanged(rel) => changed.push(rel),
+                Event::Reconciled(_) => break,
+                _ => {}
+            }
+        }
+        assert_eq!(changed, ["Note.md"]);
     }
 
     /// Depends on real inotify events.

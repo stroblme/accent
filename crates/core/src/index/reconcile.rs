@@ -184,9 +184,13 @@ impl Index {
                     break;
                 }
                 let touched = stats.touched;
-                upsert(&tx, &scan.files[job.idx], job.existing_id, &mut stats)?;
+                let f = &scan.files[job.idx];
+                upsert(&tx, f, job.existing_id, &mut stats)?;
                 if stats.touched == touched {
-                    changed.push(&scan.files[job.idx].rel_path);
+                    changed.push(&f.rel_path);
+                }
+                if f.kind != FileKind::Dir {
+                    stats.changed.push(f.rel_path.clone());
                 }
                 done += 1;
             }
