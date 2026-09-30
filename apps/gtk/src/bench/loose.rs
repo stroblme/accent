@@ -7,7 +7,7 @@ use super::*;
 const DIR: &str = "loose-drill";
 
 /// See `ACCENT_BENCH_TABS=loose:` in `mod.rs`.
-pub(super) fn bench_loose(app: &Rc<App>) {
+pub(super) fn bench_loose(app: &Rc<App>, pdf: &str) {
     // A window with no vault is one this drill opened, which runs the hooks as well.
     let Some(vault) = app.vault().cloned() else {
         return;
@@ -26,7 +26,8 @@ pub(super) fn bench_loose(app: &Rc<App>) {
         .and_then(|_| std::fs::write(dir.join("n/dot.png"), png(4, 3)))
         .and_then(|_| std::fs::write(dir.join("n/sub/dot.png"), png(4, 3)))
         .and_then(|_| std::fs::write(dir.join("above.png"), png(4, 3)))
-        .and_then(|_| std::os::unix::fs::symlink("../above.png", dir.join("n/out.png")));
+        .and_then(|_| std::os::unix::fs::symlink("../above.png", dir.join("n/out.png")))
+        .and_then(|_| std::fs::copy(vault.root().join(pdf), dir.join("p.pdf")).map(drop));
     if let Err(e) = written {
         println!("bench loose cannot write {note}: {e}");
         return bench_quit(app);
@@ -54,9 +55,69 @@ pub(super) fn bench_loose(app: &Rc<App>) {
                 );
             }
         }
+        // A PDF and an image open here and in windows of their own, each written from outside
+        // the window of its own, and what that window shows after.
+        let (image, pdf) = (format!("{DIR}/n/dot.png"), format!("{DIR}/p.pdf"));
+        app.open_path(&pdf);
+        let (shown, read) = (
+            opened_apart(&app, &image).await,
+            opened_apart(&app, &pdf).await,
+        );
+        if let (Some(shown), Some(read)) = (shown, read) {
+            let size = || {
+                let key = app.root().join(&image).to_string_lossy().into_owned();
+                let doc = shown.doc_for(&key)?;
+                let Doc::Image(viewer) = doc else { return None };
+                let (_, texture) = viewer.image.borrow().clone()?;
+                Some(format!("{}x{}", texture.width(), texture.height()))
+            };
+            println!("bench loose_image before size={:?}", size());
+            let _ = std::fs::write(dir.join("n/dot.png"), png(6, 5));
+            until(|| size().as_deref() == Some("6x5"), 3000).await;
+            println!("bench loose_image after size={:?}", size());
+            let pages = |app: &Rc<App>, key: &str| app.doc_for(key)?.pdf().map(|p| p.page_count());
+            let key = app.root().join(&pdf).to_string_lossy().into_owned();
+            until(
+                || pages(&app, &pdf) > Some(0) && pages(&read, &key) > Some(0),
+                5000,
+            )
+            .await;
+            let before = pages(&read, &key);
+            if let Some(tab) = app.doc_for(&pdf).and_then(|doc| doc.pdf().cloned()) {
+                tab.add_page(true);
+            }
+            until(|| pages(&read, &key) != before, 8000).await;
+            println!(
+                "bench loose_pdf pages={before:?}->{:?} here={:?}",
+                pages(&read, &key),
+                pages(&app, &pdf)
+            );
+            // And back: a page added there, whose own write its monitor reports too.
+            let before = pages(&app, &pdf);
+            if let Some(tab) = read.doc_for(&key).and_then(|doc| doc.pdf().cloned()) {
+                tab.add_page(true);
+            }
+            until(|| pages(&app, &pdf) != before, 8000).await;
+            glib::timeout_future(Duration::from_millis(1000)).await;
+            println!(
+                "bench loose_pdf back here={before:?}->{:?} there={:?}",
+                pages(&app, &pdf),
+                pages(&read, &key)
+            );
+        }
         let _ = std::fs::remove_dir_all(dir);
         bench_quit(&app);
     });
+}
+
+/// Wait for `done`, up to `ms`.
+async fn until(done: impl Fn() -> bool, ms: u64) {
+    for _ in 0..ms / 50 {
+        if done() {
+            return;
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
 }
 
 /// The window Open in New Window on `rel`'s tree row builds, once the file has opened there.

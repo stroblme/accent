@@ -362,6 +362,7 @@ impl App {
         ));
         let page = pdf.page.clone();
         self.mark_loose(&page, key);
+        *pdf.monitor.borrow_mut() = self.watch_loose(key, path);
         let reader = Rc::downgrade(&pdf);
         self.watch_folder_of(key);
         self.docs.borrow_mut().push(Doc::Pdf(pdf));
@@ -815,6 +816,7 @@ impl App {
             .child(&picture)
             .build();
         let image = self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic", how);
+        *image.monitor.borrow_mut() = self.watch_loose(key, path);
         // An SVG is drawn at the display's scale, so a window moved onto another display draws it
         // again (`show_image` asks for the scale with the look).
         let shown = Rc::downgrade(&image);
@@ -1420,6 +1422,24 @@ impl App {
 
     /// A tab on a file from outside this window's vault says so on its own tab, so saving it is
     /// never a surprise and it is obvious why it has no backlinks.
+    /// A monitor on a loose file, which nothing else watches: the vault's worker only reports on
+    /// its own tree. A write to it — another window's ink, a LaTeX run — reaches its PDF or image
+    /// tab as a change to a vault's file does (`changed_on_disk`). `None` for a file of the vault.
+    fn watch_loose(self: &Rc<Self>, key: &str, path: &Path) -> Option<gio::FileMonitor> {
+        if !doc::is_loose_key(key) {
+            return None;
+        }
+        let key = key.to_string();
+        editor::watch_file(
+            path,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || app.changed_on_disk(&key)
+            ),
+        )
+    }
+
     pub(crate) fn mark_loose(&self, page: &adw::TabPage, key: &str) {
         if self.vault.is_some() && doc::is_loose_key(key) {
             page.set_indicator_icon(Some(&gio::ThemedIcon::new("document-open-symbolic")));
