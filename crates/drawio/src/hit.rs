@@ -49,17 +49,21 @@ impl Scene {
 }
 
 /// Whether `prim` takes a click at `p`. A closed outline takes it anywhere inside, filled or
-/// not, as draw.io's `pointerEvents` default has it; any outline takes it on its stroke, which
-/// reaches half the stroke width or `tolerance`, whichever is more.
+/// not, as draw.io's `pointerEvents` default has it, and so does an open one that is filled, as
+/// a swimlane's title is; any outline takes it on its stroke, which reaches half the stroke
+/// width or `tolerance`, whichever is more.
 fn hits(prim: &Prim, p: Point, tolerance: f64) -> bool {
     match prim {
-        Prim::Path { path, stroke, .. } => {
+        Prim::Path {
+            path, stroke, fill, ..
+        } => {
             let lines = geom::flatten(path);
             let reach = stroke
                 .as_ref()
                 .map_or(0.0, |s| s.width / 2.0)
                 .max(tolerance);
-            (path.contains(&PathCmd::Close) && inside(&lines, p)) || near(&lines, p, reach)
+            let area = fill.is_some() || path.contains(&PathCmd::Close);
+            (area && inside(&lines, p)) || near(&lines, p, reach)
         }
         Prim::Text {
             rect,

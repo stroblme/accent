@@ -1,4 +1,4 @@
-// Derived from draw.io src/main/webapp/mxgraph/src/view/mxEdgeStyle.js, mxGraphView.js, mxGraph.js and src/main/webapp/mxgraph/src/shape/mxShape.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
+// Derived from draw.io src/main/webapp/mxgraph/src/view/mxEdgeStyle.js, mxGraphView.js, mxGraph.js, src/main/webapp/mxgraph/src/shape/mxShape.js and js/grapheditor/Graph.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
 //! Edge routing: from the two ends, the style and the waypoints to the points an edge is drawn
 //! through.
 //!
@@ -11,7 +11,8 @@
 use crate::geom::{self, Point, Rect};
 use crate::marker::DEFAULT_MARKERSIZE;
 use crate::model::{Cell, Page};
-use crate::perimeter::PerimeterKind;
+use crate::perimeter::Outline;
+use crate::shapes;
 use crate::style::{Resolved, parse_num};
 
 /// A vertex an edge is attached to.
@@ -21,7 +22,7 @@ pub struct Terminal {
     pub bounds: Rect,
     /// Degrees, about the centre of `bounds`.
     pub rotation: f64,
-    pub perimeter: PerimeterKind,
+    pub outline: Outline,
     /// The terminal's own `perimeterSpacing`.
     pub perimeter_spacing: f64,
 }
@@ -35,7 +36,7 @@ impl Terminal {
         Some(Terminal {
             bounds,
             rotation: style.num("rotation", 0.0),
-            perimeter: PerimeterKind::named(style.get("perimeter")),
+            outline: Outline::of(&style),
             perimeter_spacing: style.num("perimeterSpacing", 0.0),
         })
     }
@@ -110,61 +111,13 @@ pub struct Constraint {
     pub perimeter: bool,
 }
 
-/// A constraint on the outline at (`x`, `y`) of the bounds, with no offset.
-const fn on_outline(x: f64, y: f64) -> Constraint {
-    Constraint {
-        point: Point::new(x, y),
-        dx: 0.0,
-        dy: 0.0,
-        perimeter: true,
-    }
-}
-
-/// `mxRectangleShape.prototype.constraints`: the corners and the quarters of each side.
-// Shapes.js 9092-9107
-const RECTANGLE_CONSTRAINTS: [Constraint; 16] = [
-    on_outline(0.0, 0.0),
-    on_outline(0.25, 0.0),
-    on_outline(0.5, 0.0),
-    on_outline(0.75, 0.0),
-    on_outline(1.0, 0.0),
-    on_outline(0.0, 0.25),
-    on_outline(0.0, 0.5),
-    on_outline(0.0, 0.75),
-    on_outline(1.0, 0.25),
-    on_outline(1.0, 0.5),
-    on_outline(1.0, 0.75),
-    on_outline(0.0, 1.0),
-    on_outline(0.25, 1.0),
-    on_outline(0.5, 1.0),
-    on_outline(0.75, 1.0),
-    on_outline(1.0, 1.0),
-];
-
-/// `mxEllipse.prototype.constraints`: the corners, which land on the ellipse, and the middle of
-/// each side.
-// Shapes.js 9108-9111
-const ELLIPSE_CONSTRAINTS: [Constraint; 8] = [
-    on_outline(0.0, 0.0),
-    on_outline(1.0, 0.0),
-    on_outline(0.0, 1.0),
-    on_outline(1.0, 1.0),
-    on_outline(0.5, 0.0),
-    on_outline(0.5, 1.0),
-    on_outline(0.0, 0.5),
-    on_outline(1.0, 0.5),
-];
-
 /// The connection points of vertex `id`, draw.io's snap points: where an edge end can be
 /// pinned, each in page coordinates and turned with the shape, with the constraint that pins it
 /// there. Empty for an edge, a layer and an unknown id.
 ///
 /// A `points` style lists them; a list that does not parse gives none. Without one they are
-/// the shape's own: an ellipse's eight, a rectangle's sixteen.
+/// the shape's own ([`shapes::constraints`]), measured as it faces east.
 // Graph.getAllConnectionConstraints, Graph.js 18456-18519
-// ponytail: shapes whose points depend on their size (`getConstraints(style, w, h)`), stencils'
-// own points, the other shapes sharing the ellipse's table (`rhombus`, `doubleEllipse`, …) and
-// `direction` are not ported; they take the rectangle's sixteen.
 pub fn anchors(page: &Page, id: &str) -> Vec<(Point, Constraint)> {
     let Some(cell) = page.cell(id) else {
         return Vec::new();
@@ -173,10 +126,13 @@ pub fn anchors(page: &Page, id: &str) -> Vec<(Point, Constraint)> {
         return Vec::new();
     };
     let style = cell.style.resolve(false);
+    let (w, h) = match terminal.outline.direction.vertical() {
+        true => (terminal.bounds.h, terminal.bounds.w),
+        false => (terminal.bounds.w, terminal.bounds.h),
+    };
     let constraints = match style.get("points") {
         Some(list) => points_style(list).unwrap_or_default(),
-        None if style.shape() == "ellipse" => ELLIPSE_CONSTRAINTS.to_vec(),
-        None => RECTANGLE_CONSTRAINTS.to_vec(),
+        None => shapes::constraints(style.shape(), &style, w, h),
     };
     constraints
         .into_iter()
@@ -226,21 +182,42 @@ fn connection_constraint(style: &Resolved, source: bool) -> Option<Constraint> {
     })
 }
 
-/// Where a constraint pins an end: its point in the terminal's perimeter bounds, moved onto the
-/// outline if the constraint says so, then turned with the terminal.
-// mxGraph.getConnectionPoint, mxGraph.js 7227-7351; draw.io's Graph.getLegacyConnectionPoint is
-// the same without `direction` and flips.
+/// Where a constraint pins an end: its point in the terminal's perimeter bounds as the shape
+/// faces east, turned with its direction and moved onto the outline if the constraint says so,
+/// or else mirrored with its flips; then turned with the terminal. This is draw.io's default
+/// order (`legacyAnchorPoints`), which differs from how the shape itself is drawn.
+// Graph.getLegacyConnectionPoint, Graph.js 22831-22954
+// ponytail: `legacyAnchorPoints=0` (mxGraph.getConnectionPoint) and `anchorPointDirection=0` are
+// not read; the point is placed the default way.
 fn connection_point(t: &Terminal, c: &Constraint) -> Point {
-    let bounds = perimeter_bounds(t, 0.0);
-    // ponytail: `direction`, `flipH`/`flipV` and `anchorPointDirection` do not move the point.
+    let mut bounds = perimeter_bounds(t, 0.0);
+    let centre = bounds.centre();
+    let o = &t.outline;
+    let quarter = o.direction.degrees();
+    if o.direction.vertical() {
+        bounds = shapes::rotate90(bounds);
+    }
     let mut p = Point::new(
         bounds.x + c.point.x * bounds.w + c.dx,
         bounds.y + c.point.y * bounds.h + c.dy,
     );
+    let mut turn = t.rotation;
     if c.perimeter {
-        p = perimeter_point(t, p, false, 0.0);
+        p = perimeter_point(t, geom::rotate(p, centre, quarter), false, 0.0);
+    } else {
+        turn += quarter;
+        let (flip_h, flip_v) = match o.direction.vertical() {
+            true => (o.flip_v, o.flip_h),
+            false => (o.flip_h, o.flip_v),
+        };
+        if flip_h {
+            p.x = 2.0 * centre.x - p.x;
+        }
+        if flip_v {
+            p.y = 2.0 * centre.y - p.y;
+        }
     }
-    geom::rotate(p, bounds.centre(), t.rotation)
+    geom::rotate(p, centre, turn)
 }
 
 /// An end placed before routing: a constrained end on its terminal, or a dangling end's point.
@@ -271,8 +248,7 @@ fn perimeter_bounds(t: &Terminal, border: f64) -> Rect {
 fn perimeter_point(t: &Terminal, next: Point, orthogonal: bool, border: f64) -> Point {
     let bounds = perimeter_bounds(t, border);
     if bounds.w > 0.0 || bounds.h > 0.0 {
-        // ponytail: `flipH`/`flipV` do not mirror `next` and the result.
-        t.perimeter.point(bounds, next, orthogonal)
+        t.outline.point(bounds, next, orthogonal)
     } else {
         t.bounds.centre()
     }
@@ -1467,7 +1443,10 @@ mod tests {
         let style = Style::parse("").resolve(true);
         let flat = Terminal {
             bounds: Rect::new(0.0, 20.0, 80.0, 0.0),
-            perimeter: PerimeterKind::Ellipse,
+            outline: Outline {
+                kind: crate::perimeter::PerimeterKind::Ellipse,
+                ..Outline::default()
+            },
             ..Terminal::default()
         };
         let bend = [Point::new(140.0, 20.0)];
@@ -1528,6 +1507,20 @@ mod tests {
     fn a_turned_shapes_anchors_turn_with_it() {
         let page = shape("rotation=90;");
         assert_points(&[anchor(&page, 1.0, 0.5).0], &[(40.0, 60.0)]);
+    }
+
+    #[test]
+    fn a_shapes_own_anchors_face_mirror_and_meet_its_outline_with_it() {
+        let diamond = shape("rhombus;");
+        assert_eq!(anchors(&diamond, "a").len(), 8);
+        assert_points(&[anchor(&diamond, 0.0, 0.0).0], &[(20.0, 10.0)]);
+        // A triangle's tip, facing south, is the middle of the bottom.
+        let down = shape("triangle;direction=south;");
+        assert_points(&[anchor(&down, 1.0, 0.5).0], &[(40.0, 40.0)]);
+        // A stick figure's left hand, mirrored.
+        let mirrored = shape("shape=umlActor;flipH=1;");
+        assert_points(&[anchor(&mirrored, 0.25, 0.1).0], &[(60.0, 4.0)]);
+        assert_eq!(anchors(&shape("shape=note;"), "a").len(), 11);
     }
 
     #[test]
