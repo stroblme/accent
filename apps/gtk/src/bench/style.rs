@@ -192,7 +192,9 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
 /// each of which joins a visible line to a hidden one, then ask for the iter at every pixel row of
 /// the note, as GtkSourceView asks at the top and bottom of the screen on every frame. A line left
 /// partly hidden aborts the process there (GTK's "Byte index … is off the end of the line"); kept
-/// to whole lines, each case prints what is hidden and what the joined line reads.
+/// to whole lines, each case prints what is hidden and what the joined line reads. Last, `stale`
+/// shuts the fold and runs a Ctrl-held pointer down every row before GTK has measured the hidden
+/// lines again, which aborted the same way.
 pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
     // Short lines after the fold: GTK's walk past the joined line lands in a line too short for
     // the bytes it carried along, which is what aborts.
@@ -252,6 +254,28 @@ pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
                 .to_string();
             println!("bench seam case={case} hidden={hidden:?} line={line:?}");
         }
+        // A fold shut in the frame a Ctrl-held pointer moves in: its lines keep the height they
+        // were drawn at until GTK measures them again, so the pointer's rows fall on hidden lines,
+        // and `Tab::follow_hint` asked GTK for the iter there (`fold::iter_at_location`).
+        tab.set_text(FOLDED);
+        glib::timeout_future(Duration::from_millis(200)).await;
+        let (top, height) = tab.view.line_yrange(&tab.buffer.end_iter());
+        let fold = accent_api::Fold {
+            start_line: 0,
+            end_line: 3,
+        };
+        crate::fold::fold(tab.buffer.upcast_ref(), fold);
+        for y in 0..top + height {
+            let (x, y) = tab
+                .view
+                .buffer_to_window_coords(gtk::TextWindowType::Widget, 0, y);
+            tab.follow_hint(f64::from(x), f64::from(y), true);
+        }
+        tab.follow_hint(0.0, 0.0, false);
+        println!(
+            "bench seam case=stale folded={}",
+            crate::fold::is_folded(tab.buffer.upcast_ref(), 0)
+        );
         bench_quit(&app);
     });
 }

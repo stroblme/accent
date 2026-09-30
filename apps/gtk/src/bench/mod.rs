@@ -122,7 +122,8 @@ use tags::bench_tags;
 /// indent on 10k lines of code in the last one. `=dragfold:<rel>` selects a folded section and
 /// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
-/// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK.
+/// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK; then
+/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`).
 /// Every form of it runs only on a scratch vault under `/tmp` (`scratch_only`).
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
