@@ -90,11 +90,9 @@ impl LabelEditor {
         // Placed over the page rather than measured with it: an editor near the far edge would
         // widen the overlay and with it the canvas under the label being edited.
         overlay.set_measure_overlay(&layer, false);
+        // Clipped for the pointer as well as for sight: a press where the editor overhangs the
+        // sidebar, the header or the banner goes to them (checked with `Window::pick`).
         overlay.set_clip_overlay(&layer, true);
-        // What the overlay clips from sight the layer keeps from the pointer too: an editor
-        // hanging over the banner above the canvas, which is drawn over it, must not take the
-        // press meant for the banner's button.
-        layer.set_overflow(gtk::Overflow::Hidden);
         let editor = Rc::new(LabelEditor {
             cell,
             place,
