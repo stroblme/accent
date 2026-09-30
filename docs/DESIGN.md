@@ -415,7 +415,8 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A differing hunk carries Take / Keep Both buttons on the Theirs pane, so a merge is a click or a keystroke into the note itself. A sync conflict and a changed-on-disk note keep the Keep Theirs / Keep Mine bar under the panes; Keep Mine on a changed-on-disk note writes against the version it showed. The banner that asked drops its button while its comparison is on screen.
 - A staged change or a commit compares two texts that are not files, in a transient tab of two read-only panes keyed by what it compares, so asking twice updates one tab. It opens as the pane's preview, a list of changed files otherwise stacking a tab per click, and is re-read when the Git pane refreshes.
 - A selection in the working-tree comparison puts Stage Selected Lines on the view's menu, in a section of its own, and one in a staged comparison Unstage Selected Lines: exactly the changed rows the selection covers go in or out, a row with no line on the selection's side going with the line above it. Without a selection the entry is absent.
-- Every comparison follows the document zoom, page margins included.
+- Every comparison follows the document zoom, page margins included. A read-only side beside the editor takes the editor's page whatever moves it: its heading markers hang in the same margin, and a tab is as wide as the Indent Width makes it there.
+- The sticky block title stays off while a comparison is up: the other side has none, and one over the editor's first row alone puts the two first rows out of level.
 
 ### Language servers
 
