@@ -217,8 +217,11 @@ pub fn hunks(lines: &[DiffLine], rows: &[Row]) -> Vec<Range<usize>> {
     out
 }
 
-/// The rows a changes-only view hides, as ranges into `rows`: non-empty, sorted and
-/// non-overlapping.
+/// The fewest rows a gap hides: the button that stands for one or two is as tall as they are.
+const MIN_GAP: usize = 3;
+
+/// The rows a changes-only view hides, as ranges into `rows`: at least [`MIN_GAP`] long, sorted
+/// and non-overlapping.
 ///
 /// A run of unchanged rows between two hunks keeps `context` rows at each end, so it is hidden
 /// only where it is longer than both margins together. The runs at the start and end of the file
@@ -229,7 +232,7 @@ pub fn gaps(lines: &[DiffLine], rows: &[Row], context: usize) -> Vec<Range<usize
     let (Some(first), Some(last)) = (hunks.first(), hunks.last()) else {
         // Nothing changed, so a changes-only view shows nothing and hides all of it.
         let whole = 0..rows.len();
-        return if rows.is_empty() {
+        return if whole.len() < MIN_GAP {
             Vec::new()
         } else {
             vec![whole]
@@ -248,6 +251,7 @@ pub fn gaps(lines: &[DiffLine], rows: &[Row], context: usize) -> Vec<Range<usize
     if rows.len() - last.end > context {
         out.push(last.end + context..rows.len());
     }
+    out.retain(|gap| gap.len() >= MIN_GAP);
     out
 }
 
@@ -473,24 +477,17 @@ mod tests {
         assert_eq!(hunks(&d, &rows), vec![1..2, 3..5]);
     }
 
-    /// Ten unchanged lines with one of them rewritten: four rows lead up to the change and five
-    /// follow it, so three rows of context leaves one row hidden above and two below.
+    /// Twelve unchanged lines with the seventh rewritten: six rows lead up to the change and
+    /// five follow it, so three rows of context leaves three rows to hide above and two below.
+    /// The three are hidden; the two stay, a button standing for them saving no room.
     #[test]
-    fn a_lone_change_hides_the_run_that_outgrows_its_context() {
-        let old_text: String = (1..=10).map(|i| format!("l{i}\n")).collect();
-        let new_text: String = (1..=10)
-            .map(|i| {
-                if i == 5 {
-                    "L5\n".to_string()
-                } else {
-                    format!("l{i}\n")
-                }
-            })
-            .collect();
+    fn a_lone_change_hides_the_run_that_outgrows_its_context_by_three_rows() {
+        let old_text: String = (1..=12).map(|i| format!("l{i}\n")).collect();
+        let new_text = old_text.replace("l7\n", "L7\n");
         let d = lines(&old_text, &new_text);
         let rows = align(&d);
-        assert_eq!(hunks(&d, &rows), vec![4..5]);
-        assert_eq!(gaps(&d, &rows, 3), vec![0..1, 8..10]);
+        assert_eq!(hunks(&d, &rows), vec![6..7]);
+        assert_eq!(gaps(&d, &rows, 3), vec![0..3]);
     }
 
     #[test]
@@ -506,16 +503,12 @@ mod tests {
     }
 
     #[test]
-    fn identical_texts_are_one_gap_and_no_context_hides_every_equal_row() {
+    fn identical_texts_are_one_gap() {
         let same = "a\nb\nc\n";
         let d = lines(same, same);
         let rows = align(&d);
         assert!(hunks(&d, &rows).is_empty());
         assert_eq!(gaps(&d, &rows, 3), one(0..3));
-
-        let d = lines("a\nb\nc\nd\n", "a\nB\nc\nD\nE\n");
-        let rows = align(&d);
-        assert_eq!(gaps(&d, &rows, 0), vec![0..1, 2..3]);
     }
 
     #[test]
