@@ -181,6 +181,8 @@ pub struct Stats {
     pub tags: i64,
     pub conflicts: i64,
     pub aliases: i64,
+    /// Links nothing in the vault answers to: what [`Index::unresolved_links`] lists.
+    pub unresolved: i64,
 }
 
 impl Index {

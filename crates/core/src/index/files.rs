@@ -216,6 +216,10 @@ impl Index {
             tags: one("SELECT COUNT(DISTINCT name) FROM tags")?,
             conflicts: one("SELECT COUNT(*) FROM files WHERE kind = 4")?,
             aliases: one("SELECT COUNT(*) FROM aliases")?,
+            unresolved: one(
+                "SELECT COUNT(*) FROM links l JOIN files s ON s.id = l.src_file
+                 WHERE l.resolved_file IS NULL AND l.kind <> 3",
+            )?,
         })
     }
 }
