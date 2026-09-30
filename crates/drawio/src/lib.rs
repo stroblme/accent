@@ -9,6 +9,7 @@
 //! see `NOTICE`.
 
 mod base64;
+pub mod clipboard;
 pub mod edit;
 pub mod geom;
 pub mod guide;

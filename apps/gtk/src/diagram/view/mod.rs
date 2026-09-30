@@ -61,6 +61,11 @@ pub enum Edit {
         source: bool,
         end: End,
     },
+    /// Put the label of edge `id` at `at`, in page units.
+    LabelAt {
+        id: CellId,
+        at: Point,
+    },
     /// Give edge `id` these waypoints, in page units.
     Points {
         id: CellId,
@@ -202,6 +207,15 @@ impl DiagramView {
         self.imp().zoom.set(zoom);
         self.imp().pending_scroll.set(Some(scroll));
         self.relayout();
+    }
+
+    /// Where draw.io puts what is pasted without a place of its own (`Graph.getInsertPoint`): a
+    /// grid step in from the top-left of what is on screen, on the grid, never off the page's
+    /// top or left.
+    pub fn insert_point(&self, grid: f64) -> Point {
+        let at = self.page_at(0.0, 0.0);
+        let snap = |v: f64| (v.max(0.0) / grid + 1.0).round() * grid;
+        Point::new(snap(at.x), snap(at.y))
     }
 
     /// A page rectangle in widget coordinates.

@@ -189,6 +189,17 @@ impl Editor {
         self.edit(page, |p, _| set_end(p, id, source, on, constraint))
     }
 
+    /// [`move_label`] on page `page`.
+    pub fn move_label(
+        &mut self,
+        page: usize,
+        id: &str,
+        route: &[Point],
+        at: Point,
+    ) -> Result<(), Error> {
+        self.edit(page, |p, _| move_label(p, id, route, at))
+    }
+
     /// [`set_points`] on page `page`.
     pub fn set_points(&mut self, page: usize, id: &str, points: &[Point]) -> Result<(), Error> {
         self.edit(page, |p, _| set_points(p, id, points))
@@ -249,31 +260,53 @@ impl Editor {
     pub fn delete(&mut self, page: usize, ids: &[CellId]) -> Result<(), Error> {
         self.edit(page, |p, _| {
             check(p, ids)?;
-            let kept: HashSet<&str> = p
-                .root()
-                .into_iter()
-                .chain(p.layers())
-                .map(|c| c.id.as_str())
-                .collect();
-            let chosen = ids.iter().filter(|id| !kept.contains(id.as_str()));
-            let mut gone = with_subtrees(p, chosen.cloned());
-            // An edge can end on another edge, so removing one can leave the next without an end.
-            loop {
-                let cut = |end: &Option<CellId>| end.as_ref().is_some_and(|id| gone.contains(id));
-                let loose: Vec<CellId> = p
-                    .cells
-                    .iter()
-                    .filter(|c| !gone.contains(&c.id) && (cut(&c.source) || cut(&c.target)))
-                    .map(|c| c.id.clone())
-                    .collect();
-                if loose.is_empty() {
-                    break;
-                }
-                gone = with_subtrees(p, gone.into_iter().chain(loose));
-            }
-            p.cells.retain(|c| !gone.contains(&c.id));
+            delete(p, ids);
             Ok(())
         })
+    }
+
+    /// Group `ids` as draw.io's Group does (`mxGraph.groupCells`): those sharing the parent of
+    /// the first in the page's order (`getCellsForGroup`), two at least, go into a new `group`
+    /// cell sized to their box (`getBoundsForGroup`), added in front of its siblings, the cells
+    /// staying where they are on the page. The group's id; `None` where there is nothing to
+    /// group.
+    // mxGraph.js 4043-4150; Graph.js 13290-13345 (bounds), 18879 (the group's style)
+    pub fn group(&mut self, page: usize, ids: &[CellId]) -> Result<Option<CellId>, Error> {
+        self.edit(page, |p, fresh| {
+            check(p, ids)?;
+            let chosen: HashSet<&str> = ids.iter().map(String::as_str).collect();
+            let ordered = p.cells.iter().filter(|c| chosen.contains(c.id.as_str()));
+            let ordered: Vec<&Cell> = ordered.collect();
+            let Some(parent) = ordered.first().and_then(|c| c.parent.clone()) else {
+                return Ok(None);
+            };
+            let cells: Vec<CellId> = ordered
+                .iter()
+                .filter(|c| c.parent.as_ref() == Some(&parent))
+                .map(|c| c.id.clone())
+                .collect();
+            let bounds = group_bounds(p, &cells);
+            let (true, Some(bounds)) = (cells.len() > 1, bounds) else {
+                return Ok(None);
+            };
+            let id = fresh.fresh(p);
+            let mut group = Cell::new_vertex(&id, &parent, bounds, "group", "");
+            group.attrs.push(("connectable".into(), "0".into()));
+            let at = subtree_end(p, &parent);
+            p.cells.insert(at, group);
+            append_to(p, &cells, &id);
+            for cell in p.cells.iter_mut().filter(|c| cells.contains(&c.id)) {
+                if let Some(g) = &mut cell.geometry {
+                    translate(g, -bounds.x, -bounds.y);
+                }
+            }
+            Ok(Some(id))
+        })
+    }
+
+    /// [`ungroup`] on page `page`.
+    pub fn ungroup(&mut self, page: usize, ids: &[CellId]) -> Result<Vec<CellId>, Error> {
+        self.edit(page, |p, _| ungroup(p, ids))
     }
 
     /// Copies of cells and their subtrees, 10 units down and right, edges between copied cells
@@ -283,18 +316,8 @@ impl Editor {
             check(p, ids)?;
             let top = topmost(p, ids);
             let copied = with_subtrees(p, top.iter().cloned());
-            let fresh: HashMap<CellId, CellId> = p
-                .cells
-                .iter()
-                .filter(|c| copied.contains(&c.id))
-                .map(|c| (c.id.clone(), new_ids.fresh(p)))
-                .collect();
-            // Inside the copied set a reference goes to the copy; outside it stays.
-            let remap = |id: &mut Option<CellId>| {
-                if let Some(new) = id.as_ref().and_then(|old| fresh.get(old)) {
-                    *id = Some(new.clone());
-                }
-            };
+            let copied = p.cells.iter().filter(|c| copied.contains(&c.id));
+            let fresh = fresh_ids(p, new_ids, copied);
             // Each copy goes right after the last cell of its original's subtree.
             let mut blocks = Vec::new();
             for original in &top {
@@ -304,11 +327,7 @@ impl Editor {
                     if !subtree.contains(&cell.id) {
                         continue;
                     }
-                    let mut copy = cell.clone();
-                    copy.id = fresh[&cell.id].clone();
-                    remap(&mut copy.parent);
-                    remap(&mut copy.source);
-                    remap(&mut copy.target);
+                    let mut copy = copy_of(cell, &fresh);
                     if &cell.id == original
                         && let Some(g) = &mut copy.geometry
                     {
@@ -326,6 +345,75 @@ impl Editor {
             }
             Ok(top.iter().map(|id| fresh[id].clone()).collect())
         })
+    }
+
+    /// Paste `from`, a page read off the clipboard, as draw.io's `importGraphModel` does: the
+    /// cells of a page with one layer go into the page's first unlocked layer, moved by
+    /// (`dx`, `dy`), and each layer of one with several comes as a layer of its own; every cell
+    /// takes a fresh id, and a reference to a cell that was not pasted goes. What was pasted onto
+    /// a layer, to select.
+    // Graph.js 17723-17810
+    pub fn paste(
+        &mut self,
+        page: usize,
+        from: &Page,
+        dx: f64,
+        dy: f64,
+    ) -> Result<Vec<CellId>, Error> {
+        self.edit(page, |p, new_ids| {
+            let root = from.root().map(|c| c.id.clone());
+            let cells = from.cells.iter().filter(|c| c.parent.is_some());
+            let fresh = fresh_ids(p, new_ids, cells.clone());
+            let mut copies: Vec<Cell> = cells.map(|c| copy_of(c, &fresh)).collect();
+            let pasted_ids: HashSet<&CellId> = fresh.values().collect();
+            let known = |id: &Option<CellId>| id.as_ref().is_some_and(|id| pasted_ids.contains(id));
+            for copy in &mut copies {
+                if !known(&copy.source) {
+                    copy.source = None;
+                }
+                if !known(&copy.target) {
+                    copy.target = None;
+                }
+            }
+            let layers: Vec<CellId> = from.layers().iter().map(|l| fresh[&l.id].clone()).collect();
+            let pasted: Vec<CellId>;
+            if let [layer] = layers.as_slice() {
+                let into = default_layer(p)?;
+                copies.retain(|c| &c.id != layer);
+                for copy in &mut copies {
+                    if copy.parent.as_ref() == Some(layer) {
+                        copy.parent = Some(into.clone());
+                        if let Some(g) = &mut copy.geometry {
+                            translate(g, dx, dy);
+                        }
+                    }
+                }
+                pasted = copies
+                    .iter()
+                    .filter(|c| c.parent.as_ref() == Some(&into))
+                    .map(|c| c.id.clone())
+                    .collect();
+                let at = subtree_end(p, &into);
+                p.cells.splice(at..at, copies);
+            } else {
+                let into = p.root().map(|c| c.id.clone());
+                for copy in copies.iter_mut().filter(|c| layers.contains(&c.id)) {
+                    copy.parent = into.clone().or(root.clone());
+                }
+                pasted = copies
+                    .iter()
+                    .filter(|c| c.parent.as_ref().is_some_and(|l| layers.contains(l)))
+                    .map(|c| c.id.clone())
+                    .collect();
+                p.cells.extend(copies);
+            }
+            Ok(pasted)
+        })
+    }
+
+    /// [`remove`] on page `page`.
+    pub fn remove(&mut self, page: usize, ids: &[CellId], drawn: &Scene) -> Result<(), Error> {
+        self.edit(page, |p, _| remove(p, ids, drawn))
     }
 
     /// Move each cell, with everything under it, among its siblings: above or below all of
@@ -472,6 +560,215 @@ impl Editor {
     }
 }
 
+/// Remove the topmost of `ids` and everything under them, as draw.io's Cut does
+/// (`mxGraph.removeCells` without their edges): an edge not removed with them lets go of them
+/// where `drawn` has its end (`cellsRemoved`, `disconnectTerminal`).
+// mxGraph.js 5037-5210
+pub fn remove(p: &mut Page, ids: &[CellId], drawn: &Scene) -> Result<(), Error> {
+    check(p, ids)?;
+    let gone = with_subtrees(p, topmost(p, ids));
+    let cut = |end: &Option<CellId>| end.as_ref().is_some_and(|id| gone.contains(id));
+    let loose: Vec<CellId> = p
+        .cells
+        .iter()
+        .filter(|c| !gone.contains(&c.id) && (cut(&c.source) || cut(&c.target)))
+        .map(|c| c.id.clone())
+        .collect();
+    for id in loose {
+        let origin = p.origin_of(&id);
+        let route = drawn.route(&id).unwrap_or_default().to_vec();
+        let Some(cell) = p.cell_mut(&id) else {
+            continue;
+        };
+        let ends = [
+            (cut(&cell.source), route.first()),
+            (cut(&cell.target), route.last()),
+        ];
+        let g = cell.geometry.get_or_insert_with(|| Geometry {
+            relative: true,
+            ..Geometry::default()
+        });
+        for (i, (loose, at)) in ends.into_iter().enumerate() {
+            let at = at.map(|a| Point::new(a.x - origin.x, a.y - origin.y));
+            match (loose, i) {
+                (false, _) => {}
+                (true, 0) => {
+                    g.source_point = at.or(g.source_point);
+                    cell.source = None;
+                }
+                (true, _) => {
+                    g.target_point = at.or(g.target_point);
+                    cell.target = None;
+                }
+            }
+        }
+    }
+    p.cells.retain(|c| !gone.contains(&c.id));
+    Ok(())
+}
+
+/// Fresh ids for `cells`, none of them taken on `page`: what pasted and duplicated cells get.
+fn fresh_ids<'a>(
+    page: &Page,
+    ids: &mut Ids,
+    cells: impl IntoIterator<Item = &'a Cell>,
+) -> HashMap<CellId, CellId> {
+    cells
+        .into_iter()
+        .map(|c| (c.id.clone(), ids.fresh(page)))
+        .collect()
+}
+
+/// `cell` under its fresh id, its parent, source and target following theirs where they have
+/// one and kept where they do not.
+fn copy_of(cell: &Cell, fresh: &HashMap<CellId, CellId>) -> Cell {
+    let mut copy = cell.clone();
+    copy.id = fresh[&cell.id].clone();
+    for id in [&mut copy.parent, &mut copy.source, &mut copy.target] {
+        if let Some(new) = id.as_ref().and_then(|old| fresh.get(old)) {
+            *id = Some(new.clone());
+        }
+    }
+    copy
+}
+
+/// Remove cells, everything under them and every edge left without an end. The root and the
+/// layers are not removed this way.
+fn delete(p: &mut Page, ids: &[CellId]) {
+    let kept: HashSet<&str> = p
+        .root()
+        .into_iter()
+        .chain(p.layers())
+        .map(|c| c.id.as_str())
+        .collect();
+    let chosen = ids.iter().filter(|id| !kept.contains(id.as_str()));
+    let mut gone = with_subtrees(p, chosen.cloned());
+    // An edge can end on another edge, so removing one can leave the next without an end.
+    loop {
+        let cut = |end: &Option<CellId>| end.as_ref().is_some_and(|id| gone.contains(id));
+        let loose: Vec<CellId> = p
+            .cells
+            .iter()
+            .filter(|c| !gone.contains(&c.id) && (cut(&c.source) || cut(&c.target)))
+            .map(|c| c.id.clone())
+            .collect();
+        if loose.is_empty() {
+            break;
+        }
+        gone = with_subtrees(p, gone.into_iter().chain(loose));
+    }
+    p.cells.retain(|c| !gone.contains(&c.id));
+}
+
+/// Ungroup `ids` as draw.io's Ungroup does: each shape among them with children hands them to
+/// its own parent (`mxGraph.ungroupCells`), where they keep their place on the page and paint in
+/// front; a group then left with no fill, line or picture goes, with its edges
+/// (`removeCellsAfterUngroup`), and a shape kept is no longer a container. What to select: the
+/// children, then the cells of `ids` still there.
+// mxGraph.js 4180-4290; Graph.js 20266; Actions.js 662-701
+pub fn ungroup(p: &mut Page, ids: &[CellId]) -> Result<Vec<CellId>, Error> {
+    check(p, ids)?;
+    let groups: Vec<CellId> = ids
+        .iter()
+        .filter(|id| p.cell(id).is_some_and(|c| c.vertex) && p.children(id).next().is_some())
+        .cloned()
+        .collect();
+    let mut chosen = Vec::new();
+    for group in &groups {
+        let Some(parent) = p.cell(group).and_then(|c| c.parent.clone()) else {
+            continue;
+        };
+        let children: Vec<CellId> = p.children(group).map(|c| c.id.clone()).collect();
+        // Kept where they are on the page: moved by the group's own place in its parent, a
+        // child placed on the group by fractions of it placed from the new parent instead.
+        let shift = p.absolute_rect(group).unwrap_or_default();
+        let into = p.origin_of(group);
+        let places: Vec<Option<Rect>> = children.iter().map(|c| p.absolute_rect(c)).collect();
+        for (id, place) in children.iter().zip(places) {
+            let Some(cell) = p.cell_mut(id) else { continue };
+            let vertex = cell.vertex;
+            let Some(g) = &mut cell.geometry else {
+                continue;
+            };
+            match (vertex && g.relative, place) {
+                (true, Some(r)) => {
+                    (g.x, g.y, g.relative) = (r.x - into.x, r.y - into.y, false);
+                }
+                _ => translate(g, shift.x - into.x, shift.y - into.y),
+            }
+        }
+        append_to(p, &children, &parent);
+        chosen.extend(children);
+    }
+    let transparent: Vec<CellId> = groups
+        .into_iter()
+        .filter(|g| {
+            p.cell(g).is_some_and(|c| {
+                let style = c.style.resolve(false);
+                let none = |key: &str| style.get(key).is_none_or(|v| v == "none");
+                none("fillColor") && none("strokeColor") && style.get("image").is_none()
+            })
+        })
+        .collect();
+    delete(p, &transparent);
+    for id in ids {
+        let Some(cell) = p.cell(id) else { continue };
+        if cell.vertex && p.children(id).next().is_none() {
+            cell_mut(p, id)?.style.set("container", Some("0"));
+        }
+        chosen.push(id.clone());
+    }
+    Ok(chosen)
+}
+
+/// The box `cells`, siblings, take in their parent (`Graph.getBoundsForGroup`): a shape's
+/// rectangle, an edge's loose ends and waypoints; a shape placed on its parent by fractions of
+/// it counts for nothing.
+fn group_bounds(p: &Page, cells: &[CellId]) -> Option<Rect> {
+    let mut bounds: Option<Rect> = None;
+    let mut add = |r: Rect| bounds = Some(bounds.map_or(r, |b| b.union(&r)));
+    for cell in cells.iter().filter_map(|id| p.cell(id)) {
+        let Some(g) = &cell.geometry else { continue };
+        if cell.edge {
+            let loose = [
+                g.source_point.filter(|_| cell.source.is_none()),
+                g.target_point.filter(|_| cell.target.is_none()),
+            ];
+            let points = g.points.iter().flatten().copied();
+            for pt in loose.into_iter().flatten().chain(points) {
+                add(Rect::new(pt.x, pt.y, 0.0, 0.0));
+            }
+        } else if cell.vertex && !g.relative {
+            add(g.rect());
+        }
+    }
+    bounds
+}
+
+/// Where a cell added last under `parent` goes in the page's order: after everything under it.
+fn subtree_end(p: &Page, parent: &str) -> usize {
+    let inside = with_subtrees(p, [parent.to_string()]);
+    p.cells
+        .iter()
+        .rposition(|c| inside.contains(&c.id))
+        .map_or(p.cells.len(), |i| i + 1)
+}
+
+/// Make each of `ids`, everything under it going along, the last child of `parent`, in the
+/// page's order (`mxGraphModel.add` at the parent's child count: in front of its siblings).
+fn append_to(p: &mut Page, ids: &[CellId], parent: &str) {
+    let moving = with_subtrees(p, ids.iter().cloned());
+    let (mut taken, rest): (Vec<Cell>, Vec<Cell>) = std::mem::take(&mut p.cells)
+        .into_iter()
+        .partition(|c| moving.contains(&c.id));
+    p.cells = rest;
+    for cell in taken.iter_mut().filter(|c| ids.contains(&c.id)) {
+        cell.parent = Some(parent.to_string());
+    }
+    let at = subtree_end(p, parent);
+    p.cells.splice(at..at, taken);
+}
+
 // The edits a drag previews, as functions of a page: the editor applies them to the page in
 // the file as one undo step, and the canvas to a copy of it while the drag is under way.
 
@@ -603,6 +900,94 @@ pub fn set_end(
     Ok(())
 }
 
+/// Put the label of edge `id`, routed along `route` (absolute), at `at` (`mxEdgeHandler.moveLabel`):
+/// a relative geometry keeps where along the edge the nearest point is and how far across, in
+/// its `x` and `y`, and the rest as its offset; any other keeps the offset from the middle of its
+/// ends.
+// mxEdgeHandler.moveLabel, mxEdgeHandler.js 1924-1966
+pub fn move_label(page: &mut Page, id: &str, route: &[Point], at: Point) -> Result<(), Error> {
+    check(page, [id])?;
+    let (Some(&first), Some(&last)) = (route.first(), route.last()) else {
+        return Err(Error::Refused("the edge is not drawn"));
+    };
+    let cell = cell_mut(page, id)?;
+    let Some(g) = cell.geometry.as_mut().filter(|_| cell.edge) else {
+        return Err(Error::Refused("only an edge's label moves along it"));
+    };
+    if g.relative {
+        let (x, y) = relative_point(route, at);
+        g.x = (x * 10000.0).round() / 10000.0;
+        g.y = y.round();
+        g.offset = None;
+        let on = crate::scene::edge_label_at(route, g);
+        g.offset = Some(Point::new((at.x - on.x).round(), (at.y - on.y).round()));
+    } else {
+        let middle = Point::new((first.x + last.x) / 2.0, (first.y + last.y) / 2.0);
+        g.offset = Some(Point::new(
+            (at.x - middle.x).round(),
+            (at.y - middle.y).round(),
+        ));
+        (g.x, g.y) = (0.0, 0.0);
+    }
+    Ok(())
+}
+
+/// Where along an edge routed through `points` the point nearest `p` is, from -1 at its start to
+/// 1 at its end, and how far `p` is across it, negative on its left.
+// mxGraphView.getRelativePoint, mxGraphView.js 2101-2193
+fn relative_point(points: &[Point], p: Point) -> (f64, f64) {
+    let segments: Vec<f64> = points.windows(2).map(|w| w[0].distance(w[1])).collect();
+    let total: f64 = segments.iter().sum();
+    // The segment nearest the point, the last of equals, and how far along the edge it starts.
+    let (mut index, mut length, mut walked) = (0, 0.0, 0.0);
+    let mut nearest = crate::geom::distance_to_segment(p, points[0], points[1]);
+    for i in 2..points.len() {
+        let d = crate::geom::distance_to_segment(p, points[i - 1], points[i]);
+        walked += segments[i - 2];
+        if d <= nearest {
+            (nearest, index, length) = (d, i - 1, walked);
+        }
+    }
+    let (p0, pe) = (points[index], points[index + 1]);
+    let (sx, sy) = (p0.x - pe.x, p0.y - pe.y);
+    let (px, py) = (sx - (p.x - pe.x), sy - (p.y - pe.y));
+    let dot = px * sx + py * sy;
+    let projected = match dot <= 0.0 {
+        true => 0.0,
+        false => (dot * dot / (sx * sx + sy * sy)).sqrt(),
+    };
+    let projected = projected.min(segments[index]);
+    let mut across = crate::geom::distance_to_segment(p, p0, pe);
+    if relative_ccw(p0, pe, p) == -1 {
+        across = -across;
+    }
+    let along = match total > 0.0 {
+        true => (total / 2.0 - length - projected) / total * -2.0,
+        false => 0.0,
+    };
+    (along, across)
+}
+
+/// Which side of the line from `a` to `b` point `p` is on (`mxUtils.relativeCcw`).
+fn relative_ccw(a: Point, b: Point, p: Point) -> i32 {
+    let (x2, y2) = (b.x - a.x, b.y - a.y);
+    let (mut px, mut py) = (p.x - a.x, p.y - a.y);
+    let mut ccw = px * y2 - py * x2;
+    if ccw == 0.0 {
+        ccw = px * x2 + py * y2;
+        if ccw > 0.0 {
+            px -= x2;
+            py -= y2;
+            ccw = (px * x2 + py * y2).max(0.0);
+        }
+    }
+    match ccw {
+        c if c < 0.0 => -1,
+        c if c > 0.0 => 1,
+        _ => 0,
+    }
+}
+
 /// Give edge `id` the waypoints `points`, absolute, none for an empty list
 /// (`mxEdgeHandler.changePoints`).
 pub fn set_points(page: &mut Page, id: &str, points: &[Point]) -> Result<(), Error> {
@@ -666,7 +1051,10 @@ fn default_layer(page: &Page) -> Result<CellId, Error> {
 
 /// `roots` and every cell under them. A file in draw.io's order, parents before children,
 /// takes one pass over the cells; the loop is for any other order.
-fn with_subtrees(page: &Page, roots: impl IntoIterator<Item = CellId>) -> HashSet<CellId> {
+pub(crate) fn with_subtrees(
+    page: &Page,
+    roots: impl IntoIterator<Item = CellId>,
+) -> HashSet<CellId> {
     let mut set: HashSet<CellId> = roots.into_iter().collect();
     loop {
         let size = set.len();
@@ -682,7 +1070,7 @@ fn with_subtrees(page: &Page, roots: impl IntoIterator<Item = CellId>) -> HashSe
 }
 
 /// The cells of `ids` that are not inside another of them, in document order.
-fn topmost(page: &Page, ids: &[CellId]) -> Vec<CellId> {
+pub(crate) fn topmost(page: &Page, ids: &[CellId]) -> Vec<CellId> {
     let chosen: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let children = page
         .cells
@@ -973,6 +1361,106 @@ mod tests {
         assert_eq!(geometry(&e, "e").points, Some(vec![Point::new(1.0, 2.0)]));
         e.set_points(0, "e", &[]).unwrap();
         assert_eq!(geometry(&e, "e").points, None);
+    }
+
+    #[test]
+    fn an_edge_label_moves_along_and_off_its_edge() {
+        let mut e = editor();
+        let route = [Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+        // A quarter of the way along, 10 below the line.
+        e.move_label(0, "e", &route, Point::new(25.0, 10.0))
+            .unwrap();
+        let g = geometry(&e, "e");
+        assert_eq!((g.x, g.y, g.offset), (-0.5, -10.0, Some(Point::default())));
+        assert_eq!(
+            crate::scene::edge_label_at(&route, g),
+            Point::new(25.0, 10.0)
+        );
+        // Beyond the end: at the end, as far across as it is away, the rest as offset.
+        e.move_label(0, "e", &route, Point::new(130.0, 0.0))
+            .unwrap();
+        let g = geometry(&e, "e");
+        assert_eq!((g.x, g.y), (1.0, 30.0));
+        assert_eq!(g.offset, Some(Point::new(30.0, 30.0)));
+        assert_eq!(
+            crate::scene::edge_label_at(&route, g),
+            Point::new(130.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn a_group_holds_its_cells_where_they_were_and_ungrouping_lets_them_go() {
+        let mut e = editor();
+        // One cell is not a group.
+        assert_eq!(e.group(0, &list(&["a"])).unwrap(), None);
+        let g = e.group(0, &list(&["b", "a", "e"])).unwrap().unwrap();
+        let page = e.page(0).unwrap();
+        assert_eq!(order(&e), ["0", "1", &g, "a", "b", "e"]);
+        let group = page.cell(&g).unwrap();
+        assert_eq!(group.style.to_string(), "group;");
+        // Boxes a and b, and the edge's waypoint (70, 60): the group is sized to them.
+        assert_eq!(geometry(&e, &g).rect(), Rect::new(0.0, 0.0, 140.0, 60.0));
+        assert_eq!(
+            e.page(0).unwrap().absolute_rect("b"),
+            Some(Rect::new(100.0, 0.0, 40.0, 40.0))
+        );
+        // Moved as one, then ungrouped: the transparent group goes, the cells stay put.
+        e.move_cells(0, &list(&[g.as_str()]), 10.0, 5.0, &Scene::default())
+            .unwrap();
+        let chosen = e.ungroup(0, std::slice::from_ref(&g)).unwrap();
+        assert_eq!(chosen, list(&["a", "b", "e"]));
+        assert!(e.page(0).unwrap().cell(&g).is_none());
+        assert_eq!(geometry(&e, "b").rect(), Rect::new(110.0, 5.0, 40.0, 40.0));
+        assert_eq!(geometry(&e, "e").points, Some(vec![Point::new(80.0, 65.0)]));
+        // A group with a fill of its own stays, as a shape.
+        let g = e.group(0, &list(&["a", "b"])).unwrap().unwrap();
+        e.set_style(0, std::slice::from_ref(&g), "fillColor", Some("#ff0000"))
+            .unwrap();
+        let chosen = e.ungroup(0, std::slice::from_ref(&g)).unwrap();
+        assert_eq!(chosen, list(&["a", "b", g.as_str()]));
+        assert!(
+            e.page(0)
+                .unwrap()
+                .cell(&g)
+                .unwrap()
+                .style
+                .to_string()
+                .contains("container=0")
+        );
+    }
+
+    #[test]
+    fn a_paste_takes_fresh_ids_on_the_first_unlocked_layer_and_a_cut_lets_edges_go() {
+        let mut e = editor();
+        let drawn = crate::scene::scene(e.page(0).unwrap());
+        let xml = crate::clipboard::copy(e.page(0).unwrap(), &list(&["a", "e"]), &drawn);
+        let from = crate::clipboard::diagram_in(&xml).unwrap();
+        let pasted = e.paste(0, &from, 10.0, 10.0).unwrap();
+        assert_eq!(pasted.len(), 2);
+        let page = e.page(0).unwrap();
+        let (a2, e2) = (
+            page.cell(&pasted[0]).unwrap(),
+            page.cell(&pasted[1]).unwrap(),
+        );
+        assert_eq!(a2.parent.as_deref(), Some("1"));
+        assert_eq!(
+            a2.geometry.as_ref().unwrap().rect(),
+            Rect::new(10.0, 10.0, 40.0, 40.0)
+        );
+        // The pasted edge is on the pasted shape and let go of b, which was not copied.
+        assert_eq!(
+            (e2.source.as_ref(), e2.target.as_ref()),
+            (Some(&pasted[0]), None)
+        );
+        assert_eq!(order(&e).len(), 7);
+        // A cut keeps the edge, loose where it was drawn.
+        let mut e = editor();
+        let drawn = crate::scene::scene(e.page(0).unwrap());
+        e.remove(0, &list(&["b"]), &drawn).unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert_eq!(cell.target, None);
+        let end = drawn.route("e").unwrap().last().copied();
+        assert_eq!(geometry(&e, "e").target_point, end);
     }
 
     #[test]

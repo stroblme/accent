@@ -71,7 +71,7 @@ impl Live {
             return;
         }
         let mut page = self.base.clone();
-        if let Err(e) = apply(&mut page, edit, self.moving.as_ref()) {
+        if let Err(e) = apply(&mut page, edit, self.moving.as_ref(), &sheet.scene) {
             tracing::debug!("diagram preview refused: {e}");
         }
         let scene = accent_drawio::scene_with(&page, &sheet.ctx);
@@ -92,6 +92,7 @@ fn apply(
     page: &mut Page,
     edit: &Edit,
     moving: Option<&Moving>,
+    drawn: &Scene,
 ) -> Result<(), accent_drawio::Error> {
     match edit {
         Edit::Move { delta, .. } => {
@@ -102,6 +103,10 @@ fn apply(
         }
         Edit::Resize { id, rect } => edit::resize(page, id, *rect),
         Edit::Points { id, points } => edit::set_points(page, id, points),
+        Edit::LabelAt { id, at } => {
+            let route = drawn.route(id).unwrap_or_default();
+            edit::move_label(page, id, route, *at)
+        }
         Edit::End { id, source, end } => {
             edit::set_end(page, id, *source, (end.0.as_deref(), end.1), end.2.as_ref())
         }

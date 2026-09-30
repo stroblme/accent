@@ -684,14 +684,7 @@ impl<'a> Builder<'a> {
                 )
             }
             LabelAt::Edge(points, g) => {
-                let on = match g.relative {
-                    true => point_along(points, g.x, g.y, g.offset.unwrap_or_default()),
-                    false => {
-                        let (a, b) = (points[0], points[points.len() - 1]);
-                        let off = g.offset.unwrap_or_default();
-                        Point::new((a.x + b.x) / 2.0 + off.x, (a.y + b.y) / 2.0 + off.y)
-                    }
-                };
+                let on = edge_label_at(points, g);
                 let anchor = Point::new(on.x + shift.x, on.y + shift.y);
                 (anchor, (g.width.max(0.0), g.height.max(0.0)), rotation)
             }
@@ -741,6 +734,21 @@ enum LabelAt<'p> {
 
 /// The point `x` of the way along `points` (-1 the start, 0 the middle, 1 the end), moved `y`
 /// off the line to its left and then by `offset` (`mxGraphView.getPoint`).
+/// Where an edge routed along `points` with geometry `g` puts its label (mxGraphView's
+/// `absoluteOffset`): a relative geometry's place along the edge and across it, else the middle
+/// of its ends; the offset added either way.
+// mxGraphView.updateEdgeLabelOffset, mxGraphView.js 2213-2262
+pub fn edge_label_at(points: &[Point], g: &Geometry) -> Point {
+    match g.relative {
+        true => point_along(points, g.x, g.y, g.offset.unwrap_or_default()),
+        false => {
+            let (a, b) = (points[0], points[points.len() - 1]);
+            let off = g.offset.unwrap_or_default();
+            Point::new((a.x + b.x) / 2.0 + off.x, (a.y + b.y) / 2.0 + off.y)
+        }
+    }
+}
+
 fn point_along(points: &[Point], x: f64, y: f64, offset: Point) -> Point {
     let segments: Vec<f64> = points.windows(2).map(|w| w[0].distance(w[1])).collect();
     let length: f64 = segments.iter().sum();

@@ -698,6 +698,18 @@ impl Sheet {
         (style.get("bendable") != Some("0")).then(|| handle::kind(&style, is_loop))
     }
 
+    /// Where the handle of edge `id`'s label sits, the edge routed along `route`: none for an
+    /// edge with no label, or one that cannot be moved.
+    pub fn label_handle(&self, id: &str, route: &[Point]) -> Option<Point> {
+        let cell = self
+            .page
+            .cell(id)
+            .filter(|c| c.edge && !c.label().is_empty())?;
+        let g = cell.geometry.as_ref()?;
+        (route.len() > 1 && !self.is_pinned(id))
+            .then(|| accent_drawio::scene::edge_label_at(route, g))
+    }
+
     /// Edge `id`'s waypoints, absolute.
     pub fn waypoints(&self, id: &str) -> Vec<Point> {
         let origin = self.page.origin_of(id);

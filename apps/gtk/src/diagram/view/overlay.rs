@@ -91,25 +91,53 @@ impl DiagramView {
                 turned(&r, rotation);
             }
         }
-        let faded = theme::at(accent, FADED_ALPHA);
-        let handle = |at: Point, colour: &gdk::RGBA| {
+        let square = |at: Point| {
             let at = frame.to_content(at);
             let square = Rect::new(at.x - HANDLE / 2.0, at.y - HANDLE / 2.0, HANDLE, HANDLE);
-            snapshot.append_color(colour, &paint::grect(&square));
+            snapshot.append_color(&accent, &paint::grect(&square));
         };
-        let square = |at: Point| handle(at, &accent);
-        // A lone edge's handles: its ends and those between them, where it is drawn now.
-        if let [id] = selection.as_slice()
-            && sheet.is_edge(id)
-            && !sheet.is_pinned(id)
-            && !moving
-            && let Some(route) = drawn.route(id)
+        // An edge's handles are draw.io's: dots, faded ones for a virtual bend or an edge with
+        // no waypoints of its own, and a diamond for its label.
+        let faded = theme::at(accent, FADED_ALPHA);
+        let dot = |at: Point, colour: &gdk::RGBA| {
+            let c = frame.to_content(at);
+            let builder = gsk::PathBuilder::new();
+            builder.add_circle(
+                &graphene::Point::new(c.x as f32, c.y as f32),
+                (HANDLE / 2.0) as f32,
+            );
+            snapshot.append_fill(&builder.to_path(), gsk::FillRule::Winding, colour);
+        };
+        let diamond = |at: Point| {
+            let c = frame.to_content(at);
+            let (x, y, r) = (c.x as f32, c.y as f32, (HANDLE / 2.0 + 1.0) as f32);
+            let builder = gsk::PathBuilder::new();
+            builder.move_to(x, y - r);
+            builder.line_to(x + r, y);
+            builder.line_to(x, y + r);
+            builder.line_to(x - r, y);
+            builder.close();
+            snapshot.append_fill(&builder.to_path(), gsk::FillRule::Winding, &accent);
+        };
+        // Every selected edge carries them, where it is drawn now.
+        for id in selection
+            .iter()
+            .filter(|id| sheet.is_edge(id) && !sheet.is_pinned(id))
         {
+            let Some(route) = drawn.route(id).filter(|_| !moving) else {
+                continue;
+            };
+            if let Some(at) = self.label_handle(sheet, id, route) {
+                diamond(match shown {
+                    Some(Edit::LabelAt { id: moved, at }) if moved == id => *at,
+                    _ => at,
+                });
+            }
             for (_, at, dim) in sheet.knobs(id, route) {
-                handle(at, if dim { &faded } else { &accent });
+                dot(at, if dim { &faded } else { &accent });
             }
             for at in [route.first(), route.last()].into_iter().flatten() {
-                square(*at);
+                dot(*at, &accent);
             }
         }
         if let [id] = selection.as_slice()
@@ -226,7 +254,11 @@ impl DiagramView {
                 let (_, lines) = self.resize_to(rect, *rotation, *handle, delta, guides, free);
                 guide_lines(snapshot, frame, &lines, &accent);
             }
-            Drag::Rotate { .. } | Drag::End { .. } | Drag::Knob { .. } | Drag::Pan { .. } => {}
+            Drag::Rotate { .. }
+            | Drag::End { .. }
+            | Drag::Knob { .. }
+            | Drag::Label { .. }
+            | Drag::Pan { .. } => {}
         }
     }
 }

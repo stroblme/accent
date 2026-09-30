@@ -216,6 +216,11 @@ impl App {
             "diagram-redo" => tab.redo(),
             "diagram-delete" => tab.delete(),
             "diagram-duplicate" => tab.duplicate(),
+            "diagram-group" => tab.group(),
+            "diagram-copy" => tab.copy(),
+            "diagram-cut" => tab.cut(),
+            "diagram-paste" => self.paste_diagram(&tab),
+            "diagram-ungroup" => tab.ungroup(),
             "diagram-select-all" => tab.select_all(),
             "diagram-edit-label" => tab.edit_label(),
             "diagram-next-page" => tab.step_page(true),
@@ -432,6 +437,41 @@ impl App {
                 _ => {}
             },
         );
+    }
+
+    /// Paste into a diagram: text first, as GTK's own paste reads it, a diagram in it or a text
+    /// cell (`DiagramTab::paste_text`); else a picture, embedded as Add Image embeds one.
+    fn paste_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
+        let clipboard = tab.key_target().clipboard();
+        let formats = clipboard.formats();
+        let (app, tab) = (Rc::downgrade(self), Rc::downgrade(tab));
+        glib::spawn_future_local(async move {
+            let text = formats.contains_type(glib::Type::STRING);
+            let picture = !text && formats.contains_type(gdk::Texture::static_type());
+            let (Some(app), Some(tab)) = (app.upgrade(), tab.upgrade()) else {
+                return;
+            };
+            if text {
+                match clipboard.read_text_future().await {
+                    Ok(Some(text)) => tab.paste_text(&text),
+                    Ok(None) => {}
+                    Err(e) => app.cannot("paste", e),
+                }
+            } else if picture {
+                match clipboard.read_texture_future().await {
+                    Ok(Some(texture)) => {
+                        let bytes = texture.save_to_png_bytes();
+                        if bytes.len() > MAX_IMAGE {
+                            return app.toast("Pictures over 2 MiB are not embedded");
+                        }
+                        let size = (f64::from(texture.width()), f64::from(texture.height()));
+                        tab.add_image("image/png", &bytes, size);
+                    }
+                    Ok(None) => {}
+                    Err(e) => app.cannot("paste the picture", e),
+                }
+            }
+        });
     }
 
     /// The Image tool: a picture file, read on a worker, embedded in the page.
