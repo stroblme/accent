@@ -560,7 +560,29 @@ mod imp {
         }
     }
 
-    impl WidgetImpl for View {}
+    impl WidgetImpl for View {
+        /// GtkSourceView's gutters and annotations ask GTK for the iter at the screen's top and
+        /// bottom rows as the view is drawn, which aborts on some lines (`fold::aborts_at`): lines
+        /// hidden but not yet measured again by GTK, which it does in an idle of its own. Such a
+        /// frame is left undrawn and the next one asked for.
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            let obj = self.obj();
+            let visible = obj.visible_rect();
+            if [visible.y(), visible.y() + visible.height()]
+                .into_iter()
+                .any(|y| crate::fold::aborts_at(&*obj, y))
+            {
+                let view = obj.downgrade();
+                glib::idle_add_local_once(move || {
+                    if let Some(view) = view.upgrade() {
+                        view.queue_draw();
+                    }
+                });
+                return;
+            }
+            self.parent_snapshot(snapshot);
+        }
+    }
 
     impl TextViewImpl for View {
         fn snapshot_layer(&self, layer: gtk::TextViewLayer, snapshot: gtk::Snapshot) {
