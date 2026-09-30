@@ -243,6 +243,9 @@ pub struct Panel {
     /// The comparisons open right now, re-read whenever a refresh lands: a diff tab is not a
     /// snapshot. Weak, so a closed one falls out on the next pass.
     watches: RefCell<Vec<Watch>>,
+    /// How many comparisons a row has asked for, so only the last one asked shows: see
+    /// [`Panel::compare`].
+    asked: Cell<u64>,
     /// Set while the repository chooser's list is being filled, so the selection notify that
     /// follows is not read as the user picking a repository.
     syncing: Cell<bool>,
@@ -440,6 +443,7 @@ impl Panel {
             pending_depth: Cell::new(None),
             discovered: Cell::new(glib::monotonic_time()),
             watches: RefCell::new(Vec::new()),
+            asked: Cell::new(0),
             syncing: Cell::new(false),
             sync_busy: Cell::new(false),
             pushing: Arc::default(),
