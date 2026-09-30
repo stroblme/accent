@@ -410,6 +410,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A formula label is typeset by WebKit and painted as a picture.
 - Pages are the Outline pane's rows, the one shown selected.
 - Group puts the selected cells that share the first one's parent, two at least, into a transparent `group` cell sized to them and in front of its siblings, as draw.io's does; they stay where they are, and the group is selected. Ungroup hands a group's cells to its parent, in front, and removes the group when it has no fill, line or picture of its own, keeping it as a shape otherwise.
+- The clipboard is draw.io's: Copy writes the selection as the `<mxGraphModel>` XML draw.io's own Copy writes, as text, the topmost cells with all under them, an arrow whose shape stayed behind let go of it where it is drawn; Cut does the same and removes them, the arrows on them let go. Paste takes a diagram back in any form draw.io leaves one — a model, a page or a file, URI-encoded or escaped in HTML — onto the first unlocked layer with fresh ids and selected, the same one again a grid step further each time (and the first paste after a copy one step off it); plain text becomes a text cell at the top-left of the view, and a picture an embedded image as Add Image makes.
 - Every change is one undo step, saved a second after the last through the etag-gated save. A change on disk under unsaved edits raises a banner whose Resolve… asks Reload or Overwrite: there is no comparison of two diagrams to offer.
 
 ### Comparison
@@ -610,7 +611,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Diagram
 
-- The canvas's own keys, as a PDF's are, firing actions the palette lists without an accelerator: Undo Diagram Edit `Ctrl+Z`, Redo `Ctrl+Shift+Z` / `Ctrl+Y`, Delete Selection `Delete` / `Backspace`, Select All Shapes `Ctrl+A`, Edit Label `Return` (or any character typed over one selected shape, which becomes the label's first), Next and Previous Diagram Page `Page Down` / `Page Up`. The arrows nudge the selection a unit and Shift+arrows ten; Space held pans; `Escape` puts the tool down, then clears the selection.
+- The canvas's own keys, as a PDF's are, firing actions the palette lists without an accelerator: Undo Diagram Edit `Ctrl+Z`, Redo `Ctrl+Shift+Z` / `Ctrl+Y`, Delete Selection `Delete` / `Backspace`, Select All Shapes `Ctrl+A`, Cut Shapes, Copy Shapes and Paste into Diagram `Ctrl+X`, `Ctrl+C` and `Ctrl+V`, Edit Label `Return` (or any character typed over one selected shape, which becomes the label's first), Next and Previous Diagram Page `Page Down` / `Page Up`. The arrows nudge the selection a unit and Shift+arrows ten; Space held pans; `Escape` puts the tool down, then clears the selection.
 - Duplicate Selection is `Ctrl+D`, Duplicate Line's chord, and Group `Ctrl+G`, Go to Line's, which a diagram in front answers; `Ctrl+Return` finishes a label being edited; `F2` stays the file's Rename.
 - The tools (Select and Move, Add Rectangle, Add Ellipse, Add Text, Add Connector, Add Image…), Ungroup, Bring to Front, Send to Back, and Add, Rename and Delete Diagram Page are unbound, on the ring and in the palette; a tool picked from the palette brings the ring out, and the same tool twice puts it down.
 

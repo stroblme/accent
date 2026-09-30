@@ -316,18 +316,8 @@ impl Editor {
             check(p, ids)?;
             let top = topmost(p, ids);
             let copied = with_subtrees(p, top.iter().cloned());
-            let fresh: HashMap<CellId, CellId> = p
-                .cells
-                .iter()
-                .filter(|c| copied.contains(&c.id))
-                .map(|c| (c.id.clone(), new_ids.fresh(p)))
-                .collect();
-            // Inside the copied set a reference goes to the copy; outside it stays.
-            let remap = |id: &mut Option<CellId>| {
-                if let Some(new) = id.as_ref().and_then(|old| fresh.get(old)) {
-                    *id = Some(new.clone());
-                }
-            };
+            let copied = p.cells.iter().filter(|c| copied.contains(&c.id));
+            let fresh = fresh_ids(p, new_ids, copied);
             // Each copy goes right after the last cell of its original's subtree.
             let mut blocks = Vec::new();
             for original in &top {
@@ -337,11 +327,7 @@ impl Editor {
                     if !subtree.contains(&cell.id) {
                         continue;
                     }
-                    let mut copy = cell.clone();
-                    copy.id = fresh[&cell.id].clone();
-                    remap(&mut copy.parent);
-                    remap(&mut copy.source);
-                    remap(&mut copy.target);
+                    let mut copy = copy_of(cell, &fresh);
                     if &cell.id == original
                         && let Some(g) = &mut copy.geometry
                     {
@@ -359,6 +345,75 @@ impl Editor {
             }
             Ok(top.iter().map(|id| fresh[id].clone()).collect())
         })
+    }
+
+    /// Paste `from`, a page read off the clipboard, as draw.io's `importGraphModel` does: the
+    /// cells of a page with one layer go into the page's first unlocked layer, moved by
+    /// (`dx`, `dy`), and each layer of one with several comes as a layer of its own; every cell
+    /// takes a fresh id, and a reference to a cell that was not pasted goes. What was pasted onto
+    /// a layer, to select.
+    // Graph.js 17723-17810
+    pub fn paste(
+        &mut self,
+        page: usize,
+        from: &Page,
+        dx: f64,
+        dy: f64,
+    ) -> Result<Vec<CellId>, Error> {
+        self.edit(page, |p, new_ids| {
+            let root = from.root().map(|c| c.id.clone());
+            let cells = from.cells.iter().filter(|c| c.parent.is_some());
+            let fresh = fresh_ids(p, new_ids, cells.clone());
+            let mut copies: Vec<Cell> = cells.map(|c| copy_of(c, &fresh)).collect();
+            let pasted_ids: HashSet<&CellId> = fresh.values().collect();
+            let known = |id: &Option<CellId>| id.as_ref().is_some_and(|id| pasted_ids.contains(id));
+            for copy in &mut copies {
+                if !known(&copy.source) {
+                    copy.source = None;
+                }
+                if !known(&copy.target) {
+                    copy.target = None;
+                }
+            }
+            let layers: Vec<CellId> = from.layers().iter().map(|l| fresh[&l.id].clone()).collect();
+            let pasted: Vec<CellId>;
+            if let [layer] = layers.as_slice() {
+                let into = default_layer(p)?;
+                copies.retain(|c| &c.id != layer);
+                for copy in &mut copies {
+                    if copy.parent.as_ref() == Some(layer) {
+                        copy.parent = Some(into.clone());
+                        if let Some(g) = &mut copy.geometry {
+                            translate(g, dx, dy);
+                        }
+                    }
+                }
+                pasted = copies
+                    .iter()
+                    .filter(|c| c.parent.as_ref() == Some(&into))
+                    .map(|c| c.id.clone())
+                    .collect();
+                let at = subtree_end(p, &into);
+                p.cells.splice(at..at, copies);
+            } else {
+                let into = p.root().map(|c| c.id.clone());
+                for copy in copies.iter_mut().filter(|c| layers.contains(&c.id)) {
+                    copy.parent = into.clone().or(root.clone());
+                }
+                pasted = copies
+                    .iter()
+                    .filter(|c| c.parent.as_ref().is_some_and(|l| layers.contains(l)))
+                    .map(|c| c.id.clone())
+                    .collect();
+                p.cells.extend(copies);
+            }
+            Ok(pasted)
+        })
+    }
+
+    /// [`remove`] on page `page`.
+    pub fn remove(&mut self, page: usize, ids: &[CellId], drawn: &Scene) -> Result<(), Error> {
+        self.edit(page, |p, _| remove(p, ids, drawn))
     }
 
     /// Move each cell, with everything under it, among its siblings: above or below all of
@@ -503,6 +558,78 @@ impl Editor {
             }
         }
     }
+}
+
+/// Remove the topmost of `ids` and everything under them, as draw.io's Cut does
+/// (`mxGraph.removeCells` without their edges): an edge not removed with them lets go of them
+/// where `drawn` has its end (`cellsRemoved`, `disconnectTerminal`).
+// mxGraph.js 5037-5210
+pub fn remove(p: &mut Page, ids: &[CellId], drawn: &Scene) -> Result<(), Error> {
+    check(p, ids)?;
+    let gone = with_subtrees(p, topmost(p, ids));
+    let cut = |end: &Option<CellId>| end.as_ref().is_some_and(|id| gone.contains(id));
+    let loose: Vec<CellId> = p
+        .cells
+        .iter()
+        .filter(|c| !gone.contains(&c.id) && (cut(&c.source) || cut(&c.target)))
+        .map(|c| c.id.clone())
+        .collect();
+    for id in loose {
+        let origin = p.origin_of(&id);
+        let route = drawn.route(&id).unwrap_or_default().to_vec();
+        let Some(cell) = p.cell_mut(&id) else {
+            continue;
+        };
+        let ends = [
+            (cut(&cell.source), route.first()),
+            (cut(&cell.target), route.last()),
+        ];
+        let g = cell.geometry.get_or_insert_with(|| Geometry {
+            relative: true,
+            ..Geometry::default()
+        });
+        for (i, (loose, at)) in ends.into_iter().enumerate() {
+            let at = at.map(|a| Point::new(a.x - origin.x, a.y - origin.y));
+            match (loose, i) {
+                (false, _) => {}
+                (true, 0) => {
+                    g.source_point = at.or(g.source_point);
+                    cell.source = None;
+                }
+                (true, _) => {
+                    g.target_point = at.or(g.target_point);
+                    cell.target = None;
+                }
+            }
+        }
+    }
+    p.cells.retain(|c| !gone.contains(&c.id));
+    Ok(())
+}
+
+/// Fresh ids for `cells`, none of them taken on `page`: what pasted and duplicated cells get.
+fn fresh_ids<'a>(
+    page: &Page,
+    ids: &mut Ids,
+    cells: impl IntoIterator<Item = &'a Cell>,
+) -> HashMap<CellId, CellId> {
+    cells
+        .into_iter()
+        .map(|c| (c.id.clone(), ids.fresh(page)))
+        .collect()
+}
+
+/// `cell` under its fresh id, its parent, source and target following theirs where they have
+/// one and kept where they do not.
+fn copy_of(cell: &Cell, fresh: &HashMap<CellId, CellId>) -> Cell {
+    let mut copy = cell.clone();
+    copy.id = fresh[&cell.id].clone();
+    for id in [&mut copy.parent, &mut copy.source, &mut copy.target] {
+        if let Some(new) = id.as_ref().and_then(|old| fresh.get(old)) {
+            *id = Some(new.clone());
+        }
+    }
+    copy
 }
 
 /// Remove cells, everything under them and every edge left without an end. The root and the
@@ -924,7 +1051,10 @@ fn default_layer(page: &Page) -> Result<CellId, Error> {
 
 /// `roots` and every cell under them. A file in draw.io's order, parents before children,
 /// takes one pass over the cells; the loop is for any other order.
-fn with_subtrees(page: &Page, roots: impl IntoIterator<Item = CellId>) -> HashSet<CellId> {
+pub(crate) fn with_subtrees(
+    page: &Page,
+    roots: impl IntoIterator<Item = CellId>,
+) -> HashSet<CellId> {
     let mut set: HashSet<CellId> = roots.into_iter().collect();
     loop {
         let size = set.len();
@@ -940,7 +1070,7 @@ fn with_subtrees(page: &Page, roots: impl IntoIterator<Item = CellId>) -> HashSe
 }
 
 /// The cells of `ids` that are not inside another of them, in document order.
-fn topmost(page: &Page, ids: &[CellId]) -> Vec<CellId> {
+pub(crate) fn topmost(page: &Page, ids: &[CellId]) -> Vec<CellId> {
     let chosen: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let children = page
         .cells
@@ -1297,6 +1427,40 @@ mod tests {
                 .to_string()
                 .contains("container=0")
         );
+    }
+
+    #[test]
+    fn a_paste_takes_fresh_ids_on_the_first_unlocked_layer_and_a_cut_lets_edges_go() {
+        let mut e = editor();
+        let drawn = crate::scene::scene(e.page(0).unwrap());
+        let xml = crate::clipboard::copy(e.page(0).unwrap(), &list(&["a", "e"]), &drawn);
+        let from = crate::clipboard::diagram_in(&xml).unwrap();
+        let pasted = e.paste(0, &from, 10.0, 10.0).unwrap();
+        assert_eq!(pasted.len(), 2);
+        let page = e.page(0).unwrap();
+        let (a2, e2) = (
+            page.cell(&pasted[0]).unwrap(),
+            page.cell(&pasted[1]).unwrap(),
+        );
+        assert_eq!(a2.parent.as_deref(), Some("1"));
+        assert_eq!(
+            a2.geometry.as_ref().unwrap().rect(),
+            Rect::new(10.0, 10.0, 40.0, 40.0)
+        );
+        // The pasted edge is on the pasted shape and let go of b, which was not copied.
+        assert_eq!(
+            (e2.source.as_ref(), e2.target.as_ref()),
+            (Some(&pasted[0]), None)
+        );
+        assert_eq!(order(&e).len(), 7);
+        // A cut keeps the edge, loose where it was drawn.
+        let mut e = editor();
+        let drawn = crate::scene::scene(e.page(0).unwrap());
+        e.remove(0, &list(&["b"]), &drawn).unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert_eq!(cell.target, None);
+        let end = drawn.route("e").unwrap().last().copied();
+        assert_eq!(geometry(&e, "e").target_point, end);
     }
 
     #[test]

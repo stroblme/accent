@@ -209,6 +209,15 @@ impl DiagramView {
         self.relayout();
     }
 
+    /// Where draw.io puts what is pasted without a place of its own (`Graph.getInsertPoint`): a
+    /// grid step in from the top-left of what is on screen, on the grid, never off the page's
+    /// top or left.
+    pub fn insert_point(&self, grid: f64) -> Point {
+        let at = self.page_at(0.0, 0.0);
+        let snap = |v: f64| (v.max(0.0) / grid + 1.0).round() * grid;
+        Point::new(snap(at.x), snap(at.y))
+    }
+
     /// A page rectangle in widget coordinates.
     pub fn to_widget(&self, r: &Rect) -> Rect {
         let c = self.imp().frame.get().rect(r);

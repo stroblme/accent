@@ -196,7 +196,7 @@ fn decompress_within(text: &str, limit: usize) -> Result<String, Error> {
 
 /// JavaScript's `decodeURIComponent`: each `%XX` is a byte of UTF-8. `None` for a broken escape
 /// or bytes that are not UTF-8, where JavaScript throws.
-fn percent_decode(s: &str) -> Option<String> {
+pub(crate) fn percent_decode(s: &str) -> Option<String> {
     let hex = |b: Option<u8>| char::from(b?).to_digit(16);
     let mut bytes = s.bytes();
     let mut out = Vec::with_capacity(s.len());
@@ -214,7 +214,7 @@ fn percent_decode(s: &str) -> Option<String> {
 /// The text without the characters XML cannot hold: controls other than tab, line feed and
 /// carriage return, and U+FFFE/U+FFFF (`mxUtils.zapGremlins`; a Rust string has none of the
 /// unpaired surrogates it also removes).
-fn zap_gremlins(s: &str) -> String {
+pub(crate) fn zap_gremlins(s: &str) -> String {
     s.chars()
         .filter(|&c| {
             (c >= ' ' || matches!(c, '\t' | '\n' | '\r')) && !matches!(c, '\u{FFFE}' | '\u{FFFF}')
@@ -359,6 +359,14 @@ pub fn write(file: &File) -> String {
     let pages = file.pages.iter().map(diagram).collect();
     let mut out = String::new();
     write_element(&mut out, &node("mxfile", attrs, pages), 0);
+    out
+}
+
+/// `cells` as a bare `<mxGraphModel>`, what draw.io's Copy writes (`mxCodec.encode` of a model).
+pub(crate) fn write_model(cells: &[Cell]) -> String {
+    let root = node("root", Vec::new(), cells.iter().map(cell_node).collect());
+    let mut out = String::new();
+    write_element(&mut out, &node("mxGraphModel", Vec::new(), vec![root]), 0);
     out
 }
 

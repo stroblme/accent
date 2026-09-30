@@ -64,6 +64,9 @@ pub struct DiagramTab {
     tool: Cell<Tool>,
     /// How the tools draw: the config's `[diagram]`, which the ring's outer orbit changes.
     options: Cell<DiagramConfig>,
+    /// The text last pasted or copied here and how many times it has been pasted since: each
+    /// paste of the same lands a grid step further (`Graph.lastPasteXml`, `pasteCounter`).
+    pasted: RefCell<(Option<String>, u32)>,
     /// What a note's tab keeps about its file, so the save path is the same one (`save.rs`).
     pub save: SaveState,
     save_pending: Cell<bool>,
@@ -143,6 +146,7 @@ pub fn open(
         selection: RefCell::new(Vec::new()),
         tool: Cell::new(Tool::Select),
         options: Cell::new(DiagramConfig::default()),
+        pasted: RefCell::new((None, 0)),
         save: SaveState::at(etag),
         save_pending: Cell::new(false),
         monitor: RefCell::new(None),
@@ -645,6 +649,80 @@ impl DiagramTab {
         }
     }
 
+    /// Copy the selection as draw.io's Copy does: its XML, as text (`clipboard::copy`). The
+    /// next paste of it lands a grid step down and right, as draw.io's does.
+    pub fn copy(self: &Rc<Self>) {
+        let ids = self.selection();
+        if ids.is_empty() {
+            return;
+        }
+        let shown = self.view.sheet().unwrap_or_default();
+        let xml = {
+            let editor = self.editor.borrow();
+            let Ok(page) = editor.page(self.page_index.get()) else {
+                return;
+            };
+            accent_drawio::clipboard::copy(page, &ids, &shown.scene)
+        };
+        self.view.clipboard().set_text(&xml);
+        self.pasted.replace((Some(xml), 0));
+    }
+
+    /// Cut the selection as draw.io's Cut does: copied, then removed, the edges on it let go
+    /// of it rather than going with it. The next paste lands where the cells were.
+    pub fn cut(self: &Rc<Self>) {
+        let ids = self.selection();
+        if ids.is_empty() {
+            return;
+        }
+        self.copy();
+        self.pasted.replace((None, 0));
+        let shown = self.view.sheet().unwrap_or_default();
+        self.edit(|e, page| e.remove(page, &ids, &shown.scene));
+    }
+
+    /// Paste text read off the clipboard as draw.io's Paste does (`EditorUi.pasteXml`): a
+    /// diagram in it as its cells, anything else as a text cell at the top-left of the view;
+    /// pasting the same text again lands a grid step further each time. Selects what it
+    /// pasted.
+    pub fn paste_text(self: &Rc<Self>, text: &str) {
+        let grid = {
+            let editor = self.editor.borrow();
+            let page = editor.page(self.page_index.get());
+            page.map_or(10.0, |p| p.grid_size())
+        };
+        let steps = {
+            let mut pasted = self.pasted.borrow_mut();
+            match pasted.0.as_deref() == Some(text) {
+                true => pasted.1 += 1,
+                false => *pasted = (Some(text.to_string()), 0),
+            }
+            pasted.1
+        };
+        let d = f64::from(steps) * grid;
+        let mut chosen = Vec::new();
+        match accent_drawio::clipboard::diagram_in(text) {
+            Some(model) => self.edit(|e, page| {
+                chosen = e.paste(page, &model, d, d)?;
+                Ok(())
+            }),
+            None => {
+                let at = self.view.insert_point(grid);
+                let (w, h) = text_size(&self.view, text);
+                let rect = accent_drawio::Rect::new(at.x + d, at.y + d, w + grid, h + grid);
+                let label = accent_drawio::clipboard::text_label(text);
+                self.edit(|e, page| {
+                    let style = "text;whiteSpace=wrap;html=1;";
+                    chosen = vec![e.add_vertex(page, None, rect, style, &label)?];
+                    Ok(())
+                });
+            }
+        }
+        if !chosen.is_empty() {
+            self.select(chosen);
+        }
+    }
+
     /// Move the selection by `dx`, `dy` page units: the arrow keys.
     pub fn nudge(self: &Rc<Self>, dx: f64, dy: f64) {
         let ids = self.selection();
@@ -1042,6 +1120,9 @@ impl DiagramTab {
                     gdk::Key::z if ctrl => tab.run("win.diagram-undo"),
                     gdk::Key::y if ctrl => tab.run("win.diagram-redo"),
                     gdk::Key::a if ctrl => tab.run("win.diagram-select-all"),
+                    gdk::Key::c if ctrl => tab.run("win.diagram-copy"),
+                    gdk::Key::x if ctrl => tab.run("win.diagram-cut"),
+                    gdk::Key::v if ctrl => tab.run("win.diagram-paste"),
                     gdk::Key::Delete | gdk::Key::BackSpace => tab.run("win.diagram-delete"),
                     gdk::Key::Return | gdk::Key::KP_Enter if !ctrl => {
                         tab.run("win.diagram-edit-label")
@@ -1173,6 +1254,26 @@ impl DiagramTab {
     pub fn ask_image(self: &Rc<Self>) {
         self.emit(&self.on_image);
     }
+}
+
+/// The size `text` takes as a pasted text cell's label, as Pango lays it out in draw.io's
+/// default font, wrapped at draw.io's widest pasted text (`EditorUi.maxTextWidth`), a little
+/// room around it (`Graph.updateCellSize`).
+fn text_size(widget: &impl IsA<gtk::Widget>, text: &str) -> (f64, f64) {
+    /// Pasted text wider than this wraps (`EditorUi.maxTextWidth`).
+    const WIDEST: i32 = 520;
+    /// draw.io's `spacing` on each side of a label.
+    const SPACING: f64 = 2.0;
+    let layout = widget.create_pango_layout(Some(text));
+    let mut font = gtk::pango::FontDescription::from_string("Helvetica");
+    font.set_absolute_size(12.0 * f64::from(gtk::pango::SCALE));
+    layout.set_font_description(Some(&font));
+    if layout.pixel_size().0 > WIDEST {
+        layout.set_width(WIDEST * gtk::pango::SCALE);
+        layout.set_wrap(gtk::pango::WrapMode::WordChar);
+    }
+    let (w, h) = layout.pixel_size();
+    (f64::from(w) + 2.0 * SPACING, f64::from(h) + 2.0 * SPACING)
 }
 
 impl Saves for DiagramTab {
