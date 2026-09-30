@@ -11,7 +11,7 @@ use crate::geom::{self, PathCmd, Point, Rect};
 use crate::label::{self, Run};
 use crate::marker;
 use crate::model::{Cell, CellId, Geometry, Page};
-use crate::placeholders::Context;
+use crate::placeholders::{self, Context};
 use crate::route::{self, EdgeInput, Terminal};
 use crate::shapes::{self, Fill, Placement};
 use crate::style::{Color, Resolved};
@@ -202,8 +202,8 @@ pub fn scene(page: &Page) -> Scene {
 }
 
 /// [`scene`] of `page` shown where and when `ctx` says, which labels with placeholders fill in.
-pub fn scene_with(page: &Page, _ctx: &Context) -> Scene {
-    let b = Builder::run(page);
+pub fn scene_with(page: &Page, ctx: &Context) -> Scene {
+    let b = Builder::run(page, ctx);
     Scene {
         prims: b.prims,
         page_size: page.size(),
@@ -219,7 +219,7 @@ pub fn scene_with(page: &Page, _ctx: &Context) -> Scene {
 /// The points each edge drawn on `page` runs through, absolute and first end first: where its
 /// ends are on the page (mxGraph's `absolutePoints`).
 pub(crate) fn routes(page: &Page) -> HashMap<CellId, Vec<Point>> {
-    Builder::run(page)
+    Builder::run(page, &Context::default())
         .edge_points
         .into_iter()
         .map(|(id, points)| (id.to_string(), points))
@@ -228,9 +228,10 @@ pub(crate) fn routes(page: &Page) -> HashMap<CellId, Vec<Point>> {
 
 impl<'a> Builder<'a> {
     /// Every visible layer of `page` walked, bottom first.
-    fn run(page: &'a Page) -> Builder<'a> {
+    fn run(page: &'a Page, ctx: &'a Context) -> Builder<'a> {
         let mut b = Builder {
             page,
+            ctx,
             math: page.model_attr("math") == Some("1"),
             prims: Vec::new(),
             edge_points: HashMap::new(),
@@ -282,6 +283,8 @@ const DEFAULT_FONTFAMILY: &str = "Arial,Helvetica";
 
 struct Builder<'a> {
     page: &'a Page,
+    /// Where and when the page is shown, for labels with placeholders.
+    ctx: &'a Context,
     /// The page has `math="1"`: `\(…\)` in labels is a formula.
     math: bool,
     prims: Vec<Prim>,
@@ -584,13 +587,13 @@ impl<'a> Builder<'a> {
     /// A cell's label, placed as `mxCellRenderer.getLabelBounds` and `rotateLabelBounds` place
     /// it: the alignment point (`anchor`) and the box the text is laid out in.
     fn label(&mut self, cell: &Cell, style: &Resolved, at: LabelAt, rotation: f64, locked: bool) {
-        let text = cell.label();
+        let text = placeholders::label(self.page, cell, self.ctx);
         if text.is_empty() || style.flag("noLabel", false) {
             return;
         }
         let runs = match cell.is_html() {
-            true => label::html_to_runs(text, self.math),
-            false => label::plain_to_runs(text, self.math),
+            true => label::html_to_runs(&text, self.math),
+            false => label::plain_to_runs(&text, self.math),
         };
         if !runs
             .iter()

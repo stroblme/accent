@@ -518,8 +518,9 @@ impl DiagramTab {
     fn refresh(&self) {
         let sheet = {
             let editor = self.editor.borrow();
-            match editor.page(self.page_index.get()) {
-                Ok(page) => Sheet::of(page),
+            let index = self.page_index.get();
+            match editor.page(index) {
+                Ok(page) => Sheet::of(page, &shown(index, editor.file().pages().len())),
                 Err(_) => Sheet::default(),
             }
         };
@@ -1144,6 +1145,20 @@ impl Saves for DiagramTab {
 
     fn for_disk(&self) -> String {
         self.text()
+    }
+}
+
+/// Page `index` of `pages` shown now: what labels with placeholders fill `%pagenumber%` and
+/// `%date%` in from.
+fn shown(index: usize, pages: usize) -> accent_drawio::Context {
+    let now = chrono::Local::now();
+    accent_drawio::Context {
+        page: index,
+        pages,
+        now: Some(accent_drawio::Now {
+            unix_ms: now.timestamp_millis(),
+            offset_minutes: now.offset().local_minus_utc() / 60,
+        }),
     }
 }
 
