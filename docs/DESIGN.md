@@ -234,7 +234,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A remote vault's root that is not on the host still gets a shell, at the login's home.
 - A remote shell rides a master — the vault's in a remote vault's window, one per host elsewhere — made ready once per host before the tab spawns, the tab's screen saying so. A dropped link keeps the tab, saying "Lost the connection to host. Press a key to reconnect."; a key attaches again with the screen replayed, and a vault window's reconnect does it too. Close Tab ends the shell on the host; closing the window leaves it running.
 - New Remote Terminal… opens a shell on any host from any window (the Open Remote form); New Local Terminal opens one on this machine from a remote vault's window.
-- A focused shell keeps every chord the Keyboard section does not reserve: a terminal that answers only half of readline is not a terminal.
+- A focused shell keeps every chord the Keyboard section does not reserve, and with Forward All Keys on nearly all of those too: a terminal that answers only half of readline is not a terminal.
 - Foreground, background and all sixteen ANSI colours come from `theme.rs`, one palette per theme: VTE's own is arithmetic (its blue is 1.41:1 on our dark background), and a colour read off the widget does not follow Solarized. `vte_terminal_set_colors` takes all sixteen or none.
 - GNOME's monospace font, scaled by the terminal's own zoom; an underline cursor, so the character under it stays readable.
 - Inset 12 px either side, not by the 48 px page gutter: that measure is for prose, and a terminal is a grid.
@@ -647,9 +647,10 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - New Terminal `Ctrl+J`; `Ctrl+W` closes the tab and ends the shell, where closing the window does not. New Remote Terminal…, New Local Terminal, Save Session and Close Session are unbound.
 - In a window of shells with no note in front, `Ctrl+S` saves the session; a focused shell keeps that chord, so Save Session is in the primary menu and the palette.
 - Inside a shell, Copy in Terminal `Ctrl+Shift+C` and Paste in Terminal `Ctrl+Shift+V` are rows like any other: they rebind, list in the palette and name the shell's menu items. Over a text tab `Ctrl+Shift+V` is Paste as Plain Text. `Ctrl+PageUp` / `Ctrl+PageDown` stay `AdwTabView`'s.
-- **A focused shell wins by default**: while a terminal has the keyboard the window keeps a small reserved set and unbinds the rest of this table, so `Ctrl+A`, `Ctrl+C`, `Ctrl+D`, `Ctrl+E`, `Ctrl+K`, `Ctrl+L`, `Ctrl+R`, `Ctrl+U` and the rest of readline behave as in any terminal. Reserved: `Ctrl+W`, `Ctrl+Tab`, `Ctrl+J`, the three zoom chords, `F11`, the Move Tab and Move Divider chords, and every chord spelled with both `Control` and `Shift`.
+- **A focused shell wins by default**: while a terminal has the keyboard the window keeps a small reserved set and unbinds the rest of this table, so `Ctrl+A`, `Ctrl+C`, `Ctrl+D`, `Ctrl+K`, `Ctrl+L`, `Ctrl+R`, `Ctrl+U` and the rest of readline behave as in any terminal. Reserved: `Ctrl+W`, `Ctrl+Tab`, `Ctrl+J`, `Ctrl+E` (Go to File), the three zoom chords, `F11`, the Move Tab and Move Divider chords, and every chord spelled with both `Control` and `Shift`.
+- **Forward All Keys** (Preferences → Terminal, `forward_keys_to_terminal`) hands a focused shell the reserved set too, for a program that binds those chords itself. The window keeps Copy and Paste in Terminal — they act on the shell, and a terminal sends `Ctrl+Shift+C` on as `Ctrl+C`, which would interrupt the program instead of copying — and `AdwTabView`'s own `Ctrl+PageUp` / `Ctrl+PageDown` and `Alt+1` to `Alt+9`, which are not in this table: they are how the keyboard leaves such a shell. A change applies to the shell that has the keyboard at once.
 - The rule lives at the window, not on the shell: GTK dispatches application accelerators at the window ahead of the VTE, so unbinding them is the only way a key gets through.
-- `Ctrl+W` is the budgeted cost — readline loses delete-word, which `Alt+Backspace` still does; the zoom chords are the same trade, a terminal having its own zoom; `F11` means nothing to readline or curses and is what GNOME Terminal keeps.
+- `Ctrl+W` is the budgeted cost — readline loses delete-word, which `Alt+Backspace` still does; `Ctrl+E` is the same trade, end-of-line being `End` too; the zoom chords are the same trade, a terminal having its own zoom; `F11` means nothing to readline or curses and is what GNOME Terminal keeps.
 - A rebound chord follows the rule of the default it replaced.
 - The table is the application's, one for every window, so the shell that narrows it is the one in the active window: moving to another window gives that window its chords back.
 
@@ -663,7 +664,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 ### Panes
 
 - Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, References `Ctrl+Shift+B`, Git `Ctrl+Shift+G`, Outline `Ctrl+Shift+W`, Properties `Ctrl+Shift+A` (a diagram's), Show Hidden Files (unbound, also in Preferences → Files).
-- The pane chords carry Control and Shift, so they stay the window's while a shell has the keyboard and open their pane from a shell too.
+- The pane chords carry Control and Shift, so they stay the window's while a shell has the keyboard and open their pane from a shell too, unless Forward All Keys gives the shell them as well.
 
 ### Git
 

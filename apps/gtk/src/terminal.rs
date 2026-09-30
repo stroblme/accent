@@ -6,12 +6,13 @@
 //! downwards, which is the same gesture that puts a note there.
 //!
 //! A focused shell owns the keyboard, and it wins by default: the window keeps only Close Tab
-//! (`Ctrl+W`), New Terminal, the three zoom chords, Fullscreen and the `Ctrl+Shift` half of the
-//! action table, and everything else — `Ctrl+C`, `Ctrl+D`, `Ctrl+K`, `Ctrl+L`, `Ctrl+R` and the
-//! rest of readline — reaches the shell. The window is where that happens, not here: GTK
+//! (`Ctrl+W`), New Terminal, Go to File (`Ctrl+E`), the three zoom chords, Fullscreen and the
+//! `Ctrl+Shift` half of the action table, and everything else — `Ctrl+C`, `Ctrl+D`, `Ctrl+K`,
+//! `Ctrl+L`, `Ctrl+R` and the rest of readline — reaches the shell; with Forward All Keys on it
+//! keeps Copy and Paste in Terminal alone. The window is where that happens, not here: GTK
 //! dispatches a window's application accelerators ahead of the VTE, so nothing a controller on
 //! this widget claims can beat them, and `Shell::apply_accels` in `main` unbinds the rest of the
-//! table for as long as the active window's focus is a terminal (`main::reserved`, `has_focus`).
+//! table for as long as the active window's focus is a terminal (`actions::kept`, `has_focus`).
 //!
 //! Nothing hung on the shell's widgets may hold them: the page owns the scroller, the scroller owns
 //! the view, so a strong reference captured by a signal handler, a gesture or an action group the
