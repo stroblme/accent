@@ -76,12 +76,18 @@ pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &so
 pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     sync_scheme(buffer);
     match flavour {
-        Flavour::Note => {
-            highlight::restyle(buffer, view);
-            highlight::hang(buffer, view);
-        }
+        Flavour::Note => highlight::restyle(buffer, view),
         Flavour::Csv => highlight::restyle_csv(buffer),
         Flavour::Code => {}
+    }
+    rehang_companion(flavour, buffer, view);
+}
+
+/// A companion's heading markers and wrap indents measured again, against its left margin and in
+/// its font: what [`Tab::rehang`] does for the editor.
+pub fn rehang_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
+    if flavour.is_note() {
+        highlight::hang(buffer, view);
     }
     wrap::measure(view);
 }
@@ -116,6 +122,13 @@ impl Tab {
         let header = diff::header(mine, Some(close.upcast_ref()));
         holder.append(&header);
         holder.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        // GTK 4.22 gives the overlay scrollbar a fade handler on the scroller's adjustment at
+        // every realize and takes it off only while realized, from the adjustment it is on then.
+        // Out of the window, the scroller may be put on the other column's adjustment: its own
+        // would keep the handler, to run it on a scrollbar GTK has let go of once the comparison
+        // hands that adjustment back. Overlay scrolling off takes the handler now, while it can.
+        let overlay = self.scroller.is_overlay_scrolling();
+        self.scroller.set_overlay_scrolling(false);
         self.content.remove(&self.document);
         holder.append(&self.document);
         let editor = diff::Pane {
@@ -140,6 +153,7 @@ impl Tab {
         };
         let compare =
             self.with_map_unset(|| diff::Compare::new(old, new, Some(side), hunk_buttons));
+        self.scroller.set_overlay_scrolling(overlay);
         // Every lay moves the hidden runs, and a message at the end of a collapsed line would be
         // drawn on the row that stands for the run: the diagnostics are laid again with them.
         compare.on_laid(glib::clone!(
@@ -165,6 +179,7 @@ impl Tab {
             shut,
         });
         self.show_chevrons();
+        self.update_sticky();
         self.set_clamp();
         self.page.set_title(&self.tab_title());
         compare
@@ -191,6 +206,7 @@ impl Tab {
             self.content.remove(widget);
         }
         self.content.append(&self.document);
+        self.update_sticky();
         self.set_clamp();
         self.page.set_title(&self.tab_title());
         // The banner's button comes back, if the comparison had taken it.

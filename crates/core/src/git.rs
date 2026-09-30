@@ -8,6 +8,7 @@
 //! Everything is synchronous. A `git status` on a cold cache takes long enough to drop frames,
 //! so callers run these off the main thread.
 
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -120,7 +121,7 @@ pub struct Commit {
 /// One decoration on a commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ref {
-    /// As git shortens it: `main`, `origin/main`, `v1`, or `HEAD` for a detached HEAD.
+    /// As git shortens it: `main`, `origin/main`, `v1`, `HEAD` for a detached HEAD, or `stash`.
     pub name: String,
     pub kind: RefKind,
     /// HEAD is here: this is the branch it is on, or HEAD itself where it is detached.
@@ -135,6 +136,8 @@ pub enum RefKind {
     LocalBranch,
     RemoteBranch,
     Tag,
+    /// `refs/stash`, whose commits `log --all` walks like any other ref's.
+    Stash,
 }
 
 /// A commit placed on the history graph: which column it sits in, and which columns the edges
@@ -860,8 +863,9 @@ fn parse_log(bytes: &[u8]) -> Vec<Commit> {
 /// Read `%D` under `--decorate=full`: `HEAD -> refs/heads/main, tag: refs/tags/v1,
 /// refs/remotes/origin/main`, or `HEAD` alone where it is detached.
 ///
-/// Only branches, tags and HEAD are kept: `origin/HEAD` points at a branch rather than being one,
-/// and the stash and notes are refs no row has anything to say about. Sorted HEAD's first, then by
+/// Only branches, tags, HEAD and the stash are kept: `origin/HEAD` points at a branch rather than
+/// being one, and notes are refs no row has anything to say about. The stash is, its commits being
+/// in the history with nothing else saying what they are. Sorted HEAD's first, then by
 /// [`RefKind`], git's own order kept within each kind.
 fn parse_refs(decorations: &str) -> Vec<Ref> {
     let mut refs: Vec<Ref> = decorations
@@ -877,6 +881,8 @@ fn parse_refs(decorations: &str) -> Vec<Ref> {
                 (RefKind::LocalBranch, name)
             } else if let Some(name) = full.strip_prefix("tag: refs/tags/") {
                 (RefKind::Tag, name)
+            } else if full == "refs/stash" {
+                (RefKind::Stash, "stash")
             } else {
                 let name = full
                     .strip_prefix("refs/remotes/")
@@ -975,10 +981,10 @@ struct Lane {
 }
 
 /// What a commit's decorations would name a column after: its first branch, or failing that its
-/// first tag. A detached HEAD names no line of history.
+/// first tag. A detached HEAD and the stash name no line of history.
 fn lane_name(refs: &[Ref]) -> Option<String> {
     refs.iter()
-        .find(|r| r.kind != RefKind::Head)
+        .find(|r| !matches!(r.kind, RefKind::Head | RefKind::Stash))
         .map(|r| r.name.clone())
 }
 
@@ -1008,7 +1014,9 @@ fn free_slot(lanes: &mut Vec<Option<Lane>>) -> usize {
 /// command costs about as much as `git status` (30 ms on a 40 000-file repository) and the Git
 /// pane asks on every refresh, so the common case must not pay for it. Where the index may still
 /// hold a gitlink — broken, with no `.gitmodules` to say where it comes from, and refused by
-/// `git submodule status` for it — the index is asked instead ([`gitlinks`]).
+/// `git submodule status` for it — the index is asked instead ([`gitlinks`]). So is it where
+/// `git submodule status` refuses: one gitlink `.gitmodules` does not map is enough for it to
+/// list none, and the index lists them all, the mapped ones without their describe.
 pub fn submodules(repo: &Repo) -> Result<Vec<Submodule>, Error> {
     if !repo.root.join(".gitmodules").exists() {
         return match may_hold_gitlink(&repo.git_dir) {
@@ -1016,7 +1024,13 @@ pub fn submodules(repo: &Repo) -> Result<Vec<Submodule>, Error> {
             false => Ok(Vec::new()),
         };
     }
-    let out = run(&repo.root, &["submodule", "status"], true)?;
+    let out = match run(&repo.root, &["submodule", "status"], true) {
+        Err(Error::Git(e)) => {
+            tracing::debug!("git submodule status: {e}");
+            return gitlinks(repo);
+        }
+        out => out?,
+    };
     Ok(String::from_utf8_lossy(&out)
         .lines()
         .filter_map(parse_submodule)
@@ -1492,7 +1506,7 @@ fn rev(repo: &Repo, spec: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out).trim().to_string())
 }
 
-pub fn stage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
+pub fn stage(repo: &Repo, paths: &[impl Borrow<str>]) -> Result<(), Error> {
     write(repo, &["add"], paths)
 }
 
@@ -1504,7 +1518,7 @@ pub fn stage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
 /// directory row be unstaged as one path, and `-f` is load-bearing — the safety check refuses a
 /// path whose index content differs from both the worktree and HEAD, and with no HEAD that would
 /// be any file edited after it was staged.
-pub fn unstage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
+pub fn unstage(repo: &Repo, paths: &[impl Borrow<str>]) -> Result<(), Error> {
     match unborn(repo) {
         true => write(repo, &["rm", "--cached", "-r", "-f", "-q"], paths),
         false => write(repo, &["restore", "--staged"], paths),
@@ -1522,7 +1536,7 @@ fn unborn(repo: &Repo) -> bool {
     .is_err()
 }
 
-pub fn discard(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
+pub fn discard(repo: &Repo, paths: &[impl Borrow<str>]) -> Result<(), Error> {
     write(repo, &["restore", "--worktree"], paths)
 }
 
@@ -1579,8 +1593,9 @@ pub fn stage_text(repo: &Repo, path: &str, text: &str) -> Result<(), Error> {
 
 /// The paths go in over stdin, NUL-separated, rather than on the command line, which the kernel
 /// caps at 2 MB: a Stage All over an untracked tree of 60 000 files was refused before git ran.
-/// Nor can a note called `-f` be read as an option there.
-fn write(repo: &Repo, verb: &[&str], paths: &[&str]) -> Result<(), Error> {
+/// Nor can a note called `-f` be read as an option there. Borrowed or owned strings alike, so a
+/// caller holding `String`s, as the rpc server does, passes them as they are.
+fn write(repo: &Repo, verb: &[&str], paths: &[impl Borrow<str>]) -> Result<(), Error> {
     let args = [verb, &["--pathspec-from-file=-", "--pathspec-file-nul"]].concat();
     let mut child = command(&repo.root, &args, false)
         .stdin(Stdio::piped())

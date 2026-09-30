@@ -420,6 +420,10 @@ impl Tab {
                     highlight::hang(&tab.buffer, &tab.view);
                 }
                 wrap::measure(&tab.view);
+                // A comparison's companion is set in the same font, and takes the page with it.
+                if let Some(compare) = tab.comparison() {
+                    compare.follow_editor(true);
+                }
             }
         ));
     }
@@ -435,6 +439,12 @@ impl Tab {
     #[cfg(feature = "bench")]
     pub fn line_numbers(&self) -> (bool, i32) {
         (self.numbers.is_visible(), self.numbers.width())
+    }
+
+    /// Whether the sticky block title is up. Only `ACCENT_BENCH_COMPARE=page:` reads it.
+    #[cfg(feature = "bench")]
+    pub fn sticky_shown(&self) -> bool {
+        self.sticky_bar.is_visible()
     }
 
     /// Which line the gutter drew the caret's highlight on when it last painted, 0-based. Beside
@@ -518,6 +528,12 @@ impl Tab {
     /// blocks at all.
     pub fn update_sticky(&self) {
         if self.flavour == Flavour::Csv {
+            return;
+        }
+        // The other column of a comparison has no such bar, and one over the editor's first row
+        // alone puts the two first rows out of level.
+        if self.comparing.borrow().is_some() {
+            self.sticky_bar.set_visible(false);
             return;
         }
         // Before the view is allocated its visible rect is empty and `line_at_y` answers with

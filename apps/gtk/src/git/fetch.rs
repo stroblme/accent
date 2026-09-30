@@ -114,6 +114,8 @@ pub(super) struct Fetched {
     /// the answer somebody else's: `apply` drops it rather than storing one repository's history
     /// under another's index, and the refresh the chooser scheduled is the one that lands.
     pub(super) selected: usize,
+    /// How many commits the history was asked for: fewer back is all of it.
+    pub(super) rows: usize,
     pub(super) repos: Option<Vec<Repo>>,
     /// One per repository asked about, `None` where git did not answer.
     pub(super) statuses: Vec<Option<Status>>,
@@ -126,8 +128,15 @@ pub(super) struct Fetched {
 }
 
 /// Read what `depth` asks for. `known` is the repositories the pane already holds, which is what
-/// a refresh below [`Depth::Discover`] runs against rather than looking for them again.
-pub(super) fn fetch(vault: &Vault, selected: usize, depth: Depth, known: Vec<Repo>) -> Fetched {
+/// a refresh below [`Depth::Discover`] runs against rather than looking for them again, and `rows`
+/// how many commits of history the pane shows.
+pub(super) fn fetch(
+    vault: &Vault,
+    selected: usize,
+    depth: Depth,
+    known: Vec<Repo>,
+    rows: usize,
+) -> Fetched {
     // A refusal is not "there are no repositories": on `Err` the pane keeps the ones it had,
     // which is what a remote whose link dropped mid-refresh needs.
     let repos = match (depth >= Depth::Discover).then(|| vault.repos()) {
@@ -160,7 +169,7 @@ pub(super) fn fetch(vault: &Vault, selected: usize, depth: Depth, known: Vec<Rep
         .flatten();
     let (commits, branches, submodules) = match head {
         Some(repo) => (
-            Some(vault.git_log(repo, 0, PAGE).unwrap_or_else(|e| {
+            Some(vault.git_log(repo, 0, rows).unwrap_or_else(|e| {
                 // An empty page reads as "the history has not moved" in `apply`, so a refused log
                 // leaves the rows that are on screen where they are.
                 tracing::debug!("git log: {e}");
@@ -198,6 +207,7 @@ pub(super) fn fetch(vault: &Vault, selected: usize, depth: Depth, known: Vec<Rep
     });
     Fetched {
         selected,
+        rows,
         repos,
         statuses,
         commits,

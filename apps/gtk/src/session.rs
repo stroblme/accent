@@ -4,7 +4,7 @@
 use super::*;
 
 /// What the palette lists before the user types anything.
-const RECENT_NOTES: usize = 50;
+const RECENT_FILES: usize = 50;
 
 /// Commands kept in the session's recently-used list. There are only about forty of them, so a
 /// shorter list is still every command the user actually reaches for.
@@ -24,7 +24,7 @@ pub struct Corpus {
     /// `(alias, note)` for every frontmatter alias, which Go to File also finds a note by.
     aliases: Rc<Vec<(String, String)>>,
     tags: Rc<Vec<String>>,
-    /// The index's recently changed notes, up to [`RECENT_NOTES`]: one refresh behind at worst,
+    /// The index's recently changed notes, up to [`RECENT_FILES`]: one refresh behind at worst,
     /// which a list of what changed lately can afford.
     recent: Rc<Vec<String>>,
 }
@@ -38,7 +38,7 @@ impl App {
         };
         // A file from outside the vault has no path in it to ask about.
         let opened: Vec<String> = self
-            .recent_notes
+            .recent_files
             .borrow()
             .iter()
             .filter(|rel| !doc::is_loose_key(rel))
@@ -75,14 +75,14 @@ impl App {
                         .into_iter()
                         .map(|(name, _)| name)
                         .collect::<Vec<_>>(),
-                    vault.recent_files(RECENT_NOTES).unwrap_or_default(),
+                    vault.recent_files(RECENT_FILES).unwrap_or_default(),
                 )
             })
             .await;
             if let (Some(app), Some(((files, real, gone, aliases), tags, recent))) =
                 (weak.upgrade(), loaded)
             {
-                app.recent_notes
+                app.recent_files
                     .borrow_mut()
                     .retain(|rel| !gone.contains(rel));
                 *app.corpus.borrow_mut() = Corpus {
@@ -101,7 +101,7 @@ impl App {
         self.refresh_corpus();
         // Two answers to "recent": what this window opened, and what changed on disk. The first
         // is what the user means, so it leads and the index's mtime list fills the page below it.
-        let mru = self.recent_notes.borrow().clone();
+        let mru = self.recent_files.borrow().clone();
         let mut recent = mru.clone();
         for rel in self.corpus.borrow().recent.iter() {
             if !recent.contains(rel) {
@@ -202,13 +202,13 @@ impl App {
         );
     }
 
-    /// Remember that this note was just looked at. Called from `sync_active`, so it covers
-    /// opening a note, switching to its tab and coming back to the window.
-    pub fn note_used(self: &Rc<Self>, rel: &str) {
-        if self.recent_notes.borrow().first().is_some_and(|r| r == rel) {
+    /// Remember that this file was just looked at. Called from `sync_active`, so it covers
+    /// opening a file, switching to its tab and coming back to the window.
+    pub fn file_used(self: &Rc<Self>, rel: &str) {
+        if self.recent_files.borrow().first().is_some_and(|r| r == rel) {
             return;
         }
-        accent_core::config::touch(&mut self.recent_notes.borrow_mut(), rel, RECENT_NOTES);
+        accent_core::config::touch(&mut self.recent_files.borrow_mut(), rel, RECENT_FILES);
         self.save_session_soon();
     }
 
@@ -258,7 +258,7 @@ impl App {
             sidebar_width: sidebar_width(width),
             view: self.mode.get().name().to_string(),
             zoom: self.zoom.get(),
-            recent_notes: self.recent_notes.borrow().clone(),
+            recent_files: self.recent_files.borrow().clone(),
             recent_commands: self.recent_commands.borrow().clone(),
             // Merged rather than replaced: a PDF closed earlier in this session keeps the place
             // it was left at, which is the whole point of remembering it.
@@ -634,12 +634,12 @@ impl App {
         // answer to a question they asked in another sitting.
         self.restore_sidebar(session.sidebar, sidebar_width(session.sidebar_width));
         self.set_mode(Mode::from_name(&session.view));
-        // Last, and merged rather than assigned: opening the tabs above ran `note_used` for each
+        // Last, and merged rather than assigned: opening the tabs above ran `file_used` for each
         // of them, and the order they happened to restore in says nothing about how they were
         // used. Touching the stored list back to front puts it in front of those, and a note the
         // restore opened that the stored list does not know about still keeps its place at the end.
-        for rel in session.recent_notes.iter().rev() {
-            accent_core::config::touch(&mut self.recent_notes.borrow_mut(), rel, RECENT_NOTES);
+        for rel in session.recent_files.iter().rev() {
+            accent_core::config::touch(&mut self.recent_files.borrow_mut(), rel, RECENT_FILES);
         }
         for action in session.recent_commands.iter().rev() {
             accent_core::config::touch(
@@ -1041,8 +1041,8 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
         }
     }
     stored.active = stored.active.or(now.active);
-    for rel in now.recent_notes.iter().rev() {
-        accent_core::config::touch(&mut stored.recent_notes, rel, RECENT_NOTES);
+    for rel in now.recent_files.iter().rev() {
+        accent_core::config::touch(&mut stored.recent_files, rel, RECENT_FILES);
     }
     for action in now.recent_commands.iter().rev() {
         accent_core::config::touch(&mut stored.recent_commands, action, RECENT_COMMANDS);

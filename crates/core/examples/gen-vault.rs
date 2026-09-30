@@ -1575,7 +1575,7 @@ fn print_summary(out: &Path, s: &Summary) {
     println!("elapsed       {} ms", s.ms);
     println!(
         "note          the {} files under Submissions/proj-b/examples/.venv/ are skipped by that\n\
-         \x20             directory's pyvenv.cfg marker; --index-dependency-trees brings them back.",
+         \x20             directory's pyvenv.cfg marker; the file tree still lists them.",
         s.venv_files
     );
 }

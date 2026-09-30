@@ -36,7 +36,7 @@ mod text;
 
 pub use banner::Alert;
 use compare::Comparing;
-pub use compare::{companion, overlay_view, restyle_companion, style_companion};
+pub use compare::{companion, overlay_view, rehang_companion, restyle_companion, style_companion};
 #[cfg(feature = "bench")]
 pub(crate) use drag::content as drag_content;
 use follow::Follow;
@@ -420,8 +420,9 @@ fn build(
     view.set_enable_snippets(true);
     sourceview5::SnippetManager::default().set_search_path(&[]);
     view.set_show_line_numbers(false);
-    // The Indent Width preference's default, which `Tab::set_indent_width` replaces in a tab; a
-    // companion keeps it, so both sides of a comparison count a tab and a wrap level alike.
+    // The Indent Width preference's default, which `Tab::set_indent_width` replaces in a tab. A
+    // companion beside a tab takes the tab's (`diff::Compare::follow_editor`) and two companions
+    // keep this, so both sides of a comparison count a tab and a wrap level alike.
     view.set_tab_width(4);
     if !flavour.is_note() {
         view.set_auto_indent(true);
@@ -1319,6 +1320,9 @@ impl Tab {
     /// list item's own indent; four columns is also the tab stop CommonMark reads a note's tab at.
     pub fn set_indent_width(&self, columns: u32) {
         self.view.set_tab_width(columns);
+        if let Some(compare) = self.comparison() {
+            compare.follow_editor(false);
+        }
     }
 
     pub fn set_spellcheck(&self, on: bool) {

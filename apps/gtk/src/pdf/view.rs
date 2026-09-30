@@ -141,7 +141,7 @@ impl PdfView {
         let Some((x, y)) = at else {
             return self.set_zoom(zoom);
         };
-        let (before_x, before_y) = self.content_at(x, y);
+        let (ox, oy) = self.scroll_offset();
         let (old_w, old_h) = {
             let layout = self.imp().layout.borrow();
             (layout.width, layout.height)
@@ -151,13 +151,22 @@ impl PdfView {
         let layout = self.imp().layout.borrow().clone();
         // The same fraction of the content stays under the pointer, which is what makes zooming
         // feel like moving the page rather than moving the window.
-        let (fx, fy) = (before_x / old_w.max(1.0), before_y / old_h.max(1.0));
         let (hadj, vadj) = (self.hadjustment(), self.vadjustment());
         if let Some(hadj) = hadj {
-            hadj.set_value(f64::from(fx * layout.width) - x);
+            hadj.set_value(crate::zoom::zoomed_scroll(
+                x,
+                ox,
+                old_w.into(),
+                layout.width.into(),
+            ));
         }
         if let Some(vadj) = vadj {
-            vadj.set_value(f64::from(fy * layout.height) - y);
+            vadj.set_value(crate::zoom::zoomed_scroll(
+                y,
+                oy,
+                old_h.into(),
+                layout.height.into(),
+            ));
         }
         self.zoomed();
     }

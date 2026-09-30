@@ -852,11 +852,13 @@ impl Vault {
     }
 }
 
-/// The requests a document answers, written once for the three layers that carry them:
-/// [`Languages`] finds the provider that holds the document and spawns the request on the
-/// runtime, [`Vault`] asks it here or on the host that has the files, and the host answers it
-/// through the same rpc dispatch every other method goes through. Each line reads
-/// `façade => trait method`, and `then f` finishes a host's answer here with `f`.
+/// What a document is asked and told, written once for the three layers that carry it:
+/// [`Languages`] finds the provider that holds the document and spawns the call on the runtime,
+/// [`Vault`] makes it here or on the host that has the files, and the host answers it through the
+/// same rpc dispatch every other method goes through. Each line reads `façade => trait method`. A
+/// line with an answer is a request, whose trait method is a future to await, and `then f`
+/// finishes a host's answer here with `f`; one without is a notification, which the provider has
+/// taken in by the time its trait method returns.
 macro_rules! requests {
     (@remote $r:ident $name:ident $params:expr) => {
         remote_task($r.clone(), stringify!($name), $params)
@@ -864,20 +866,29 @@ macro_rules! requests {
     (@remote $r:ident $name:ident $params:expr, $then:path) => {
         remote_task_then($r.clone(), stringify!($name), $params, $then)
     };
+    (@ret) => { () };
+    (@ret $ret:ty) => { $ret };
+    (@answer $call:expr;) => { $call };
+    (@answer $call:expr; $ret:ty) => { $call.await };
     ($(
         $(#[$doc:meta])*
-        $name:ident => $inner:ident ( $($arg:ident : $ty:ty),* ) -> $ret:ty $(, then $then:path)?;
+        $name:ident => $inner:ident ( $($arg:ident : $ty:ty),* ) $(-> $ret:ty)?
+            $(, then $then:path)?;
     )*) => {
         impl Languages { $(
-            pub(crate) fn $name(&self, rel: String, $($arg: $ty),*) -> Task<$ret> {
+            pub(crate) fn $name(&self, rel: String, $($arg: $ty),*)
+                -> Task<requests!(@ret $($ret)?)>
+            {
                 let provider = self.provider(&rel);
-                Task::spawn(async move { provider?.$inner(&rel, $($arg),*).await })
+                Task::spawn(async move {
+                    requests!(@answer provider?.$inner(&rel, $($arg),*); $($ret)?)
+                })
             }
         )* }
 
         impl Vault { $(
             $(#[$doc])*
-            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<$ret> {
+            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<requests!(@ret $($ret)?)> {
                 match &self.backend {
                     Backend::Local(v) => v.$name(rel, $($arg),*),
                     Backend::Remote(r) => {
@@ -888,7 +899,7 @@ macro_rules! requests {
         )* }
 
         impl Local { $(
-            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<$ret> {
+            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<requests!(@ret $($ret)?)> {
                 self.lang.$name(rel.to_string(), $($arg),*)
             }
         )* }
@@ -896,24 +907,13 @@ macro_rules! requests {
         /// These methods' half of the rpc dispatch. Every request runs on its own thread in
         /// [`crate::rpc::serve_local`], so blocking on the runtime here is a wait for one answer
         /// and never a nested one.
-        pub(crate) fn dispatch_requests(
+        pub(crate) fn dispatch(
             vault: &Local,
             method: &str,
             p: &Value,
         ) -> Option<std::result::Result<Value, crate::rpc::RpcError>> {
             $( if method == stringify!($name) {
-                let rel: String = match crate::rpc::arg(p, 0) {
-                    Ok(rel) => rel,
-                    Err(e) => return Some(Err(e)),
-                };
-                let _i = 1usize;
-                $(
-                    let $arg: $ty = match crate::rpc::arg(p, _i) {
-                        Ok(value) => value,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    let _i = _i + 1;
-                )*
+                crate::rpc::args!(p; rel: String $(, $arg: $ty)*);
                 return Some(crate::rpc::any(crate::rpc::block(
                     vault.$name(&rel, $($arg),*),
                 )));
@@ -937,78 +937,17 @@ requests! {
     /// The rest of the line as ghost text, or nothing. Asked on every pause in the typing, so
     /// dropping the task is the normal end of one.
     inline_completion => inline_completion(pos: Pos) -> Option<String>;
-}
 
-/// What the editor did to a document, told to whoever answers for it: no answer to wait for, and
-/// nothing to await inside. The same three layers as [`requests!`], plus the rpc arm; each line
-/// reads `façade => Languages method / trait method`.
-macro_rules! notifications {
-    ($(
-        $(#[$doc:meta])*
-        $name:ident => $held:ident / $inner:ident ( $($arg:ident : $ty:ty),* );
-    )*) => {
-        impl Languages { $(
-            pub(crate) fn $held(&self, rel: String, $($arg: $ty),*) -> Task<()> {
-                let provider = self.provider(&rel);
-                Task::spawn(async move { provider?.$inner(&rel, $($arg),*) })
-            }
-        )* }
-
-        impl Vault { $(
-            $(#[$doc])*
-            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<()> {
-                match &self.backend {
-                    Backend::Local(v) => v.$name(rel, $($arg),*),
-                    Backend::Remote(r) => {
-                        remote_task(r.clone(), stringify!($name), json!([rel, $($arg),*]))
-                    }
-                }
-            }
-        )* }
-
-        impl Local { $(
-            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<()> {
-                self.lang.$held(rel.to_string(), $($arg),*)
-            }
-        )* }
-
-        pub(crate) fn dispatch_notifications(
-            vault: &Local,
-            method: &str,
-            p: &Value,
-        ) -> Option<std::result::Result<Value, crate::rpc::RpcError>> {
-            $( if method == stringify!($name) {
-                let rel: String = match crate::rpc::arg(p, 0) {
-                    Ok(rel) => rel,
-                    Err(e) => return Some(Err(e)),
-                };
-                let _i = 1usize;
-                $(
-                    let $arg: $ty = match crate::rpc::arg(p, _i) {
-                        Ok(value) => value,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    let _i = _i + 1;
-                )*
-                return Some(crate::rpc::any(crate::rpc::block(
-                    vault.$name(&rel, $($arg),*),
-                )));
-            } )*
-            None
-        }
-    };
-}
-
-notifications! {
-    change_document => change_document / change(text: String);
+    // What the editor did to the document: nothing to answer, and nothing to await inside.
+    change_document => change(text: String);
     /// The buffer was written; a server that checks on save is told.
-    save_document => save_document / saved();
+    save_document => saved();
     /// The user left the document. Cheap for every provider but the ghost one, which re-reads
     /// the vault here rather than on every autosave.
-    settle => settle_document / settle();
+    settle => settle();
     /// The index moved under the document: its hints are worked out again and published. What a
     /// note's dangling link needs, the note it names having just been created.
-    rediagnose => rediagnose_document / rediagnose();
+    rediagnose => rediagnose();
 }
 
 /// One remote request as a task.

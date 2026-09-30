@@ -15,6 +15,7 @@
 use accent_core::diff::{self, DiffLine, Op, Row};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ops::{Range, RangeInclusive};
@@ -261,8 +262,7 @@ impl Pool {
                 button.set_tooltip_text(Some("Show these lines"));
                 button.connect_clicked(self.act(&role, |compare, role| {
                     if let Role::Gap { key, .. } = role {
-                        compare.opened.borrow_mut().insert(key);
-                        compare.refresh();
+                        compare.open_run(key);
                     }
                 }));
                 (button.clone().upcast(), Some(button))
@@ -373,6 +373,15 @@ enum Anchor {
     Hunk(usize),
     /// Centred in the blank space a hidden run left at this row.
     Gap(usize),
+}
+
+/// Where the view is kept until the rows are laid: see [`Compare::keep`].
+#[derive(Clone, Copy)]
+enum Keep {
+    /// The first hunk at [`FIRST_HUNK_AT`] of the page, which is where a comparison opens.
+    FirstHunk,
+    /// The scroll a hidden run was opened at, held there: see [`Compare::open_run`].
+    Scroll(f64),
 }
 
 /// What a relayout measured: every row's natural height per side (`None` where the side has no
@@ -750,11 +759,11 @@ pub struct Compare {
     /// The bottom margin each view was last given here, and how much of it is the blank under a
     /// side with no line: see [`Compare::page_bottom`].
     bottoms: [Cell<(i32, i32)>; 2],
-    /// Whether the next relayout should put the first hunk on screen. Set once, when the
-    /// comparison is built: a diff opens on what changed rather than on the top of a file whose
-    /// first difference is four hundred lines down. Cleared by the relayout that does it, because
-    /// after that where the view sits is the reader's business.
-    first_view: Cell<bool>,
+    /// Where the view is kept until a relayout has laid every row, which clears it. The first
+    /// hunk, as the comparison is built: a diff opens on what changed rather than on the top of a
+    /// file whose first difference is four hundred lines down. The scroll a run was opened at (see
+    /// [`Compare::open_run`]). After that where the view sits is the reader's business.
+    keep: Cell<Option<Keep>>,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
     /// Each pane's context menu as [`Compare::offer`] left it, and the one it replaced, to put
     /// back when the comparison goes. Empty until something is offered.
@@ -830,7 +839,7 @@ impl Compare {
             settling: Cell::new(0),
             own_vadjustment,
             bottoms: Default::default(),
-            first_view: Cell::new(true),
+            keep: Cell::new(Some(Keep::FirstHunk)),
             handlers: RefCell::new(Vec::new()),
             offered: RefCell::new(Vec::new()),
             laid: RefCell::new(None),
@@ -870,6 +879,16 @@ impl Compare {
         let id = vadj.connect_upper_notify(move |_| {
             if let Some(c) = w.upgrade() {
                 c.schedule_relayout();
+            }
+        });
+        connect(vadj.clone().upcast(), id);
+        // A scroll held by `Compare::open_run` goes back to where it is held.
+        let w = weak.clone();
+        let id = vadj.connect_value_changed(move |adj| {
+            if let Some(Keep::Scroll(value)) = w.upgrade().and_then(|c| c.keep.get())
+                && adj.value() != value
+            {
+                adj.set_value(value);
             }
         });
         connect(vadj.upcast(), id);
@@ -1158,7 +1177,7 @@ impl Compare {
         let Some(top) = row.and_then(|r| self.grid.borrow().tops.get(r).copied()) else {
             return;
         };
-        self.first_view.set(false);
+        self.keep.set(None);
         // `visible_rect` is in buffer coordinates and the adjustment is not — the top margin
         // lies between them — so the scroll moves by the distance from what is on screen now.
         let (adj, seen) = (
@@ -1166,6 +1185,18 @@ impl Compare {
             self.panes[0].view.visible_rect(),
         );
         adj.set_value(adj.value() + f64::from(top - seen.y()) - FIRST_HUNK_AT * adj.page_size());
+    }
+
+    /// Open the hidden run keyed `key`, as its button does, with the scroll held where it was
+    /// until the rows are laid: the rows above stay, and the run opens downwards from the button's
+    /// row. Left to GTK, each view keeps its own top line in place as the lines above it grow,
+    /// both on the one scroll they share, so a run opened at the top of the view scrolled it by
+    /// twice its height, and by twice the height laid so far while GTK caught up.
+    fn open_run(&self, key: usize) {
+        let value = self.panes[0].scroller.vadjustment().value();
+        self.keep.set(Some(Keep::Scroll(value)));
+        self.opened.borrow_mut().insert(key);
+        self.refresh();
     }
 
     /// Take the tints, the emphasis and the hidden runs off `side`, which a refresh lays down
@@ -1244,6 +1275,29 @@ impl Compare {
         }
     }
 
+    /// Put the editor's page on the companion beside it: the margins, so the first row of each
+    /// starts level, the line spacing, and the tab width the Indent Width preference sets. The
+    /// heading markers hang in the left margin and are measured in the font, so they are hung
+    /// again where the margin moves and, with `refont`, after a font change, which only the
+    /// editor's tab hears of. The bottom margin is [`Compare::relayout`]'s.
+    pub fn follow_editor(&self, refont: bool) {
+        let Some(mine) = self.editable else {
+            return;
+        };
+        let (from, companion) = (&self.pane(mine).view, self.pane(mine.other()));
+        let to = &companion.view;
+        let rehang = refont || to.left_margin() != from.left_margin();
+        to.set_top_margin(from.top_margin());
+        to.set_left_margin(from.left_margin());
+        to.set_right_margin(from.right_margin());
+        to.set_pixels_above_lines(from.pixels_above_lines());
+        to.set_pixels_below_lines(from.pixels_below_lines());
+        to.set_tab_width(from.tab_width());
+        if rehang {
+            editor::rehang_companion(companion.flavour, &companion.buffer, to);
+        }
+    }
+
     /// The bottom margin the page gives `side`, without the blank a relayout left under a side
     /// with no line: the editor's own, which a companion beside it takes as well. A margin
     /// someone else has set since — the zoom — is the page's whole.
@@ -1291,15 +1345,7 @@ impl Compare {
         if let Some(mine) = self.editable {
             reclaim(&self.pane(mine).buffer);
         }
-        // The companion takes the editor's page margins, so the first row of each starts level.
-        if let Some(mine) = self.editable {
-            let (from, to) = (&self.pane(mine).view, &self.pane(mine.other()).view);
-            to.set_top_margin(from.top_margin());
-            to.set_left_margin(from.left_margin());
-            to.set_right_margin(from.right_margin());
-            to.set_pixels_above_lines(from.pixels_above_lines());
-            to.set_pixels_below_lines(from.pixels_below_lines());
-        }
+        self.follow_editor(false);
         let lines = self.lines.borrow();
         let rows = self.rows.borrow();
         let starts = self.starts.borrow();
@@ -1405,10 +1451,11 @@ impl Compare {
             extra,
             tops,
         };
-        // GTK had not laid some line out yet: ask again once it has. So too while the first hunk
-        // waits for a pass that moved nothing: padding GTK has not laid out yet is not in where
-        // the scroll puts a line, and each view keeps its top line where it was as it catches up.
-        let unsettled = estimated.get() || (self.first_view.get() && repadded);
+        // GTK had not laid some line out yet: ask again once it has. So too while the view waits
+        // to be put somewhere for a pass that moved nothing: padding GTK has not laid out yet is
+        // not in where the scroll puts a line, and each view keeps its top line where it was as it
+        // catches up.
+        let unsettled = estimated.get() || (self.keep.get().is_some() && repadded);
         let exhausted = self.settling.get() == 0;
         if unsettled && !exhausted && self.pending.borrow().is_none() {
             self.settling.set(self.settling.get() - 1);
@@ -1424,10 +1471,13 @@ impl Compare {
         // Once every row is measured and laid as the grid has it, or GTK has been asked as often
         // as it will be. After the borrows: moving the scroll runs handlers that may lay the
         // comparison again.
-        let reveal = self.first_view.get() && (!unsettled || exhausted);
+        let keep = self.keep.get().filter(|_| !unsettled || exhausted);
         drop((lines, rows, starts, hidden));
-        if reveal {
-            self.reveal_first_hunk();
+        match keep {
+            Some(Keep::FirstHunk) => self.reveal_first_hunk(),
+            // Held all along, and the rows above the run have not moved.
+            Some(Keep::Scroll(_)) => self.keep.set(None),
+            None => {}
         }
     }
 
@@ -1604,8 +1654,7 @@ impl Compare {
     pub fn open_gap(&self, i: usize) {
         let key = self.hidden.borrow().get(i).map(|(_, key)| *key);
         if let Some(key) = key {
-            self.opened.borrow_mut().insert(key);
-            self.refresh();
+            self.open_run(key);
         }
     }
 

@@ -130,7 +130,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 **Properties**
 
-- The diagram's own widget: `AdwPreferencesGroup` rows for the selected cells — Shape (fill and line colour, each with a switch for having one; line width, dashed, rounded, shadow, opacity), Text (size, colour, bold/italic/underline, alignment), Line for an edge (route, arrow heads), Style (one cell's raw style string, applied on Enter) — and with nothing selected, the page (name, background, size).
+- The diagram's own widget: `AdwPreferencesGroup` rows for the selected cells — Shape (fill, gradient and line colour, each with a switch for having one, the gradient greyed without a fill and its direction shown while there is one; line width, dashed, rounded, shadow, opacity; flex arrows alone show only the fill and the gradient), Text (size, colour, bold/italic/underline, alignment), Line for an edge (route, arrow heads), Style (one cell's raw style string, applied on Enter) — and with nothing selected, the page (name, background, size).
 - Every row is one undo step; spin rows wait for a burst of steps to settle.
 - GTK's own colour chooser is the whole picker: it cannot be given a palette, so none is imitated.
 - The pane leaves by showing Outline first, so the stack never shows nothing. Its icon is `document-properties-symbolic`.
@@ -180,11 +180,11 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A row whose file was staged, discarded or committed since the refresh opens nothing, two identical columns being no answer: the pane says the file has no unstaged changes and asks git again, which takes the row away.
 - `Ctrl+Shift+G` shows the pane with the keyboard in the commit box.
 - The lower half, across a vertical `GtkPaned`, is the history: 200 commits at a time behind Load More, each in its lane's colour (the hue rotation, Colour). A commit expands on a single click into the files it changed, each opening the commit against its first parent as a diff tab.
-- A commit leads its summary with a label per decoration — HEAD's branch in the accent, a remote branch dimmer, a tag outlined — three at most and `+N` for the rest; a branch and a tag of one name stay apart, and `origin/HEAD`, the stash and notes are not shown.
-- Each lane is named after its first decorated commit and handed down first parents, and a commit where other named lanes end says "side branched here". That is the graph's own reading, with no git call of its own, so a branch that has not diverged shares its lane and forks nowhere.
+- A commit leads its summary with a label per decoration — HEAD's branch in the accent, a remote branch dimmer, a tag outlined, and the stash `stash` in a local branch's label, its commits being in the history with nothing else saying what they are — three at most and `+N` for the rest; a branch and a tag of one name stay apart, and `origin/HEAD` and notes are not shown.
+- Each lane is named after its first decorated commit and handed down first parents (the stash names none), and a commit where other named lanes end says "side branched here". That is the graph's own reading, with no git call of its own, so a branch that has not diverged shares its lane and forks nowhere.
 - A commit row carries Check Out Commit and Copy Commit ID on hover and `:focus-within`, so the summary has the pane's width otherwise; two actions are two buttons, not a menu. Check Out is `git switch --detach`, unasked, git refusing it where work would be lost; moving onto a branch is the popover's job.
 - Hovering a commit shows its decorations, short id, lane ("On main") and whole message, from what the log already fetched.
-- One commit is expanded at a time, and a refresh closes it only where the history moved, so an expanded commit and what Load More added survive the save that scheduled the refresh.
+- One commit is expanded at a time, and a refresh closes it only where the history moved, so an expanded commit and what Load More added survive the save that scheduled the refresh. A refresh reads as many commits as are shown, so what Load More added survives a history that moved too, at the price of a bigger `git log` on every save once it was used.
 - A refresh leaves both lists where they are, as the tree does (Files): a Stage click takes its row out of Changes and the keyboard to the row now in its place.
 
 ### Editor
@@ -331,6 +331,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Window without a vault
 
 - A file named on the command line or handed over by the file manager, or `accent --terminal`, opens in a window with no vault: no index, no watcher, tabs keyed by absolute path, and no session, since a window opened on one file is opened the same way again.
+- Files handed over together — several picked in Files, `accent a.pdf b.md` — open in one window, the one the first would open in alone: the window of the open vault holding it, else this one. The others join it as tabs, from outside its vault where it does not hold them (user decision 2026-09-30).
 - A window of shells saved under a name is the exception: keyed `terminal://<name>`, listed among the vaults, one window each, and written like a vault's (Save asks for the name once), so its shells come back when it is opened again. Close Session, after a question saying how many shells end, ends them, forgets the session and leaves for the start screen.
 - Its sidebar holds the Outline pane alone, the others being views of an index, and starts hidden.
 - There are two unnamed ones at most, one per kind, and the launch that builds one decides its kind for good: `accent --terminal` goes to the terminal window and a file from outside the open vaults to the documents window, so a PDF opened from Files never lands among the shells. What is opened in either by hand stays there without changing its kind, and a closed one is built again by the next launch of its kind.
@@ -410,12 +411,14 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Rows are kept level by blank space, never filler text, and a line's number stays beside its text.
 - Paired lines start on the row they share. A changed line shorter than its partner carries the difference as blank space under it, in its own tint, so a change reads as one block of equal height on both sides. The blank of a hunk that only adds or only deletes takes the colour of the lines it faces, at half a row's tint: green on the left facing an addition, red on the right facing a deletion.
 - Unchanged runs beyond three lines of context hide behind a "⋯ N unchanged lines" button: all of them on opening, the caret going to the first change, then all but the run holding the caret. A hidden line's end-of-line diagnostic message is left off (the gutter icon still says it is there), or a collapsed run's messages would stack on one row.
+- Opening a run keeps the view where it was: the rows above stay, and the run opens downwards from its button's row, the one at the top of a file too.
 - The collapsed runs are the only folding while a comparison is up: the tab's shut folds open with it, nothing folds meanwhile (the chevrons go), and when it goes each fold shuts again whose header is still there unchanged, unless the caret is inside. GTK 4.22 lays a line where a fold ends inside or beside a collapsed run out as a blank row, and aborts when asked for a position in it.
 - Typing re-diffs on each keystroke and moves no row that did not change.
 - A differing hunk carries Take / Keep Both buttons on the Theirs pane, so a merge is a click or a keystroke into the note itself. A sync conflict and a changed-on-disk note keep the Keep Theirs / Keep Mine bar under the panes; Keep Mine on a changed-on-disk note writes against the version it showed. The banner that asked drops its button while its comparison is on screen.
 - A staged change or a commit compares two texts that are not files, in a transient tab of two read-only panes keyed by what it compares, so asking twice updates one tab. It opens as the pane's preview, a list of changed files otherwise stacking a tab per click, and is re-read when the Git pane refreshes.
 - A selection in the working-tree comparison puts Stage Selected Lines on the view's menu, in a section of its own, and one in a staged comparison Unstage Selected Lines: exactly the changed rows the selection covers go in or out, a row with no line on the selection's side going with the line above it. Without a selection the entry is absent.
-- Every comparison follows the document zoom, page margins included.
+- Every comparison follows the document zoom, page margins included. A read-only side beside the editor takes the editor's page whatever moves it: its heading markers hang in the same margin, and a tab is as wide as the Indent Width makes it there.
+- The sticky block title stays off while a comparison is up: the other side has none, and one over the editor's first row alone puts the two first rows out of level.
 
 ### Language servers
 
@@ -613,7 +616,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 - Zoom In `Ctrl++` (also `Ctrl+=` and the keypad), Zoom Out `Ctrl+-`, Reset `Ctrl+0`, and `Ctrl+scroll` over a document, a PDF, an image, the preview or a terminal — never the chrome, which keeps the system interface font.
 - The chords go to the active tab: a PDF fits its pages, an image is given a size of its own and centred, a terminal scales its own font (a grid of columns, not a page of prose), a document scales the display-wide one, and a status page and a diff have no zoom. The preview is zoomed with the editor, so presentation follows.
-- A step is a tenth for the document font, a PDF page and an image alike, from the chord, the wheel or a pinch, and lands on the next tenth: a page fitted at 137 % steps to 140 %. A pinch follows the fingers in the same tenths, around the point between them. A step is taken from the zoom asked for, never read back off the rendered pixels, whose rounding would leave it stuck.
+- A step is a tenth for the document font, a PDF page and an image alike, from the chord, the wheel or a pinch, and lands on the next tenth: a page fitted at 137 % steps to 140 %. A pinch follows the fingers in the same tenths, around the point between them. A step is taken from the zoom asked for, never read back off the rendered pixels, and counted in whole percent, so a zoom a hair off its tenth still moves.
+- A wheel notch keeps what is under the pointer under it, on a PDF page and an image alike. A chord, having no pointer, keeps a PDF's reading position, the view's top-left corner, and the middle of an image's view, as a diagram's. A page or an image narrower than the view is centred in it, so that point stays put only once it fills the view.
 - The range is a tenth to eight times for a page or an image, a half to triple for the document font.
 - The readout at the end of the status bar is the Reset control: clicking it is `Ctrl+0` — 100 % for a document, Fit Height for a PDF, though a PDF opens at Fit Width.
 - Fit Height fills the viewport's height with one page, edge to edge, landing on the top of the page being read: any margin would only show the next page. A pane too narrow for that fits the width, so the whole page stays on screen.

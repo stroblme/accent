@@ -398,6 +398,7 @@ impl DiagramTab {
                     count: cells.len(),
                     vertices: cells.iter().any(|c| c.vertex),
                     edges: cells.iter().any(|c| c.edge),
+                    fills: cells.iter().any(|c| c.takes_fill()),
                 },
                 None => props::Target::Page {
                     name: page.name().to_string(),
@@ -870,6 +871,12 @@ impl DiagramTab {
     /// What the file should hold now.
     pub fn text(&self) -> String {
         self.editor.borrow().file().to_xml()
+    }
+
+    /// The model as it stands, for a save's worker to serialise: a clone costs a fraction of
+    /// [`text`](Self::text), which the main thread would otherwise wait on.
+    pub fn file(&self) -> File {
+        self.editor.borrow().file().clone()
     }
 
     /// A write of the model landed: the tab is clean at `etag`.

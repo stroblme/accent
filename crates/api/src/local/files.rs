@@ -13,8 +13,8 @@ use accent_core::{markdown, search, template};
 use super::{Local, Msg};
 use crate::paths::{accent_conflict_name, with_md};
 use crate::{
-    Etag, FileEdits, FileKind, KeptLink, PageEdit, Regex, RenamePlan, RenameReport, RepageReport,
-    ReplaceReport, SaveError, UndoReport, fs, locked,
+    Etag, FileEdits, FileKind, KeptLink, Options, PageEdit, Regex, RenamePlan, RenameReport,
+    RepageReport, ReplaceReport, SaveError, UndoReport, fs, locked,
 };
 
 /// Most text a Replace All keeps to undo itself with. The pre-images are held in memory, and the
@@ -477,8 +477,9 @@ impl Local {
         Ok(done)
     }
 
-    /// Replace every match of `re` in every file whose indexed body has one — the files
-    /// [`grep`](Self::grep) lists and counts under the same `include_ignored`, notes or not.
+    /// Replace every match of `query` under `options` in every file whose indexed body has one —
+    /// the files [`grep`](Self::grep) lists and counts under the same `include_ignored`, notes or
+    /// not. The pattern is compiled here, as `grep` compiles it.
     ///
     /// `literal` takes `$1` in `replacement` as two characters rather than a capture group, which
     /// is what the sidebar's non-regex modes mean. Same shape as [`rename`](Self::rename): a file
@@ -501,13 +502,14 @@ impl Local {
     /// nothing renders would be machinery for its own sake.
     pub fn replace_all(
         &self,
-        re: &Regex,
+        query: &str,
+        options: Options,
         replacement: &str,
         literal: bool,
         include_ignored: bool,
     ) -> Result<ReplaceReport> {
         self.replace_within(
-            re,
+            &search::pattern(query, options)?,
             replacement,
             literal,
             include_ignored,

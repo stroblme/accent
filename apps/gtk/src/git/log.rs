@@ -504,8 +504,8 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
 /// then `+N` for the rest on the last one, and any label left over hidden.
 ///
 /// The classes are the `.git-ref` rules in `install_chrome_css`: HEAD's branch in the accent
-/// colour, a remote branch dimmer than a local one, a tag outlined. Set whole on every bind,
-/// because a recycled row still wears whatever the commit before it was.
+/// colour, a remote branch dimmer than a local one, a tag outlined, the stash as a local branch.
+/// Set whole on every bind, because a recycled row still wears whatever the commit before it was.
 fn bind_refs(labels: &gtk::Box, refs: &[git::Ref]) {
     let mut next = labels.first_child().and_downcast::<gtk::Label>();
     for i in 0..=SHOWN_REFS {

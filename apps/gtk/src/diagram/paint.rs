@@ -353,6 +353,40 @@ pub fn outline(
                     snapshot.pop();
                 }
             }
+            Some(Paint::Radial {
+                from,
+                to,
+                centre,
+                radii: (rx, ry),
+                rotation,
+            }) => {
+                // An outline with no area fills nothing, and GSK refuses a zero radius.
+                if let Some(bounds) = path.bounds().filter(|_| *rx > 0.0 && *ry > 0.0) {
+                    let c = frame.to_content(*centre);
+                    // A square about the centre reaching the outline's far corner covers it
+                    // under any turn.
+                    let mid = bounds.center();
+                    let reach = (bounds.width().hypot(bounds.height()) / 2.0) as f64
+                        + c.distance(Point::new(mid.x() as f64, mid.y() as f64));
+                    let cover = Rect::new(c.x - reach, c.y - reach, 2.0 * reach, 2.0 * reach);
+                    snapshot.push_fill(path, gsk::FillRule::Winding);
+                    rotated(snapshot, c, *rotation, || {
+                        snapshot.append_radial_gradient(
+                            &grect(&cover),
+                            &gpoint(c),
+                            (rx * frame.scale) as f32,
+                            (ry * frame.scale) as f32,
+                            0.0,
+                            1.0,
+                            &[
+                                gsk::ColorStop::new(0.0, rgba(*from)),
+                                gsk::ColorStop::new(1.0, rgba(*to)),
+                            ],
+                        )
+                    });
+                    snapshot.pop();
+                }
+            }
             None => {}
         }
         if let Some(s) = stroke {
