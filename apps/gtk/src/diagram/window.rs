@@ -216,6 +216,8 @@ impl App {
             "diagram-redo" => tab.redo(),
             "diagram-delete" => tab.delete(),
             "diagram-duplicate" => tab.duplicate(),
+            "diagram-group" => tab.group(),
+            "diagram-ungroup" => tab.ungroup(),
             "diagram-select-all" => tab.select_all(),
             "diagram-edit-label" => tab.edit_label(),
             "diagram-next-page" => tab.step_page(true),

@@ -619,6 +619,32 @@ impl DiagramTab {
         self.select(copies);
     }
 
+    /// Group the selection, and select the group (draw.io's Group, `Ctrl+G`).
+    pub fn group(self: &Rc<Self>) {
+        let ids = self.selection();
+        let mut group = None;
+        self.edit(|e, page| {
+            group = e.group(page, &ids)?;
+            Ok(())
+        });
+        if let Some(group) = group {
+            self.select(vec![group]);
+        }
+    }
+
+    /// Ungroup the selection, and select what it let go of.
+    pub fn ungroup(self: &Rc<Self>) {
+        let ids = self.selection();
+        let mut chosen = Vec::new();
+        self.edit(|e, page| {
+            chosen = e.ungroup(page, &ids)?;
+            Ok(())
+        });
+        if !chosen.is_empty() {
+            self.select(chosen);
+        }
+    }
+
     /// Move the selection by `dx`, `dy` page units: the arrow keys.
     pub fn nudge(self: &Rc<Self>, dx: f64, dy: f64) {
         let ids = self.selection();

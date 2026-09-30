@@ -260,31 +260,53 @@ impl Editor {
     pub fn delete(&mut self, page: usize, ids: &[CellId]) -> Result<(), Error> {
         self.edit(page, |p, _| {
             check(p, ids)?;
-            let kept: HashSet<&str> = p
-                .root()
-                .into_iter()
-                .chain(p.layers())
-                .map(|c| c.id.as_str())
-                .collect();
-            let chosen = ids.iter().filter(|id| !kept.contains(id.as_str()));
-            let mut gone = with_subtrees(p, chosen.cloned());
-            // An edge can end on another edge, so removing one can leave the next without an end.
-            loop {
-                let cut = |end: &Option<CellId>| end.as_ref().is_some_and(|id| gone.contains(id));
-                let loose: Vec<CellId> = p
-                    .cells
-                    .iter()
-                    .filter(|c| !gone.contains(&c.id) && (cut(&c.source) || cut(&c.target)))
-                    .map(|c| c.id.clone())
-                    .collect();
-                if loose.is_empty() {
-                    break;
-                }
-                gone = with_subtrees(p, gone.into_iter().chain(loose));
-            }
-            p.cells.retain(|c| !gone.contains(&c.id));
+            delete(p, ids);
             Ok(())
         })
+    }
+
+    /// Group `ids` as draw.io's Group does (`mxGraph.groupCells`): those sharing the parent of
+    /// the first in the page's order (`getCellsForGroup`), two at least, go into a new `group`
+    /// cell sized to their box (`getBoundsForGroup`), added in front of its siblings, the cells
+    /// staying where they are on the page. The group's id; `None` where there is nothing to
+    /// group.
+    // mxGraph.js 4043-4150; Graph.js 13290-13345 (bounds), 18879 (the group's style)
+    pub fn group(&mut self, page: usize, ids: &[CellId]) -> Result<Option<CellId>, Error> {
+        self.edit(page, |p, fresh| {
+            check(p, ids)?;
+            let chosen: HashSet<&str> = ids.iter().map(String::as_str).collect();
+            let ordered = p.cells.iter().filter(|c| chosen.contains(c.id.as_str()));
+            let ordered: Vec<&Cell> = ordered.collect();
+            let Some(parent) = ordered.first().and_then(|c| c.parent.clone()) else {
+                return Ok(None);
+            };
+            let cells: Vec<CellId> = ordered
+                .iter()
+                .filter(|c| c.parent.as_ref() == Some(&parent))
+                .map(|c| c.id.clone())
+                .collect();
+            let bounds = group_bounds(p, &cells);
+            let (true, Some(bounds)) = (cells.len() > 1, bounds) else {
+                return Ok(None);
+            };
+            let id = fresh.fresh(p);
+            let mut group = Cell::new_vertex(&id, &parent, bounds, "group", "");
+            group.attrs.push(("connectable".into(), "0".into()));
+            let at = subtree_end(p, &parent);
+            p.cells.insert(at, group);
+            append_to(p, &cells, &id);
+            for cell in p.cells.iter_mut().filter(|c| cells.contains(&c.id)) {
+                if let Some(g) = &mut cell.geometry {
+                    translate(g, -bounds.x, -bounds.y);
+                }
+            }
+            Ok(Some(id))
+        })
+    }
+
+    /// [`ungroup`] on page `page`.
+    pub fn ungroup(&mut self, page: usize, ids: &[CellId]) -> Result<Vec<CellId>, Error> {
+        self.edit(page, |p, _| ungroup(p, ids))
     }
 
     /// Copies of cells and their subtrees, 10 units down and right, edges between copied cells
@@ -481,6 +503,143 @@ impl Editor {
             }
         }
     }
+}
+
+/// Remove cells, everything under them and every edge left without an end. The root and the
+/// layers are not removed this way.
+fn delete(p: &mut Page, ids: &[CellId]) {
+    let kept: HashSet<&str> = p
+        .root()
+        .into_iter()
+        .chain(p.layers())
+        .map(|c| c.id.as_str())
+        .collect();
+    let chosen = ids.iter().filter(|id| !kept.contains(id.as_str()));
+    let mut gone = with_subtrees(p, chosen.cloned());
+    // An edge can end on another edge, so removing one can leave the next without an end.
+    loop {
+        let cut = |end: &Option<CellId>| end.as_ref().is_some_and(|id| gone.contains(id));
+        let loose: Vec<CellId> = p
+            .cells
+            .iter()
+            .filter(|c| !gone.contains(&c.id) && (cut(&c.source) || cut(&c.target)))
+            .map(|c| c.id.clone())
+            .collect();
+        if loose.is_empty() {
+            break;
+        }
+        gone = with_subtrees(p, gone.into_iter().chain(loose));
+    }
+    p.cells.retain(|c| !gone.contains(&c.id));
+}
+
+/// Ungroup `ids` as draw.io's Ungroup does: each shape among them with children hands them to
+/// its own parent (`mxGraph.ungroupCells`), where they keep their place on the page and paint in
+/// front; a group then left with no fill, line or picture goes, with its edges
+/// (`removeCellsAfterUngroup`), and a shape kept is no longer a container. What to select: the
+/// children, then the cells of `ids` still there.
+// mxGraph.js 4180-4290; Graph.js 20266; Actions.js 662-701
+pub fn ungroup(p: &mut Page, ids: &[CellId]) -> Result<Vec<CellId>, Error> {
+    check(p, ids)?;
+    let groups: Vec<CellId> = ids
+        .iter()
+        .filter(|id| p.cell(id).is_some_and(|c| c.vertex) && p.children(id).next().is_some())
+        .cloned()
+        .collect();
+    let mut chosen = Vec::new();
+    for group in &groups {
+        let Some(parent) = p.cell(group).and_then(|c| c.parent.clone()) else {
+            continue;
+        };
+        let children: Vec<CellId> = p.children(group).map(|c| c.id.clone()).collect();
+        // Kept where they are on the page: moved by the group's own place in its parent, a
+        // child placed on the group by fractions of it placed from the new parent instead.
+        let shift = p.absolute_rect(group).unwrap_or_default();
+        let into = p.origin_of(group);
+        let places: Vec<Option<Rect>> = children.iter().map(|c| p.absolute_rect(c)).collect();
+        for (id, place) in children.iter().zip(places) {
+            let Some(cell) = p.cell_mut(id) else { continue };
+            let vertex = cell.vertex;
+            let Some(g) = &mut cell.geometry else {
+                continue;
+            };
+            match (vertex && g.relative, place) {
+                (true, Some(r)) => {
+                    (g.x, g.y, g.relative) = (r.x - into.x, r.y - into.y, false);
+                }
+                _ => translate(g, shift.x - into.x, shift.y - into.y),
+            }
+        }
+        append_to(p, &children, &parent);
+        chosen.extend(children);
+    }
+    let transparent: Vec<CellId> = groups
+        .into_iter()
+        .filter(|g| {
+            p.cell(g).is_some_and(|c| {
+                let style = c.style.resolve(false);
+                let none = |key: &str| style.get(key).is_none_or(|v| v == "none");
+                none("fillColor") && none("strokeColor") && style.get("image").is_none()
+            })
+        })
+        .collect();
+    delete(p, &transparent);
+    for id in ids {
+        let Some(cell) = p.cell(id) else { continue };
+        if cell.vertex && p.children(id).next().is_none() {
+            cell_mut(p, id)?.style.set("container", Some("0"));
+        }
+        chosen.push(id.clone());
+    }
+    Ok(chosen)
+}
+
+/// The box `cells`, siblings, take in their parent (`Graph.getBoundsForGroup`): a shape's
+/// rectangle, an edge's loose ends and waypoints; a shape placed on its parent by fractions of
+/// it counts for nothing.
+fn group_bounds(p: &Page, cells: &[CellId]) -> Option<Rect> {
+    let mut bounds: Option<Rect> = None;
+    let mut add = |r: Rect| bounds = Some(bounds.map_or(r, |b| b.union(&r)));
+    for cell in cells.iter().filter_map(|id| p.cell(id)) {
+        let Some(g) = &cell.geometry else { continue };
+        if cell.edge {
+            let loose = [
+                g.source_point.filter(|_| cell.source.is_none()),
+                g.target_point.filter(|_| cell.target.is_none()),
+            ];
+            let points = g.points.iter().flatten().copied();
+            for pt in loose.into_iter().flatten().chain(points) {
+                add(Rect::new(pt.x, pt.y, 0.0, 0.0));
+            }
+        } else if cell.vertex && !g.relative {
+            add(g.rect());
+        }
+    }
+    bounds
+}
+
+/// Where a cell added last under `parent` goes in the page's order: after everything under it.
+fn subtree_end(p: &Page, parent: &str) -> usize {
+    let inside = with_subtrees(p, [parent.to_string()]);
+    p.cells
+        .iter()
+        .rposition(|c| inside.contains(&c.id))
+        .map_or(p.cells.len(), |i| i + 1)
+}
+
+/// Make each of `ids`, everything under it going along, the last child of `parent`, in the
+/// page's order (`mxGraphModel.add` at the parent's child count: in front of its siblings).
+fn append_to(p: &mut Page, ids: &[CellId], parent: &str) {
+    let moving = with_subtrees(p, ids.iter().cloned());
+    let (mut taken, rest): (Vec<Cell>, Vec<Cell>) = std::mem::take(&mut p.cells)
+        .into_iter()
+        .partition(|c| moving.contains(&c.id));
+    p.cells = rest;
+    for cell in taken.iter_mut().filter(|c| ids.contains(&c.id)) {
+        cell.parent = Some(parent.to_string());
+    }
+    let at = subtree_end(p, parent);
+    p.cells.splice(at..at, taken);
 }
 
 // The edits a drag previews, as functions of a page: the editor applies them to the page in
@@ -1096,6 +1255,47 @@ mod tests {
         assert_eq!(
             crate::scene::edge_label_at(&route, g),
             Point::new(130.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn a_group_holds_its_cells_where_they_were_and_ungrouping_lets_them_go() {
+        let mut e = editor();
+        // One cell is not a group.
+        assert_eq!(e.group(0, &list(&["a"])).unwrap(), None);
+        let g = e.group(0, &list(&["b", "a", "e"])).unwrap().unwrap();
+        let page = e.page(0).unwrap();
+        assert_eq!(order(&e), ["0", "1", &g, "a", "b", "e"]);
+        let group = page.cell(&g).unwrap();
+        assert_eq!(group.style.to_string(), "group;");
+        // Boxes a and b, and the edge's waypoint (70, 60): the group is sized to them.
+        assert_eq!(geometry(&e, &g).rect(), Rect::new(0.0, 0.0, 140.0, 60.0));
+        assert_eq!(
+            e.page(0).unwrap().absolute_rect("b"),
+            Some(Rect::new(100.0, 0.0, 40.0, 40.0))
+        );
+        // Moved as one, then ungrouped: the transparent group goes, the cells stay put.
+        e.move_cells(0, &list(&[g.as_str()]), 10.0, 5.0, &Scene::default())
+            .unwrap();
+        let chosen = e.ungroup(0, std::slice::from_ref(&g)).unwrap();
+        assert_eq!(chosen, list(&["a", "b", "e"]));
+        assert!(e.page(0).unwrap().cell(&g).is_none());
+        assert_eq!(geometry(&e, "b").rect(), Rect::new(110.0, 5.0, 40.0, 40.0));
+        assert_eq!(geometry(&e, "e").points, Some(vec![Point::new(80.0, 65.0)]));
+        // A group with a fill of its own stays, as a shape.
+        let g = e.group(0, &list(&["a", "b"])).unwrap().unwrap();
+        e.set_style(0, std::slice::from_ref(&g), "fillColor", Some("#ff0000"))
+            .unwrap();
+        let chosen = e.ungroup(0, std::slice::from_ref(&g)).unwrap();
+        assert_eq!(chosen, list(&["a", "b", g.as_str()]));
+        assert!(
+            e.page(0)
+                .unwrap()
+                .cell(&g)
+                .unwrap()
+                .style
+                .to_string()
+                .contains("container=0")
         );
     }
 

@@ -409,6 +409,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A label is edited as Markdown in the note editor, floated over the cell at the label's size with an accent outline: opened by a double click (the innermost shape under it, or a label's own text), `Return`, or typing over the one selected shape (a bare arrow's opens halfway along it), finished by a click elsewhere, Escape or `Ctrl+Return`.
 - A formula label is typeset by WebKit and painted as a picture.
 - Pages are the Outline pane's rows, the one shown selected.
+- Group puts the selected cells that share the first one's parent, two at least, into a transparent `group` cell sized to them and in front of its siblings, as draw.io's does; they stay where they are, and the group is selected. Ungroup hands a group's cells to its parent, in front, and removes the group when it has no fill, line or picture of its own, keeping it as a shape otherwise.
 - Every change is one undo step, saved a second after the last through the etag-gated save. A change on disk under unsaved edits raises a banner whose Resolve… asks Reload or Overwrite: there is no comparison of two diagrams to offer.
 
 ### Comparison
@@ -610,8 +611,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 ### Diagram
 
 - The canvas's own keys, as a PDF's are, firing actions the palette lists without an accelerator: Undo Diagram Edit `Ctrl+Z`, Redo `Ctrl+Shift+Z` / `Ctrl+Y`, Delete Selection `Delete` / `Backspace`, Select All Shapes `Ctrl+A`, Edit Label `Return` (or any character typed over one selected shape, which becomes the label's first), Next and Previous Diagram Page `Page Down` / `Page Up`. The arrows nudge the selection a unit and Shift+arrows ten; Space held pans; `Escape` puts the tool down, then clears the selection.
-- Duplicate Selection is `Ctrl+D`, Duplicate Line's chord, which a diagram in front answers; `Ctrl+Return` finishes a label being edited; `F2` stays the file's Rename.
-- The tools (Select and Move, Add Rectangle, Add Ellipse, Add Text, Add Connector, Add Image…), Bring to Front, Send to Back, and Add, Rename and Delete Diagram Page are unbound, on the ring and in the palette; a tool picked from the palette brings the ring out, and the same tool twice puts it down.
+- Duplicate Selection is `Ctrl+D`, Duplicate Line's chord, and Group `Ctrl+G`, Go to Line's, which a diagram in front answers; `Ctrl+Return` finishes a label being edited; `F2` stays the file's Rename.
+- The tools (Select and Move, Add Rectangle, Add Ellipse, Add Text, Add Connector, Add Image…), Ungroup, Bring to Front, Send to Back, and Add, Rename and Delete Diagram Page are unbound, on the ring and in the palette; a tool picked from the palette brings the ring out, and the same tool twice puts it down.
 
 ### History
 

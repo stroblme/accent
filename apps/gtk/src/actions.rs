@@ -233,12 +233,14 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // The diagram tab. Undo, Redo, Delete Selection, Select All Shapes, Edit Label and the
     // paging commands are the canvas's own keys, which fire these, and carry no chord for the
     // PDF's reason: `Ctrl+Z`, `Ctrl+A`, `Delete` and `Return` belong to whatever has the
-    // keyboard. Duplicate Selection is `Ctrl+D`, which is Duplicate Line's chord and which
-    // `run_action` hands to a diagram in front.
+    // keyboard. Duplicate Selection is `Ctrl+D`, which is Duplicate Line's chord, and Group is
+    // `Ctrl+G`, Go to Line's, which `run_action` hands to a diagram in front.
     ("win.diagram-undo", "Undo Diagram Edit", &[]),
     ("win.diagram-redo", "Redo Diagram Edit", &[]),
     ("win.diagram-delete", "Delete Selection", &[]),
     ("win.diagram-duplicate", "Duplicate Selection", &[]),
+    ("win.diagram-group", "Group", &[]),
+    ("win.diagram-ungroup", "Ungroup", &[]),
     ("win.diagram-select-all", "Select All Shapes", &[]),
     ("win.diagram-edit-label", "Edit Label", &[]),
     ("win.diagram-next-page", "Next Diagram Page", &[]),
@@ -391,7 +393,11 @@ impl App {
             "open-recent" => self.palette(palette::Mode::Vaults),
             "find" => self.open_find(find::Mode::Find),
             "replace" => self.open_find(find::Mode::Replace),
-            "goto-line" => self.open_find(find::Mode::Goto),
+            // `Ctrl+G` over a diagram groups the selection, as `Ctrl+D` duplicates it.
+            "goto-line" => match self.active_diagram() {
+                Some(d) => d.group(),
+                None => self.open_find(find::Mode::Goto),
+            },
             "find-next" => self.pane().find.step(true),
             "find-previous" => self.pane().find.step(false),
             // `Ctrl+D` over a diagram duplicates the selection: an application accelerator is
