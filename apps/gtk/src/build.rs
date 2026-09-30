@@ -282,6 +282,7 @@ pub fn build_window(
         docs: RefCell::new(Vec::new()),
         awaiting: RefCell::new(HashMap::new()),
         placing: RefCell::new(HashMap::new()),
+        launched: RefCell::new(Vec::new()),
         restore: RefCell::new(std::rc::Weak::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),

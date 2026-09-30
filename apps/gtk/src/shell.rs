@@ -462,15 +462,17 @@ impl Shell {
             self.open_vault(gtk_app, path, note);
         }
         // The files open where the first belongs, which is how accent works as the system's PDF
-        // viewer and text editor, and the rest as tabs beside it, since Files hands over every
-        // file picked at once: from outside that window's vault where it does not hold them.
+        // viewer and text editor, and the rest as tabs beside it in the order named, since Files
+        // hands over every file picked at once: from outside that window's vault where it does
+        // not hold them.
         if let Some(app) = files
             .first()
             .and_then(|first| self.file_window(gtk_app, first))
         {
             app.window.present();
-            for path in &files {
-                app.open_path(&app.key_for(path));
+            app.launched.borrow_mut().clear();
+            for (at, path) in files.iter().enumerate() {
+                app.open_as(&app.key_for(path), Opened::Launched(at));
             }
         }
         code
@@ -910,12 +912,12 @@ Usage:
 
 PATH is a folder, opened as a vault in a window of its own, or a file (a note,
 PDF, image, diagram or any text). NOTE, a file inside the folder before it,
-named from there or in full, opens in that vault. The files open in one window:
-the one of the open vault that holds the first, else a window without a vault.
-Without PATH the last vault opens, or the start screen if there is none.
-ADDRESS is ssh://[USER@]HOST[:PORT]/PATH, a vault on that host, and its NOTE a
-path in it. DIR may be an ssh:// address, for a shell on that host. A session
-NAME not seen before is made.
+named from there or in full, opens in that vault. The files open as tabs in the
+order named, all in the window of the open vault that holds the first, else in
+a window without a vault. Without PATH the last vault opens, or the start
+screen if there is none. ADDRESS is ssh://[USER@]HOST[:PORT]/PATH, a vault on
+that host, and its NOTE a path in it. DIR may be an ssh:// address, for a shell
+on that host. A session NAME not seen before is made.
 ";
 
 /// What the launching process answers itself, before `app.run` hands the arguments to the

@@ -265,6 +265,9 @@ struct App {
     awaiting: RefCell<HashMap<String, Waiting>>,
     /// The pane a restored tab goes into, by key, until it has one: see [`App::tabs_for`].
     placing: RefCell<HashMap<String, std::rc::Weak<Pane>>>,
+    /// The tabs the files of the last launch naming several have landed in so far, each with its
+    /// place among them: see [`App::land_in_order`].
+    launched: RefCell<Vec<(usize, glib::WeakRef<adw::TabPage>)>>,
     /// The session restore while its tabs are still landing: see [`App::reader_in`].
     restore: RefCell<std::rc::Weak<session::Restore>>,
     /// Set once, after `App` exists, by the sidebar the tree lives in.
