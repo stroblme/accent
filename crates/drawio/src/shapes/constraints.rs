@@ -36,8 +36,9 @@ const fn fixed(x: f64, y: f64) -> Constraint {
 // ponytail: a stencil's own points (`<connections>`) need the stencil; the rectangle's stand in.
 pub fn constraints(shape: &str, style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
     let table: &[Constraint] = match shape {
-        "ellipse" | "doubleEllipse" | "rhombus" => &ELLIPSE,
-        "cylinder" | "message" => &CYLINDER,
+        "ellipse" | "doubleEllipse" | "rhombus" | "startState" | "endState" => &ELLIPSE,
+        "cylinder" | "message" | "waypoint" => &CYLINDER,
+        "component" => &COMPONENT,
         "actor" | "curlyBracket" => &ACTOR,
         "umlActor" => &UML_ACTOR,
         "tape" => &TAPE,
@@ -54,6 +55,7 @@ pub fn constraints(shape: &str, style: &Resolved, w: f64, h: f64) -> Vec<Constra
         "cube" => return cube(style, w, h),
         "cylinder3" => return cylinder3(style, w, h),
         "callout" => return callout(style, w, h),
+        "folder" => return folder(style, w, h),
         _ => &RECTANGLE,
     };
     table.to_vec()
@@ -120,6 +122,21 @@ const UML_ACTOR: [Constraint; 8] = [
     fixed(1.0, 1.0 / 3.0),
     fixed(1.0, 1.0),
     fixed(0.5, 0.5),
+];
+
+// Shapes.js 9348-9358
+const COMPONENT: [Constraint; 11] = [
+    on(0.25, 0.0),
+    on(0.5, 0.0),
+    on(0.75, 0.0),
+    on(0.0, 0.3),
+    on(0.0, 0.7),
+    on(1.0, 0.25),
+    on(1.0, 0.5),
+    on(1.0, 0.75),
+    on(0.25, 1.0),
+    on(0.5, 1.0),
+    on(0.75, 1.0),
 ];
 
 // Shapes.js 9359-9368
@@ -357,5 +374,33 @@ fn callout(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
     if w >= s * 2.0 {
         c.push(fixed(0.5, 0.0));
     }
+    c
+}
+
+// Shapes.js 9220-9259
+fn folder(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let dx = style.num("tabWidth", 60.0).min(w).max(0.0);
+    let dy = style.num("tabHeight", 20.0).min(h).max(0.0);
+    let mut c = match style.get("tabPosition") {
+        Some("left") => vec![
+            fixed(0.0, 0.0),
+            at(0.0, 0.0, dx * 0.5, 0.0),
+            at(0.0, 0.0, dx, 0.0),
+            at(0.0, 0.0, dx, dy),
+            at(0.0, 0.0, (w + dx) * 0.5, dy),
+        ],
+        _ => vec![
+            fixed(1.0, 0.0),
+            at(0.0, 0.0, w - dx * 0.5, 0.0),
+            at(0.0, 0.0, w - dx, 0.0),
+            at(0.0, 0.0, w - dx, dy),
+            at(0.0, 0.0, (w - dx) * 0.5, dy),
+        ],
+    };
+    for x in [w, 0.0] {
+        c.extend([0.0, 0.25, 0.5, 0.75].map(|f| at(0.0, 0.0, x, (h - dy) * f + dy)));
+        c.push(at(0.0, 0.0, x, h));
+    }
+    c.extend([fixed(0.25, 1.0), fixed(0.5, 1.0), fixed(0.75, 1.0)]);
     c
 }

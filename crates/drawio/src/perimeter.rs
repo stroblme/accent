@@ -35,6 +35,8 @@ pub enum PerimeterKind {
     Step,
     Hexagon,
     Callout,
+    /// The centre itself, where a waypoint's edges meet.
+    Center,
 }
 
 impl Outline {
@@ -77,6 +79,7 @@ impl Outline {
             PerimeterKind::Trapezoid => trapezoid(bounds, d, size(20.0, 0.2), next, orthogonal),
             PerimeterKind::Step => step(bounds, d, size(20.0, 0.2), next, orthogonal),
             PerimeterKind::Hexagon => hexagon(bounds, d, size(20.0, 0.25), next, orthogonal),
+            PerimeterKind::Center => Some(c),
             PerimeterKind::Callout => {
                 let tail = self.size.unwrap_or(30.0).min(bounds.h).max(0.0);
                 let m = Margins {
@@ -94,8 +97,8 @@ impl Outline {
 impl PerimeterKind {
     /// The perimeter registered under `name` (mxStyleRegistry.js 70-74, Shapes.js 3395-3673),
     /// the rectangle's for any other.
-    // ponytail: mxGraph's own `hexagonPerimeter`, `centerPerimeter` and draw.io's lifeline,
-    // orthogonal and backbone perimeters are met as the rectangle is.
+    // ponytail: mxGraph's own `hexagonPerimeter` and draw.io's lifeline, orthogonal and backbone
+    // perimeters are met as the rectangle is.
     pub fn named(name: Option<&str>) -> PerimeterKind {
         match name {
             Some("ellipsePerimeter") => PerimeterKind::Ellipse,
@@ -106,6 +109,7 @@ impl PerimeterKind {
             Some("stepPerimeter") => PerimeterKind::Step,
             Some("hexagonPerimeter2") => PerimeterKind::Hexagon,
             Some("calloutPerimeter") => PerimeterKind::Callout,
+            Some("centerPerimeter") => PerimeterKind::Center,
             _ => PerimeterKind::Rectangle,
         }
     }

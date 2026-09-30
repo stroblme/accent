@@ -87,6 +87,7 @@ pub fn is_known(shape: &str) -> bool {
         shape,
         "label"
             | "rectangle"
+            | "rect"
             | "ellipse"
             | "doubleEllipse"
             | "rhombus"
@@ -121,6 +122,14 @@ pub fn is_known(shape: &str) -> bool {
             | "xor"
             | "dataStorage"
             | "message"
+            | "partialRectangle"
+            | "folder"
+            | "component"
+            | "plus"
+            | "startState"
+            | "endState"
+            | "offPageConnector"
+            | "waypoint"
     )
 }
 
@@ -161,7 +170,16 @@ pub fn vertex(shape: &str, bounds: Rect, style: &Resolved) -> Vec<Part> {
         "xor" => ge::xor(b),
         "dataStorage" => ge::data_storage(b, style),
         "message" => ge::message(b),
-        // `label`, `rectangle`, and the stand-in for every other shape.
+        "partialRectangle" => ge::partial_rectangle(b, style),
+        "folder" => ge::folder(b, style),
+        "component" => ge::component(b, style),
+        "plus" => ge::plus(b, style),
+        "startState" => ge::state(b, false),
+        "endState" => ge::state(b, true),
+        "offPageConnector" => ge::off_page_connector(b, style),
+        "waypoint" => ge::waypoint(b, style),
+        // `label`, `rectangle`, `rect` (a name draw.io has no shape for, which it draws as its
+        // fallback rectangle), and the stand-in for every other shape.
         _ => vec![Part::body(mxgraph::rectangle(b, style))],
     }
 }
@@ -175,7 +193,9 @@ pub fn label_bounds(shape: &str, rect: Rect, style: &Resolved, inverted: bool) -
     use grapheditor as ge;
     match shape {
         "swimlane" => return mxgraph::swimlane_label(rect, style),
-        "doubleEllipse" => return mxgraph::double_ellipse_label(rect, style),
+        "doubleEllipse" | "startState" | "endState" => {
+            return mxgraph::double_ellipse_label(rect, style);
+        }
         "process" | "process2" => return ge::process_label(rect, style),
         "tape" => return ge::tape_label(rect, style),
         _ => {}
@@ -194,6 +214,7 @@ pub fn label_bounds(shape: &str, rect: Rect, style: &Resolved, inverted: bool) -
         "document" => ge::document_margins(measured, style),
         "cylinder" => mxgraph::cylinder_margins(measured, style),
         "cylinder3" => ge::cylinder_margins(measured, style),
+        "folder" => ge::folder_margins(measured, style),
         _ => return rect,
     };
     let (mut flip_h, mut flip_v) = (style.flag("flipH", false), style.flag("flipV", false));
@@ -533,10 +554,10 @@ mod tests {
 
     #[test]
     fn unknown_shapes_are_not_known() {
-        assert!(is_known("note") && is_known("rhombus") && is_known("swimlane"));
-        assert!(!is_known("folder") && !is_known("mxgraph.aws4.lambda") && !is_known(""));
+        assert!(is_known("note") && is_known("rhombus") && is_known("rect"));
+        assert!(!is_known("umlLifeline") && !is_known("mxgraph.aws4.lambda") && !is_known(""));
         assert_eq!(
-            vertex("folder", BOX, &style("shape=folder;", false)),
+            vertex("umlLifeline", BOX, &style("shape=umlLifeline;", false)),
             vec![Part::body(rect(BOX))],
             "a stand-in is the plain rectangle"
         );

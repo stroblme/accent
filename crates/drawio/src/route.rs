@@ -11,7 +11,7 @@
 use crate::geom::{self, Point, Rect};
 use crate::marker::DEFAULT_MARKERSIZE;
 use crate::model::{Cell, Page};
-use crate::perimeter::Outline;
+use crate::perimeter::{Outline, PerimeterKind};
 use crate::shapes;
 use crate::style::{Resolved, parse_num};
 
@@ -220,17 +220,19 @@ fn connection_point(t: &Terminal, c: &Constraint) -> Point {
     geom::rotate(p, centre, turn)
 }
 
-/// An end placed before routing: a constrained end on its terminal, or a dangling end's point.
-/// `None` leaves the end floating until the edge style has run.
-// mxGraphView.getFixedTerminalPoint, mxGraphView.js 1343-1368
+/// An end placed before routing: a constrained end on its terminal, the centre of one with
+/// `centerPerimeter`, or a dangling end's point. `None` leaves the end floating until the edge
+/// style has run.
+// mxGraphView.getFixedTerminalPoint, mxGraphView.js 1343-1368, and draw.io's centerPerimeter,
+// Graph.js 16965-16980
 fn fixed_terminal_point(input: &EdgeInput, source: bool) -> Option<Point> {
     let (terminal, point) = if source {
         (input.source, input.source_point)
     } else {
         (input.target, input.target_point)
     };
-    // ponytail: draw.io's `centerPerimeter` (Graph.js) is not pinned to the centre.
     match terminal {
+        Some(t) if t.outline.kind == PerimeterKind::Center => Some(t.bounds.centre()),
         Some(t) => connection_constraint(input.style, source).map(|c| connection_point(&t, &c)),
         None => point,
     }
@@ -1444,7 +1446,7 @@ mod tests {
         let flat = Terminal {
             bounds: Rect::new(0.0, 20.0, 80.0, 0.0),
             outline: Outline {
-                kind: crate::perimeter::PerimeterKind::Ellipse,
+                kind: PerimeterKind::Ellipse,
                 ..Outline::default()
             },
             ..Terminal::default()
@@ -1521,6 +1523,20 @@ mod tests {
         let mirrored = shape("shape=umlActor;flipH=1;");
         assert_points(&[anchor(&mirrored, 0.25, 0.1).0], &[(60.0, 4.0)]);
         assert_eq!(anchors(&shape("shape=note;"), "a").len(), 11);
+    }
+
+    #[test]
+    fn an_end_on_a_center_perimeter_is_its_centre() {
+        let style = Style::parse("edgeStyle=orthogonalEdgeStyle;").resolve(true);
+        let dot = Terminal {
+            outline: Outline {
+                kind: PerimeterKind::Center,
+                ..Outline::default()
+            },
+            ..rect(200.0, 100.0)
+        };
+        let pts = route(&input(&style, rect(0.0, 0.0), dot));
+        assert_eq!(pts.last(), Some(&Point::new(240.0, 120.0)));
     }
 
     #[test]
