@@ -398,6 +398,7 @@ impl DiagramTab {
                     count: cells.len(),
                     vertices: cells.iter().any(|c| c.vertex),
                     edges: cells.iter().any(|c| c.edge),
+                    fills: cells.iter().any(|c| c.takes_fill()),
                 },
                 None => props::Target::Page {
                     name: page.name().to_string(),

@@ -22,6 +22,8 @@ pub enum Target {
         count: usize,
         vertices: bool,
         edges: bool,
+        /// Some cell takes a fill: a shape, or a flex arrow ([`accent_drawio::Cell::takes_fill`]).
+        fills: bool,
     },
     Page {
         name: String,
@@ -52,6 +54,14 @@ const HEADS: [(&str, &str); 6] = [
 const ALIGN: [(&str, &str); 3] = [("left", "Left"), ("center", "Centre"), ("right", "Right")];
 const VALIGN: [(&str, &str); 3] = [("top", "Top"), ("middle", "Middle"), ("bottom", "Bottom")];
 const ROUTES: [&str; 3] = ["Straight", "Orthogonal", "Curved"];
+/// draw.io's gradient directions (Format panel), south when a style names none.
+const DIRECTIONS: [(&str, &str); 5] = [
+    ("north", "North"),
+    ("east", "East"),
+    ("south", "South"),
+    ("west", "West"),
+    ("radial", "Radial"),
+];
 
 type OnChange = Rc<RefCell<Option<Box<dyn Fn(Change)>>>>;
 
@@ -128,6 +138,8 @@ pub struct Props {
     raw_group: adw::PreferencesGroup,
     page_group: adw::PreferencesGroup,
     fill: Rc<ColourRow>,
+    gradient: Rc<ColourRow>,
+    direction: adw::ComboRow,
     stroke: Rc<ColourRow>,
     stroke_width: adw::SpinRow,
     dashed: adw::SwitchRow,
@@ -193,6 +205,8 @@ impl Props {
         );
 
         let fill = Rc::new(ColourRow::new("Fill"));
+        let gradient = Rc::new(ColourRow::new("Gradient"));
+        let direction = combo("Gradient Direction", &DIRECTIONS.map(|(_, l)| l));
         let stroke = Rc::new(ColourRow::new("Line Colour"));
         let stroke_width = spin("Line Width", (0.0, 20.0, 0.5));
         stroke_width.set_digits(1);
@@ -201,9 +215,10 @@ impl Props {
         let shadow = adw::SwitchRow::builder().title("Shadow").build();
         let opacity = spin("Opacity", (0.0, 100.0, 5.0));
         let rotation = spin("Rotation", (-180.0, 180.0, 1.0));
-        for row in [&fill.row, &stroke.row] {
-            shape.add(row);
-        }
+        shape.add(&fill.row);
+        shape.add(&gradient.row);
+        shape.add(&direction);
+        shape.add(&stroke.row);
         shape.add(&stroke_width);
         shape.add(&dashed);
         shape.add(&rounded);
@@ -279,6 +294,8 @@ impl Props {
             raw_group,
             page_group,
             fill,
+            gradient,
+            direction,
             stroke,
             stroke_width,
             dashed,
@@ -337,7 +354,16 @@ impl Props {
             row.connect(&self.filling, move |value| set(Some(value)));
         };
         colour(&self.fill, "fillColor");
+        colour(&self.gradient, "gradientColor");
         colour(&self.stroke, "strokeColor");
+        for switch in [&self.fill.switch, &self.gradient.switch] {
+            let me = Rc::downgrade(self);
+            switch.connect_active_notify(move |_| {
+                if let Some(me) = me.upgrade() {
+                    me.sync_gradient();
+                }
+            });
+        }
         colour(&self.font_colour, "fontColor");
         let page_send = send.clone();
         self.background.connect(&self.filling, move |value| {
@@ -422,6 +448,11 @@ impl Props {
             "verticalAlign",
             VALIGN.map(|(v, _)| v).to_vec(),
         );
+        pick(
+            &self.direction,
+            "gradientDirection",
+            DIRECTIONS.map(|(v, _)| v).to_vec(),
+        );
         pick(&self.start, "startArrow", HEADS.map(|(v, _)| v).to_vec());
         pick(&self.end, "endArrow", HEADS.map(|(v, _)| v).to_vec());
         let route_send = send.clone();
@@ -459,10 +490,25 @@ impl Props {
                 count,
                 vertices,
                 edges,
+                fills,
             } => {
-                self.shape.set_visible(*vertices);
+                // Every shape takes a fill; flex arrows alone show only the rows it takes.
+                self.shape.set_visible(*fills);
+                let outline: [&gtk::Widget; 7] = [
+                    self.stroke.row.upcast_ref(),
+                    self.stroke_width.upcast_ref(),
+                    self.dashed.upcast_ref(),
+                    self.rounded.upcast_ref(),
+                    self.shadow.upcast_ref(),
+                    self.opacity.upcast_ref(),
+                    self.rotation.upcast_ref(),
+                ];
+                for row in outline {
+                    row.set_visible(*vertices);
+                }
                 self.line.set_visible(*edges);
                 self.fill.fill(style.color("fillColor"));
+                self.gradient.fill(style.color("gradientColor"));
                 self.stroke.fill(style.color("strokeColor"));
                 self.stroke_width.set_value(style.num("strokeWidth", 1.0));
                 self.dashed.set_active(style.flag("dashed", false));
@@ -487,6 +533,9 @@ impl Props {
                     .set_selected(at(&ALIGN.map(|(v, _)| v), style.get("align")));
                 self.valign
                     .set_selected(at(&VALIGN.map(|(v, _)| v), style.get("verticalAlign")));
+                let direction = style.get("gradientDirection").unwrap_or("south");
+                self.direction
+                    .set_selected(at(&DIRECTIONS.map(|(v, _)| v), Some(direction)));
                 let heads = HEADS.map(|(v, _)| v);
                 self.start
                     .set_selected(at(&heads, Some(style.get("startArrow").unwrap_or("none"))));
@@ -516,7 +565,17 @@ impl Props {
                 self.page_height.set_value(size.1);
             }
         }
+        self.sync_gradient();
         self.filling.set(false);
+    }
+
+    /// A gradient runs from the fill, so it is greyed without one, and its direction shows only
+    /// while there is a gradient.
+    fn sync_gradient(&self) {
+        let fill = self.fill.switch.is_active();
+        self.gradient.row.set_sensitive(fill);
+        self.direction
+            .set_visible(fill && self.gradient.switch.is_active());
     }
 }
 

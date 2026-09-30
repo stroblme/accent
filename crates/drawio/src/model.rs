@@ -364,6 +364,12 @@ impl Cell {
         }
     }
 
+    /// Whether the cell is drawn with a fill it can be given (`Graph.isFillState`): every vertex,
+    /// and of the edges the flex arrow, the one edge shape ported with an inside.
+    pub fn takes_fill(&self) -> bool {
+        self.vertex || (self.edge && self.style.resolve(true).shape() == "flexArrow")
+    }
+
     /// Whether the label is an HTML fragment (`html=1`) rather than plain text.
     pub fn is_html(&self) -> bool {
         self.style.get("html") == Some("1")
@@ -498,6 +504,23 @@ mod tests {
         assert_eq!(c.label(), "%AUTHOR%");
         c.set_label("x");
         assert_eq!(c.label(), "x");
+    }
+
+    #[test]
+    fn shapes_and_flex_arrows_take_a_fill_and_a_line_does_not() {
+        let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let edge = |style| {
+            Cell::new_edge(
+                "e",
+                "1",
+                (None, Point::default()),
+                (None, rect.centre()),
+                style,
+            )
+        };
+        assert!(Cell::new_vertex("v", "1", rect, "text;", "").takes_fill());
+        assert!(edge("shape=flexArrow;").takes_fill());
+        assert!(!edge("endArrow=block;").takes_fill());
     }
 
     /// A cell that is its own parent: draw.io writes none, a hand-edited file can hold one, and
