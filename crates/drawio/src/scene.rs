@@ -11,6 +11,7 @@ use crate::geom::{self, PathCmd, Point, Rect};
 use crate::label::{self, Run};
 use crate::marker;
 use crate::model::{Cell, CellId, Geometry, Page};
+use crate::placeholders::Context;
 use crate::route::{self, EdgeInput, Terminal};
 use crate::shapes;
 use crate::style::{Color, Resolved};
@@ -22,6 +23,17 @@ pub struct Scene {
     pub page_size: (f64, f64),
     /// The page colour; `None` is draw.io's default white.
     pub background: Option<Color>,
+    /// Each drawn edge's route, by id; see [`Scene::route`].
+    pub(crate) routes: HashMap<CellId, Vec<Point>>,
+}
+
+impl Scene {
+    /// The points edge `id` runs through, absolute and first end first: where its ends are on
+    /// the page before arrow heads shorten it (mxGraph's `absolutePoints`). `None` for an edge
+    /// not drawn.
+    pub fn route(&self, id: &str) -> Option<&[Point]> {
+        self.routes.get(id).map(Vec::as_slice)
+    }
 }
 
 /// How an outline is filled.
@@ -183,13 +195,24 @@ impl Prim {
 }
 
 /// The display list of `page`: every visible cell in paint order — layers bottom first, each
-/// cell's shape, then its picture, then its label, then its children.
+/// cell's shape, then its picture, then its label, then its children. The page is shown as a
+/// lone page with no clock; see [`scene_with`].
 pub fn scene(page: &Page) -> Scene {
+    scene_with(page, &Context::default())
+}
+
+/// [`scene`] of `page` shown where and when `ctx` says, which labels with placeholders fill in.
+pub fn scene_with(page: &Page, _ctx: &Context) -> Scene {
     let b = Builder::run(page);
     Scene {
         prims: b.prims,
         page_size: page.size(),
         background: page.background(),
+        routes: b
+            .edge_points
+            .into_iter()
+            .map(|(id, points)| (id.to_string(), points))
+            .collect(),
     }
 }
 
@@ -1000,6 +1023,16 @@ mod tests {
             edge,
         ]);
         let s = scene(&p);
+        let route = s.route("e").expect("a route");
+        assert!(
+            route.len() == 2 && route[0].distance(Point::new(40.0, 20.0)) < 1e-9,
+            "{route:?}"
+        );
+        assert!(
+            route[1].distance(Point::new(200.0, 20.0)) < 1e-9,
+            "the route runs to the outline, the head's room not taken off: {route:?}"
+        );
+        assert_eq!(s.route("a"), None);
         let edge: Vec<&Prim> = s.prims.iter().filter(|p| p.cell() == "e").collect();
         let (line, head) = match (edge[0], edge[1]) {
             (
