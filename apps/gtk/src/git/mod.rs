@@ -64,6 +64,9 @@ pub const GIT_SHARE: (i32, i32) = (1, 2);
 /// One page of history: what Load More adds, and what a refresh reads until it has.
 const PAGE: usize = 200;
 
+/// How many rows one turn of the main loop adds to the changes list or the history ([`Fill`]).
+const FILL_CHUNK: usize = 10;
+
 /// How long the pane waits after being poked before asking git again. Long enough that a burst of
 /// watcher events is one query, short enough that a save shows up while the hand is still there.
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -290,7 +293,10 @@ pub struct Panel {
     collapsed: RefCell<HashSet<String>>,
     /// A press is down over the changes list, so its rows are held where they are until the
     /// release (see [`Panel::rebuild_changes`]).
-    pressed: Cell<bool>,
+    pressed: Rc<Cell<bool>>,
+    /// The two lists' fills under way, if any.
+    changes_fill: Fill,
+    log_fill: Fill,
 }
 
 impl Panel {
@@ -401,7 +407,9 @@ impl Panel {
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
             collapsed: RefCell::new(HashSet::new()),
-            pressed: Cell::new(false),
+            pressed: Rc::default(),
+            changes_fill: Fill::default(),
+            log_fill: Fill::default(),
             hooks,
             root: root.upcast(),
             banner,
@@ -531,6 +539,7 @@ impl Panel {
     /// — so [`Panel::rebuild_changes`] would keep it as it was.
     pub fn set_tree(&self, on: bool) {
         if self.tree.replace(on) != on {
+            self.changes_fill.cancel();
             self.changes.remove_all();
             self.rebuild_changes();
         }
@@ -1148,6 +1157,97 @@ fn peek<T: 'static, R>(object: Option<glib::Object>, read: impl FnOnce(&T) -> R)
     Some(read(
         &object?.downcast::<glib::BoxedAnyObject>().ok()?.borrow(),
     ))
+}
+
+/// A list store filled [`FILL_CHUNK`] rows at a time, the first at once and each of the rest from an
+/// idle, so the frames in between are drawn.
+///
+/// A list view makes a row for up to 200 of the items its store holds, and one of ours costs
+/// ~0.25 ms of widgets to build and bind and about half that again to lay out in the next frame —
+/// GTK's work, which only fewer widgets per row would cut. Spliced at once, a pick onto a
+/// repository with 2 000 changes and a page of history was 80-130 ms of main thread before the
+/// next frame (release, Xvfb, 2026-09-30); ten rows are 2-7 ms, and the rows past a store's first
+/// 200 make no widgets at all.
+#[derive(Default)]
+struct Fill(Rc<RefCell<Option<glib::SourceId>>>);
+
+impl Fill {
+    /// Replace `removed` rows at `at` in `store` with `items`, each chunk going in before the rows
+    /// that followed the replaced ones — the end of the store where nothing did, however many rows
+    /// went in above meanwhile (a commit expanded). A chunk due while `hold` says so is not
+    /// spliced, and the rest is left to whoever lets go; `done` runs once every item is in.
+    fn splice(
+        &self,
+        store: &gio::ListStore,
+        at: u32,
+        removed: u32,
+        items: Vec<glib::BoxedAnyObject>,
+        hold: impl Fn() -> bool + 'static,
+        done: impl FnOnce() + 'static,
+    ) {
+        self.cancel();
+        let tail = store.n_items() - at - removed;
+        let mut items = items.into_iter();
+        let first: Vec<_> = items.by_ref().take(FILL_CHUNK).collect();
+        store.splice(at, removed, &first);
+        let mut rest = items.peekable();
+        if rest.peek().is_none() {
+            return done();
+        }
+        let (store, pending, mut done) = (store.downgrade(), self.0.clone(), Some(done));
+        let id = glib::idle_add_local(move || {
+            let Some(store) = store.upgrade().filter(|_| !hold()) else {
+                pending.take();
+                return glib::ControlFlow::Break;
+            };
+            let chunk: Vec<_> = rest.by_ref().take(FILL_CHUNK).collect();
+            store.splice(store.n_items() - tail, 0, &chunk);
+            if rest.peek().is_some() {
+                return glib::ControlFlow::Continue;
+            }
+            pending.take();
+            if let Some(done) = done.take() {
+                done();
+            }
+            glib::ControlFlow::Break
+        });
+        self.0.replace(Some(id));
+    }
+
+    /// Stop a fill under way, saying whether there was one: what it had not spliced yet is not.
+    fn cancel(&self) -> bool {
+        self.0.take().map(glib::SourceId::remove).is_some()
+    }
+}
+
+/// A row of the changes list or the history: a stack of the layouts the items bound to it have
+/// needed, so a recycled row can be any of them ([`layout`]). Not homogeneous: a header's button is
+/// taller than an entry, a commit two lines to a file's one, and every row taking the tallest
+/// height would turn the list into a ladder.
+fn row_stack() -> gtk::Stack {
+    gtk::Stack::builder()
+        .hhomogeneous(false)
+        .vhomogeneous(false)
+        .build()
+}
+
+/// Show the child `name` of a list row's stack, built by `build` the first time the row is bound as
+/// one, and hand it back to be filled.
+///
+/// A list view makes a row for up to 200 of its items at once, and nearly every row of a list is
+/// one kind — 2 000 changed files are 2 000 entries, a page of history 200 commits — so building
+/// every kind a row can be up front was most of what one cost to make.
+fn layout<W: IsA<gtk::Widget>>(stack: &gtk::Stack, name: &str, build: impl FnOnce() -> W) -> W {
+    let child = match stack.child_by_name(name).and_downcast::<W>() {
+        Some(child) => child,
+        None => {
+            let child = build();
+            stack.add_named(&child, Some(name));
+            child
+        }
+    };
+    stack.set_visible_child(&child);
+    child
 }
 
 /// What a list row carries. Every store in this pane holds [`glib::BoxedAnyObject`]s, and every

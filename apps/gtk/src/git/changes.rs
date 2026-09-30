@@ -64,9 +64,9 @@ enum Row {
 
 impl Panel {
     pub(super) fn wire_changes(self: &Rc<Self>, view: &gtk::ListView) {
-        let (setup, bound) = (Rc::downgrade(self), Rc::downgrade(self));
+        let bound = Rc::downgrade(self);
         view.set_factory(Some(&crate::widgets::factory(
-            move |item| change_row(item, &setup),
+            |_| row_stack(),
             // The row is rebuilt from the item rather than from the stack handed over: a
             // recycled row draws what it is bound to, not what it held.
             move |_: &gtk::Stack, item| bind_change(item, &bound),
@@ -117,12 +117,13 @@ impl Panel {
     /// Draw the changes list from what the last refresh learned, and nothing else: what the
     /// grouping preference and a folder row both need, neither being a reason to ask git again.
     ///
-    /// Only the run of rows that differs is spliced, as the log compares before it draws: a save,
-    /// a watcher event and the `.git` write a Stage makes each land a refresh that mostly says
-    /// what is on screen already, and a row spliced out from under a press loses its release —
-    /// which is how Stage clicks went missing. So a row has to carry everything its binding
-    /// draws; the one thing it does not, the view, empties the list in [`Panel::set_tree`].
-    /// Nothing moves while a press is down over the list: its release redraws.
+    /// Only the run of rows that differs is spliced, a few at a time ([`Fill`]), as the log
+    /// compares before it draws: a save, a watcher event and the `.git` write a Stage makes each
+    /// land a refresh that mostly says what is on screen already, and a row spliced out from under
+    /// a press loses its release — which is how Stage clicks went missing. So a row has to carry
+    /// everything its binding draws; the one thing it does not, the view, empties the list in
+    /// [`Panel::set_tree`]. Nothing moves while a press is down over the list, a fill under way
+    /// included: its release redraws.
     pub(super) fn rebuild_changes(&self) {
         if self.pressed.get() {
             return;
@@ -156,7 +157,15 @@ impl Panel {
             .take(added)
             .map(glib::BoxedAnyObject::new)
             .collect();
-        self.changes.splice(at as u32, removed as u32, &items);
+        let pressed = self.pressed.clone();
+        self.changes_fill.splice(
+            &self.changes,
+            at as u32,
+            removed as u32,
+            items,
+            move || pressed.get(),
+            || {},
+        );
     }
 
     /// Activate the row `path` is listed on, as a click on it does, and say which section it was
@@ -219,10 +228,11 @@ fn sides_for(section: Section, entry: &Entry) -> Option<Sides> {
     }
 }
 
-/// One changes row: a header layout and an entry layout in a stack, so a recycled row can be
-/// either. The buttons hold the `GtkListItem` rather than the row's data, because the data is
-/// replaced under them every time the row is reused.
-fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
+/// A changes row's section header, the first of the three layouts a row's stack can show — a
+/// header, a folder or an entry, as the row bound to it is ([`layout`]): its title, then Stage All
+/// or Unstage All and Discard All. The buttons of all three hold the `GtkListItem` rather than the
+/// row's data, because the data is replaced under them every time the row is reused.
+fn header_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     let title = gtk::Label::builder()
         .xalign(0.0)
         .hexpand(true)
@@ -265,10 +275,13 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     header.append(&title);
     header.append(&all);
     header.append(&discard);
+    header
+}
 
-    // A folder of the tree view: the chevron says whether it is open, the folder icon says it is
-    // one — the same icon the Files tree gives a directory — and the label carries whatever
-    // segments this row adds to the one above it.
+/// A folder of the tree view: the chevron says whether it is open, the folder icon says it is
+/// one — the same icon the Files tree gives a directory — and the label carries whatever segments
+/// this row adds to the one above it.
+fn folder_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     let chevron = gtk::Image::new();
     let folder_name = gtk::Label::builder()
         .xalign(0.0)
@@ -280,20 +293,14 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     folder.append(&gtk::Image::from_icon_name(crate::doc::FOLDER_ICON));
     folder.append(&folder_name);
     folder.append(&actions(item, panel));
+    folder
+}
 
+/// A changed file, or a submodule.
+fn entry_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     let entry = file_line();
     entry.append(&actions(item, panel));
-
-    // Not homogeneous: the header's button is taller than an entry row, and every row taking that
-    // height would turn the list into a ladder.
-    let stack = gtk::Stack::builder()
-        .hhomogeneous(false)
-        .vhomogeneous(false)
-        .build();
-    stack.add_named(&header, Some("header"));
-    stack.add_named(&folder, Some("folder"));
-    stack.add_named(&entry, Some("entry"));
-    stack
+    entry
 }
 
 /// The marker class on a list row whose buttons already follow its hover ([`reveal_on_hover`]).
@@ -434,11 +441,11 @@ impl Panel {
     }
 }
 
-fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
+fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
     let (Some(stack), Some(row), Some(panel)) = (
         item.child().and_downcast::<gtk::Stack>(),
         boxed::<Row>(item.item()),
-        panel.upgrade(),
+        weak.upgrade(),
     ) else {
         return;
     };
@@ -453,25 +460,6 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             reveal_on_hover(&list_row);
         }
     });
-    let (Some(header), Some(folder), Some(entry)) = (
-        stack.child_by_name("header").and_downcast::<gtk::Box>(),
-        stack.child_by_name("folder").and_downcast::<gtk::Box>(),
-        stack.child_by_name("entry").and_downcast::<gtk::Box>(),
-    ) else {
-        return;
-    };
-    let Some(title) = header.first_child().and_downcast::<gtk::Label>() else {
-        return;
-    };
-    let (Some(all), Some(discard_all)) = (
-        title.next_sibling().and_downcast::<gtk::Button>(),
-        header.last_child(),
-    ) else {
-        return;
-    };
-    let Some(actions) = buttons(entry.last_child()) else {
-        return;
-    };
     // A header only titles its section and activating it does nothing, so it takes no hover
     // highlight: the row lit up around its own button read as one control. A recycled row may
     // have been a header, which is why every other row sets it back.
@@ -483,7 +471,16 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             all: section,
             discardable,
         } => {
-            stack.set_visible_child_name("header");
+            let header = layout(&stack, "header", || header_layout(item, weak));
+            let Some(title) = header.first_child().and_downcast::<gtk::Label>() else {
+                return;
+            };
+            let (Some(all), Some(discard_all)) = (
+                title.next_sibling().and_downcast::<gtk::Button>(),
+                header.last_child(),
+            ) else {
+                return;
+            };
             stack.set_tooltip_text(None);
             title.set_text(text);
             all.set_visible(section.is_some());
@@ -504,7 +501,7 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             open,
             discardable,
         } => {
-            stack.set_visible_child_name("folder");
+            let folder = layout(&stack, "folder", || folder_layout(item, weak));
             let (Some(chevron), Some(buttons)) = (
                 folder.first_child().and_downcast::<gtk::Image>(),
                 buttons(folder.last_child()),
@@ -537,7 +534,10 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             key,
             depth,
         } => {
-            stack.set_visible_child_name("entry");
+            let entry = layout(&stack, "entry", || entry_layout(item, weak));
+            let Some(actions) = buttons(entry.last_child()) else {
+                return;
+            };
             entry.set_margin_start(inset(depth, panel.tree.get()));
             let directory = match depth {
                 0 => split_name(&e.path).0,
@@ -560,7 +560,10 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             offer(&actions, section, discardable(&e, &key));
         }
         Row::Submodule(sub) => {
-            stack.set_visible_child_name("entry");
+            let entry = layout(&stack, "entry", || entry_layout(item, weak));
+            let Some(actions) = buttons(entry.last_child()) else {
+                return;
+            };
             entry.set_margin_start(0);
             let directory = sub
                 .describe
