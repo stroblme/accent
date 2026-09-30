@@ -11,16 +11,8 @@
 use crate::geom::{self, Point, Rect};
 use crate::marker::DEFAULT_MARKERSIZE;
 use crate::model::{Cell, Page};
-use crate::perimeter;
+use crate::perimeter::PerimeterKind;
 use crate::style::{Resolved, parse_num};
-
-/// Which outline an end attaches to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PerimeterKind {
-    #[default]
-    Rectangle,
-    Ellipse,
-}
 
 /// A vertex an edge is attached to.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -43,10 +35,7 @@ impl Terminal {
         Some(Terminal {
             bounds,
             rotation: style.num("rotation", 0.0),
-            perimeter: match style.get("perimeter") {
-                Some("ellipsePerimeter") => PerimeterKind::Ellipse,
-                _ => PerimeterKind::Rectangle,
-            },
+            perimeter: PerimeterKind::named(style.get("perimeter")),
             perimeter_spacing: style.num("perimeterSpacing", 0.0),
         })
     }
@@ -283,10 +272,7 @@ fn perimeter_point(t: &Terminal, next: Point, orthogonal: bool, border: f64) -> 
     let bounds = perimeter_bounds(t, border);
     if bounds.w > 0.0 || bounds.h > 0.0 {
         // ponytail: `flipH`/`flipV` do not mirror `next` and the result.
-        match t.perimeter {
-            PerimeterKind::Rectangle => perimeter::rectangle(bounds, next, orthogonal),
-            PerimeterKind::Ellipse => perimeter::ellipse(bounds, next, orthogonal),
-        }
+        t.perimeter.point(bounds, next, orthogonal)
     } else {
         t.bounds.centre()
     }
