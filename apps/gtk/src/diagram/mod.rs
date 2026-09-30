@@ -585,8 +585,7 @@ impl DiagramTab {
                 self.edit_label();
             }
             Edit::Rotate { id, degrees } => {
-                // No turn is no key, as a shape draw.io never turned has none.
-                let value = (degrees != 0.0).then(|| props::number(degrees));
+                let value = props::rotation(degrees);
                 self.edit(|e, page| e.set_style(page, &[id], "rotation", value.as_deref()));
             }
         }
@@ -807,6 +806,12 @@ impl DiagramTab {
     #[cfg(feature = "bench")]
     pub fn scale(&self) -> f64 {
         self.view.scale()
+    }
+
+    /// One frame of a move of `ids` by `delta` on the canvas, timed (`DiagramView::bench_move`).
+    #[cfg(feature = "bench")]
+    pub fn bench_move(&self, ids: &[CellId], delta: Option<Point>) -> (f64, f64) {
+        self.view.bench_move(ids, delta)
     }
 
     /// Whether formulas are still being typeset.

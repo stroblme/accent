@@ -346,6 +346,8 @@ pub struct Pick {
 /// of the cell tree to select groups and to know what can be moved and resized.
 #[derive(Debug, Default)]
 pub struct Sheet {
+    /// The page it was made from, which a drag's preview edits a copy of.
+    pub page: Page,
     pub scene: Scene,
     /// Where and when the page is shown, which labels with placeholders fill in.
     pub ctx: Context,
@@ -389,6 +391,7 @@ impl Sheet {
             .map(|p| p.cell().to_string())
             .collect();
         let mut sheet = Sheet {
+            page: page.clone(),
             scene,
             ctx: *ctx,
             bounds,
