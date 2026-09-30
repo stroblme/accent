@@ -327,7 +327,7 @@ impl Target {
 }
 
 impl What {
-    /// Both sides, on the worker, or the toast that says which one git would not read.
+    /// Both sides, on the worker, or the toast that says which one could not be read.
     fn read(&self, vault: &Vault) -> Result<(Blob, Blob), String> {
         let left = match self.sides.left_rev() {
             Some(rev) => self.side(vault, rev, self.left_rel())?,
@@ -339,7 +339,7 @@ impl What {
             // machine: reading it through the vault is what makes the diff work there as well
             // as here. It is read even though the tab shows its own buffer, so that the same
             // hop answers "is this binary" for both.
-            Sides::Worktree => self.worktree(vault),
+            Sides::Worktree => self.worktree(vault)?,
             Sides::Deleted => Blob::Text(String::new()),
             Sides::Commit { oid, .. } => self.side(vault, oid, &self.rel)?,
         };
@@ -381,19 +381,20 @@ impl What {
     /// with a root component rather than escape the vault. Such a file is read directly instead,
     /// which is right because a key is only absolute when the file is outside the vault — and
     /// impossible on a remote vault, where "outside the vault" is on the other machine and the
-    /// diff has to say so rather than diff against nothing.
-    fn worktree(&self, vault: &Vault) -> Blob {
+    /// toast has to say so rather than diff against nothing.
+    fn worktree(&self, vault: &Vault) -> Result<Blob, String> {
         let outside = Path::new(&self.key).is_absolute();
         // Outside the vault on a remote vault is on the other machine, and the path would name
         // this one's file if it named anything: refusing is the only honest answer.
         if outside && vault.is_remote() {
-            return Blob::Binary;
+            let name = split_name(&self.rel).1;
+            return Err(format!("{name} is outside the vault on the remote host"));
         }
         let read = match outside {
             true => accent_core::fs::read_text(Path::new(&self.key)),
             false => vault.read_text(&self.key),
         };
-        match read {
+        Ok(match read {
             // With the line endings the file has, which reading it as text takes away: a change
             // of those alone is a change to git, and [`line_endings_only`] has to see it.
             Ok(accent_api::fs::Read::Text(t)) => {
@@ -407,7 +408,7 @@ impl What {
                 tracing::debug!("reading {}: {e}", self.key);
                 Blob::Text(String::new())
             }
-        }
+        })
     }
 }
 
