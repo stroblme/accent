@@ -850,7 +850,8 @@ pub(super) fn bench_apart(app: &Rc<App>, rels: &str) {
     for rel in &rels {
         app.open_path(rel);
     }
-    app.open_terminal();
+    // On this machine whatever the vault, so a remote run leaves no shell held on the host.
+    app.open_terminal_at(Some(glib::home_dir()));
     let landed = {
         let (app, rels) = (app.clone(), rels.clone());
         move || rels.iter().all(|rel| app.doc_for(rel).is_some())
