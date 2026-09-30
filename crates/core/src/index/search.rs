@@ -15,8 +15,8 @@ const CLIP_BEFORE: usize = 40;
 const CLIP_AFTER: usize = 200;
 
 /// Shortest mid-word query [`Index::infix`] asks the trigram index for. Below three characters
-/// there is no trigram to look up, and FTS5 answers a `LIKE` by reading every body instead — the
-/// one thing the second index exists to avoid.
+/// there is no trigram to look up, and the only answer is reading every body — the one thing the
+/// second index exists to avoid.
 pub const MIN_INFIX: usize = 3;
 
 /// Rows one file may contribute to a grep, however many matches it holds. The list's own cap is
@@ -198,35 +198,44 @@ impl Index {
     /// [`search_mid_word`](Self::search_mid_word)'s, which the sidebar asks once the typing
     /// stops.
     ///
-    /// The match is a literal, case-insensitive substring of the body or the title. Two
-    /// consequences of that, both from FTS5 answering the `LIKE` by verifying it against the
-    /// stored text: diacritics are not folded the way the ranked path folds them, and `%` and `_`
-    /// keep their `LIKE` meaning — escaping them needs an `ESCAPE` clause, which FTS5 does not
-    /// recognise and which would turn the query into a scan of all of the bodies.
+    /// The match is a substring of the body or the title, folded as the ranked path folds —
+    /// case and Latin diacritics, so `cafe` finds `Unicafé` — and taken literally, `%` and `_`
+    /// included. The index is asked for the files holding every three-character window of the
+    /// query, which it folds the same way (`remove_diacritics 1`), and each of those is then
+    /// read for the query itself ([`folded_find`], through `phrase_start`): a `LIKE` would be
+    /// verified against the stored text, unfolded, with its wildcards live.
     ///
     /// With no term statistics to rank by — `detail='none'` keeps none — the order is a title
     /// that holds the needle first, then the shortest file, which is the length normalisation
     /// bm25 would have applied.
     fn infix(&self, query: &str, limit: usize, include_ignored: bool) -> Result<Vec<SearchHit>> {
         let needle = terms(query).join(" ");
-        if needle.chars().count() < MIN_INFIX {
+        let chars: Vec<char> = needle.chars().collect();
+        if chars.len() < MIN_INFIX {
             return Ok(Vec::new());
         }
+        // One quoted term per window: `detail='none'` answers no phrase of several.
+        let windows: Vec<String> = chars
+            .windows(MIN_INFIX)
+            .map(|w| format!("\"{}\"", String::from_iter(w).replace('"', "\"\"")))
+            .collect();
         let mut st = self.conn.prepare_cached(
             "SELECT f.rel_path, f.title, snippet_window(n.body, ?2), phrase_start(n.body, ?2)
              FROM notes n JOIN files f ON f.id = n.file_id
              WHERE n.file_id IN (
                  SELECT t.rowid FROM notes_tri t JOIN files g ON g.id = t.rowid
-                  WHERE (t.body LIKE ?1 OR t.title LIKE ?1)
+                  WHERE notes_tri MATCH ?1
+                    AND (phrase_start(t.body, ?2) IS NOT NULL
+                         OR phrase_start(t.title, ?2) IS NOT NULL)
                     AND (?4 OR g.git_ignored = 0 OR g.kind = ?5)
-                  ORDER BY ifnull(g.title, '') LIKE ?1 DESC, g.size
+                  ORDER BY phrase_start(ifnull(g.title, ''), ?2) IS NOT NULL DESC, g.size
                   LIMIT ?3)
-             ORDER BY ifnull(f.title, '') LIKE ?1 DESC, f.size",
+             ORDER BY phrase_start(ifnull(f.title, ''), ?2) IS NOT NULL DESC, f.size",
         )?;
         let phrase = fold(&needle);
         let rows = st.query_map(
             params![
-                format!("%{needle}%"),
+                windows.join(" AND "),
                 &phrase,
                 limit as i64,
                 include_ignored,
@@ -608,8 +617,14 @@ fn folded_prefix(hay: &str, needle: &str) -> Option<usize> {
 /// Where the folded `needle` first occurs in `hay`, as the byte offset it starts at and the bytes
 /// it covers there. The length is `hay`'s rather than the needle's: folding and a run of
 /// whitespace both let the two differ.
+///
+/// An ASCII character folds to its own lower case, so only the needle's first character can begin
+/// a match where the body has one, and that test comes first: it spares nearly every character of
+/// a body the whole fold, which the mid-word path pays on every file the index offers it.
 pub(super) fn folded_find(hay: &str, needle: &str) -> Option<(usize, usize)> {
+    let first = needle.chars().next().filter(|&w| w != ' ');
     hay.char_indices()
+        .filter(|&(_, c)| first.is_none_or(|w| !c.is_ascii() || c.to_ascii_lowercase() == w))
         .find_map(|(i, _)| folded_prefix(&hay[i..], needle).map(|n| (i, n)))
 }
 
@@ -1119,6 +1134,30 @@ mod tests {
 
     /// `toggle` is a prefix hit in `target.md` and a mid-word one in `retoggle.md`: the prefix hit
     /// comes first, the mid-word one is listed below it, and neither twice.
+    /// The mid-word path folds as the ranked one does, case and Latin diacritics, and takes the
+    /// query as it is written: `%` and `_` are characters, not `LIKE` wildcards.
+    #[test]
+    fn a_mid_word_query_folds_and_is_literal() {
+        let vault = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            ("u.md", "the Unicafé opens\n"),
+            ("mini.md", "a minicafeteria\n"),
+            ("share.md", "a 50% share\n"),
+            ("five.md", "a 500 share\n"),
+        ] {
+            fs::write(vault.path().join(name), body).unwrap();
+        }
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("CAFE", 10, false).unwrap();
+        assert_eq!(files(&hits), ["mini.md", "u.md"], "shortest first");
+        assert!(hits[1].snippet.contains("Uni«café»"), "{:?}", hits[1]);
+        let hits = ix.infix("50%", 10, false).unwrap();
+        assert_eq!(files(&hits), ["share.md"]);
+    }
+
     #[test]
     fn mid_word_hits_come_below_the_prefix_ones_and_never_repeat_them() {
         let (vault, db) = ranking_vault();
