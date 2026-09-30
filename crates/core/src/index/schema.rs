@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-pub(super) const SCHEMA_VERSION: i64 = 11;
+pub(super) const SCHEMA_VERSION: i64 = 12;
 
 /// Biggest non-markdown file whose text goes into the index.
 ///
@@ -77,14 +77,21 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 -- The other half of that query. A term index answers "starts with", and no number of prefixes
 -- makes it answer "contains": `oggle split` is not a term `notes_fts` holds, so the ranked path
 -- found nothing where `toggle split` found the note. The trigram tokenizer indexes every
--- three-character window instead, which is what turns `LIKE '%…%'` into an index lookup rather
--- than a pass over every stored body (`Index::infix`).
+-- three-character window instead, which is what turns a substring query into an index lookup
+-- rather than a pass over every stored body (`Index::infix`).
 --
 -- `detail='none', columnsize=0` is what makes it affordable, and it costs nothing that is read:
--- FTS5 verifies a `LIKE` against the content row itself, so the token positions and per-column
--- sizes a phrase query would need are dead weight — and the snippet is cut in Rust here anyway,
--- as it is for `notes_fts`. Three candidates, sized on the testvault this comment already
--- measures, now 41 684 entries and 21 360 bodies over 110 MB of text (2026-09-13):
+-- a query asks for the files holding each of its trigrams and reads every one for the query
+-- itself (`Index::infix`), so the token positions and per-column sizes a phrase query would need
+-- are dead weight — and the snippet is cut in Rust here anyway, as it is for `notes_fts`.
+-- `remove_diacritics 1` folds the trigrams as `unicode61 remove_diacritics 2` folds the terms
+-- above, for Latin letters, so `cafe` finds `Unicafé` mid-word as it finds `café` whole; on the
+-- generated vault, which holds no diacritics, the index and the first index are the same size and
+-- time with it (259.6 MiB, 17.5 MiB of it this table, 2026-09-30), and a mid-word query of a
+-- common needle listing 100 rows takes 58–108 ms where its `LIKE` took 85–155 ms.
+--
+-- Three candidates, sized on the testvault this comment already measures, now 41 684 entries and
+-- 21 360 bodies over 110 MB of text (2026-09-13):
 --
 --     trigram, detail='none'                   +17.4 MiB   what shipped
 --     trigram, detail='full'                  +214.8 MiB   positions nobody reads
@@ -116,7 +123,7 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
 -- bodies grows 30%.
 CREATE VIRTUAL TABLE notes_tri USING fts5(
     body, title, content='notes', content_rowid='file_id',
-    tokenize='trigram', detail='none', columnsize=0
+    tokenize='trigram remove_diacritics 1', detail='none', columnsize=0
 );
 CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
     INSERT INTO notes_fts(rowid, body, title) VALUES (new.file_id, new.body, new.title);
