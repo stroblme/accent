@@ -536,6 +536,13 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return memory::bench_memory(&app, &arg);
         }
         if let Some(rel) = compare {
+            // These make a repository in the vault root, or stage and commit in the one there.
+            if ["lines:", "row:", "left:", "pads:", "clicks"]
+                .iter()
+                .any(|mode| rel.starts_with(mode))
+            {
+                own_repository_only(&app, "ACCENT_BENCH_COMPARE");
+            }
             if let Some(rel) = rel.strip_prefix("lines:") {
                 return bench_compare_lines(&app, rel);
             }
@@ -665,6 +672,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_diagram(&app, &arg);
         }
         if let Some(dir) = scroll {
+            own_repository_only(&app, "ACCENT_BENCH_SCROLL");
             return bench_scroll(&app, &dir);
         }
         if let Some(rels) = moving {
@@ -762,6 +770,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(arg) = git {
+            own_repository_only(&app, "ACCENT_BENCH_GIT");
             if let Some(phase) = arg.strip_prefix("close:") {
                 return bench_git_close(&app, phase);
             }
@@ -936,6 +945,32 @@ fn scratch_only(app: &Rc<App>, drill: &str) {
     if !root.starts_with("/tmp") {
         eprintln!(
             "{drill} types into its note: run it on a scratch vault under /tmp, not {root:?}"
+        );
+        std::process::exit(2);
+    }
+}
+
+/// A drill that makes a repository in the vault root, or stages and commits in the one there,
+/// refuses a vault inside a repository whose top it is not — a scratch copy under this checkout's
+/// `target/` — where its `git add` and the Git pane's Stage would reach that repository's index,
+/// the pane having picked it before any `git init` of the drill's. A vault in no repository is left
+/// to the drill, whose own `git init` makes it one; a remote vault's git is its host's.
+fn own_repository_only(app: &Rc<App>, drill: &str) {
+    if app.vault().is_none_or(|vault| vault.is_remote()) {
+        return;
+    }
+    let root = app.root();
+    let top = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&root)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()));
+    if let Some(top) = top.filter(|top| top.canonicalize().ok() != root.canonicalize().ok()) {
+        eprintln!(
+            "{drill} writes to the vault's repository: {root:?} is inside {top:?}; \
+             run `git init` in it first, or use a vault outside any repository"
         );
         std::process::exit(2);
     }
