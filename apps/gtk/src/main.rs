@@ -52,6 +52,7 @@ mod references;
 mod relink;
 mod ring;
 mod save;
+mod scrollable;
 mod session;
 mod settings;
 mod shell;

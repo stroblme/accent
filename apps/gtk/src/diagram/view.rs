@@ -3,7 +3,7 @@
 //!
 //! It never changes the diagram. A gesture ends in an [`Edit`] handed to the tab, which applies
 //! it to the model and hands back a new [`Sheet`]; so one gesture is one undo step, and the
-//! widget is a picture of the page plus a pointer. The scrollable skeleton is the PDF view's.
+//! widget is a picture of the page plus a pointer. The scrolling is [`crate::scrollable`]'s.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -221,17 +221,11 @@ impl DiagramView {
     }
 
     pub fn scroll(&self) -> (f64, f64) {
-        let value = |a: Option<gtk::Adjustment>| a.map_or(0.0, |a| a.value());
-        (value(self.hadjustment()), value(self.vadjustment()))
+        self.imp().scroll.scroll()
     }
 
-    pub fn set_scroll(&self, (x, y): (f64, f64)) {
-        if let Some(a) = self.hadjustment() {
-            a.set_value(x);
-        }
-        if let Some(a) = self.vadjustment() {
-            a.set_value(y);
-        }
+    pub fn set_scroll(&self, at: (f64, f64)) {
+        self.imp().scroll.set_scroll(at);
     }
 
     /// Where the diagram is left: the zoom and scroll to come back to. Applied once the widget
@@ -336,8 +330,7 @@ impl DiagramView {
         if imp.frame.replace(frame).scale != frame.scale {
             imp.cache.forget();
         }
-        configure(self.hadjustment(), size.0, w);
-        configure(self.vadjustment(), size.1, h);
+        imp.scroll.configure(size, (w, h));
         if !imp.laid_out.replace(true) && imp.pending_scroll.get().is_none() {
             self.centre_page();
         }
@@ -741,18 +734,9 @@ impl DiagramView {
     }
 }
 
-/// Point an adjustment at a content size, keeping it where it is scrolled to. The upper bound is
-/// never below the page size, which GTK asserts on (the PDF view's `configure`).
-fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {
-    let Some(adjustment) = adjustment else {
-        return;
-    };
-    let value = adjustment.value().min((upper - page).max(0.0));
-    adjustment.configure(value, 0.0, upper.max(page), page * 0.1, page * 0.9, page);
-}
-
 mod imp {
     use super::*;
+    use crate::scrollable::Adjustments;
 
     type OnEdit = Box<dyn Fn(Edit)>;
     type OnZoom = Box<dyn Fn()>;
@@ -760,15 +744,13 @@ mod imp {
     #[derive(glib::Properties)]
     #[properties(wrapper_type = super::DiagramView)]
     pub struct DiagramView {
-        #[property(get, set = Self::adopt_h, nullable, override_interface = gtk::Scrollable)]
-        pub hadjustment: RefCell<Option<gtk::Adjustment>>,
-        #[property(get, set = Self::adopt_v, nullable, override_interface = gtk::Scrollable)]
-        pub vadjustment: RefCell<Option<gtk::Adjustment>>,
+        #[property(name = "hadjustment", type = Option<gtk::Adjustment>, get = |v: &Self| v.scroll.h(), set = Self::adopt_h, nullable, override_interface = gtk::Scrollable)]
+        #[property(name = "vadjustment", type = Option<gtk::Adjustment>, get = |v: &Self| v.scroll.v(), set = Self::adopt_v, nullable, override_interface = gtk::Scrollable)]
+        pub scroll: Adjustments,
         #[property(get, set, override_interface = gtk::Scrollable, builder(gtk::ScrollablePolicy::Minimum))]
         pub hscroll_policy: Cell<gtk::ScrollablePolicy>,
         #[property(get, set, override_interface = gtk::Scrollable, builder(gtk::ScrollablePolicy::Minimum))]
         pub vscroll_policy: Cell<gtk::ScrollablePolicy>,
-        pub adj_handlers: RefCell<[Option<glib::SignalHandlerId>; 2]>,
         pub sheet: RefCell<Option<Rc<Sheet>>>,
         pub selection: RefCell<Vec<CellId>>,
         pub zoom: Cell<Zoom>,
@@ -796,11 +778,9 @@ mod imp {
     impl Default for DiagramView {
         fn default() -> Self {
             DiagramView {
-                hadjustment: RefCell::new(None),
-                vadjustment: RefCell::new(None),
+                scroll: Adjustments::default(),
                 hscroll_policy: Cell::new(gtk::ScrollablePolicy::Minimum),
                 vscroll_policy: Cell::new(gtk::ScrollablePolicy::Minimum),
-                adj_handlers: RefCell::new([None, None]),
                 sheet: RefCell::new(None),
                 selection: RefCell::new(Vec::new()),
                 zoom: Cell::new(Zoom::Fit),
@@ -831,35 +811,13 @@ mod imp {
 
     impl DiagramView {
         fn adopt_h(&self, adjustment: Option<gtk::Adjustment>) {
-            self.adopt(0, adjustment);
+            self.scroll
+                .adopt(&*self.obj(), 0, adjustment, |v| v.queue_draw());
         }
 
         fn adopt_v(&self, adjustment: Option<gtk::Adjustment>) {
-            self.adopt(1, adjustment);
-        }
-
-        /// Follow an adjustment: redraw when it moves, and drop the handler on the old one. The
-        /// handler holds the view weakly: the view holds the adjustment, and a scrolled window
-        /// going away leaves its child's adjustments set, so a strong one kept every closed
-        /// diagram's view alive, and with it the WebKit process its formulas were typeset in.
-        fn adopt(&self, slot: usize, adjustment: Option<gtk::Adjustment>) {
-            let obj = self.obj().downgrade();
-            let old = match slot {
-                0 => self.hadjustment.replace(adjustment.clone()),
-                _ => self.vadjustment.replace(adjustment.clone()),
-            };
-            if let (Some(old), Some(id)) = (old, self.adj_handlers.borrow_mut()[slot].take()) {
-                old.disconnect(id);
-            }
-            if let Some(adjustment) = adjustment {
-                let id = adjustment.connect_value_changed(move |_| {
-                    if let Some(obj) = obj.upgrade() {
-                        obj.queue_draw();
-                    }
-                });
-                self.adj_handlers.borrow_mut()[slot] = Some(id);
-            }
-            self.obj().queue_allocate();
+            self.scroll
+                .adopt(&*self.obj(), 1, adjustment, |v| v.queue_draw());
         }
     }
 

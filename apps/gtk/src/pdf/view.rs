@@ -903,18 +903,15 @@ impl PdfView {
     }
 
     fn scroll_offset(&self) -> (f64, f64) {
-        (
-            self.hadjustment().map_or(0.0, |a| a.value()),
-            self.vadjustment().map_or(0.0, |a| a.value()),
-        )
+        self.imp().scroll.scroll()
     }
 
     fn hadjustment(&self) -> Option<gtk::Adjustment> {
-        self.imp().hadjustment.borrow().clone()
+        self.imp().scroll.h()
     }
 
     fn vadjustment(&self) -> Option<gtk::Adjustment> {
-        self.imp().vadjustment.borrow().clone()
+        self.imp().scroll.v()
     }
 
     /// Recompute the layout for the current size and zoom, and tell the scrollbars.
@@ -943,8 +940,8 @@ impl PdfView {
         let layout = layout(&sizes, scale, w as f32);
         let (width, height) = (f64::from(layout.width), f64::from(layout.height));
         *self.imp().layout.borrow_mut() = layout;
-        configure(self.hadjustment(), width, f64::from(w));
-        configure(self.vadjustment(), height, f64::from(h));
+        let viewport = (f64::from(w), f64::from(h));
+        self.imp().scroll.configure((width, height), viewport);
         if let Some(anchor) = anchor {
             self.scroll_to(anchor);
         }
@@ -952,25 +949,12 @@ impl PdfView {
     }
 }
 
-/// Point an adjustment at a content size without disturbing where it is scrolled to.
-///
-/// The upper bound is never below the page size, which GTK asserts on and which a document
-/// smaller than the window otherwise breaks — an A4 sketch in a split pane, or any small page in
-/// a large one. There is nothing to scroll in that case either way: the value clamps to zero.
 /// Whether the seat has a stylus at all. Asked on the press rather than cached: a tablet can be
 /// plugged in mid-session.
 fn stylus_attached() -> bool {
     gdk::Display::default()
         .and_then(|d| d.default_seat())
         .is_some_and(|s| !s.devices(gdk::SeatCapabilities::TABLET_STYLUS).is_empty())
-}
-
-fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {
-    let Some(adjustment) = adjustment else {
-        return;
-    };
-    let value = adjustment.value().min((upper - page).max(0.0));
-    adjustment.configure(value, 0.0, upper.max(page), page * 0.1, page * 0.9, page);
 }
 
 /// A piece a partial eraser leaves of `ink`: its style along `points`, as the render thread will
@@ -1038,7 +1022,14 @@ fn dot_cursor() -> gdk::Cursor {
 
 mod imp {
     use super::*;
+    use crate::scrollable::Adjustments;
     use std::cell::OnceCell;
+
+    /// The view scrolled: paint what is under it now, and report the page if that changed.
+    fn moved(view: &super::PdfView) {
+        view.queue_draw();
+        view.imp().notice_page();
+    }
 
     type Wants = Box<dyn Fn(&super::PdfView, f32, bool, Vec<Want>)>;
     type Coords = Box<dyn Fn(&super::PdfView, f64, f64)>;
@@ -1058,16 +1049,13 @@ mod imp {
     pub struct PdfView {
         // The four `GtkScrollable` properties. GTK reads and writes them by name, so they have to
         // be real GObject properties rather than plain fields.
-        #[property(get, set = Self::adopt_h, nullable, override_interface = gtk::Scrollable)]
-        pub hadjustment: RefCell<Option<gtk::Adjustment>>,
-        #[property(get, set = Self::adopt_v, nullable, override_interface = gtk::Scrollable)]
-        pub vadjustment: RefCell<Option<gtk::Adjustment>>,
+        #[property(name = "hadjustment", type = Option<gtk::Adjustment>, get = |v: &Self| v.scroll.h(), set = Self::adopt_h, nullable, override_interface = gtk::Scrollable)]
+        #[property(name = "vadjustment", type = Option<gtk::Adjustment>, get = |v: &Self| v.scroll.v(), set = Self::adopt_v, nullable, override_interface = gtk::Scrollable)]
+        pub scroll: Adjustments,
         #[property(get, set, override_interface = gtk::Scrollable, builder(gtk::ScrollablePolicy::Minimum))]
         pub hscroll_policy: Cell<gtk::ScrollablePolicy>,
         #[property(get, set, override_interface = gtk::Scrollable, builder(gtk::ScrollablePolicy::Minimum))]
         pub vscroll_policy: Cell<gtk::ScrollablePolicy>,
-        /// The handlers on the two adjustments, dropped when they are replaced.
-        pub adj_handlers: RefCell<[Option<glib::SignalHandlerId>; 2]>,
         pub sizes: RefCell<Vec<(f32, f32)>>,
         pub layout: RefCell<super::Layout>,
         pub cache: OnceCell<std::rc::Rc<RefCell<Cache>>>,
@@ -1151,11 +1139,9 @@ mod imp {
     impl Default for PdfView {
         fn default() -> Self {
             PdfView {
-                hadjustment: RefCell::new(None),
-                vadjustment: RefCell::new(None),
+                scroll: Adjustments::default(),
                 hscroll_policy: Cell::new(gtk::ScrollablePolicy::Minimum),
                 vscroll_policy: Cell::new(gtk::ScrollablePolicy::Minimum),
-                adj_handlers: RefCell::new([None, None]),
                 sizes: RefCell::new(Vec::new()),
                 layout: RefCell::new(super::Layout::default()),
                 cache: OnceCell::new(),
@@ -1212,36 +1198,11 @@ mod imp {
 
     impl PdfView {
         fn adopt_h(&self, adjustment: Option<gtk::Adjustment>) {
-            self.adopt(0, adjustment);
+            self.scroll.adopt(&*self.obj(), 0, adjustment, moved);
         }
 
         fn adopt_v(&self, adjustment: Option<gtk::Adjustment>) {
-            self.adopt(1, adjustment);
-        }
-
-        /// Follow an adjustment: redraw when it moves, and drop the handler on the old one. The
-        /// handler holds the view weakly: the view holds the adjustment, and a scrolled window
-        /// going away leaves its child's adjustments set, so a strong one kept every closed PDF's
-        /// views and their rendered tiles alive.
-        fn adopt(&self, slot: usize, adjustment: Option<gtk::Adjustment>) {
-            let obj = self.obj().downgrade();
-            let old = match slot {
-                0 => self.hadjustment.replace(adjustment.clone()),
-                _ => self.vadjustment.replace(adjustment.clone()),
-            };
-            if let (Some(old), Some(id)) = (old, self.adj_handlers.borrow_mut()[slot].take()) {
-                old.disconnect(id);
-            }
-            if let Some(adjustment) = adjustment {
-                let id = adjustment.connect_value_changed(move |_| {
-                    if let Some(obj) = obj.upgrade() {
-                        obj.queue_draw();
-                        obj.imp().notice_page();
-                    }
-                });
-                self.adj_handlers.borrow_mut()[slot] = Some(id);
-            }
-            self.obj().queue_allocate();
+            self.scroll.adopt(&*self.obj(), 1, adjustment, moved);
         }
 
         /// The colour a page's paper is drawn in before its tiles arrive, matching what the
