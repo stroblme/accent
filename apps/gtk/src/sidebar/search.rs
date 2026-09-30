@@ -219,15 +219,13 @@ type Pages = HashMap<String, PageStarts>;
 /// in it; `None` for one that does not parse.
 fn diagram_text(xml: &str) -> Option<(String, PageStarts)> {
     let file = accent_drawio::File::from_bytes(xml.as_bytes()).ok()?;
-    let (mut text, mut starts) = (String::new(), PageStarts::new());
+    let (mut text, mut starts, mut page) = (String::new(), PageStarts::new(), None);
     for label in accent_drawio::text::labels(&file) {
         if !text.is_empty() {
             text.push('\n');
         }
-        if starts
-            .last()
-            .is_none_or(|(_, name)| *name != file.pages[label.page].name())
-        {
+        if page != Some(label.page) {
+            page = Some(label.page);
             starts.push((text.len(), file.pages[label.page].name().to_string()));
         }
         text.push_str(&label.text);
