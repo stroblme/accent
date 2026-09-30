@@ -260,11 +260,14 @@ use tags::bench_tags;
 /// the made note with an edit still in its buffer, printing whether each menu offered its item,
 /// whether the tab stayed and what was said; then every other window and what it holds, and what
 /// the made note says on disk, before removing it. On a remote vault neither item is offered.
-/// `=loose:` writes a note and its images into `loose-drill/` and opens the note in a window of its
-/// own from its tree row, where no vault is behind it, and prints what the Outline pane there holds
-/// and the headings it lists, then whether each image in its preview loaded: those beside it and
-/// under it, and neither one above its folder nor one through a symlink out of it
-/// (`loose::bench_loose`), before removing the folder.
+/// `=loose:<rel_pdf>` writes a note and its images into `loose-drill/` and opens the note in a
+/// window of its own from its tree row, where no vault is behind it, and prints what the Outline
+/// pane there holds and the headings it lists, then whether each image in its preview loaded:
+/// those beside it and under it, and neither one above its folder nor one through a symlink out
+/// of it. Then it opens an image and a copy of the PDF in windows of their own, the PDF here too,
+/// and prints the image's size there before and after the file is written over with a larger one,
+/// and the pages of the PDF there before and after a page is added here, then here after one is
+/// added there (`loose::bench_loose`), before removing the folder.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
@@ -686,8 +689,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rels) = rels.strip_prefix("apart:") {
                 return bench_apart(&app, rels);
             }
-            if rels == "loose:" {
-                return loose::bench_loose(&app);
+            if let Some(pdf) = rels.strip_prefix("loose:") {
+                return loose::bench_loose(&app, pdf);
             }
             return bench_tabs(&app, &rels);
         }

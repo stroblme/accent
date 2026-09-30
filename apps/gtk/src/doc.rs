@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use accent_core::path::{FileType, file_type};
-use gtk::gdk;
+use gtk::{gdk, gio};
 
 use crate::difftab::DiffTab;
 use crate::editor::Tab;
@@ -36,6 +36,8 @@ pub struct Viewer {
     pub look: Cell<Option<(Look, bool, i32, f64)>>,
     /// Counts the times the image was sent to be shown, so only the last one's answer lands.
     pub shows: Cell<u32>,
+    /// The monitor on a loose image, which nothing else watches (`App::watch_loose`).
+    pub monitor: RefCell<Option<gio::FileMonitor>>,
 }
 
 impl Viewer {
@@ -47,6 +49,7 @@ impl Viewer {
             image: RefCell::new(None),
             look: Cell::new(None),
             shows: Cell::new(0),
+            monitor: RefCell::default(),
         })
     }
 

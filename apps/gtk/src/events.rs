@@ -63,7 +63,7 @@ impl App {
 
     /// Bring whatever shows `rel` up to date with its file, which something other than this
     /// window has changed.
-    fn changed_on_disk(self: &Rc<Self>, rel: &str) {
+    pub(crate) fn changed_on_disk(self: &Rc<Self>, rel: &str) {
         self.reshow_preview_image(rel);
         let Some(doc) = self.doc_for(rel) else {
             return;

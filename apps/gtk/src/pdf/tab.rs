@@ -183,6 +183,8 @@ pub struct PdfTab {
     pub(super) on_choice: ChoiceHook,
     pub(super) on_repaged: RepageHook,
     pub relinks: RefCell<Relinks>,
+    /// The monitor on a loose file, which nothing else watches (`App::watch_loose`).
+    pub monitor: RefCell<Option<gio::FileMonitor>>,
 }
 
 /// A new tab of `tabs` for the PDF at `path`, showing itself opening until [`PdfTab::load`] is
@@ -291,6 +293,7 @@ pub fn open(
         on_choice: RefCell::new(None),
         on_repaged: RefCell::new(None),
         relinks: RefCell::default(),
+        monitor: RefCell::default(),
     });
 
     tab.view.set_zoom(place.zoom);
