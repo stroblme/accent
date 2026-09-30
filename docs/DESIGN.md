@@ -108,7 +108,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 **Search**
 
 - The entry on a line of its own; under it a `.linked` group of Match Case / Match Whole Word / Regular Expression / All toggles with the replace toggle at the row's far end; a revealer with the replace field; a progress bar above the results.
-- The four toggles are text (`Aa`, `Word`, `.*`, `All`): Adwaita has no glyph for them. The replace toggle is `edit-find-replace-symbolic`, outside the group: it opens a panel rather than changing the query.
+- The four toggles are text (`Aa`, `Word`, `.*`, `All`): Adwaita has no glyph for them. The first three are the find bar's too (Find bar), built and read by the same code. The replace toggle is `edit-find-replace-symbolic`, outside the group: it opens a panel rather than changing the query.
 - The search space is everything the index holds — every note, every other text file under 1 MiB and every diagram's labels — minus what git ignores.
 - A diagram — named as one, or an `.xml` whose first element is draw.io's — is searched by what its labels say, one line per label with its markup left out and a formula as written, never by its XML, where every style key and id would be a hit. Its row names the page the label is on instead of a line, and opens the diagram on that page with the label's shape selected and in view; Replace All rewrites the labels through the diagram's model, its markup kept, and writes the file once.
 - `All` drops that exclusion in either mode, and reaches the trees the walk never entered by walking them: at once in an exact search, and in a ranked one once the box has been still for 400 ms, the next keystroke cancelling the wait and the walk. What it finds has no FTS row to rank it by, so it comes last, after the mid-word matches, in path order, under a Not Indexed heading. Its tooltip names both halves.
@@ -234,7 +234,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A remote vault's root that is not on the host still gets a shell, at the login's home.
 - A remote shell rides a master — the vault's in a remote vault's window, one per host elsewhere — made ready once per host before the tab spawns, the tab's screen saying so. A dropped link keeps the tab, saying "Lost the connection to host. Press a key to reconnect."; a key attaches again with the screen replayed, and a vault window's reconnect does it too. Close Tab ends the shell on the host; closing the window leaves it running.
 - New Remote Terminal… opens a shell on any host from any window (the Open Remote form); New Local Terminal opens one on this machine from a remote vault's window.
-- A focused shell keeps every chord the Keyboard section does not reserve: a terminal that answers only half of readline is not a terminal.
+- A focused shell keeps every chord the Keyboard section does not reserve, and with Forward All Keys on nearly all of those too: a terminal that answers only half of readline is not a terminal.
 - Foreground, background and all sixteen ANSI colours come from `theme.rs`, one palette per theme: VTE's own is arithmetic (its blue is 1.41:1 on our dark background), and a colour read off the widget does not follow Solarized. `vte_terminal_set_colors` takes all sixteen or none.
 - GNOME's monospace font, scaled by the terminal's own zoom; an underline cursor, so the character under it stays readable.
 - Inset 12 px either side, not by the 48 px page gutter: that measure is for prose, and a terminal is a grid.
@@ -300,6 +300,10 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Over a shell the bar goes and the chord opens nothing: vte keeps its own scrollback.
 - F5 over a note takes the pane tree off screen, so the presented pane lends its bar to the editor column for the duration.
 - The readout says "3 of 12" in the buffer, a PDF and the rendered preview alike; past WebKit's 500-match ceiling the preview's total is a floor and no position is claimed.
+- Beside the query sit the Search pane's Match Case, Match Whole Word and Regular Expression toggles, the same text buttons in the same `.linked` group, and a buffer is matched by the Search pane's own matcher (`accent_core::search`): the whole text at once, so `^` is the start of the note and a pattern may run across lines, a whole word ends where `\b` says (`_` is a word character), and under Regular Expression a replacement's `$1` names a group, as Replace All in Files writes it. Each bar keeps its own toggles, apart from the Search pane's and the other pane's bar.
+- A query that does not compile marks the box as the Search pane marks its own, and the readout says "Invalid pattern".
+- Over the rendered preview and a PDF the toggles are insensitive and keep their state: WebKit's find and the PDF search take the query as written, without regard to case.
+- The matches are painted in the lines on screen and a hundred either side, again as the view scrolls; the count and the steps cover the whole note. A tag on each of a hundred thousand matches is seconds of work on every keystroke.
 - In a buffer the bar searches folded text too, as VS Code does: the count includes it, a step into a shut block or a collapsed comparison run opens it, and a replacement there leaves it shut.
 - Previous and next are `go-up-symbolic` and `go-down-symbolic`: the matches are places in a vertical document, and back and forward arrows read as history.
 - **Escape closes the bar wherever it is pressed**, from the bar ahead of `GtkSearchEntry`'s own Escape (which only clears the query), and from the document once nothing nearer the focus has answered it.
@@ -647,9 +651,10 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - New Terminal `Ctrl+J`; `Ctrl+W` closes the tab and ends the shell, where closing the window does not. New Remote Terminal…, New Local Terminal, Save Session and Close Session are unbound.
 - In a window of shells with no note in front, `Ctrl+S` saves the session; a focused shell keeps that chord, so Save Session is in the primary menu and the palette.
 - Inside a shell, Copy in Terminal `Ctrl+Shift+C` and Paste in Terminal `Ctrl+Shift+V` are rows like any other: they rebind, list in the palette and name the shell's menu items. Over a text tab `Ctrl+Shift+V` is Paste as Plain Text. `Ctrl+PageUp` / `Ctrl+PageDown` stay `AdwTabView`'s.
-- **A focused shell wins by default**: while a terminal has the keyboard the window keeps a small reserved set and unbinds the rest of this table, so `Ctrl+A`, `Ctrl+C`, `Ctrl+D`, `Ctrl+E`, `Ctrl+K`, `Ctrl+L`, `Ctrl+R`, `Ctrl+U` and the rest of readline behave as in any terminal. Reserved: `Ctrl+W`, `Ctrl+Tab`, `Ctrl+J`, the three zoom chords, `F11`, the Move Tab and Move Divider chords, and every chord spelled with both `Control` and `Shift`.
+- **A focused shell wins by default**: while a terminal has the keyboard the window keeps a small reserved set and unbinds the rest of this table, so `Ctrl+A`, `Ctrl+C`, `Ctrl+D`, `Ctrl+K`, `Ctrl+L`, `Ctrl+R`, `Ctrl+U` and the rest of readline behave as in any terminal. Reserved: `Ctrl+W`, `Ctrl+Tab`, `Ctrl+J`, `Ctrl+E` (Go to File), the three zoom chords, `F11`, the Move Tab and Move Divider chords, and every chord spelled with both `Control` and `Shift`.
+- **Forward All Keys** (Preferences → Terminal, `forward_keys_to_terminal`) hands a focused shell the reserved set too, for a program that binds those chords itself. The window keeps Copy and Paste in Terminal — they act on the shell, and a terminal sends `Ctrl+Shift+C` on as `Ctrl+C`, which would interrupt the program instead of copying — and `AdwTabView`'s own `Ctrl+PageUp` / `Ctrl+PageDown` and `Alt+1` to `Alt+9`, which are not in this table: they are how the keyboard leaves such a shell. A change applies to the shell that has the keyboard at once.
 - The rule lives at the window, not on the shell: GTK dispatches application accelerators at the window ahead of the VTE, so unbinding them is the only way a key gets through.
-- `Ctrl+W` is the budgeted cost — readline loses delete-word, which `Alt+Backspace` still does; the zoom chords are the same trade, a terminal having its own zoom; `F11` means nothing to readline or curses and is what GNOME Terminal keeps.
+- `Ctrl+W` is the budgeted cost — readline loses delete-word, which `Alt+Backspace` still does; `Ctrl+E` is the same trade, end-of-line being `End` too; the zoom chords are the same trade, a terminal having its own zoom; `F11` means nothing to readline or curses and is what GNOME Terminal keeps.
 - A rebound chord follows the rule of the default it replaced.
 - The table is the application's, one for every window, so the shell that narrows it is the one in the active window: moving to another window gives that window its chords back.
 
@@ -663,7 +668,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 ### Panes
 
 - Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, References `Ctrl+Shift+B`, Git `Ctrl+Shift+G`, Outline `Ctrl+Shift+W`, Properties `Ctrl+Shift+A` (a diagram's), Show Hidden Files (unbound, also in Preferences → Files).
-- The pane chords carry Control and Shift, so they stay the window's while a shell has the keyboard and open their pane from a shell too.
+- The pane chords carry Control and Shift, so they stay the window's while a shell has the keyboard and open their pane from a shell too, unless Forward All Keys gives the shell them as well.
 
 ### Git
 

@@ -131,21 +131,30 @@ pub fn hiding(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> Vec<gtk::TextTa
     hiders(buffer).filter(|tag| iter.has_tag(tag)).collect()
 }
 
-/// The iter at buffer point `x`, `y` of `view`, as `gtk_text_view_get_iter_at_location` answers,
-/// or `None` over a line holding hidden text, where GTK 4.22 can abort answering (see
-/// [`whole_lines`]). Such a line is under the pointer where one is left partly hidden, and in the
-/// frame after lines are hidden — a fold shut, a comparison's run collapsed — which keep the
-/// height they were drawn at until GTK measures them again: GTK finds a hidden line at the point
-/// and walks past it into the lines after. `line_at_y` finds the same line without that walk.
-pub fn iter_at_location(view: &impl IsA<gtk::TextView>, x: i32, y: i32) -> Option<gtk::TextIter> {
-    let (start, _) = view.line_at_y(y);
+/// Whether GTK 4.22 aborts when asked for the iter at buffer `y` of `view` (see
+/// [`whole_lines`]): the line it finds there holds hidden text and `y` is below that line's top,
+/// so `gtk_text_layout_get_iter_at_position` hands the line's whole byte count to a walk that
+/// counts visible bytes only and runs on into the lines after. Such a line is found where one is
+/// left partly hidden, and in the frames after lines are hidden — a fold shut, a comparison's run
+/// collapsed — which keep the height they were drawn at until GTK measures them again.
+/// `line_at_y` finds the same line without that walk.
+pub fn aborts_at(view: &impl IsA<gtk::TextView>, y: i32) -> bool {
+    let (start, top) = view.line_at_y(y);
+    let (_, height) = view.line_yrange(&start);
     let mut next = start;
     next.forward_line();
-    let hidden = hiders(&view.buffer()).any(|tag| {
-        let mut toggle = start;
-        start.has_tag(&tag) || (toggle.forward_to_tag_toggle(Some(&tag)) && toggle < next)
-    });
-    if hidden {
+    top < y
+        && y < top + height
+        && hiders(&view.buffer()).any(|tag| {
+            let mut toggle = start;
+            start.has_tag(&tag) || (toggle.forward_to_tag_toggle(Some(&tag)) && toggle < next)
+        })
+}
+
+/// The iter at buffer point `x`, `y` of `view`, as `gtk_text_view_get_iter_at_location` answers,
+/// or `None` where asking would abort ([`aborts_at`]).
+pub fn iter_at_location(view: &impl IsA<gtk::TextView>, x: i32, y: i32) -> Option<gtk::TextIter> {
+    if aborts_at(view, y) {
         return None;
     }
     view.iter_at_location(x, y)

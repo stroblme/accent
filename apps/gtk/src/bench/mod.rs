@@ -124,7 +124,8 @@ use tags::bench_tags;
 /// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
 /// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK; then
-/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`).
+/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`) and draws the view
+/// with its top row on a partly hidden line (`case=screen`).
 /// Every form of it runs only on a scratch vault under `/tmp` (`scratch_only`).
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
@@ -353,7 +354,9 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_FIND=<rel_note>` uses two queries in a note's find bar and then presses Ctrl+F
 /// twice over the open bar — once on a typed query, once on one Up recalled — printing what is
-/// selected in the box each time and again once its delayed search has run.
+/// selected in the box each time and again once its delayed search has run. `=options` writes a
+/// note of its own and prints what the bar reads out under each of its toggles, an invalid
+/// pattern and a Replace All with `$1`, then removes the note.
 ///
 /// `ACCENT_BENCH_DIAG=<rel_code_file>` hands a code tab an error, a warning and a hint, then
 /// presses the status bar's count twice, printing what the count says and how much of the answer

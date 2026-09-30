@@ -129,6 +129,7 @@ fn fill(
     page.add(&files_group(config, &save));
     page.add(&git_group(config, &save));
     page.add(&pdf_group(config, &save));
+    page.add(&terminal_group(config, &save));
     if let Some(root) = root {
         page.add(&vault_group(config, root, &save));
     }
@@ -451,6 +452,29 @@ fn pdf_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Preferen
         }
     });
     group.add(&mouse);
+
+    group
+}
+
+// --------------------------------------------------------------------------------- terminal
+
+fn terminal_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title("Terminal").build();
+
+    // Off, a focused shell leaves the window a small reserved set of chords (`actions::kept`).
+    let forward = adw::SwitchRow::builder()
+        .title("Forward All Keys")
+        .subtitle("Only copy, paste and Ctrl+Page Up and Down between tabs stay with accent")
+        .active(config.borrow().forward_keys_to_terminal)
+        .build();
+    forward.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().forward_keys_to_terminal = r.is_active();
+            save();
+        }
+    });
+    group.add(&forward);
 
     group
 }

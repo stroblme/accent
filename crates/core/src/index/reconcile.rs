@@ -75,6 +75,7 @@ impl Index {
             }
             None if !dir.is_empty() => {
                 return Ok(ReconcileStats {
+                    dir: dir.to_string(),
                     removed: self.remove_file_batched(dir)?,
                     ..Default::default()
                 });
@@ -117,6 +118,7 @@ impl Index {
             scan.files.insert(0, top);
         }
         let mut stats = ReconcileStats {
+            dir: dir.to_string(),
             scanned: scan.files.len(),
             aliases: scan.aliases.len(),
             conflicts: scan
@@ -840,6 +842,7 @@ mod tests {
             ]
         );
         assert_eq!((stats.added, stats.removed), (1, 1), "{stats:?}");
+        assert_eq!(stats.dir, "sub", "the walk says which folder it was");
         assert_eq!(ix.stats().unwrap().aliases, 0, "the second link was walked");
     }
 

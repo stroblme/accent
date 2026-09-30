@@ -25,6 +25,7 @@ git_tree = true
 show_hidden = false
 column_width = 50
 indent_width = 4
+forward_keys_to_terminal = false
 theme = "solarized"
 focus_mode = "high"
 
@@ -119,6 +120,10 @@ pub struct Config {
     /// the run of spaces Tab writes in its place. Prose is not measured in columns and keeps
     /// GtkSourceView's own.
     pub indent_width: u32,
+    /// Hand a focused shell every key, accent's own shortcuts included, but Copy and Paste in
+    /// Terminal. Off by default: the shell then gets every key but a small reserved set the
+    /// window keeps (DESIGN.md, Keyboard → Terminal).
+    pub forward_keys_to_terminal: bool,
     pub theme: Theme,
     pub focus_mode: FocusMode,
     /// Accelerator overrides, keyed by full action name ("win.save"). Only what the user changed
@@ -236,6 +241,7 @@ impl Default for Config {
             show_hidden: true,
             column_width: 50,
             indent_width: 4,
+            forward_keys_to_terminal: false,
             theme: Theme::System,
             focus_mode: FocusMode::default(),
             shortcuts: BTreeMap::new(),
@@ -957,6 +963,7 @@ daily_template = "DailyNote.md"
         assert!(!c.show_hidden);
         assert_eq!(c.column_width, 50);
         assert_eq!(c.indent_width, 4);
+        assert!(!c.forward_keys_to_terminal);
         assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.focus_mode, FocusMode::High);
         assert_eq!(c.editor_font, None);

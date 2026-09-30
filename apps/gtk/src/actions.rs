@@ -823,6 +823,8 @@ const CAPTURED: &[&str] = &[
 ///   scale one have to be reachable from inside one.
 /// * `win.fullscreen` (`F11`) — no readline or curses meaning, and GNOME Terminal keeps the same
 ///   key for the same reason: a fullscreen window has to be leavable from a focused shell.
+/// * `win.palette-files` (`Ctrl+E`) — Go to File, so a file is one chord away from a shell as it
+///   is from a note. What a shell loses is readline's end-of-line, which `End` still does.
 /// * every chord whose spelling carries both `<Control>` and `<Shift>` — the existing convention,
 ///   which no shell claims, and which already covers Copy and Paste in Terminal, the pane chords,
 ///   the palette's second spelling and Replace in Files.
@@ -849,7 +851,21 @@ fn reserved(action: &str, accel: &str) -> bool {
             | "win.zoom-out"
             | "win.zoom-reset"
             | "win.fullscreen"
+            | "win.palette-files"
     ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
+}
+
+/// Whether the window keeps `accel` while a shell has the keyboard: the [`reserved`] set, or,
+/// where the shell is given every key (`Config::forward_keys_to_terminal`), Copy and Paste in
+/// Terminal alone. Those two act on the shell rather than on the window, and a terminal hands
+/// `Ctrl+Shift+C` to the program as `Ctrl+C`, so forwarding it would interrupt what runs instead
+/// of copying from it. `AdwTabView`'s own chords are not in this table and stay either way, which
+/// is how the keyboard leaves such a shell: `Ctrl+PageUp` / `Ctrl+PageDown` to the next tab.
+fn kept(action: &str, accel: &str, forward: bool) -> bool {
+    match forward {
+        true => matches!(action, "win.terminal-copy" | "win.terminal-paste"),
+        false => reserved(action, accel),
+    }
 }
 
 fn clear(controller: &gtk::ShortcutController) {
@@ -1142,11 +1158,11 @@ impl Shell {
     /// `set_accels_for_action` calls are cheaper than working out which of them a config change
     /// touched.
     ///
-    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
-    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
-    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
-    /// the same rule as the default it replaced. The shell asked about is the active window's,
-    /// whichever window is rebuilding: the table is one for all of them.
+    /// A focused shell narrows the table to what is [`kept`], because an application accelerator
+    /// is dispatched at the window ahead of the VTE and unbinding it is the only thing that lets
+    /// the key reach the shell. The filter reads the accelerators in force, so a rebound chord
+    /// follows the same rule as the default it replaced. The shell asked about is the active
+    /// window's, whichever window is rebuilding: the table is one for all of them.
     pub fn apply_accels(&self, gtk_app: &gtk::Application) {
         let config = self.config.borrow();
         let shell = terminal::has_focus(gtk_app);
@@ -1156,7 +1172,7 @@ impl Shell {
             let accels: Vec<&str> = accels
                 .iter()
                 .map(String::as_str)
-                .filter(|accel| !shell || reserved(action, accel))
+                .filter(|accel| !shell || kept(action, accel, config.forward_keys_to_terminal))
                 .collect();
             gtk_app.set_accels_for_action(action, &accels);
         }
@@ -1457,6 +1473,8 @@ mod tests {
         }
         assert!(reserved("win.zoom-out", "<Control>minus"));
         assert!(reserved("win.zoom-reset", "<Control>0"));
+        // Go to File, so a file is one chord away from a shell as it is from a note.
+        assert!(reserved("win.palette-files", "<Control>e"));
         // The shell's: plain Ctrl, function keys, and the chords readline reaches for most.
         for (action, accel) in [
             ("win.save", "<Control>s"),
@@ -1464,12 +1482,32 @@ mod tests {
             ("win.next-occurrence", "<Alt>j"),
             ("win.toggle-comment", "<Control>k"),
             ("win.delete-line", "<Control>l"),
-            ("win.palette-files", "<Control>e"),
             ("win.palette-commands", "<Control>p"),
             ("win.find-previous", "<Shift>F3"),
             ("win.menu", "F10"),
         ] {
             assert!(!reserved(action, accel), "{action} eats {accel}");
+        }
+    }
+
+    /// Forwarding every key leaves the window Copy and Paste in Terminal alone: the reserved set
+    /// goes to the shell with the rest of the table.
+    #[test]
+    fn a_shell_given_every_key_keeps_only_copy_and_paste() {
+        assert!(kept("win.terminal-copy", "<Control><Shift>c", true));
+        assert!(kept("win.terminal-paste", "<Control><Shift>v", true));
+        for (action, accel) in [
+            ("win.close-tab", "<Control>w"),
+            ("win.next-tab", "<Control>Tab"),
+            ("win.palette-files", "<Control>e"),
+            ("win.palette-commands", "<Control><Shift>p"),
+            ("win.fullscreen", "F11"),
+        ] {
+            assert!(!kept(action, accel, true), "{action} eats {accel}");
+            assert!(
+                kept(action, accel, false),
+                "{action} is reserved when capturing"
+            );
         }
     }
 

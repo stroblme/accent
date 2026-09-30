@@ -150,7 +150,9 @@ impl Changed {
             font: old.editor_font != new.editor_font,
             // Every vault's entries, not this window's: a `hello` too many is harmless.
             vault: old.vaults != new.vaults || old.ghost_text != new.ghost_text,
-            shortcuts: old.shortcuts != new.shortcuts,
+            // What a focused shell is left is part of the table.
+            shortcuts: old.shortcuts != new.shortcuts
+                || old.forward_keys_to_terminal != new.forward_keys_to_terminal,
         }
     }
 }
