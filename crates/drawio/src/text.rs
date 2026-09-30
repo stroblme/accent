@@ -5,6 +5,17 @@
 use crate::label::{self, Run};
 use crate::model::{Cell, CellId, File};
 
+/// Whether `text` is a draw.io file by its first element, whatever its name says: how an `.xml`
+/// draw.io wrote is known.
+pub fn sniff(text: &str) -> bool {
+    let body = text.trim_start_matches('\u{feff}').trim_start();
+    let body = match body.strip_prefix("<?xml") {
+        Some(rest) => rest.split_once("?>").map_or("", |(_, r)| r).trim_start(),
+        None => body,
+    };
+    body.starts_with("<mxfile") || body.starts_with("<mxGraphModel")
+}
+
 /// One label as search reads it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Label {
@@ -142,6 +153,14 @@ mod tests {
         let mut file = File::blank();
         file.pages = vec![one, two];
         file
+    }
+
+    #[test]
+    fn a_diagram_is_known_by_its_first_element() {
+        assert!(sniff("<mxfile host=\"x\">"));
+        assert!(sniff("\u{feff}<?xml version=\"1.0\"?>\n  <mxGraphModel>"));
+        assert!(!sniff("<?xml version=\"1.0\"?><svg/>"));
+        assert!(!sniff("mxfile"));
     }
 
     #[test]

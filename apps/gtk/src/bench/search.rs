@@ -52,9 +52,13 @@ pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
         return bench_seed(app, rel);
     }
     if let Some(query) = arg.strip_prefix("label:") {
-        let query = query.to_string();
+        // `:xml` saves the diagram as a plain `.xml`, known for one by its first element alone.
+        let (query, ext) = match query.strip_suffix(":xml") {
+            Some(query) => (query.to_string(), "xml"),
+            None => (query.to_string(), "drawio"),
+        };
         return bench_search_indexed(app.clone(), Instant::now(), move |app| {
-            bench_label(app, query)
+            bench_label(app, query, ext)
         });
     }
     let more = (arg.strip_prefix("more:").map(|rest| (rest, false)))
@@ -405,9 +409,9 @@ const CLICK_WAIT: Duration = Duration::from_secs(20);
 /// label on its second page, searches for it and prints each row as its name and dim line, which
 /// must name the page (`Second`), not a line; then opens the first row as a click does and prints
 /// the page the diagram shows and what is selected, which must be `page=1` and `["found"]`. Once
-/// ranked, then with the replace row open.
-fn bench_label(app: Rc<App>, query: String) {
-    let rel = format!("{NOTE}.drawio");
+/// ranked, then with the replace row open. `=label:<query>:xml` saves it as a plain `.xml`.
+fn bench_label(app: Rc<App>, query: String, ext: &'static str) {
+    let rel = format!("{NOTE}.{ext}");
     let path = app.root().join(&rel);
     let cell = |id: &str, label: &str| {
         format!(

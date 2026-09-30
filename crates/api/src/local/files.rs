@@ -599,7 +599,7 @@ impl Local {
                 .into_owned(),
             false => re.replace_all(text, replacement).into_owned(),
         };
-        let (matches, rewritten) = match accent_core::path::is_diagram(rel) {
+        let (matches, rewritten) = match accent_core::path::holds_diagram(rel, &text) {
             true => {
                 let mut file = accent_drawio::File::from_bytes(text.as_bytes())?;
                 let mut matches = 0;
@@ -1002,12 +1002,19 @@ mod tests {
     }
 
     /// A diagram is rewritten in its labels and nowhere else, one write for the file, and the
-    /// undo puts its XML back as it was.
+    /// undo puts its XML back as it was: a `.drawio`, and an `.xml` only its first element says
+    /// is one, which stays a diagram.
     #[test]
     fn replace_all_rewrites_a_diagrams_labels_and_not_its_xml() {
+        for name in ["flow.drawio", "flow.xml"] {
+            replace_in_diagram(name);
+        }
+    }
+
+    fn replace_in_diagram(name: &str) {
         let f = Fixture::open(VaultConfig::default());
         let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="k" value="Kettle and kettle" style="kettle=1;" vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell><mxCell id="t" value="&lt;b&gt;Kettle&lt;/b&gt;" style="html=1;" vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell></root></mxGraphModel></diagram></mxfile>"#;
-        f.write("flow.drawio", xml);
+        f.write(name, xml);
         f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
@@ -1018,7 +1025,7 @@ mod tests {
             .replace_all("kettle", plain, "Pot", true, false)
             .unwrap();
         assert_eq!((report.rewritten.len(), report.matches), (1, 3));
-        let file = accent_drawio::File::from_bytes(f.read("flow.drawio").as_bytes()).unwrap();
+        let file = accent_drawio::File::from_bytes(f.read(name).as_bytes()).unwrap();
         assert_eq!(
             accent_drawio::text::search_text(&file),
             "Pot and Pot\nPot",
@@ -1031,9 +1038,13 @@ mod tests {
             "a style key is not text"
         );
         assert_eq!(cells[3].label(), "<b>Pot</b>");
+        assert!(
+            accent_drawio::text::sniff(&f.read(name)),
+            "{name} is still a diagram"
+        );
 
         f.vault.undo_replace().unwrap();
-        assert_eq!(f.read("flow.drawio"), xml);
+        assert_eq!(f.read(name), xml);
     }
 
     /// The undo writes back through the etag gate, so a note edited since the rewrite keeps the

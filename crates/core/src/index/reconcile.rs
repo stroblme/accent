@@ -374,7 +374,13 @@ fn upsert(
         // one line each (`accent_drawio::text`). A label is short however big the file is with
         // its pictures, so the cap does not apply.
         FileKind::Other if crate::path::is_diagram(&f.rel_path) => body().and_then(diagram_labels),
-        FileKind::Other if f.size <= MAX_INDEXED_BODY => body(),
+        // An `.xml` draw.io wrote is known by its first element once its text is in.
+        FileKind::Other if f.size <= MAX_INDEXED_BODY => body().and_then(|read| match read {
+            crate::fs::Read::Text(t) if crate::path::holds_diagram(&f.rel_path, &t.text) => {
+                diagram_labels(crate::fs::Read::Text(t))
+            }
+            read => Some(read),
+        }),
         _ => None,
     };
     let (hash, text) = match read {
@@ -1171,12 +1177,29 @@ mod tests {
         );
     }
 
-    /// A diagram is found by what its labels say, a line each, and never by its XML.
+    /// A diagram is found by what its labels say, a line each, and never by its XML, whether its
+    /// name says it is one or only its first element does.
     #[test]
     fn a_diagrams_labels_are_indexed_and_its_xml_is_not() {
+        for name in ["flow.drawio", "flow.xml"] {
+            diagram_indexed_as_labels(name);
+        }
         let (vault, db) = fixture();
         fs::write(
-            vault.path().join("flow.drawio"),
+            vault.path().join("plain.xml"),
+            r#"<svg><g id="zorblat"/></svg>"#,
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
+        assert_eq!(ix.grep(&re, 10, false).unwrap().1, 1, "other XML is text");
+    }
+
+    fn diagram_indexed_as_labels(name: &str) {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join(name),
             r#"<mxfile><diagram name="P"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
             <mxCell id="k" value="Kettle" style="fillColor=#zorblat;" vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell>
             <mxCell id="t" value="&lt;b&gt;Hot&lt;/b&gt; tea" style="html=1;" vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell>
@@ -1187,13 +1210,13 @@ mod tests {
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
         let hits = ix.search("hot tea", 10, false).unwrap();
-        assert_eq!(hits[0].rel_path, "flow.drawio");
+        assert_eq!(hits[0].rel_path, name);
         assert_eq!(hits[0].line, Some(2), "the second label's line");
         let re = crate::search::pattern("zorblat|<b>", crate::search::Options::default()).unwrap();
         assert_eq!(
             ix.grep(&re, 10, false).unwrap().1,
             0,
-            "no style key, no markup"
+            "{name}: no style key, no markup"
         );
     }
 }

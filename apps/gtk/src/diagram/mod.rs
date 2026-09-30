@@ -35,16 +35,6 @@ const AUTOSAVE: std::time::Duration = std::time::Duration::from_secs(1);
 
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<DiagramTab>)>>>;
 
-/// Whether `text` is a draw.io diagram whatever its name says: an `.xml` file draw.io wrote.
-pub fn sniff(text: &str) -> bool {
-    let body = text.trim_start_matches('\u{feff}').trim_start();
-    let body = match body.strip_prefix("<?xml") {
-        Some(rest) => rest.split_once("?>").map_or("", |(_, r)| r).trim_start(),
-        None => body,
-    };
-    body.starts_with("<mxfile") || body.starts_with("<mxGraphModel")
-}
-
 pub struct DiagramTab {
     key: RefCell<String>,
     path: RefCell<PathBuf>,
@@ -1183,18 +1173,5 @@ fn shown(index: usize, pages: usize) -> accent_drawio::Context {
             unix_ms: now.timestamp_millis(),
             offset_minutes: now.offset().local_minus_utc() / 60,
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_diagram_is_known_by_its_first_element() {
-        assert!(super::sniff("<mxfile host=\"x\">"));
-        assert!(super::sniff(
-            "\u{feff}<?xml version=\"1.0\"?>\n  <mxGraphModel>"
-        ));
-        assert!(!super::sniff("<?xml version=\"1.0\"?><svg/>"));
-        assert!(!super::sniff("mxfile"));
     }
 }
