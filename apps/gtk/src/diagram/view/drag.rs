@@ -20,13 +20,15 @@ enum Grip {
 /// A drag under way, in page units.
 #[derive(Debug, Clone)]
 pub(super) enum Drag {
-    /// Moving `ids`, whose frames start at `origin`; a release that did not move selects
-    /// `click` instead, when there is one (a click into a selected group).
+    /// Moving `ids`, whose boxes take up `bounds`, aligning them to the boxes in `guides`; a
+    /// release that did not move selects `click` instead, when there is one (a click into a
+    /// selected group).
     Move {
         from: Point,
         ids: Vec<CellId>,
         click: Option<CellId>,
-        origin: Point,
+        bounds: Rect,
+        guides: Vec<Rect>,
     },
     Resize {
         from: Point,
@@ -111,6 +113,8 @@ impl DiagramView {
                     self.emit(Edit::Select(next));
                     return None;
                 }
+                // The cell under the pointer, whose parent and edges pick the guides.
+                let pressed = pick.held.clone().unwrap_or(pick.cell.clone());
                 let (ids, click) = match &pick.held {
                     Some(held) => (selection, (pick.cell != *held).then_some(pick.cell)),
                     None => {
@@ -119,16 +123,18 @@ impl DiagramView {
                     }
                 };
                 let ids: Vec<CellId> = ids.into_iter().filter(|id| !sheet.is_pinned(id)).collect();
-                let origin = ids
+                let bounds = ids
                     .iter()
-                    .filter_map(|id| sheet.frame_of(id))
+                    .filter_map(|id| sheet.guide_box(id))
                     .reduce(|a, b| a.union(&b))
-                    .map_or(p, |r| Point::new(r.x, r.y));
+                    .unwrap_or(Rect::new(p.x, p.y, 0.0, 0.0));
+                let guides = sheet.guide_boxes(&ids, &pressed);
                 Some(Drag::Move {
                     from: p,
                     ids,
                     click,
-                    origin,
+                    bounds,
+                    guides,
                 })
             }
             tool if tool.draws_box() => Some(Drag::Draw { tool, from: p }),
@@ -159,13 +165,33 @@ impl DiagramView {
         geometry::rotation_to(r.centre(), handle, frame.to_content(pointer), free)
     }
 
-    /// A move of the selection from `from` to `to`, on the grid unless `free`.
-    pub(super) fn move_delta(&self, from: Point, to: Point, origin: Point, free: bool) -> Point {
+    /// A move of the selection from `from` to `to`, and the guides that show where it lands:
+    /// aligned to `guides` and the page and on the grid, unless `free` — Alt, which turns both
+    /// off in draw.io (Graph.js 17465) — or the page has its guides off (`guides="0"`).
+    pub(super) fn move_delta(
+        &self,
+        from: Point,
+        to: Point,
+        bounds: &Rect,
+        guides: &[Rect],
+        free: bool,
+    ) -> (Point, Vec<accent_drawio::guide::Line>) {
         let raw = Point::new(to.x - from.x, to.y - from.y);
-        match self.grid(free) {
-            Some(grid) => geometry::snap_move(origin, raw, grid),
-            None => raw,
+        let Some(sheet) = self.sheet().filter(|_| !free) else {
+            return (raw, Vec::new());
+        };
+        if !sheet.guides {
+            let origin = Point::new(bounds.x, bounds.y);
+            let snapped = sheet.grid.map(|g| geometry::snap_move(origin, raw, g));
+            return (snapped.unwrap_or(raw), Vec::new());
         }
+        let (w, h) = sheet.scene.page_size;
+        let targets = accent_drawio::guide::Targets {
+            shapes: guides,
+            page: Rect::new(0.0, 0.0, w, h),
+        };
+        let px = 1.0 / self.scale();
+        accent_drawio::guide::snap(bounds, raw, &targets, sheet.grid, px)
     }
 
     pub(super) fn grid(&self, free: bool) -> Option<f64> {
@@ -177,10 +203,14 @@ impl DiagramView {
     pub(super) fn drag_edit(&self, drag: &Drag, p: Point, free: bool) -> Option<Edit> {
         match drag {
             Drag::Move {
-                from, ids, origin, ..
+                from,
+                ids,
+                bounds,
+                guides,
+                ..
             } if !ids.is_empty() => Some(Edit::Move {
                 ids: ids.clone(),
-                delta: self.move_delta(*from, p, *origin, free),
+                delta: self.move_delta(*from, p, bounds, guides, free).0,
             }),
             Drag::Resize {
                 from,
