@@ -55,7 +55,7 @@ pub(crate) fn spawn(
         stop,
         paused: false,
         next_walk: Instant::now(),
-        walk_due: false,
+        due: None,
     };
     std::thread::Builder::new()
         .name("accent-vault".to_string())
@@ -95,7 +95,8 @@ pub(crate) enum Msg {
     /// worker's batching costs a caller is that a write it has just made is not yet readable;
     /// this is how [`Local::settle_index`] waits for it instead of guessing at a delay.
     Settled(Sender<()>),
-    Rescan,
+    /// Walk this folder, `""` being the whole vault.
+    Rescan(String),
     /// Walk again after a [`Local::stop_indexing`](crate::local::Local::stop_indexing), and only
     /// then: while a vault is paused every other reason to rescan is ignored, or the walk the
     /// user just stopped would start again on the next thing the watcher saw.
@@ -137,8 +138,9 @@ struct Worker {
     paused: bool,
     /// When a walk the watcher's news asks for may start: [`WALK_FLOOR`] after the last one.
     next_walk: Instant,
-    /// One was asked for before then, and comes as a [`Msg::Rescan`] at [`Worker::next_walk`].
-    walk_due: bool,
+    /// The folder of one asked for before then, which comes as a [`Msg::Rescan`] at
+    /// [`Worker::next_walk`]: the folder holding every folder asked for meanwhile.
+    due: Option<String>,
 }
 
 /// What one batch has accumulated: the directories whose children changed, and the paths it took
@@ -164,7 +166,7 @@ impl Worker {
         // missed until the rebuild below. Build the watch set from the scan result instead of
         // the cache if that ever bites.
         self.rebuild_watcher();
-        self.reconcile();
+        self.reconcile("");
 
         loop {
             // One `recv` plus the rest of the burst: a Syncthing pull of 500 files is one batch,
@@ -172,13 +174,12 @@ impl Worker {
             let mut batch = std::mem::take(&mut self.held);
             if batch.is_empty() {
                 let wait = self.next_walk.saturating_duration_since(Instant::now());
-                let first = match self.walk_due {
+                let first = match self.due.is_some() {
                     true => match self.rx.recv_timeout(wait) {
                         Ok(msg) => msg,
                         // Cleared here as well as by the walk: a paused vault drops the rescan.
                         Err(RecvTimeoutError::Timeout) => {
-                            self.walk_due = false;
-                            Msg::Rescan
+                            Msg::Rescan(self.due.take().unwrap_or_default())
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
                     },
@@ -215,7 +216,7 @@ impl Worker {
 
     fn process_batch(&mut self, batch: Vec<Msg>) {
         // Git first, and before anything else looks at these paths. A `.git` directory is full of
-        // children, so `needs_rescan` would read a commit as a whole tree moved in and walk the
+        // children, so `walk_scope` would read a commit as a whole tree moved in and walk the
         // vault; and `rel` cannot place a submodule's git directory, which lives outside the
         // vault entirely. Taking them out here leaves the rest of the worker exactly as it was.
         let (git, batch): (Vec<Msg>, Vec<Msg>) = batch
@@ -288,32 +289,43 @@ impl Worker {
         }
         // What only the watcher's news asks for waits out the floor, the batch meanwhile applied a
         // file at a time like any other — the `.gitignore` itself among them.
-        let walk = batch.iter().any(|m| self.needs_rescan(m));
-        if walk
-            && Instant::now() < self.next_walk
-            && batch
-                .iter()
-                .all(|m| !self.needs_rescan(m) || touches_gitignore(m) || lost_news(m))
-        {
-            self.walk_due = true;
-        } else if walk {
-            // The walk replaces the index wholesale, but the moves in this batch are still news:
-            // a tab open on a path that was renamed under it has to follow.
-            for msg in &batch {
-                if let Msg::Fs(VaultEvent::Renamed { from, to }) = msg
-                    && let (Some(from), Some(to)) = (self.rel(from), self.rel(to))
-                {
-                    self.emit(Event::FileRenamed { from, to });
+        let walk = batch
+            .iter()
+            .filter_map(|m| self.walk_scope(m))
+            .reduce(|a, b| common_dir(&a, &b).to_string());
+        let mut walk_after = None;
+        if let Some(dir) = walk {
+            if Instant::now() < self.next_walk
+                && batch.iter().all(|m| {
+                    self.walk_scope(m).is_none() || self.gitignore_dir(m).is_some() || lost_news(m)
+                })
+            {
+                self.due = Some(match self.due.take() {
+                    Some(due) => common_dir(&due, &dir).to_string(),
+                    None => dir,
+                });
+            } else if dir.is_empty() {
+                // The walk replaces the index wholesale, but the moves in this batch are still
+                // news: a tab open on a path that was renamed under it has to follow.
+                for msg in &batch {
+                    if let Msg::Fs(VaultEvent::Renamed { from, to }) = msg
+                        && let (Some(from), Some(to)) = (self.rel(from), self.rel(to))
+                    {
+                        self.emit(Event::FileRenamed { from, to });
+                    }
                 }
+                self.reconcile("");
+                return;
+            } else {
+                // A folder's walk leaves the rest of the vault to the batch, applied first.
+                walk_after = Some(dir);
             }
-            self.reconcile();
-            return;
         }
         let mut batched = Batch::default();
         for msg in batch {
             match msg {
                 // `Settled` is answered by the caller of this one and never reaches here.
-                Msg::Rescan
+                Msg::Rescan(_)
                 | Msg::Resume
                 | Msg::Shutdown
                 | Msg::WatchGit(_)
@@ -334,26 +346,31 @@ impl Worker {
             .iter()
             .any(|rel| has_children(&self.root.join(rel)))
         {
-            let _ = self.tx.send(Msg::Rescan);
+            let _ = self.tx.send(Msg::Rescan(String::new()));
         }
         if !batched.dirs.is_empty() {
             self.emit(Event::DirsChanged(batched.dirs.into_iter().collect()));
         }
+        if let Some(dir) = walk_after {
+            self.reconcile(&dir);
+        }
     }
 
-    fn needs_rescan(&self, msg: &Msg) -> bool {
+    /// The folder `msg` asks to walk, `""` being the whole vault, or `None` for no walk.
+    fn walk_scope(&self, msg: &Msg) -> Option<String> {
         // A paused vault walks again when the user says so and at no other prompting: a folder
         // moved in, a resumed Android app, a reconnect — every one of them would otherwise
         // restart the walk that was just stopped. What the watcher says about single files is
         // still applied, so the partial index keeps up with what is edited in it.
         if self.paused {
-            return false;
+            return None;
         }
-        if touches_gitignore(msg) {
-            return true;
+        if let Some(dir) = self.gitignore_dir(msg) {
+            return Some(dir);
         }
-        match msg {
-            Msg::Resume | Msg::Rescan | Msg::Fs(VaultEvent::Rescan) => true,
+        let whole = match msg {
+            Msg::Rescan(dir) => return Some(dir.clone()),
+            Msg::Resume | Msg::Fs(VaultEvent::Rescan) => true,
             // A directory that shows up with children was moved in whole, and inotify reports
             // nothing about what is inside it: only a walk can find those files. A directory that
             // was renamed — by us or in a terminal — is the same story, and worse: the removal of
@@ -364,19 +381,55 @@ impl Worker {
             Msg::Fs(VaultEvent::Renamed { to, .. }) => *to != self.root && has_children(to),
             Msg::Update { rel, .. } => !rel.is_empty() && has_children(&self.root.join(rel)),
             _ => false,
+        };
+        whole.then(String::new)
+    }
+
+    /// The folder of the `.gitignore` `msg` is news about, wherever in the vault it sits.
+    ///
+    /// One of these decides which *directories* the walk enters (`walk::stat_one`), so editing one
+    /// changes the shape of the index rather than the contents of a file: adding `mlruns/` has to
+    /// drop the tree the last walk indexed, and removing it has to walk the tree left lazy. Only a
+    /// walk can do either, and a `.gitignore` rules nothing outside its own folder, so that folder
+    /// is what is walked — the root's, the common one, being the whole vault. One open in a tab is
+    /// saved far more often than it is edited, and [`WALK_FLOOR`] is what keeps that to a walk now
+    /// and then.
+    fn gitignore_dir(&self, msg: &Msg) -> Option<String> {
+        let dir = |rel: &str| {
+            let named = Path::new(rel)
+                .file_name()
+                .is_some_and(|n| n == ".gitignore");
+            named.then(|| parent_dir(rel).to_string())
+        };
+        let watched = |path: &Path| self.rel(path).and_then(|rel| dir(&rel));
+        match msg {
+            Msg::Fs(VaultEvent::Changed(p) | VaultEvent::Removed(p)) => watched(p),
+            Msg::Fs(VaultEvent::Renamed { from, to }) => match (watched(from), watched(to)) {
+                (Some(from), Some(to)) => Some(common_dir(&from, &to).to_string()),
+                (from, to) => from.or(to),
+            },
+            // Our own save of one, which the watcher reports as well; whichever arrives first walks.
+            Msg::Update { rel, .. } => dir(rel),
+            _ => None,
         }
     }
 
-    /// A full walk, then a fresh watcher because symlinked directories may have come or gone.
-    /// [`Event::Reconciled`] is emitted once both are done, so receiving it means the vault is
-    /// indexed *and* watched.
+    /// A walk of the folder `dir` (`""` for the whole vault), then a fresh watcher because
+    /// directories and the symlinked ones may have come or gone. [`Event::Reconciled`] is emitted
+    /// once both are done, so receiving it means the vault is indexed *and* watched.
     ///
     /// A first walk of a large vault takes seconds, so the inbox is read between its batches.
     /// What does not touch the walk is answered there — git news, the git directories to watch,
     /// the exclusion set — and everything else is held for [`Worker::run`], in the order it came.
-    fn reconcile(&mut self) {
-        // Whatever asked for a walk before this one is answered by it.
-        self.walk_due = false;
+    fn reconcile(&mut self, dir: &str) {
+        // Whatever asked for a walk of this folder or of one inside it is answered by this one.
+        if self
+            .due
+            .as_deref()
+            .is_some_and(|due| common_dir(due, dir) == dir)
+        {
+            self.due = None;
+        }
         let mut excluded = None;
         let Worker {
             root,
@@ -393,6 +446,7 @@ impl Worker {
         } = self;
         let stats = index.reconcile_with(
             root,
+            dir,
             &ScanOptions::default(),
             &|| stop.load(Ordering::Relaxed) != RUN,
             |index, p| {
@@ -534,7 +588,7 @@ impl Worker {
 
     fn apply(&mut self, ev: VaultEvent, b: &mut Batch) {
         match ev {
-            // Both handled before the batch is walked: a rescan in `needs_rescan`, a git change
+            // Both handled before the batch is walked: a rescan in `walk_scope`, a git change
             // in the partition at the top of `process`.
             VaultEvent::Rescan | VaultEvent::Git(_) => {}
             VaultEvent::Changed(p) => {
@@ -728,24 +782,16 @@ fn lost_news(msg: &Msg) -> bool {
     matches!(msg, Msg::Fs(VaultEvent::Rescan))
 }
 
-/// News about a `.gitignore`, wherever in the vault it sits.
-///
-/// One of these decides which *directories* the walk enters (`walk::stat_one`), so editing one
-/// changes the shape of the index rather than the contents of a file: adding `mlruns/` has to
-/// drop the tree the last walk indexed, and removing it has to walk the tree left lazy. Only a
-/// walk can do either, and there is no walk of one subtree — [`Index::reconcile_with`] is the
-/// whole vault or nothing — so this asks for the whole thing. A `.gitignore` is edited about as
-/// often as a preference, which is what makes that affordable; one open in a tab is saved far
-/// more often, and [`WALK_FLOOR`] is what keeps that to a walk now and then.
-fn touches_gitignore(msg: &Msg) -> bool {
-    let named = |p: &Path| p.file_name().is_some_and(|n| n == ".gitignore");
-    match msg {
-        Msg::Fs(VaultEvent::Changed(p) | VaultEvent::Removed(p)) => named(p),
-        Msg::Fs(VaultEvent::Renamed { from, to }) => named(from) || named(to),
-        // Our own save of one, which the watcher reports as well; whichever arrives first walks.
-        Msg::Update { rel, .. } => named(Path::new(rel)),
-        _ => false,
+/// The deepest folder holding both `a` and `b`, vault-relative folders both, `""` being the root.
+fn common_dir<'a>(a: &'a str, b: &str) -> &'a str {
+    let mut len = 0;
+    for (x, y) in a.split('/').zip(b.split('/')) {
+        if x != y {
+            break;
+        }
+        len += x.len() + 1;
     }
+    &a[..len.saturating_sub(1)]
 }
 
 #[cfg(test)]
@@ -1386,6 +1432,49 @@ mod tests {
             poll_until(indexed, BUDGET),
             "the tree stayed lazy after it stopped being ignored"
         );
+    }
+
+    /// A `.gitignore` below the root rules nothing outside its own folder, so editing one walks
+    /// that folder alone: `sub` and its `.gitignore`, the tree it now ignores gone.
+    #[test]
+    fn editing_a_nested_gitignore_walks_its_folder_alone() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("keep.md"), "keep\n").unwrap();
+        std::fs::create_dir_all(root.path().join("sub/mlruns")).unwrap();
+        std::fs::write(root.path().join("sub/mlruns/run.md"), "run\n").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+
+        f.write("sub/.gitignore", "mlruns/\n");
+        let done = f.wait(|e| matches!(e, Event::Reconciled(_)));
+        let Some(Event::Reconciled(stats)) = done else {
+            panic!("no walk: {done:?}");
+        };
+        assert_eq!(stats.scanned, 2, "{stats:?}");
+        let paths = f.vault.file_paths(false).unwrap();
+        assert_eq!(paths, ["keep.md", "sub/.gitignore"]);
+    }
+
+    /// Reload on a folder walks that folder: what no watcher reported under it is taken in, and
+    /// what changed outside it is left to a walk of its own. Unwatched, so only a walk finds either.
+    #[test]
+    fn a_walk_of_one_folder_takes_in_that_folder_alone() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let (vault, events) = crate::Vault::open_unwatched_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        assert!(wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+
+        std::fs::write(root.path().join("sub/new.md"), "new\n").unwrap();
+        std::fs::write(root.path().join("top.md"), "top\n").unwrap();
+        vault.rescan_dir("sub").unwrap();
+        assert!(wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+        assert_eq!(vault.file_paths(false).unwrap(), ["sub/new.md"]);
+        assert!(vault.rescan_dir("../elsewhere").is_err());
     }
 
     /// A `.gitignore` open in a tab is saved a second after each pause in the typing, and each

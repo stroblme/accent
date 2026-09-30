@@ -455,11 +455,18 @@ pub fn unindexed_children(
 
 /// Walk `root`, applying the symlink rules. Returns files, aliases and skip reports.
 pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
-    scan_until(root, opts, &|| false, &AtomicUsize::new(0))
+    scan_until(root, "", &[], opts, &|| false, &AtomicUsize::new(0))
 }
 
-/// [`scan`], stoppable. `stop` is asked once per entry, on the walking threads, so a walk halts
-/// within one directory entry rather than at the end of the vault.
+/// [`scan`], stoppable, and of the folder `dir` alone (vault-relative, `""` for the whole vault).
+/// `stop` is asked once per entry, on the walking threads, so a walk halts within one directory
+/// entry rather than at the end of the vault.
+///
+/// A folder's entries come out as the whole walk lists them: its folders are held to the
+/// `.gitignore` of every folder above them as well as their own, and a link inside it to one of
+/// `linked` — the canonical folders the vault already reaches through a link outside `dir` — is
+/// refused as the second way in that it is. `dir` itself is not listed, and nothing above it is
+/// asked whether the walk would enter it: that is the caller's to know.
 ///
 /// `found` counts the entries as they are kept, before the `(dev, ino)` dedup: what another
 /// thread can report while the walk is still running, which has no total until it ends.
@@ -470,12 +477,14 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
 /// ([`crate::index::Index::reconcile_with`]).
 pub fn scan_until(
     root: &Path,
+    dir: &str,
+    linked: &[PathBuf],
     opts: &ScanOptions,
     stop: &(dyn Fn() -> bool + Sync),
     found: &AtomicUsize,
 ) -> ScanResult {
     let collected: Mutex<Vec<FileMeta>> = Mutex::new(Vec::new());
-    let mut skipped = walk_passes(root, opts, &|f| {
+    let mut skipped = walk_passes(root, dir, linked, opts, &|f| {
         if stop() {
             return WalkState::Quit;
         }
@@ -543,16 +552,18 @@ pub fn scan_until(
 /// two paths is handed over twice, and any order at all. A caller that needs either sorts what it
 /// kept, which is cheap exactly when the caller keeps few rows.
 pub fn visit(root: &Path, opts: &ScanOptions, on_file: &(dyn Fn(FileMeta) -> bool + Send + Sync)) {
-    walk_passes(root, opts, &|f| match on_file(f) {
+    walk_passes(root, "", &[], opts, &|f| match on_file(f) {
         true => WalkState::Continue,
         false => WalkState::Quit,
     });
 }
 
-/// The pass queue both entry points share: the vault, then one pass per accepted symlink target.
-/// Returns what was skipped; the files went to `on_file`.
+/// The pass queue both entry points share: the vault (or its folder `dir`), then one pass per
+/// accepted symlink target. Returns what was skipped; the files went to `on_file`.
 fn walk_passes(
     root: &Path,
+    dir: &str,
+    linked: &[PathBuf],
     opts: &ScanOptions,
     on_file: &(dyn Fn(FileMeta) -> WalkState + Send + Sync),
 ) -> Vec<Skipped> {
@@ -560,7 +571,7 @@ fn walk_passes(
     // A Mutex around the accepted-symlink-target list: `admit_symlink` holds it across the
     // overlap check and the push, so two threads cannot accept overlapping targets. A handful of
     // directory symlinks in a real vault means contention is nil.
-    let followed: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let followed: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(linked.to_vec()));
     // `ignore` stops the pass that quit, and nothing tells us it did: the flag is what keeps a
     // symlink target from being walked after the caller has said it has enough.
     let quit = AtomicBool::new(false);
@@ -575,8 +586,11 @@ fn walk_passes(
     let mut skipped = Vec::new();
     let mut queue: VecDeque<Pass> = VecDeque::new();
     queue.push_back(Pass {
-        root: root.to_path_buf(),
-        prefix: String::new(),
+        root: match dir {
+            "" => root.to_path_buf(),
+            dir => root.join(dir),
+        },
+        prefix: dir.to_string(),
         gitignore: opts.vault_gitignore,
         // The All toggle exists to reach exactly these trees, so it turns the rule off.
         dir_gitignore: !opts.vault_gitignore && !opts.include_skipped,
@@ -662,8 +676,9 @@ fn walk_pass(
         let skip_deps = opts.skip_dependency_trees && !opts.include_skipped;
         let include_skipped = opts.include_skipped;
         // Per thread rather than shared: `IncrementalIgnore` caches what it reads behind `&mut`,
-        // and a lock per directory would be paid on the one hot path the walk has.
-        let mut ignores = pass.dir_gitignore.then(|| dir_ignores(&pass.root));
+        // and a lock per directory would be paid on the one hot path the walk has. Rooted at the
+        // vault whichever folder the pass starts at, so the rules above that folder hold too.
+        let mut ignores = pass.dir_gitignore.then(|| dir_ignores(&canonical_root));
         Box::new(move |result| {
             let entry = match result {
                 Ok(e) => e,
@@ -691,16 +706,19 @@ fn walk_pass(
                 }));
                 return WalkState::Skip;
             }
+            let rel_path = match path.strip_prefix(&walk_root) {
+                Ok(r) if r.as_os_str().is_empty() => return WalkState::Continue, // the root itself
+                Ok(r) if prefix.is_empty() => r.to_string_lossy().into_owned(),
+                Ok(r) => format!("{prefix}/{}", r.to_string_lossy()),
+                Err(_) => return WalkState::Continue,
+            };
             // A directory git ignores is not walked; the file tree opens it a level at a time
             // (`unindexed_children`). Real directories only — a directory *symlink* is admitted
             // below and then walked as its own pass, which honours the target's own ignore files
             // whole, so the tree behind it is pruned there instead.
             if let Some(ignores) = ignores.as_mut()
-                && entry.depth() > 0
                 && entry.file_type().is_some_and(|t| t.is_dir())
-                && path
-                    .strip_prefix(&walk_root)
-                    .is_ok_and(|rel| ignores.matched(rel, true).is_ignore())
+                && ignores.matched(&rel_path, true).is_ignore()
             {
                 let _ = tx.send(Msg::Skip(Skipped {
                     path: path.to_path_buf(),
@@ -708,12 +726,6 @@ fn walk_pass(
                 }));
                 return WalkState::Skip;
             }
-            let rel_path = match path.strip_prefix(&walk_root) {
-                Ok(r) if r.as_os_str().is_empty() => return WalkState::Continue, // the root itself
-                Ok(r) if prefix.is_empty() => r.to_string_lossy().into_owned(),
-                Ok(r) => format!("{prefix}/{}", r.to_string_lossy()),
-                Err(_) => return WalkState::Continue,
-            };
             let io_skip = |tx: &mpsc::Sender<Msg>| {
                 let _ = tx.send(Msg::Skip(Skipped {
                     path: path.to_path_buf(),

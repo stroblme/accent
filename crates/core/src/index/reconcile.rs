@@ -8,7 +8,7 @@ use crate::{markdown, path};
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -30,7 +30,7 @@ impl Index {
         root: &Path,
         mut on_progress: impl FnMut(Progress),
     ) -> Result<ReconcileStats> {
-        self.reconcile_with(root, &ScanOptions::default(), &|| false, |_, p| {
+        self.reconcile_with(root, "", &ScanOptions::default(), &|| false, |_, p| {
             on_progress(p)
         })
     }
@@ -44,13 +44,44 @@ impl Index {
     /// diff over the same vault, so it indexes the remainder instead of starting over. What comes
     /// back then has [`ReconcileStats::stopped`] set, which is the only thing that tells a partial
     /// index from a finished one.
+    ///
+    /// `dir` narrows the walk to one folder, `""` being the whole vault: the folder and what is
+    /// under it are brought in line with the disk, as the whole walk would have them, and no row
+    /// outside it is touched. A file the index already holds by a path outside the folder is an
+    /// alias there, whichever path the whole walk would have kept. A folder that is gone, or that
+    /// the walk would no longer enter, leaves the index with everything under it; one a link
+    /// brings in is walked with the whole vault, a link's rules being those of the pass it starts.
     pub fn reconcile_with(
         &mut self,
         root: &Path,
+        dir: &str,
         opts: &ScanOptions,
         stop: &(dyn Fn() -> bool + Sync),
         mut on_progress: impl FnMut(&mut Index, Progress),
     ) -> Result<ReconcileStats> {
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let top = match dir {
+            "" => None,
+            dir => match walk::stat_one(root, dir) {
+                Ok(Some(top)) if top.kind == FileKind::Dir => Some(top),
+                Ok(_) => None,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e).with_context(|| format!("stat {dir}")),
+            },
+        };
+        match &top {
+            Some(top) if !top.canonical.starts_with(&canonical_root) => {
+                return self.reconcile_with(root, "", opts, stop, on_progress);
+            }
+            None if !dir.is_empty() => {
+                return Ok(ReconcileStats {
+                    removed: self.remove_file_batched(dir)?,
+                    ..Default::default()
+                });
+            }
+            _ => {}
+        }
+        let linked = self.linked_outside(&canonical_root, dir)?;
         let t_scan = Instant::now();
         // The scan writes nothing and has no total until it ends, which on a large vault over
         // slow storage (Android's shared storage) is seconds. So it walks on a thread of its own,
@@ -60,7 +91,7 @@ impl Index {
             let (tx, rx) = mpsc::channel();
             let found = &found;
             let walk = s.spawn(move || {
-                let _ = tx.send(walk::scan_until(root, opts, stop, found));
+                let _ = tx.send(walk::scan_until(root, dir, &linked, opts, stop, found));
             });
             loop {
                 match rx.recv_timeout(SCAN_TICK) {
@@ -80,6 +111,11 @@ impl Index {
                 }
             }
         });
+        let mut scan = scan;
+        if let Some(top) = top {
+            self.alias_held_outside(dir, &mut scan)?;
+            scan.files.insert(0, top);
+        }
         let mut stats = ReconcileStats {
             scanned: scan.files.len(),
             aliases: scan.aliases.len(),
@@ -121,19 +157,29 @@ impl Index {
         // One pass over `files` into memory. 47k rows of five integers is a few MB and turns the
         // per-file diff into a hash lookup instead of a query.
         let mut existing: HashMap<String, (i64, i64, i64, i64)> = HashMap::new();
+        let (lo, hi) = path::subtree_range(dir);
         {
-            let mut st = self
-                .conn
-                .prepare("SELECT id, rel_path, mtime_ns, size, ino FROM files")?;
-            let mut rows = st.query([])?;
+            // Two statements, as one `?1 = '' OR …` would scan the table for a folder too.
+            let mut st = self.conn.prepare(match dir {
+                "" => "SELECT id, rel_path, mtime_ns, size, ino FROM files",
+                _ => {
+                    "SELECT id, rel_path, mtime_ns, size, ino FROM files
+                      WHERE rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3)"
+                }
+            })?;
+            let mut rows = match dir {
+                "" => st.query([])?,
+                _ => st.query(params![dir, lo, hi])?,
+            };
             while let Some(r) = rows.next()? {
                 existing.insert(r.get(1)?, (r.get(0)?, r.get(2)?, r.get(3)?, r.get(4)?));
             }
         }
 
         // Nothing to compare against: the cold build, which resolves its links in one pass at
-        // the end rather than file by file.
-        let cold = existing.is_empty();
+        // the end rather than file by file. Never a folder's walk, the rest of the vault's links
+        // being resolved already.
+        let cold = dir.is_empty() && existing.is_empty();
 
         let mut jobs: Vec<Job> = Vec::new();
         for (idx, f) in scan.files.iter().enumerate() {
@@ -221,7 +267,10 @@ impl Index {
         if dirty {
             // Aliases are a handful of rows; rewriting them beats diffing them.
             let tx = self.write_tx()?;
-            tx.execute("DELETE FROM aliases", [])?;
+            tx.execute(
+                "DELETE FROM aliases WHERE ?1 = '' OR (rel_path >= ?2 AND rel_path < ?3)",
+                params![dir, lo, hi],
+            )?;
             for a in &scan.aliases {
                 tx.prepare_cached(
                     "INSERT OR REPLACE INTO aliases(rel_path, file_id)
@@ -246,6 +295,60 @@ impl Index {
         }
 
         Ok(stats)
+    }
+
+    /// The canonical folders the index reaches through a link outside the folder `dir`, which a
+    /// link inside it must not bring in a second time. None for the whole vault, whose walk finds
+    /// them itself.
+    fn linked_outside(&self, canonical_root: &Path, dir: &str) -> Result<Vec<PathBuf>> {
+        if dir.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (lo, hi) = path::subtree_range(dir);
+        let mut st = self.conn.prepare(
+            "SELECT canonical FROM files
+              WHERE kind = ?1 AND rel_path <> ?2 AND (rel_path < ?3 OR rel_path >= ?4)",
+        )?;
+        let rows = st.query_map(params![FileKind::Dir.as_i64(), dir, lo, hi], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut linked = Vec::new();
+        for canonical in rows {
+            let canonical = PathBuf::from(canonical?);
+            if !canonical.starts_with(canonical_root) {
+                linked.push(canonical);
+            }
+        }
+        Ok(linked)
+    }
+
+    /// Turn what a folder's `scan` found that the index holds by a path outside the folder into an
+    /// alias of that path: the vault-wide `(dev, ino)` dedup, which a walk of the folder alone
+    /// cannot make.
+    fn alias_held_outside(&self, dir: &str, scan: &mut walk::ScanResult) -> Result<()> {
+        let (lo, hi) = path::subtree_range(dir);
+        let mut st = self.conn.prepare(
+            "SELECT rel_path FROM files
+              WHERE dev = ?1 AND ino = ?2 AND rel_path <> ?3 AND (rel_path < ?4 OR rel_path >= ?5)",
+        )?;
+        let mut kept = Vec::with_capacity(scan.files.len());
+        for f in std::mem::take(&mut scan.files) {
+            let held: Option<String> = st
+                .query_row(params![f.dev as i64, f.ino as i64, dir, lo, hi], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            match held {
+                Some(target_rel_path) => scan.aliases.push(walk::Alias {
+                    rel_path: f.rel_path,
+                    target_rel_path,
+                    canonical: f.canonical,
+                }),
+                None => kept.push(f),
+            }
+        }
+        scan.files = kept;
+        Ok(())
     }
 
     /// Bring one path in line with the disk. This is the watcher's entry point: the caller turns a
@@ -654,6 +757,7 @@ mod tests {
         let stats = ix
             .reconcile_with(
                 vault.path(),
+                "",
                 &ScanOptions::default(),
                 &|| stopped.load(std::sync::atomic::Ordering::Relaxed),
                 |_, p| {
@@ -681,6 +785,64 @@ mod tests {
         assert_eq!(ix.file_paths(false).unwrap().len(), notes);
     }
 
+    /// A walk of one folder brings that folder in line with the disk and leaves the rest of the
+    /// index as it was, under the rules the whole walk applies there: a `.gitignore` above the
+    /// folder, and a folder linked in elsewhere, which a link inside it does not bring in twice.
+    #[test]
+    fn a_walk_of_one_folder_changes_that_folder_alone() {
+        let (vault, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let write = |rel: &str| {
+            let path = vault.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "# note\n").unwrap();
+        };
+        fs::write(vault.path().join(".gitignore"), "sub/build/\n").unwrap();
+        fs::write(outside.path().join("ext.md"), "# ext\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), vault.path().join("linked")).unwrap();
+        write("sub/gone.md");
+        write("other.md");
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        write("sub/new.md");
+        write("sub/build/out.md");
+        write("later.md");
+        fs::remove_file(vault.path().join("sub/gone.md")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), vault.path().join("sub/again")).unwrap();
+        let stats = ix
+            .reconcile_with(
+                vault.path(),
+                "sub",
+                &ScanOptions::default(),
+                &|| false,
+                |_, _| {},
+            )
+            .unwrap();
+
+        let paths: Vec<String> = ix
+            .conn
+            .prepare("SELECT rel_path FROM files ORDER BY rel_path")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ".gitignore",
+                "linked",
+                "linked/ext.md",
+                "other.md",
+                "sub",
+                "sub/new.md"
+            ]
+        );
+        assert_eq!((stats.added, stats.removed), (1, 1), "{stats:?}");
+        assert_eq!(ix.stats().unwrap().aliases, 0, "the second link was walked");
+    }
+
     /// A walk over an index that is already there resolves each batch's links as it commits it,
     /// so no reader between two batches sees a changed note link to nothing; a link to a note a
     /// later batch adds still resolves when that note arrives.
@@ -700,11 +862,17 @@ mod tests {
         }
         write("z.md", "z\n");
         let mut between = None;
-        ix.reconcile_with(vault.path(), &ScanOptions::default(), &|| false, |ix, p| {
-            if p.phase == Phase::Index && between.is_none() {
-                between = Some(ix.backlinks("old.md").unwrap().len());
-            }
-        })
+        ix.reconcile_with(
+            vault.path(),
+            "",
+            &ScanOptions::default(),
+            &|| false,
+            |ix, p| {
+                if p.phase == Phase::Index && between.is_none() {
+                    between = Some(ix.backlinks("old.md").unwrap().len());
+                }
+            },
+        )
         .unwrap();
 
         assert_eq!(
@@ -726,9 +894,13 @@ mod tests {
         assert!(before > 0);
 
         let stats = ix
-            .reconcile_with(vault.path(), &ScanOptions::default(), &|| true, |_, p| {
-                assert_eq!(p.total, 0, "a stopped scan reports no more than its count")
-            })
+            .reconcile_with(
+                vault.path(),
+                "",
+                &ScanOptions::default(),
+                &|| true,
+                |_, p| assert_eq!(p.total, 0, "a stopped scan reports no more than its count"),
+            )
             .unwrap();
         assert!(stats.stopped);
         assert_eq!(
@@ -751,6 +923,7 @@ mod tests {
         let mut scans = Vec::new();
         ix.reconcile_with(
             vault.path(),
+            "",
             &ScanOptions::default(),
             &|| {
                 // Bounded, so a scan that never reports fails the test rather than hanging it.
