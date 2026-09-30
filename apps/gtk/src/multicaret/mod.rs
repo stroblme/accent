@@ -492,9 +492,9 @@ mod imp {
         pub fade: Cell<f32>,
         pub fade_from: Cell<(i64, f32)>,
         pub fade_tick: RefCell<Option<gtk::TickCallbackId>>,
-        /// The find bar's search context over this view's buffer, whose matches the fade leaves
-        /// unveiled.
-        pub search: RefCell<Option<sourceview5::SearchContext>>,
+        /// The tag the find bar paints its matches in this view's buffer with, which the fade
+        /// leaves unveiled.
+        pub find_tag: RefCell<Option<gtk::TextTag>>,
     }
 
     #[glib::object_subclass]
@@ -782,18 +782,14 @@ impl View {
         self.imp().fade_on.get()
     }
 
-    /// Hand the view the find bar's search context, so the line fade can leave its matches be.
-    pub fn set_search(&self, context: &sourceview5::SearchContext) {
-        self.imp().search.replace(Some(context.clone()));
+    /// Hand the view the find bar's match tag, so the line fade can leave its matches be.
+    pub fn set_find_tag(&self, tag: &gtk::TextTag) {
+        self.imp().find_tag.replace(Some(tag.clone()));
     }
 
-    /// The find bar's search context, while it is highlighting its matches.
-    pub(crate) fn highlighted_search(&self) -> Option<sourceview5::SearchContext> {
-        self.imp()
-            .search
-            .borrow()
-            .clone()
-            .filter(|context| context.is_highlight())
+    /// The find bar's match tag, which is on nothing while the bar's highlight is off.
+    pub(crate) fn find_tag(&self) -> Option<gtk::TextTag> {
+        self.imp().find_tag.borrow().clone()
     }
 
     /// Put a caret one line below (or above) the outermost caret in that direction, so repeating

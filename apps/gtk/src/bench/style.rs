@@ -1158,7 +1158,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
             println!(
                 "bench reveal {label} query={:?} painting={} on={} at={:?}",
                 bar.query_text(),
-                tab.search_context().is_highlight(),
+                tab.is_highlighting(),
                 tab.reveal_highlight().0,
                 tab.buffer
                     .selection_bounds()
@@ -1211,12 +1211,11 @@ fn bench_reveal_marks(app: &Rc<App>, tab: &Rc<Tab>) {
         let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
         let show = |label: &str| {
             let (on, tag) = tab.reveal_highlight();
-            let context = tab.search_context();
             println!(
                 "bench reveal case={label} on={on} at={:?} query={:?} painting={}",
                 bench_tag_ranges(&tab, &tag),
-                sourceview5::prelude::SearchSettingsExt::search_text(&context.settings()),
-                context.is_highlight()
+                Some(tab.find_query()).filter(|query| !query.is_empty()),
+                tab.is_highlighting()
             );
         };
 

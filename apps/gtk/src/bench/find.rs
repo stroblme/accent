@@ -1,4 +1,5 @@
-//! The find bar's own drill: what Ctrl+F and Ctrl+H leave selected in a bar that is already open.
+//! The find bar's own drills: what Ctrl+F and Ctrl+H leave selected in a bar that is already
+//! open, and what its three toggles make of a query.
 
 use super::*;
 use crate::find::{Bar, Mode};
@@ -18,7 +19,12 @@ type Step = Box<dyn Fn(&Rc<App>, &Rc<Bar>)>;
 ///
 /// The box the press selects must read `sel=Some((0, n))` — the whole of it — in both lines of
 /// all three cases.
+///
+/// `ACCENT_BENCH_FIND=options` is [`bench_find_options`] instead.
 pub(super) fn bench_find(app: &Rc<App>, rel: &str) {
+    if rel == "options" {
+        return bench_find_options(app);
+    }
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
     glib::timeout_add_local_once(Duration::from_millis(600), move || {
@@ -57,6 +63,91 @@ pub(super) fn bench_find(app: &Rc<App>, rel: &str) {
         ];
         run(app, bar, steps.into());
     });
+}
+
+/// The note [`bench_find_options`] writes into the vault and takes away again.
+const NOTE: &str = "accent-bench-find.md";
+/// Words the three toggles tell apart, and two calls for the regex to rewrite.
+const TEXT: &str = "Foo foo food foo_bar\nÄ foo(1) FOO(22)\n";
+
+/// `ACCENT_BENCH_FIND=options` writes a note of its own and walks its find bar's toggles over
+/// `foo`, printing the readout and whether the box is marked invalid after each. The counts are
+/// the Search pane's, being its matcher: `plain` 6 matches, `case` 4, `word` 4 (neither `food`
+/// nor `foo_bar`), `case_word` 2, `regex` (`fo+\(`) 2, `invalid` (`foo(`) `Invalid pattern`
+/// with `invalid=true`. `replaced` is Replace All of `(\w+)\((\d+)\)` by `$2-$1`, which must
+/// read `Ä 1-foo 22-FOO` on the second line. `presenting` opens the bar over the rendered preview,
+/// where the toggles are off-limits: `toggles=false`. The note is closed, which writes it, and
+/// removed before the drill quits.
+fn bench_find_options(app: &Rc<App>) {
+    let path = app.root().join(NOTE);
+    if let Err(e) = std::fs::write(&path, TEXT) {
+        println!("bench find options wrote=false {e}");
+        return bench_quit(app);
+    }
+    app.open_path(NOTE);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(600), move || {
+        let bar = app.pane().find.clone();
+        let set = |bar: &Rc<Bar>, case: bool, word: bool, regex: bool| {
+            for (button, on) in bar.toggles().iter().zip([case, word, regex]) {
+                button.set_active(on);
+            }
+        };
+        let steps: Vec<Step> = vec![
+            Box::new(|_, bar| {
+                bar.open(Mode::Find);
+                typed(bar, "foo");
+            }),
+            Box::new(|_, bar| readout("plain", bar)),
+            Box::new(move |_, bar| {
+                set(bar, true, false, false);
+                readout("case", bar);
+                set(bar, false, true, false);
+                readout("word", bar);
+                set(bar, true, true, false);
+                readout("case_word", bar);
+                set(bar, false, false, true);
+                typed(bar, r"fo+\(");
+            }),
+            Box::new(|_, bar| {
+                readout("regex", bar);
+                typed(bar, "foo(");
+            }),
+            Box::new(|_, bar| {
+                readout("invalid", bar);
+                typed(bar, r"(\w+)\((\d+)\)");
+            }),
+            Box::new(|app, bar| {
+                bar.replace_box().set_text("$2-$1");
+                bar.press_replace_all();
+                let text = app.active().map(|tab| tab.text()).unwrap_or_default();
+                println!("bench find options case=replaced text={text:?}");
+                app.set_presenting(true);
+                bar.open(Mode::Find);
+                println!(
+                    "bench find options case=presenting toggles={}",
+                    bar.toggles()[0].is_sensitive()
+                );
+                app.set_presenting(false);
+                if let Some(tab) = app.active() {
+                    app.close_page(&tab.page);
+                }
+            }),
+            Box::new(|app, _| {
+                let _ = std::fs::remove_file(app.root().join(NOTE));
+            }),
+        ];
+        run(app, bar, steps.into());
+    });
+}
+
+/// What the bar reads out for the query in its box.
+fn readout(label: &str, bar: &Rc<Bar>) {
+    let (readout, invalid) = bar.readout();
+    println!(
+        "bench find options case={label} query={:?} readout={readout:?} invalid={invalid}",
+        bar.query_box().text()
+    );
 }
 
 /// Run each step `SETTLED` after the one before, so every step sees what the last one left once

@@ -353,7 +353,9 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_FIND=<rel_note>` uses two queries in a note's find bar and then presses Ctrl+F
 /// twice over the open bar — once on a typed query, once on one Up recalled — printing what is
-/// selected in the box each time and again once its delayed search has run.
+/// selected in the box each time and again once its delayed search has run. `=options` writes a
+/// note of its own and prints what the bar reads out under each of its toggles, an invalid
+/// pattern and a Replace All with `$1`, then removes the note.
 ///
 /// `ACCENT_BENCH_DIAG=<rel_code_file>` hands a code tab an error, a warning and a hint, then
 /// presses the status bar's count twice, printing what the count says and how much of the answer
