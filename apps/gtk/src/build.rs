@@ -634,7 +634,7 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
             };
             let (title, text) = (title.to_string(), text.to_string());
             // The file's own tab, as a preview like any other single click in the sidebar.
-            app.with_tab(key, Opened::Preview, "compare", move |_, tab| {
+            app.with_tab(key, Opened::Preview, "compare", move |app, tab| {
                 let name = doc::file_name(&tab.rel()).to_string();
                 let compare = tab.compare(
                     &format!("{name} (Working Tree)"),
@@ -647,6 +647,10 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 if !register(Rc::downgrade(&compare)) {
                     tab.leave_compare();
                 }
+                // The editor is the working-tree side, and a tab can be behind its file: a change
+                // a walk took into the index first reaches the watcher as no change at all. Asked
+                // here, a tab that is reads the file again, and the comparison with it.
+                app.file_changed(tab);
             });
         }),
         trash: Box::new(move |keys| {

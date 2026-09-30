@@ -1542,3 +1542,372 @@ pub(super) fn bench_compare_pick(app: &Rc<App>, rel: &str) {
         bench_quit(&app);
     });
 }
+
+/// Changes, Staged, Deleted and history rows clicked in the orders and at the moments a reader
+/// clicks them (`=clicks`): a file not open yet, the same row again, a file open in a tab, right
+/// after a save, right after the file changed on disk under its open tab, while a refresh is on
+/// its way, two rows a few milliseconds apart, a deletion, a staged change and a commit's file.
+/// After each it prints what the comparison in front holds once it has settled: each column's
+/// line count, whether that is the text git has for it (`ok`), how many of its lines show text on
+/// screen (`seen`) and each column's width, and `bad` names what is off. A comparison showing one
+/// side only has a column empty, wrong, off screen or squeezed. It makes a repository in the
+/// vault root, so point it at a throwaway vault.
+pub(super) fn bench_compare_clicks(app: &Rc<App>) {
+    app.show_pane("git");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        let root = app.root();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=bench",
+                    "-c",
+                    "user.email=bench@accent.invalid",
+                ])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .unwrap_or_default()
+        };
+        let write = |rel: &str, text: &str| {
+            let _ = std::fs::write(root.join(rel), text);
+        };
+        let (long, open, gone, staged) = (
+            note(40, "long"),
+            note(12, "open"),
+            note(4, "gone"),
+            note(6, "staged"),
+        );
+        let big: String = (1..=1500)
+            .map(|i| format!("    let value_{i} = compute(\"a line of code that is long enough to wrap in a narrow column {i}\", {i});\n"))
+            .collect();
+        for (rel, text) in [
+            ("long.md", &long),
+            ("open.md", &open),
+            ("gone.md", &gone),
+            ("staged.md", &staged),
+            ("big.rs", &big),
+        ] {
+            write(rel, text);
+        }
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        // A second commit for the history row.
+        let before = long.clone();
+        let long = long.replace("## long 3\n", "## long three\n");
+        write("long.md", &long);
+        git(&["commit", "-qam", "three"]);
+        let long_work = long
+            .replace("## long 1\n", "## long one\n")
+            .replace("- long item 20 a\n", "")
+            .replace("## long 30\n", "## long thirty\nA paragraph added.\n\n")
+            + "added at the end\n";
+        let open_work = open.replace("## open 5\n", "## open five\n");
+        let staged_index = staged.replace("## staged 2\n", "## staged two\n");
+        let big_work: String = big
+            .lines()
+            .enumerate()
+            .filter(|(i, _)| !(400..700).contains(i))
+            .map(|(i, l)| match i % 37 {
+                0 => format!("{l} // changed\n"),
+                _ => format!("{l}\n"),
+            })
+            .collect::<String>()
+            + &"    added();\n".repeat(200);
+        write("big.rs", &big_work);
+        write("long.md", &long_work);
+        write("open.md", &open_work);
+        write("staged.md", &staged_index);
+        let _ = std::fs::remove_file(root.join("gone.md"));
+        git(&["add", "staged.md"]);
+        let (oid, parent) = (
+            git(&["rev-parse", "--short=7", "HEAD"]),
+            git(&["rev-parse", "--short=7", "HEAD~1"]),
+        );
+        for _ in 0..120 {
+            wait(250).await;
+            if app.git.get().is_some_and(|git| git.changes_rows() >= 5) {
+                break;
+            }
+        }
+        let Some(panel) = app.git.get().filter(|git| git.has_repos()).cloned() else {
+            println!("bench compare_clicks no_repo");
+            return bench_quit(&app);
+        };
+        for _ in 0..80 {
+            if bench_toast(&app).is_none() {
+                break;
+            }
+            wait(100).await;
+        }
+        println!("bench compare_clicks rows={}", panel.changes_rows());
+        let typed = RefCell::new(String::new());
+        let expect = |rel: &str| -> (String, String) {
+            match rel {
+                "big.rs" => (big.clone(), big_work.clone()),
+                "long.md" => (long.clone(), long_work.clone()),
+                "open.md" => (open.clone(), open_work.clone() + &typed.borrow()),
+                "gone.md" => (gone.clone(), String::new()),
+                _ => (staged.clone(), staged_index.clone()),
+            }
+        };
+        let click = |rel: &str| {
+            if panel.activate_change(rel).is_none() {
+                println!("bench compare_clicks unlisted rel={rel}");
+            }
+        };
+        let report = |case: &str, rel: &str, expect: (String, String)| {
+            let (app, case, rel) = (app.clone(), case.to_string(), rel.to_string());
+            async move {
+                glib::timeout_future(Duration::from_millis(1500)).await;
+                println!(
+                    "bench compare_clicks {case} rel={rel} {}",
+                    columns(&app, &rel, &expect)
+                );
+            }
+        };
+
+        // The first click on a file no tab holds, a long source file and a note, and the same
+        // row again over its comparison.
+        click("big.rs");
+        report("first", "big.rs", expect("big.rs")).await;
+        click("long.md");
+        report("first", "long.md", expect("long.md")).await;
+        click("long.md");
+        report("again", "long.md", expect("long.md")).await;
+        // A file already open in a tab of its own, plain.
+        app.open_path("open.md");
+        wait(800).await;
+        click("open.md");
+        report("open", "open.md", expect("open.md")).await;
+        // Right after a save, whose refresh lands while the comparison is read.
+        let tab = app
+            .open_tabs()
+            .into_iter()
+            .find(|tab| tab.rel() == "open.md");
+        if let Some(tab) = &tab {
+            tab.leave_compare();
+            tab.buffer.insert(&mut tab.buffer.end_iter(), "typed\n");
+            typed.borrow_mut().push_str("typed\n");
+            let _ = app.write_tab(tab, None);
+            click("open.md");
+            report("saved", "open.md", expect("open.md")).await;
+        }
+        // Right after the file changed on disk under its open tab, which reloads on the watcher's
+        // news.
+        if let Some(tab) = &tab {
+            tab.leave_compare();
+            wait(800).await;
+            typed.borrow_mut().push_str("from disk\n");
+            write("open.md", &expect("open.md").1);
+            click("open.md");
+            report("disk", "open.md", expect("open.md")).await;
+        }
+        // A refresh on its way: an untracked file appears as the row is clicked.
+        write("new.md", "new\n");
+        click("long.md");
+        report("refreshing", "long.md", expect("long.md")).await;
+        // Two rows a few milliseconds apart: the second is what is left in front.
+        for ms in [0, 5, 20, 60, 150] {
+            for (a, b) in [
+                ("long.md", "open.md"),
+                ("open.md", "long.md"),
+                ("gone.md", "long.md"),
+                ("long.md", "staged.md"),
+            ] {
+                click(a);
+                wait(ms).await;
+                click(b);
+                report(&format!("quick{ms}:{a}"), b, expect(b)).await;
+            }
+        }
+        click("gone.md");
+        report("deleted", "gone.md", expect("gone.md")).await;
+        click("staged.md");
+        report("staged", "staged.md", expect("staged.md")).await;
+        // And straight back to a file that is open, from a tab of two blobs.
+        click("long.md");
+        report("back", "long.md", expect("long.md")).await;
+        // A commit's file, and the file again.
+        panel.compare_commit("long.md", &oid, &parent);
+        report("commit", "long.md", (before, long.clone())).await;
+        click("long.md");
+        report("after_commit", "long.md", expect("long.md")).await;
+        bench_quit(&app);
+    });
+}
+
+/// A note of `n` sections as a reader writes one: a heading, a paragraph long enough to wrap, a
+/// list and now and then a fenced block, each line naming `name` and its section.
+fn note(n: usize, name: &str) -> String {
+    (1..=n)
+        .map(|i| {
+            let words = format!("{name} {i} ").repeat(24);
+            let fence = match i % 4 {
+                0 => format!("```rust\nfn {name}_{i}() {{}}\n```\n\n"),
+                _ => String::new(),
+            };
+            format!(
+                "## {name} {i}\n\n{words}\n\n- {name} item {i} a\n- {name} item {i} b\n\n{fence}"
+            )
+        })
+        .collect()
+}
+
+/// What the comparison in front for `rel` shows: see [`bench_compare_clicks`].
+fn columns(app: &Rc<App>, rel: &str, expect: &(String, String)) -> String {
+    let front = app.tabs().selected_page().map(|page| page.title());
+    let compare = app
+        .open_tabs()
+        .into_iter()
+        .find(|tab| tab.rel() == rel)
+        .and_then(|tab| tab.comparison())
+        .or_else(|| {
+            let front = app.tabs().selected_page()?;
+            app.docs().into_iter().find_map(|doc| match doc {
+                Doc::Diff(diff)
+                    if diff.page == front && diff.key().ends_with(&format!(":{rel}")) =>
+                {
+                    Some(diff.comparison().clone())
+                }
+                _ => None,
+            })
+        });
+    let Some(compare) = compare else {
+        return format!(
+            "front={front:?} comparing=false toast={:?}",
+            bench_toast(app)
+        );
+    };
+    let paned = compare.widget().downcast_ref::<gtk::Paned>().cloned();
+    let mut bad = Vec::new();
+    let mut widths = [0; 2];
+    let mut side = |end: bool| {
+        let Some(view) = pane_view(compare.widget(), end) else {
+            return "none".to_string();
+        };
+        let buffer = view.buffer();
+        let (s, e) = buffer.bounds();
+        let text = buffer.text(&s, &e, true);
+        let want = if end { &expect.1 } else { &expect.0 };
+        let width = paned
+            .as_ref()
+            .and_then(|p| if end { p.end_child() } else { p.start_child() })
+            .map_or(0, |w| w.width());
+        widths[usize::from(end)] = width;
+        let (ok, seen) = (text.as_str() == diff::normalise(want), seen(&view));
+        if !ok || (seen == 0 && !want.is_empty()) {
+            bad.push(if end { "new" } else { "old" });
+        }
+        format!(
+            "{}:lines={},ok={ok},seen={seen},width={width}",
+            if end { "new" } else { "old" },
+            buffer.line_count(),
+        )
+    };
+    let (old, new) = (side(false), side(true));
+    if (widths[0] - widths[1]).abs() > 2 {
+        bad.push("split");
+    }
+    format!(
+        "front={front:?} {old} {new} {} bad={bad:?}",
+        bench_compare_line(&compare),
+    )
+}
+
+/// How many lines with text in them show some of it inside `view`'s visible rectangle: from the
+/// top of the first character to the bottom of the last, padding left out.
+fn seen(view: &gtk::TextView) -> usize {
+    let rect = view.visible_rect();
+    let bottom = rect.y() + rect.height();
+    let (mut at, _) = view.line_at_y(rect.y());
+    let mut n = 0;
+    loop {
+        let top = view.iter_location(&at).y();
+        if top >= bottom {
+            break;
+        }
+        let mut end = at;
+        end.forward_to_line_end();
+        let last = view.iter_location(&end);
+        if !at.ends_line() && view.line_yrange(&at).1 > 0 && last.y() + last.height() > rect.y() {
+            n += 1;
+        }
+        if !at.forward_line() {
+            break;
+        }
+    }
+    n
+}
+
+/// A Changes row clicked while the file's own tab is behind the disk (`=stale:<rel>`): the note
+/// is opened as the window comes up and changed on disk while the first index is still walking,
+/// which takes the change in before the watcher's news of it, so the news reads as no change and
+/// the tab is never told. Its row is clicked as soon as the Git pane lists it, and the drill
+/// prints whether the tab had the disk's text then and what the click opened 1.5 s on, as
+/// `=clicks` does. Point it at a clean repository large enough to take seconds to index: `make
+/// vault` into a scratch folder, committed.
+pub(super) fn bench_compare_stale(app: &Rc<App>, rel: &str) {
+    app.show_pane("git");
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        let mut tab = None;
+        for _ in 0..100 {
+            wait(50).await;
+            tab = app.open_tabs().into_iter().find(|tab| tab.rel() == rel);
+            if tab.is_some() {
+                break;
+            }
+        }
+        let Some(tab) = tab else {
+            println!("bench compare_stale no_tab");
+            return bench_quit(&app);
+        };
+        let text = |tab: &Tab| {
+            let (s, e) = tab.buffer.bounds();
+            tab.buffer.text(&s, &e, true).to_string()
+        };
+        let index = text(&tab);
+        let work = format!("{index}changed behind the tab\n");
+        let _ = std::fs::write(app.root().join(&rel), &work);
+        let started = std::time::Instant::now();
+        let Some(panel) = app.git.get().cloned() else {
+            println!("bench compare_stale no_git");
+            return bench_quit(&app);
+        };
+        let mut listed = false;
+        for _ in 0..600 {
+            wait(50).await;
+            if panel.changes_rows() > 0 {
+                listed = true;
+                break;
+            }
+        }
+        println!(
+            "bench compare_stale listed={listed} after={}ms reconciled={} tab_current={}",
+            started.elapsed().as_millis(),
+            app.reconciled.get(),
+            text(&tab) == work
+        );
+        let report = |what: &str| {
+            println!(
+                "bench compare_stale {what} t={} reconciled={} tab_current={} {}",
+                started.elapsed().as_millis(),
+                app.reconciled.get(),
+                text(&tab) == work,
+                columns(&app, &rel, &(index.clone(), work.clone()))
+            );
+        };
+        println!("bench compare_stale row={:?}", panel.activate_change(&rel));
+        wait(1500).await;
+        report("clicked");
+        bench_quit(&app);
+    });
+}

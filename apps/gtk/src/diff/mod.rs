@@ -391,6 +391,14 @@ impl Compare {
         let titles = gtk::SizeGroup::new(gtk::SizeGroupMode::Vertical);
         titles.add_widget(&old.header);
         titles.add_widget(&new.header);
+        // And one minimum width for both columns, which is what splits them evenly: a paned whose
+        // position was never set divides its width in the ratio of the two, on every allocation
+        // until a drag sets one. A position set from an idle once the paned was mapped was lost
+        // whenever the idle ran before the first allocation, and the columns stayed split by
+        // their own minimums, the editor's the wider for its Stop Comparing.
+        let columns = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
+        columns.add_widget(&old.root);
+        columns.add_widget(&new.root);
 
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
         paned.set_start_child(Some(&old.root));
@@ -399,16 +407,6 @@ impl Compare {
         paned.set_shrink_start_child(false);
         paned.set_resize_end_child(true);
         paned.set_shrink_end_child(false);
-        // Even split. The widget cannot know how wide its host will be, so the position is set
-        // once from an idle, which runs after the first layout pass has given the paned a width.
-        paned.connect_map(|p| {
-            let p = p.clone();
-            glib::idle_add_local_once(move || {
-                if p.width() > 0 {
-                    p.set_position(p.width() / 2);
-                }
-            });
-        });
 
         let this = Rc::new_cyclic(|weak| Compare {
             weak: weak.clone(),

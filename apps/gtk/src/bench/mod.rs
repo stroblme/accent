@@ -28,10 +28,10 @@ mod tags;
 use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
-    bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_folds,
-    bench_compare_gap, bench_compare_gutter, bench_compare_left, bench_compare_lines,
-    bench_compare_pads, bench_compare_page, bench_compare_pick, bench_compare_press,
-    bench_compare_row,
+    bench_compare, bench_compare_clicks, bench_compare_conflict, bench_compare_diag,
+    bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_left,
+    bench_compare_lines, bench_compare_pads, bench_compare_page, bench_compare_pick,
+    bench_compare_press, bench_compare_row, bench_compare_stale,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -140,7 +140,11 @@ use tags::bench_tags;
 /// not touch it; where HEAD did, the tab it opens says whether its first change is on screen and
 /// where the shared scrollbar is. `=pick:<repo_rel>` picks a second repository in the chooser and
 /// clicks the root's row at once, printing both sides' line counts of what opened (see
-/// `compare::bench_compare_pick`). `=diag:<rel_text_file>`
+/// `compare::bench_compare_pick`). `=clicks` clicks Changes, Staged, Deleted and history rows in
+/// a repository it makes, in the orders and at the moments a reader does, and prints what both
+/// columns of the comparison in front hold after each (`compare::bench_compare_clicks`);
+/// `=stale:<rel>` clicks a row whose file's tab is behind the disk (`compare::bench_compare_stale`).
+/// `=diag:<rel_text_file>`
 /// collapses a run with warnings in it and prints how many end-of-line messages and gutter marks
 /// each state drew: the messages of a hidden run go, the icons stay. It then folds a block over
 /// the same file, which hides lines the same way, and reads the two numbers again without
@@ -531,6 +535,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("pick:") {
                 return bench_compare_pick(&app, rel);
+            }
+            if rel == "clicks" {
+                return bench_compare_clicks(&app);
+            }
+            if let Some(rel) = rel.strip_prefix("stale:") {
+                return bench_compare_stale(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("diag:") {
                 return bench_compare_diag(&app, rel);
