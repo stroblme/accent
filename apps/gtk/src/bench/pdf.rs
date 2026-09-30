@@ -215,6 +215,71 @@ pub(super) fn bench_pdf_render(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// A document zoomed deep. `arg` is `<rel>[,<percent>]`, 800 % unless given: the break between
+/// the first two pages across the middle of the view, left alone for 20 s, each second printing
+/// how many tiles the view wants and has not got, how many on screen it shows other than sharp,
+/// how many landed in that second and how many of those had landed before — the render thread
+/// never idle and the set churning, where the cache cannot hold what the view asks for. Then a
+/// reader at that zoom: a wheel notch, a tenth of the view, every 100 ms for 10 s, and ten Page
+/// Downs of a whole view 600 ms apart, each counting the steps after which a tile on screen was
+/// not yet sharp.
+pub(super) fn bench_pdf_deep(app: &Rc<App>, arg: &str) {
+    let (rel, percent) = match arg.split_once(',') {
+        Some((rel, percent)) => (rel.to_string(), percent.parse().unwrap_or(800.0)),
+        None => (arg.to_string(), 800.0),
+    };
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench pdf deep no_tab");
+            return bench_quit(&app);
+        };
+        pdf.set_zoom(pdfview::PdfZoom::Scale(percent / 100.0));
+        glib::timeout_future(Duration::from_millis(100)).await;
+        pdf.scroll_both(1.0, 0.0);
+        pdf.scroll_by(-0.5);
+        let sf = pdf.views()[0].scale_factor();
+        println!("bench pdf deep sf={sf} {}", pdf.geometry());
+        let (t0, mut last) = (Instant::now(), None);
+        let mut seen = HashSet::new();
+        for second in 1..=20 {
+            let (mut landed, mut again) = (0, 0);
+            for _ in 0..10 {
+                glib::timeout_future(Duration::from_millis(100)).await;
+                let (_, _, rendered) = pdf.tiles();
+                if !rendered.is_empty() {
+                    last = Some(ms_since(t0) as u64);
+                }
+                landed += rendered.len();
+                again += rendered
+                    .into_iter()
+                    .filter(|key| !seen.insert(*key))
+                    .count();
+            }
+            let (missing, unsharp, _) = pdf.tiles();
+            println!(
+                "bench pdf deep t={second} missing={missing} unsharp={unsharp} \
+                 landed={landed} again={again}"
+            );
+        }
+        println!("bench pdf deep last_tile_ms={last:?}");
+        for (name, step, every, steps) in [("wheel", 0.1, 100, 100), ("page_down", 1.0, 600, 10)] {
+            let (mut blurred, mut worst) = (0, 0);
+            for _ in 0..steps {
+                pdf.scroll_by(step);
+                // A few frames after the step: what the reader sees on arriving.
+                glib::timeout_future(Duration::from_millis(50)).await;
+                let (_, unsharp, _) = pdf.tiles();
+                blurred += usize::from(unsharp > 0);
+                worst = worst.max(unsharp);
+                glib::timeout_future(Duration::from_millis(every - 50)).await;
+            }
+            println!("bench pdf deep {name} steps={steps} unsharp_steps={blurred} worst={worst}");
+        }
+        bench_quit(&app);
+    });
+}
+
 /// A PDF that will not open waits for its file and opens once the file is whole. `arg`, relative
 /// to the vault or an absolute path outside it (which no watcher reports on), is cut in half in
 /// place and opened; then written back in six pieces a quarter of a second apart, the way a LaTeX

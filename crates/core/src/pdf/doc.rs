@@ -251,9 +251,12 @@ impl PdfDoc {
 
     /// The document as it now stands, annotations included.
     ///
-    // ponytail: `FPDF_SaveAsCopy` rewrites the whole file, so a 100 MB PDF is 100 MB of work
-    // under the global pdfium lock and loses whatever incremental history the file had. Saving
-    // incrementally (`FPDF_INCREMENTAL`) is the upgrade if that ever bites.
+    // ponytail: `FPDF_SaveAsCopy` rewrites the whole file under the global pdfium lock (80 to
+    // 140 ms for a 100 MB scanned PDF, 25 to 50 ms for a 6 MB one of 383 pages of text) and loses
+    // whatever incremental history the file had. `FPDF_INCREMENTAL` is no cheaper way out: pdfium
+    // keeps no record of what changed and appends every object it has parsed since the document
+    // was opened, so a document read through before a stroke is saved at twice its size, and
+    // grows by what was read again in every session that saves (measured 2026-09-30).
     pub fn save(&self) -> Result<Vec<u8>> {
         let _guard = lock();
         self.doc().save_to_bytes().context("save pdf")

@@ -14,7 +14,7 @@ use gtk::{gdk, glib, graphene, gsk};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
-use super::cache::{Cache, TILE, TileKey, Want, texture, tiles_across};
+use super::cache::{Cache, TILE, TileKey, Want, reach, texture, tiles_across, tiles_within};
 use super::geometry::{
     Anchor, Layout, MAX_SCALE, MIN_SCALE, PT_TO_PX, PdfZoom, Span, anchor_at, clamp_scale,
     fit_scale, layout, offset_of, page_at, resume_at, stepped,
@@ -789,6 +789,12 @@ impl PdfView {
             .collect()
     }
 
+    /// How many tiles on screen the last frame painted blurred or not at all.
+    #[cfg(feature = "bench")]
+    pub fn unsharp(&self) -> usize {
+        self.imp().unsharp.get()
+    }
+
     /// Put the reader back where `anchor` says, or at the top of its page under
     /// [`PdfZoom::FitPage`]. See [`resume_at`].
     pub fn scroll_to(&self, anchor: Anchor) {
@@ -1116,6 +1122,9 @@ mod imp {
         /// What the last frame found missing, asked for or not: what a drill waits to see empty.
         #[cfg(feature = "bench")]
         pub unrendered: RefCell<Vec<Want>>,
+        /// How many tiles on screen the last frame showed other than sharp.
+        #[cfg(feature = "bench")]
+        pub unsharp: Cell<usize>,
         pub page: Cell<usize>,
         /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
         /// the same for every page of every frame until the theme changes.
@@ -1169,6 +1178,8 @@ mod imp {
                 asked_for: Cell::new((0, false, 0)),
                 #[cfg(feature = "bench")]
                 unrendered: RefCell::new(Vec::new()),
+                #[cfg(feature = "bench")]
+                unsharp: Cell::new(0),
                 page: Cell::new(0),
                 paper: Cell::new(None),
                 on_wants: RefCell::new(None),
@@ -1459,7 +1470,7 @@ mod imp {
                 return;
             }
             let (ox, oy) = obj.scroll_offset();
-            let (_, vh) = (f64::from(obj.width()), f64::from(obj.height()));
+            let (vw, vh) = (f64::from(obj.width()), f64::from(obj.height()));
             let dark = self.dark.get();
             let sf = obj.scale_factor().max(1);
             let device_scale = layout.scale * sf as f32;
@@ -1471,18 +1482,23 @@ mod imp {
 
             let frame = obj.color();
             let accent = theme::accent();
-            let mut wanted: Vec<Want> = Vec::new();
+            // What is on screen first, then what is within reach of it: the render thread works
+            // down the list, and a list a scroll overtakes starts again from its head.
+            let (mut wanted, mut ahead): (Vec<Want>, Vec<Want>) = (Vec::new(), Vec::new());
+            #[cfg(feature = "bench")]
+            let mut unsharp = 0;
             let cache = obj.cache();
             let marks = self.marks.borrow();
             let highlights = self.highlights.borrow();
             let strokes = self.strokes.borrow();
             let adjust = self.adjust.borrow();
             let selection = self.selection.borrow();
-            // One viewport of prefetch above and below, so scrolling meets ready tiles. The
-            // ends of that range are two binary searches; the pages outside it are not looked at
-            // at all, which at 1 554 pages is the difference between a frame and a scan.
-            let first = page_at(&layout, oy - vh);
-            let last = page_at(&layout, oy + vh + vh);
+            let shown = ((ox, ox + vw), (oy, oy + vh));
+            let near = reach(shown, sf);
+            // The ends of that range are two binary searches; the pages outside it are not looked
+            // at at all, which at 1 554 pages is the difference between a frame and a scan.
+            let first = page_at(&layout, near.1.0);
+            let last = page_at(&layout, near.1.1);
             for (index, rect) in layout.pages.iter().enumerate().take(last + 1).skip(first) {
                 let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
                 // The page's own paper, so a tile that has not arrived is not a hole.
@@ -1490,69 +1506,103 @@ mod imp {
 
                 let page = index as u32;
                 let low = cache.borrow_mut().lowres(page, dark);
-                let mut missing = false;
-                // A page whose content changed becomes the set of tiles that are out of date,
-                // once, here — this is where what is actually on screen is known.
+                // A tile within reach has not arrived, which asks for the stand-in, and one on
+                // screen has not, which paints it.
+                let (mut missing, mut blank) = (false, false);
+                let mut tiles = Vec::new();
                 let refreshing = self.stale_pages.borrow_mut().remove(&page);
                 if !thumbnails {
                     let device_w = (rect.w * sf as f32).round() as i32;
                     let device_h = (rect.h * sf as f32).round() as i32;
-                    for ty in 0..tiles_across(device_h) {
-                        for tx in 0..tiles_across(device_w) {
-                            let key = TileKey {
-                                page,
-                                scale_milli,
-                                tx: tx as u16,
-                                ty: ty as u16,
-                                dark,
-                            };
-                            if refreshing.is_some_and(|area| {
-                                touches(area, device_scale, tx as u16, ty as u16)
-                            }) {
-                                self.stale_tiles.borrow_mut().insert(key);
+                    let (across, down) = (tiles_across(device_w), tiles_across(device_h));
+                    let key = |tx: i32, ty: i32| TileKey {
+                        page,
+                        scale_milli,
+                        tx: tx as u16,
+                        ty: ty as u16,
+                        dark,
+                    };
+                    // A page whose content changed becomes the set of tiles that are out of date,
+                    // once, here — this is where what is actually on screen is known. Every tile
+                    // the change touches, within reach or not, since the rest are kept and will
+                    // be painted once the reader gets to them.
+                    if let Some(area) = refreshing {
+                        let mut stale = self.stale_tiles.borrow_mut();
+                        for ty in 0..down {
+                            for tx in 0..across {
+                                if touches(area, device_scale, tx as u16, ty as u16) {
+                                    stale.insert(key(tx, ty));
+                                }
                             }
-                            let tile = cache.borrow_mut().get(&key);
+                        }
+                    }
+                    let on_x = tiles_within(rect.x, shown.0, sf, across);
+                    let on_y = tiles_within(rect.y, shown.1, sf, down);
+                    for ty in tiles_within(rect.y, near.1, sf, down) {
+                        for tx in tiles_within(rect.x, near.0, sf, across) {
+                            let key = key(tx, ty);
+                            let on = on_x.contains(&tx) && on_y.contains(&ty);
+                            let list = if on { &mut wanted } else { &mut ahead };
                             let want = Want {
                                 page,
-                                tx: tx as u16,
-                                ty: ty as u16,
+                                tx: key.tx,
+                                ty: key.ty,
                             };
+                            let tile = cache.borrow_mut().get(&key);
                             match tile {
                                 Some(texture) => {
-                                    let x = rect.x + (tx * TILE) as f32 / sf as f32;
-                                    let y = rect.y + (ty * TILE) as f32 / sf as f32;
-                                    let w = texture.width() as f32 / sf as f32;
-                                    let h = texture.height() as f32 / sf as f32;
-                                    snapshot
-                                        .append_texture(&texture, &graphene::Rect::new(x, y, w, h));
                                     // Painted, and still the old render: ask again, and keep
                                     // asking until the replacement lands, so a batch pushed
                                     // aside by a scroll is picked up by the next one.
                                     if self.stale_tiles.borrow().contains(&key) {
-                                        wanted.push(want);
+                                        list.push(want);
+                                    }
+                                    if on {
+                                        tiles.push((tx, ty, texture));
                                     }
                                 }
                                 None => {
                                     missing = true;
-                                    wanted.push(want);
+                                    blank |= on;
+                                    #[cfg(feature = "bench")]
+                                    {
+                                        unsharp += usize::from(on);
+                                    }
+                                    list.push(want);
                                 }
                             }
                         }
                     }
                 }
-                // Over the tiles rather than under them: painting it every frame would cost a
-                // scaled draw per page, and a finished page has nothing missing to cover.
-                match (thumbnails || missing, low) {
-                    (true, Some(low)) => {
+                // Under the tiles, so what has arrived stays sharp and only the holes are blurred,
+                // and only while there are holes on screen: painting it every frame would cost a
+                // scaled draw per page.
+                match low {
+                    Some(low) if thumbnails || blank => {
                         snapshot.append_scaled_texture(&low, gsk::ScalingFilter::Linear, &bounds);
                     }
-                    // Not even a stand-in yet: ask for one. `u16::MAX` is the whole page.
-                    (true, None) => wanted.push(Want {
-                        page,
-                        tx: u16::MAX,
-                        ty: u16::MAX,
-                    }),
-                    (false, _) => {}
+                    // Not even a stand-in yet: ask for one, with what is on screen if it is to be
+                    // painted now. `u16::MAX` is the whole page.
+                    None if thumbnails || missing => {
+                        let list = if thumbnails || blank {
+                            &mut wanted
+                        } else {
+                            &mut ahead
+                        };
+                        list.push(Want {
+                            page,
+                            tx: u16::MAX,
+                            ty: u16::MAX,
+                        });
+                    }
+                    _ => {}
+                }
+                for (tx, ty, texture) in tiles {
+                    let x = rect.x + (tx * TILE) as f32 / sf as f32;
+                    let y = rect.y + (ty * TILE) as f32 / sf as f32;
+                    let w = texture.width() as f32 / sf as f32;
+                    let h = texture.height() as f32 / sf as f32;
+                    snapshot.append_texture(&texture, &graphene::Rect::new(x, y, w, h));
                 }
 
                 // A hairline, so a white page on a light background still reads as a page.
@@ -1694,8 +1744,11 @@ mod imp {
             // are part of "the same", because the same tiles at another scale, or after the page
             // changed, are a different render.
             let stamp = (scale_milli, dark, cache.borrow().generation());
+            wanted.append(&mut ahead);
             #[cfg(feature = "bench")]
             self.unrendered.replace(wanted.clone());
+            #[cfg(feature = "bench")]
+            self.unsharp.set(unsharp);
             if !wanted.is_empty()
                 && (self.asked_for.get() != stamp || *self.asked.borrow() != wanted)
             {

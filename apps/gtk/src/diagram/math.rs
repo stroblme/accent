@@ -24,6 +24,9 @@ use webkit6::prelude::*;
 /// is scaled down, not up, below it.
 const RENDER_ZOOM: f64 = 3.0;
 
+/// How long after a batch fails to wait for WebKit to say its process died.
+const LOST_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// A label to typeset: its HTML and the width it wraps at, if it wraps.
 pub struct Label {
     pub key: u64,
@@ -42,8 +45,11 @@ pub struct Typesetter {
     view: webkit6::WebView,
     done: RefCell<HashMap<u64, Option<Rendered>>>,
     queued: RefCell<Vec<Label>>,
-    /// The keys of the document loaded now, in its order; empty while nothing is in flight.
-    batch: RefCell<Vec<u64>>,
+    /// The labels of the document loaded now, in its order; empty while nothing is in flight.
+    batch: RefCell<Vec<Label>>,
+    /// Whether WebKit's process died under a batch since one last came back; see
+    /// [`Typesetter::lost`].
+    lost: Cell<bool>,
     scheduled: Cell<bool>,
     on_ready: RefCell<Option<Box<dyn Fn()>>>,
 }
@@ -77,6 +83,7 @@ impl Typesetter {
             done: RefCell::new(HashMap::new()),
             queued: RefCell::new(Vec::new()),
             batch: RefCell::new(Vec::new()),
+            lost: Cell::new(false),
             scheduled: Cell::new(false),
             on_ready: RefCell::new(None),
         });
@@ -88,7 +95,36 @@ impl Typesetter {
                 glib::spawn_future_local(async move { t.collect().await });
             }
         });
+        let weak = Rc::downgrade(&typesetter);
         typesetter
+            .view
+            .connect_web_process_terminated(move |_, reason| {
+                tracing::warn!("the diagram formulas' web process ended: {reason:?}");
+                if let Some(t) = weak.upgrade()
+                    && reason != webkit6::WebProcessTerminationReason::TerminatedByApi
+                {
+                    t.lost();
+                }
+            });
+        typesetter
+    }
+
+    /// WebKit's process died under the view — a crash, or past its memory limit — and the batch
+    /// in flight will never come back, which left every formula after it as its source until the
+    /// diagram was opened again. It goes again on a new process, once until a batch comes back:
+    /// a batch that brings the process down again stays as source, and the rest go on.
+    fn lost(&self) {
+        let batch: Vec<Label> = self.batch.borrow_mut().drain(..).collect();
+        match self.lost.replace(true) {
+            false => {
+                self.queued.borrow_mut().splice(0..0, batch);
+            }
+            true => {
+                let mut done = self.done.borrow_mut();
+                done.extend(batch.iter().map(|l| (l.key, None)));
+            }
+        }
+        self.finish();
     }
 
     /// Whether anything is waiting to be typeset or in the middle of it.
@@ -109,7 +145,7 @@ impl Typesetter {
     /// Typeset `label` when WebKit is next free. Asking twice is asking once.
     pub fn ask(self: &Rc<Self>, label: Label) {
         let known = self.done.borrow().contains_key(&label.key)
-            || self.batch.borrow().contains(&label.key)
+            || self.batch.borrow().iter().any(|l| l.key == label.key)
             || self.queued.borrow().iter().any(|l| l.key == label.key);
         if known {
             return;
@@ -143,7 +179,7 @@ impl Typesetter {
                 label.html
             ));
         }
-        *self.batch.borrow_mut() = labels.iter().map(|l| l.key).collect();
+        *self.batch.borrow_mut() = labels;
         let page = format!(
             "<!doctype html><html><head><meta charset=\"utf-8\"><style>\
              html, body {{ margin: 0; padding: 0; background: transparent; }}\
@@ -158,7 +194,7 @@ impl Typesetter {
 
     /// The document is laid out: measure every label, take one picture, and cut it up.
     async fn collect(self: Rc<Self>) {
-        let keys = self.batch.borrow().clone();
+        let keys: Vec<u64> = self.batch.borrow().iter().map(|l| l.key).collect();
         if keys.is_empty() {
             return;
         }
@@ -174,10 +210,32 @@ impl Typesetter {
                 webkit6::SnapshotOptions::TRANSPARENT_BACKGROUND,
             )
             .await;
+        // The process died meanwhile and the batch went again: this one is not ours any more.
+        if !self
+            .batch
+            .borrow()
+            .iter()
+            .map(|l| l.key)
+            .eq(keys.iter().copied())
+        {
+            return;
+        }
         let (measured, texture) = match (measured, shot) {
             (Ok(m), Ok(t)) => (m, t),
             (m, t) => {
                 tracing::warn!("diagram formulas not typeset: {:?} {:?}", m.err(), t.err());
+                // A process that died fails these first and says so a moment later: that batch
+                // is `lost`'s to send again, not this one's to give up on.
+                glib::timeout_future(LOST_GRACE).await;
+                if !self
+                    .batch
+                    .borrow()
+                    .iter()
+                    .map(|l| l.key)
+                    .eq(keys.iter().copied())
+                {
+                    return;
+                }
                 for key in &keys {
                     self.done.borrow_mut().insert(*key, None);
                 }
@@ -199,6 +257,7 @@ impl Typesetter {
             });
             self.done.borrow_mut().insert(*key, rendered);
         }
+        self.lost.set(false);
         self.finish();
     }
 

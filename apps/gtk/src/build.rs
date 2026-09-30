@@ -281,6 +281,7 @@ pub fn build_window(
         statusbar,
         docs: RefCell::new(Vec::new()),
         awaiting: RefCell::new(HashMap::new()),
+        revealing: RefCell::new(HashMap::new()),
         placing: RefCell::new(HashMap::new()),
         launched: RefCell::new(Vec::new()),
         restore: RefCell::new(std::rc::Weak::new()),

@@ -3,6 +3,7 @@
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use std::collections::HashMap;
+use std::ops::Range;
 
 /// Tile edge in device pixels. 512 is 1 MiB of RGBA, small enough that a scroll never waits on
 /// one page-sized render and large enough that a screen is a handful of them.
@@ -51,6 +52,9 @@ pub struct Cache {
     tick: u64,
     /// How many times a page's renders have been declared out of date. See [`Cache::generation`].
     generation: u64,
+    /// Every tile that has landed, in order, until a drill takes the list.
+    #[cfg(feature = "bench")]
+    pub rendered: Vec<TileKey>,
 }
 
 impl Cache {
@@ -70,6 +74,8 @@ impl Cache {
     }
 
     pub fn insert(&mut self, key: TileKey, texture: gdk::MemoryTexture, bytes: usize) {
+        #[cfg(feature = "bench")]
+        self.rendered.push(key);
         self.tick += 1;
         self.bytes += bytes;
         // A re-render of a tile already held replaces it, so its bytes go with it: counting only
@@ -247,6 +253,34 @@ pub(super) fn tiles_across(pixels: i32) -> i32 {
     (pixels + TILE - 1) / TILE
 }
 
+/// A part of the content in logical pixels: its span across and its span down.
+pub(super) type Area = ((f64, f64), (f64, f64));
+
+/// The part of the content whose tiles are asked for, from the part on screen, at `sf` device
+/// pixels to a logical one: a viewport more above and below, where a reader goes next and where
+/// Page Down lands, and a tile more either side, a page wider than the view being panned across
+/// far less than it is read down.
+///
+/// Not every tile of every page near the screen, which is what was asked for until 2026-09-30: at
+/// 800 % an A4 page is 228 MB of tiles, two pages of it overflowed [`BUDGET`], and the cache
+/// dropped what it had just rendered to make room for the rest, for as long as the page was open.
+pub(super) fn reach((across, down): Area, sf: i32) -> Area {
+    let tile = f64::from(TILE) / f64::from(sf);
+    let tall = down.1 - down.0;
+    (
+        (across.0 - tile, across.1 + tile),
+        (down.0 - tall, down.1 + tall),
+    )
+}
+
+/// The tiles along one axis of a page `count` tiles long that cover `span` of the view, with the
+/// page starting at `origin`: logical pixels throughout, `sf` device pixels to one.
+pub(super) fn tiles_within(origin: f32, span: (f64, f64), sf: i32, count: i32) -> Range<i32> {
+    let tile = f64::from(TILE) / f64::from(sf);
+    let at = |x: f64| ((x - f64::from(origin)) / tile).clamp(0.0, f64::from(count));
+    at(span.0).floor() as i32..at(span.1).ceil() as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +290,30 @@ mod tests {
         assert_eq!(tiles_across(TILE), 1);
         assert_eq!(tiles_across(TILE + 1), 2);
         assert_eq!(tiles_across(0), 0);
+    }
+
+    /// A page four tiles long starting 100 px down the view, on a 2x screen, where a tile is 256
+    /// logical pixels: a span takes every tile it touches and none off the page.
+    #[test]
+    fn a_span_takes_the_tiles_it_touches() {
+        assert_eq!(tiles_within(100.0, (0.0, 50.0), 2, 4), 0..0);
+        assert_eq!(tiles_within(100.0, (300.0, 400.0), 2, 4), 0..2);
+        assert_eq!(tiles_within(100.0, (0.0, 5000.0), 2, 4), 0..4);
+        assert_eq!(tiles_within(100.0, (2000.0, 3000.0), 2, 4), 4..4);
+    }
+
+    /// What a view asks for has to fit in what eviction leaves, three quarters of the budget, or
+    /// it drops tiles still wanted and they are rendered again for ever. The largest view there
+    /// is today, 3840 x 2160 device pixels on a 4K screen at 2x, with a page break across it,
+    /// which cuts a row of tiles in two.
+    #[test]
+    fn a_4k_view_and_its_reach_fit_the_budget() {
+        let (across, down) = reach(((0.0, 1920.0), (0.0, 1080.0)), 2);
+        // Device pixels over a tile, and one more for a page's grid that is not the screen's.
+        let tiles = |(from, to): (f64, f64)| ((to - from) * 2.0 / f64::from(TILE)).ceil() + 1.0;
+        let wanted = tiles(across) * (tiles(down) + 1.0);
+        let bytes = wanted * f64::from(TILE * TILE * 4);
+        assert!(bytes <= (BUDGET / 4 * 3) as f64, "{wanted} tiles");
     }
 
     /// Ten entries of 10 bytes against a budget of 100: nothing goes until the eleventh, and then

@@ -310,6 +310,58 @@ pub fn prim(
     }
 }
 
+/// The page's grid of `step` page units over `area` (page units, the page on screen) as
+/// draw.io paints it (`mxGraphView.createSvgGrid`): a step doubled until it is 4 px on screen
+/// (`minGridSize`), every fourth line strong and the others at a fifth of it, in black on light
+/// paper and white on dark.
+pub fn grid(snapshot: &gtk::Snapshot, frame: &Frame, area: Rect, step: f64, paper: Color) {
+    const MIN_PX: f64 = 4.0;
+    const STRONG_EVERY: i64 = 4;
+    let mut step = step;
+    while step * frame.scale < MIN_PX {
+        step *= 2.0;
+    }
+    let light =
+        0.299 * f64::from(paper.r) + 0.587 * f64::from(paper.g) + 0.114 * f64::from(paper.b);
+    let ink = if light > 127.0 {
+        gdk::RGBA::BLACK
+    } else {
+        gdk::RGBA::WHITE
+    };
+    let (strong, faint) = (gsk::PathBuilder::new(), gsk::PathBuilder::new());
+    let lines = |from: f64, to: f64, line: &dyn Fn(f64, &gsk::PathBuilder)| {
+        let mut i = (from / step).ceil() as i64;
+        while i as f64 * step <= to {
+            let pick = if i % STRONG_EVERY == 0 {
+                &strong
+            } else {
+                &faint
+            };
+            line(i as f64 * step, pick);
+            i += 1;
+        }
+    };
+    let at = |p: Point| frame.to_content(p);
+    lines(area.x, area.right(), &|x, b| {
+        let (a, e) = (at(Point::new(x, area.y)), at(Point::new(x, area.bottom())));
+        b.move_to(a.x as f32, a.y as f32);
+        b.line_to(e.x as f32, e.y as f32);
+    });
+    lines(area.y, area.bottom(), &|y, b| {
+        let (a, e) = (at(Point::new(area.x, y)), at(Point::new(area.right(), y)));
+        b.move_to(a.x as f32, a.y as f32);
+        b.line_to(e.x as f32, e.y as f32);
+    });
+    let stroke = gsk::Stroke::new(1.0);
+    let colour = theme::at(ink, theme::GRID_ALPHA);
+    snapshot.append_stroke(
+        &faint.to_path(),
+        &stroke,
+        &theme::at(ink, theme::GRID_ALPHA / 5.0),
+    );
+    snapshot.append_stroke(&strong.to_path(), &stroke, &colour);
+}
+
 /// A path's commands in content coordinates.
 pub fn to_gsk(path: &[PathCmd], frame: &Frame) -> gsk::Path {
     let builder = gsk::PathBuilder::new();

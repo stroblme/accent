@@ -55,6 +55,22 @@ pub enum Edit {
         id: CellId,
         degrees: f64,
     },
+    /// Put the source end (else the target end) of edge `id` on `end`.
+    End {
+        id: CellId,
+        source: bool,
+        end: End,
+    },
+    /// Put the label of edge `id` at `at`, in page units.
+    LabelAt {
+        id: CellId,
+        at: Point,
+    },
+    /// Give edge `id` these waypoints, in page units.
+    Points {
+        id: CellId,
+        points: Vec<Point>,
+    },
 }
 
 glib::wrapper! {
@@ -193,6 +209,24 @@ impl DiagramView {
         self.relayout();
     }
 
+    /// The cell a secondary click at widget `(x, y)` is about: the selected one under it, else
+    /// the one a click there would select (`Sheet::pick`); `None` over empty page.
+    pub fn cell_at(&self, x: f64, y: f64) -> Option<CellId> {
+        let sheet = self.sheet()?;
+        let tolerance = TOLERANCE / self.scale();
+        let pick = sheet.pick(self.page_at(x, y), tolerance, &self.selection())?;
+        Some(pick.held.unwrap_or(pick.cell))
+    }
+
+    /// Where draw.io puts what is pasted without a place of its own (`Graph.getInsertPoint`): a
+    /// grid step in from the top-left of what is on screen, on the grid, never off the page's
+    /// top or left.
+    pub fn insert_point(&self, grid: f64) -> Point {
+        let at = self.page_at(0.0, 0.0);
+        let snap = |v: f64| (v.max(0.0) / grid + 1.0).round() * grid;
+        Point::new(snap(at.x), snap(at.y))
+    }
+
     /// A page rectangle in widget coordinates.
     pub fn to_widget(&self, r: &Rect) -> Rect {
         let c = self.imp().frame.get().rect(r);
@@ -296,6 +330,13 @@ impl DiagramView {
         }
         self.queue_draw();
     }
+}
+
+/// Where two rectangles overlap, if they do.
+fn intersection(a: &Rect, b: &Rect) -> Option<Rect> {
+    let (x, y) = (a.x.max(b.x), a.y.max(b.y));
+    let (r, bottom) = (a.right().min(b.right()), a.bottom().min(b.bottom()));
+    (r > x && bottom > y).then(|| Rect::new(x, y, r - x, bottom - y))
 }
 
 mod imp {
@@ -591,6 +632,20 @@ mod imp {
                 &[edge; 4],
             );
 
+            // Only what is on screen, a prim's box being known from when the page was shown.
+            let near = frame.to_page(Point::new(sx, sy));
+            let visible = Rect::new(near.x, near.y, w / frame.scale, h / frame.scale);
+            // The grid, while a move, a resize or a drawing is under way.
+            let placing = matches!(
+                self.drag.borrow().as_ref(),
+                Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Draw { .. })
+            );
+            if let Some(step) = sheet.grid.filter(|_| placing && self.moved.get())
+                && let Some(area) = intersection(&visible, &Rect::new(0.0, 0.0, pw, ph))
+            {
+                paint::grid(snapshot, &frame, area, step, paper);
+            }
+
             // The page as a drag under way would leave it, or as it is.
             obj.update_preview(&sheet);
             let preview = self.preview.borrow();
@@ -598,9 +653,6 @@ mod imp {
                 Some(Preview::Live(live)) => (&live.scene.prims, &live.bounds, &live.cache),
                 _ => (&sheet.scene.prims, &sheet.bounds, &self.cache),
             };
-            // Only what is on screen, a prim's box being known from when the page was shown.
-            let near = frame.to_page(Point::new(sx, sy));
-            let visible = Rect::new(near.x, near.y, w / frame.scale, h / frame.scale);
             let typesetter = self.typesetter.borrow();
             for (i, prim) in prims.iter().enumerate() {
                 if bounds[i].intersects(&visible) {

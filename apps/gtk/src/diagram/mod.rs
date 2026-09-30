@@ -35,16 +35,6 @@ const AUTOSAVE: std::time::Duration = std::time::Duration::from_secs(1);
 
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<DiagramTab>)>>>;
 
-/// Whether `text` is a draw.io diagram whatever its name says: an `.xml` file draw.io wrote.
-pub fn sniff(text: &str) -> bool {
-    let body = text.trim_start_matches('\u{feff}').trim_start();
-    let body = match body.strip_prefix("<?xml") {
-        Some(rest) => rest.split_once("?>").map_or("", |(_, r)| r).trim_start(),
-        None => body,
-    };
-    body.starts_with("<mxfile") || body.starts_with("<mxGraphModel")
-}
-
 pub struct DiagramTab {
     key: RefCell<String>,
     path: RefCell<PathBuf>,
@@ -74,6 +64,9 @@ pub struct DiagramTab {
     tool: Cell<Tool>,
     /// How the tools draw: the config's `[diagram]`, which the ring's outer orbit changes.
     options: Cell<DiagramConfig>,
+    /// The text last pasted or copied here and how many times it has been pasted since: each
+    /// paste of the same lands a grid step further (`Graph.lastPasteXml`, `pasteCounter`).
+    pasted: RefCell<(Option<String>, u32)>,
     /// What a note's tab keeps about its file, so the save path is the same one (`save.rs`).
     pub save: SaveState,
     save_pending: Cell<bool>,
@@ -153,6 +146,7 @@ pub fn open(
         selection: RefCell::new(Vec::new()),
         tool: Cell::new(Tool::Select),
         options: Cell::new(DiagramConfig::default()),
+        pasted: RefCell::new((None, 0)),
         save: SaveState::at(etag),
         save_pending: Cell::new(false),
         monitor: RefCell::new(None),
@@ -216,6 +210,7 @@ pub fn open(
         move |_| tab.emit(&tab.on_banner)
     ));
     tab.wire_keys();
+    tab.wire_menu();
     tab
 }
 
@@ -293,6 +288,16 @@ impl DiagramTab {
         }
         self.emit(&self.on_jump);
         self.show_page(i);
+    }
+
+    /// Show cell `id` of page `page`: the page as a jump, the cell selected and scrolled into
+    /// view. Where a search hit on a label lands.
+    pub fn reveal_cell(self: &Rc<Self>, page: usize, id: &str) {
+        self.goto_page(page);
+        self.select(vec![id.to_string()]);
+        if let Some(frame) = self.view.sheet().and_then(|sheet| sheet.frame_of(id)) {
+            self.view.reveal(&frame);
+        }
     }
 
     /// The next or previous page, as reading rather than a jump.
@@ -539,9 +544,7 @@ impl DiagramTab {
     fn apply(self: &Rc<Self>, edit: Edit) {
         match edit {
             Edit::Select(ids) => self.select(ids),
-            Edit::Move { ids, delta } => {
-                self.edit(|e, page| e.move_cells(page, &ids, delta.x, delta.y));
-            }
+            Edit::Move { ids, delta } => self.move_cells(&ids, delta.x, delta.y),
             Edit::Resize { id, rect } => self.edit(|e, page| e.resize(page, &id, rect)),
             Edit::Add { tool, rect } => {
                 let style = tool.style(&self.options.get());
@@ -584,6 +587,16 @@ impl DiagramTab {
                 self.select(vec![id]);
                 self.edit_label();
             }
+            Edit::Points { id, points } => self.edit(|e, page| e.set_points(page, &id, &points)),
+            Edit::LabelAt { id, at } => {
+                let shown = self.view.sheet().unwrap_or_default();
+                let route = shown.scene.route(&id).unwrap_or_default();
+                self.edit(|e, page| e.move_label(page, &id, route, at));
+            }
+            Edit::End { id, source, end } => self.edit(|e, page| {
+                let on = (end.0.as_deref(), end.1);
+                e.set_end(page, &id, source, on, end.2.as_ref())
+            }),
             Edit::Rotate { id, degrees } => {
                 let value = props::rotation(degrees);
                 self.edit(|e, page| e.set_style(page, &[id], "rotation", value.as_deref()));
@@ -591,7 +604,18 @@ impl DiagramTab {
         }
     }
 
+    /// Delete the selection as draw.io's Delete does: the edges on it stay, let go of it where
+    /// they are drawn.
     pub fn delete(self: &Rc<Self>) {
+        let ids = self.selection();
+        if !ids.is_empty() {
+            let shown = self.view.sheet().unwrap_or_default();
+            self.edit(|e, page| e.remove(page, &ids, &shown.scene));
+        }
+    }
+
+    /// Delete the selection with every edge on it, as draw.io's Delete All (`Ctrl+Delete`).
+    pub fn delete_all(self: &Rc<Self>) {
         let ids = self.selection();
         if !ids.is_empty() {
             self.edit(|e, page| e.delete(page, &ids));
@@ -611,12 +635,123 @@ impl DiagramTab {
         self.select(copies);
     }
 
+    /// Group the selection, and select the group (draw.io's Group, `Ctrl+G`).
+    pub fn group(self: &Rc<Self>) {
+        let ids = self.selection();
+        let mut group = None;
+        self.edit(|e, page| {
+            group = e.group(page, &ids)?;
+            Ok(())
+        });
+        if let Some(group) = group {
+            self.select(vec![group]);
+        }
+    }
+
+    /// Ungroup the selection, and select what it let go of.
+    pub fn ungroup(self: &Rc<Self>) {
+        let ids = self.selection();
+        let mut chosen = Vec::new();
+        self.edit(|e, page| {
+            chosen = e.ungroup(page, &ids)?;
+            Ok(())
+        });
+        if !chosen.is_empty() {
+            self.select(chosen);
+        }
+    }
+
+    /// Copy the selection as draw.io's Copy does: its XML, as text (`clipboard::copy`). The
+    /// next paste of it lands a grid step down and right, as draw.io's does.
+    pub fn copy(self: &Rc<Self>) {
+        let ids = self.selection();
+        if ids.is_empty() {
+            return;
+        }
+        let shown = self.view.sheet().unwrap_or_default();
+        let xml = {
+            let editor = self.editor.borrow();
+            let Ok(page) = editor.page(self.page_index.get()) else {
+                return;
+            };
+            accent_drawio::clipboard::copy(page, &ids, &shown.scene)
+        };
+        self.view.clipboard().set_text(&xml);
+        self.pasted.replace((Some(xml), 0));
+    }
+
+    /// Cut the selection as draw.io's Cut does: copied, then removed, the edges on it let go
+    /// of it rather than going with it. The next paste lands where the cells were.
+    pub fn cut(self: &Rc<Self>) {
+        let ids = self.selection();
+        if ids.is_empty() {
+            return;
+        }
+        self.copy();
+        self.pasted.replace((None, 0));
+        let shown = self.view.sheet().unwrap_or_default();
+        self.edit(|e, page| e.remove(page, &ids, &shown.scene));
+    }
+
+    /// Paste text read off the clipboard as draw.io's Paste does (`EditorUi.pasteXml`): a
+    /// diagram in it as its cells, anything else as a text cell at the top-left of the view;
+    /// pasting the same text again lands a grid step further each time. Selects what it
+    /// pasted.
+    pub fn paste_text(self: &Rc<Self>, text: &str) {
+        let grid = {
+            let editor = self.editor.borrow();
+            let page = editor.page(self.page_index.get());
+            page.map_or(10.0, |p| p.grid_size())
+        };
+        let steps = {
+            let mut pasted = self.pasted.borrow_mut();
+            match pasted.0.as_deref() == Some(text) {
+                true => pasted.1 += 1,
+                false => *pasted = (Some(text.to_string()), 0),
+            }
+            pasted.1
+        };
+        let d = f64::from(steps) * grid;
+        let mut chosen = Vec::new();
+        let pages = accent_drawio::clipboard::pages_in(text);
+        let count = self.page_count();
+        match pages.is_empty() {
+            false => self.edit(|e, page| {
+                chosen = e.paste(page, &pages, d, d)?;
+                Ok(())
+            }),
+            true => {
+                let at = self.view.insert_point(grid);
+                let (w, h) = text_size(&self.view, text);
+                let rect = accent_drawio::Rect::new(at.x + d, at.y + d, w + grid, h + grid);
+                let label = accent_drawio::clipboard::text_label(text);
+                self.edit(|e, page| {
+                    let style = "text;whiteSpace=wrap;html=1;";
+                    chosen = vec![e.add_vertex(page, None, rect, style, &label)?];
+                    Ok(())
+                });
+            }
+        }
+        if self.page_count() != count {
+            self.emit(&self.on_pages);
+        }
+        if !chosen.is_empty() {
+            self.select(chosen);
+        }
+    }
+
     /// Move the selection by `dx`, `dy` page units: the arrow keys.
     pub fn nudge(self: &Rc<Self>, dx: f64, dy: f64) {
         let ids = self.selection();
         if !ids.is_empty() {
-            self.edit(|e, page| e.move_cells(page, &ids, dx, dy));
+            self.move_cells(&ids, dx, dy);
         }
+    }
+
+    /// Move `ids` by `dx`, `dy`, an edge letting go of a shape where the canvas draws its end.
+    fn move_cells(self: &Rc<Self>, ids: &[CellId], dx: f64, dy: f64) {
+        let shown = self.view.sheet().unwrap_or_default();
+        self.edit(|e, page| e.move_cells(page, ids, dx, dy, &shown.scene));
     }
 
     pub fn reorder(self: &Rc<Self>, z: accent_drawio::ZOrder) {
@@ -982,6 +1117,82 @@ impl DiagramTab {
         let _ = self.view.activate_action(action, None);
     }
 
+    /// The canvas's own menu on a secondary click, as a PDF page has one: the cell under the
+    /// pointer is selected first unless it is already, and empty page lets the selection go, as
+    /// draw.io's `mxPopupMenuHandler` does.
+    fn wire_menu(self: &Rc<Self>) {
+        let secondary = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_SECONDARY)
+            .build();
+        secondary.connect_pressed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _, x, y| tab.menu_at(x, y)
+        ));
+        self.view.add_controller(secondary);
+    }
+
+    /// The menu under the pointer, at widget `(x, y)`: the clipboard and Duplicate and Delete,
+    /// Group or Ungroup where they apply, the order, and Edit Label for one cell; over nothing
+    /// selected, Paste alone. Window actions, so the palette lists them and they can be rebound.
+    fn menu_at(self: &Rc<Self>, x: f64, y: f64) {
+        match self.view.cell_at(x, y) {
+            Some(cell) if !self.selection.borrow().contains(&cell) => self.select(vec![cell]),
+            Some(_) => {}
+            None => self.select(Vec::new()),
+        }
+        let ids = self.selection();
+        let menu = gio::Menu::new();
+        let section = |actions: &[&str]| {
+            let part = gio::Menu::new();
+            for action in actions {
+                part.append(Some(crate::actions::label_of(action)), Some(action));
+            }
+            if part.n_items() > 0 {
+                menu.append_section(None, &part);
+            }
+        };
+        if ids.is_empty() {
+            section(&["win.diagram-paste"]);
+        } else {
+            section(&[
+                "win.diagram-cut",
+                "win.diagram-copy",
+                "win.diagram-paste",
+                "win.diagram-duplicate",
+                "win.diagram-delete",
+            ]);
+            let groups = {
+                let editor = self.editor.borrow();
+                let page = editor.page(self.page_index.get());
+                let group =
+                    |id: &CellId| page.as_ref().is_ok_and(|p| p.children(id).next().is_some());
+                ids.iter().any(group)
+            };
+            let mut grouping = Vec::new();
+            if ids.len() > 1 {
+                grouping.push("win.diagram-group");
+            }
+            if groups {
+                grouping.push("win.diagram-ungroup");
+            }
+            section(&grouping);
+            section(&["win.diagram-to-front", "win.diagram-to-back"]);
+            if ids.len() == 1 {
+                section(&["win.diagram-edit-label"]);
+            }
+        }
+        // Parented to the tab's box, not the canvas, which allocates itself: a popover on it
+        // would never be presented again (DESIGN.md, States).
+        let Some(host) = self.page.child().downcast::<gtk::Box>().ok() else {
+            return;
+        };
+        let at = gtk::graphene::Point::new(x as f32, y as f32);
+        let at = self.view.compute_point(&host, &at).unwrap_or(at);
+        let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+        crate::widgets::popup_menu(&host, &menu, Some(anchor));
+    }
+
     /// The canvas's keys. Undo, Select All and Delete belong to whatever has the keyboard, so
     /// they are the canvas's own and fire the window's actions rather than being accelerators
     /// (the PDF doctrine, `actions.rs`).
@@ -1002,6 +1213,12 @@ impl DiagramTab {
                     gdk::Key::z if ctrl => tab.run("win.diagram-undo"),
                     gdk::Key::y if ctrl => tab.run("win.diagram-redo"),
                     gdk::Key::a if ctrl => tab.run("win.diagram-select-all"),
+                    gdk::Key::c if ctrl => tab.run("win.diagram-copy"),
+                    gdk::Key::x if ctrl => tab.run("win.diagram-cut"),
+                    gdk::Key::v if ctrl => tab.run("win.diagram-paste"),
+                    gdk::Key::Delete | gdk::Key::BackSpace if ctrl => {
+                        tab.run("win.diagram-delete-all")
+                    }
                     gdk::Key::Delete | gdk::Key::BackSpace => tab.run("win.diagram-delete"),
                     gdk::Key::Return | gdk::Key::KP_Enter if !ctrl => {
                         tab.run("win.diagram-edit-label")
@@ -1135,6 +1352,26 @@ impl DiagramTab {
     }
 }
 
+/// The size `text` takes as a pasted text cell's label, as Pango lays it out in draw.io's
+/// default font, wrapped at draw.io's widest pasted text (`EditorUi.maxTextWidth`), a little
+/// room around it (`Graph.updateCellSize`).
+fn text_size(widget: &impl IsA<gtk::Widget>, text: &str) -> (f64, f64) {
+    /// Pasted text wider than this wraps (`EditorUi.maxTextWidth`).
+    const WIDEST: i32 = 520;
+    /// draw.io's `spacing` on each side of a label.
+    const SPACING: f64 = 2.0;
+    let layout = widget.create_pango_layout(Some(text));
+    let mut font = gtk::pango::FontDescription::from_string("Helvetica");
+    font.set_absolute_size(12.0 * f64::from(gtk::pango::SCALE));
+    layout.set_font_description(Some(&font));
+    if layout.pixel_size().0 > WIDEST {
+        layout.set_width(WIDEST * gtk::pango::SCALE);
+        layout.set_wrap(gtk::pango::WrapMode::WordChar);
+    }
+    let (w, h) = layout.pixel_size();
+    (f64::from(w) + 2.0 * SPACING, f64::from(h) + 2.0 * SPACING)
+}
+
 impl Saves for DiagramTab {
     fn save_state(&self) -> &SaveState {
         &self.save
@@ -1164,18 +1401,5 @@ fn shown(index: usize, pages: usize) -> accent_drawio::Context {
             unix_ms: now.timestamp_millis(),
             offset_minutes: now.offset().local_minus_utc() / 60,
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_diagram_is_known_by_its_first_element() {
-        assert!(super::sniff("<mxfile host=\"x\">"));
-        assert!(super::sniff(
-            "\u{feff}<?xml version=\"1.0\"?>\n  <mxGraphModel>"
-        ));
-        assert!(!super::sniff("<?xml version=\"1.0\"?><svg/>"));
-        assert!(!super::sniff("mxfile"));
     }
 }

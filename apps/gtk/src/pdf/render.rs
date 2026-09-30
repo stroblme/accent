@@ -393,9 +393,9 @@ fn render_loop(
                         drop(ack);
                         continue;
                     }
-                    // ponytail: `save_to_bytes` rewrites the whole file under the pdfium lock, so
-                    // a very large PDF stops the tiles for as long as that takes. Saving
-                    // incrementally is the upgrade.
+                    // ponytail: the whole file is rewritten, so a very large PDF stops this
+                    // document's tiles for as long as that takes; `PdfDoc::save` says why
+                    // pdfium's incremental save is no way out.
                     match doc.save().map_err(|e| e.to_string()).and_then(|bytes| {
                         accent_core::fs::write_bytes(&path, &bytes, etag).map_err(|e| e.to_string())
                     }) {
