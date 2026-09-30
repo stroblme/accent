@@ -525,6 +525,22 @@ impl PdfTab {
         (self.view.unrendered(), self.thumbs.unrendered())
     }
 
+    /// How many tiles the reading view last wanted, how many on screen it last showed other than
+    /// sharp, and every tile that has landed since the last ask. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn tiles(&self) -> (usize, usize, Vec<super::TileKey>) {
+        let rendered = std::mem::take(&mut self.view.cache().borrow_mut().rendered);
+        (self.view.unrendered().len(), self.view.unsharp(), rendered)
+    }
+
+    /// Scroll the reading view down by `views` of its own height. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn scroll_by(&self, views: f64) {
+        if let Some(v) = gtk::prelude::ScrollableExt::vadjustment(&self.view) {
+            v.set_value(v.value() + views * v.page_size());
+        }
+    }
+
     /// Scroll the reading view and the strip to these places, in pages from the top: a reader
     /// scrolling one while the other still moves. Only drills ask.
     #[cfg(feature = "bench")]

@@ -58,9 +58,9 @@ use panes::{
     bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
-    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_dropped,
-    bench_pdf_failed, bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale,
-    bench_pdf_strip,
+    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_deep,
+    bench_pdf_dropped, bench_pdf_failed, bench_pdf_pages, bench_pdf_renaming, bench_pdf_render,
+    bench_pdf_stale, bench_pdf_strip,
 };
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -226,7 +226,11 @@ use tags::bench_tags;
 /// `=broken:<rel_path or absolute path>` cuts the PDF in half in place, opens it and writes it
 /// back slowly, then breaks and mends it again under the open tab, printing the waiting page or
 /// the pages after each step and how many opens that cost (`pdf::bench_pdf_broken`); it writes
-/// into the file, so point it at a scratch copy.
+/// into the file, so point it at a scratch copy. `=deep:<rel_path>[,<percent>]` zooms to 800 % or
+/// `percent` across the break between the first two pages and prints, each second for 20 s, the
+/// tiles wanted, those on screen not yet sharp, and those that landed and landed again; then how
+/// many wheel notches and Page Downs at that zoom arrived on a tile not yet sharp
+/// (`pdf::bench_pdf_deep`); point it at a text document of a few pages.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -567,6 +571,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(arg) = rel.strip_prefix("broken:") {
                 return bench_pdf_broken(&app, arg);
+            }
+            if let Some(arg) = rel.strip_prefix("deep:") {
+                return bench_pdf_deep(&app, arg);
             }
             if let Some(rel) = rel.strip_prefix("failed:") {
                 return bench_pdf_failed(&app, rel);
