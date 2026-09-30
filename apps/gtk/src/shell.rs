@@ -82,6 +82,10 @@ pub enum Loose {
     /// Where every file from outside the open vaults opens: `accent <file>`, or the file
     /// manager's Open With.
     Documents,
+    /// One built by Open in New Window or Move to New Window for the file it names, as many as
+    /// were asked for. Never the documents window a launch looks for, so a file handed over by
+    /// the file manager does not join one.
+    Apart,
 }
 
 /// What Reload Window opens again: the key the window was on, the session it had, which only a
@@ -812,40 +816,52 @@ impl Shell {
         let Some((from, doc)) = self.owner_of(page) else {
             return tracing::debug!("a tab in no window's bookkeeping; left where it is");
         };
-        // A shell is a running process, a diff is a view of two texts and a remote vault's file is
-        // on its host: none is a file the other window could open, so the drag goes back where it
-        // came from.
-        let key = doc.key();
-        if doc.is_transient() || from.on_host(&key) {
-            return return_page(into, &from, page, "This tab cannot move between windows.");
-        }
-        let path = match doc::is_loose_key(&key) {
-            true => PathBuf::from(&key),
-            false => from.root().join(&key),
+        let path = match written_out(&from, &doc) {
+            Ok(path) => path,
+            Err(why) => return return_page(into, &from, page, &why),
         };
-        if let Some(tab) = doc.tab().filter(|tab| tab.save.modified.get())
-            && let Err(e) = from.flush_tab(tab)
-        {
-            // Refused rather than dropped: a drag must never be the thing that loses an edit.
-            return return_page(into, &from, page, &format!("Save failed: {e}"));
-        }
-        // A diagram the same way, a label still being typed going into its cell first.
-        if let Doc::Diagram(d) = &doc {
-            d.finish_label();
-            if let Err(e) = from.flush_diagram(d) {
-                return return_page(into, &from, page, &format!("Save failed: {e}"));
-            }
-        }
         // Opened before the old page goes, so a pane that the drop has just split off never
-        // stands empty and closes itself out from under the note arriving in it. A pinned tab is
-        // pinned there too, as one moved into another pane is.
-        let how = match from.is_pinned(page) {
-            true => Opened::Pinned,
-            false => Opened::Kept,
-        };
-        into.open_as(&into.key_for(&path), how);
+        // stands empty and closes itself out from under the note arriving in it.
+        into.open_as(&into.key_for(&path), kept_as(&from, page));
         from.forget_page(page);
         into.close_page(page);
+    }
+
+    /// Open in New Window: `path` in a window of its own with no vault, built for it whether or
+    /// not another window shows the file already (DESIGN.md, Window without a vault).
+    pub fn open_apart(
+        self: &Rc<Self>,
+        gtk_app: &adw::Application,
+        path: &Path,
+        how: Opened,
+    ) -> Option<Rc<App>> {
+        let app = self.add_window(gtk_app, WindowKey::Loose(Loose::Apart), None)?;
+        app.window.present();
+        app.open_as(&app.key_for(path), how);
+        Some(app)
+    }
+
+    /// Move to New Window: `page` leaves `from` for a window of its own with no vault, written out
+    /// first as a tab dragged into another window is ([`Self::adopt_page`]).
+    pub fn move_apart(
+        self: &Rc<Self>,
+        gtk_app: &adw::Application,
+        from: &Rc<App>,
+        page: &adw::TabPage,
+    ) {
+        let Some(doc) = from.doc_for_page(page) else {
+            return;
+        };
+        let path = match written_out(from, &doc) {
+            Ok(path) => path,
+            Err(why) => return from.toast(&why),
+        };
+        if self
+            .open_apart(gtk_app, &path, kept_as(from, page))
+            .is_some()
+        {
+            from.close_page(page);
+        }
     }
 
     /// The open window remembered by `key`, a vault's key.
@@ -1006,6 +1022,48 @@ fn shell_dir(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) 
             eprintln!("cannot open {}: {e}", path.display());
             None
         }
+    }
+}
+
+/// Whether another window could open what `doc` holds in `app`. A shell is a running process, a
+/// diff is a view of two texts and a remote vault's file is on its host: none is a file here.
+pub fn movable(app: &App, doc: &Doc) -> bool {
+    !doc.is_transient() && !app.on_host(&doc.key())
+}
+
+/// The file `doc` holds in `from`, written out for another window to open: a tab moving between
+/// windows goes there as its file, so an edit still in its buffer would be left behind. `Err`
+/// says why it cannot move, and then nothing has changed — a move must never be the thing that
+/// loses an edit.
+fn written_out(from: &Rc<App>, doc: &Doc) -> Result<PathBuf, String> {
+    let key = doc.key();
+    if !movable(from, doc) {
+        return Err("This tab cannot move between windows.".to_string());
+    }
+    if let Some(tab) = doc.tab().filter(|tab| tab.save.modified.get())
+        && let Err(e) = from.flush_tab(tab)
+    {
+        return Err(format!("Save failed: {e}"));
+    }
+    // A diagram the same way, a label still being typed going into its cell first.
+    if let Doc::Diagram(d) = doc {
+        d.finish_label();
+        if let Err(e) = from.flush_diagram(d) {
+            return Err(format!("Save failed: {e}"));
+        }
+    }
+    Ok(match doc::is_loose_key(&key) {
+        true => PathBuf::from(&key),
+        false => from.root().join(&key),
+    })
+}
+
+/// How a tab moved to another window opens there: a pinned tab pinned there too, as one moved
+/// into another pane is.
+fn kept_as(from: &App, page: &adw::TabPage) -> Opened {
+    match from.is_pinned(page) {
+        true => Opened::Pinned,
+        false => Opened::Kept,
     }
 }
 

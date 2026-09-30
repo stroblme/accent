@@ -223,6 +223,24 @@ impl Tree {
         self.invalidate(&dirs);
     }
 
+    /// Reload on a folder's menu: list `dir` and every folder open under it again, and say
+    /// whether the index holds `dir`. Only a folder it holds is listed out of the index; one it
+    /// does not walk is read off the disk, and so is all that is under it.
+    pub fn reload(&self, dir: &str) -> bool {
+        let dirs: Vec<String> = self
+            .cache
+            .borrow()
+            .keys()
+            .filter(|open| crate::fileops::trashed_with(dir, open))
+            .cloned()
+            .collect();
+        self.invalidate(&dirs);
+        find_row(&self.model, dir)
+            .and_then(|row| row.item())
+            .and_then(|item| decode(&item))
+            .is_some_and(|row| row.indexed)
+    }
+
     /// Refill only these directories' cached child models ("" is the root). A background reindex
     /// touches a handful of directories, not the whole tree.
     pub fn invalidate(&self, dirs: &[String]) {
