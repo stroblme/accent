@@ -124,6 +124,7 @@ impl App {
             let config = self.config.borrow();
             tab.set_spellcheck(config.spellcheck);
             tab.set_font(config.editor_font.as_deref());
+            tab.set_options(config.diagram);
         }
         let page = tab.page.clone();
         self.mark_loose(&page, key);
@@ -171,6 +172,11 @@ impl App {
         tab.connect_autosave(on(|app, tab| app.save_diagram(tab, false)));
         tab.connect_image(on(|app, tab| app.pick_image(tab)));
         tab.connect_banner(on(|app, tab| app.resolve_diagram(tab)));
+        // Into the config, to every open diagram, and onto disk a second later, as a PDF's picks.
+        tab.connect_options(on(|app, tab| {
+            app.config.borrow_mut().diagram = tab.options();
+            app.config_changed();
+        }));
     }
 
     /// The Properties pane follows the tab in front: a diagram's own, or none.

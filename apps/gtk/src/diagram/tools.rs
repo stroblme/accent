@@ -5,6 +5,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use accent_core::config::{DiagramConfig, Route};
 use accent_drawio::presets::{self, EdgeKind};
 use adw::prelude::*;
 
@@ -44,14 +45,15 @@ impl Tool {
         matches!(self, Tool::Rect | Tool::Ellipse | Tool::Text)
     }
 
-    /// The style a new cell made with it gets.
-    pub fn style(self, options: &Options) -> String {
+    /// The style a new cell made with it gets, drawn as the ring's outer orbit says (kept in the
+    /// config's `[diagram]`, so every diagram draws alike).
+    pub fn style(self, options: &DiagramConfig) -> String {
         match self {
             Tool::Rect if options.rounded => presets::ROUNDED.to_string(),
             Tool::Rect => presets::RECT.to_string(),
             Tool::Ellipse => presets::ELLIPSE.to_string(),
             Tool::Text => presets::TEXT.to_string(),
-            Tool::Connector => presets::edge(options.edge, options.arrow),
+            Tool::Connector => presets::edge(edge_kind(options.route), options.arrow),
             Tool::Select | Tool::Image => String::new(),
         }
     }
@@ -61,24 +63,6 @@ impl Tool {
         match self {
             Tool::Text => "Text",
             _ => "",
-        }
-    }
-}
-
-/// How the tools draw, as the ring's outer orbit sets it: per window, like the ring itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Options {
-    pub rounded: bool,
-    pub edge: EdgeKind,
-    pub arrow: bool,
-}
-
-impl Default for Options {
-    fn default() -> Options {
-        Options {
-            rounded: false,
-            edge: EdgeKind::Orthogonal,
-            arrow: true,
         }
     }
 }
@@ -102,25 +86,33 @@ impl crate::ring::Tool for Tool {
     }
 }
 
+fn edge_kind(route: Route) -> EdgeKind {
+    match route {
+        Route::Straight => EdgeKind::Straight,
+        Route::Orthogonal => EdgeKind::Orthogonal,
+        Route::Curved => EdgeKind::Curved,
+    }
+}
+
 /// The glyphs on the outer orbit: what a rectangle's corners and a connector's line will be.
 #[derive(Debug, Clone, Copy)]
 enum Glyph {
     Square,
     Rounded,
-    Line(EdgeKind),
+    Line(Route),
     Arrow,
 }
 
-type OnOptions = RefCell<Option<Box<dyn Fn(Options)>>>;
+type OnOptions = RefCell<Option<Box<dyn Fn(DiagramConfig)>>>;
 
 /// The generic ring with a diagram's options on its outer orbit: plain or rounded corners while
 /// the rectangle is in hand, and the line's route and its arrow while the connector is.
 pub struct DiagramRing {
     ring: Rc<Ring<Tool>>,
     corners: Vec<(bool, gtk::ToggleButton)>,
-    lines: Vec<(EdgeKind, gtk::ToggleButton)>,
+    lines: Vec<(Route, gtk::ToggleButton)>,
     arrow: gtk::ToggleButton,
-    options: Cell<Options>,
+    options: Cell<DiagramConfig>,
     on_options: OnOptions,
 }
 
@@ -139,16 +131,16 @@ impl DiagramRing {
         ];
         let lines = vec![
             (
-                EdgeKind::Straight,
-                option(0, Glyph::Line(EdgeKind::Straight), "Straight"),
+                Route::Straight,
+                option(0, Glyph::Line(Route::Straight), "Straight"),
             ),
             (
-                EdgeKind::Orthogonal,
-                option(1, Glyph::Line(EdgeKind::Orthogonal), "Orthogonal"),
+                Route::Orthogonal,
+                option(1, Glyph::Line(Route::Orthogonal), "Orthogonal"),
             ),
             (
-                EdgeKind::Curved,
-                option(2, Glyph::Line(EdgeKind::Curved), "Curved"),
+                Route::Curved,
+                option(2, Glyph::Line(Route::Curved), "Curved"),
             ),
         ];
         let arrow = option(3, Glyph::Arrow, "Arrow at the End");
@@ -157,26 +149,26 @@ impl DiagramRing {
             corners,
             lines,
             arrow,
-            options: Cell::new(Options::default()),
+            options: Cell::new(DiagramConfig::default()),
             on_options: RefCell::new(None),
         });
         for (rounded, button) in &diagram.corners {
             let (rounded, weak) = (*rounded, Rc::downgrade(&diagram));
             button.connect_clicked(move |_| {
                 if let Some(d) = weak.upgrade() {
-                    d.choose(Options {
+                    d.choose(DiagramConfig {
                         rounded,
                         ..d.options.get()
                     });
                 }
             });
         }
-        for (edge, button) in &diagram.lines {
-            let (edge, weak) = (*edge, Rc::downgrade(&diagram));
+        for (route, button) in &diagram.lines {
+            let (route, weak) = (*route, Rc::downgrade(&diagram));
             button.connect_clicked(move |_| {
                 if let Some(d) = weak.upgrade() {
-                    d.choose(Options {
-                        edge,
+                    d.choose(DiagramConfig {
+                        route,
                         ..d.options.get()
                     });
                 }
@@ -186,7 +178,7 @@ impl DiagramRing {
         diagram.arrow.connect_clicked(move |_| {
             if let Some(d) = weak.upgrade() {
                 let options = d.options.get();
-                d.choose(Options {
+                d.choose(DiagramConfig {
                     arrow: !options.arrow,
                     ..options
                 });
@@ -212,16 +204,16 @@ impl DiagramRing {
         self.sync();
     }
 
-    pub fn set_options(&self, options: Options) {
+    pub fn set_options(&self, options: DiagramConfig) {
         self.options.set(options);
         self.sync();
     }
 
-    pub fn connect_options(&self, f: impl Fn(Options) + 'static) {
+    pub fn connect_options(&self, f: impl Fn(DiagramConfig) + 'static) {
         *self.on_options.borrow_mut() = Some(Box::new(f));
     }
 
-    fn choose(&self, options: Options) {
+    fn choose(&self, options: DiagramConfig) {
         self.set_options(options);
         if let Some(f) = self.on_options.borrow().as_ref() {
             f(options);
@@ -241,8 +233,8 @@ impl DiagramRing {
         for (rounded, button) in &self.corners {
             check(button, tool == Tool::Rect, *rounded == options.rounded);
         }
-        for (edge, button) in &self.lines {
-            check(button, tool == Tool::Connector, *edge == options.edge);
+        for (route, button) in &self.lines {
+            check(button, tool == Tool::Connector, *route == options.route);
         }
         check(&self.arrow, tool == Tool::Connector, options.arrow);
     }
@@ -286,17 +278,17 @@ fn glyph_area(glyph: Glyph) -> gtk::DrawingArea {
                 );
                 cr.close_path();
             }
-            Glyph::Line(EdgeKind::Straight) => {
+            Glyph::Line(Route::Straight) => {
                 cr.move_to(l, b);
                 cr.line_to(r, t);
             }
-            Glyph::Line(EdgeKind::Orthogonal) => {
+            Glyph::Line(Route::Orthogonal) => {
                 cr.move_to(l, b);
                 cr.line_to(w / 2.0, b);
                 cr.line_to(w / 2.0, t);
                 cr.line_to(r, t);
             }
-            Glyph::Line(EdgeKind::Curved) => {
+            Glyph::Line(Route::Curved) => {
                 cr.move_to(l, b);
                 cr.curve_to(w / 2.0, b, w / 2.0, t, r, t);
             }
@@ -323,7 +315,7 @@ mod tests {
 
     #[test]
     fn each_tool_makes_draw_io_s_own_cell() {
-        let mut options = Options::default();
+        let mut options = DiagramConfig::default();
         assert_eq!(Tool::Rect.style(&options), presets::RECT);
         options.rounded = true;
         assert!(Tool::Rect.style(&options).contains("rounded=1"));
@@ -333,7 +325,7 @@ mod tests {
                 .contains("orthogonalEdgeStyle")
         );
         options.arrow = false;
-        options.edge = EdgeKind::Curved;
+        options.route = Route::Curved;
         let edge = Tool::Connector.style(&options);
         assert!(edge.contains("curved=1") && edge.contains("endArrow=none"));
         assert!(Tool::Text.draws_box() && !Tool::Connector.draws_box());

@@ -42,8 +42,13 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 /// there is none) and prints each step; `=shot:<rel>:<dir>` paints every page of it into
 /// `<dir>/page-N.png` and prints how long each took; `=hold:<rel>[:<tool>]` prints where the
 /// sample's shapes are on the screen and stays up for ten seconds, for an XTEST pointer to work
-/// on (`build-aux/xtest.py`), then prints what the model holds.
+/// on (`build-aux/xtest.py`), then prints what the model holds; `=preview:<rel>` times the
+/// frames of a move on the page of `rel` with the most cells: none moving, the shape with the
+/// most edges on it moving live, and everything on the page moving as a box.
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
+    if let Some(rel) = arg.strip_prefix("preview:") {
+        return preview(app, rel);
+    }
     if let Some(rest) = arg.strip_prefix("hold:") {
         let (rel, tool) = rest.split_once(':').unwrap_or((rest, ""));
         return hold(app, rel, tool);
@@ -350,5 +355,82 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                 bench_quit(&app);
             });
         });
+    });
+}
+
+fn preview(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+        let Some(tab) = app.active_diagram() else {
+            println!("bench diagram no_tab");
+            return bench_quit(&app);
+        };
+        let file = tab.file();
+        let Some((index, page)) = file
+            .pages
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, p)| p.cells.len())
+        else {
+            return bench_quit(&app);
+        };
+        tab.show_page(index);
+        bench_pump();
+        let layers: Vec<&str> = page.layers().iter().map(|c| c.id.as_str()).collect();
+        let top: Vec<String> = page
+            .cells
+            .iter()
+            .filter(|c| c.parent.as_deref().is_some_and(|p| layers.contains(&p)))
+            .map(|c| c.id.clone())
+            .collect();
+        let edges_on = |id: &str| {
+            let on = |end: &Option<String>| end.as_deref() == Some(id);
+            page.cells
+                .iter()
+                .filter(|c| on(&c.source) || on(&c.target))
+                .count()
+        };
+        let busiest = top
+            .iter()
+            .filter(|id| page.cell(id).is_some_and(|c| c.vertex))
+            .max_by_key(|id| edges_on(id))
+            .cloned()
+            .unwrap_or_default();
+        // Each case's frames: the first, then the median and the worst of the rest.
+        let run = |name: &str, ids: &[String], moving: bool| {
+            let frames: Vec<(f64, f64)> = (1..=30)
+                .map(|i| {
+                    let delta = moving
+                        .then(|| accent_drawio::Point::new(f64::from(i) * 7.0, f64::from(i) * 3.0));
+                    tab.bench_move(ids, delta)
+                })
+                .collect();
+            tab.bench_move(ids, None);
+            let mut rest: Vec<f64> = frames[1..].iter().map(|f| f.0 + f.1).collect();
+            rest.sort_by(f64::total_cmp);
+            println!(
+                "bench diagram preview {name} moved={} first_ms={:.2} (update {:.2}) median_ms={:.2} max_ms={:.2} median_update_ms={:.2}",
+                ids.len(),
+                frames[0].0 + frames[0].1,
+                frames[0].0,
+                rest[rest.len() / 2],
+                rest[rest.len() - 1],
+                {
+                    let mut u: Vec<f64> = frames[1..].iter().map(|f| f.0).collect();
+                    u.sort_by(f64::total_cmp);
+                    u[u.len() / 2]
+                }
+            );
+        };
+        println!(
+            "bench diagram preview page={index} cells={} busiest={busiest} edges={}",
+            page.cells.len(),
+            edges_on(&busiest)
+        );
+        run("still", &[], false);
+        run("live", std::slice::from_ref(&busiest), true);
+        run("boxed", &top, true);
+        bench_quit(&app);
     });
 }

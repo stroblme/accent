@@ -57,7 +57,7 @@ impl Tab {
         let (bx, by) =
             self.view
                 .window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-        let Some(iter) = self.view.iter_at_location(bx, by) else {
+        let Some(iter) = crate::fold::iter_at_location(&self.view, bx, by) else {
             return self.clear_follow();
         };
         // A link is already known: the analysis stored its range in characters for exactly this.

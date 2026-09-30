@@ -359,6 +359,15 @@ impl App {
             self,
             move |label| app.pane().find.set_matches_text(label)
         ));
+        preview.connect_lost(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move || {
+                if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
+                    app.render(&tab);
+                }
+            }
+        ));
         *self.preview.borrow_mut() = Some(preview);
     }
 

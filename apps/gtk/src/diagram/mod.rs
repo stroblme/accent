@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use accent_core::config::DiagramPlace;
+use accent_core::config::{DiagramConfig, DiagramPlace};
 use accent_core::fs::Etag;
 use accent_drawio::{CellId, Editor, File, Point};
 use adw::prelude::*;
@@ -27,7 +27,7 @@ use gtk::{gdk, gio, glib};
 
 use crate::editor::{SaveState, Saves};
 use geometry::{Sheet, Zoom};
-pub use tools::{Options, Tool};
+pub use tools::Tool;
 use view::{DiagramView, Edit};
 
 /// How long after the last edit the file is written: a note's autosave.
@@ -72,7 +72,8 @@ pub struct DiagramTab {
     page_index: Cell<usize>,
     selection: RefCell<Vec<CellId>>,
     tool: Cell<Tool>,
-    options: Cell<Options>,
+    /// How the tools draw: the config's `[diagram]`, which the ring's outer orbit changes.
+    options: Cell<DiagramConfig>,
     /// What a note's tab keeps about its file, so the save path is the same one (`save.rs`).
     pub save: SaveState,
     save_pending: Cell<bool>,
@@ -90,6 +91,7 @@ pub struct DiagramTab {
     on_autosave: Hook,
     on_image: Hook,
     on_banner: Hook,
+    on_options: Hook,
 }
 
 /// A new tab of `tabs` showing `file` as it was read, at its etag, where the session last left
@@ -111,6 +113,8 @@ pub fn open(
         .build();
     let overlay = gtk::Overlay::builder().child(&scroller).build();
     let ring = tools::DiagramRing::new();
+    // Select is in hand from the start, and its button says so.
+    ring.set_tool(Tool::Select);
     overlay.add_overlay(ring.widget());
     let banner = adw::Banner::builder()
         .title("This diagram changed on disk")
@@ -148,7 +152,7 @@ pub fn open(
         page_index: Cell::new(place.page.min(pages.saturating_sub(1))),
         selection: RefCell::new(Vec::new()),
         tool: Cell::new(Tool::Select),
-        options: Cell::new(Options::default()),
+        options: Cell::new(DiagramConfig::default()),
         save: SaveState::at(etag),
         save_pending: Cell::new(false),
         monitor: RefCell::new(None),
@@ -161,6 +165,7 @@ pub fn open(
         on_autosave: RefCell::new(None),
         on_image: RefCell::new(None),
         on_banner: RefCell::new(None),
+        on_options: RefCell::new(None),
     });
     if has_math {
         tab.view.set_typesetter(math::Typesetter::new(&tab.overlay));
@@ -200,7 +205,10 @@ pub fn open(
     tab.ring.connect_options(glib::clone!(
         #[weak]
         tab,
-        move |options| tab.options.set(options)
+        move |options| {
+            tab.options.set(options);
+            tab.emit(&tab.on_options);
+        }
     ));
     tab.banner.connect_button_clicked(glib::clone!(
         #[weak]
@@ -322,6 +330,16 @@ impl DiagramTab {
         self.tool.set(tool);
         self.view.set_tool(tool);
         self.ring.set_tool(tool);
+    }
+
+    pub fn options(&self) -> DiagramConfig {
+        self.options.get()
+    }
+
+    /// Draw with `options`: the config's, on opening and whenever a diagram's ring changed them.
+    pub fn set_options(&self, options: DiagramConfig) {
+        self.options.set(options);
+        self.ring.set_options(options);
     }
 
     pub fn ring_shown(&self) -> bool {
@@ -500,8 +518,9 @@ impl DiagramTab {
     fn refresh(&self) {
         let sheet = {
             let editor = self.editor.borrow();
-            match editor.page(self.page_index.get()) {
-                Ok(page) => Sheet::of(page),
+            let index = self.page_index.get();
+            match editor.page(index) {
+                Ok(page) => Sheet::of(page, &shown(index, editor.file().pages().len())),
                 Err(_) => Sheet::default(),
             }
         };
@@ -566,8 +585,7 @@ impl DiagramTab {
                 self.edit_label();
             }
             Edit::Rotate { id, degrees } => {
-                // No turn is no key, as a shape draw.io never turned has none.
-                let value = (degrees != 0.0).then(|| props::number(degrees));
+                let value = props::rotation(degrees);
                 self.edit(|e, page| e.set_style(page, &[id], "rotation", value.as_deref()));
             }
         }
@@ -788,6 +806,12 @@ impl DiagramTab {
     #[cfg(feature = "bench")]
     pub fn scale(&self) -> f64 {
         self.view.scale()
+    }
+
+    /// One frame of a move of `ids` by `delta` on the canvas, timed (`DiagramView::bench_move`).
+    #[cfg(feature = "bench")]
+    pub fn bench_move(&self, ids: &[CellId], delta: Option<Point>) -> (f64, f64) {
+        self.view.bench_move(ids, delta)
     }
 
     /// Whether formulas are still being typeset.
@@ -1059,6 +1083,11 @@ impl DiagramTab {
         *self.on_image.borrow_mut() = Some(Rc::new(f));
     }
 
+    /// The ring's outer orbit changed how the tools draw.
+    pub fn connect_options(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
+        *self.on_options.borrow_mut() = Some(Rc::new(f));
+    }
+
     /// The changed-on-disk banner's button.
     pub fn connect_banner(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
         *self.on_banner.borrow_mut() = Some(Rc::new(f));
@@ -1121,6 +1150,20 @@ impl Saves for DiagramTab {
 
     fn for_disk(&self) -> String {
         self.text()
+    }
+}
+
+/// Page `index` of `pages` shown now: what labels with placeholders fill `%pagenumber%` and
+/// `%date%` in from.
+fn shown(index: usize, pages: usize) -> accent_drawio::Context {
+    let now = chrono::Local::now();
+    accent_drawio::Context {
+        page: index,
+        pages,
+        now: Some(accent_drawio::Now {
+            unix_ms: now.timestamp_millis(),
+            offset_minutes: now.offset().local_minus_utc() / 60,
+        }),
     }
 }
 

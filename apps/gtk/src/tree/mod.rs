@@ -16,6 +16,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod drag;
+mod listing;
+
+pub use drag::dropped_paths;
+use drag::{Import, Move, import_target, move_content, move_target};
+use listing::{Asked, ShowHidden, Watches, children_model, fill, watch_unindexed};
+pub use listing::{decode, dot_named};
+
 /// The style class a row a Ctrl+click has marked carries, defined in `build::install_chrome_css`.
 const MARKED: &str = "accent-marked";
 
@@ -30,7 +38,7 @@ type Marks = BTreeMap<String, bool>;
 /// One row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    /// `d` for a directory, `f` for a file — see [`encode`].
+    /// `d` for a directory, `f` for a file — see [`encode`](listing::encode).
     pub kind: char,
     /// Vault-relative path.
     pub rel: String,
@@ -56,180 +64,6 @@ impl Row {
     }
 }
 
-/// ponytail: rows are `gtk::StringObject`s holding `"<kind><state><rel_path>"` instead of a custom
-/// GObject with typed properties. Saves ~40 lines of subclass boilerplate; if the tree ever needs
-/// more per-row state (git status, unsaved marker) define a real `FileItem` GObject then.
-///
-/// `kind` is `d` or `f`; `state` is `i` for a row the index holds, `g` for one left out because
-/// git ignores its folder, and `x` for one inside a dependency tree ([`Row::dependency`]).
-fn encode(kind: FileKind, rel: &str, indexed: bool, dependency: bool) -> String {
-    // What a file is — its icon, what it opens as — is read off its name, so a directory is the
-    // one thing the row has to carry.
-    let c = match kind {
-        FileKind::Dir => 'd',
-        _ => 'f',
-    };
-    let state = match (indexed, dependency) {
-        (true, _) => 'i',
-        (false, false) => 'g',
-        (false, true) => 'x',
-    };
-    format!("{c}{state}{rel}")
-}
-
-pub fn decode(item: &glib::Object) -> Option<Row> {
-    decode_str(&item.downcast_ref::<gtk::StringObject>()?.string())
-}
-
-/// The pure half of [`decode`], so the encoding is a test rather than a running window.
-fn decode_str(s: &str) -> Option<Row> {
-    let mut cs = s.chars();
-    let kind = cs.next()?;
-    let state = cs.next()?;
-    Some(Row {
-        kind,
-        rel: cs.as_str().to_string(),
-        indexed: state == 'i',
-        dependency: state == 'x',
-    })
-}
-
-/// Whether the tree leaves a listed row out: a Syncthing conflict always, and a dot-named one
-/// while Show Hidden Files (`show_hidden`) is off.
-///
-/// A row the index does not hold is never left out: it is one of the skipped trees, which the walk
-/// has already filtered, and hiding the dot-named ones would hide `.venv` and four of the six names
-/// in `SKIP_DIRS`. `.git` and `.trash` never get this far whatever the toggle says, because
-/// neither the index nor that listing ever holds them (`walk::ALWAYS_SKIP_DIRS`).
-pub fn hidden(row_kind: FileKind, rel: &str, indexed: bool, show_hidden: bool) -> bool {
-    indexed
-        && (row_kind == FileKind::Conflict
-            || (!show_hidden && dot_named(rel))
-            || rel.rsplit('/').next().is_some_and(is_sync_conflict))
-}
-
-/// A dot-named path, or one inside a dot-named folder: what a file manager calls hidden.
-pub fn dot_named(rel: &str) -> bool {
-    rel.split('/').any(|c| c.starts_with('.'))
-}
-
-/// How many listings of each directory ("" is the root) one tree has asked for.
-///
-/// Two listings of one directory can be on their way at once — the refresh after a reconnect and
-/// the file that was just made, or two reindexes in a row — and over a link they need not land in
-/// the order they were asked. Only the newest one is spliced in: an older one landing after it
-/// would put back the rows it no longer has.
-type Asked = Rc<RefCell<HashMap<String, u64>>>;
-
-/// Show Hidden Files, shared by every listing the tree asks for. Read when a listing lands rather
-/// than when it is asked for, so one still on its way after a toggle is filtered by the new value.
-type ShowHidden = Rc<Cell<bool>>;
-
-/// Run when a listing of the root lands, whether or not it changed the store.
-type Landed = Option<Rc<dyn Fn()>>;
-
-/// Bring `store` in step with the direct children of `prefix`.
-///
-/// The listing is asked for on a worker thread and spliced in when it lands, so the store this
-/// returns to is empty for a frame or two. That is what lets a vault on another machine expand a
-/// directory without the click waiting for a round trip; on a local vault the index answers in
-/// well under a frame and nobody sees the gap. `list_dir` already returns directories first, then
-/// names case-insensitively. `landed` runs once the listing is in.
-fn fill(
-    store: &gio::ListStore,
-    vault: &Arc<Vault>,
-    asked: &Asked,
-    show_hidden: &ShowHidden,
-    prefix: &str,
-    landed: Landed,
-) {
-    let ticket = {
-        let mut asked = asked.borrow_mut();
-        let n = asked.entry(prefix.to_string()).or_default();
-        *n += 1;
-        *n
-    };
-    let (store, vault, asked, show_hidden) = (
-        store.clone(),
-        vault.clone(),
-        asked.clone(),
-        show_hidden.clone(),
-    );
-    let dir = prefix.to_string();
-    glib::spawn_future_local(async move {
-        let listed = crate::work::off_thread("tree", {
-            let dir = dir.clone();
-            move || vault.list_dir(&dir)
-        })
-        .await;
-        // A newer listing of this directory was asked for while this one was on its way.
-        if asked.borrow().get(&dir) != Some(&ticket) {
-            return;
-        }
-        match listed {
-            Some(Ok(rows)) => {
-                splice(&store, rows, show_hidden.get());
-                if let Some(landed) = landed {
-                    landed();
-                }
-            }
-            // Leaving the rows alone beats blanking a directory the index simply could not answer
-            // for — or, on a remote vault, one the connection could not reach.
-            Some(Err(e)) => tracing::warn!("listing a directory failed: {e:#}"),
-            None => {}
-        }
-    });
-}
-
-/// The rows the listing produced, against the ones the store already holds.
-fn splice(store: &gio::ListStore, rows: Vec<accent_api::FileRow>, show_hidden: bool) {
-    let items: Vec<String> = rows
-        .into_iter()
-        // `id == 0` is `Vault::list_dir` saying this row came off the disk rather than out of
-        // the index.
-        .filter(|r| !hidden(r.kind, &r.rel_path, r.id != 0, show_hidden))
-        .map(|r| encode(r.kind, &r.rel_path, r.id != 0, r.dependency))
-        .collect();
-    let Some((at, removed, added)) = changed_span(&current(store), &items) else {
-        return;
-    };
-    let new: Vec<gtk::StringObject> = items[at..at + added]
-        .iter()
-        .map(|s| gtk::StringObject::new(s))
-        .collect();
-    // One splice, one `items-changed`. Appending row by row made a 2 400-child directory emit
-    // 2 400 signals out through TreeListModel -> SingleSelection -> ListView.
-    store.splice(at as u32, removed as u32, &new);
-}
-
-/// The encoded value of every row currently in `store`.
-fn current(store: &gio::ListStore) -> Vec<String> {
-    (0..store.n_items())
-        .filter_map(|i| store.item(i).and_downcast::<gtk::StringObject>())
-        .map(|s| s.string().to_string())
-        .collect()
-}
-
-/// The one span `old` and `new` differ in, as (start, rows to remove, rows to insert), or `None`
-/// when they are already the same.
-///
-/// A row's expanded children hang off the *object* in the store, so a blanket splice collapses
-/// every expanded directory and jumps the scroll position. Trimming the equal head and tail means
-/// a reindex that changed nothing splices nothing, and one added or removed file touches one row.
-fn changed_span(old: &[String], new: &[String]) -> Option<(usize, usize, usize)> {
-    let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-    let tail = old[head..]
-        .iter()
-        .rev()
-        .zip(new[head..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    match (old.len() - head - tail, new.len() - head - tail) {
-        (0, 0) => None,
-        (removed, added) => Some((head, removed, added)),
-    }
-}
-
 /// The lazy tree, plus the per-directory child models it has already built.
 ///
 /// The cache is not an optimisation of last resort, it is what makes binding a row free:
@@ -247,7 +81,7 @@ pub struct Tree {
     watches: Watches,
     asked: Asked,
     show_hidden: ShowHidden,
-    /// The root's [`Landed`], which tells the empty page the host has answered.
+    /// The root's [`Landed`](listing::Landed), which tells the empty page the host has answered.
     landed: Rc<dyn Fn()>,
     /// What git ignores, shared with the row factory so binding a row is still two setters and a
     /// set lookup rather than a question for the index.
@@ -763,300 +597,6 @@ pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRo
         let item = row.item().as_ref().and_then(decode)?;
         (item.rel == rel).then_some(row)
     })
-}
-
-/// The folders the index does not walk whose listings the tree keeps, which the vault watches for
-/// it.
-type Watches = Rc<RefCell<HashSet<String>>>;
-
-/// Keep `dir`'s listing in step with the disk for as long as the tree holds it.
-///
-/// The index never walks a gitignored folder, so nothing in the vault's own watch set reports a
-/// file written into one: a build filling the folder whose row is open, or a training run writing
-/// into an `mlruns/`, showed nothing new until the row was collapsed and opened again. One watch
-/// per such folder answers for exactly the listings the tree keeps — a child model is built and
-/// cached the first time its row is bound and lives as long as the window, so the watch has the
-/// same lifetime as the rows it keeps honest, and collapsing one throws neither away. The listing
-/// it stands beside is already paid for, which is what makes this the cheap answer rather than a
-/// budget of its own.
-///
-/// The vault's own watcher keeps it, one level deep, where the files are: on the host for a remote
-/// vault, which is the one place they can be watched from. Its news is
-/// [`Event::UnindexedChanged`](accent_api::Event::UnindexedChanged), which lists the folder again,
-/// once per debounced burst rather than per file.
-///
-/// The dependency trees get none: a `node_modules` is opened to look at, and 40 000 files is the
-/// one tree this must not start watching.
-fn watch_unindexed(watches: &Watches, vault: &Arc<Vault>, dir: &str) {
-    if !watches.borrow_mut().insert(dir.to_string()) {
-        return;
-    }
-    // A round trip on a remote vault, from a row being bound: sent from a worker and not waited
-    // for. One that cannot be sent yet is kept, and asked of the host once it answers.
-    let (vault, dirs) = (vault.clone(), vec![dir.to_string()]);
-    gio::spawn_blocking(move || {
-        if let Err(e) = vault.watch_unindexed(&dirs) {
-            tracing::debug!("watching an unindexed folder: {e:#}");
-        }
-    });
-}
-
-fn children_model(
-    vault: &Arc<Vault>,
-    cache: &Rc<RefCell<HashMap<String, gio::ListStore>>>,
-    asked: &Asked,
-    show_hidden: &ShowHidden,
-    rel: &str,
-) -> gio::ListStore {
-    // Cloned out so the cache borrow cannot still be live during `fill`.
-    let hit = cache.borrow().get(rel).cloned();
-    if let Some(store) = hit {
-        return store;
-    }
-    let t0 = Instant::now();
-    let store = gio::ListStore::new::<gtk::StringObject>();
-    fill(&store, vault, asked, show_hidden, rel, None);
-    cache.borrow_mut().insert(rel.to_string(), store.clone());
-    tracing::debug!(
-        dir = rel,
-        rows = store.n_items(),
-        ms = t0.elapsed().as_secs_f64() * 1e3,
-        "expanded directory"
-    );
-    store
-}
-
-/// What a tree-to-tree move travels as, beside the plain string a pane opens.
-///
-/// ponytail: a `GtkStringObject` rather than the `application/x-accent-path` mime the design note
-/// named, because `GtkDropTarget` matches on GType and never on a mime type — a mime would mean
-/// `GtkDropTargetAsync` and reading the drop's stream by hand. What the decision asks for is a
-/// type the panes do not take, and their target takes `AdwTabPage` and `String` only, so a folder
-/// offering this and nothing else cannot be dropped into a pane at all.
-fn move_content(rel: &str) -> gdk::ContentProvider {
-    gdk::ContentProvider::for_value(&gtk::StringObject::new(rel).to_value())
-}
-
-/// What a drop is handed to: each path a drag carried, and the path it goes to.
-type Move = Rc<dyn Fn(Vec<(String, String)>)>;
-
-/// The paths a tree drag is carrying: one row, or the marked set a marked row carries along
-/// (a `GtkStringList`, which no pane takes either — there is no one note in it to open).
-fn dragged(value: &glib::Value) -> Vec<String> {
-    if let Ok(one) = value.get::<gtk::StringObject>() {
-        return vec![one.string().to_string()];
-    }
-    value.get::<gtk::StringList>().map_or_else(
-        |_| Vec::new(),
-        |list| {
-            (0..list.n_items())
-                .filter_map(|i| list.string(i))
-                .map(|rel| rel.to_string())
-                .collect()
-        },
-    )
-}
-
-/// What dropping `paths` into `dir` moves: each of them that has somewhere to go there.
-fn moves_into(paths: &[String], dir: &str) -> Vec<(String, String)> {
-    paths
-        .iter()
-        .filter_map(|from| Some((from.clone(), crate::fileops::move_dest(from, dir)?)))
-        .collect()
-}
-
-/// How long a drag rests over a shut folder before it opens. Long enough that crossing one on the
-/// way somewhere else never opens it, short enough to read as part of the drag — the second
-/// GTK's own file chooser and Nautilus both wait.
-const SPRING_OPEN: Duration = Duration::from_millis(800);
-
-/// A timer waiting to open the folder a drag is resting on.
-type Spring = Rc<crate::widgets::Debounce>;
-
-/// Open the shut folder a drag has come to rest on, so a file can be dropped into something that
-/// was not on screen when the drag began. `row` is the row under the pointer, `None` when the drag
-/// has left the target or has been dropped, which disarms the timer.
-///
-/// Per drop target, which is per row: a drag crossing three folders arms and disarms three timers,
-/// one at a time. Nothing closes the folder again — a drag that opened one and went elsewhere
-/// leaves the tree as the reader would have left it by clicking the chevron.
-fn spring_open(timer: &Spring, row: Option<gtk::TreeListRow>) {
-    timer.cancel();
-    let Some(row) = row.filter(|row| row.is_expandable() && !row.is_expanded()) else {
-        return;
-    };
-    timer.call(move || row.set_expanded(true));
-}
-
-/// The `GtkTreeListRow` a drop target on a row expander is over, and `None` for a target that is
-/// not on one — the vault row above the tree, and the list's own blank area.
-fn target_row(target: &gtk::DropTarget) -> Option<gtk::TreeListRow> {
-    target
-        .widget()?
-        .downcast::<gtk::TreeExpander>()
-        .ok()?
-        .list_row()
-}
-
-/// A drop target that moves the dragged files into the directory `dir` answers with for the
-/// pointer position — `Some("")` being the vault root — and refuses the drop where it answers
-/// `None`, or where none of them has anywhere to go there.
-///
-/// The refusal happens while the pointer is still moving rather than after the drop, so a row
-/// that cannot take what is over it never lights up: a folder onto itself, into what is under it,
-/// or into the folder it is already in are simply not targets. GTK's own `:drop(active)` outline
-/// on the row is then the whole of the feedback, and there is nothing else to draw.
-fn move_target(
-    on_move: &Move,
-    dir: impl Fn(&gtk::DropTarget, f64, f64) -> Option<String> + 'static,
-) -> gtk::DropTarget {
-    let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::MOVE);
-    target.set_types(&[
-        gtk::StringObject::static_type(),
-        gtk::StringList::static_type(),
-    ]);
-    // The dragged paths have to be readable while the drag is still in flight, or the decision
-    // could only be taken once the drop had already happened.
-    target.set_preload(true);
-    let dir = Rc::new(dir);
-    let planned = {
-        let dir = dir.clone();
-        move |target: &gtk::DropTarget, x, y| {
-            let moves = moves_into(&dragged(&target.value()?), &dir(target, x, y)?);
-            (!moves.is_empty()).then_some(moves)
-        }
-    };
-    let planned = Rc::new(planned);
-    let spring = Spring::new(crate::widgets::Debounce::new(SPRING_OPEN));
-    // Both, because `enter` is what decides whether the row highlights at all and `motion` is
-    // what corrects it once the preloaded value has arrived.
-    let answer = {
-        let (planned, spring) = (planned.clone(), spring.clone());
-        move |target: &gtk::DropTarget, x, y| match planned(target, x, y) {
-            Some(_) => {
-                spring_open(&spring, target_row(target));
-                gdk::DragAction::MOVE
-            }
-            // A folder that cannot take what is over it has no reason to open either.
-            None => {
-                spring_open(&spring, None);
-                gdk::DragAction::empty()
-            }
-        }
-    };
-    target.connect_enter({
-        let answer = answer.clone();
-        move |target, x, y| answer(target, x, y)
-    });
-    target.connect_motion(answer);
-    target.connect_leave({
-        let spring = spring.clone();
-        move |_| spring_open(&spring, None)
-    });
-    let on_move = on_move.clone();
-    target.connect_drop(move |target, value, x, y| {
-        spring_open(&spring, None);
-        // The value is handed over here rather than read back off the target, which is the one
-        // place it is certain to have arrived.
-        let Some(dir) = dir(target, x, y) else {
-            return false;
-        };
-        let moves = moves_into(&dragged(value), &dir);
-        if moves.is_empty() {
-            return false;
-        }
-        on_move(moves);
-        true
-    });
-    target
-}
-
-/// What a drop of files from outside accent is handed to: the files, the vault-relative folder
-/// they go into ("" being the root) and whether the drag was a move, which takes the originals
-/// away.
-type Import = Rc<dyn Fn(Vec<PathBuf>, String, bool)>;
-
-/// A drop target for files dragged in from another application — GNOME Files, a browser's
-/// downloads — onto the same three zones a tree-to-tree move has: a folder row, a file row (its
-/// folder) and the blank area or the vault row (the root). `dir` answers with the folder for a
-/// pointer position, exactly as [`move_target`]'s does.
-///
-/// `GdkFileList` is the type rather than `text/uri-list`: GDK deserialises the one into the other,
-/// so this takes what every file manager offers without reading a stream by hand. A drop that
-/// offers **only** move is moved — that is Shift held in the file manager — and anything else is
-/// copied, which is what a plain drag between applications means.
-fn import_target(
-    on_import: &Import,
-    dir: impl Fn(&gtk::DropTarget, f64, f64) -> Option<String> + 'static,
-) -> gtk::DropTarget {
-    let target = gtk::DropTarget::new(
-        gdk::FileList::static_type(),
-        gdk::DragAction::COPY | gdk::DragAction::MOVE,
-    );
-    let dir = Rc::new(dir);
-    let spring = Spring::new(crate::widgets::Debounce::new(SPRING_OPEN));
-    let answer = {
-        let (dir, spring) = (dir.clone(), spring.clone());
-        move |target: &gtk::DropTarget, x, y| match dir(target, x, y) {
-            Some(_) => {
-                spring_open(&spring, target_row(target));
-                wanted(target)
-            }
-            None => {
-                spring_open(&spring, None);
-                gdk::DragAction::empty()
-            }
-        }
-    };
-    target.connect_enter({
-        let answer = answer.clone();
-        move |target, x, y| answer(target, x, y)
-    });
-    target.connect_motion(answer);
-    target.connect_leave({
-        let spring = spring.clone();
-        move |_| spring_open(&spring, None)
-    });
-    let on_import = on_import.clone();
-    target.connect_drop(move |target, value, x, y| {
-        spring_open(&spring, None);
-        let (Some(into), Some(files)) = (dir(target, x, y), dropped_paths(value)) else {
-            return false;
-        };
-        on_import(files, into, wanted(target) == gdk::DragAction::MOVE);
-        true
-    });
-    target
-}
-
-/// The files a drop from another application carries, as paths on this machine, or `None` where
-/// it named none that way — an `ftp://` or a `trash://` URI has nothing here to copy from.
-///
-/// Public because it is the half of a cross-application drop a drill can drive: Xvfb carries a
-/// drag inside one process and not between two, so `ACCENT_BENCH_DROP` builds the `GdkFileList`
-/// itself and takes it from here.
-pub fn dropped_paths(value: &glib::Value) -> Option<Vec<PathBuf>> {
-    let files: Vec<PathBuf> = value
-        .get::<gdk::FileList>()
-        .ok()?
-        .files()
-        .iter()
-        .filter_map(|f| f.path())
-        .collect();
-    (!files.is_empty()).then_some(files)
-}
-
-/// What a drop from another application is asking for: a move only where move is the one action
-/// it offers, which is how a file manager reports Shift being held.
-fn wanted(target: &gtk::DropTarget) -> gdk::DragAction {
-    let offered = target
-        .current_drop()
-        .map(|drop| drop.actions())
-        .unwrap_or(gdk::DragAction::COPY);
-    match offered == gdk::DragAction::MOVE {
-        true => gdk::DragAction::MOVE,
-        false => gdk::DragAction::COPY,
-    }
 }
 
 /// The row above the tree naming the vault, and the drop zone for "put it in the vault root".
@@ -1630,10 +1170,6 @@ pub fn build(
 mod tests {
     use super::*;
 
-    fn rows(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
     fn ancestors_lists_the_directories_reveal_has_to_expand() {
         let dirs = |rel| ancestors(rel).collect::<Vec<_>>();
@@ -1641,46 +1177,6 @@ mod tests {
         // A note at the vault root has nothing above it to expand.
         assert_eq!(dirs("c.md"), [] as [&str; 0]);
         assert_eq!(dirs(""), [] as [&str; 0]);
-    }
-
-    #[test]
-    fn a_row_carries_whether_the_index_holds_it() {
-        let row = |kind, rel, indexed, dep| decode_str(&encode(kind, rel, indexed, dep)).unwrap();
-        let note = row(FileKind::Markdown, "Notes/A.md", true, false);
-        assert_eq!(note.kind, 'f');
-        assert_eq!(note.rel, "Notes/A.md");
-        assert!(note.indexed);
-        assert!(!note.dependency);
-        // A row read off the disk keeps its kind — the icon and the expander must not change —
-        // and says the index has never heard of it.
-        let dep = row(FileKind::Dir, "node_modules", false, true);
-        assert_eq!(dep.kind, 'd');
-        assert!(dep.is_dir());
-        assert_eq!(dep.rel, "node_modules");
-        assert!(!dep.indexed);
-        assert!(dep.dependency);
-        // A gitignored folder is out of the index too, and is still the reader's own.
-        let ignored = row(FileKind::Dir, "mlruns", false, false);
-        assert!(!ignored.indexed);
-        assert!(!ignored.dependency);
-    }
-
-    #[test]
-    fn show_hidden_decides_the_dot_named_rows_the_index_holds() {
-        use FileKind::{Conflict, Dir, Markdown, Other};
-        // Shown with the toggle on, left out with it off.
-        for rel in [".gitignore", ".obsidian/app.json", "Notes/.draft.md"] {
-            assert!(!hidden(Other, rel, true, true), "{rel}");
-            assert!(hidden(Other, rel, true, false), "{rel}");
-        }
-        assert!(!hidden(Markdown, "Notes/a.md", true, false));
-        // A dot-named tree the walk refuses is listed off the disk either way, as it was before
-        // the toggle existed.
-        assert!(!hidden(Dir, ".venv", false, false));
-        assert!(!hidden(Other, ".venv/pyvenv.cfg", false, false));
-        // A conflict copy never is: resolving one is the conflict banner's business.
-        let conflict = "a.sync-conflict-20260903-101500-ABCDEFG.md";
-        assert!(hidden(Conflict, conflict, true, true));
     }
 
     #[test]
@@ -1697,52 +1193,5 @@ mod tests {
         // A directory whose name merely starts the same is a different directory.
         assert!(!set.has("builder/x"));
         assert!(!Ignored::default().has("build/x"));
-    }
-
-    #[test]
-    fn changed_span_reports_nothing_when_the_listing_is_unchanged() {
-        let same = rows(&["dNotes", "ma.md", "mb.md"]);
-        assert_eq!(changed_span(&same, &same), None);
-        assert_eq!(changed_span(&[], &[]), None);
-    }
-
-    #[test]
-    fn changed_span_covers_only_the_rows_that_moved() {
-        let old = rows(&["dNotes", "ma.md", "mc.md"]);
-        // Inserted in the middle: one row added, none removed.
-        assert_eq!(
-            changed_span(&old, &rows(&["dNotes", "ma.md", "mb.md", "mc.md"])),
-            Some((2, 0, 1))
-        );
-        // Removed from the middle.
-        assert_eq!(
-            changed_span(&old, &rows(&["dNotes", "mc.md"])),
-            Some((1, 1, 0))
-        );
-        // Renamed in place.
-        assert_eq!(
-            changed_span(&old, &rows(&["dNotes", "ma.md", "mz.md"])),
-            Some((2, 1, 1))
-        );
-        // Appended at the end, so the head is everything that was already there.
-        assert_eq!(
-            changed_span(&old, &rows(&["dNotes", "ma.md", "mc.md", "md.md"])),
-            Some((3, 0, 1))
-        );
-    }
-
-    #[test]
-    fn changed_span_handles_an_empty_side() {
-        let listing = rows(&["dNotes", "ma.md"]);
-        assert_eq!(changed_span(&[], &listing), Some((0, 0, 2)));
-        assert_eq!(changed_span(&listing, &[]), Some((0, 2, 0)));
-    }
-
-    #[test]
-    fn changed_span_keeps_a_repeated_row_from_widening_the_span() {
-        // Equal head and tail must not overlap, or the span would remove more than there is.
-        let old = rows(&["ma.md", "ma.md"]);
-        assert_eq!(changed_span(&old, &rows(&["ma.md"])), Some((1, 1, 0)));
-        assert_eq!(changed_span(&rows(&["ma.md"]), &old), Some((1, 0, 1)));
     }
 }

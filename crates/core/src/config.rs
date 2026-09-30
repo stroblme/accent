@@ -43,6 +43,11 @@ highlighter_color = [0, 0, 0]
 eraser_radius = 4.0
 eraser_partial = true
 
+[diagram]
+rounded = true
+route = "curved"
+arrow = false
+
 [vaults."/home/me/Notes"]
 templates_dir = "Templates"
 new_file_dir = "Inbox"
@@ -122,6 +127,7 @@ pub struct Config {
     pub shortcuts: BTreeMap<String, Vec<String>>,
     pub search: SearchConfig,
     pub drawing: DrawingConfig,
+    pub diagram: DiagramConfig,
     /// Keyed by canonical vault path.
     pub vaults: BTreeMap<String, VaultConfig>,
 }
@@ -185,6 +191,38 @@ impl Default for DrawingConfig {
     }
 }
 
+/// How a diagram's tools draw, as the ring's outer orbit last set them: global, as the PDF's
+/// picks are, so every diagram starts where the last one left off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiagramConfig {
+    /// A rectangle's corners are rounded.
+    pub rounded: bool,
+    pub route: Route,
+    /// A connector ends in an arrow.
+    pub arrow: bool,
+}
+
+impl Default for DiagramConfig {
+    fn default() -> Self {
+        DiagramConfig {
+            rounded: false,
+            route: Route::Orthogonal,
+            arrow: true,
+        }
+    }
+}
+
+/// The way a new connector runs between its ends.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Route {
+    Straight,
+    #[default]
+    Orthogonal,
+    Curved,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -203,6 +241,7 @@ impl Default for Config {
             shortcuts: BTreeMap::new(),
             search: SearchConfig::default(),
             drawing: DrawingConfig::default(),
+            diagram: DiagramConfig::default(),
             vaults: BTreeMap::new(),
         }
     }
@@ -936,6 +975,12 @@ daily_template = "DailyNote.md"
         assert_eq!(c.drawing.highlighter_color, Some([0, 0, 0]));
         assert_eq!(c.drawing.eraser_radius, 4.0);
         assert!(c.drawing.eraser_partial);
+        let diagram = DiagramConfig {
+            rounded: true,
+            route: Route::Curved,
+            arrow: false,
+        };
+        assert_eq!(c.diagram, diagram);
 
         let back = tmp.path().join("written.toml");
         c.write(&back).unwrap();
@@ -948,6 +993,7 @@ daily_template = "DailyNote.md"
         assert_eq!(again.shortcuts, c.shortcuts);
         assert_eq!(again.search.exclude, c.search.exclude);
         assert_eq!(again.drawing, c.drawing);
+        assert_eq!(again.diagram, c.diagram);
     }
 
     #[test]

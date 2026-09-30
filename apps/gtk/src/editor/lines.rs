@@ -481,7 +481,7 @@ pub(super) fn primary_paste(view: &sourceview5::View) {
 /// it, or the end or start of the row it is beside. `iter_at_location` answers only over text, so
 /// beside a row that row is found by walking the paragraph's display rows down to `y`.
 pub(crate) fn pressed_at(view: &sourceview5::View, x: i32, y: i32) -> gtk::TextIter {
-    if let Some(at) = view.iter_at_location(x, y) {
+    if let Some(at) = crate::fold::iter_at_location(view, x, y) {
         return at;
     }
     let (mut row, _) = view.line_at_y(y);

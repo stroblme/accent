@@ -180,6 +180,12 @@ fn spin(title: &str, range: (f64, f64, f64)) -> adw::SpinRow {
     row
 }
 
+/// The `rotation` a turn of `degrees` writes: none for no turn, as a shape draw.io never turned
+/// has none.
+pub(super) fn rotation(degrees: f64) -> Option<String> {
+    (degrees != 0.0).then(|| number(degrees))
+}
+
 /// A number as a style value: `12`, not `12.0`.
 pub(super) fn number(v: f64) -> String {
     match v.fract() == 0.0 {

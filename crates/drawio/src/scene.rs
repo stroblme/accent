@@ -11,8 +11,9 @@ use crate::geom::{self, PathCmd, Point, Rect};
 use crate::label::{self, Run};
 use crate::marker;
 use crate::model::{Cell, CellId, Geometry, Page};
+use crate::placeholders::{self, Context};
 use crate::route::{self, EdgeInput, Terminal};
-use crate::shapes;
+use crate::shapes::{self, Fill, Placement};
 use crate::style::{Color, Resolved};
 
 /// A page ready to paint.
@@ -22,6 +23,17 @@ pub struct Scene {
     pub page_size: (f64, f64),
     /// The page colour; `None` is draw.io's default white.
     pub background: Option<Color>,
+    /// Each drawn edge's route, by id; see [`Scene::route`].
+    pub(crate) routes: HashMap<CellId, Vec<Point>>,
+}
+
+impl Scene {
+    /// The points edge `id` runs through, absolute and first end first: where its ends are on
+    /// the page before arrow heads shorten it (mxGraph's `absolutePoints`). `None` for an edge
+    /// not drawn.
+    pub fn route(&self, id: &str) -> Option<&[Point]> {
+        self.routes.get(id).map(Vec::as_slice)
+    }
 }
 
 /// How an outline is filled.
@@ -183,20 +195,31 @@ impl Prim {
 }
 
 /// The display list of `page`: every visible cell in paint order — layers bottom first, each
-/// cell's shape, then its picture, then its label, then its children.
+/// cell's shape, then its picture, then its label, then its children. The page is shown as a
+/// lone page with no clock; see [`scene_with`].
 pub fn scene(page: &Page) -> Scene {
-    let b = Builder::run(page);
+    scene_with(page, &Context::default())
+}
+
+/// [`scene`] of `page` shown where and when `ctx` says, which labels with placeholders fill in.
+pub fn scene_with(page: &Page, ctx: &Context) -> Scene {
+    let b = Builder::run(page, ctx);
     Scene {
         prims: b.prims,
         page_size: page.size(),
         background: page.background(),
+        routes: b
+            .edge_points
+            .into_iter()
+            .map(|(id, points)| (id.to_string(), points))
+            .collect(),
     }
 }
 
 /// The points each edge drawn on `page` runs through, absolute and first end first: where its
 /// ends are on the page (mxGraph's `absolutePoints`).
 pub(crate) fn routes(page: &Page) -> HashMap<CellId, Vec<Point>> {
-    Builder::run(page)
+    Builder::run(page, &Context::default())
         .edge_points
         .into_iter()
         .map(|(id, points)| (id.to_string(), points))
@@ -205,9 +228,10 @@ pub(crate) fn routes(page: &Page) -> HashMap<CellId, Vec<Point>> {
 
 impl<'a> Builder<'a> {
     /// Every visible layer of `page` walked, bottom first.
-    fn run(page: &'a Page) -> Builder<'a> {
+    fn run(page: &'a Page, ctx: &'a Context) -> Builder<'a> {
         let mut b = Builder {
             page,
+            ctx,
             math: page.model_attr("math") == Some("1"),
             prims: Vec::new(),
             edge_points: HashMap::new(),
@@ -259,6 +283,8 @@ const DEFAULT_FONTFAMILY: &str = "Arial,Helvetica";
 
 struct Builder<'a> {
     page: &'a Page,
+    /// Where and when the page is shown, for labels with placeholders.
+    ctx: &'a Context,
     /// The page has `math="1"`: `\(…\)` in labels is a formula.
     math: bool,
     prims: Vec<Prim>,
@@ -329,27 +355,25 @@ impl<'a> Builder<'a> {
         let mut stroke = stroke(&style);
         if !known && let Some(s) = stroke.as_mut() {
             // ponytail: a stencil or a shape not ported yet is drawn as its box, dashed so it
-            // reads as a stand-in. Porting `mxStencil` and the shape registry is the upgrade.
+            // reads as a stand-in. Porting `mxStencil` is the upgrade.
             s.dash = Some(vec![3.0 * s.width, 3.0 * s.width]);
         }
         let shadow = style.flag("shadow", false);
         // An unfilled, unstroked shape still takes a click inside (draw.io's `pointerEvents`),
         // except a group's, which leaves the clicks to what is in it.
         let hittable = style.flag("pointerEvents", true);
-        let parts = match known {
-            true => shapes::vertex(shape, rect, &style),
-            false => shapes::vertex("label", rect, &style),
-        };
-        for (i, mut part) in parts.into_iter().enumerate() {
-            let fill = part
-                .fill
-                .then(|| paint(&style, &part.path, rect.centre(), rotation))
-                .flatten();
+        let place = Placement::of(rect, &style);
+        let drawn = if known { shape } else { "label" };
+        for (i, mut part) in shapes::vertex(drawn, place.bounds, &style)
+            .into_iter()
+            .enumerate()
+        {
+            let fill = fill(&style, part.fill, &part.path, &place);
             let stroke = stroke.clone().filter(|_| part.stroke);
             if fill.is_none() && stroke.is_none() && !hittable {
                 continue;
             }
-            geom::rotate_path(&mut part.path, rect.centre(), rotation);
+            geom::map_path(&mut part.path, |p| place.apply(p));
             self.prims.push(Prim::Path {
                 cell: cell.id.clone(),
                 locked,
@@ -472,10 +496,7 @@ impl<'a> Builder<'a> {
                 self.prims.push(Prim::Path {
                     cell: cell.id.clone(),
                     locked,
-                    fill: part
-                        .fill
-                        .then(|| paint(&style, &part.path, Point::default(), 0.0))
-                        .flatten(),
+                    fill: fill(&style, part.fill, &part.path, &Placement::default()),
                     path: part.path,
                     stroke: line.clone().filter(|_| part.stroke),
                     opacity,
@@ -566,13 +587,13 @@ impl<'a> Builder<'a> {
     /// A cell's label, placed as `mxCellRenderer.getLabelBounds` and `rotateLabelBounds` place
     /// it: the alignment point (`anchor`) and the box the text is laid out in.
     fn label(&mut self, cell: &Cell, style: &Resolved, at: LabelAt, rotation: f64, locked: bool) {
-        let text = cell.label();
+        let text = placeholders::label(self.page, cell, self.ctx);
         if text.is_empty() || style.flag("noLabel", false) {
             return;
         }
         let runs = match cell.is_html() {
-            true => label::html_to_runs(text, self.math),
-            false => label::plain_to_runs(text, self.math),
+            true => label::html_to_runs(&text, self.math),
+            false => label::plain_to_runs(&text, self.math),
         };
         if !runs
             .iter()
@@ -628,21 +649,36 @@ impl<'a> Builder<'a> {
             LabelAt::Vertex { rect, offset } => {
                 let hpos = style.get("labelPosition").unwrap_or("center");
                 let vpos = style.get("verticalLabelPosition").unwrap_or("middle");
-                let mut base = Rect::new(
-                    rect.x + offset.x,
-                    rect.y + offset.y,
-                    rect.w.max(1.0),
-                    rect.h.max(1.0),
-                );
+                // A label beside its shape is a shape's width or height off
+                // (`mxGraphView.updateVertexLabelOffset`).
+                let mut off = offset;
                 match hpos {
-                    "left" => base.x -= rect.w,
-                    "right" => base.x += rect.w,
+                    "left" => off.x -= rect.w,
+                    "right" => off.x += rect.w,
                     _ => {}
                 }
                 match vpos {
-                    "top" => base.y -= rect.h,
-                    "bottom" => base.y += rect.h,
+                    "top" => off.y -= rect.h,
+                    "bottom" => off.y += rect.h,
                     _ => {}
+                }
+                // A label across the height (`horizontal=0`) is laid out in the box turned a
+                // quarter, and turned back with its text (`mxCellRenderer.getLabelBounds`).
+                let inverted = !style.flag("horizontal", true);
+                if inverted {
+                    off = Point::new(off.y, off.x);
+                }
+                let mut base = Rect::new(
+                    rect.x + off.x,
+                    rect.y + off.y,
+                    rect.w.max(1.0),
+                    rect.h.max(1.0),
+                );
+                if inverted {
+                    base = shapes::rotate90(base);
+                }
+                if hpos == "center" && vpos == "middle" {
+                    base = shapes::label_bounds(style.shape(), base, style, inverted);
                 }
                 let anchor = Point::new(
                     base.x - m.0 * base.w + shift.x,
@@ -650,14 +686,9 @@ impl<'a> Builder<'a> {
                 );
                 let w = base.w - if hpos == "center" { sl + sr } else { 0.0 };
                 let h = base.h - if vpos == "middle" { st + sb } else { 0.0 };
-                let turn = rotation
-                    + if style.flag("horizontal", true) {
-                        0.0
-                    } else {
-                        -90.0
-                    };
+                let turn = rotation + if inverted { -90.0 } else { 0.0 };
                 (
-                    geom::rotate(anchor, rect.centre(), rotation),
+                    geom::rotate(anchor, rect.centre(), turn),
                     (w.max(0.0), h.max(0.0)),
                     turn,
                 )
@@ -750,12 +781,31 @@ fn point_along(points: &[Point], x: f64, y: f64, offset: Point) -> Point {
     )
 }
 
+/// What a shape's part `outline` is filled with, before `place` puts it on the page.
+fn fill(style: &Resolved, fill: Fill, outline: &[PathCmd], place: &Placement) -> Option<Paint> {
+    match fill {
+        Fill::None => None,
+        Fill::Cell => paint(style, outline, place),
+        Fill::Own(colour) => Some(Paint::Solid(
+            colour.fade(style.num("fillOpacity", 100.0) / 100.0),
+        )),
+        Fill::Shade(opacity) => {
+            let ink = if opacity < 0.0 {
+                Color::WHITE
+            } else {
+                Color::BLACK
+            };
+            Some(Paint::Solid(ink.fade(opacity.abs())))
+        }
+    }
+}
+
 /// A cell's fill of `outline`: its colour at its `fillOpacity`, as a gradient when it has a
 /// `gradientColor`, running `gradientDirection` (south by default, or `radial` from the centre)
-/// across the outline's own box before it is turned `rotation` degrees about `centre`. draw.io's
-/// SVG gradient is in `objectBoundingBox` units of each path it fills
-/// (`mxSvgCanvas2D.createSvgGradient`), so a level arrow's south gradient crosses its band.
-fn paint(style: &Resolved, outline: &[PathCmd], centre: Point, rotation: f64) -> Option<Paint> {
+/// across the outline's own box before `place` mirrors and turns it. draw.io's SVG gradient is in
+/// `objectBoundingBox` units of each path it fills (`mxSvgCanvas2D.createSvgGradient`), so a
+/// level arrow's south gradient crosses its band.
+fn paint(style: &Resolved, outline: &[PathCmd], place: &Placement) -> Option<Paint> {
     let alpha = style.num("fillOpacity", 100.0) / 100.0;
     let from = style.color("fillColor")?.fade(alpha);
     let gradient = style.color("gradientColor");
@@ -770,9 +820,9 @@ fn paint(style: &Resolved, outline: &[PathCmd], centre: Point, rotation: f64) ->
             return Some(Paint::Radial {
                 from,
                 to,
-                centre: geom::rotate(mid, centre, rotation),
+                centre: place.apply(mid),
                 radii: (bounds.w / 2.0, bounds.h / 2.0),
-                rotation,
+                rotation: place.degrees,
             });
         }
         "north" => (Point::new(mid.x, b), Point::new(mid.x, t)),
@@ -783,8 +833,8 @@ fn paint(style: &Resolved, outline: &[PathCmd], centre: Point, rotation: f64) ->
     Some(Paint::Linear {
         from,
         to,
-        start: geom::rotate(start, centre, rotation),
-        end: geom::rotate(end, centre, rotation),
+        start: place.apply(start),
+        end: place.apply(end),
     })
 }
 
@@ -1000,6 +1050,16 @@ mod tests {
             edge,
         ]);
         let s = scene(&p);
+        let route = s.route("e").expect("a route");
+        assert!(
+            route.len() == 2 && route[0].distance(Point::new(40.0, 20.0)) < 1e-9,
+            "{route:?}"
+        );
+        assert!(
+            route[1].distance(Point::new(200.0, 20.0)) < 1e-9,
+            "the route runs to the outline, the head's room not taken off: {route:?}"
+        );
+        assert_eq!(s.route("a"), None);
         let edge: Vec<&Prim> = s.prims.iter().filter(|p| p.cell() == "e").collect();
         let (line, head) = match (edge[0], edge[1]) {
             (
@@ -1091,6 +1151,64 @@ mod tests {
             Paint::Radial { centre, radii, .. } => {
                 assert_eq!((centre, radii), (Point::new(50.0, 20.0), (50.0, 20.0)));
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shape_faces_its_direction_and_mirrors_with_its_flips() {
+        let tip_at = |style: &str, tip: Point| {
+            let r = Rect::new(0.0, 0.0, 80.0, 40.0);
+            let p = page(vec![Cell::new_vertex("t", "1", r, style, "")]);
+            match &scene(&p).prims[0] {
+                Prim::Path { path, .. } => path.iter().any(|c| match c {
+                    PathCmd::MoveTo(p) | PathCmd::LineTo(p) => p.distance(tip) < 1e-9,
+                    _ => false,
+                }),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(tip_at("triangle;", Point::new(80.0, 20.0)));
+        assert!(tip_at("triangle;direction=south;", Point::new(40.0, 40.0)));
+        assert!(tip_at("triangle;flipH=1;", Point::new(0.0, 20.0)));
+        assert!(tip_at(
+            "triangle;direction=north;flipV=1;",
+            Point::new(40.0, 40.0)
+        ));
+    }
+
+    #[test]
+    fn a_label_keeps_clear_of_a_bounded_shape_and_lies_across_a_turned_one() {
+        let r = Rect::new(0.0, 0.0, 100.0, 60.0);
+        let doc = page(vec![Cell::new_vertex(
+            "d",
+            "1",
+            r,
+            "shape=document;boundedLbl=1;",
+            "D",
+        )]);
+        assert_eq!(
+            text(&scene(&doc), "d").1,
+            Point::new(50.0, 21.0),
+            "above the wave"
+        );
+        // `horizontal=0` wraps across the height and turns the text a quarter back.
+        let lane = page(vec![Cell::new_vertex(
+            "s",
+            "1",
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+            "swimlane;horizontal=0;startSize=30;whiteSpace=wrap;",
+            "S",
+        )]);
+        let s = scene(&lane);
+        let (rect, anchor, wrap) = text(&s, "s");
+        assert!(wrap && (rect.w - 96.0).abs() < 1e-9, "{rect:?}");
+        assert!(
+            anchor.distance(Point::new(15.0, 50.0)) < 1e-9,
+            "in the title: {anchor:?}"
+        );
+        match s.prims.iter().find(|p| matches!(p, Prim::Text { .. })) {
+            Some(Prim::Text { rotation, .. }) => assert_eq!(*rotation, -90.0),
             other => panic!("{other:?}"),
         }
     }
