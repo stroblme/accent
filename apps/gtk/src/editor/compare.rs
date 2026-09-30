@@ -122,6 +122,13 @@ impl Tab {
         let header = diff::header(mine, Some(close.upcast_ref()));
         holder.append(&header);
         holder.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        // GTK 4.22 gives the overlay scrollbar a fade handler on the scroller's adjustment at
+        // every realize and takes it off only while realized, from the adjustment it is on then.
+        // Out of the window, the scroller may be put on the other column's adjustment: its own
+        // would keep the handler, to run it on a scrollbar GTK has let go of once the comparison
+        // hands that adjustment back. Overlay scrolling off takes the handler now, while it can.
+        let overlay = self.scroller.is_overlay_scrolling();
+        self.scroller.set_overlay_scrolling(false);
         self.content.remove(&self.document);
         holder.append(&self.document);
         let editor = diff::Pane {
@@ -146,6 +153,7 @@ impl Tab {
         };
         let compare =
             self.with_map_unset(|| diff::Compare::new(old, new, Some(side), hunk_buttons));
+        self.scroller.set_overlay_scrolling(overlay);
         // Every lay moves the hidden runs, and a message at the end of a collapsed line would be
         // drawn on the row that stands for the run: the diagnostics are laid again with them.
         compare.on_laid(glib::clone!(
