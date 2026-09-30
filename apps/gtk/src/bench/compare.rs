@@ -735,13 +735,17 @@ fn bench_banner_button(tab: &Tab) -> Option<glib::GString> {
     tab.banner.button_label().filter(|label| !label.is_empty())
 }
 
-/// A note compared with its disk copy, which puts the copy's column on the editor's scrollbar,
-/// left once that column's overlay scrollbar has faded out, and the editor scrolled the moment the
-/// column has been freed: prints `gone=true` and the scroll. Handing the column its own scrollbar
-/// back used to leave GTK's fade handler for it on the editor's adjustment (see
-/// `diff::swap_vadjustment`), so this scroll ran the handler on freed memory: a critical here
-/// (fatal under the drills' `G_DEBUG`), a segfault in a real session, the window crash of
-/// 2026-09-28. Writes the note, so point it at a scratch vault.
+/// A note compared, the comparison scrolled and left once its overlay scrollbar has faded out, and
+/// the editor scrolled the moment the other column has been freed: prints `gone=true` and the
+/// scroll, for two comparisons. With the disk copy first, which puts the copy's column on the
+/// editor's scrollbar: handing the column its own scrollbar back used to leave GTK's fade handler
+/// for it on the editor's adjustment (see `diff::swap_vadjustment`), so this scroll ran the handler
+/// on freed memory: a critical here (fatal under the drills' `G_DEBUG`), a segfault in a real
+/// session, the window crash of 2026-09-28. Then with the index of a repository the drill makes in
+/// the vault root, which puts the editor on the Index column's scrollbar: the editor's own
+/// scrollbar kept the fade handler it was given before the comparison, and taking that scrollbar
+/// back ran it on an indicator GTK had let go of, the same critical. Writes the note and makes a
+/// repository, so point it at a throwaway vault.
 pub(super) fn bench_compare_left(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -752,44 +756,88 @@ pub(super) fn bench_compare_left(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         };
         // Enough lines to scroll, which the disk copy does not have.
-        tab.set_text(&(1..=200).map(|i| format!("line {i}\n")).collect::<String>());
+        let lines = |word: &str| {
+            (1..=200)
+                .map(|i| format!("{word} {i}\n"))
+                .collect::<String>()
+        };
+        tab.set_text(&lines("line"));
         app.compare_with_disk(&tab);
-        let mut column = None;
-        for _ in 0..40 {
-            wait(100).await;
-            column = tab
-                .comparison()
-                .and_then(|compare| pane_view(compare.widget(), true))
-                .and_then(|view| view.parent())
-                .map(|scroller| scroller.downgrade());
-            if column.is_some() {
-                break;
-            }
+        println!("bench compare_left disk {}", bench_left(&tab).await);
+        let root = app.root();
+        for args in [
+            &["init", "-q"][..],
+            &["add", "--", &rel],
+            &["commit", "-qm", "base"],
+        ] {
+            let _ = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=bench",
+                    "-c",
+                    "user.email=bench@accent.invalid",
+                ])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(&root)
+                .output();
         }
-        let Some(column) = column else {
-            println!("bench compare_left none");
+        // The watcher's debounce and a repository discovery that runs git per directory.
+        wait(4000).await;
+        let Some(git) = app.git.get().filter(|git| git.has_repos()).cloned() else {
+            println!("bench compare_left no_repo");
             return bench_quit(&app);
         };
-        // Faded out two seconds after the last scroll, on a half-second tick.
-        wait(3000).await;
-        tab.leave_compare();
-        for _ in 0..200 {
-            if column.upgrade().is_none() {
-                break;
-            }
-            wait(10).await;
-        }
-        if let Some(adj) = tab.view.vadjustment() {
-            let from = adj.value();
-            adj.set_value(from + adj.page_size() / 2.0);
-            println!(
-                "bench compare_left gone={} scrolled={from}->{}",
-                column.upgrade().is_none(),
-                adj.value()
-            );
-        }
+        tab.set_text(&lines("changed"));
+        git.compare_worktree(&rel);
+        println!("bench compare_left worktree {}", bench_left(&tab).await);
         bench_quit(&app);
     });
+}
+
+/// Wait for `tab`'s comparison, scroll it half a page, leave it once its overlay scrollbar has
+/// faded out, and scroll the editor the moment the other column is freed.
+async fn bench_left(tab: &Tab) -> String {
+    let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+    let mut column = None;
+    for _ in 0..40 {
+        wait(100).await;
+        column = tab.comparison().and_then(|compare| {
+            let views = [false, true].map(|end| pane_view(compare.widget(), end));
+            let other = views
+                .into_iter()
+                .flatten()
+                .find(|v| v != tab.view.upcast_ref::<gtk::TextView>())?;
+            let adj = compare.vadjustment();
+            adj.set_value(adj.value() + adj.page_size() / 2.0);
+            Some(other.parent()?.downgrade())
+        });
+        if column.is_some() {
+            break;
+        }
+    }
+    let Some(column) = column else {
+        return "none".to_string();
+    };
+    // Faded out two seconds after the last scroll, on a half-second tick.
+    wait(3000).await;
+    tab.leave_compare();
+    for _ in 0..200 {
+        if column.upgrade().is_none() {
+            break;
+        }
+        wait(10).await;
+    }
+    let Some(adj) = tab.view.vadjustment() else {
+        return "no_scroll".to_string();
+    };
+    let from = adj.value();
+    adj.set_value(from + adj.page_size() / 2.0);
+    format!(
+        "gone={} scrolled={from}->{}",
+        column.upgrade().is_none(),
+        adj.value()
+    )
 }
 
 /// The page a comparison's companion shares with the editor beside it. The note is a heading over
