@@ -172,6 +172,38 @@ impl DiagramView {
         self.sheet().filter(|_| !free).and_then(|s| s.grid)
     }
 
+    /// What a move, a resize or a turn asks for with the pointer at `p`: the edit its release
+    /// makes, and the one the live preview shows meanwhile. `None` for any other drag.
+    pub(super) fn drag_edit(&self, drag: &Drag, p: Point, free: bool) -> Option<Edit> {
+        match drag {
+            Drag::Move {
+                from, ids, origin, ..
+            } if !ids.is_empty() => Some(Edit::Move {
+                ids: ids.clone(),
+                delta: self.move_delta(*from, p, *origin, free),
+            }),
+            Drag::Resize {
+                from,
+                id,
+                handle,
+                rect,
+                rotation,
+            } => {
+                let delta = Point::new(p.x - from.x, p.y - from.y);
+                let grid = self.grid(free);
+                Some(Edit::Resize {
+                    id: id.clone(),
+                    rect: geometry::resize_rotated(rect, *rotation, *handle, delta, grid),
+                })
+            }
+            Drag::Rotate { id, rect } => Some(Edit::Rotate {
+                id: id.clone(),
+                degrees: self.turn_to(rect, p, free),
+            }),
+            _ => None,
+        }
+    }
+
     /// What a drag that ends at widget `(x, y)` asks for.
     pub(super) fn end_drag(&self, drag: Drag, x: f64, y: f64, moved: bool, free: bool) {
         let p = self.page_at(x, y);
@@ -180,36 +212,13 @@ impl DiagramView {
             Some(g) => Point::new(geometry::snap(q.x, g), geometry::snap(q.y, g)),
             None => q,
         };
+        if let Some(edit) = self.drag_edit(&drag, p, free).filter(|_| moved) {
+            return self.emit(edit);
+        }
         match drag {
             Drag::Move {
-                from,
-                ids,
-                click,
-                origin,
-            } => match (moved, click) {
-                (true, _) if !ids.is_empty() => self.emit(Edit::Move {
-                    ids,
-                    delta: self.move_delta(from, p, origin, free),
-                }),
-                (false, Some(cell)) => self.emit(Edit::Select(vec![cell])),
-                _ => {}
-            },
-            Drag::Resize {
-                from,
-                id,
-                handle,
-                rect,
-                rotation,
-            } if moved => {
-                let delta = Point::new(p.x - from.x, p.y - from.y);
-                let grid = self.grid(free);
-                let rect = geometry::resize_rotated(&rect, rotation, handle, delta, grid);
-                self.emit(Edit::Resize { id, rect });
-            }
-            Drag::Rotate { id, rect } if moved => {
-                let degrees = self.turn_to(&rect, p, free);
-                self.emit(Edit::Rotate { id, degrees });
-            }
+                click: Some(cell), ..
+            } if !moved => self.emit(Edit::Select(vec![cell])),
             Drag::Band { from, add } if moved => {
                 let mut ids = sheet.band(Rect::from_corners(from, p));
                 if add {

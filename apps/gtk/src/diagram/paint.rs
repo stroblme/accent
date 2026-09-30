@@ -54,6 +54,22 @@ impl Cache {
         self.boxes.borrow_mut().clear();
     }
 
+    /// What of this cache holds for `new`, a display list replacing `old` prim for prim, as each
+    /// frame of a drag's preview replaces the one before: a label or a picture is kept where the
+    /// prim in its place is the same cell's same kind, a label wrapping at the same width. Only a
+    /// drag's frames are alike enough for that: they move and resize cells, and change nothing
+    /// a cell says.
+    pub fn carried(&self, old: &[Prim], new: &[Prim]) -> Cache {
+        let keep = |i: usize| old.len() == new.len() && alike(&old[i], &new[i]);
+        Cache {
+            layouts: kept(&self.layouts, keep),
+            textures: kept(&self.textures, keep),
+            decoded: self.decoded.clone(),
+            math: kept(&self.math, keep),
+            boxes: RefCell::default(),
+        }
+    }
+
     /// The topmost unlocked label whose painted text is under page point `p`. The display list
     /// gives an edge's label no box of its own, only a point, so the text as painted is the
     /// only place it can be aimed at.
@@ -104,6 +120,41 @@ impl Cache {
             .clone();
         self.textures.borrow_mut().insert(index, texture.clone());
         texture
+    }
+}
+
+/// The entries of `map` whose prim `keep` keeps.
+fn kept<V: Clone>(
+    map: &RefCell<HashMap<usize, V>>,
+    keep: impl Fn(usize) -> bool,
+) -> RefCell<HashMap<usize, V>> {
+    let map = map.borrow();
+    RefCell::new(
+        map.iter()
+            .filter(|(i, _)| keep(**i))
+            .map(|(i, v)| (*i, v.clone()))
+            .collect(),
+    )
+}
+
+/// Whether `b` paints what `a` does, wherever it is: the same cell's same kind of prim, a label
+/// wrapping at the same width.
+fn alike(a: &Prim, b: &Prim) -> bool {
+    match (a, b) {
+        (
+            Prim::Text {
+                cell, wrap, rect, ..
+            },
+            Prim::Text {
+                cell: c,
+                wrap: w,
+                rect: r,
+                ..
+            },
+        ) => cell == c && wrap == w && (!wrap || rect.w == r.w),
+        (Prim::Image { cell, .. }, Prim::Image { cell: c, .. })
+        | (Prim::Path { cell, .. }, Prim::Path { cell: c, .. }) => cell == c,
+        _ => false,
     }
 }
 

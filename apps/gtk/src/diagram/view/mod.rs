@@ -7,6 +7,7 @@
 
 mod drag;
 mod overlay;
+mod preview;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -21,6 +22,7 @@ use super::paint::{self, Cache};
 use super::tools::Tool;
 use crate::theme;
 use drag::Drag;
+use preview::Preview;
 
 /// What a gesture on the canvas asks of the diagram.
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +91,8 @@ impl DiagramView {
         let imp = self.imp();
         let before = imp.frame.get();
         imp.cache.forget();
+        // A preview is of the page before; a drag still under way starts one of this page.
+        imp.preview.take();
         *imp.sheet.borrow_mut() = Some(Rc::new(sheet));
         self.relayout();
         let after = imp.frame.get();
@@ -321,6 +325,7 @@ mod imp {
         pub tool: Cell<Tool>,
         pub panning: Cell<bool>,
         pub(super) drag: RefCell<Option<Drag>>,
+        pub(super) preview: RefCell<Option<Preview>>,
         /// Whether the drag under way has gone past [`DRAG_SLOP`].
         pub moved: Cell<bool>,
         /// Where the pointer is in the drag under way, in page units.
@@ -350,6 +355,7 @@ mod imp {
                 tool: Cell::new(Tool::Select),
                 panning: Cell::new(false),
                 drag: RefCell::new(None),
+                preview: RefCell::new(None),
                 moved: Cell::new(false),
                 pointer: Cell::new(Point::default()),
                 free: Cell::new(false),
@@ -484,6 +490,7 @@ mod imp {
                         .current_event_state()
                         .contains(gdk::ModifierType::ALT_MASK);
                     obj.end_drag(drag, x0 + dx, y0 + dy, moved, free);
+                    imp.preview.take();
                     obj.queue_draw();
                 }
             ));
@@ -584,19 +591,26 @@ mod imp {
                 &[edge; 4],
             );
 
+            // The page as a drag under way would leave it, or as it is.
+            obj.update_preview(&sheet);
+            let preview = self.preview.borrow();
+            let (prims, bounds, cache) = match preview.as_ref() {
+                Some(Preview::Live(live)) => (&live.scene.prims, &live.bounds, &live.cache),
+                _ => (&sheet.scene.prims, &sheet.bounds, &self.cache),
+            };
             // Only what is on screen, a prim's box being known from when the page was shown.
             let near = frame.to_page(Point::new(sx, sy));
             let visible = Rect::new(near.x, near.y, w / frame.scale, h / frame.scale);
-            for (i, prim) in sheet.scene.prims.iter().enumerate() {
-                if sheet.bounds[i].intersects(&visible) {
-                    let typesetter = self.typesetter.borrow();
+            let typesetter = self.typesetter.borrow();
+            for (i, prim) in prims.iter().enumerate() {
+                if bounds[i].intersects(&visible) {
                     paint::prim(
                         snapshot,
                         obj.upcast_ref(),
                         i,
                         prim,
                         &frame,
-                        &self.cache,
+                        cache,
                         typesetter.as_ref(),
                     );
                 }

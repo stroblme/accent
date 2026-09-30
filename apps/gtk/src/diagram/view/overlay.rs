@@ -1,14 +1,15 @@
 //! What the canvas draws over the page: the selection, its handles, the connection points in
 //! reach and whatever a drag is doing.
 
+use accent_drawio::Rect;
 use accent_drawio::geom::{self, rotate};
-use accent_drawio::{Point, Rect};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{graphene, gsk};
 
-use super::DiagramView;
 use super::drag::Drag;
+use super::preview::Preview;
+use super::{DiagramView, Edit};
 use crate::diagram::geometry::{self, Frame, HANDLE, Handle, Sheet, TOLERANCE};
 use crate::diagram::paint;
 use crate::diagram::tools::Tool;
@@ -33,6 +34,26 @@ impl DiagramView {
         let selection = imp.selection.borrow();
         let moving = matches!(drag.as_ref(), Some(Drag::Move { .. } | Drag::Rotate { .. }))
             && imp.moved.get();
+        // Where the live preview has the selection: its frames and handles go with it, as
+        // draw.io's do (`mxGraphHandler.redrawHandles`).
+        let preview = imp.preview.borrow();
+        let shown = match preview.as_ref() {
+            Some(Preview::Live(live)) => live.shown.as_ref(),
+            _ => None,
+        };
+        let placed = |id: &str, r: Rect| match shown {
+            Some(Edit::Move { ids, delta }) if ids.iter().any(|m| sheet.is_within(id, m)) => {
+                (r.translate(delta.x, delta.y), sheet.rotation(id))
+            }
+            Some(Edit::Resize { id: resized, rect }) if resized == id => {
+                (*rect, sheet.rotation(id))
+            }
+            Some(Edit::Rotate {
+                id: turned,
+                degrees,
+            }) if turned == id => (r, *degrees),
+            _ => (r, sheet.rotation(id)),
+        };
         // A page rectangle turned `rotation` degrees, outlined on screen.
         let turned = |r: &Rect, rotation: f64| {
             if rotation == 0.0 {
@@ -54,7 +75,8 @@ impl DiagramView {
         };
         for id in selection.iter() {
             if let Some(r) = sheet.frame_of(id) {
-                turned(&r, sheet.rotation(id));
+                let (r, rotation) = placed(id, r);
+                turned(&r, rotation);
             }
         }
         if let [id] = selection.as_slice()
@@ -62,7 +84,7 @@ impl DiagramView {
             && !sheet.is_pinned(id)
             && !moving
         {
-            let rotation = sheet.rotation(id);
+            let (r, rotation) = placed(id, r);
             for h in Handle::ALL {
                 let at = frame.to_content(rotate(h.at(&r), r.centre(), rotation));
                 let square = Rect::new(at.x - HANDLE / 2.0, at.y - HANDLE / 2.0, HANDLE, HANDLE);
@@ -110,48 +132,21 @@ impl DiagramView {
             return;
         };
         match drag {
+            // Too many cells to show live: their box moves, dashed as draw.io's preview shape is
+            // (`mxGraphHandler.createPreviewShape`).
             Drag::Move {
                 from, ids, origin, ..
-            } => {
+            } if matches!(*preview, Some(Preview::Boxed)) => {
                 let d = self.move_delta(*from, pointer, *origin, free);
-                snapshot.save();
-                snapshot.translate(&graphene::Point::new(
-                    (d.x * frame.scale) as f32,
-                    (d.y * frame.scale) as f32,
-                ));
-                snapshot.push_opacity(f64::from(theme::GHOST_ALPHA));
-                for (i, prim) in sheet.scene.prims.iter().enumerate() {
-                    if ids.iter().any(|id| sheet.is_within(prim.cell(), id)) {
-                        let typesetter = imp.typesetter.borrow();
-                        paint::prim(
-                            snapshot,
-                            self.upcast_ref(),
-                            i,
-                            prim,
-                            frame,
-                            &imp.cache,
-                            typesetter.as_ref(),
-                        );
-                    }
+                let moved = ids.iter().filter_map(|id| sheet.frame_of(id));
+                if let Some(r) = moved.reduce(|a, b| a.union(&b)) {
+                    let builder = gsk::PathBuilder::new();
+                    builder.add_rect(&paint::grect(&frame.rect(&r.translate(d.x, d.y))));
+                    let stroke = gsk::Stroke::new(1.0);
+                    stroke.set_dash(&[3.0, 3.0]);
+                    snapshot.append_stroke(&builder.to_path(), &stroke, &accent);
                 }
-                snapshot.pop();
-                snapshot.restore();
             }
-            Drag::Resize {
-                from,
-                handle,
-                rect,
-                rotation,
-                ..
-            } => {
-                let delta = Point::new(pointer.x - from.x, pointer.y - from.y);
-                let grid = self.grid(free);
-                turned(
-                    &geometry::resize_rotated(rect, *rotation, *handle, delta, grid),
-                    *rotation,
-                );
-            }
-            Drag::Rotate { rect, .. } => turned(rect, self.turn_to(rect, pointer, free)),
             Drag::Band { from, .. } => {
                 let r = frame.rect(&Rect::from_corners(*from, pointer));
                 snapshot.append_color(
@@ -181,7 +176,7 @@ impl DiagramView {
                 builder.line_to(b.x as f32, b.y as f32);
                 snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
             }
-            Drag::Pan { .. } => {}
+            Drag::Move { .. } | Drag::Resize { .. } | Drag::Rotate { .. } | Drag::Pan { .. } => {}
         }
     }
 }
