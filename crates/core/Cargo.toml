@@ -9,6 +9,8 @@ default = []
 pdf = ["dep:pdfium-render"]
 
 [dependencies]
+# A diagram's labels are what the index holds of it (`index::reconcile`), read through the model.
+accent-drawio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

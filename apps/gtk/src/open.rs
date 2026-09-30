@@ -78,6 +78,12 @@ impl App {
     /// The old tab goes after the new one is in place, so the pane never stands empty and closes
     /// itself out from under the note arriving in it.
     pub(crate) fn mark_opened(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
+        if let Some(Doc::Diagram(tab)) = self.doc_for_page(page) {
+            let at = self.revealing.borrow_mut().remove(&tab.key());
+            if let Some(at) = at {
+                reveal_label(&tab, at);
+            }
+        }
         if how == Opened::Pinned {
             return self.set_pinned(page, true);
         }
@@ -1109,9 +1115,25 @@ impl App {
     pub fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<sidebar::Target>) {
         self.mark();
         match at {
+            Some(sidebar::Target::Range(bytes)) if doc::kind_of(rel) == Kind::Diagram => {
+                self.open_label(rel, bytes.start)
+            }
             Some(at) => self.select_when_open(rel, at),
             None => self.open_preview(rel),
         }
+    }
+
+    /// Open diagram `rel` on the label a search found at byte `at` of its labels' text (one line
+    /// each, as the index holds them): its page, the cell selected and in view. A diagram goes up
+    /// once a worker has read it, so one not open yet shows the label when it arrives
+    /// ([`mark_opened`](Self::mark_opened)).
+    fn open_label(self: &Rc<Self>, rel: &str, at: usize) {
+        if let Some(Doc::Diagram(tab)) = self.doc_for(rel) {
+            self.reveal_page(&tab.page);
+            return reveal_label(&tab, at);
+        }
+        self.revealing.borrow_mut().insert(rel.to_string(), at);
+        self.open_preview(rel);
     }
 
     /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit, a tag or a
@@ -1591,6 +1613,13 @@ impl App {
         if let Some(what) = waiting.and_then(|waiting| waiting.what) {
             self.cannot(&what, why);
         }
+    }
+}
+
+/// Show the label of `tab` whose line in its labels' text holds byte `at`, if there still is one.
+fn reveal_label(tab: &Rc<crate::diagram::DiagramTab>, at: usize) {
+    if let Some((page, cell)) = accent_drawio::text::label_at(&tab.file(), at) {
+        tab.reveal_cell(page, &cell);
     }
 }
 

@@ -51,6 +51,12 @@ pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("seed:") {
         return bench_seed(app, rel);
     }
+    if let Some(query) = arg.strip_prefix("label:") {
+        let query = query.to_string();
+        return bench_search_indexed(app.clone(), Instant::now(), move |app| {
+            bench_label(app, query)
+        });
+    }
     let more = (arg.strip_prefix("more:").map(|rest| (rest, false)))
         .or_else(|| arg.strip_prefix("click:").map(|rest| (rest, true)));
     if let Some((rest, click)) = more {
@@ -395,6 +401,96 @@ const CLICK_WAIT: Duration = Duration::from_secs(20);
 
 /// The note `=more:` opens: named to sort among the others, so the exact scan, which lists in
 /// path order, puts it in the middle of the list.
+/// `ACCENT_BENCH_SEARCH=label:<query>` writes a two-page diagram holding `<query>` in a bold
+/// label on its second page, searches for it and prints each row as its name and dim line, which
+/// must name the page (`Second`), not a line; then opens the first row as a click does and prints
+/// the page the diagram shows and what is selected, which must be `page=1` and `["found"]`. Once
+/// ranked, then with the replace row open.
+fn bench_label(app: Rc<App>, query: String) {
+    let rel = format!("{NOTE}.drawio");
+    let path = app.root().join(&rel);
+    let cell = |id: &str, label: &str| {
+        format!(
+            r#"<mxCell id="{id}" value="{label}" style="html=1;" vertex="1" parent="1"><mxGeometry x="40" y="40" width="160" height="60" as="geometry"/></mxCell>"#
+        )
+    };
+    let page = |name: &str, cells: &str| {
+        format!(
+            r#"<diagram name="{name}" id="{name}"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>{cells}</root></mxGraphModel></diagram>"#
+        )
+    };
+    let xml = format!(
+        "<mxfile>{}{}</mxfile>",
+        page("First", &cell("other", "nothing here")),
+        page(
+            "Second",
+            &cell("found", &format!("&lt;b&gt;{query}&lt;/b&gt; label"))
+        )
+    );
+    if let Err(e) = std::fs::write(&path, xml) {
+        println!("bench search label wrote=false {e}");
+        return bench_quit(&app);
+    }
+    let Some(sidebar) = app.sidebar.get() else {
+        return bench_quit(&app);
+    };
+    sidebar.show_pane("search");
+    sidebar.set_search_text(&query);
+    glib::timeout_add_local_once(SETTLE, move || {
+        bench_label_open(&app, "ranked");
+        let app2 = app.clone();
+        glib::timeout_add_local_once(SETTLE, move || {
+            bench_label_opened(&app2, "ranked");
+            if let Some(sidebar) = app2.sidebar.get() {
+                sidebar.show_replace();
+            }
+            glib::timeout_add_local_once(SETTLE, move || {
+                bench_label_open(&app2, "exact");
+                glib::timeout_add_local_once(SETTLE, move || {
+                    bench_label_opened(&app2, "exact");
+                    bench_search_remove(&[path]);
+                    bench_quit(&app2);
+                });
+            });
+        });
+    });
+}
+
+/// Print the rows as they are drawn, name and dim line, and open the first as a click does.
+fn bench_label_open(app: &Rc<App>, mode: &str) {
+    let Some(view) = app.sidebar.get().and_then(|s| s.search_view()) else {
+        return;
+    };
+    let label = |w: Option<gtk::Widget>| w.and_downcast::<gtk::Label>().map(|l| l.text());
+    let mut rows = Vec::new();
+    let mut child = view.first_child();
+    while let Some(item) = child {
+        if let Some(head) = item.first_child().and_then(|row| row.first_child()) {
+            let name = label(head.first_child().and_then(|i| i.next_sibling()));
+            rows.push(format!(
+                "{} | {}",
+                name.unwrap_or_default(),
+                label(head.last_child()).unwrap_or_default()
+            ));
+        }
+        child = item.next_sibling();
+    }
+    println!("bench search label={mode} rows={rows:?}");
+    view.emit_by_name::<()>("activate", &[&0u32]);
+}
+
+/// What the diagram the row opened shows.
+fn bench_label_opened(app: &Rc<App>, mode: &str) {
+    match app.active_diagram() {
+        Some(tab) => println!(
+            "bench search label={mode} opened page={} selection={:?}",
+            tab.page_index(),
+            tab.selection()
+        ),
+        None => println!("bench search label={mode} opened=none"),
+    }
+}
+
 fn more_note() -> String {
     format!("{NOTE}-15more.md")
 }

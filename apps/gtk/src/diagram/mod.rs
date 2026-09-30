@@ -295,6 +295,16 @@ impl DiagramTab {
         self.show_page(i);
     }
 
+    /// Show cell `id` of page `page`: the page as a jump, the cell selected and scrolled into
+    /// view. Where a search hit on a label lands.
+    pub fn reveal_cell(self: &Rc<Self>, page: usize, id: &str) {
+        self.goto_page(page);
+        self.select(vec![id.to_string()]);
+        if let Some(frame) = self.frame_of(id) {
+            self.view.reveal(&frame);
+        }
+    }
+
     /// The next or previous page, as reading rather than a jump.
     pub fn step_page(self: &Rc<Self>, forward: bool) {
         let i = self.page_index.get();
