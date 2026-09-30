@@ -260,6 +260,7 @@ impl Pool {
                 button.add_css_class("flat");
                 button.add_css_class("caption");
                 button.set_tooltip_text(Some("Show these lines"));
+                crate::widgets::claim_press(&button);
                 button.connect_clicked(self.act(&role, |compare, role| {
                     if let Role::Gap { key, .. } = role {
                         compare.open_run(key);
@@ -278,6 +279,7 @@ impl Pool {
                     let button = gtk::Button::with_label(label);
                     button.add_css_class("caption");
                     button.set_tooltip_text(Some(tip));
+                    crate::widgets::claim_press(&button);
                     button.connect_clicked(self.act(&role, move |compare, role| {
                         if let Role::Hunk(hunk) = role {
                             compare.take(hunk, keep_own);

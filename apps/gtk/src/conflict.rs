@@ -274,8 +274,8 @@ impl Conflicts {
             let button = gtk::Button::with_label(label);
             button.add_css_class("caption");
             button.set_tooltip_text(Some(tip));
-            // The editor keeps the keyboard, so typing goes on where it was.
-            button.set_focus_on_click(false);
+            // The editor keeps the keyboard and its caret, so typing goes on where it was.
+            crate::widgets::claim_press(&button);
             let weak = self.weak.clone();
             button.connect_clicked(move |_| {
                 let Some(c) = weak.upgrade() else { return };

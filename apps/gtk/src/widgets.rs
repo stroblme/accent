@@ -159,6 +159,27 @@ pub(crate) fn set_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
     }
 }
 
+/// Keep a press on `button` to the button, for one laid over a text view. GtkButton claims its
+/// press only on release, so the view under it saw the press too, put its caret under the pointer
+/// and took the keyboard. The claim is made in a group with the button's own click, which a
+/// gesture claiming alone would deny; and the click leaves the keyboard where it was.
+pub(crate) fn claim_press(button: &gtk::Button) {
+    let claim = gtk::GestureClick::new();
+    claim.set_propagation_phase(gtk::PropagationPhase::Capture);
+    claim.connect_pressed(|gesture, _, _, _| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    button.add_controller(claim.clone());
+    let controllers = button.observe_controllers();
+    let own = (0..controllers.n_items())
+        .filter_map(|i| controllers.item(i).and_downcast::<gtk::GestureClick>())
+        .find(|gesture| *gesture != claim);
+    if let Some(own) = own {
+        claim.group_with(&own);
+    }
+    button.set_focus_on_click(false);
+}
+
 /// A progress bar stepped by a timer of ours, GTK4 having no indeterminate mode (DESIGN.md,
 /// Loading). Every timer it starts is removed when the work ends and when the bar's window
 /// closes: a leaked `glib::timeout` keeps firing.

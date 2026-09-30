@@ -1007,36 +1007,15 @@ pub(super) fn bench_compare_gap(app: &Rc<App>, rel: &str) {
 /// the scroll strayed meanwhile.
 async fn bench_gap(compare: &diff::Compare, view: &gtk::TextView, pick: Option<usize>) -> String {
     let adj = compare.vadjustment();
-    let mut buttons = Vec::new();
-    let mut stack = vec![view.clone().upcast::<gtk::Widget>()];
-    while let Some(widget) = stack.pop() {
-        let mut child = widget.first_child();
-        while let Some(c) = child {
-            child = c.next_sibling();
-            if let Ok(button) = c.clone().downcast::<gtk::Button>()
-                && button.is_visible()
-                && button.label().is_some_and(|l| l.starts_with('⋯'))
-            {
-                buttons.push(button);
-            }
-            stack.push(c);
-        }
-    }
-    let top = |button: &gtk::Button| {
-        let at = button.compute_point(view, &gtk::graphene::Point::zero());
-        at.map_or(0, |p| p.y() as i32) + view.visible_rect().y()
-    };
-    buttons.sort_by_key(top);
-    let Some(button) = buttons.get(pick.unwrap_or(buttons.len() / 2)).cloned() else {
+    let buttons = overlaid(view, "⋯");
+    let Some((top, button)) = buttons.get(pick.unwrap_or(buttons.len() / 2)).cloned() else {
         return format!("buttons={}", buttons.len());
     };
-    let seen = view.visible_rect();
-    adj.set_value(adj.value() + f64::from(top(&button) - seen.y()) - adj.page_size() / 2.0);
-    glib::timeout_future(Duration::from_millis(500)).await;
+    centre(compare, view, top).await;
     // Kept as marks, since the click lays both buffers again. The button sits in the padding of
     // the line under the run; the line above is the visible one before that, if there is one.
     let buffer = view.buffer();
-    let (below, _) = view.line_at_y(top(&button));
+    let (below, _) = view.line_at_y(top);
     let mut above = below;
     let marks = [above.backward_visible_line().then_some(above), Some(below)]
         .map(|at| at.map(|at| buffer.create_mark(None, &at, true)));
@@ -1069,6 +1048,129 @@ async fn bench_gap(compare: &diff::Compare, view: &gtk::TextView, pick: Option<u
         before[1],
         after[1]
     )
+}
+
+/// The shown buttons laid over `view` whose label starts with `label`, top to bottom, each with
+/// the `y` it starts at in buffer coordinates.
+fn overlaid(view: &gtk::TextView, label: &str) -> Vec<(i32, gtk::Button)> {
+    let mut buttons = Vec::new();
+    let mut stack = vec![view.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = stack.pop() {
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            if let Ok(button) = c.clone().downcast::<gtk::Button>()
+                && button.is_visible()
+                && button.label().is_some_and(|l| l.starts_with(label))
+            {
+                let at = button.compute_point(view, &gtk::graphene::Point::zero());
+                buttons.push((
+                    at.map_or(0, |p| p.y() as i32) + view.visible_rect().y(),
+                    button,
+                ));
+            }
+            stack.push(c);
+        }
+    }
+    buttons.sort_by_key(|(y, _)| *y);
+    buttons
+}
+
+/// Scroll the comparison so buffer `y` of `view` is halfway down it, as far as it goes.
+async fn centre(compare: &diff::Compare, view: &gtk::TextView, y: i32) {
+    let (adj, seen) = (compare.vadjustment(), view.visible_rect());
+    adj.set_value(adj.value() + f64::from(y - seen.y()) - adj.page_size() / 2.0);
+    glib::timeout_future(Duration::from_millis(500)).await;
+}
+
+/// The overlaid buttons pressed through the real pointer, which a drill's `clicked` is not: a note
+/// of 400 lines changed at every fortieth, compared with its disk copy, the editor's caret at its
+/// start. Prints `bench compare_press aim <x> <y>` over the middle "⋯" button of the editor's
+/// column, for `build-aux/xtest.py :N "move <x> <y>; focus; down; up"`, and once the run has
+/// opened (`acted=true`), the editor's caret line and the widget with the keyboard; then the same
+/// over the middle Take button on the other column, with that column's caret offset. The claim is
+/// `caret_line=0` and `theirs_caret=0` throughout, the keyboard staying where it was: the press
+/// reached the text view under the button too, which put that column's caret under the pointer
+/// and gave it the keyboard. Waits
+/// ten seconds for each press. Writes the note, so point it at a scratch vault.
+pub(super) fn bench_compare_press(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let text = |changed: bool| -> String {
+            (1..=400)
+                .map(|i| match changed && i % 40 == 20 {
+                    true => format!("line {i} changed\n"),
+                    false => format!("line {i}\n"),
+                })
+                .collect()
+        };
+        tab.set_text(&text(false));
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_press write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.set_text(&text(true));
+        app.compare_with_disk(&tab);
+        wait(1200).await;
+        let (Some(compare), Some(theirs)) = (
+            tab.comparison(),
+            tab.comparison().and_then(|c| pane_view(c.widget(), true)),
+        ) else {
+            println!("bench compare_press none");
+            return bench_quit(&app);
+        };
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        let mine: &gtk::TextView = tab.view.upcast_ref();
+        let say = |what: &str, acted: bool| {
+            let caret = |view: &gtk::TextView| {
+                let buffer = view.buffer();
+                buffer.iter_at_mark(&buffer.get_insert())
+            };
+            let focus = GtkWindowExt::focus(&app.window).map(|w| w.type_().name().to_string());
+            println!(
+                "bench compare_press {what} acted={acted} caret_line={} theirs_caret={} focus={focus:?}",
+                caret(mine).line(),
+                caret(&theirs).offset()
+            );
+        };
+        for (what, view, label) in [("gap", mine, "⋯"), ("take", &theirs, "Take")] {
+            let buttons = overlaid(view, label);
+            let Some((top, button)) = buttons.get(buttons.len() / 2).cloned() else {
+                println!("bench compare_press {what} none");
+                continue;
+            };
+            centre(&compare, view, top).await;
+            let Some(root) = button.root() else { continue };
+            let middle = gtk::graphene::Point::new(
+                button.width() as f32 / 2.0,
+                button.height() as f32 / 2.0,
+            );
+            let (sx, sy) = app.window.surface_transform();
+            if let Some(p) = button.compute_point(&root, &middle) {
+                println!(
+                    "bench compare_press aim {:.0} {:.0}",
+                    f64::from(p.x()) + sx,
+                    f64::from(p.y()) + sy
+                );
+            }
+            let counts = compare.counts();
+            for _ in 0..100 {
+                wait(100).await;
+                if compare.counts() != counts {
+                    break;
+                }
+            }
+            wait(300).await;
+            say(what, compare.counts() != counts);
+        }
+        bench_quit(&app);
+    });
 }
 
 /// A note with its first section folded, compared with its disk copy, which differs only at the

@@ -30,7 +30,8 @@ use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_folds,
     bench_compare_gap, bench_compare_gutter, bench_compare_left, bench_compare_lines,
-    bench_compare_pads, bench_compare_page, bench_compare_pick, bench_compare_row,
+    bench_compare_pads, bench_compare_page, bench_compare_pick, bench_compare_press,
+    bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -154,7 +155,8 @@ use tags::bench_tags;
 /// note, and then in a tab of two blobs, and prints where the rows around each button went
 /// (`compare::bench_compare_gap`). `=page:<rel>` prints the sticky title and the page the
 /// companion shares with the editor, across a zoom and a new Indent Width
-/// (`compare::bench_compare_page`).
+/// (`compare::bench_compare_page`). `=press:<rel>` prints where to press the overlaid buttons with
+/// XTEST and where the carets are after each press (`compare::bench_compare_press`).
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
@@ -537,6 +539,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("page:") {
                 return bench_compare_page(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("press:") {
+                return bench_compare_press(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
