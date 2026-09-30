@@ -16,9 +16,17 @@ use webkit6::prelude::*;
 /// `=zoom:<rel_svg>,<rel_svg>,…` instead steps each SVG in thirty times, then forty more, then
 /// back to the fit, printing the picture just after each run and once the zoom has settled, with
 /// how long the drawing at the new zoom took to land: it is drawn once per run, at the last step.
+///
+/// `=anchor:<rel>` instead zooms the image around a point two fifths into the view, as a
+/// Ctrl+wheel there does, forty steps in from the fit and ten out, then once in by the chord,
+/// printing after each where in the image the point is (`under`, in fractions of it) and the
+/// top-left corner for the chord. Once the image is larger than the view, neither moves.
 pub(super) fn bench_image(app: &Rc<App>, arg: &str) {
     if let Some(rels) = arg.strip_prefix("zoom:") {
         return zoom_svgs(app, rels);
+    }
+    if let Some(rel) = arg.strip_prefix("anchor:") {
+        return zoom_around(app, rel);
     }
     let Some((rel, other)) = arg.split_once(',') else {
         println!("bench image needs <rel_png>,<rel_other_png>");
@@ -78,6 +86,78 @@ fn zoom_svgs(app: &Rc<App>, rels: &str) {
         }
         bench_quit(&app);
     });
+}
+
+/// See `=anchor:` on [`bench_image`].
+fn zoom_around(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(600)).await;
+        let Some(Doc::Image(image)) = app.active_doc() else {
+            println!("bench image anchor no_tab");
+            return bench_quit(&app);
+        };
+        let Ok(scroller) = image.page.child().downcast::<gtk::ScrolledWindow>() else {
+            return bench_quit(&app);
+        };
+        let at = (
+            f64::from(scroller.width()) * 0.4,
+            f64::from(scroller.height()) * 0.4,
+        );
+        anchor_state(&image, &scroller, at, "fitted");
+        for (out, steps) in [(false, 40), (true, 10)] {
+            for _ in 0..steps {
+                app.zoom_image(&image, Some(out), Some(at));
+                // A frame, for the viewport to take the picture's new size.
+                glib::timeout_future(Duration::from_millis(100)).await;
+                anchor_state(&image, &scroller, at, &format!("out={out}"));
+            }
+        }
+        anchor_state(&image, &scroller, (0.0, 0.0), "before_chord");
+        let _ = WidgetExt::activate_action(&app.window, "win.zoom-in", None);
+        glib::timeout_future(Duration::from_millis(100)).await;
+        anchor_state(&image, &scroller, (0.0, 0.0), "chord");
+        bench_quit(&app);
+    });
+}
+
+/// One `bench image anchor` line: the image's drawn size, the scroll offsets and where `at`, a
+/// point in `scroller`, falls in the image.
+fn anchor_state(image: &doc::Viewer, scroller: &gtk::ScrolledWindow, at: (f64, f64), when: &str) {
+    let picture = picture_of(&image.page);
+    let paintable = picture.as_ref().and_then(|p| p.paintable());
+    let origin = picture
+        .as_ref()
+        .and_then(|p| p.compute_point(scroller, &graphene::Point::zero()));
+    let (Some(picture), Some(paintable), Some(origin)) = (picture, paintable, origin) else {
+        return println!("bench image anchor {when} no_picture");
+    };
+    let (pw, ph) = (f64::from(picture.width()), f64::from(picture.height()));
+    let (iw, ih) = (
+        f64::from(paintable.intrinsic_width()),
+        f64::from(paintable.intrinsic_height()),
+    );
+    // Fitted, the picture fills the view and draws the image scaled down in its middle.
+    let scale = (pw / iw).min(ph / ih);
+    let scale = match image.zoom.get() {
+        Some(_) => scale,
+        None => scale.min(1.0),
+    };
+    let (dw, dh) = (iw * scale, ih * scale);
+    let x = f64::from(origin.x()) + (pw - dw) / 2.0;
+    let y = f64::from(origin.y()) + (ph - dh) / 2.0;
+    println!(
+        "bench image anchor {when} label={:?} drawn={dw:.0}x{dh:.0} view={}x{} scroll={:.0},{:.0} \
+         under={:.4},{:.4}",
+        crate::zoom::image_zoom_label(image),
+        scroller.width(),
+        scroller.height(),
+        scroller.hadjustment().value(),
+        scroller.vadjustment().value(),
+        (at.0 - x) / dw,
+        (at.1 - y) / dh,
+    );
 }
 
 /// The pixels of the texture the picture in front draws, an SVG's inside its paintable.

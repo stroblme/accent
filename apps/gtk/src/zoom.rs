@@ -3,8 +3,8 @@
 
 use super::*;
 
-/// One press of Zoom In or Zoom Out, a tenth of the document font.
-const ZOOM_STEP: f64 = 0.1;
+/// One press of Zoom In or Zoom Out, in percent: a tenth of the document font.
+const ZOOM_STEP: i64 = 10;
 
 /// How long an image's zoom is left alone before an SVG is drawn again at it, the drawing before
 /// enlarged meanwhile: a run of steps draws once, at the last.
@@ -17,7 +17,16 @@ impl App {
     /// rather than from the size it asked the picture for: a pixel width is a whole number, and a
     /// zoom read back out of one lands short of the tenth it was, which is enough for the next
     /// step to be the zoom the image is already at.
-    pub fn zoom_image(self: &Rc<Self>, image: &Rc<doc::Viewer>, out: Option<bool>) {
+    ///
+    /// A step keeps what is under `at` (a point in the scroller, the pointer's) where it is, as a
+    /// PDF page does; a chord has no pointer and keeps the top-left corner, as a PDF keeps the
+    /// reading position.
+    pub fn zoom_image(
+        self: &Rc<Self>,
+        image: &Rc<doc::Viewer>,
+        out: Option<bool>,
+        at: Option<(f64, f64)>,
+    ) {
         let Some(picture) = picture_of(&image.page) else {
             return;
         };
@@ -25,7 +34,12 @@ impl App {
             stepped_zoom(from, out).clamp(pdfview::MIN_SCALE, pdfview::MAX_SCALE)
         });
         image.zoom.set(zoom);
-        set_image_zoom(&picture, zoom);
+        let size = set_image_zoom(&picture, zoom);
+        if let (Some(size), Ok(scroller)) =
+            (size, image.page.child().downcast::<gtk::ScrolledWindow>())
+        {
+            keep_under(&scroller, size, at.unwrap_or_default());
+        }
         self.refresh_zoom();
         // `show_image` draws an SVG at its zoom (`look::drawn_zoom`), and does nothing for an
         // image the zoom leaves as it is drawn.
@@ -117,11 +131,12 @@ pub fn image_zoom_label(image: &doc::Viewer) -> String {
     }
 }
 
-/// Draw an image at `zoom`, or fitted to the window when there is none.
+/// Draw an image at `zoom`, or fitted to the window when there is none, returning the size a
+/// zoomed one asks for.
 ///
 /// A zoomed picture is centred and asks for its exact size, so the scroller scrolls it once it
 /// is larger than the viewport and does not stretch it while it is smaller.
-pub fn set_image_zoom(picture: &gtk::Picture, zoom: Option<f64>) {
+pub fn set_image_zoom(picture: &gtk::Picture, zoom: Option<f64>) -> Option<(i32, i32)> {
     let size = zoom.and_then(|zoom| {
         let paintable = picture.paintable()?;
         let (w, h) = (paintable.intrinsic_width(), paintable.intrinsic_height());
@@ -140,6 +155,25 @@ pub fn set_image_zoom(picture: &gtk::Picture, zoom: Option<f64>) {
             picture.set_valign(gtk::Align::Fill);
             picture.set_size_request(-1, -1);
         }
+    }
+    size
+}
+
+/// Scroll an image's scroller so that what is under `at` is under it again once the picture in
+/// it is `size`, by [`zoomed_scroll`].
+///
+/// The viewport takes the picture's new size only when it is next allocated, and meanwhile
+/// clamps a value to the old one, so the adjustments are handed the new extent first: the
+/// picture's, or the viewport's own while the picture is the smaller, as the viewport will.
+fn keep_under(scroller: &gtk::ScrolledWindow, size: (i32, i32), at: (f64, f64)) {
+    for (adjustment, size, at) in [
+        (scroller.hadjustment(), size.0, at.0),
+        (scroller.vadjustment(), size.1, at.1),
+    ] {
+        let now = f64::from(size).max(adjustment.page_size());
+        let value = zoomed_scroll(at, adjustment.value(), adjustment.upper(), now);
+        adjustment.set_upper(now);
+        adjustment.set_value(value);
     }
 }
 
@@ -169,15 +203,26 @@ pub fn clamp_zoom(zoom: f64) -> f64 {
 /// window at 137 % lands on 140 % rather than 147 %. Shared with `pdfview`, so a chord, a wheel
 /// notch and a pinch mean the same amount of zoom whichever kind of tab is in front.
 ///
-/// The epsilon is what keeps an exact multiple from stepping to itself once the division has
-/// drifted; the rounding is what keeps the result out of 1.4000000000000001.
+/// Counted in whole percent, the readout's own unit. A zoom read back off a rendered size (an
+/// `f32` layout scale, a pixel width) is a hair off the tenth it was; counted in fractions of a
+/// step, a hair under made that tenth the next one, and the step returned its own input. Rounded
+/// to a percent it is that tenth again, and a step always moves the zoom by half a percent at
+/// least.
 pub fn stepped_zoom(zoom: f64, out: bool) -> f64 {
-    let steps = zoom / ZOOM_STEP;
+    let percent = (zoom * 100.0).round() as i64;
     let next = match out {
-        true => (steps - 1e-6).ceil() - 1.0,
-        false => (steps + 1e-6).floor() + 1.0,
+        true => (percent - 1) / ZOOM_STEP * ZOOM_STEP,
+        false => (percent / ZOOM_STEP + 1) * ZOOM_STEP,
     };
-    (next * ZOOM_STEP * 100.0).round() / 100.0
+    next as f64 / 100.0
+}
+
+/// Where one axis scrolls to so that a zoom keeps what is under the pointer under it: the point
+/// `at` into the viewport, scrolled to `offset`, stays the same fraction of the content as that
+/// grows from `was` long to `now`. Clamping is the adjustment's, since a point near the edge of
+/// content smaller than the viewport cannot stay put.
+pub fn zoomed_scroll(at: f64, offset: f64, was: f64, now: f64) -> f64 {
+    (offset + at) * now / was.max(1.0) - at
 }
 
 /// How many whole steps `dy` completes, given the fraction earlier deltas left over. A
@@ -305,6 +350,18 @@ mod tests {
         assert_eq!(stepped_zoom(1.37, false), 1.4);
         assert_eq!(stepped_zoom(1.37, true), 1.3);
         assert_eq!(stepped_zoom(1.1, false), 1.2);
+        // A zoom read back off a rendered size lands a hair either side of the tenth it was, and
+        // a step from it still has to move.
+        assert_eq!(stepped_zoom(2.2999998, false), 2.4);
+        assert_eq!(stepped_zoom(2.3000002, true), 2.2);
+    }
+
+    #[test]
+    fn a_zoom_keeps_what_is_under_the_pointer_under_it() {
+        // 800 px into content 2000 wide (scrolled 500, pointer at 300): doubled, that point is
+        // 1600 in, and still under the pointer.
+        assert_eq!(zoomed_scroll(300.0, 500.0, 2000.0, 4000.0), 1300.0);
+        assert_eq!(zoomed_scroll(300.0, 1300.0, 4000.0, 2000.0), 500.0);
     }
 
     #[test]

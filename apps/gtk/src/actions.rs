@@ -705,6 +705,7 @@ impl App {
                     "zoom-out" => Some(true),
                     _ => None,
                 },
+                None,
             ),
             Some(Doc::Diagram(d)) => match name {
                 "zoom-in" => d.zoom_step(false),

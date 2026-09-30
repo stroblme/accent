@@ -796,9 +796,9 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |out, _| {
+                move |out, at| {
                     if let Some(image) = viewer.upgrade() {
-                        app.zoom_image(&image, Some(out));
+                        app.zoom_image(&image, Some(out), at);
                     }
                 }
             ),
