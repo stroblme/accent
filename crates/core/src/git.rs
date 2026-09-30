@@ -121,7 +121,7 @@ pub struct Commit {
 /// One decoration on a commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ref {
-    /// As git shortens it: `main`, `origin/main`, `v1`, or `HEAD` for a detached HEAD.
+    /// As git shortens it: `main`, `origin/main`, `v1`, `HEAD` for a detached HEAD, or `stash`.
     pub name: String,
     pub kind: RefKind,
     /// HEAD is here: this is the branch it is on, or HEAD itself where it is detached.
@@ -136,6 +136,8 @@ pub enum RefKind {
     LocalBranch,
     RemoteBranch,
     Tag,
+    /// `refs/stash`, whose commits `log --all` walks like any other ref's.
+    Stash,
 }
 
 /// A commit placed on the history graph: which column it sits in, and which columns the edges
@@ -861,8 +863,9 @@ fn parse_log(bytes: &[u8]) -> Vec<Commit> {
 /// Read `%D` under `--decorate=full`: `HEAD -> refs/heads/main, tag: refs/tags/v1,
 /// refs/remotes/origin/main`, or `HEAD` alone where it is detached.
 ///
-/// Only branches, tags and HEAD are kept: `origin/HEAD` points at a branch rather than being one,
-/// and the stash and notes are refs no row has anything to say about. Sorted HEAD's first, then by
+/// Only branches, tags, HEAD and the stash are kept: `origin/HEAD` points at a branch rather than
+/// being one, and notes are refs no row has anything to say about. The stash is, its commits being
+/// in the history with nothing else saying what they are. Sorted HEAD's first, then by
 /// [`RefKind`], git's own order kept within each kind.
 fn parse_refs(decorations: &str) -> Vec<Ref> {
     let mut refs: Vec<Ref> = decorations
@@ -878,6 +881,8 @@ fn parse_refs(decorations: &str) -> Vec<Ref> {
                 (RefKind::LocalBranch, name)
             } else if let Some(name) = full.strip_prefix("tag: refs/tags/") {
                 (RefKind::Tag, name)
+            } else if full == "refs/stash" {
+                (RefKind::Stash, "stash")
             } else {
                 let name = full
                     .strip_prefix("refs/remotes/")
@@ -976,10 +981,10 @@ struct Lane {
 }
 
 /// What a commit's decorations would name a column after: its first branch, or failing that its
-/// first tag. A detached HEAD names no line of history.
+/// first tag. A detached HEAD and the stash name no line of history.
 fn lane_name(refs: &[Ref]) -> Option<String> {
     refs.iter()
-        .find(|r| r.kind != RefKind::Head)
+        .find(|r| !matches!(r.kind, RefKind::Head | RefKind::Stash))
         .map(|r| r.name.clone())
 }
 
