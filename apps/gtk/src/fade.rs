@@ -82,18 +82,20 @@ fn cover(line: i32, span: &RangeInclusive<i32>, found: &[RangeInclusive<i32>]) -
 }
 
 /// The lines from `at` down to `bottom` holding a match of the find bar's query, first to
-/// last, or none while its highlight is off. One match is all a line needs, so the walk goes on
-/// from the line after each, which also keeps a match of no width from being found forever.
+/// last: the runs of its match tag, which is on nothing while its highlight is off. One match is
+/// all a line needs, so the walk goes on from the line after each.
 fn found(view: &multicaret::View, mut at: gtk::TextIter, bottom: i32) -> Vec<RangeInclusive<i32>> {
-    let Some(search) = view.highlighted_search() else {
+    let Some(tag) = view.find_tag() else {
         return Vec::new();
     };
     let mut lines = Vec::new();
-    while let Some((start, mut end, wrapped)) = search.forward(&at) {
-        if wrapped || view.line_yrange(&start).0 >= bottom {
+    while at.has_tag(&tag) || at.forward_to_tag_toggle(Some(&tag)) {
+        if view.line_yrange(&at).0 >= bottom {
             break;
         }
-        lines.push(start.line()..=end.line());
+        let mut end = at;
+        end.forward_to_tag_toggle(Some(&tag));
+        lines.push(at.line()..=end.line());
         if !end.forward_line() {
             break;
         }

@@ -373,11 +373,10 @@ impl App {
 
     /// What a preview may read: a note's asset path to the vault file it names and that file on
     /// this machine. The assets come through the vault, so a note's images load whether the file
-    /// is on this disk or on a host. A window with no vault has only absolute keys, which it hands
-    /// straight back.
+    /// is on this disk or on a host. A window with no vault has only loose notes, whose images the
+    /// preview reads beside them without asking (`preview::resolve_asset`).
     pub(crate) fn asset_resolver(&self) -> Arc<preview::Resolve> {
         let vault = self.vault().cloned();
-        let root = self.root();
         Arc::new(move |rel: &str| match &vault {
             // `fetch` refuses a `rel` that climbs out lexically, on either backend. What it
             // cannot see is a symlink *inside* the vault pointing outside it, and the answer
@@ -396,11 +395,7 @@ impl App {
                 };
                 inside.then_some((key, path))
             }
-            // A loose file's key is its path, as its tab's is.
-            None => {
-                let path = root.join(rel);
-                Some((path.to_string_lossy().into_owned(), path))
-            }
+            None => None,
         })
     }
 

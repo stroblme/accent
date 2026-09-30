@@ -5,7 +5,9 @@ use accent_core::diff;
 
 impl Panel {
     /// Open the comparison a row stands for. Both sides are read in one worker hop, because two
-    /// would show the file mid-write if it changed between them.
+    /// would show the file mid-write if it changed between them. Only the last row clicked opens:
+    /// reads land in whatever order the workers finish them, and two rows clicked within one read
+    /// put the first in front, a staged or deleted file's preview closing the other's tab.
     pub(super) fn compare(self: &Rc<Self>, rel: &str, key: &str, sides: Sides) {
         let repo = {
             let state = self.state.borrow();
@@ -20,6 +22,8 @@ impl Panel {
             key: key.to_string(),
             sides,
         };
+        let asked = self.asked.get() + 1;
+        self.asked.set(asked);
         let panel = self.clone();
         let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
@@ -27,6 +31,9 @@ impl Panel {
                 let what = what.clone();
                 crate::work::off_thread("git", move || what.read(&vault)).await
             };
+            if panel.asked.get() != asked {
+                return;
+            }
             match read {
                 Some(Ok(read)) => panel.show(what, read),
                 Some(Err(why)) => (panel.hooks.toast)(&why),
@@ -48,6 +55,7 @@ impl Panel {
         let right_title = format!("{name} ({})", what.sides.right_title());
         let nothing = what.sides.nothing_to_show();
         let endings = line_endings_only(&left, &right);
+        let unchanged = left == right;
         match what.sides.clone() {
             // The working tree is the file itself, so the comparison lives in its tab and the
             // refresh only ever has the index side to re-read.
@@ -64,7 +72,10 @@ impl Panel {
                         // two sides carry the same text and the comparison shows nothing. Two
                         // identical columns are not an answer: say so and ask git again, so the
                         // row goes as well. Unless the file's line endings are all that changed,
-                        // which git goes on listing however often it is asked.
+                        // which git goes on listing however often it is asked. And unless the
+                        // disk does differ from the index, and it is the tab that has not caught
+                        // up with the disk yet: the tab reads it again as it opens (`compare_file`)
+                        // and the comparison is laid again over what it reads.
                         if compare.counts().1 == 0 {
                             if endings {
                                 (panel.hooks.toast)(&format!(
@@ -72,9 +83,11 @@ impl Panel {
                                 ));
                                 return false;
                             }
-                            (panel.hooks.toast)(&format!("{name} {nothing}"));
-                            panel.schedule_refresh(Depth::Everything);
-                            return false;
+                            if unchanged {
+                                (panel.hooks.toast)(&format!("{name} {nothing}"));
+                                panel.schedule_refresh(Depth::Everything);
+                                return false;
+                            }
                         }
                         panel.offer_lines(&compare, &what);
                     }

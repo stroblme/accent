@@ -63,7 +63,7 @@ impl App {
 
     /// Bring whatever shows `rel` up to date with its file, which something other than this
     /// window has changed.
-    fn changed_on_disk(self: &Rc<Self>, rel: &str) {
+    pub(crate) fn changed_on_disk(self: &Rc<Self>, rel: &str) {
         self.reshow_preview_image(rel);
         let Some(doc) = self.doc_for(rel) else {
             return;
@@ -215,6 +215,17 @@ impl App {
                 }
                 self.refresh_corpus();
                 self.sync_active();
+                // A walk of one folder is news only to the reader who asked for it with Reload,
+                // and answers every such ask for that folder or one inside it.
+                let asked = {
+                    let mut reloads = self.reloads.borrow_mut();
+                    let before = reloads.len();
+                    reloads.retain(|d| !Path::new(d).starts_with(&stats.dir));
+                    reloads.len() < before
+                };
+                if !stats.stopped && !stats.dir.is_empty() && !asked {
+                    return;
+                }
                 // Conflicts on files nobody has open have no banner to appear on, so the toast
                 // that is already there says how many are waiting in the vault. Counted on a
                 // worker, the index being on the host for a remote vault.

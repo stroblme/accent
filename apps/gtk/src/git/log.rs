@@ -42,9 +42,9 @@ enum LogItem {
 
 impl Panel {
     pub(super) fn wire_log(self: &Rc<Self>, view: &gtk::ListView) {
-        let (setup, bound) = (Rc::downgrade(self), Rc::downgrade(self));
+        let bound = Rc::downgrade(self);
         view.set_factory(Some(&crate::widgets::factory(
-            move |item| log_row(item, &setup),
+            |_| row_stack(),
             // The row is rebuilt from the item rather than from the stack handed over: a
             // recycled row draws what it is bound to, not what it held.
             move |_: &gtk::Stack, item| bind_log(item, &bound),
@@ -79,6 +79,11 @@ impl Panel {
     /// unchanged: [`git::lanes`] is one forward pass, so a Load More can only append, and
     /// appending leaves the reader where they were instead of scrolling back to the top.
     pub(super) fn fill_log(self: &Rc<Self>, commits: Vec<Commit>, keep: usize) {
+        // A fill still under way holds fewer rows than `keep` counts, so the page is drawn whole.
+        let keep = match self.log_fill.cancel() {
+            true => 0,
+            false => keep,
+        };
         // Which commit was open, so it can be opened again below. A refresh lands on every
         // commit, pull and checkout, and the file list closing under each of them was the one
         // thing about the history that did not survive one.
@@ -96,13 +101,25 @@ impl Panel {
         if self.has_more.get() {
             items.push(glib::BoxedAnyObject::new(LogItem::More));
         }
-        self.log
-            .splice(keep, self.log.n_items().saturating_sub(keep), &items);
-        // After the splice, and only where the commit is still in the page: `toggle` asks git
-        // for the file list again and splices it back under the row it now has.
-        if let Some(commit) = was.and_then(|oid| rows.iter().find(|r| r.commit.id == oid)) {
-            self.toggle(&commit.commit.clone());
-        }
+        // Once every row is in, and only where the commit is still in the page and nothing was
+        // opened meanwhile: `toggle` asks git for the file list again and splices it back under
+        // the row it now has.
+        let again = was.and_then(|oid| rows.into_iter().find(|r| r.commit.id == oid));
+        let weak = Rc::downgrade(self);
+        self.log_fill.splice(
+            &self.log,
+            keep,
+            self.log.n_items().saturating_sub(keep),
+            items,
+            || false,
+            move || {
+                if let (Some(panel), Some(row)) = (weak.upgrade(), again)
+                    && panel.expanded.borrow().is_none()
+                {
+                    panel.toggle(&row.commit);
+                }
+            },
+        );
     }
 
     /// Take away whatever file list is open.
@@ -261,8 +278,10 @@ impl Panel {
     }
 }
 
-/// One log row: the graph on the left, the summary and its author on the right.
-fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
+/// A commit, the first of the three layouts a history row's stack can show — a commit, a file of
+/// the expanded one or Load More, as the item bound to it is ([`layout`]): the graph on the left,
+/// the summary and its author on the right.
+fn commit_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     let area = gtk::DrawingArea::new();
     // The draw reads the bound row straight off the list item, so a recycled row cannot draw the
     // graph of the commit that used to be in it.
@@ -336,14 +355,20 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     commit.append(&area);
     commit.append(&text);
     commit.append(&commit_actions(item, panel));
+    commit
+}
 
-    // A file of the expanded commit, indented past the graph so it reads as belonging above it.
+/// A file of the expanded commit, indented past the graph so it reads as belonging above it.
+fn file_layout() -> gtk::Box {
     let file = file_line();
     file.set_margin_start(LANE * 2);
     file.set_margin_top(2);
     file.set_margin_bottom(2);
+    file
+}
 
-    // Centred and quiet: it continues the history above it rather than competing with it.
+/// Load More: centred and quiet, it continues the history above it rather than competing with it.
+fn more_layout() -> gtk::Label {
     let more = gtk::Label::builder()
         .label("Load More")
         .margin_top(6)
@@ -352,18 +377,7 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     for class in ["caption", "dim-label"] {
         more.add_css_class(class);
     }
-
-    // Not homogeneous, for the reason `change_row` gives: a commit row is two lines tall and a
-    // file row one, and every row taking the taller of the two would be a ladder.
-    let stack = gtk::Stack::builder()
-        .hhomogeneous(false)
-        .vhomogeneous(false)
-        .build();
-    stack.add_named(&commit, Some("commit"));
-    stack.add_named(&file, Some("file"));
-    stack.add_named(&more, Some("more"));
-
-    stack
+    more
 }
 
 /// A commit row's Check Out Commit and Copy Commit ID buttons, the two things a commit offers.
@@ -411,12 +425,6 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     ) else {
         return;
     };
-    let (Some(commit), Some(file)) = (
-        stack.child_by_name("commit").and_downcast::<gtk::Box>(),
-        stack.child_by_name("file").and_downcast::<gtk::Box>(),
-    ) else {
-        return;
-    };
     // The list row itself, which only exists once the item is first bound, and from an idle for
     // the reason `changes::bind_change` gives.
     let list_row = stack.parent();
@@ -429,20 +437,20 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     let row = match item_row {
         LogItem::Commit(row) => row,
         LogItem::File { letter, path, .. } => {
-            stack.set_visible_child_name("file");
+            let file = layout(&stack, "file", file_layout);
             let icon = crate::doc::icon_for(&path);
             bind_file_line(&file, icon, letter, &path, split_name(&path).0);
             stack.set_tooltip_text(Some(&path));
             return;
         }
         LogItem::More => {
-            stack.set_visible_child_name("more");
+            layout(&stack, "more", more_layout);
             stack.set_tooltip_text(None);
             return;
         }
     };
 
-    stack.set_visible_child_name("commit");
+    let commit = layout(&stack, "commit", || commit_layout(item, panel));
     // Next sibling and not `last_child`: the row's action buttons sit after the text.
     let Some(area) = commit.first_child().and_downcast::<gtk::DrawingArea>() else {
         return;
@@ -500,7 +508,7 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     }));
 }
 
-/// Put a commit's decorations on the labels [`log_row`] made: the first [`SHOWN_REFS`] as names,
+/// Put a commit's decorations on the labels [`commit_layout`] made: the first [`SHOWN_REFS`] as names,
 /// then `+N` for the rest on the last one, and any label left over hidden.
 ///
 /// The classes are the `.git-ref` rules in `install_chrome_css`: HEAD's branch in the accent

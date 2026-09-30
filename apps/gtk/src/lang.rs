@@ -158,12 +158,18 @@ pub fn language_id(tab: &Tab) -> String {
 ///
 /// A CSV is skipped: its columns are coloured by us and no language server speaks the format, so
 /// opening it would only cost a round trip to be told nothing.
-pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
+///
+/// A file outside every vault (`None`) has no language layer to ask: a note there is outlined from
+/// its own text ([`outline_alone`]), and anything else gets nothing.
+pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
     if tab.flavour() == Flavour::Csv {
         return;
     }
-    *tab.lang.vault.borrow_mut() = Some(vault.clone());
     *tab.lang.hooks.borrow_mut() = Some(Rc::new(hooks));
+    let Some(vault) = vault else {
+        return restart(tab, Duration::ZERO);
+    };
+    *tab.lang.vault.borrow_mut() = Some(vault.clone());
     crate::completion::install(tab);
     crate::hover::install(tab);
     crate::signature::install(tab);
@@ -394,7 +400,7 @@ async fn pause(delay: Duration) {
 /// what is left of the wait once the ghost has been asked for.
 async fn refresh(tab: Rc<Tab>, rest: Duration) {
     let Some(vault) = tab.lang.vault() else {
-        return;
+        return outline_alone(tab, rest).await;
     };
     let edits = tab.save.edits.get();
     flush(tab.clone()).await;
@@ -417,6 +423,31 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
         Ok(folds) if tab.save.edits.get() == edits => tab.set_folds(folds),
         Ok(_) => {}
         Err(e) => tracing::debug!("folds for {rel}: {e:#}"),
+    }
+    let hooks = tab.lang.hooks.borrow().clone();
+    if let Some(hooks) = hooks {
+        (hooks.on_symbols)(&tab);
+    }
+}
+
+/// [`refresh`] for a note outside every vault: its headings and folds are read from its own text,
+/// off the main loop, as the notes provider reads them inside one.
+async fn outline_alone(tab: Rc<Tab>, rest: Duration) {
+    if !tab.flavour().is_note() {
+        return;
+    }
+    pause(rest).await;
+    let (edits, text) = (tab.save.edits.get(), tab.text());
+    let outline =
+        crate::work::off_thread("outline", move || accent_api::language::note_outline(&text));
+    let Some((symbols, folds)) = outline.await else {
+        return;
+    };
+    *tab.lang.rows.borrow_mut() = flatten(&symbols);
+    *tab.lang.symbols.borrow_mut() = symbols;
+    // As in `refresh`: folds worked out for a text edited since would hide the wrong lines.
+    if tab.save.edits.get() == edits {
+        tab.set_folds(folds);
     }
     let hooks = tab.lang.hooks.borrow().clone();
     if let Some(hooks) = hooks {

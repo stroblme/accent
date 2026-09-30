@@ -411,6 +411,9 @@ methods! {
     /// level each, never the tree under one.
     any watch_unindexed(dirs: ref [String]) -> ();
     any unwatch_unindexed(dirs: ref [String]) -> ();
+    /// Walk one folder of the vault (Reload on its row), where [`rescan`](Vault::rescan) walks
+    /// all of it: what the watcher never reported under it is taken in.
+    io rescan_dir(dir: ref str) -> ();
     any search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
     /// A host whose `accent-cli serve` predates it answers "no such method", which the Search
     /// pane takes as no mid-word matches.

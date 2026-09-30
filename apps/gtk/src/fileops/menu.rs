@@ -50,6 +50,11 @@ pub fn context_menu(
     let menu = gio::Menu::new();
     if let Some((rel, false)) = row {
         menu.append_item(&item(GROUP, "Open", "open", rel));
+        // A window with no vault opens a file by its path on this machine, which a remote vault's
+        // file is not.
+        if !ops.vault.is_remote() {
+            menu.append_item(&item(GROUP, "Open in New Window", "open-apart", rel));
+        }
     }
     // Everything that puts something in a folder shares one target, so a right-click anywhere in
     // the tree can create: in the folder clicked, beside the file clicked, or in the vault root.
@@ -86,6 +91,8 @@ pub fn context_menu(
     // right here, which is why this beats a preferences row nobody can point at a folder from.
     if is_dir {
         menu.append_item(&item(GROUP, "Leave Out of Search", "exclude", rel));
+        // For a listing that has fallen behind the disk: what the watcher never reported.
+        menu.append_item(&item(GROUP, "Reload", "reload", rel));
     }
     // A file manager's own three, in a section of their own between what changes the file and
     // what reads its name out.
@@ -240,6 +247,8 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
         group.add_action(&action);
     };
     add("open", Box::new(|ops, rel| (ops.open)(rel, &[])));
+    add("open-apart", Box::new(|ops, rel| (ops.apart)(rel)));
+    add("reload", Box::new(|ops, dir| (ops.relist)(dir)));
     add("new-file", Box::new(new_file));
     add("new-folder", Box::new(new_folder));
     add("new-drawing", Box::new(new_drawing));

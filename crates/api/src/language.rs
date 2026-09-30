@@ -1012,6 +1012,17 @@ impl Local {
     }
 }
 
+/// A note's headings as symbols and the folds of its sections, fences and frontmatter, read from
+/// its text alone: what the notes provider answers, for a note outside every vault, which has no
+/// provider to ask.
+pub fn note_outline(text: &str) -> (Vec<Symbol>, Vec<Fold>) {
+    let analysis = markdown::analyze(text);
+    (
+        notes::symbols_of(text, &analysis.headings),
+        notes::folds_of(text, &analysis),
+    )
+}
+
 /// Byte offset → position in `text`. Linear in the offset; a line table if a note ever makes it show.
 pub fn pos_of(text: &str, byte: usize) -> Pos {
     let byte = byte.min(text.len());
@@ -1050,6 +1061,22 @@ pub fn range_of(text: &str, r: &std::ops::Range<usize>) -> Range {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note outside every vault has no provider to ask, and gets from its text what the notes
+    /// provider would answer: its headings nested, and the folds of their sections.
+    #[test]
+    fn a_note_is_outlined_from_its_text_alone() {
+        let (symbols, folds) = note_outline("# One\ntext\n## Two\n");
+        assert_eq!(symbols[0].name, "One");
+        assert_eq!(symbols[0].children[0].name, "Two");
+        assert_eq!(
+            folds,
+            [Fold {
+                start_line: 0,
+                end_line: 2
+            }]
+        );
+    }
 
     #[test]
     fn positions_count_chars_not_bytes() {

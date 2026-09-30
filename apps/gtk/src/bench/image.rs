@@ -377,7 +377,7 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
 
 /// Every image on the preview's page: its address, its box in the document and whether it has
 /// finished loading.
-async fn page_images(app: &Rc<App>) -> Vec<(String, f64, f64, f64, f64, bool)> {
+pub(super) async fn page_images(app: &Rc<App>) -> Vec<(String, f64, f64, f64, f64, bool)> {
     let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
         return Vec::new();
     };

@@ -6,8 +6,8 @@
 //! the document down rather than covering it.
 //!
 //! Because it outlives any one tab, the bar drives the tab from the outside — `Tab` keeps its
-//! `SearchContext` and the caret moves, this file keeps the widgets — and it re-targets whenever
-//! the pane's tab in front changes. Re-targeting leaves the old tab's marks alone: the query and
+//! query, its matches and the caret moves, this file keeps the widgets — and it re-targets
+//! whenever the pane's tab in front changes. Re-targeting leaves the old tab's marks alone: the query and
 //! the highlight belong to the tab, so a note opened from a search hit is still marked when the
 //! reader comes back to it. While presenting there is no buffer to search, so the same widgets
 //! address the rendered preview through [`PreviewOp`] instead; that indirection is also what keeps
@@ -15,11 +15,39 @@
 
 use crate::editor::Tab;
 use crate::recall::{self, QUERIES, REPLACEMENTS};
+use accent_core::search::Options;
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use sourceview5::prelude::SearchSettingsExt;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
+
+/// Match Case, Match Whole Word and Use Regular Expression, in the order the find bar and the
+/// Search pane both show them: text rather than icons, since Adwaita has no glyph for any of the
+/// three, and VS Code's `Aa`, `Word` and `.*` are what a user arriving from there already reads.
+pub const TOGGLES: [(&str, &str); 3] = [
+    ("Aa", "Match Case"),
+    ("Word", "Match Whole Word"),
+    (".*", "Use Regular Expression"),
+];
+
+/// A flat text toggle, the look every query toggle has.
+pub fn toggle((label, tooltip): (&str, &str)) -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::builder()
+        .label(label)
+        .tooltip_text(tooltip)
+        .build();
+    button.add_css_class("flat");
+    button
+}
+
+/// What three toggles made from [`TOGGLES`] say, in that order.
+pub fn options([case, word, regex]: [&gtk::ToggleButton; 3]) -> Options {
+    Options {
+        case: case.is_active(),
+        word: word.is_active(),
+        regex: regex.is_active(),
+    }
+}
 
 /// What the bar wants done to the rendered preview while presentation mode is on.
 pub enum PreviewOp {
@@ -58,20 +86,18 @@ pub enum Mode {
     Goto,
 }
 
-/// A tab the bar is pointed at, with the handlers watching its match count, its line count and
-/// its query. All three go when the bar is pointed elsewhere, or they accumulate one per tab
-/// switch.
-type Watch = (
-    Rc<Tab>,
-    glib::SignalHandlerId,
-    glib::SignalHandlerId,
-    glib::SignalHandlerId,
-);
+/// A tab the bar is pointed at, with the handler watching its line count, which goes when the bar
+/// is pointed elsewhere, or they accumulate one per tab switch.
+type Watch = (Rc<Tab>, glib::SignalHandlerId);
 
 pub struct Bar {
     bar: gtk::SearchBar,
     rows: gtk::Stack,
     query: gtk::SearchEntry,
+    /// This bar's own [`TOGGLES`], and the group they sit in. The bar's rather than the tab's or
+    /// the Search pane's: each bar keeps what it was set to.
+    toggles: [gtk::ToggleButton; 3],
+    toggle_group: gtk::Box,
     replace: gtk::Entry,
     replace_row: gtk::Box,
     matches: gtk::Label,
@@ -112,6 +138,13 @@ impl Bar {
             .placeholder_text("Find")
             .hexpand(true)
             .build();
+        // The Search pane's toggles, in the same `.linked` group.
+        let toggles = TOGGLES.map(toggle);
+        let toggle_group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        toggle_group.add_css_class("linked");
+        for button in &toggles {
+            toggle_group.append(button);
+        }
         let matches = gtk::Label::builder().css_classes(["dim-label"]).build();
         // Up and down, not back and forward: the matches are places in a document that scrolls
         // vertically, which is the axis every other find bar names here (DESIGN.md, Iconography).
@@ -136,6 +169,7 @@ impl Bar {
         // 6 px inside a control group, 12 px between the two rows (DESIGN.md, Spacing).
         let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         top.append(&query);
+        top.append(&toggle_group);
         top.append(&matches);
         top.append(&previous);
         top.append(&next);
@@ -178,6 +212,8 @@ impl Bar {
             bar,
             rows,
             query: query.clone(),
+            toggles: toggles.clone(),
+            toggle_group,
             replace: replace.clone(),
             replace_row,
             matches,
@@ -220,6 +256,14 @@ impl Bar {
             this,
             move |_| bar.step(true)
         ));
+        // A toggle changes what the query means, so the query is asked again.
+        for button in &toggles {
+            button.connect_toggled(glib::clone!(
+                #[weak(rename_to = bar)]
+                this,
+                move |_| bar.search(&bar.query.text())
+            ));
+        }
         next.connect_clicked(glib::clone!(
             #[weak(rename_to = bar)]
             this,
@@ -279,6 +323,13 @@ impl Bar {
             }
         ));
         this.bar.add_controller(keys);
+        // F5 over a note lends the bar to the editor column and takes it back (`App::hoist_find`),
+        // which is when the rendered preview starts and stops being what it searches.
+        this.bar.connect_parent_notify(glib::clone!(
+            #[weak(rename_to = bar)]
+            this,
+            move |_| bar.sync_toggles()
+        ));
         this.bar.connect_search_mode_enabled_notify(glib::clone!(
             #[weak(rename_to = bar)]
             this,
@@ -311,56 +362,76 @@ impl Bar {
     /// Point the bar at the tab that just came to the front of its pane.
     ///
     /// The old tab keeps its query and its marks: they are the tab's, not the bar's, so a note
-    /// opened from a search hit is still marked after a switch away and back. Only the handlers
-    /// watching its match count, its length and its query go, or they accumulate one per tab
-    /// switch.
+    /// opened from a search hit is still marked after a switch away and back. Only the handler
+    /// watching its length goes, or they accumulate one per tab switch.
     pub fn retarget(self: &Rc<Self>, tab: Option<Rc<Tab>>) {
-        if let Some((old, matches, lines, query)) = self.target.borrow_mut().take() {
-            old.search_context().disconnect(matches);
+        if let Some((old, lines)) = self.target.borrow_mut().take() {
             old.buffer.disconnect(lines);
-            old.search_context().settings().disconnect(query);
         }
+        self.sync_toggles();
         let Some(tab) = tab else {
             return self.refresh_count();
         };
-        let matches = tab
-            .search_context()
-            .connect_occurrences_count_notify(glib::clone!(
-                #[weak(rename_to = bar)]
-                self,
-                move |_| bar.refresh_matches()
-            ));
         let lines = tab.buffer.connect_changed(glib::clone!(
             #[weak(rename_to = bar)]
             self,
             move |_| bar.refresh_count()
         ));
-        // The query is the tab's, so it can change without the bar being touched: a sidebar jump
-        // hands the tab the text it landed on. The box follows it, or the bar would say one thing
-        // while `F3` stepped through another. Nothing is written when the box already says it,
-        // which is what keeps the bar's own searches from coming back round to it.
-        let query = tab
-            .search_context()
-            .settings()
-            .connect_search_text_notify(glib::clone!(
-                #[weak(rename_to = bar)]
-                self,
-                move |settings| {
-                    let text = settings.search_text().unwrap_or_default();
-                    if bar.query.text() == text {
-                        return;
-                    }
-                    *bar.synced.borrow_mut() = Some(text.to_string());
-                    bar.query.set_text(&text);
-                }
-            ));
+        // Set anew on every retarget rather than taken back on the way out: a tab dragged into
+        // another pane is that pane's bar's from then on, whichever bar lets go of it last.
+        tab.connect_found(glib::clone!(
+            #[weak(rename_to = bar)]
+            self,
+            #[weak]
+            tab,
+            move |query| bar.found(&tab, query)
+        ));
         if self.showing("find") {
+            tab.set_find_options(self.options());
             tab.set_query(&self.query.text());
             tab.set_highlight(true);
         }
-        *self.target.borrow_mut() = Some((tab, matches, lines, query));
+        *self.target.borrow_mut() = Some((tab, lines));
         self.refresh_matches();
         self.refresh_count();
+    }
+
+    /// `tab` matched its query again, and the readout follows. The query is the tab's, so it can
+    /// change without the bar being touched — a sidebar jump hands the tab the text it landed on
+    /// — and where it did (`query`) the box follows it too, or the bar would say one thing while
+    /// `F3` stepped through another. Only then: text typed into the box waits out its
+    /// `search-changed` delay before the tab has it, and an edit or a scroll matched meanwhile
+    /// would put the old query back over it. Nothing is written when the box already says it,
+    /// which is what keeps the bar's own searches from coming back round to it. A tab this bar is
+    /// no longer pointed at is none of its business.
+    fn found(&self, tab: &Rc<Tab>, query: bool) {
+        if !self.tab().is_some_and(|mine| Rc::ptr_eq(&mine, tab)) {
+            return;
+        }
+        let text = tab.find_query();
+        if query && self.query.text() != text {
+            *self.synced.borrow_mut() = Some(text.clone());
+            self.query.set_text(&text);
+        }
+        self.refresh_matches();
+    }
+
+    /// What this bar's toggles say.
+    fn options(&self) -> Options {
+        let [case, word, regex] = &self.toggles;
+        options([case, word, regex])
+    }
+
+    /// The toggles are a buffer's alone. The rendered preview and a PDF are searched for the
+    /// query as written, without regard to case, which is all WebKit's find and ours over a PDF's
+    /// text do, so there the toggles are shown off-limits rather than quietly ignored, and keep
+    /// what they were set to for the next note.
+    fn sync_toggles(&self) {
+        let presenting = self.presenting();
+        self.toggle_group.set_sensitive(!presenting);
+        if presenting {
+            self.query.remove_css_class("error");
+        }
     }
 
     /// Reveal the bar in `mode`, prefilled from the selection when there is one worth searching.
@@ -384,6 +455,7 @@ impl Bar {
                 // not offered there: it used to appear and quietly do nothing.
                 let replacing = mode == Mode::Replace && !self.presenting();
                 self.replace_row.set_visible(replacing);
+                self.sync_toggles();
                 self.rows.set_visible_child_name("find");
                 self.bar.set_search_mode(true);
                 self.search(&self.query.text());
@@ -422,7 +494,7 @@ impl Bar {
         self.busy.set(true);
         tab.step(forward, false);
         self.busy.set(false);
-        self.matches.set_text(&tab.matches_label());
+        self.show_matches(&tab);
     }
 
     /// The readout, said in the caller's own words: the PDF reader and the preview both count
@@ -466,6 +538,7 @@ impl Bar {
 
     fn search(self: &Rc<Self>, text: &str) {
         self.mark_once();
+        self.sync_toggles();
         if self.presenting() {
             return self.to_preview(PreviewOp::Find(text.to_string()));
         }
@@ -477,10 +550,11 @@ impl Bar {
         // appending to the old query rather than typing over it.
         let boxes: [&gtk::Editable; 2] = [self.query.upcast_ref(), self.replace.upcast_ref()];
         let selected = boxes.map(|entry| entry.selection_bounds());
+        self.busy.set(true);
+        tab.set_find_options(self.options());
         tab.set_query(text);
         tab.set_highlight(true);
         // From the current match, not past it: typing must not walk through the document.
-        self.busy.set(true);
         tab.step(true, true);
         self.busy.set(false);
         for (entry, bounds) in boxes.into_iter().zip(selected) {
@@ -488,7 +562,7 @@ impl Bar {
                 entry.select_region(start, end);
             }
         }
-        self.matches.set_text(&tab.matches_label());
+        self.show_matches(&tab);
     }
 
     fn replace(self: &Rc<Self>, all: bool) {
@@ -507,18 +581,27 @@ impl Bar {
             false => tab.replace_current(&with),
         }
         self.busy.set(false);
-        self.matches.set_text(&tab.matches_label());
+        self.show_matches(&tab);
     }
 
     fn refresh_matches(&self) {
         if self.busy.get() {
             return;
         }
-        let label = self
-            .tab()
-            .map(|tab| tab.matches_label())
-            .unwrap_or_default();
-        self.matches.set_text(&label);
+        match self.tab() {
+            Some(tab) => self.show_matches(&tab),
+            None => self.matches.set_text(""),
+        }
+    }
+
+    /// The readout for `tab`, and the query box marked as the Search pane marks its own when the
+    /// query does not compile. Not while presenting, where the query is searched as written.
+    fn show_matches(&self, tab: &Tab) {
+        self.matches.set_text(&tab.matches_label());
+        match tab.find_invalid() && !self.presenting() {
+            true => self.query.add_css_class("error"),
+            false => self.query.remove_css_class("error"),
+        }
     }
 
     /// The go-to row's "of N lines", read again whenever it can have changed while the row is up:
@@ -601,6 +684,27 @@ impl Bar {
         &self.query
     }
 
+    /// The three toggles, for `ACCENT_BENCH_FIND=options` to set.
+    #[cfg(feature = "bench")]
+    pub fn toggles(&self) -> &[gtk::ToggleButton; 3] {
+        &self.toggles
+    }
+
+    /// The readout and whether the query box is marked invalid, for the same drill.
+    #[cfg(feature = "bench")]
+    pub fn readout(&self) -> (String, bool) {
+        (
+            self.matches.text().to_string(),
+            self.query.has_css_class("error"),
+        )
+    }
+
+    /// Replace All, as its button presses it, for `ACCENT_BENCH_FIND=options`.
+    #[cfg(feature = "bench")]
+    pub fn press_replace_all(self: &Rc<Self>) {
+        self.replace(true);
+    }
+
     /// The replacement box, for the same reason as [`Bar::query_box`].
     #[cfg(feature = "bench")]
     pub fn replace_box(&self) -> &gtk::Entry {
@@ -621,6 +725,7 @@ impl Bar {
         }
         self.to_preview(PreviewOp::Clear);
         self.matches.set_text("");
+        self.query.remove_css_class("error");
     }
 }
 

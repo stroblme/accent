@@ -192,9 +192,10 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
 /// each of which joins a visible line to a hidden one, then ask for the iter at every pixel row of
 /// the note, as GtkSourceView asks at the top and bottom of the screen on every frame. A line left
 /// partly hidden aborts the process there (GTK's "Byte index … is off the end of the line"); kept
-/// to whole lines, each case prints what is hidden and what the joined line reads. Last, `stale`
+/// to whole lines, each case prints what is hidden and what the joined line reads. Then `stale`
 /// shuts the fold and runs a Ctrl-held pointer down every row before GTK has measured the hidden
-/// lines again, which aborted the same way.
+/// lines again, and `screen` draws the view with its top row below a partly hidden line, where
+/// GtkSourceView's gutter and annotations ask GTK for the iter: both aborted the same way.
 pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
     // Short lines after the fold: GTK's walk past the joined line lands in a line too short for
     // the bytes it carried along, which is what aborts.
@@ -275,6 +276,32 @@ pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
         println!(
             "bench seam case=stale folded={}",
             crate::fold::is_folded(tab.buffer.upcast_ref(), 0)
+        );
+        // The screen's top row in the pixels below a partly hidden line, as the view is drawn:
+        // GtkSourceView's annotations ask GTK for the iter there on every frame. The tag goes on
+        // without an edit, which is all `whole_lines` answers to.
+        let body: String = (0..200).map(|i| format!("body line {i}\n")).collect();
+        tab.set_text(&format!("# One\n{body}# Two\nplain line\n"));
+        glib::timeout_future(Duration::from_millis(200)).await;
+        let line = tab.buffer.iter_at_line(50).expect("bench line");
+        let (top, height) = tab.view.line_yrange(&line);
+        if let Some(adjustment) = tab.view.vadjustment() {
+            adjustment.set_value(f64::from(top + height - 1 + tab.view.top_margin()));
+        }
+        glib::timeout_future(Duration::from_millis(200)).await;
+        if let Some(tag) = tab.buffer.tag_table().lookup(crate::fold::TAG) {
+            let mut from = line;
+            from.forward_chars(5);
+            let to = tab.buffer.iter_at_line(61).expect("bench line");
+            tab.buffer.apply_tag(&tag, &from, &to);
+        }
+        tab.view.queue_draw();
+        if let Some(parent) = tab.view.parent() {
+            parent.snapshot_child(&tab.view, &gtk::Snapshot::new());
+        }
+        println!(
+            "bench seam case=screen top_in_line={}",
+            tab.view.visible_rect().y() - top
         );
         bench_quit(&app);
     });
@@ -1158,7 +1185,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
             println!(
                 "bench reveal {label} query={:?} painting={} on={} at={:?}",
                 bar.query_text(),
-                tab.search_context().is_highlight(),
+                tab.is_highlighting(),
                 tab.reveal_highlight().0,
                 tab.buffer
                     .selection_bounds()
@@ -1211,12 +1238,11 @@ fn bench_reveal_marks(app: &Rc<App>, tab: &Rc<Tab>) {
         let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
         let show = |label: &str| {
             let (on, tag) = tab.reveal_highlight();
-            let context = tab.search_context();
             println!(
                 "bench reveal case={label} on={on} at={:?} query={:?} painting={}",
                 bench_tag_ranges(&tab, &tag),
-                sourceview5::prelude::SearchSettingsExt::search_text(&context.settings()),
-                context.is_highlight()
+                Some(tab.find_query()).filter(|query| !query.is_empty()),
+                tab.is_highlighting()
             );
         };
 

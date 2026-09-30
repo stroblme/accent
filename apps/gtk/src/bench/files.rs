@@ -1398,7 +1398,8 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
 /// it, with the vault's worker busy on a walk; a second file is written the moment the first is
 /// listed, before the new folder's watch can be in place, and the folder's rows are printed once
 /// the worker has caught up. The files are written the way anything outside accent writes them,
-/// on the host for a remote vault.
+/// on the host for a remote vault. `=reload:<rel_dir>` is Reload on a folder's menu
+/// ([`bench_unfold_reload`]).
 pub(super) fn bench_unfold(app: &Rc<App>, arg: &str) {
     if arg.contains(':') {
         scratch_only(app, "ACCENT_BENCH_UNFOLD");
@@ -1414,6 +1415,9 @@ pub(super) fn bench_unfold(app: &Rc<App>, arg: &str) {
     }
     if let Some(dir) = arg.strip_prefix("again:") {
         return bench_unfold_again(app, dir);
+    }
+    if let Some(dir) = arg.strip_prefix("reload:") {
+        return bench_unfold_reload(app, dir);
     }
     let (app, dirs) = (
         app.clone(),
@@ -1545,6 +1549,65 @@ fn bench_unfold_tab(app: &Rc<App>, rel: &str) {
         println!("bench unfold_tab after {:?}", tab.text());
         bench_quit(&app);
     });
+}
+
+/// `=reload:<rel_dir>`: Reload from the open folder's menu, the moment a file is written into it
+/// from outside accent — inside the 300 ms the watcher holds its news back. Prints the folder's
+/// rows before and once the file is listed, or 250 ms on; then, 5 s later, whether a walk said
+/// it had indexed the vault and whether the index holds the file. A folder the index holds walks,
+/// a gitignored one does not.
+fn bench_unfold_reload(app: &Rc<App>, dir: &str) {
+    let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
+        return bench_quit(app);
+    };
+    let (app, dir) = (app.clone(), dir.to_string());
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        until(|| app.reconciled.get()).await;
+        unfold(tree, &dir).await;
+        // The first walk's own toast gone, so one seen later is the Reload's.
+        until(|| indexed_said(&app).is_none()).await;
+        let at = gdk::Rectangle::new(0, 0, 1, 1);
+        let menu = fileops::context_menu(&ops, tree.widget(), Some((&dir, true)), &[], at);
+        let offered = menu
+            .menu_model()
+            .is_some_and(|m| fileops::labels(&m).iter().any(|l| l == "Reload"));
+        menu.popdown();
+        let rel = format!("{dir}/reloaded.md");
+        let quoted = accent_api::ssh::quote(&rel);
+        scroll::in_vault(&app, &format!("echo reloaded > {quoted}"));
+        let t = Instant::now();
+        println!("bench unfold_reload before {:?}", listed(tree, &dir));
+        let _ =
+            WidgetExt::activate_action(tree.widget(), "fileops.reload", Some(&dir.to_variant()));
+        while !listed(tree, &dir).contains(&rel) && t.elapsed() < Duration::from_millis(250) {
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
+        println!(
+            "bench unfold_reload offered={offered} after_ms={} {:?}",
+            t.elapsed().as_millis(),
+            listed(tree, &dir)
+        );
+        glib::timeout_future(Duration::from_secs(5)).await;
+        let held = vault
+            .list_dir(&dir)
+            .is_ok_and(|rows| rows.iter().any(|r| r.rel_path == rel && r.id != 0));
+        println!(
+            "bench unfold_reload walked={:?} indexed={held}",
+            indexed_said(&app)
+        );
+        scroll::in_vault(&app, &format!("rm -f {quoted}"));
+        bench_quit(&app);
+    });
+}
+
+/// The "Indexed …" toast a finished walk leaves over the window, if one is up.
+fn indexed_said(app: &Rc<App>) -> Option<String> {
+    let label = find_widget(app.window.upcast_ref(), &|w| {
+        w.downcast_ref::<gtk::Label>()
+            .is_some_and(|l| l.label().starts_with("Indexed "))
+    })?;
+    Some(label.downcast::<gtk::Label>().ok()?.label().to_string())
 }
 
 /// Open `dir`'s row and every row above it, as clicks would, and give its listing a second.

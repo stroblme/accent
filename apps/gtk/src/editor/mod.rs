@@ -1,9 +1,9 @@
 //! One editor tab: a `sourceview5::View` on a note, plus its etag, banner and the debounced
 //! work that hangs off a keystroke.
 //!
-//! Finding and replacing live in `find.rs`, one bar per window: the bar drives the tab's
-//! `SearchContext` from the outside, so the same widgets serve every tab and stay on screen while
-//! presentation mode has hidden the tab stack.
+//! Finding and replacing live in `find.rs`, one bar per window: the bar drives the tab's query
+//! from the outside, so the same widgets serve every tab and stay on screen while presentation
+//! mode has hidden the tab stack.
 //!
 //! Nothing here knows about the app. What the tab has to say goes out through a `connect_*`
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
@@ -52,7 +52,7 @@ pub use open::open;
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
 pub(crate) use page::{font_css, install_font, next_view_name, set_margins};
-use search::{matched, mute};
+use search::{match_style, matched, mute};
 pub(crate) use text::{caret, line_end, line_prefix};
 
 /// How long a long note waits after the last keystroke before it is re-analysed.
@@ -72,6 +72,8 @@ const CURSOR: Duration = Duration::from_millis(100);
 /// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell
 /// before it runs: a callback is free to reach back into the tab that called it.
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>)>>>;
+/// The find bar's hook, told whether the query itself changed ([`Tab::connect_found`]).
+type FoundHook = RefCell<Option<Rc<dyn Fn(bool)>>>;
 
 /// Whether a save may write the file under a tab.
 ///
@@ -277,7 +279,12 @@ pub struct Tab {
     /// Every question standing about this file. The banner shows one of them ([`banner_alert`]);
     /// the rest wait rather than being overwritten.
     alerts: RefCell<Vec<Alert>>,
-    context: sourceview5::SearchContext,
+    /// The find bar's query over this tab, and where it matches ([`search::Find`]).
+    find: RefCell<search::Find>,
+    /// What the find bar's matches are painted with, raised to the top of the table as it paints.
+    find_tag: gtk::TextTag,
+    /// The bar last pointed at this tab, told when the query has been matched again.
+    on_found: FoundHook,
     /// Every other occurrence of what is selected, muted.
     ///
     /// A tag of our own rather than a second `SearchContext` fed the selection, which is the
@@ -285,7 +292,7 @@ pub struct Tab {
     /// of the tag table and re-raise it as they rescan, so which of the two colours paints an
     /// overlap is a race. Measured under `ACCENT_BENCH_OCCUR`, the find bar lost it — every match
     /// rendered in the muted colour with the bar open on the selected word. An ordinary tag made
-    /// before the context stays under it whatever either of them does.
+    /// before the find bar's stays under it whatever either of them does.
     occurrence_tag: gtk::TextTag,
     /// What that tag is showing, so a caret move that changes nothing re-tags nothing.
     occurrence_query: RefCell<Option<String>>,
@@ -611,6 +618,7 @@ impl Tab {
         // Derived from the scheme that just changed, so both have to be derived again.
         mute(&self.buffer, &self.occurrence_tag);
         matched(&self.buffer, &self.reveal_tag);
+        match_style(&self.buffer, &self.find_tag);
         match self.flavour {
             Flavour::Note => {
                 highlight::restyle(&self.buffer, &self.view);
@@ -1042,6 +1050,8 @@ impl Tab {
 
     fn on_changed(self: &Rc<Self>) {
         self.note_turn(true, false);
+        // Ahead of the early return: a reload changes what the query matches too.
+        self.find_edited();
         if self.loading.get() {
             return;
         }

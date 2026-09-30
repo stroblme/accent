@@ -123,7 +123,10 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                     .and_then(|page| app.doc_for_page(page))
                     .as_ref()
                     .and_then(export::printable);
-                actions::fill_tab_menu(&menu, app.menu_file().is_some(), pinned, prints);
+                let movable = page
+                    .and_then(|page| app.doc_for_page(page))
+                    .is_some_and(|doc| shell::movable(&app, &doc));
+                actions::fill_tab_menu(&menu, app.menu_file().is_some(), movable, pinned, prints);
             }
         }
     ));

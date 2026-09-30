@@ -204,14 +204,13 @@ pub fn open(
     document.append(&map);
 
     let banner = adw::Banner::new("");
-    // Made before the find bar's search context, so it stays under the tag that context paints
-    // with: a tag added later to the table outranks an earlier one, and gtksourceview only ever
-    // raises its own. See [`Tab::occurrence_tag`].
+    // Made before the find bar's match tag, so it stays under it: a tag added later to the table
+    // outranks an earlier one, and the match tag is only ever raised. See [`Tab::occurrence_tag`].
     let occurrence_tag = gtk::TextTag::new(Some("occurrence"));
     buffer.tag_table().add(&occurrence_tag);
     mute(&buffer, &occurrence_tag);
-    // After the muted hint and before the search context, which is the order the three paint in:
-    // see [`Tab::reveal_range`].
+    // After the muted hint and before the find bar's match tag, which is the order the three
+    // paint in: see [`Tab::reveal_range`].
     let reveal_tag = gtk::TextTag::new(Some("reveal"));
     buffer.tag_table().add(&reveal_tag);
     matched(&buffer, &reveal_tag);
@@ -220,17 +219,13 @@ pub fn open(
     let follow_tag = gtk::TextTag::new(Some("follow"));
     follow_tag.set_underline(pango::Underline::Single);
     buffer.tag_table().add(&follow_tag);
-    // Folded text included, as VS Code finds into folds: GtkSourceView skips invisible text by
-    // default, so a match in a shut block was never stepped to, counted or replaced. Stepping to
-    // one opens its fold (`Tab::step`).
-    let settings = sourceview5::SearchSettings::builder()
-        .wrap_around(true)
-        .case_sensitive(false)
-        .visible_only(false)
-        .build();
-    let context = sourceview5::SearchContext::new(&buffer, Some(&settings));
+    // Last of the three. The query matches folded text too, as VS Code finds into folds, and
+    // stepping to a match in a shut block opens it (`Tab::step`).
+    let find_tag = gtk::TextTag::new(Some("find"));
+    buffer.tag_table().add(&find_tag);
+    match_style(&buffer, &find_tag);
     if let Some(column) = view.downcast_ref::<multicaret::View>() {
-        column.set_search(&context);
+        column.set_find_tag(&find_tag);
     }
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -269,7 +264,9 @@ pub fn open(
         banner: banner.clone(),
         save: SaveState::at(text.etag),
         alerts: RefCell::new(Vec::new()),
-        context,
+        find: RefCell::default(),
+        find_tag,
+        on_found: RefCell::new(None),
         occurrence_tag,
         occurrence_query: RefCell::new(None),
         reveal_tag,
@@ -374,6 +371,19 @@ pub fn open(
         #[weak(rename_to = tab)]
         tab,
         move |_| tab.update_sticky()
+    ));
+    // The find bar paints the matches around what is on screen, so a scroll or a resize that
+    // shows other lines has them painted too (`Tab::paint_matches`).
+    let adjustment = scroller.vadjustment();
+    adjustment.connect_value_changed(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_| tab.queue_paint()
+    ));
+    adjustment.connect_changed(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_| tab.queue_paint()
     ));
 
     tab.analyse();

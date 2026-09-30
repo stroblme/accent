@@ -307,6 +307,9 @@ struct Assets {
     served: RefCell<HashSet<String>>,
     /// A page for print or export ([`Preview::for_paper`]): white paper, images as their files.
     paper: bool,
+    /// The key of the note on the page: a loose one's images are read beside it
+    /// ([`resolve_asset`]).
+    note: RefCell<String>,
 }
 
 /// Where the find readout goes; see [`Preview::connect_found`].
@@ -362,6 +365,7 @@ impl Preview {
             requests: Cell::new(0),
             served: RefCell::default(),
             paper,
+            note: RefCell::default(),
         });
 
         let context = webkit6::WebContext::new();
@@ -477,6 +481,7 @@ impl Preview {
     /// to a worker is the upgrade path if a large note ever shows up in a profile.
     pub fn render(&self, rel: &str, text: &str) {
         let body = accent_core::markdown::to_html(text);
+        *self.inner.assets.note.borrow_mut() = rel.to_string();
         self.inner.set_mermaid(body.contains("language-mermaid"));
         self.inner.loaded.set(false);
         self.inner
@@ -803,14 +808,16 @@ fn same_page(uri: &str, current: &str) -> bool {
 /// `on_invert` the image's key once the vault has named the file.
 fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
     let action = gio::SimpleAction::new("invert-image", Some(glib::VariantTy::STRING));
-    let (resolve, on_invert) = (inner.assets.resolve.clone(), Rc::new(on_invert));
+    let (assets, on_invert) = (inner.assets.clone(), Rc::new(on_invert));
     action.connect_activate(move |_, rel| {
         let Some(rel) = rel.and_then(|v| v.str()).map(str::to_string) else {
             return;
         };
-        let (resolve, on_invert) = (resolve.clone(), on_invert.clone());
+        let (resolve, note) = (assets.resolve.clone(), assets.note.borrow().clone());
+        let on_invert = on_invert.clone();
         glib::spawn_future_local(async move {
-            let found = crate::work::off_thread("asset", move || resolve_asset(&*resolve, &rel));
+            let found =
+                crate::work::off_thread("asset", move || resolve_asset(&*resolve, &note, &rel));
             if let Some(Some((key, _))) = found.await {
                 on_invert(&key);
             }
@@ -856,10 +863,11 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
         false => Look::now(),
     };
     let inverted = assets.inverted.borrow().clone();
+    let note = assets.note.borrow().clone();
     let assets = assets.clone();
     glib::spawn_future_local(async move {
         let answer = crate::work::off_thread("asset", move || {
-            let (key, path) = resolve_asset(&*resolve, &rel)?;
+            let (key, path) = resolve_asset(&*resolve, &note, &rel)?;
             let served = look::serve(&path, look, inverted.contains(&key));
             Some((key, path, served))
         });
@@ -903,7 +911,19 @@ fn deny(request: &webkit6::URISchemeRequest, what: &str) {
 /// what stops `![[../../../etc/passwd]]` however the resolver is written. The other half is the
 /// resolver's, and has to be: only it knows the root, so only it can say whether the file it hands
 /// back is still inside the vault once symlinks have been followed.
-fn resolve_asset(resolve: &Resolve, rel: &str) -> Option<(String, PathBuf)> {
+///
+/// A `note` from outside every vault, keyed by its absolute path, has no resolver to ask: its own
+/// folder is the root, under the same two rules ([`beside`]). Its page is based at that folder's
+/// path ([`base_uri`]), so what it links relatively arrives as a path under the folder, which is
+/// taken back to one relative to it, and a `![[name]]` arrives bare.
+fn resolve_asset(resolve: &Resolve, note: &str, rel: &str) -> Option<(String, PathBuf)> {
+    let folder = Path::new(note)
+        .parent()
+        .filter(|_| Path::new(note).is_absolute());
+    let rel = match folder.and_then(|dir| Path::new(rel).strip_prefix(dir).ok()) {
+        Some(inside) => inside.to_str()?,
+        None => rel,
+    };
     if rel.is_empty() || Path::new(rel).is_absolute() {
         return None;
     }
@@ -917,16 +937,28 @@ fn resolve_asset(resolve: &Resolve, rel: &str) -> Option<(String, PathBuf)> {
             _ => return None,
         }
     }
-    resolve(rel)
+    match folder {
+        Some(dir) => beside(dir, rel),
+        None => resolve(rel),
+    }
 }
 
-/// The file on this machine an `accent://file/` address on the page names, held to the vault as
-/// every request the page makes is.
-pub(crate) fn asset(resolve: &Resolve, uri: &str) -> Option<PathBuf> {
+/// `rel` in the folder `dir` as a vault holds a file: the file it names once symlinks are followed,
+/// while that is still under `dir`, keyed by its path as a loose tab is.
+fn beside(dir: &Path, rel: &str) -> Option<(String, PathBuf)> {
+    let root = dir.canonicalize().ok()?;
+    let path = root.join(rel).canonicalize().ok()?;
+    path.starts_with(&root)
+        .then(|| (path.to_string_lossy().into_owned(), path))
+}
+
+/// The file on this machine an `accent://file/` address on `note`'s page names, held to the vault
+/// as every request the page makes is.
+pub(crate) fn asset(resolve: &Resolve, note: &str, uri: &str) -> Option<PathBuf> {
     let Some(("file", rel)) = accent_uri(uri) else {
         return None;
     };
-    resolve_asset(resolve, &rel).map(|(_, path)| path)
+    resolve_asset(resolve, note, &rel).map(|(_, path)| path)
 }
 
 /// Split `accent://<host>/<path>` into host and percent-decoded path, dropping `?query` and
@@ -1189,14 +1221,14 @@ mod tests {
         std::fs::write(root.join("attachments/img.png"), b"x").unwrap();
         let resolve = vault_resolver(root.clone());
         assert_eq!(
-            resolve_asset(&resolve, "attachments/img.png"),
+            resolve_asset(&resolve, "n.md", "attachments/img.png"),
             Some((
                 "attachments/img.png".to_string(),
                 root.canonicalize().unwrap().join("attachments/img.png")
             ))
         );
         // Nothing there is the resolver's `None`, and reaches the reader as the same refusal.
-        assert_eq!(resolve_asset(&resolve, "missing.png"), None);
+        assert_eq!(resolve_asset(&resolve, "n.md", "missing.png"), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1211,7 +1243,7 @@ mod tests {
             "/etc/passwd",
             "",
         ] {
-            assert_eq!(resolve_asset(&naive, rel), None, "{rel}");
+            assert_eq!(resolve_asset(&naive, "n.md", rel), None, "{rel}");
         }
     }
 
@@ -1226,10 +1258,42 @@ mod tests {
         // Neither path is lexically wrong, so the check here passes them on; refusing them takes
         // the root, which only the resolver has.
         let resolve = vault_resolver(root.clone());
-        assert_eq!(resolve_asset(&resolve, "escape.txt"), None);
-        assert_eq!(resolve_asset(&resolve, "out/secret.txt"), None);
+        assert_eq!(resolve_asset(&resolve, "n.md", "escape.txt"), None);
+        assert_eq!(resolve_asset(&resolve, "n.md", "out/secret.txt"), None);
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::remove_dir_all(&outside).unwrap();
+    }
+
+    /// A note outside every vault reads its images beside it: its folder stands in for the vault
+    /// root, so a relative link or a bare `![[name]]` reaches a file in it or under it, and nothing
+    /// above it, named by its path or through a symlink out of it.
+    #[test]
+    fn a_loose_note_reads_its_images_beside_it() {
+        let root = scratch("loose").canonicalize().unwrap();
+        let dir = root.join("n");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        for file in ["n/img.png", "n/sub/b.png", "above.png"] {
+            std::fs::write(root.join(file), b"x").unwrap();
+        }
+        std::os::unix::fs::symlink(root.join("above.png"), dir.join("out.png")).unwrap();
+        let note = dir.join("note.md");
+        // A loose note never asks the vault's resolver.
+        let vault = |_: &str| -> Option<(String, PathBuf)> { unreachable!() };
+        let found = |rel: &Path| resolve_asset(&vault, note.to_str()?, rel.to_str()?);
+        let img = dir.join("img.png");
+        // `![](img.png)` as the page based at the folder asks for it, then `![[img.png]]`.
+        assert_eq!(
+            found(&img),
+            Some((img.to_string_lossy().into_owned(), img.clone()))
+        );
+        assert_eq!(found(Path::new("img.png")).map(|(_, p)| p), Some(img));
+        let deeper = dir.join("sub/b.png");
+        assert_eq!(found(&deeper).map(|(_, p)| p), Some(deeper));
+        // `![](../above.png)`, the page's way and a wikilink's, and a symlink out of the folder.
+        assert_eq!(found(&root.join("above.png")), None);
+        assert_eq!(found(Path::new("../above.png")), None);
+        assert_eq!(found(Path::new("out.png")), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

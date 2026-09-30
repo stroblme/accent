@@ -790,6 +790,10 @@ fn caret_prefix(tab: &Rc<Tab>) -> String {
 /// then opens in this one, which is the state after switching windows away from a shell. Closing
 /// the second window hands the keyboard back through the same `active-window` notify a real
 /// switch goes through. Prints what `Ctrl+S` activates: `["win.save"]`, then `[]`.
+///
+/// Then what the shell leaves the window, captured and with Forward All Keys switched on under
+/// it: `Ctrl+E` and `Ctrl+W` stay the window's (`["win.palette-files"]`, `["win.close-tab"]`)
+/// and then go to the shell (`[]`), and Copy in Terminal stays the window's either way.
 pub(super) fn bench_shell_keys(app: &Rc<App>) {
     let Some(gtk_app) = app.window.application().and_downcast::<adw::Application>() else {
         return bench_quit(app);
@@ -815,9 +819,23 @@ pub(super) fn bench_shell_keys(app: &Rc<App>) {
         other.window.close();
         glib::timeout_add_local_once(Duration::from_millis(200), move || {
             print("shell-here");
+            bench_shell_kept(&app, "capture");
+            app.config.borrow_mut().forward_keys_to_terminal = true;
+            app.config_changed();
+            bench_shell_kept(&app, "forward");
             bench_quit(&app);
         });
     });
+}
+
+/// What `Ctrl+E`, `Ctrl+W` and `Ctrl+Shift+C` activate from the focused shell.
+fn bench_shell_kept(app: &Rc<App>, when: &str) {
+    let Some(gtk_app) = app.window.application() else {
+        return;
+    };
+    let [e, w, copy] = ["<Control>e", "<Control>w", "<Control><Shift>c"]
+        .map(|accel| gtk_app.actions_for_accel(accel));
+    println!("bench shell_keys {when} ctrl_e={e:?} ctrl_w={w:?} copy={copy:?}");
 }
 
 /// `ACCENT_BENCH_TERM=1` against `accent --terminal`: what the vault-less shell window calls

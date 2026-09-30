@@ -71,6 +71,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.move-tab-up", "Move Tab Up", &[]),
     ("win.move-tab-down", "Move Tab Down", &[]),
+    // Out of the window altogether, into one of its own with no vault (`Shell::move_apart`).
+    ("win.move-to-new-window", "Move to New Window", &[]),
     // Held at the start of its pane's bar, keeping its title and its close button. Two actions
     // rather than one toggle, so the menu names what it will do and the label still comes from
     // this table.
@@ -386,6 +388,17 @@ impl App {
             "move-tab-right" => self.move_tab(Side::Right),
             "move-tab-up" => self.move_tab(Side::Up),
             "move-tab-down" => self.move_tab(Side::Down),
+            "move-to-new-window" => {
+                let page = self.menu_page.borrow().clone();
+                let gtk_app = self.window.application().and_downcast::<adw::Application>();
+                if let (Some(page), Some(shell), Some(gtk_app)) = (
+                    page.or_else(|| self.tabs().selected_page()),
+                    self.shell.upgrade(),
+                    gtk_app,
+                ) {
+                    shell.move_apart(&gtk_app, self, &page);
+                }
+            }
             "pin-tab" => self.pin_tab(true),
             "unpin-tab" => self.pin_tab(false),
             "divider-left" => self.move_divider(Side::Left),
@@ -810,6 +823,8 @@ const CAPTURED: &[&str] = &[
 ///   scale one have to be reachable from inside one.
 /// * `win.fullscreen` (`F11`) — no readline or curses meaning, and GNOME Terminal keeps the same
 ///   key for the same reason: a fullscreen window has to be leavable from a focused shell.
+/// * `win.palette-files` (`Ctrl+E`) — Go to File, so a file is one chord away from a shell as it
+///   is from a note. What a shell loses is readline's end-of-line, which `End` still does.
 /// * every chord whose spelling carries both `<Control>` and `<Shift>` — the existing convention,
 ///   which no shell claims, and which already covers Copy and Paste in Terminal, the pane chords,
 ///   the palette's second spelling and Replace in Files.
@@ -836,7 +851,21 @@ fn reserved(action: &str, accel: &str) -> bool {
             | "win.zoom-out"
             | "win.zoom-reset"
             | "win.fullscreen"
+            | "win.palette-files"
     ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
+}
+
+/// Whether the window keeps `accel` while a shell has the keyboard: the [`reserved`] set, or,
+/// where the shell is given every key (`Config::forward_keys_to_terminal`), Copy and Paste in
+/// Terminal alone. Those two act on the shell rather than on the window, and a terminal hands
+/// `Ctrl+Shift+C` to the program as `Ctrl+C`, so forwarding it would interrupt what runs instead
+/// of copying from it. `AdwTabView`'s own chords are not in this table and stay either way, which
+/// is how the keyboard leaves such a shell: `Ctrl+PageUp` / `Ctrl+PageDown` to the next tab.
+fn kept(action: &str, accel: &str, forward: bool) -> bool {
+    match forward {
+        true => matches!(action, "win.terminal-copy" | "win.terminal-paste"),
+        false => reserved(action, accel),
+    }
 }
 
 fn clear(controller: &gtk::ShortcutController) {
@@ -1010,11 +1039,11 @@ pub fn primary_menu(key: &crate::shell::WindowKey) -> gio::Menu {
 }
 
 /// The tab's own context menu, as a pane is built with it: nothing yet known about which page
-/// will show it, so without the two items that name a file or the ones that print it, and
-/// offering Pin Tab.
+/// will show it, so without the two items that name a file, Move to New Window or the ones that
+/// print it, and offering Pin Tab.
 pub fn tab_menu() -> gio::Menu {
     let menu = gio::Menu::new();
-    fill_tab_menu(&menu, false, false, None);
+    fill_tab_menu(&menu, false, false, false, None);
     menu
 }
 
@@ -1025,7 +1054,9 @@ pub fn tab_menu() -> gio::Menu {
 /// `file` says whether the tab about to show this holds a file of this vault, which is what
 /// Rename and Move to Trash need and nothing else here does: a shell and a comparison are no
 /// file, and a loose one is outside the vault those two act in. On such a tab the two are not on
-/// the menu at all rather than on it and refusing (DESIGN.md, Principle 1). `pinned` says which
+/// the menu at all rather than on it and refusing (DESIGN.md, Principle 1). `movable` says whether
+/// another window could open what the tab holds, which Move to New Window needs: a shell, a
+/// comparison and a remote vault's file cannot. `pinned` says which
 /// of Pin Tab and Unpin Tab it offers, and `prints` what the tab can be printed and exported as
 /// (`export::printable`): a note Print…, Export as PDF… and Export as HTML…, a PDF the first two,
 /// anything else none, in a section of their own after Reveal, since they make something of the
@@ -1034,7 +1065,13 @@ pub fn tab_menu() -> gio::Menu {
 /// Filled in place rather than built afresh, because `AdwTabView` holds one model per pane and a
 /// `GtkPopoverMenu` follows the model it was made from: the page about to show the menu is what
 /// decides what it says (`wire::wire_pane`, `setup-menu`).
-pub fn fill_tab_menu(menu: &gio::Menu, file: bool, pinned: bool, prints: Option<Kind>) {
+pub fn fill_tab_menu(
+    menu: &gio::Menu,
+    file: bool,
+    movable: bool,
+    pinned: bool,
+    prints: Option<Kind>,
+) {
     menu.remove_all();
     let split = gio::Menu::new();
     for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
@@ -1046,6 +1083,10 @@ pub fn fill_tab_menu(menu: &gio::Menu, file: bool, pinned: bool, prints: Option<
     for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
         let action = format!("win.move-tab-{}", side.action());
         move_tab.append(Some(label_of(&action)), Some(&action));
+    }
+    if movable {
+        let action = "win.move-to-new-window";
+        move_tab.append(Some(label_of(action)), Some(action));
     }
     // After the moves, as GNOME Web has it: pinning is where in the bar the tab stays.
     let pin = match pinned {
@@ -1117,11 +1158,11 @@ impl Shell {
     /// `set_accels_for_action` calls are cheaper than working out which of them a config change
     /// touched.
     ///
-    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
-    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
-    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
-    /// the same rule as the default it replaced. The shell asked about is the active window's,
-    /// whichever window is rebuilding: the table is one for all of them.
+    /// A focused shell narrows the table to what is [`kept`], because an application accelerator
+    /// is dispatched at the window ahead of the VTE and unbinding it is the only thing that lets
+    /// the key reach the shell. The filter reads the accelerators in force, so a rebound chord
+    /// follows the same rule as the default it replaced. The shell asked about is the active
+    /// window's, whichever window is rebuilding: the table is one for all of them.
     pub fn apply_accels(&self, gtk_app: &gtk::Application) {
         let config = self.config.borrow();
         let shell = terminal::has_focus(gtk_app);
@@ -1131,7 +1172,7 @@ impl Shell {
             let accels: Vec<&str> = accels
                 .iter()
                 .map(String::as_str)
-                .filter(|accel| !shell || reserved(action, accel))
+                .filter(|accel| !shell || kept(action, accel, config.forward_keys_to_terminal))
                 .collect();
             gtk_app.set_accels_for_action(action, &accels);
         }
@@ -1196,6 +1237,7 @@ mod tests {
         for action in [
             "win.rename",
             "win.trash",
+            "win.move-to-new-window",
             "win.pin-tab",
             "win.unpin-tab",
             "win.print",
@@ -1207,6 +1249,20 @@ mod tests {
                 "{action} is on the tab menu but not in ACTIONS"
             );
         }
+    }
+
+    /// Move to New Window ends the moves before the pin, on a tab another window can open: a
+    /// shell, a comparison and a remote vault's file cannot go.
+    #[test]
+    fn only_a_tab_that_can_move_offers_a_new_window() {
+        let moves = |movable| {
+            let menu = gio::Menu::new();
+            fill_tab_menu(&menu, false, movable, false, None);
+            let section = menu.item_link(1, "section").expect("the move section");
+            menu_actions(&section)[4..].to_vec()
+        };
+        assert_eq!(moves(true), ["win.move-to-new-window", "win.pin-tab"]);
+        assert_eq!(moves(false), ["win.pin-tab"]);
     }
 
     #[test]
@@ -1307,7 +1363,7 @@ mod tests {
     fn the_tab_menu_names_a_file_only_where_there_is_one() {
         let sections = |file| {
             let menu = gio::Menu::new();
-            fill_tab_menu(&menu, file, false, None);
+            fill_tab_menu(&menu, file, false, false, None);
             menu.n_items()
         };
         assert_eq!(sections(true), sections(false) + 2);
@@ -1319,7 +1375,7 @@ mod tests {
     fn the_tab_menu_offers_the_pin_the_page_does_not_have() {
         let last_move = |pinned| {
             let menu = gio::Menu::new();
-            fill_tab_menu(&menu, false, pinned, None);
+            fill_tab_menu(&menu, false, false, pinned, None);
             let moves = menu.item_link(1, "section").expect("the move section");
             let last = moves.n_items() - 1;
             moves
@@ -1350,7 +1406,7 @@ mod tests {
     fn the_tab_menu_prints_what_can_be_printed() {
         let after_reveal = |prints| {
             let menu = gio::Menu::new();
-            fill_tab_menu(&menu, true, false, prints);
+            fill_tab_menu(&menu, true, false, false, prints);
             let actions = menu_actions(menu.upcast_ref());
             let at = actions
                 .iter()
@@ -1417,6 +1473,8 @@ mod tests {
         }
         assert!(reserved("win.zoom-out", "<Control>minus"));
         assert!(reserved("win.zoom-reset", "<Control>0"));
+        // Go to File, so a file is one chord away from a shell as it is from a note.
+        assert!(reserved("win.palette-files", "<Control>e"));
         // The shell's: plain Ctrl, function keys, and the chords readline reaches for most.
         for (action, accel) in [
             ("win.save", "<Control>s"),
@@ -1424,12 +1482,32 @@ mod tests {
             ("win.next-occurrence", "<Alt>j"),
             ("win.toggle-comment", "<Control>k"),
             ("win.delete-line", "<Control>l"),
-            ("win.palette-files", "<Control>e"),
             ("win.palette-commands", "<Control>p"),
             ("win.find-previous", "<Shift>F3"),
             ("win.menu", "F10"),
         ] {
             assert!(!reserved(action, accel), "{action} eats {accel}");
+        }
+    }
+
+    /// Forwarding every key leaves the window Copy and Paste in Terminal alone: the reserved set
+    /// goes to the shell with the rest of the table.
+    #[test]
+    fn a_shell_given_every_key_keeps_only_copy_and_paste() {
+        assert!(kept("win.terminal-copy", "<Control><Shift>c", true));
+        assert!(kept("win.terminal-paste", "<Control><Shift>v", true));
+        for (action, accel) in [
+            ("win.close-tab", "<Control>w"),
+            ("win.next-tab", "<Control>Tab"),
+            ("win.palette-files", "<Control>e"),
+            ("win.palette-commands", "<Control><Shift>p"),
+            ("win.fullscreen", "F11"),
+        ] {
+            assert!(!kept(action, accel, true), "{action} eats {accel}");
+            assert!(
+                kept(action, accel, false),
+                "{action} is reserved when capturing"
+            );
         }
     }
 

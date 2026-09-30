@@ -15,6 +15,7 @@ mod find;
 mod git;
 mod image;
 mod keys;
+mod loose;
 mod memory;
 mod outline;
 mod panes;
@@ -28,10 +29,10 @@ mod tags;
 use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
-    bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_folds,
-    bench_compare_gap, bench_compare_gutter, bench_compare_left, bench_compare_lines,
-    bench_compare_pads, bench_compare_page, bench_compare_pick, bench_compare_press,
-    bench_compare_row,
+    bench_compare, bench_compare_clicks, bench_compare_conflict, bench_compare_diag,
+    bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_left,
+    bench_compare_lines, bench_compare_pads, bench_compare_page, bench_compare_pick,
+    bench_compare_press, bench_compare_row, bench_compare_stale,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -54,8 +55,8 @@ use keys::{
 };
 use outline::bench_outline;
 use panes::{
-    bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window,
-    bench_pins_restored, bench_reload, bench_tabs,
+    bench_apart, bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin,
+    bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_deep,
@@ -123,7 +124,8 @@ use tags::bench_tags;
 /// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
 /// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK; then
-/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`).
+/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`) and draws the view
+/// with its top row on a partly hidden line (`case=screen`).
 /// Every form of it runs only on a scratch vault under `/tmp` (`scratch_only`).
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
@@ -140,7 +142,11 @@ use tags::bench_tags;
 /// not touch it; where HEAD did, the tab it opens says whether its first change is on screen and
 /// where the shared scrollbar is. `=pick:<repo_rel>` picks a second repository in the chooser and
 /// clicks the root's row at once, printing both sides' line counts of what opened (see
-/// `compare::bench_compare_pick`). `=diag:<rel_text_file>`
+/// `compare::bench_compare_pick`). `=clicks` clicks Changes, Staged, Deleted and history rows in
+/// a repository it makes, in the orders and at the moments a reader does, and prints what both
+/// columns of the comparison in front hold after each (`compare::bench_compare_clicks`);
+/// `=stale:<rel>` clicks a row whose file's tab is behind the disk (`compare::bench_compare_stale`).
+/// `=diag:<rel_text_file>`
 /// collapses a run with warnings in it and prints how many end-of-line messages and gutter marks
 /// each state drew: the messages of a hidden run go, the icons stay. It then folds a block over
 /// the same file, which hides lines the same way, and reads the two numbers again without
@@ -250,6 +256,19 @@ use tags::bench_tags;
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
+/// `=apart:<rel>,…` opens those files, a note it makes (`apart-drill.md`) and a shell; fires Open
+/// in New Window from the first one's tree menu, then Move to New Window from every tab's menu,
+/// the made note with an edit still in its buffer, printing whether each menu offered its item,
+/// whether the tab stayed and what was said; then every other window and what it holds, and what
+/// the made note says on disk, before removing it. On a remote vault neither item is offered.
+/// `=loose:<rel_pdf>` writes a note and its images into `loose-drill/` and opens the note in a
+/// window of its own from its tree row, where no vault is behind it, and prints what the Outline
+/// pane there holds and the headings it lists, then whether each image in its preview loaded:
+/// those beside it and under it, and neither one above its folder nor one through a symlink out
+/// of it. Then it opens an image and a copy of the PDF in windows of their own, the PDF here too,
+/// and prints the image's size there before and after the file is written over with a larger one,
+/// and the pages of the PDF there before and after a page is added here, then here after one is
+/// added there (`loose::bench_loose`), before removing the folder.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
@@ -335,7 +354,9 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_FIND=<rel_note>` uses two queries in a note's find bar and then presses Ctrl+F
 /// twice over the open bar — once on a typed query, once on one Up recalled — printing what is
-/// selected in the box each time and again once its delayed search has run.
+/// selected in the box each time and again once its delayed search has run. `=options` writes a
+/// note of its own and prints what the bar reads out under each of its toggles, an invalid
+/// pattern and a Replace All with `$1`, then removes the note.
 ///
 /// `ACCENT_BENCH_DIAG=<rel_code_file>` hands a code tab an error, a warning and a hint, then
 /// presses the status bar's count twice, printing what the count says and how much of the answer
@@ -518,6 +539,13 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return memory::bench_memory(&app, &arg);
         }
         if let Some(rel) = compare {
+            // These make a repository in the vault root, or stage and commit in the one there.
+            if ["lines:", "row:", "left:", "pads:", "clicks"]
+                .iter()
+                .any(|mode| rel.starts_with(mode))
+            {
+                own_repository_only(&app, "ACCENT_BENCH_COMPARE");
+            }
             if let Some(rel) = rel.strip_prefix("lines:") {
                 return bench_compare_lines(&app, rel);
             }
@@ -526,6 +554,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("pick:") {
                 return bench_compare_pick(&app, rel);
+            }
+            if rel == "clicks" {
+                return bench_compare_clicks(&app);
+            }
+            if let Some(rel) = rel.strip_prefix("stale:") {
+                return bench_compare_stale(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("diag:") {
                 return bench_compare_diag(&app, rel);
@@ -641,6 +675,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_diagram(&app, &arg);
         }
         if let Some(dir) = scroll {
+            own_repository_only(&app, "ACCENT_BENCH_SCROLL");
             return bench_scroll(&app, &dir);
         }
         if let Some(rels) = moving {
@@ -661,6 +696,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(keys) = rels.strip_prefix("reload:") {
                 return bench_reload(&app, keys);
+            }
+            if let Some(rels) = rels.strip_prefix("apart:") {
+                return bench_apart(&app, rels);
+            }
+            if let Some(pdf) = rels.strip_prefix("loose:") {
+                return loose::bench_loose(&app, pdf);
             }
             return bench_tabs(&app, &rels);
         }
@@ -732,6 +773,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(arg) = git {
+            own_repository_only(&app, "ACCENT_BENCH_GIT");
             if let Some(phase) = arg.strip_prefix("close:") {
                 return bench_git_close(&app, phase);
             }
@@ -906,6 +948,32 @@ fn scratch_only(app: &Rc<App>, drill: &str) {
     if !root.starts_with("/tmp") {
         eprintln!(
             "{drill} types into its note: run it on a scratch vault under /tmp, not {root:?}"
+        );
+        std::process::exit(2);
+    }
+}
+
+/// A drill that makes a repository in the vault root, or stages and commits in the one there,
+/// refuses a vault inside a repository whose top it is not — a scratch copy under this checkout's
+/// `target/` — where its `git add` and the Git pane's Stage would reach that repository's index,
+/// the pane having picked it before any `git init` of the drill's. A vault in no repository is left
+/// to the drill, whose own `git init` makes it one; a remote vault's git is its host's.
+fn own_repository_only(app: &Rc<App>, drill: &str) {
+    if app.vault().is_none_or(|vault| vault.is_remote()) {
+        return;
+    }
+    let root = app.root();
+    let top = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&root)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()));
+    if let Some(top) = top.filter(|top| top.canonicalize().ok() != root.canonicalize().ok()) {
+        eprintln!(
+            "{drill} writes to the vault's repository: {root:?} is inside {top:?}; \
+             run `git init` in it first, or use a vault outside any repository"
         );
         std::process::exit(2);
     }

@@ -482,11 +482,8 @@ struct Search {
 
 impl Search {
     fn key(&self) -> Key {
-        let options = Options {
-            case: self.toggles[0].is_active(),
-            word: self.toggles[1].is_active(),
-            regex: self.toggles[2].is_active(),
-        };
+        let [case, word, regex, _] = &self.toggles;
+        let options = crate::find::options([case, word, regex]);
         Key {
             text: self.entry.text().to_string(),
             options,
@@ -1320,30 +1317,19 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         .build();
     replace_toggle.add_css_class("flat");
 
-    // Text buttons, not icons: Adwaita has no glyph for any of the four, and VS Code's `Aa`,
-    // `Word` and `.*` are what a user arriving from there already reads.
+    // The find bar's three toggles, made the same way, and All after them, a text button too:
+    // Adwaita has no glyph for it either.
     //
     // All's tooltip says which half of "everywhere" it reaches, because the two halves are not
     // the same mechanism: dropping the git-ignored exclusion is a column the ranked search reads
     // too, while the skipped trees are a walk, whose rows nothing can rank and which are listed
     // last under their own heading.
-    let toggles = [
-        ("Aa", "Match Case"),
-        ("Word", "Match Whole Word"),
-        (".*", "Use Regular Expression"),
-        (
-            "All",
-            "Include ignored files and list skipped folders under Not Indexed",
-        ),
-    ]
-    .map(|(label, tooltip)| {
-        let button = gtk::ToggleButton::builder()
-            .label(label)
-            .tooltip_text(tooltip)
-            .build();
-        button.add_css_class("flat");
-        button
-    });
+    let [case, word, regex] = crate::find::TOGGLES;
+    let all = (
+        "All",
+        "Include ignored files and list skipped folders under Not Indexed",
+    );
+    let toggles = [case, word, regex, all].map(crate::find::toggle);
     let options = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     options.add_css_class("linked");
     options.set_halign(gtk::Align::Start);

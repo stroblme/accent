@@ -355,6 +355,9 @@ struct App {
     /// Whether the close under way is Reload Window's, which opens what this window showed again
     /// once it has gone ([`App::reload`]).
     reloading: Cell<bool>,
+    /// The folders Reload has asked the vault to walk, whose walks end in a toast: a walk of a
+    /// folder nobody asked for (a `.gitignore` saved below the root) ends in none.
+    reloads: RefCell<Vec<String>>,
     /// The tab `setup-menu` named, so the tab context menu acts on the page that was
     /// right-clicked rather than on the selected one. `None` once the popup is gone, which is
     /// what makes the same actions work from the palette.
