@@ -217,7 +217,7 @@ pub struct ScanOptions {
     /// an index nobody wants and 9 % of the kernel's inotify watch budget.
     ///
     /// ponytail: if someone really keeps notes under a `CACHEDIR.TAG`, this becomes a per-vault
-    /// preference; until then `accent-cli --index-dependency-trees` is the way back.
+    /// preference; until then the file tree still lists such a tree and Search's All reaches it.
     pub skip_dependency_trees: bool,
     /// Walk [`SKIP_DIRS`] and marked dependency trees anyway. Off by default, and never turned on
     /// for the index: this is the Search pane's All toggle reaching, for one query, the trees the

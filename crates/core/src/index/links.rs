@@ -253,6 +253,7 @@ mod tests {
             ix.unresolved_links().unwrap(),
             vec![("a.md".into(), "Nope".into())]
         );
+        assert_eq!(ix.stats().unwrap().unresolved, 1);
     }
 
     #[test]

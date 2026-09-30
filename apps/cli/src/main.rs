@@ -1,13 +1,15 @@
 //! accent-cli: index | scan | search | backlinks | tags | stats. Works without the GUI.
-//! Read-only with respect to the vault — the only thing it writes is the cache db.
+//! Read-only with respect to the vault — the only thing it writes is the cache db, which it brings
+//! up to date through the same façade, scan policy and defaults as the app before it answers.
 //! Also what runs behind the window: `serve` on a remote host, and `hold`, `attach`, `kill`,
 //! `held` and `clip`, which keep the terminal tabs' shells alive between windows.
 
 mod hold;
 
-use accent_core::index::{Index, Phase, Progress, default_db_path};
+use accent_api::{Event, Progress, ReconcileStats, Vault, VaultConfig};
+use accent_core::index::{Phase, default_db_path};
 use accent_core::walk::{self, ScanOptions};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -31,18 +33,6 @@ struct Common {
     /// Index database. Defaults to $XDG_CACHE_HOME/accent/<hash-of-vault-path>.db
     #[arg(long)]
     db: Option<PathBuf>,
-    /// Also leave out gitignored *files* inside the vault tree (off by default: vaults often
-    /// gitignore *.md). A gitignored directory is left out either way.
-    #[arg(long)]
-    vault_gitignore: bool,
-    /// Do not honour .gitignore inside directory-symlink targets (on by default, so that
-    /// external code repos do not drag .venv / target / node_modules into the index).
-    #[arg(long)]
-    no_target_gitignore: bool,
-    /// Index dependency and build trees too. Off by default: a directory carrying CACHEDIR.TAG
-    /// or pyvenv.cfg is somebody's cache, not notes. This is the way back in.
-    #[arg(long)]
-    index_dependency_trees: bool,
 }
 
 impl Common {
@@ -51,17 +41,22 @@ impl Common {
             .clone()
             .unwrap_or_else(|| default_db_path(&self.vault))
     }
-    fn scan_options(&self) -> ScanOptions {
-        ScanOptions {
-            vault_gitignore: self.vault_gitignore,
-            target_gitignore: !self.no_target_gitignore,
-            skip_dependency_trees: !self.index_dependency_trees,
-            ..ScanOptions::default()
+
+    /// Open the vault as the app does and wait for the walk that brings its index up to date,
+    /// telling `progress` how it goes. Unwatched: the command is over before a change could
+    /// matter.
+    fn open(&self, progress: impl Fn(Progress)) -> Result<(Vault, ReconcileStats)> {
+        let (vault, events) =
+            Vault::open_unwatched_at(&self.vault, &self.db_path(), VaultConfig::default())?;
+        for event in events {
+            match event {
+                Event::Progress(p) => progress(p),
+                Event::Reconciled(stats) => return Ok((vault, stats)),
+                Event::Error(e) => anyhow::bail!(e),
+                _ => {}
+            }
         }
-    }
-    fn open(&self) -> Result<Index> {
-        let p = self.db_path();
-        Index::open(&p).with_context(|| format!("opening index at {}", p.display()))
+        anyhow::bail!("the vault stopped before its index was up to date")
     }
 }
 
@@ -83,13 +78,16 @@ enum Cmd {
         #[arg(long)]
         show_skipped: bool,
     },
-    /// Full-text search over every indexed file.
+    /// Full-text search over the indexed files.
     Search {
         #[command(flatten)]
         common: Common,
         query: Vec<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Also search the files git ignores, which are left out by default as in the Search pane.
+        #[arg(long)]
+        all: bool,
     },
     /// Notes linking to a file.
     Backlinks {
@@ -161,19 +159,12 @@ fn main() -> Result<()> {
 
     match Cli::parse().cmd {
         Cmd::Index { common, progress } => {
-            let mut ix = common.open()?;
             let t = Instant::now();
-            let stats = ix.reconcile_with(
-                &common.vault,
-                &common.scan_options(),
-                // Nothing to press Stop here: the walk runs to the end or the process is killed.
-                &|| false,
-                |_, p: Progress| {
-                    if progress && p.phase == Phase::Index {
-                        eprintln!("  indexing {}/{}", p.done, p.total);
-                    }
-                },
-            )?;
+            let (_vault, stats) = common.open(|p| {
+                if progress && p.phase == Phase::Index {
+                    eprintln!("  indexing {}/{}", p.done, p.total);
+                }
+            })?;
             let total_ms = t.elapsed().as_millis();
             let db = common.db_path();
             println!("db            {}", db.display());
@@ -204,7 +195,8 @@ fn main() -> Result<()> {
             show_skipped,
         } => {
             let t = Instant::now();
-            let r = walk::scan(&common.vault, &common.scan_options());
+            // The walk the vault's worker makes, without the index it would write.
+            let r = walk::scan(&common.vault, &ScanOptions::default());
             let ms = t.elapsed().as_millis();
             let dirs = r
                 .files
@@ -239,34 +231,31 @@ fn main() -> Result<()> {
             common,
             query,
             limit,
+            all,
         } => {
-            let ix = common.open()?;
-            // Everything, always: the CLI is a diagnostic tool with no All toggle to offer, and
-            // the ignore set is only ever written by the desktop app's git refresh.
+            let (vault, _) = common.open(|_| {})?;
             // A row is an occurrence, so a file says itself once per match: the line is what
             // tells two of its rows apart.
-            for h in ix.search(&query.join(" "), limit, true)? {
+            for h in vault.search(&query.join(" "), limit, all)? {
                 let at = h.line.map(|l| format!(":{l}")).unwrap_or_default();
                 println!("{}{at}\n  {}", h.rel_path, h.snippet.replace('\n', " "));
             }
         }
         Cmd::Backlinks { common, rel_path } => {
-            let ix = common.open()?;
-            for b in ix.backlinks(&rel_path)? {
+            let (vault, _) = common.open(|_| {})?;
+            for b in vault.backlinks(&rel_path)? {
                 println!("{}  [{}..{}]", b.src_rel_path, b.byte_start, b.byte_end);
             }
         }
         Cmd::Tags { common } => {
-            let ix = common.open()?;
-            for (name, count) in ix.tags()? {
+            let (vault, _) = common.open(|_| {})?;
+            for (name, count) in vault.tags()? {
                 println!("{count:>6}  #{name}");
             }
         }
         Cmd::Stats { common } => {
-            let ix = common.open()?;
-            let s = ix.stats()?;
-            println!("{}", serde_json::to_string_pretty(&s)?);
-            println!("unresolved links {}", ix.unresolved_links()?.len());
+            let (vault, _) = common.open(|_| {})?;
+            println!("{}", serde_json::to_string_pretty(&vault.stats()?)?);
         }
         Cmd::Serve { vault, db } => {
             // Logging must not go anywhere near stdout: that is the protocol. Stdin unlocked,

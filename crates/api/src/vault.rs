@@ -19,7 +19,7 @@ use crate::local::Local;
 use crate::{
     Backlink, Commit, Etag, Event, FileRow, KeptLink, Location, Match, Options, PageEdit, PdfLink,
     RenamePlan, RenameReport, RepageReport, ReplaceReport, Repo, SaveError, SearchHit, Session,
-    Status, Submodule, UndoReport, VaultConfig, fs, git, remote, rpc, ssh,
+    Stats, Status, Submodule, UndoReport, VaultConfig, fs, git, remote, rpc, ssh,
 };
 
 /// One open vault, wherever it lives.
@@ -69,7 +69,17 @@ impl Vault {
     /// reach the index, since every one of them posts an update to the worker.
     pub fn open_unwatched(root: &Path, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
         let db = accent_core::index::default_db_path(root);
-        let (local, events) = Local::open_with(root, &db, cfg, false)?;
+        Vault::open_unwatched_at(root, &db, cfg)
+    }
+
+    /// [`open_unwatched`](Self::open_unwatched) with an explicit index file: `accent-cli`, which
+    /// is done before a change could matter.
+    pub fn open_unwatched_at(
+        root: &Path,
+        db: &Path,
+        cfg: VaultConfig,
+    ) -> Result<(Vault, Receiver<Event>)> {
+        let (local, events) = Local::open_with(root, db, cfg, false)?;
         Ok((Vault::of(Backend::Local(local)), events))
     }
 
@@ -413,6 +423,8 @@ methods! {
     any grep(query: ref str, options: val Options, limit: val usize, include_ignored: val bool)
         -> (Vec<Match>, usize);
     any tags() -> Vec<(String, i64)>;
+    /// What the index holds, counted: `accent-cli stats`.
+    any stats() -> Stats;
     any files_with_tag(tag: ref str) -> Vec<FileRow>;
     any backlinks(rel: ref str) -> Vec<Backlink>;
     /// A host whose `accent-cli serve` predates it answers "no such method", which the

@@ -15,7 +15,9 @@ use accent_core::{git, search};
 use super::{Local, Msg};
 use crate::language::notes;
 use crate::paths::conflict_pairs;
-use crate::{Backlink, FileRow, Location, Match, Options, PdfLink, Repo, SearchHit, fs, locked};
+use crate::{
+    Backlink, FileRow, Location, Match, Options, PdfLink, Repo, SearchHit, Stats, fs, locked,
+};
 
 impl Local {
     /// Direct children of one directory ("" is the vault root): one level per call, so the tree
@@ -206,6 +208,11 @@ impl Local {
 
     pub fn tags(&self) -> Result<Vec<(String, i64)>> {
         self.index().tags()
+    }
+
+    /// What the index holds, counted.
+    pub fn stats(&self) -> Result<Stats> {
+        self.index().stats()
     }
 
     pub fn files_with_tag(&self, tag: &str) -> Result<Vec<FileRow>> {
