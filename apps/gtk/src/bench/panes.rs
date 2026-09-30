@@ -821,3 +821,153 @@ fn bench_outline(app: &Rc<App>) -> String {
         None => "nothing".to_string(),
     }
 }
+
+/// See `ACCENT_BENCH_TABS=apart:` above.
+pub(super) fn bench_apart(app: &Rc<App>, rels: &str) {
+    // A window with no vault is one this drill opened, which runs the hooks as well.
+    if app.vault().is_none() {
+        return;
+    }
+    // A remote vault opens nothing before its host has answered.
+    if !app.restored.get() {
+        let (waiting, app, rels) = (app.clone(), app.clone(), rels.to_string());
+        return bench_layout_when(
+            move || waiting.restored.get(),
+            move || bench_apart(&app, &rels),
+        );
+    }
+    let (Some(vault), Some(ops)) = (app.vault().cloned(), app.ops().cloned()) else {
+        return;
+    };
+    // Typed into and moved, so it is made here rather than taken from the vault.
+    let typed = "apart-drill.md".to_string();
+    if let Err(e) = vault.write_file(&typed, b"# Apart\n") {
+        println!("bench apart cannot make {typed}: {e}");
+        return bench_quit(app);
+    }
+    let mut rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    rels.push(typed.clone());
+    for rel in &rels {
+        app.open_path(rel);
+    }
+    app.open_terminal();
+    let landed = {
+        let (app, rels) = (app.clone(), rels.clone());
+        move || rels.iter().all(|rel| app.doc_for(rel).is_some())
+    };
+    let app = app.clone();
+    bench_layout_when(landed, move || {
+        glib::spawn_future_local(async move {
+            let shell = app.shell.upgrade().expect("a shell");
+            // The tree row's menu, and its item fired through the group the menu resolves in.
+            let tree = app.tree.get().expect("a tree");
+            let at = gdk::Rectangle::new(0, 0, 1, 1);
+            let menu = fileops::context_menu(&ops, tree.widget(), Some((&rels[0], false)), &[], at);
+            let offered = menu.menu_model().is_some_and(|m| {
+                fileops::labels(&m)
+                    .iter()
+                    .any(|l| l == "Open in New Window")
+            });
+            menu.popdown();
+            println!("bench apart_tree_menu {} offered={offered}", rels[0]);
+            if offered {
+                let _ = WidgetExt::activate_action(
+                    tree.widget(),
+                    "fileops.open-apart",
+                    Some(&rels[0].to_variant()),
+                );
+                apart_settle(&shell).await;
+                apart_windows("opened", &shell, &app);
+                println!(
+                    "bench apart_opened still_here={}",
+                    app.doc_for(&rels[0]).is_some()
+                );
+            }
+            // What each tab's menu offers, then every tab moved from its menu, the typed note
+            // with an edit still in its buffer.
+            if let Some(tab) = app.tab_for(&typed) {
+                tab.buffer
+                    .insert(&mut tab.buffer.end_iter(), "typed before the move\n");
+            }
+            for doc in app.docs() {
+                let page = doc.page().clone();
+                let tabs = app.pane_of(&page).expect("a pane").tabs.clone();
+                tabs.emit_by_name::<()>("setup-menu", &[&Some(&page)]);
+                let offered = tabs.menu_model().is_some_and(|m| {
+                    fileops::labels(&m)
+                        .iter()
+                        .any(|l| l == "Move to New Window")
+                });
+                let _ = WidgetExt::activate_action(&app.window, "win.move-to-new-window", None);
+                tabs.emit_by_name::<()>("setup-menu", &[&None::<adw::TabPage>]);
+                apart_settle(&shell).await;
+                let stayed = app.doc_for(&doc.key()).is_some();
+                println!(
+                    "bench apart_move {} offered={offered} stayed={stayed} said={:?}",
+                    doc.key(),
+                    apart_said(&app).filter(|_| stayed)
+                );
+            }
+            apart_windows("moved", &shell, &app);
+            println!(
+                "bench apart_written {:?}",
+                vault.read(&typed).map(|(text, _)| text).ok()
+            );
+            let _ = vault.delete(&typed);
+            bench_quit(&app);
+        });
+    });
+}
+
+/// Long enough for a window to be built and its file to open in it.
+async fn apart_settle(shell: &Rc<crate::shell::Shell>) {
+    let before = shell.windows.borrow().len();
+    for _ in 0..20 {
+        glib::timeout_future(Duration::from_millis(100)).await;
+        if shell.windows.borrow().len() != before {
+            break;
+        }
+    }
+    glib::timeout_future(Duration::from_millis(600)).await;
+}
+
+/// Every window but `here`: what it was opened on and the documents it holds, by kind.
+fn apart_windows(what: &str, shell: &Rc<crate::shell::Shell>, here: &Rc<App>) {
+    use crate::shell::{Loose, WindowKey};
+    for app in shell
+        .windows
+        .borrow()
+        .iter()
+        .filter(|a| !Rc::ptr_eq(a, here))
+    {
+        let apart = *app.key.borrow() == WindowKey::Loose(Loose::Apart);
+        let docs: Vec<String> = app
+            .docs()
+            .iter()
+            .map(|doc| {
+                let kind = match doc {
+                    Doc::Text(_) => "text",
+                    Doc::Pdf(_) => "pdf",
+                    Doc::Image(_) => "image",
+                    Doc::Diagram(_) => "diagram",
+                    Doc::Status(_) => "status",
+                    Doc::Diff(_) | Doc::Terminal(_) => "other",
+                };
+                format!("{kind}:{}", doc::file_name(&doc.key()))
+            })
+            .collect();
+        println!(
+            "bench apart_window {what} apart={apart} vault={} {docs:?}",
+            app.vault().is_some()
+        );
+    }
+}
+
+/// The toast a refused move leaves over `app`'s window, if one is up.
+fn apart_said(app: &Rc<App>) -> Option<String> {
+    let label = find_widget(app.window.upcast_ref(), &|w| {
+        w.downcast_ref::<gtk::Label>()
+            .is_some_and(|l| l.label().contains("cannot move"))
+    })?;
+    Some(label.downcast::<gtk::Label>().ok()?.label().to_string())
+}

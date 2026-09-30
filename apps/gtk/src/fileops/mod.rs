@@ -111,6 +111,8 @@ pub struct Ops {
     /// Add a directory to the vault's `[search] exclude` list, save it and refresh what search
     /// leaves out. Offered on directory rows alone.
     pub exclude: Box<dyn Fn(&str)>,
+    /// Open in New Window: the file in a window of its own with no vault.
+    pub apart: Box<dyn Fn(&str)>,
     /// Dim these tree rows and undim the rest: what a Cut is waiting to move. Cleared with an
     /// empty slice by the paste that answers it.
     pub cut: Box<dyn Fn(&[String])>,

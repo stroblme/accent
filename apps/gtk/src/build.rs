@@ -48,7 +48,7 @@ pub fn build_window(
     }
 
     // A window with no vault is named for what it holds rather than for a folder it has not got:
-    // a terminal session by its name, the shells' window says so, the documents window carries
+    // a terminal session by its name, the shells' window says so, a window of documents carries
     // the application's name.
     let vault_name = match key {
         WindowKey::Vault(root) => root
@@ -57,7 +57,7 @@ pub fn build_window(
             .unwrap_or_else(|| root.display().to_string()),
         WindowKey::Terminal(key) => terminal::session_name(key).unwrap_or_default().to_string(),
         WindowKey::Loose(Loose::Terminal) => "Terminal".to_string(),
-        WindowKey::Loose(Loose::Documents) => "Accent".to_string(),
+        WindowKey::Loose(Loose::Documents | Loose::Apart) => "Accent".to_string(),
     };
     // A remote window says which machine it is on, under the vault's name. Nothing else in the
     // chrome differs: it is the same vault, and the point is that it behaves like one.
@@ -759,6 +759,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let cut = Rc::downgrade(app);
     let moved = Rc::downgrade(app);
     let unmark = Rc::downgrade(app);
+    let apart = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: vault.clone(),
         window: app.window.clone(),
@@ -827,6 +828,13 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
             // index leaves out (`App::sync_excluded`).
             app.config_changed();
             app.toast(&format!("Left {dir} out of search"));
+        }),
+        apart: Box::new(move |rel| {
+            let Some(app) = apart.upgrade() else { return };
+            let gtk_app = app.window.application().and_downcast::<adw::Application>();
+            if let (Some(shell), Some(gtk_app)) = (app.shell.upgrade(), gtk_app) {
+                shell.open_apart(&gtk_app, &app.root().join(rel), Opened::Kept);
+            }
         }),
         cut: Box::new(move |rels| {
             let Some(app) = cut.upgrade() else { return };

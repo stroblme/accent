@@ -54,8 +54,8 @@ use keys::{
 };
 use outline::bench_outline;
 use panes::{
-    bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window,
-    bench_pins_restored, bench_reload, bench_tabs,
+    bench_apart, bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin,
+    bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_deep,
@@ -250,6 +250,11 @@ use tags::bench_tags;
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
+/// `=apart:<rel>,…` opens those files, a note it makes (`apart-drill.md`) and a shell; fires Open
+/// in New Window from the first one's tree menu, then Move to New Window from every tab's menu,
+/// the made note with an edit still in its buffer, printing whether each menu offered its item,
+/// whether the tab stayed and what was said; then every other window and what it holds, and what
+/// the made note says on disk, before removing it. On a remote vault neither item is offered.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
@@ -661,6 +666,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(keys) = rels.strip_prefix("reload:") {
                 return bench_reload(&app, keys);
+            }
+            if let Some(rels) = rels.strip_prefix("apart:") {
+                return bench_apart(&app, rels);
             }
             return bench_tabs(&app, &rels);
         }

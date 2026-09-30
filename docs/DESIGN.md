@@ -273,6 +273,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A restored window has an empty Back and Forward: a restore's selections are not places. A first opening, or a session without a layout, is one pane; a split's share is kept to 10–90 %.
 - A tab on a file outside the window's vault carries `document-open-symbolic` in its indicator slot, tooltipped Outside this vault, so saving it is never a surprise and it is plain why it has no backlinks.
 - A tab dragged into another window moves there, its buffer written first. One vault never having two windows, it arrives from another vault and is adopted as a file from outside a vault: it edits and saves, without index, backlinks or wikilink resolution. A shell, a comparison and a remote vault's file cannot be reopened elsewhere, so they go back to their window with a toast; so does a tab let go outside every window.
+- **Move to New Window** on the tab menu is the same move into a window built for it, with no vault (Window without a vault); the Files tree's **Open in New Window** opens a file in such a window and leaves it open wherever else it is. Neither is offered where the move above is refused: on a shell, a comparison or anything of a remote vault's.
 - **Which tab is selected is decided by use, not position.** Each pane keeps its tabs in most-recently-selected order: `Ctrl+Tab` steps along it and `Ctrl+Shift+Tab` back, and closing a tab falls back to the most recently used one left. Per pane, because a window-wide order would move the keyboard across a split.
 - While Ctrl is held each Tab steps one deeper without reordering, so three presses are three tabs back; the release commits the tab landed on, and a press past the end comes round. Nothing is shown meanwhile — VS Code's idiom without its overlay, for a chord mostly used for the last two notes. A selection from anywhere else ends the chord, so a lost release never strands the pane.
 - **A tab opened by browsing is a preview** (VS Code's idiom): a click on a tree row, a search hit, a tag, a backlink, an outline heading or a Git changed file, and a wikilink followed. A pane holds at most one and the next such open replaces it, so clicking down a list leaves one tab, not twenty. What the reader named is kept: the palette, Open File…, a drop, a rename, the command line, the session.
@@ -327,7 +328,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### New Window
 
-- **One vault never has two windows** (VS Code's rule): a vault with a window raises it, whoever asks, since two windows over one index, session and watcher have no shared state to keep in step. New Window therefore opens the start screen.
+- **One vault never has two windows** (VS Code's rule): a vault with a window raises it, whoever asks, since two windows over one index, session and watcher have no shared state to keep in step. New Window therefore opens the start screen, and Open in New Window and Move to New Window open a vault's file in a window with no vault.
 - It is both an `app.new-window` GAction and a `new-window` desktop action, since GNOME Shell looks for either before offering New Window in the launcher's menu; `accent --new-window` asks for it from a second process.
 
 ### Window without a vault
@@ -336,7 +337,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Files handed over together — several picked in Files, `accent a.pdf b.md` — open in one window, the one the first would open in alone: the window of the open vault holding it, else this one. The others join it as tabs, from outside its vault where it does not hold them, and the bar holds them in the order named with the last one named in front, whichever lands first (`Opened::Launched`). Each folder handed over is a vault in a window of its own, opened before the files so that a file inside one opens there; `accent FOLDER NOTE` still opens NOTE in that vault where it is a file inside FOLDER (user decisions 2026-09-30).
 - A window of shells saved under a name is the exception: keyed `terminal://<name>`, listed among the vaults, one window each, and written like a vault's (Save asks for the name once), so its shells come back when it is opened again. Close Session, after a question saying how many shells end, ends them, forgets the session and leaves for the start screen.
 - Its sidebar holds the Outline pane alone, the others being views of an index, and starts hidden.
-- There are two unnamed ones at most, one per kind, and the launch that builds one decides its kind for good: `accent --terminal` goes to the terminal window and a file from outside the open vaults to the documents window, so a PDF opened from Files never lands among the shells. What is opened in either by hand stays there without changing its kind, and a closed one is built again by the next launch of its kind.
+- There are two unnamed ones at most, one per kind, and the launch that builds one decides its kind for good: `accent --terminal` goes to the terminal window and a file from outside the open vaults to the documents window, so a PDF opened from Files never lands among the shells. What is opened in either by hand stays there without changing its kind, and a closed one is built again by the next launch of its kind. Open in New Window and Move to New Window are the exception to "at most": each builds a window of its own for the one file, which no launch joins (user decision 2026-09-30).
 - Closing an unnamed window ends its shells, nothing being able to take them up; an empty shells window says No Shell Open.
 - Everything that needs the vault says so instead of failing quietly.
 
@@ -468,6 +469,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - **Show in Files is a local vault's**: on a remote one Download… takes its place, and the tab menu's or palette's Show in Files says why in a toast.
 - **Splitting is the tab menu's alone**: a split opens the active tab beside itself, which is not done to a file in the tree. So is pinning: Pin Tab or Unpin Tab ends the Move Tab section, as in GNOME Web.
 - **Rename and Move to Trash are on the tab menu too**, acting on the page right-clicked, and only where it holds a file of this vault; on a shell, a comparison or a loose file they are absent rather than refusing.
+- **Open in New Window follows Open** on a file row, and only a local vault's: a window with no vault opens a file by its path on this machine. On the tab menu it is **Move to New Window**, ending the moves before Pin Tab, since the tab leaves (Tabs).
 - **Print…, Export as PDF… and Export as HTML… are a section of the tab menu's own**, after Reveal in Sidebar, as they make something of the file rather than name it: a note has all three, a PDF the first two, any other tab none, and a loose file as much as a vault's. They are on no tree menu, and on no primary menu, which holds no document command.
 - **Move to…** sits with Cut and Copy, on a row's menu and a marked set's: the dialog is a folder path in the vault's path field, from the vault root, opening on the folder the first path is in. It is a drop onto a folder by another way, for a folder that is not on screen — one plan, a taken name refusing the whole batch — and a folder not there yet is made once any Update Links? question is answered, as Rename makes the folders a typed path names. A folder moved into itself is refused, and what is already there stays; Rename is still the one path's move from the keyboard.
 - **A tree menu pins the highlight** to its row until it closes: the popover taking the pointer is a leave to the list, which would otherwise light the open file instead.
@@ -705,7 +707,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Tab menu
 
-- Copy Name, Copy Relative Path, Copy Absolute Path, Show in Files, Reveal in Sidebar, Pin Tab and Unpin Tab, all unbound: the tab menu's items, acting on the tab it was opened on, or from the palette on the active tab.
+- Copy Name, Copy Relative Path, Copy Absolute Path, Show in Files, Reveal in Sidebar, Move to New Window, Pin Tab and Unpin Tab, all unbound: the tab menu's items, acting on the tab it was opened on, or from the palette on the active tab.
 
 ### Tabs and panes
 
