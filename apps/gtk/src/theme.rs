@@ -203,6 +203,8 @@ pub const MARK_ALPHA: f32 = 0.3;
 pub const CURRENT_MARK_ALPHA: f32 = 0.6;
 pub const GHOST_ALPHA: f32 = 0.6;
 pub const PAGE_EDGE_ALPHA: f32 = 0.15;
+/// A diagram's grid over its paper, in the ink that reads on it: draw.io's `#e6e6e6` on white.
+pub const GRID_ALPHA: f32 = 0.1;
 
 /// libadwaita's text selection as its stylesheet writes it: the accent at 30 % while the text has
 /// the keyboard (`selection:focus-within`), the text colour at 10 % when it does not. GTK paints

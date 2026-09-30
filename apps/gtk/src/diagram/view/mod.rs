@@ -332,6 +332,13 @@ impl DiagramView {
     }
 }
 
+/// Where two rectangles overlap, if they do.
+fn intersection(a: &Rect, b: &Rect) -> Option<Rect> {
+    let (x, y) = (a.x.max(b.x), a.y.max(b.y));
+    let (r, bottom) = (a.right().min(b.right()), a.bottom().min(b.bottom()));
+    (r > x && bottom > y).then(|| Rect::new(x, y, r - x, bottom - y))
+}
+
 mod imp {
     use super::*;
     use crate::scrollable::Adjustments;
@@ -625,6 +632,20 @@ mod imp {
                 &[edge; 4],
             );
 
+            // Only what is on screen, a prim's box being known from when the page was shown.
+            let near = frame.to_page(Point::new(sx, sy));
+            let visible = Rect::new(near.x, near.y, w / frame.scale, h / frame.scale);
+            // The grid, while a move, a resize or a drawing is under way.
+            let placing = matches!(
+                self.drag.borrow().as_ref(),
+                Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Draw { .. })
+            );
+            if let Some(step) = sheet.grid.filter(|_| placing && self.moved.get())
+                && let Some(area) = intersection(&visible, &Rect::new(0.0, 0.0, pw, ph))
+            {
+                paint::grid(snapshot, &frame, area, step, paper);
+            }
+
             // The page as a drag under way would leave it, or as it is.
             obj.update_preview(&sheet);
             let preview = self.preview.borrow();
@@ -632,9 +653,6 @@ mod imp {
                 Some(Preview::Live(live)) => (&live.scene.prims, &live.bounds, &live.cache),
                 _ => (&sheet.scene.prims, &sheet.bounds, &self.cache),
             };
-            // Only what is on screen, a prim's box being known from when the page was shown.
-            let near = frame.to_page(Point::new(sx, sy));
-            let visible = Rect::new(near.x, near.y, w / frame.scale, h / frame.scale);
             let typesetter = self.typesetter.borrow();
             for (i, prim) in prims.iter().enumerate() {
                 if bounds[i].intersects(&visible) {
