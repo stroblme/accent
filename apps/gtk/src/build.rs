@@ -320,6 +320,7 @@ pub fn build_window(
         fetching: RefCell::new(HashSet::new()),
         restored: Cell::new(false),
         reloading: Cell::new(false),
+        reloads: RefCell::new(Vec::new()),
         menu_page: RefCell::new(None),
         pinned: RefCell::new(Vec::new()),
         tree_painted: Cell::new(0),
@@ -853,11 +854,14 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
             if !tree.reload(dir) {
                 return;
             }
+            app.reloads.borrow_mut().push(dir.to_string());
             let (weak, dir) = (Rc::downgrade(&app), dir.to_string());
             glib::spawn_future_local(async move {
+                let asked = dir.clone();
                 let walked =
-                    crate::work::attempt("reindex the folder", move || vault.rescan_dir(&dir));
+                    crate::work::attempt("reindex the folder", move || vault.rescan_dir(&asked));
                 if let (Err(why), Some(app)) = (walked.await, weak.upgrade()) {
+                    app.reloads.borrow_mut().retain(|d| *d != dir);
                     app.toast(&why);
                 }
             });

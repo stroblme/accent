@@ -52,6 +52,8 @@ pub struct Progress {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconcileStats {
+    /// The folder walked, vault-relative: `""` for the whole vault.
+    pub dir: String,
     /// Entries the walk produced (files + dirs, aliases excluded).
     pub scanned: usize,
     /// `(mtime_ns, size, ino)` matched the index — not even opened.
