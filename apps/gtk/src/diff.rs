@@ -382,6 +382,9 @@ enum Keep {
     FirstHunk,
     /// The scroll a hidden run was opened at, held there: see [`Compare::open_run`].
     Scroll(f64),
+    /// Line `.1` of side `.0`, its row `.2` pixels below the top of the view, the scroll held at
+    /// `.3` meanwhile: see [`Compare::set_side`].
+    Line(Side, usize, i32, f64),
 }
 
 /// What a relayout measured: every row's natural height per side (`None` where the side has no
@@ -882,10 +885,11 @@ impl Compare {
             }
         });
         connect(vadj.clone().upcast(), id);
-        // A scroll held by `Compare::open_run` goes back to where it is held.
+        // A scroll held by `Compare::open_run` or `set_side` goes back to where it is held.
         let w = weak.clone();
         let id = vadj.connect_value_changed(move |adj| {
-            if let Some(Keep::Scroll(value)) = w.upgrade().and_then(|c| c.keep.get())
+            if let Some(Keep::Scroll(value) | Keep::Line(.., value)) =
+                w.upgrade().and_then(|c| c.keep.get())
                 && adj.value() != value
             {
                 adj.set_value(value);
@@ -942,10 +946,30 @@ impl Compare {
         if self.text(side) == text {
             return;
         }
+        // The rows are numbered anew under the reader, so their place is kept as a line of the
+        // side that stays.
+        if !matches!(self.keep.get(), Some(Keep::FirstHunk)) {
+            self.keep.set(self.top_line(side.other()));
+        }
         let pane = self.pane(side);
         pane.buffer.set_text(&text);
         editor::style_companion(pane.flavour, &pane.buffer, &pane.view);
         self.refresh();
+    }
+
+    /// Where the reader is, as a line of `side`: the one in the row at the top of the view, or in
+    /// the nearest row above it that has one, and how far below the top of the view its row starts.
+    fn top_line(&self, side: Side) -> Option<Keep> {
+        let (lines, rows, grid) = (self.lines.borrow(), self.rows.borrow(), self.grid.borrow());
+        let seen = self.panes[0].view.visible_rect().y();
+        let top = grid.tops.partition_point(|&y| y <= seen).max(1);
+        let (row, n) = rows[..top.min(rows.len())]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(r, row)| Some((r, side.number(&lines[side.of(row)?])?)))?;
+        let value = self.panes[0].scroller.vadjustment().value();
+        Some(Keep::Line(side, n, grid.tops[row] - seen, value))
     }
 
     /// Re-read both buffers and lay the diff over them: the tints, the emphasis, the hidden runs
@@ -1160,13 +1184,7 @@ impl Compare {
         *self.laid.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Put the first hunk at [`FIRST_HUNK_AT`] of the page, once, from the rows the last relayout
-    /// measured. Both panes share the vertical adjustment, so setting it scrolls both.
-    ///
-    /// The grid rather than GTK's own figures, and not before the relayout: GTK lays lines out
-    /// lazily and the padding just laid is not in its figures yet, so a `scroll_to_mark` made as
-    /// the comparison opened landed wherever the estimates put the line, which in a long file
-    /// with its unchanged runs folded away was nowhere near it.
+    /// Put the first hunk at [`FIRST_HUNK_AT`] of the page, once.
     fn reveal_first_hunk(&self) {
         let row = {
             let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
@@ -1174,7 +1192,22 @@ impl Compare {
         };
         // Nothing has changed yet — an untouched buffer against its own index side. The next
         // relayout that finds a difference is the one that opens on it.
-        let Some(top) = row.and_then(|r| self.grid.borrow().tops.get(r).copied()) else {
+        if let Some(row) = row {
+            let page = self.panes[0].scroller.vadjustment().page_size();
+            self.reveal(row, FIRST_HUNK_AT * page);
+        }
+    }
+
+    /// Put row `row` `at` pixels below the top of the view, from the rows the last relayout
+    /// measured, and let the view go. Both panes share the vertical adjustment, so setting it
+    /// scrolls both.
+    ///
+    /// The grid rather than GTK's own figures, and not before the relayout: GTK lays lines out
+    /// lazily and the padding just laid is not in its figures yet, so a `scroll_to_mark` made as
+    /// the comparison opened landed wherever the estimates put the line, which in a long file
+    /// with its unchanged runs folded away was nowhere near it.
+    fn reveal(&self, row: usize, at: f64) {
+        let Some(top) = self.grid.borrow().tops.get(row).copied() else {
             return;
         };
         self.keep.set(None);
@@ -1184,7 +1217,7 @@ impl Compare {
             self.panes[0].scroller.vadjustment(),
             self.panes[0].view.visible_rect(),
         );
-        adj.set_value(adj.value() + f64::from(top - seen.y()) - FIRST_HUNK_AT * adj.page_size());
+        adj.set_value(adj.value() + f64::from(top - seen.y()) - at);
     }
 
     /// Open the hidden run keyed `key`, as its button does, with the scroll held where it was
@@ -1477,6 +1510,17 @@ impl Compare {
             Some(Keep::FirstHunk) => self.reveal_first_hunk(),
             // Held all along, and the rows above the run have not moved.
             Some(Keep::Scroll(_)) => self.keep.set(None),
+            Some(Keep::Line(side, n, at, _)) => {
+                self.keep.set(None);
+                let row = {
+                    let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
+                    let number = |row: &Row| side.number(&lines[side.of(row)?]);
+                    rows.iter().position(|row| number(row) == Some(n))
+                };
+                if let Some(row) = row {
+                    self.reveal(row, f64::from(at));
+                }
+            }
             None => {}
         }
     }

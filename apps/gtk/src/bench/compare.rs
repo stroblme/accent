@@ -915,9 +915,12 @@ pub(super) fn bench_compare_page(app: &Rc<App>, rel: &str) {
 /// button and the line under it were before and after, in the view's pixels, and the furthest the
 /// scroll strayed from where it was, read every 16 ms meanwhile (`value=a->b above=y0->y1
 /// below=y0->y1 strayed=0`: the rows above stay and the run opens downwards), then the middle run
-/// again in a tab of two blobs. Opening the first run used to scroll the view by twice the run's height, which
-/// both views took back from the scroll they share. Writes the note, so point it at a scratch
-/// vault.
+/// again in a tab of two blobs. Opening the first run used to scroll the view by twice the run's
+/// height, which both views took back from the scroll they share. The blobs are then read again
+/// with three lines more at the top of each side, as the Git pane's refresh reads them, printing
+/// the line at the top of the view and where it starts before and after (`reread
+/// top="line 18"@-4->"line 18"@-4`, the two the same): the view used to land elsewhere. Writes the
+/// note, so point it at a scratch vault.
 pub(super) fn bench_compare_gap(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -967,13 +970,33 @@ pub(super) fn bench_compare_gap(app: &Rc<App>, rel: &str) {
         );
         wait(1200).await;
         let compare = diff.comparison();
-        match pane_view(compare.widget(), true) {
-            Some(view) => println!(
-                "bench compare_gap blobs {}",
-                bench_gap(compare, &view, None).await
-            ),
-            None => println!("bench compare_gap blobs none"),
-        }
+        let Some(view) = pane_view(compare.widget(), true) else {
+            println!("bench compare_gap blobs none");
+            return bench_quit(&app);
+        };
+        println!(
+            "bench compare_gap blobs {}",
+            bench_gap(compare, &view, None).await
+        );
+        // The Git pane's refresh reading both blobs again, each three lines longer at the top.
+        let top = || {
+            let seen = view.visible_rect();
+            let (at, y) = view.line_at_y(seen.y());
+            let mut end = at;
+            end.forward_to_line_end();
+            let text: String = view
+                .buffer()
+                .text(&at, &end, true)
+                .chars()
+                .take(8)
+                .collect();
+            format!("{text:?}@{}", y - seen.y())
+        };
+        let before = top();
+        let longer = |text: &str| format!("new 1\nnew 2\nnew 3\n{text}");
+        diff.set_texts(&longer(&disk), &longer(&edited));
+        wait(800).await;
+        println!("bench compare_gap reread top={before}->{}", top());
         bench_quit(&app);
     });
 }
