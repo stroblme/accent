@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use accent_drawio::geom::rotate;
-use accent_drawio::{CellId, Constraint, Page, PathCmd, Point, Prim, Rect, Scene};
+use accent_drawio::{CellId, Constraint, Context, Page, PathCmd, Point, Prim, Rect, Scene};
 
 pub const MIN_SCALE: f64 = 0.1;
 pub const MAX_SCALE: f64 = 8.0;
@@ -347,6 +347,8 @@ pub struct Pick {
 #[derive(Debug, Default)]
 pub struct Sheet {
     pub scene: Scene,
+    /// Where and when the page is shown, which labels with placeholders fill in.
+    pub ctx: Context,
     /// Per prim, in page units: what culling tests against the viewport.
     pub bounds: Vec<Rect>,
     /// The page and the drawing together, which is what the canvas scrolls over.
@@ -370,8 +372,8 @@ pub struct Sheet {
 }
 
 impl Sheet {
-    pub fn of(page: &Page) -> Sheet {
-        let scene = accent_drawio::scene(page);
+    pub fn of(page: &Page, ctx: &Context) -> Sheet {
+        let scene = accent_drawio::scene_with(page, ctx);
         let bounds: Vec<Rect> = scene.prims.iter().map(|p| p.bounds()).collect();
         let (w, h) = page.size();
         let extent = bounds
@@ -388,6 +390,7 @@ impl Sheet {
             .collect();
         let mut sheet = Sheet {
             scene,
+            ctx: *ctx,
             bounds,
             extent,
             grid: page.grid(),
@@ -688,7 +691,7 @@ mod tests {
             .push(cell("s", Rect::new(50.0, 50.0, 40.0, 20.0), ""));
         page.cells
             .push(cell("t", Rect::new(250.0, 200.0, 40.0, 20.0), ""));
-        let sheet = Sheet::of(&page);
+        let sheet = Sheet::of(&page, &Context::default());
         let ends = |a: (f64, f64), b: (f64, f64)| {
             let (s, t) = sheet.connect_ends(Point::new(a.0, a.1), Point::new(b.0, b.1), 1.0, 1.0);
             (s.0, t.0)
@@ -712,7 +715,7 @@ mod tests {
             <mxCell id="b" parent="C" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
             </root></mxGraphModel></diagram></mxfile>"#;
         let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
-        let sheet = Sheet::of(&file.pages()[0]);
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
         assert!(sheet.is_pinned("a") && !sheet.is_pinned("b"));
         assert_eq!(sheet.top_level(), vec!["b".to_string()]);
     }
@@ -736,7 +739,7 @@ mod tests {
             .push(cell("s", Rect::new(50.0, 50.0, 40.0, 20.0)));
         page.cells
             .push(cell("t", Rect::new(250.0, 200.0, 40.0, 20.0)));
-        let sheet = Sheet::of(&page);
+        let sheet = Sheet::of(&page, &Context::default());
         let (s, t) = sheet.connect_ends(Point::new(91.0, 61.0), Point::new(249.0, 209.0), 1.0, 3.0);
         assert_eq!((s.0.as_deref(), s.1), (Some("s"), Point::new(90.0, 60.0)));
         assert_eq!(s.2.map(|c| c.point), Some(Point::new(1.0, 0.5)));
