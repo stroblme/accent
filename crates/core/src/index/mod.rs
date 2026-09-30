@@ -16,7 +16,7 @@ use crate::walk::FileKind;
 use anyhow::{Context, Result};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension};
-use schema::{DROP_ALL, SCHEMA, SCHEMA_VERSION};
+use schema::{BODIES, DROP_ALL, SCHEMA, SCHEMA_VERSION};
 pub use search::MIN_INFIX;
 use search::{folded_find, snippet_window};
 use serde::{Deserialize, Serialize};
@@ -256,6 +256,7 @@ impl Index {
             conn.execute_batch(SCHEMA)?;
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        conn.execute_batch(BODIES)?;
         Ok(Index { conn })
     }
 

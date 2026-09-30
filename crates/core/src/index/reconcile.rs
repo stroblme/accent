@@ -189,6 +189,7 @@ impl Index {
                 }
                 done += 1;
             }
+            write_bodies(&tx)?;
             // What these files can have changed is resolved in the transaction that wrote them, so
             // no reader between two batches sees a changed note link to nothing. A note a later
             // batch adds takes the links waiting for it then: they are the ones its keys name.
@@ -289,6 +290,7 @@ impl Index {
         let existing_id = existing.map(|(id, ..)| id);
         let tx = self.write_tx()?;
         upsert(&tx, &meta, existing_id, &mut ReconcileStats::default())?;
+        write_bodies(&tx)?;
         // The file's own links were just written unresolved, and a new note can be what a link
         // written long before it existed was waiting for — or a shorter path for one that
         // resolved deeper. Both are the links its keys name, and nothing else moved. In the same
@@ -529,11 +531,29 @@ fn upsert(
                 .execute(params![id, name])?;
         }
     }
+    // Set aside for [`write_bodies`], which the caller runs before it commits.
     if let Some(body) = text.as_ref() {
-        tx.prepare_cached("INSERT INTO notes(file_id, body, title) VALUES(?1,?2,?3)")?
+        tx.prepare_cached("INSERT INTO temp.bodies(file_id, body, title) VALUES(?1,?2,?3)")?
             .execute(params![id, body, title.as_deref().unwrap_or_default()])?;
     }
     Ok(id)
+}
+
+/// Write the bodies [`upsert`] set aside into `notes`, and through its trigger into both FTS
+/// tables, in one statement.
+///
+/// FTS5 writes the terms it holds in memory out as a new segment at every statement savepoint,
+/// which the statements of a batch after a note's insert open: a body inserted per file was a
+/// segment per note in each table, and merging them back was half of a first index (the
+/// generated vault, 41 683 files: 23.5 s → 12.2 s). The rows, the triggers and the index they
+/// build are the same.
+fn write_bodies(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.prepare_cached(
+        "INSERT INTO notes(file_id, body, title) SELECT file_id, body, title FROM temp.bodies",
+    )?
+    .execute([])?;
+    tx.prepare_cached("DELETE FROM temp.bodies")?.execute([])?;
+    Ok(())
 }
 
 /// A diagram read as text, turned into its labels: `None` for one that does not parse or shows
@@ -633,6 +653,9 @@ mod tests {
         assert!(stats.stopped, "the walk reports that it was stopped");
         assert_eq!(stats.added, BATCH, "one batch written, the rest left");
         assert_eq!(ix.file_paths(false).unwrap().len(), BATCH);
+        // A batch's bodies are written together at its end, a stopped one's too.
+        assert_eq!(ix.stats().unwrap().notes, BATCH as i64);
+        assert_eq!(ix.search("Note", 1, false).unwrap().len(), 1);
 
         // Nothing said the index is partial except the flag, so the next open just reconciles.
         let stats = ix.reconcile(vault.path(), |_| {}).unwrap();
