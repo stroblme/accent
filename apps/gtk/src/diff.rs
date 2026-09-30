@@ -260,6 +260,7 @@ impl Pool {
                 button.add_css_class("flat");
                 button.add_css_class("caption");
                 button.set_tooltip_text(Some("Show these lines"));
+                crate::widgets::claim_press(&button);
                 button.connect_clicked(self.act(&role, |compare, role| {
                     if let Role::Gap { key, .. } = role {
                         compare.open_run(key);
@@ -278,6 +279,7 @@ impl Pool {
                     let button = gtk::Button::with_label(label);
                     button.add_css_class("caption");
                     button.set_tooltip_text(Some(tip));
+                    crate::widgets::claim_press(&button);
                     button.connect_clicked(self.act(&role, move |compare, role| {
                         if let Role::Hunk(hunk) = role {
                             compare.take(hunk, keep_own);
@@ -382,6 +384,9 @@ enum Keep {
     FirstHunk,
     /// The scroll a hidden run was opened at, held there: see [`Compare::open_run`].
     Scroll(f64),
+    /// Line `.1` of side `.0`, its row `.2` pixels below the top of the view, the scroll held at
+    /// `.3` meanwhile: see [`Compare::set_side`].
+    Line(Side, usize, i32, f64),
 }
 
 /// What a relayout measured: every row's natural height per side (`None` where the side has no
@@ -882,10 +887,11 @@ impl Compare {
             }
         });
         connect(vadj.clone().upcast(), id);
-        // A scroll held by `Compare::open_run` goes back to where it is held.
+        // A scroll held by `Compare::open_run` or `set_side` goes back to where it is held.
         let w = weak.clone();
         let id = vadj.connect_value_changed(move |adj| {
-            if let Some(Keep::Scroll(value)) = w.upgrade().and_then(|c| c.keep.get())
+            if let Some(Keep::Scroll(value) | Keep::Line(.., value)) =
+                w.upgrade().and_then(|c| c.keep.get())
                 && adj.value() != value
             {
                 adj.set_value(value);
@@ -942,10 +948,30 @@ impl Compare {
         if self.text(side) == text {
             return;
         }
+        // The rows are numbered anew under the reader, so their place is kept as a line of the
+        // side that stays.
+        if !matches!(self.keep.get(), Some(Keep::FirstHunk)) {
+            self.keep.set(self.top_line(side.other()));
+        }
         let pane = self.pane(side);
         pane.buffer.set_text(&text);
         editor::style_companion(pane.flavour, &pane.buffer, &pane.view);
         self.refresh();
+    }
+
+    /// Where the reader is, as a line of `side`: the one in the row at the top of the view, or in
+    /// the nearest row above it that has one, and how far below the top of the view its row starts.
+    fn top_line(&self, side: Side) -> Option<Keep> {
+        let (lines, rows, grid) = (self.lines.borrow(), self.rows.borrow(), self.grid.borrow());
+        let seen = self.panes[0].view.visible_rect().y();
+        let top = grid.tops.partition_point(|&y| y <= seen).max(1);
+        let (row, n) = rows[..top.min(rows.len())]
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(r, row)| Some((r, side.number(&lines[side.of(row)?])?)))?;
+        let value = self.panes[0].scroller.vadjustment().value();
+        Some(Keep::Line(side, n, grid.tops[row] - seen, value))
     }
 
     /// Re-read both buffers and lay the diff over them: the tints, the emphasis, the hidden runs
@@ -1160,13 +1186,7 @@ impl Compare {
         *self.laid.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Put the first hunk at [`FIRST_HUNK_AT`] of the page, once, from the rows the last relayout
-    /// measured. Both panes share the vertical adjustment, so setting it scrolls both.
-    ///
-    /// The grid rather than GTK's own figures, and not before the relayout: GTK lays lines out
-    /// lazily and the padding just laid is not in its figures yet, so a `scroll_to_mark` made as
-    /// the comparison opened landed wherever the estimates put the line, which in a long file
-    /// with its unchanged runs folded away was nowhere near it.
+    /// Put the first hunk at [`FIRST_HUNK_AT`] of the page, once.
     fn reveal_first_hunk(&self) {
         let row = {
             let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
@@ -1174,7 +1194,22 @@ impl Compare {
         };
         // Nothing has changed yet — an untouched buffer against its own index side. The next
         // relayout that finds a difference is the one that opens on it.
-        let Some(top) = row.and_then(|r| self.grid.borrow().tops.get(r).copied()) else {
+        if let Some(row) = row {
+            let page = self.panes[0].scroller.vadjustment().page_size();
+            self.reveal(row, FIRST_HUNK_AT * page);
+        }
+    }
+
+    /// Put row `row` `at` pixels below the top of the view, from the rows the last relayout
+    /// measured, and let the view go. Both panes share the vertical adjustment, so setting it
+    /// scrolls both.
+    ///
+    /// The grid rather than GTK's own figures, and not before the relayout: GTK lays lines out
+    /// lazily and the padding just laid is not in its figures yet, so a `scroll_to_mark` made as
+    /// the comparison opened landed wherever the estimates put the line, which in a long file
+    /// with its unchanged runs folded away was nowhere near it.
+    fn reveal(&self, row: usize, at: f64) {
+        let Some(top) = self.grid.borrow().tops.get(row).copied() else {
             return;
         };
         self.keep.set(None);
@@ -1184,7 +1219,7 @@ impl Compare {
             self.panes[0].scroller.vadjustment(),
             self.panes[0].view.visible_rect(),
         );
-        adj.set_value(adj.value() + f64::from(top - seen.y()) - FIRST_HUNK_AT * adj.page_size());
+        adj.set_value(adj.value() + f64::from(top - seen.y()) - at);
     }
 
     /// Open the hidden run keyed `key`, as its button does, with the scroll held where it was
@@ -1477,6 +1512,17 @@ impl Compare {
             Some(Keep::FirstHunk) => self.reveal_first_hunk(),
             // Held all along, and the rows above the run have not moved.
             Some(Keep::Scroll(_)) => self.keep.set(None),
+            Some(Keep::Line(side, n, at, _)) => {
+                self.keep.set(None);
+                let row = {
+                    let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
+                    let number = |row: &Row| side.number(&lines[side.of(row)?]);
+                    rows.iter().position(|row| number(row) == Some(n))
+                };
+                if let Some(row) = row {
+                    self.reveal(row, f64::from(at));
+                }
+            }
             None => {}
         }
     }
@@ -1760,96 +1806,6 @@ impl Compare {
         buffer.insert(&mut a, &text);
         buffer.end_user_action();
         self.refresh();
-    }
-}
-
-/// A comparison of two texts that are not files, as a tab of its own: a staged change, a commit
-/// against its parent. Both panes are companions, so the tab carries the font provider the
-/// editor would otherwise have.
-pub struct DiffTab {
-    pub page: adw::TabPage,
-    key: String,
-    compare: Rc<Compare>,
-    /// Both panes' views. They take the page's margins from the zoom here, having no editor
-    /// beside them for [`Compare::relayout`] to copy them from.
-    views: [sourceview5::View; 2],
-    flavour: Flavour,
-    name: String,
-    font: RefCell<Option<gtk::CssProvider>>,
-}
-
-impl DiffTab {
-    /// `old` and `new` are (title, text). `key` is what the tab is keyed by, see
-    /// `App::open_diff`; the file name behind it picks the language and the flavour.
-    #[allow(clippy::too_many_arguments)]
-    pub fn open(
-        tabs: &adw::TabView,
-        key: &str,
-        file: &str,
-        title: &str,
-        flavour: Flavour,
-        old: (&str, &str),
-        new: (&str, &str),
-        font: Option<&str>,
-        zoom: f64,
-    ) -> Rc<DiffTab> {
-        let name = editor::next_view_name();
-        let language = match flavour {
-            Flavour::Code => editor::language_for(file, new.1),
-            _ => None,
-        };
-        let old = pane(old.0, flavour, old.1, &name, language.as_ref());
-        let new = pane(new.0, flavour, new.1, &name, language.as_ref());
-        let views = [old.view.clone(), new.view.clone()];
-        let compare = Compare::new(old, new, None, false);
-        let page = tabs.append(compare.widget());
-        page.set_title(title);
-        page.set_icon(Some(&gtk::gio::ThemedIcon::new("view-dual-symbolic")));
-        let tab = Rc::new(DiffTab {
-            page,
-            key: key.to_string(),
-            compare,
-            views,
-            flavour,
-            name,
-            font: RefCell::new(None),
-        });
-        tab.set_font(font, zoom);
-        tab
-    }
-
-    pub fn key(&self) -> String {
-        self.key.clone()
-    }
-
-    /// The font and the page at `zoom`, as `Tab::set_font` sets them for an editor.
-    pub fn set_font(&self, font: Option<&str>, zoom: f64) {
-        for view in &self.views {
-            editor::set_margins(view, zoom);
-        }
-        editor::install_font(&self.font, self.flavour, font, zoom, &self.name);
-        // Heading markers hang in the left margin and are measured in the font, so they are
-        // measured again once the font has reached the views, as `Tab::rehang` does.
-        let compare = Rc::downgrade(&self.compare);
-        glib::idle_add_local_once(move || {
-            if let Some(compare) = compare.upgrade() {
-                compare.restyle();
-            }
-        });
-    }
-
-    pub fn restyle(&self) {
-        self.compare.restyle();
-    }
-
-    /// Both texts again, after what they compare has moved.
-    pub fn set_texts(&self, old: &str, new: &str) {
-        self.compare.set_side(Side::Old, old);
-        self.compare.set_side(Side::New, new);
-    }
-
-    pub fn comparison(&self) -> &Rc<Compare> {
-        &self.compare
     }
 }
 

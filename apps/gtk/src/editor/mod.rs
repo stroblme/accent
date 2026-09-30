@@ -819,7 +819,7 @@ pub fn open(
             let (bx, by) =
                 tab.view
                     .window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-            if let Some(iter) = tab.view.iter_at_location(bx, by) {
+            if let Some(iter) = crate::fold::iter_at_location(&tab.view, bx, by) {
                 tab.buffer.place_cursor(&iter);
             }
             gesture.set_state(gtk::EventSequenceState::Claimed);
@@ -1474,7 +1474,7 @@ impl Tab {
         let (bx, by) =
             self.view
                 .window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-        let iter = self.view.iter_at_location(bx, by)?;
+        let iter = crate::fold::iter_at_location(&self.view, bx, by)?;
         self.link_at_iter(&iter)
     }
 

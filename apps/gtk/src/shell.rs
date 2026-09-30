@@ -441,26 +441,38 @@ impl Shell {
             self.open_vault(gtk_app, PathBuf::from(root), note);
             return glib::ExitCode::SUCCESS;
         }
-        let Some(path) = resolve(command_line, arg) else {
-            return glib::ExitCode::FAILURE;
-        };
-        if path.is_dir() {
-            let note = args.get(2).and_then(|a| a.to_str()).map(str::to_string);
-            self.open_vault(gtk_app, path, note);
-            return glib::ExitCode::SUCCESS;
-        }
-        // Files rather than a folder: the first opened where it belongs, which is how accent works
-        // as the system's PDF viewer and text editor, and the rest as tabs beside it, since Files
-        // hands over every file picked at once. One the window's vault does not hold opens there
-        // from outside it.
-        let Some(app) = self.open_file(gtk_app, path) else {
-            return glib::ExitCode::SUCCESS;
-        };
+        // Every folder is a vault in a window of its own, opened first so that the files named
+        // with it find it open. A file after a folder that is inside it is that vault's NOTE.
         let mut code = glib::ExitCode::SUCCESS;
-        for arg in &args[2..] {
-            match resolve(command_line, arg) {
-                Some(path) => app.open_path(&app.key_for(&path)),
-                None => code = glib::ExitCode::FAILURE,
+        let mut files = Vec::new();
+        let mut named = args[1..].iter().peekable();
+        while let Some(arg) = named.next() {
+            let Some(path) = resolve(command_line, arg) else {
+                code = glib::ExitCode::FAILURE;
+                continue;
+            };
+            if !path.is_dir() {
+                files.push(path);
+                continue;
+            }
+            let note = named.peek().and_then(|next| note_in(&path, next));
+            if note.is_some() {
+                named.next();
+            }
+            self.open_vault(gtk_app, path, note);
+        }
+        // The files open where the first belongs, which is how accent works as the system's PDF
+        // viewer and text editor, and the rest as tabs beside it in the order named, since Files
+        // hands over every file picked at once: from outside that window's vault where it does
+        // not hold them.
+        if let Some(app) = files
+            .first()
+            .and_then(|first| self.file_window(gtk_app, first))
+        {
+            app.window.present();
+            app.launched.borrow_mut().clear();
+            for (at, path) in files.iter().enumerate() {
+                app.open_as(&app.key_for(path), Opened::Launched(at));
             }
         }
         code
@@ -845,23 +857,21 @@ impl Shell {
             .cloned()
     }
 
-    /// Open `path` wherever it belongs: in the window whose vault contains it, or in the window
-    /// kept for documents that are in no vault — never the one `accent --terminal` opened. The
-    /// window it went to, which files opened with it follow.
-    fn open_file(self: &Rc<Self>, gtk_app: &adw::Application, path: PathBuf) -> Option<Rc<App>> {
-        let inside = self.windows.borrow().iter().find_map(|app| {
-            let rel = path.strip_prefix(app.key.borrow().vault()?).ok()?;
-            Some((app.clone(), rel.to_string_lossy().into_owned()))
-        });
-        if let Some((app, rel)) = inside {
-            app.window.present();
-            app.open_path(&rel);
-            return Some(app);
-        }
-        let app = self.loose_window(gtk_app, Loose::Documents)?;
-        app.window.present();
-        app.open_path(&path.to_string_lossy());
-        Some(app)
+    /// The window `path` opens in: the one whose vault contains it, or the one kept for
+    /// documents that are in no vault — never the one `accent --terminal` opened.
+    fn file_window(self: &Rc<Self>, gtk_app: &adw::Application, path: &Path) -> Option<Rc<App>> {
+        let inside = self
+            .windows
+            .borrow()
+            .iter()
+            .find(|app| {
+                app.key
+                    .borrow()
+                    .vault()
+                    .is_some_and(|root| path.starts_with(root))
+            })
+            .cloned();
+        inside.or_else(|| self.loose_window(gtk_app, Loose::Documents))
     }
 
     /// The window with no vault of this `kind`, built if this is the first thing to want one since
@@ -892,21 +902,22 @@ const FLAGS: [&str; 3] = ["--terminal", "-t", "--new-window"];
 /// What `accent --help` prints: every form [`Shell::command_line`] takes.
 const USAGE: &str = "\
 Usage:
-  accent [PATH [NOTE]]          Open a vault, and NOTE in it
-  accent FILE...                Open files, all in one window
+  accent [PATH [NOTE]]...       Open vaults and files
+  accent ADDRESS [NOTE]         Open a vault on another machine
   accent -t, --terminal [DIR]   Open a shell at DIR, or at home
   accent terminal://NAME [DIR]  Open terminal session NAME, and a shell at DIR
   accent --new-window           Show the start screen
   accent -h, --help             Print this help
   accent --version              Print the version
 
-PATH is a folder, opened as a vault, or an ssh://[USER@]HOST[:PORT]/PATH
-address, a vault on that host. NOTE, a path inside the vault, opens in a tab.
-Without PATH the last vault opens, or the start screen if there is none. The
-first FILE (a note, PDF, image, diagram or any text) opens in the window of the
-open vault that holds it, else in a window without a vault, and the others as
-tabs in the same window. DIR may be an ssh:// address, for a shell on that
-host. A session NAME not seen before is made.
+PATH is a folder, opened as a vault in a window of its own, or a file (a note,
+PDF, image, diagram or any text). NOTE, a file inside the folder before it,
+named from there or in full, opens in that vault. The files open as tabs in the
+order named, all in the window of the open vault that holds the first, else in
+a window without a vault. Without PATH the last vault opens, or the start
+screen if there is none. ADDRESS is ssh://[USER@]HOST[:PORT]/PATH, a vault on
+that host, and its NOTE a path in it. DIR may be an ssh:// address, for a shell
+on that host. A session NAME not seen before is made.
 ";
 
 /// What the launching process answers itself, before `app.run` hands the arguments to the
@@ -953,6 +964,14 @@ fn resolve(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) ->
     path.canonicalize()
         .inspect_err(|e| eprintln!("cannot open {}: {e}", path.display()))
         .ok()
+}
+
+/// The argument after a folder as that vault's NOTE: its vault-relative path, where it names a
+/// file inside the vault from the vault's root or in full. `None` leaves it a path of its own.
+fn note_in(root: &Path, arg: &std::ffi::OsStr) -> Option<String> {
+    let path = root.join(arg);
+    let rel = path.strip_prefix(root).ok()?.to_str()?.to_string();
+    path.is_file().then_some(rel)
 }
 
 /// Where a shell was asked for on the command line: on a host, as an `ssh://` address read back
@@ -1031,6 +1050,29 @@ mod tests {
         assert_eq!(cwd(&["accent"]), None);
         // The other flag a command line can carry is not a path either.
         assert_eq!(cwd(&["accent", "--new-window", "--terminal"]), None);
+    }
+
+    #[test]
+    fn a_note_after_a_folder_is_a_file_inside_it() {
+        // `std::env::temp_dir`, as `start`'s tests: apps/gtk has no `tempfile`.
+        let vault = std::env::temp_dir().join(format!("accent-note-{}", std::process::id()));
+        std::fs::create_dir_all(vault.join("Daily")).unwrap();
+        std::fs::write(vault.join("Daily/a.md"), "a").unwrap();
+        let note = |arg: &Path| note_in(&vault, arg.as_os_str());
+
+        // Named from the vault's root, as `accent ~/Notes Daily/a.md` always was, or in full.
+        assert_eq!(note(Path::new("Daily/a.md")).as_deref(), Some("Daily/a.md"));
+        assert_eq!(
+            note(&vault.join("Daily/a.md")).as_deref(),
+            Some("Daily/a.md")
+        );
+        // A folder inside it is a vault of its own, and neither a file elsewhere nor one that is
+        // not there is the vault's.
+        assert_eq!(note(&vault.join("Daily")), None);
+        assert_eq!(note(Path::new("/etc/hostname")), None);
+        assert_eq!(note(Path::new("b.md")), None);
+
+        std::fs::remove_dir_all(&vault).unwrap();
     }
 
     #[test]

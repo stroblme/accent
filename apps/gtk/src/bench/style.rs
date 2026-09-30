@@ -192,7 +192,9 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
 /// each of which joins a visible line to a hidden one, then ask for the iter at every pixel row of
 /// the note, as GtkSourceView asks at the top and bottom of the screen on every frame. A line left
 /// partly hidden aborts the process there (GTK's "Byte index … is off the end of the line"); kept
-/// to whole lines, each case prints what is hidden and what the joined line reads.
+/// to whole lines, each case prints what is hidden and what the joined line reads. Last, `stale`
+/// shuts the fold and runs a Ctrl-held pointer down every row before GTK has measured the hidden
+/// lines again, which aborted the same way.
 pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
     // Short lines after the fold: GTK's walk past the joined line lands in a line too short for
     // the bytes it carried along, which is what aborts.
@@ -252,6 +254,28 @@ pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
                 .to_string();
             println!("bench seam case={case} hidden={hidden:?} line={line:?}");
         }
+        // A fold shut in the frame a Ctrl-held pointer moves in: its lines keep the height they
+        // were drawn at until GTK measures them again, so the pointer's rows fall on hidden lines,
+        // and `Tab::follow_hint` asked GTK for the iter there (`fold::iter_at_location`).
+        tab.set_text(FOLDED);
+        glib::timeout_future(Duration::from_millis(200)).await;
+        let (top, height) = tab.view.line_yrange(&tab.buffer.end_iter());
+        let fold = accent_api::Fold {
+            start_line: 0,
+            end_line: 3,
+        };
+        crate::fold::fold(tab.buffer.upcast_ref(), fold);
+        for y in 0..top + height {
+            let (x, y) = tab
+                .view
+                .buffer_to_window_coords(gtk::TextWindowType::Widget, 0, y);
+            tab.follow_hint(f64::from(x), f64::from(y), true);
+        }
+        tab.follow_hint(0.0, 0.0, false);
+        println!(
+            "bench seam case=stale folded={}",
+            crate::fold::is_folded(tab.buffer.upcast_ref(), 0)
+        );
         bench_quit(&app);
     });
 }
@@ -537,10 +561,11 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
 /// The hover over the first wikilink of the note at `rel`, zoomed in twice, through the real
 /// pointer: prints `bench hover_aim <x> <y>` for `build-aux/xtest.py :N "move <x> <y>"`, then, once
 /// the hover is up, its font beside the note's, its size beside the window's, a line of it beside
-/// one of the note's and how tall its whole text is. Then `bench hover_scroll_aim <x> <y>`, the
-/// middle of the hover, for the pointer to be walked into (a jump there dismisses it) and a wheel
-/// turned, and what the hover's scroll came to. Held on screen 5 s in all, long enough for
-/// `import -window root -display :N shot.png`.
+/// one of the note's and how tall its whole text is, and `emptied`: the hover emptied while up, as
+/// GtkSourceView empties it before asking again, which aborted. Then `bench hover_scroll_aim <x>
+/// <y>`, the middle of the hover, for the pointer to be walked into (a jump there dismisses it)
+/// and a wheel turned, and what the hover's scroll came to. Held on screen 5 s in all, long enough
+/// for `import -window root -display :N shot.png`.
 fn bench_hover(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -613,6 +638,21 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
             rect.height(),
             label.as_ref().map_or(0, |label| label.height()),
         );
+        // GtkSourceView empties a hover that is up before asking the providers again, when the
+        // pointer settles on other text (`_gtk_source_hover_assistant_display`), and the view's
+        // allocations meanwhile present it as it is: emptied, it measured 0 wide, which
+        // `gdk_popup_present` refuses with a critical.
+        let display = find_widget(&popover, &|w| w.is::<sourceview5::HoverDisplay>())
+            .and_downcast::<sourceview5::HoverDisplay>();
+        let content = find_widget(&popover, &|w| w.is::<gtk::ScrolledWindow>());
+        if let (Some(display), Some(content)) = (display, content) {
+            display.remove(&content);
+            tab.view.queue_allocate();
+            glib::timeout_future(Duration::from_millis(300)).await;
+            println!("bench hover emptied up={}", popover.is_mapped());
+            display.append(&content);
+            glib::timeout_future(Duration::from_millis(300)).await;
+        }
         // A wheel over the hover scrolls what did not fit, and the hover stays up. The popup's
         // surface is placed against the window's, which under Xvfb sits at the screen's origin.
         let scroller = find_widget(&popover, &|w| w.is::<gtk::ScrolledWindow>())

@@ -23,7 +23,8 @@ use accent_api::git::{self, Blob, Branch, Commit, Entry, LogRow, Repo, Status, S
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 
-use crate::diff::{Compare, DiffTab, Side};
+use crate::diff::{Compare, Side};
+use crate::difftab::DiffTab;
 
 use crate::highlight;
 

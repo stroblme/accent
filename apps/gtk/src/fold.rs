@@ -131,6 +131,26 @@ pub fn hiding(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> Vec<gtk::TextTa
     hiders(buffer).filter(|tag| iter.has_tag(tag)).collect()
 }
 
+/// The iter at buffer point `x`, `y` of `view`, as `gtk_text_view_get_iter_at_location` answers,
+/// or `None` over a line holding hidden text, where GTK 4.22 can abort answering (see
+/// [`whole_lines`]). Such a line is under the pointer where one is left partly hidden, and in the
+/// frame after lines are hidden — a fold shut, a comparison's run collapsed — which keep the
+/// height they were drawn at until GTK measures them again: GTK finds a hidden line at the point
+/// and walks past it into the lines after. `line_at_y` finds the same line without that walk.
+pub fn iter_at_location(view: &impl IsA<gtk::TextView>, x: i32, y: i32) -> Option<gtk::TextIter> {
+    let (start, _) = view.line_at_y(y);
+    let mut next = start;
+    next.forward_line();
+    let hidden = hiders(&view.buffer()).any(|tag| {
+        let mut toggle = start;
+        start.has_tag(&tag) || (toggle.forward_to_tag_toggle(Some(&tag)) && toggle < next)
+    });
+    if hidden {
+        return None;
+    }
+    view.iter_at_location(x, y)
+}
+
 /// The tags that hide text in an editor's buffer: its folds' and a comparison's collapsed runs'.
 fn hiders(buffer: &gtk::TextBuffer) -> impl Iterator<Item = gtk::TextTag> {
     [tag(buffer), buffer.tag_table().lookup(crate::diff::TAG_GAP)]

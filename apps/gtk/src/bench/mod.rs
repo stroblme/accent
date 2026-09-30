@@ -30,7 +30,8 @@ use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_folds,
     bench_compare_gap, bench_compare_gutter, bench_compare_left, bench_compare_lines,
-    bench_compare_pads, bench_compare_page, bench_compare_pick, bench_compare_row,
+    bench_compare_pads, bench_compare_page, bench_compare_pick, bench_compare_press,
+    bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -121,7 +122,8 @@ use tags::bench_tags;
 /// indent on 10k lines of code in the last one. `=dragfold:<rel>` selects a folded section and
 /// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
-/// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK.
+/// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK; then
+/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`).
 /// Every form of it runs only on a scratch vault under `/tmp` (`scratch_only`).
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
@@ -154,7 +156,8 @@ use tags::bench_tags;
 /// note, and then in a tab of two blobs, and prints where the rows around each button went
 /// (`compare::bench_compare_gap`). `=page:<rel>` prints the sticky title and the page the
 /// companion shares with the editor, across a zoom and a new Indent Width
-/// (`compare::bench_compare_page`).
+/// (`compare::bench_compare_page`). `=press:<rel>` prints where to press the overlaid buttons with
+/// XTEST and where the carets are after each press (`compare::bench_compare_press`).
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
@@ -252,8 +255,8 @@ use tags::bench_tags;
 /// link typed at the end of a note past 16 K characters and followed at once, which must offer New
 /// File as well. Any text file will do for the underline: a `.txt` has no wikilinks, and its URL
 /// underlines all the same. `=hover:<rel_note>` instead aims the real pointer at the note's first
-/// wikilink and prints the hover's font and size beside the note's and the window's, and whether a
-/// wheel scrolls it (see `style::bench_hover`).
+/// wikilink and prints the hover's font and size beside the note's and the window's, whether it
+/// survives being emptied while up, and whether a wheel scrolls it (see `style::bench_hover`).
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a
@@ -537,6 +540,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("page:") {
                 return bench_compare_page(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("press:") {
+                return bench_compare_press(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),

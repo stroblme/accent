@@ -23,6 +23,9 @@ pub enum Opened {
     /// Kept, and pinned: a pinned tab dragged in from another window, which is opened here afresh
     /// (`Shell::adopt_page`) and lands at the end of its pane's pinned tabs.
     Pinned,
+    /// Kept, and the `n`th of the files a launch named together, which keep the order they were
+    /// named in whichever tab lands first (see [`App::land_in_order`]).
+    Launched(usize),
 }
 
 impl App {
@@ -70,13 +73,16 @@ impl App {
     }
 
     /// A preview tab has arrived: it replaces whichever tab this pane was previewing before. A
-    /// pinned one is pinned here.
+    /// pinned one is pinned here, and a launch's is put among the others it named.
     ///
     /// The old tab goes after the new one is in place, so the pane never stands empty and closes
     /// itself out from under the note arriving in it.
     pub(crate) fn mark_opened(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
         if how == Opened::Pinned {
             return self.set_pinned(page, true);
+        }
+        if let Opened::Launched(at) = how {
+            return self.land_in_order(page, at);
         }
         if how != Opened::Preview {
             return;
@@ -87,6 +93,25 @@ impl App {
         if let Some(old) = pane.set_preview(page) {
             pane.tabs.close_page(&old);
         }
+    }
+
+    /// Put the tab of the `at`th file a launch named ahead of the first one named after it that
+    /// has already landed in its pane. A PDF's tab is up at once and a text tab only once its
+    /// read is, so the bar would otherwise hold them in the order they landed.
+    fn land_in_order(&self, page: &adw::TabPage, at: usize) {
+        let mut launched = self.launched.borrow_mut();
+        if let Some(pane) = self.pane_of(page)
+            && let Some((_, later)) = launched
+                .iter()
+                .filter(|(named, _)| *named > at)
+                .filter_map(|(named, landed)| Some((*named, landed.upgrade()?)))
+                .filter(|(_, landed)| pane.has(landed))
+                .min_by_key(|(named, _)| *named)
+        {
+            pane.tabs
+                .reorder_page(page, pane.tabs.page_position(&later));
+        }
+        launched.push((at, page.downgrade()));
     }
 
     /// The preferences every text tab is built with.
@@ -1018,7 +1043,7 @@ impl App {
         title: &str,
         old: (&str, &str),
         new: (&str, &str),
-    ) -> Rc<diff::DiffTab> {
+    ) -> Rc<difftab::DiffTab> {
         if let Some(Doc::Diff(tab)) = self.doc_for(key) {
             tab.set_texts(old.1, new.1);
             self.reveal_page(&tab.page);
@@ -1029,7 +1054,7 @@ impl App {
             _ => flavour_of(file),
         };
         let font = self.config.borrow().editor_font.clone();
-        let tab = diff::DiffTab::open(
+        let tab = difftab::DiffTab::open(
             &self.tabs(),
             key,
             file,
