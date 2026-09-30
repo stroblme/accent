@@ -210,6 +210,7 @@ pub fn open(
         move |_| tab.emit(&tab.on_banner)
     ));
     tab.wire_keys();
+    tab.wire_menu();
     tab
 }
 
@@ -1098,6 +1099,82 @@ impl DiagramTab {
     /// Fire a window action from the canvas's own keys (the PDF tab's `run`).
     fn run(&self, action: &str) {
         let _ = self.view.activate_action(action, None);
+    }
+
+    /// The canvas's own menu on a secondary click, as a PDF page has one: the cell under the
+    /// pointer is selected first unless it is already, and empty page lets the selection go, as
+    /// draw.io's `mxPopupMenuHandler` does.
+    fn wire_menu(self: &Rc<Self>) {
+        let secondary = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_SECONDARY)
+            .build();
+        secondary.connect_pressed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _, x, y| tab.menu_at(x, y)
+        ));
+        self.view.add_controller(secondary);
+    }
+
+    /// The menu under the pointer, at widget `(x, y)`: the clipboard and Duplicate and Delete,
+    /// Group or Ungroup where they apply, the order, and Edit Label for one cell; over nothing
+    /// selected, Paste alone. Window actions, so the palette lists them and they can be rebound.
+    fn menu_at(self: &Rc<Self>, x: f64, y: f64) {
+        match self.view.cell_at(x, y) {
+            Some(cell) if !self.selection.borrow().contains(&cell) => self.select(vec![cell]),
+            Some(_) => {}
+            None => self.select(Vec::new()),
+        }
+        let ids = self.selection();
+        let menu = gio::Menu::new();
+        let section = |actions: &[&str]| {
+            let part = gio::Menu::new();
+            for action in actions {
+                part.append(Some(crate::actions::label_of(action)), Some(action));
+            }
+            if part.n_items() > 0 {
+                menu.append_section(None, &part);
+            }
+        };
+        if ids.is_empty() {
+            section(&["win.diagram-paste"]);
+        } else {
+            section(&[
+                "win.diagram-cut",
+                "win.diagram-copy",
+                "win.diagram-paste",
+                "win.diagram-duplicate",
+                "win.diagram-delete",
+            ]);
+            let groups = {
+                let editor = self.editor.borrow();
+                let page = editor.page(self.page_index.get());
+                let group =
+                    |id: &CellId| page.as_ref().is_ok_and(|p| p.children(id).next().is_some());
+                ids.iter().any(group)
+            };
+            let mut grouping = Vec::new();
+            if ids.len() > 1 {
+                grouping.push("win.diagram-group");
+            }
+            if groups {
+                grouping.push("win.diagram-ungroup");
+            }
+            section(&grouping);
+            section(&["win.diagram-to-front", "win.diagram-to-back"]);
+            if ids.len() == 1 {
+                section(&["win.diagram-edit-label"]);
+            }
+        }
+        // Parented to the tab's box, not the canvas, which allocates itself: a popover on it
+        // would never be presented again (DESIGN.md, States).
+        let Some(host) = self.page.child().downcast::<gtk::Box>().ok() else {
+            return;
+        };
+        let at = gtk::graphene::Point::new(x as f32, y as f32);
+        let at = self.view.compute_point(&host, &at).unwrap_or(at);
+        let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+        crate::widgets::popup_menu(&host, &menu, Some(anchor));
     }
 
     /// The canvas's keys. Undo, Select All and Delete belong to whatever has the keyboard, so

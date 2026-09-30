@@ -209,6 +209,15 @@ impl DiagramView {
         self.relayout();
     }
 
+    /// The cell a secondary click at widget `(x, y)` is about: the selected one under it, else
+    /// the one a click there would select (`Sheet::pick`); `None` over empty page.
+    pub fn cell_at(&self, x: f64, y: f64) -> Option<CellId> {
+        let sheet = self.sheet()?;
+        let tolerance = TOLERANCE / self.scale();
+        let pick = sheet.pick(self.page_at(x, y), tolerance, &self.selection())?;
+        Some(pick.held.unwrap_or(pick.cell))
+    }
+
     /// Where draw.io puts what is pasted without a place of its own (`Graph.getInsertPoint`): a
     /// grid step in from the top-left of what is on screen, on the grid, never off the page's
     /// top or left.
