@@ -370,11 +370,11 @@ fn upsert(
     };
     let read = match f.kind {
         FileKind::Markdown => body(),
-        // A diagram's body is XML whose every style key would come back as a search hit, so it
-        // keeps a stat row only; searching its labels is a job for the diagram crate.
-        FileKind::Other if f.size <= MAX_INDEXED_BODY && !crate::path::is_diagram(&f.rel_path) => {
-            body()
-        }
+        // A diagram's XML would make every style key a hit, so what is indexed is its labels,
+        // one line each (`accent_drawio::text`). A label is short however big the file is with
+        // its pictures, so the cap does not apply.
+        FileKind::Other if crate::path::is_diagram(&f.rel_path) => body().and_then(diagram_labels),
+        FileKind::Other if f.size <= MAX_INDEXED_BODY => body(),
         _ => None,
     };
     let (hash, text) = match read {
@@ -528,6 +528,19 @@ fn upsert(
             .execute(params![id, body, title.as_deref().unwrap_or_default()])?;
     }
     Ok(id)
+}
+
+/// A diagram read as text, turned into its labels: `None` for one that does not parse or shows
+/// no text, which keeps its stat row and nothing to be found by.
+fn diagram_labels(read: crate::fs::Read) -> Option<crate::fs::Read> {
+    let crate::fs::Read::Text(mut t) = read else {
+        return None;
+    };
+    let file = accent_drawio::File::from_bytes(t.text.as_bytes())
+        .inspect_err(|e| tracing::debug!("no labels indexed: {e}"))
+        .ok()?;
+    t.text = accent_drawio::text::search_text(&file);
+    (!t.text.is_empty()).then_some(crate::fs::Read::Text(t))
 }
 
 /// Everything a file's content produced, so a re-read starts clean — and a file that could not
@@ -1155,6 +1168,32 @@ mod tests {
         assert_eq!(
             ix.grep_paths(&re, false).unwrap(),
             vec!["a.md", "sub/Beta.md", "tool.py"]
+        );
+    }
+
+    /// A diagram is found by what its labels say, a line each, and never by its XML.
+    #[test]
+    fn a_diagrams_labels_are_indexed_and_its_xml_is_not() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("flow.drawio"),
+            r#"<mxfile><diagram name="P"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="k" value="Kettle" style="fillColor=#zorblat;" vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell>
+            <mxCell id="t" value="&lt;b&gt;Hot&lt;/b&gt; tea" style="html=1;" vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#,
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("hot tea", 10, false).unwrap();
+        assert_eq!(hits[0].rel_path, "flow.drawio");
+        assert_eq!(hits[0].line, Some(2), "the second label's line");
+        let re = crate::search::pattern("zorblat|<b>", crate::search::Options::default()).unwrap();
+        assert_eq!(
+            ix.grep(&re, 10, false).unwrap().1,
+            0,
+            "no style key, no markup"
         );
     }
 }

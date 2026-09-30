@@ -11,7 +11,7 @@ use crate::dialogs::confirm;
 use crate::recall::{self, QUERIES, REPLACEMENTS};
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
 use accent_core::index::{Index, MIN_INFIX, Match, SearchHit};
-use accent_core::path::{basename, parent_dir};
+use accent_core::path::{basename, is_diagram, parent_dir};
 use accent_core::search::{self, Options, Regex};
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
@@ -191,15 +191,54 @@ fn match_markup(line: &str, range: Range<usize>, replaced: Option<&str>, accent:
 /// file — `design.md` and the folder holding it — rather than the note's title: the title hides
 /// the extension, and two notes titled the same are then one row twice.
 fn dir_label(rel_path: &str, line: Option<u32>) -> String {
+    place_label(rel_path, line.map(|line| format!("line {line}")).as_deref())
+}
+
+/// The folder a row's file sits in, and where in the file the match is: a line, or a diagram's
+/// page.
+fn place_label(rel_path: &str, place: Option<&str>) -> String {
     let dir = match parent_dir(rel_path) {
         "" => String::new(),
         dir => format!("{dir}/"),
     };
-    match (line, dir.is_empty()) {
+    match (place, dir.is_empty()) {
         (None, _) => dir,
-        (Some(line), true) => format!("line {line}"),
-        (Some(line), false) => format!("{dir} — line {line}"),
+        (Some(place), true) => place.to_string(),
+        (Some(place), false) => format!("{dir} — {place}"),
     }
+}
+
+/// Where each page's labels start in a diagram's labels' text, one line per label as the index
+/// holds it, and the page's name: what names a diagram row's page.
+type PageStarts = Vec<(usize, String)>;
+
+/// The diagrams in an answer, by path: where their pages start.
+type Pages = HashMap<String, PageStarts>;
+
+/// A diagram's text as the index holds it — its labels, a line each — and where its pages start
+/// in it; `None` for one that does not parse.
+fn diagram_text(xml: &str) -> Option<(String, PageStarts)> {
+    let file = accent_drawio::File::from_bytes(xml.as_bytes()).ok()?;
+    let (mut text, mut starts) = (String::new(), PageStarts::new());
+    for label in accent_drawio::text::labels(&file) {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        if starts
+            .last()
+            .is_none_or(|(_, name)| *name != file.pages[label.page].name())
+        {
+            starts.push((text.len(), file.pages[label.page].name().to_string()));
+        }
+        text.push_str(&label.text);
+    }
+    Some((text, starts))
+}
+
+/// The dim half of a diagram's row: the folder and the page the match at byte `at` is on.
+fn page_label(rel_path: &str, starts: &PageStarts, at: usize) -> Option<String> {
+    let (_, page) = starts.iter().rev().find(|(start, _)| *start <= at)?;
+    Some(place_label(rel_path, Some(page)))
 }
 
 /// The row under a file whose matches the per-file cap cut short. The dim line alone, and it
@@ -275,25 +314,55 @@ fn open_tails(rows: Vec<Row>, bodies: &Bodies, accent: &str) -> Vec<Row> {
     out
 }
 
-/// Ask `query`, then read the files in `opened` that its answer cuts short again. Run on a
-/// worker thread, so a question asked again — the vault moved under it — lands with those files
-/// already open ([`open_tails`]): listed shut first, the list would lose its place.
+/// Ask `query`, then read the files in `opened` that its answer cuts short again, and the
+/// diagrams it found, whose rows name their pages. Run on a worker thread, so a question asked
+/// again — the vault moved under it — lands with those files already open ([`open_tails`]):
+/// listed shut first, the list would lose its place.
 fn answer_with_bodies(
     run: &dyn Fn(Query) -> Answer,
     read: &dyn Fn(&str) -> Option<String>,
     query: Query,
     opened: Vec<String>,
-) -> (Answer, Bodies) {
+) -> (Answer, Bodies, Pages) {
     let answer = run(query);
     let bodies = opened
         .into_iter()
         .filter(|rel| answer.cuts(rel))
-        .filter_map(|rel| read(&rel).map(|body| (rel, body)))
+        .filter_map(|rel| searchable(read, &rel).map(|body| (rel, body)))
         .collect();
-    (answer, bodies)
+    let mut diagrams: Vec<&str> = answer.paths().filter(|rel| is_diagram(rel)).collect();
+    diagrams.dedup();
+    let pages = diagrams
+        .into_iter()
+        .filter_map(|rel| Some((rel.to_string(), diagram_text(&read(rel)?)?.1)))
+        .collect();
+    (answer, bodies, pages)
+}
+
+/// A file's text as search found its matches in: a diagram's labels, a line each, as the index
+/// holds them, or the file itself.
+fn searchable(read: &dyn Fn(&str) -> Option<String>, rel: &str) -> Option<String> {
+    let text = read(rel)?;
+    match is_diagram(rel) {
+        true => diagram_text(&text).map(|(labels, _)| labels),
+        false => Some(text),
+    }
 }
 
 impl Answer {
+    /// The file of every row, in order.
+    fn paths(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+        match self {
+            Answer::Fts(hits) | Answer::MidWord(hits) => {
+                Box::new(hits.iter().map(|h| h.rel_path.as_str()))
+            }
+            Answer::Grep { hits, walked, .. } => {
+                Box::new(hits.iter().chain(walked).map(|m| m.rel_path.as_str()))
+            }
+            Answer::Walked(walked) => Box::new(walked.iter().map(|m| m.rel_path.as_str())),
+        }
+    }
+
     /// Whether the per-file cap cut `rel`'s rows short here, leaving the file a tail row.
     fn cuts(&self, rel: &str) -> bool {
         let fts = |hits: &[SearchHit]| hits.iter().any(|h| h.more > 0 && h.rel_path == rel);
@@ -406,6 +475,8 @@ struct Search {
     /// it. The same question asked again — the vault moved under it — opens them again; any
     /// other forgets them.
     opened: RefCell<(Option<Key>, HashSet<String>)>,
+    /// Where the pages start in each diagram the rows list, which the rows name the page by.
+    pages: Rc<RefCell<Pages>>,
 }
 
 impl Search {
@@ -514,7 +585,7 @@ impl Search {
             })
             .await;
             search.running.set(search.running.get() - 1);
-            let Some((answer, bodies)) = answer else {
+            let Some((answer, bodies, pages)) = answer else {
                 return search.set_busy(search.busy());
             };
             tracing::debug!(
@@ -545,6 +616,7 @@ impl Search {
             // The box has moved on since this was asked, so a newer query is already on its way
             // with the answer that belongs on screen. Old results stay up until it lands.
             if search.generation.load(Ordering::Relaxed) == mine {
+                search.pages.replace(pages);
                 search.show(&key, answer, &bodies);
                 if let Some(listed) = listed
                     && (skip.is_some() || key.all)
@@ -633,6 +705,10 @@ impl Search {
             answer_with_bodies(&*run, &*read, query, opened)
         })
         .await;
+        let answer = answer.map(|(answer, bodies, pages)| {
+            self.pages.borrow_mut().extend(pages);
+            (answer, bodies)
+        });
         self.running.set(self.running.get() - 1);
         self.set_busy(self.busy());
         tracing::debug!(
@@ -792,7 +868,7 @@ impl Search {
         glib::spawn_future_local(async move {
             let t0 = Instant::now();
             let rows = crate::work::off_thread("more", move || {
-                read(&rel).map(|body| rest_rows(&rel, &body, &more, &accent))
+                searchable(&*read, &rel).map(|body| rest_rows(&rel, &body, &more, &accent))
             })
             .await
             .flatten();
@@ -1066,6 +1142,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     // properties, the same trade `tree.rs` documents. Define a real item type if the row ever
     // needs bindable state.
     let results = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let pages: Rc<RefCell<Pages>> = Rc::default();
 
     let factory = crate::widgets::factory(
         |_| {
@@ -1105,44 +1182,52 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             row.append(&snippet);
             row
         },
-        |row: &gtk::Box, item| {
-            let (Some(head), Some(snippet)) = (
-                row.first_child().and_downcast::<gtk::Box>(),
-                row.last_child().and_downcast::<gtk::Label>(),
-            ) else {
-                return;
-            };
-            let Some(icon) = head.first_child().and_downcast::<gtk::Image>() else {
-                return;
-            };
-            let (Some(name), Some(dir)) = (
-                icon.next_sibling().and_downcast::<gtk::Label>(),
-                head.last_child().and_downcast::<gtk::Label>(),
-            ) else {
-                return;
-            };
-            let Some(boxed) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
-                return;
-            };
-            let hit: Ref<Row> = boxed.borrow();
-            // A heading is small and dim, like the branch popover's Remote, and nothing to open.
-            // A recycled row may have been one, which is why every other row sets it back.
-            let heading = hit.rel_path.is_empty();
-            item.set_activatable(!heading);
-            item.set_selectable(!heading);
-            name.set_css_classes(match heading {
-                true => &["caption-heading", "dim-label"],
-                false => &["heading"],
-            });
-            // A tail row has no name, and no icon either: it continues the file above it.
-            icon.set_icon_name(Some(crate::doc::icon_for(&hit.rel_path)));
-            icon.set_visible(!hit.name.is_empty() && !heading);
-            name.set_text(&hit.name);
-            dir.set_text(&hit.dir);
-            // A tail row is the dim line alone, so the empty second line is taken away rather than
-            // left as a gap under it.
-            snippet.set_markup(&hit.snippet);
-            snippet.set_visible(!hit.snippet.is_empty());
+        {
+            let pages = pages.clone();
+            move |row: &gtk::Box, item: &gtk::ListItem| {
+                let (Some(head), Some(snippet)) = (
+                    row.first_child().and_downcast::<gtk::Box>(),
+                    row.last_child().and_downcast::<gtk::Label>(),
+                ) else {
+                    return;
+                };
+                let Some(icon) = head.first_child().and_downcast::<gtk::Image>() else {
+                    return;
+                };
+                let (Some(name), Some(dir)) = (
+                    icon.next_sibling().and_downcast::<gtk::Label>(),
+                    head.last_child().and_downcast::<gtk::Label>(),
+                ) else {
+                    return;
+                };
+                let Some(boxed) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
+                    return;
+                };
+                let hit: Ref<Row> = boxed.borrow();
+                // A heading is small and dim, like the branch popover's Remote, and nothing to open.
+                // A recycled row may have been one, which is why every other row sets it back.
+                let heading = hit.rel_path.is_empty();
+                item.set_activatable(!heading);
+                item.set_selectable(!heading);
+                name.set_css_classes(match heading {
+                    true => &["caption-heading", "dim-label"],
+                    false => &["heading"],
+                });
+                // A tail row has no name, and no icon either: it continues the file above it.
+                icon.set_icon_name(Some(crate::doc::icon_for(&hit.rel_path)));
+                icon.set_visible(!hit.name.is_empty() && !heading);
+                name.set_text(&hit.name);
+                // A diagram's row names the page its match is on rather than a line of its labels.
+                let page = hit.at.as_ref().and_then(|at| {
+                    let pages = pages.borrow();
+                    page_label(&hit.rel_path, pages.get(&hit.rel_path)?, at.start)
+                });
+                dir.set_text(page.as_deref().unwrap_or(&hit.dir));
+                // A tail row is the dim line alone, so the empty second line is taken away rather than
+                // left as a gap under it.
+                snippet.set_markup(&hit.snippet);
+                snippet.set_visible(!hit.snippet.is_empty());
+            }
         },
     );
 
@@ -1319,6 +1404,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         total: Cell::new(0),
         counted: Cell::new((0, 0, false)),
         opened: RefCell::default(),
+        pages,
     });
 
     // Every handler below holds `search` weakly. Each is connected to a widget `Search` holds, so
@@ -1529,6 +1615,40 @@ mod tests {
             "notes/deep/ — line 12"
         );
         assert_eq!(dir_label("top.md", Some(3)), "line 3");
+    }
+
+    #[test]
+    fn a_diagrams_row_names_the_page_its_label_is_on() {
+        let cell = |id: &str, label: &str| {
+            format!(
+                r#"<mxCell id="{id}" value="{label}" vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell>"#
+            )
+        };
+        let page = |name: &str, cells: &str| {
+            format!(
+                r#"<diagram name="{name}" id="{name}"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>{cells}</root></mxGraphModel></diagram>"#
+            )
+        };
+        let xml = format!(
+            "<mxfile>{}{}</mxfile>",
+            page("One", &(cell("a", "Kettle") + &cell("b", "Tea"))),
+            page("Two", &cell("c", "Cup"))
+        );
+        let (text, starts) = diagram_text(&xml).unwrap();
+        assert_eq!(
+            text, "Kettle\nTea\nCup",
+            "the index's text, a line per label"
+        );
+        let names: Vec<&str> = starts.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(names, ["One", "Two"]);
+        assert_eq!(
+            page_label("d/flow.drawio", &starts, 12).as_deref(),
+            Some("d/ — Two")
+        );
+        assert_eq!(
+            page_label("flow.drawio", &starts, 3).as_deref(),
+            Some("One")
+        );
     }
 
     #[test]

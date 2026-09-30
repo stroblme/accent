@@ -580,6 +580,10 @@ impl Local {
     /// How many matches this file lost, and what it held before; `None` when it held none. The
     /// count comes from the file rather than from the index, which may be a watcher debounce
     /// behind what is on disk.
+    ///
+    /// A diagram's labels are rewritten through its model, as the index searched them, and its
+    /// XML — style keys, ids, markup — is left alone; it is written once however many labels
+    /// changed.
     fn replace_one(
         &self,
         rel: &str,
@@ -589,14 +593,28 @@ impl Local {
     ) -> Result<Option<(usize, Before)>> {
         let path = self.resolve_inside(rel)?;
         let (text, etag) = fs::read_note(&path)?;
-        let matches = re.find_iter(&text).count();
+        let substitute = |text: &str| match literal {
+            true => re
+                .replace_all(text, search::NoExpand(replacement))
+                .into_owned(),
+            false => re.replace_all(text, replacement).into_owned(),
+        };
+        let (matches, rewritten) = match accent_core::path::is_diagram(rel) {
+            true => {
+                let mut file = accent_drawio::File::from_bytes(text.as_bytes())?;
+                let mut matches = 0;
+                accent_drawio::text::edit_labels(&mut file, |label| {
+                    let found = re.find_iter(label).count();
+                    matches += found;
+                    (found > 0).then(|| substitute(label))
+                });
+                (matches, file.to_xml())
+            }
+            false => (re.find_iter(&text).count(), substitute(&text)),
+        };
         if matches == 0 {
             return Ok(None);
         }
-        let rewritten = match literal {
-            true => re.replace_all(&text, search::NoExpand(replacement)),
-            false => re.replace_all(&text, replacement),
-        };
         let etag = fs::write_note(&path, &rewritten, Some(etag))?;
         self.post(Msg::Update {
             rel: rel.to_string(),
@@ -981,6 +999,41 @@ mod tests {
             0,
             "the rewrites must be in the index by the time replace_all returns"
         );
+    }
+
+    /// A diagram is rewritten in its labels and nowhere else, one write for the file, and the
+    /// undo puts its XML back as it was.
+    #[test]
+    fn replace_all_rewrites_a_diagrams_labels_and_not_its_xml() {
+        let f = Fixture::open(VaultConfig::default());
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="k" value="Kettle and kettle" style="kettle=1;" vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell><mxCell id="t" value="&lt;b&gt;Kettle&lt;/b&gt;" style="html=1;" vertex="1" parent="1"><mxGeometry as="geometry"/></mxCell></root></mxGraphModel></diagram></mxfile>"#;
+        f.write("flow.drawio", xml);
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let plain = Options::default();
+        assert_eq!(f.vault.grep("kettle", plain, 10, false).unwrap().1, 3);
+        let report = f
+            .vault
+            .replace_all("kettle", plain, "Pot", true, false)
+            .unwrap();
+        assert_eq!((report.rewritten.len(), report.matches), (1, 3));
+        let file = accent_drawio::File::from_bytes(f.read("flow.drawio").as_bytes()).unwrap();
+        assert_eq!(
+            accent_drawio::text::search_text(&file),
+            "Pot and Pot\nPot",
+            "both labels, the markup kept"
+        );
+        let cells = &file.pages()[0].cells;
+        assert_eq!(
+            cells[2].style.get("kettle"),
+            Some("1"),
+            "a style key is not text"
+        );
+        assert_eq!(cells[3].label(), "<b>Pot</b>");
+
+        f.vault.undo_replace().unwrap();
+        assert_eq!(f.read("flow.drawio"), xml);
     }
 
     /// The undo writes back through the etag gate, so a note edited since the rewrite keeps the

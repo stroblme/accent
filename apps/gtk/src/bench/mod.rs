@@ -347,6 +347,8 @@ use tags::bench_tags;
 /// under Not Indexed. `=more:<query>[:<n>]` opens a note's "+N more in this file" row, printing
 /// the rows, the count, the tabs and the scroll before and after, and again after the same query
 /// is asked again and a new one; `=click:` waits for a real XTEST press on it instead.
+/// `=label:<query>` finds `<query>` in a diagram's label on its second page and opens the row,
+/// printing the rows' dim lines, which name the page, and the page and cell the diagram then shows.
 /// `=seed:<rel_note>` fires Ctrl+Shift+F and Ctrl+Shift+H over the note and prints which box has
 /// the keyboard and what it has selected, then types after the real chord through XTEST (see
 /// `search::bench_seed`).

@@ -38,6 +38,7 @@ name = "accent-api"
 version = "2.0.0"
 dependencies = [
  "accent-core",
+ "accent-drawio",
  "accent-lsp",
  "anyhow",
  "blake3",
@@ -71,6 +72,7 @@ dependencies = [
 name = "accent-core"
 version = "2.0.0"
 dependencies = [
+ "accent-drawio",
  "anyhow",
  "blake3",
  "chrono",
