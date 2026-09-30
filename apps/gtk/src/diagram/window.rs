@@ -283,7 +283,14 @@ impl App {
             }
             return;
         }
-        self.start_save(tab, explicit, Self::save_diagram, Self::land_diagram);
+        let file = tab.file();
+        self.start_save(
+            tab,
+            explicit,
+            Self::save_diagram,
+            Self::land_diagram,
+            move || file.to_xml(),
+        );
     }
 
     /// `App::land_flight` for a diagram: `report` is false for a write about to go after it.
