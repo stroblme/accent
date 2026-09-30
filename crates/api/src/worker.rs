@@ -8,8 +8,9 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -53,12 +54,19 @@ pub(crate) fn spawn(
         held: Vec::new(),
         stop,
         paused: false,
+        next_walk: Instant::now(),
+        walk_due: false,
     };
     std::thread::Builder::new()
         .name("accent-vault".to_string())
         .spawn(move || worker.run())
         .context("spawning the vault worker")
 }
+
+/// How long after a walk ends the next one the watcher's news asks for waits: a `.gitignore`
+/// saved, which an editor autosaves a second after each pause in the typing, or events the
+/// watcher lost. The first ask past it walks at once; every ask inside it is one walk at its end.
+const WALK_FLOOR: Duration = Duration::from_secs(2);
 
 /// What `stop` says: walk on.
 pub(crate) const RUN: u8 = 0;
@@ -127,6 +135,10 @@ struct Worker {
     /// must not be: the index is a diff, so *opening the vault again* is the resume. What a
     /// pause has to survive is this session, where the vault stays open and half-indexed.
     paused: bool,
+    /// When a walk the watcher's news asks for may start: [`WALK_FLOOR`] after the last one.
+    next_walk: Instant,
+    /// One was asked for before then, and comes as a [`Msg::Rescan`] at [`Worker::next_walk`].
+    walk_due: bool,
 }
 
 /// What one batch has accumulated: the directories whose children changed, and the paths it took
@@ -159,7 +171,22 @@ impl Worker {
             // and therefore one event for the UI. What the last walk held back came first.
             let mut batch = std::mem::take(&mut self.held);
             if batch.is_empty() {
-                let Ok(first) = self.rx.recv() else { break };
+                let wait = self.next_walk.saturating_duration_since(Instant::now());
+                let first = match self.walk_due {
+                    true => match self.rx.recv_timeout(wait) {
+                        Ok(msg) => msg,
+                        // Cleared here as well as by the walk: a paused vault drops the rescan.
+                        Err(RecvTimeoutError::Timeout) => {
+                            self.walk_due = false;
+                            Msg::Rescan
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    },
+                    false => match self.rx.recv() {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                };
                 batch.push(first);
             }
             batch.extend(self.rx.try_iter());
@@ -259,7 +286,17 @@ impl Worker {
         if batch.iter().any(|m| matches!(m, Msg::Resume)) {
             self.paused = false;
         }
-        if batch.iter().any(|m| self.needs_rescan(m)) {
+        // What only the watcher's news asks for waits out the floor, the batch meanwhile applied a
+        // file at a time like any other — the `.gitignore` itself among them.
+        let walk = batch.iter().any(|m| self.needs_rescan(m));
+        if walk
+            && Instant::now() < self.next_walk
+            && batch
+                .iter()
+                .all(|m| !self.needs_rescan(m) || touches_gitignore(m) || lost_news(m))
+        {
+            self.walk_due = true;
+        } else if walk {
             // The walk replaces the index wholesale, but the moves in this batch are still news:
             // a tab open on a path that was renamed under it has to follow.
             for msg in &batch {
@@ -338,6 +375,8 @@ impl Worker {
     /// What does not touch the walk is answered there — git news, the git directories to watch,
     /// the exclusion set — and everything else is held for [`Worker::run`], in the order it came.
     fn reconcile(&mut self) {
+        // Whatever asked for a walk before this one is answered by it.
+        self.walk_due = false;
         let mut excluded = None;
         let Worker {
             root,
@@ -389,6 +428,7 @@ impl Worker {
         let _ = self
             .stop
             .compare_exchange(PAUSE, RUN, Ordering::Relaxed, Ordering::Relaxed);
+        self.next_walk = Instant::now() + WALK_FLOOR;
         self.paused = matches!(&stats, Ok(s) if s.stopped);
         // A set written mid-walk marked the rows that were there, and what the walk added after
         // it inherited its parent's flag — but a directory the set itself names, added after it,
@@ -677,6 +717,11 @@ fn has_children(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some())
 }
 
+/// The watcher saying it lost events (a queue overflow), which only a walk makes up for.
+fn lost_news(msg: &Msg) -> bool {
+    matches!(msg, Msg::Fs(VaultEvent::Rescan))
+}
+
 /// News about a `.gitignore`, wherever in the vault it sits.
 ///
 /// One of these decides which *directories* the walk enters (`walk::stat_one`), so editing one
@@ -684,7 +729,8 @@ fn has_children(path: &Path) -> bool {
 /// drop the tree the last walk indexed, and removing it has to walk the tree left lazy. Only a
 /// walk can do either, and there is no walk of one subtree — [`Index::reconcile_with`] is the
 /// whole vault or nothing — so this asks for the whole thing. A `.gitignore` is edited about as
-/// often as a preference, which is what makes that affordable.
+/// often as a preference, which is what makes that affordable; one open in a tab is saved far
+/// more often, and [`WALK_FLOOR`] is what keeps that to a walk now and then.
 fn touches_gitignore(msg: &Msg) -> bool {
     let named = |p: &Path| p.file_name().is_some_and(|n| n == ".gitignore");
     match msg {
@@ -1305,6 +1351,72 @@ mod tests {
             poll_until(indexed, BUDGET),
             "the tree stayed lazy after it stopped being ignored"
         );
+    }
+
+    /// A `.gitignore` open in a tab is saved a second after each pause in the typing, and each
+    /// save used to walk the whole vault: the saves inside [`WALK_FLOOR`](super::WALK_FLOOR) of
+    /// the last walk are one walk at its end, and the first save after it walks at once.
+    #[test]
+    fn saves_of_a_gitignore_inside_the_floor_are_one_walk() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        std::fs::create_dir(root_path.join("mlruns")).unwrap();
+        std::fs::write(root_path.join("mlruns/run.md"), "run\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("index.db");
+        let (tx, rx) = channel();
+        let (events, event_rx) = channel();
+        // Unwatched: the saves below are the worker's only news, as `Vault::save` posts them.
+        let worker = spawn(
+            root_path.clone(),
+            Index::open(&db).unwrap(),
+            rx,
+            tx.clone(),
+            events,
+            false,
+            Arc::new(AtomicU8::new(RUN)),
+        )
+        .unwrap();
+        assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+        let save = |text: &str| {
+            std::fs::write(root_path.join(".gitignore"), text).unwrap();
+            tx.send(Msg::Update {
+                rel: ".gitignore".to_string(),
+                own: true,
+            })
+            .unwrap();
+        };
+        let walks = |within: Duration| {
+            let deadline = Instant::now() + within;
+            let mut n = 0;
+            while let Ok(e) =
+                event_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                n += usize::from(matches!(e, Event::Reconciled(_)));
+            }
+            n
+        };
+
+        for text in ["m", "mlr", "mlruns/\n"] {
+            save(text);
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        assert_eq!(walks(super::WALK_FLOOR + Duration::from_secs(1)), 1);
+        let indexed = Index::open(&db).unwrap().file_paths(false).unwrap();
+        assert!(
+            !indexed.contains(&"mlruns/run.md".to_string()),
+            "the walk read the last save: {indexed:?}"
+        );
+
+        std::thread::sleep(super::WALK_FLOOR);
+        save("# nothing\n");
+        assert_eq!(
+            walks(Duration::from_millis(500)),
+            1,
+            "the save after the floor waited"
+        );
+        tx.send(Msg::Shutdown).unwrap();
+        worker.join().unwrap();
     }
 
     /// A new watch set must not lose what the old one had seen and not yet reported. The window's
