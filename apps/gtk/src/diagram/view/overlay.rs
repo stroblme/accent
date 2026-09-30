@@ -1,0 +1,187 @@
+//! What the canvas draws over the page: the selection, its handles, the connection points in
+//! reach and whatever a drag is doing.
+
+use accent_drawio::geom::{self, rotate};
+use accent_drawio::{Point, Rect};
+use gtk::prelude::*;
+use gtk::subclass::prelude::*;
+use gtk::{graphene, gsk};
+
+use super::DiagramView;
+use super::drag::Drag;
+use crate::diagram::geometry::{self, Frame, HANDLE, Handle, Sheet, TOLERANCE};
+use crate::diagram::paint;
+use crate::diagram::tools::Tool;
+use crate::theme;
+
+impl DiagramView {
+    /// The selection, its handles and whatever a drag is doing, over the page.
+    pub(super) fn paint_overlays(&self, snapshot: &gtk::Snapshot, sheet: &Sheet, frame: &Frame) {
+        let imp = self.imp();
+        let accent = theme::accent();
+        let outline = |r: &Rect| {
+            snapshot.append_border(
+                &gsk::RoundedRect::from_rect(paint::grect(r), 0.0),
+                &[1.0; 4],
+                &[accent; 4],
+            );
+        };
+        // Borrowed, not cloned: this runs every frame, and nothing it calls changes either.
+        let drag = imp.drag.borrow();
+        let pointer = imp.pointer.get();
+        let free = imp.free.get();
+        let selection = imp.selection.borrow();
+        let moving = matches!(drag.as_ref(), Some(Drag::Move { .. } | Drag::Rotate { .. }))
+            && imp.moved.get();
+        // A page rectangle turned `rotation` degrees, outlined on screen.
+        let turned = |r: &Rect, rotation: f64| {
+            if rotation == 0.0 {
+                return outline(&frame.rect(r));
+            }
+            let builder = gsk::PathBuilder::new();
+            for (i, corner) in geom::corners(r, r.centre(), rotation)
+                .into_iter()
+                .enumerate()
+            {
+                let c = frame.to_content(corner);
+                match i {
+                    0 => builder.move_to(c.x as f32, c.y as f32),
+                    _ => builder.line_to(c.x as f32, c.y as f32),
+                }
+            }
+            builder.close();
+            snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
+        };
+        for id in selection.iter() {
+            if let Some(r) = sheet.frame_of(id) {
+                turned(&r, sheet.rotation(id));
+            }
+        }
+        if let [id] = selection.as_slice()
+            && let Some(r) = sheet.rect(id)
+            && !sheet.is_pinned(id)
+            && !moving
+        {
+            let rotation = sheet.rotation(id);
+            for h in Handle::ALL {
+                let at = frame.to_content(rotate(h.at(&r), r.centre(), rotation));
+                let square = Rect::new(at.x - HANDLE / 2.0, at.y - HANDLE / 2.0, HANDLE, HANDLE);
+                snapshot.append_color(&accent, &paint::grect(&square));
+            }
+            // The rotate handle, a ring beyond the top-right corner, turned with the frame.
+            if sheet.is_turnable(id) {
+                let b = frame.rect(&r);
+                let at = rotate(geometry::rotate_handle(&b), b.centre(), rotation);
+                let ring = gsk::PathBuilder::new();
+                ring.add_circle(
+                    &graphene::Point::new(at.x as f32, at.y as f32),
+                    (HANDLE / 2.0) as f32,
+                );
+                snapshot.append_stroke(&ring.to_path(), &gsk::Stroke::new(1.5), &accent);
+            }
+        }
+        // The connector in hand: the shape under the pointer shows its connection points as
+        // draw.io's small crosses, and the one an end would pin to is lit.
+        if imp.tool.get() == Tool::Connector {
+            let (tolerance, reach) = (TOLERANCE / frame.scale, HANDLE / frame.scale);
+            let near = sheet.anchor_near(pointer, reach);
+            let shape = match &near {
+                Some((id, ..)) => Some(id.clone()),
+                None => sheet.vertex_at(pointer, tolerance),
+            };
+            let arm = (HANDLE / 2.0 - 1.0) as f32;
+            for (at, _) in shape.as_deref().map_or(&[][..], |id| sheet.anchors_of(id)) {
+                let c = frame.to_content(*at);
+                let (x, y) = (c.x as f32, c.y as f32);
+                let builder = gsk::PathBuilder::new();
+                builder.move_to(x - arm, y - arm);
+                builder.line_to(x + arm, y + arm);
+                builder.move_to(x + arm, y - arm);
+                builder.line_to(x - arm, y + arm);
+                snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.5), &accent);
+                if near.as_ref().is_some_and(|n| n.1 == *at) {
+                    let lit = Rect::new(c.x - HANDLE / 2.0, c.y - HANDLE / 2.0, HANDLE, HANDLE);
+                    let tint = theme::at(accent, theme::HIGHLIGHT_ALPHA);
+                    snapshot.append_color(&tint, &paint::grect(&lit));
+                }
+            }
+        }
+        let Some(drag) = drag.as_ref().filter(|_| imp.moved.get()) else {
+            return;
+        };
+        match drag {
+            Drag::Move {
+                from, ids, origin, ..
+            } => {
+                let d = self.move_delta(*from, pointer, *origin, free);
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(
+                    (d.x * frame.scale) as f32,
+                    (d.y * frame.scale) as f32,
+                ));
+                snapshot.push_opacity(f64::from(theme::GHOST_ALPHA));
+                for (i, prim) in sheet.scene.prims.iter().enumerate() {
+                    if ids.iter().any(|id| sheet.is_within(prim.cell(), id)) {
+                        let typesetter = imp.typesetter.borrow();
+                        paint::prim(
+                            snapshot,
+                            self.upcast_ref(),
+                            i,
+                            prim,
+                            frame,
+                            &imp.cache,
+                            typesetter.as_ref(),
+                        );
+                    }
+                }
+                snapshot.pop();
+                snapshot.restore();
+            }
+            Drag::Resize {
+                from,
+                handle,
+                rect,
+                rotation,
+                ..
+            } => {
+                let delta = Point::new(pointer.x - from.x, pointer.y - from.y);
+                let grid = self.grid(free);
+                turned(
+                    &geometry::resize_rotated(rect, *rotation, *handle, delta, grid),
+                    *rotation,
+                );
+            }
+            Drag::Rotate { rect, .. } => turned(rect, self.turn_to(rect, pointer, free)),
+            Drag::Band { from, .. } => {
+                let r = frame.rect(&Rect::from_corners(*from, pointer));
+                snapshot.append_color(
+                    &theme::at(accent, theme::HIGHLIGHT_ALPHA),
+                    &paint::grect(&r),
+                );
+                outline(&r);
+            }
+            Drag::Draw { tool, from } => {
+                let r = frame.rect(&Rect::from_corners(*from, pointer));
+                let builder = gsk::PathBuilder::new();
+                match tool {
+                    Tool::Ellipse => builder.add_rounded_rect(&gsk::RoundedRect::from_rect(
+                        paint::grect(&r),
+                        (r.w.min(r.h) / 2.0) as f32,
+                    )),
+                    _ => builder.add_rect(&paint::grect(&r)),
+                }
+                snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
+            }
+            Drag::Connect { from } => {
+                let (tolerance, reach) = (TOLERANCE / frame.scale, HANDLE / frame.scale);
+                let (s, t) = sheet.connect_ends(*from, pointer, tolerance, reach);
+                let (a, b) = (frame.to_content(s.1), frame.to_content(t.1));
+                let builder = gsk::PathBuilder::new();
+                builder.move_to(a.x as f32, a.y as f32);
+                builder.line_to(b.x as f32, b.y as f32);
+                snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
+            }
+            Drag::Pan { .. } => {}
+        }
+    }
+}
