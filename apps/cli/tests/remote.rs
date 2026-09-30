@@ -176,6 +176,12 @@ fn a_remote_vault_connects_indexes_and_answers() {
         "`sub` changed {made:?} after create_note, {uploaded:?} after an upload, \
          {outside:?} after a write on the host"
     );
+    // Reload on a folder walks that folder on the host: `sub` and its four files.
+    vault.rescan_dir("sub").unwrap();
+    wait_for(
+        &events,
+        |e| matches!(e, Event::Reconciled(s) if s.scanned == 5),
+    );
     std::fs::remove_dir_all(&scratch).unwrap();
 
     // A fetch whose origin does not answer in time. The host's cap has to answer before the RPC

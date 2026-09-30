@@ -137,7 +137,20 @@ impl Local {
 
     /// Ask for a full walk: after a resume, or when the UI suspects it missed something.
     pub fn rescan(&self) {
-        self.post(Msg::Rescan);
+        self.post(Msg::Rescan(String::new()));
+    }
+
+    /// Ask for a walk of the folder `dir` alone, which the reader suspects the index has fallen
+    /// behind on. A plain vault-relative path: the walk starts where it names.
+    pub fn rescan_dir(&self, dir: &str) -> io::Result<()> {
+        if !Path::new(dir)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        {
+            return Err(outside(dir));
+        }
+        self.post(Msg::Rescan(dir.to_string()));
+        Ok(())
     }
 
     /// Stop the walk that is running, keeping everything it has already written.

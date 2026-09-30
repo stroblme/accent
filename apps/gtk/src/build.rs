@@ -847,16 +847,16 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 return;
             };
             // A folder the walk does not enter is listed off the disk, so listing it again is the
-            // whole of it. One the index holds is listed out of the index, which only a walk
-            // brings up to date with a file the watcher never reported — the whole vault's, there
-            // being no walk of one folder (`Index::reconcile_with`); its "Indexed …" toast says
-            // when that has landed, and the tree is refilled with it.
+            // whole of it. One the index holds is listed out of the index, which only a walk of
+            // the folder brings up to date with a file the watcher never reported; its "Indexed …"
+            // toast says when that has landed, and the tree is refilled with it.
             if !tree.reload(dir) {
                 return;
             }
-            let weak = Rc::downgrade(&app);
+            let (weak, dir) = (Rc::downgrade(&app), dir.to_string());
             glib::spawn_future_local(async move {
-                let walked = crate::work::attempt("reindex the vault", move || vault.rescan());
+                let walked =
+                    crate::work::attempt("reindex the folder", move || vault.rescan_dir(&dir));
                 if let (Err(why), Some(app)) = (walked.await, weak.upgrade()) {
                     app.toast(&why);
                 }
