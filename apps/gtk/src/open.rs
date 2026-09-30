@@ -24,7 +24,7 @@ pub enum Opened {
     /// (`Shell::adopt_page`) and lands at the end of its pane's pinned tabs.
     Pinned,
     /// Kept, and the `n`th of the files a launch named together, which keep the order they were
-    /// named in whichever tab lands first (see [`App::land_in_order`]).
+    /// named in, the last one in front, whichever tab lands first (see [`App::land_in_order`]).
     Launched(usize),
 }
 
@@ -96,22 +96,28 @@ impl App {
     }
 
     /// Put the tab of the `at`th file a launch named ahead of the first one named after it that
-    /// has already landed in its pane. A PDF's tab is up at once and a text tab only once its
-    /// read is, so the bar would otherwise hold them in the order they landed.
+    /// has already landed in its pane, and the last one named in front. A PDF's tab is up at once
+    /// and a text tab only once its read is, so the bar would otherwise hold them in the order
+    /// they landed, the last to land in front.
     fn land_in_order(&self, page: &adw::TabPage, at: usize) {
-        let mut launched = self.launched.borrow_mut();
-        if let Some(pane) = self.pane_of(page)
-            && let Some((_, later)) = launched
-                .iter()
-                .filter(|(named, _)| *named > at)
-                .filter_map(|(named, landed)| Some((*named, landed.upgrade()?)))
-                .filter(|(_, landed)| pane.has(landed))
-                .min_by_key(|(named, _)| *named)
-        {
-            pane.tabs
-                .reorder_page(page, pane.tabs.page_position(&later));
+        self.launched.borrow_mut().push((at, page.downgrade()));
+        let Some(pane) = self.pane_of(page) else {
+            return;
+        };
+        let landed: Vec<(usize, adw::TabPage)> = self
+            .launched
+            .borrow()
+            .iter()
+            .filter_map(|(named, landed)| Some((*named, landed.upgrade()?)))
+            .filter(|(_, landed)| pane.has(landed))
+            .collect();
+        let later = landed.iter().filter(|(named, _)| *named > at);
+        if let Some((_, later)) = later.min_by_key(|(named, _)| *named) {
+            pane.tabs.reorder_page(page, pane.tabs.page_position(later));
         }
-        launched.push((at, page.downgrade()));
+        if let Some((_, last)) = landed.iter().max_by_key(|(named, _)| *named) {
+            pane.tabs.set_selected_page(last);
+        }
     }
 
     /// The preferences every text tab is built with.
