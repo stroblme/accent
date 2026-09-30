@@ -760,6 +760,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let moved = Rc::downgrade(app);
     let unmark = Rc::downgrade(app);
     let apart = Rc::downgrade(app);
+    let relist = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: vault.clone(),
         window: app.window.clone(),
@@ -835,6 +836,27 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
             if let (Some(shell), Some(gtk_app)) = (app.shell.upgrade(), gtk_app) {
                 shell.open_apart(&gtk_app, &app.root().join(rel), Opened::Kept);
             }
+        }),
+        relist: Box::new(move |dir| {
+            let Some(app) = relist.upgrade() else { return };
+            let (Some(tree), Some(vault)) = (app.tree.get(), app.vault().cloned()) else {
+                return;
+            };
+            // A folder the walk does not enter is listed off the disk, so listing it again is the
+            // whole of it. One the index holds is listed out of the index, which only a walk
+            // brings up to date with a file the watcher never reported — the whole vault's, there
+            // being no walk of one folder (`Index::reconcile_with`); its "Indexed …" toast says
+            // when that has landed, and the tree is refilled with it.
+            if !tree.reload(dir) {
+                return;
+            }
+            let weak = Rc::downgrade(&app);
+            glib::spawn_future_local(async move {
+                let walked = crate::work::attempt("reindex the vault", move || vault.rescan());
+                if let (Err(why), Some(app)) = (walked.await, weak.upgrade()) {
+                    app.toast(&why);
+                }
+            });
         }),
         cut: Box::new(move |rels| {
             let Some(app) = cut.upgrade() else { return };

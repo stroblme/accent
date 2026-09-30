@@ -91,6 +91,8 @@ pub fn context_menu(
     // right here, which is why this beats a preferences row nobody can point at a folder from.
     if is_dir {
         menu.append_item(&item(GROUP, "Leave Out of Search", "exclude", rel));
+        // For a listing that has fallen behind the disk: what the watcher never reported.
+        menu.append_item(&item(GROUP, "Reload", "reload", rel));
     }
     // A file manager's own three, in a section of their own between what changes the file and
     // what reads its name out.
@@ -246,6 +248,7 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     };
     add("open", Box::new(|ops, rel| (ops.open)(rel, &[])));
     add("open-apart", Box::new(|ops, rel| (ops.apart)(rel)));
+    add("reload", Box::new(|ops, dir| (ops.relist)(dir)));
     add("new-file", Box::new(new_file));
     add("new-folder", Box::new(new_folder));
     add("new-drawing", Box::new(new_drawing));
