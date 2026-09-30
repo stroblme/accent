@@ -347,68 +347,37 @@ impl Editor {
         })
     }
 
-    /// Paste `from`, a page read off the clipboard, as draw.io's `importGraphModel` does: the
-    /// cells of a page with one layer go into the page's first unlocked layer, moved by
-    /// (`dx`, `dy`), and each layer of one with several comes as a layer of its own; every cell
-    /// takes a fresh id, and a reference to a cell that was not pasted goes. What was pasted onto
-    /// a layer, to select.
-    // Graph.js 17723-17810
+    /// Paste `from`, the pages read off the clipboard, as one step: the first onto page `page`
+    /// ([`paste_into`]), and any others after the last page as pages of their own, with ids of
+    /// their own and a name where they had none. What was pasted onto `page`, to select.
+    // diagramly/EditorUi.js 11240-11330
     pub fn paste(
         &mut self,
         page: usize,
-        from: &Page,
+        from: &[Page],
         dx: f64,
         dy: f64,
     ) -> Result<Vec<CellId>, Error> {
-        self.edit(page, |p, new_ids| {
-            let root = from.root().map(|c| c.id.clone());
-            let cells = from.cells.iter().filter(|c| c.parent.is_some());
-            let fresh = fresh_ids(p, new_ids, cells.clone());
-            let mut copies: Vec<Cell> = cells.map(|c| copy_of(c, &fresh)).collect();
-            let pasted_ids: HashSet<&CellId> = fresh.values().collect();
-            let known = |id: &Option<CellId>| id.as_ref().is_some_and(|id| pasted_ids.contains(id));
-            for copy in &mut copies {
-                if !known(&copy.source) {
-                    copy.source = None;
-                }
-                if !known(&copy.target) {
-                    copy.target = None;
-                }
+        let [first, rest @ ..] = from else {
+            return Ok(Vec::new());
+        };
+        if rest.is_empty() {
+            return self.edit(page, |p, ids| paste_into(p, ids, first, dx, dy));
+        }
+        self.file.page(page)?;
+        let mut pages = self.file.pages.clone();
+        let pasted = paste_into(&mut pages[page], &mut self.ids, first, dx, dy)?;
+        for from in rest {
+            let mut added = from.clone();
+            added.set_id(&guid());
+            if added.name().is_empty() {
+                added.set_name(&format!("Page-{}", pages.len() + 1));
             }
-            let layers: Vec<CellId> = from.layers().iter().map(|l| fresh[&l.id].clone()).collect();
-            let pasted: Vec<CellId>;
-            if let [layer] = layers.as_slice() {
-                let into = default_layer(p)?;
-                copies.retain(|c| &c.id != layer);
-                for copy in &mut copies {
-                    if copy.parent.as_ref() == Some(layer) {
-                        copy.parent = Some(into.clone());
-                        if let Some(g) = &mut copy.geometry {
-                            translate(g, dx, dy);
-                        }
-                    }
-                }
-                pasted = copies
-                    .iter()
-                    .filter(|c| c.parent.as_ref() == Some(&into))
-                    .map(|c| c.id.clone())
-                    .collect();
-                let at = subtree_end(p, &into);
-                p.cells.splice(at..at, copies);
-            } else {
-                let into = p.root().map(|c| c.id.clone());
-                for copy in copies.iter_mut().filter(|c| layers.contains(&c.id)) {
-                    copy.parent = into.clone().or(root.clone());
-                }
-                pasted = copies
-                    .iter()
-                    .filter(|c| c.parent.as_ref().is_some_and(|l| layers.contains(l)))
-                    .map(|c| c.id.clone())
-                    .collect();
-                p.cells.extend(copies);
-            }
-            Ok(pasted)
-        })
+            pages.push(added);
+        }
+        let before = std::mem::replace(&mut self.file.pages, pages);
+        self.record(Snapshot::Pages(before));
+        Ok(pasted)
     }
 
     /// [`remove`] on page `page`.
@@ -558,6 +527,68 @@ impl Editor {
             }
         }
     }
+}
+
+/// Paste `from`, a page read off the clipboard, onto `page` as draw.io's `importGraphModel`
+/// does: the cells of a page with one layer go into the first unlocked layer, moved by
+/// (`dx`, `dy`), and each layer of one with several comes as a layer of its own; every cell
+/// takes a fresh id, and a reference to a cell that was not pasted goes. What was pasted onto
+/// a layer.
+// Graph.js 17723-17810
+fn paste_into(
+    page: &mut Page,
+    new_ids: &mut Ids,
+    from: &Page,
+    dx: f64,
+    dy: f64,
+) -> Result<Vec<CellId>, Error> {
+    let root = from.root().map(|c| c.id.clone());
+    let cells = from.cells.iter().filter(|c| c.parent.is_some());
+    let fresh = fresh_ids(page, new_ids, cells.clone());
+    let mut copies: Vec<Cell> = cells.map(|c| copy_of(c, &fresh)).collect();
+    let pasted_ids: HashSet<&CellId> = fresh.values().collect();
+    let known = |id: &Option<CellId>| id.as_ref().is_some_and(|id| pasted_ids.contains(id));
+    for copy in &mut copies {
+        if !known(&copy.source) {
+            copy.source = None;
+        }
+        if !known(&copy.target) {
+            copy.target = None;
+        }
+    }
+    let layers: Vec<CellId> = from.layers().iter().map(|l| fresh[&l.id].clone()).collect();
+    let pasted: Vec<CellId>;
+    if let [layer] = layers.as_slice() {
+        let into = default_layer(page)?;
+        copies.retain(|c| &c.id != layer);
+        for copy in &mut copies {
+            if copy.parent.as_ref() == Some(layer) {
+                copy.parent = Some(into.clone());
+                if let Some(g) = &mut copy.geometry {
+                    translate(g, dx, dy);
+                }
+            }
+        }
+        pasted = copies
+            .iter()
+            .filter(|c| c.parent.as_ref() == Some(&into))
+            .map(|c| c.id.clone())
+            .collect();
+        let at = subtree_end(page, &into);
+        page.cells.splice(at..at, copies);
+    } else {
+        let into = page.root().map(|c| c.id.clone());
+        for copy in copies.iter_mut().filter(|c| layers.contains(&c.id)) {
+            copy.parent = into.clone().or(root.clone());
+        }
+        pasted = copies
+            .iter()
+            .filter(|c| c.parent.as_ref().is_some_and(|l| layers.contains(l)))
+            .map(|c| c.id.clone())
+            .collect();
+        page.cells.extend(copies);
+    }
+    Ok(pasted)
 }
 
 /// Remove the topmost of `ids` and everything under them, as draw.io's Cut does
@@ -1434,7 +1465,7 @@ mod tests {
         let mut e = editor();
         let drawn = crate::scene::scene(e.page(0).unwrap());
         let xml = crate::clipboard::copy(e.page(0).unwrap(), &list(&["a", "e"]), &drawn);
-        let from = crate::clipboard::diagram_in(&xml).unwrap();
+        let from = crate::clipboard::pages_in(&xml);
         let pasted = e.paste(0, &from, 10.0, 10.0).unwrap();
         assert_eq!(pasted.len(), 2);
         let page = e.page(0).unwrap();
@@ -1453,6 +1484,20 @@ mod tests {
             (Some(&pasted[0]), None)
         );
         assert_eq!(order(&e).len(), 7);
+        // A file of two pages: the first onto the page, the second a page of its own.
+        let file = format!(
+            "<mxfile><diagram name=\"One\" id=\"x\">{xml}</diagram><diagram id=\"y\">{xml}</diagram></mxfile>"
+        );
+        let before = e.file().pages.len();
+        let pasted = e
+            .paste(0, &crate::clipboard::pages_in(&file), 0.0, 0.0)
+            .unwrap();
+        assert_eq!((pasted.len(), e.file().pages.len()), (2, before + 1));
+        let added = &e.file().pages[before];
+        assert_eq!(added.name(), "Page-2");
+        assert_ne!(crate::model::attr(&added.attrs, "id"), Some("y"));
+        assert!(e.undo());
+        assert_eq!(e.file().pages.len(), before);
         // A cut keeps the edge, loose where it was drawn.
         let mut e = editor();
         let drawn = crate::scene::scene(e.page(0).unwrap());

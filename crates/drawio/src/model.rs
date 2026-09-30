@@ -132,6 +132,10 @@ impl Page {
         set_attr(&mut self.attrs, "name", name);
     }
 
+    pub fn set_id(&mut self, id: &str) {
+        set_attr(&mut self.attrs, "id", id);
+    }
+
     pub fn model_attr(&self, name: &str) -> Option<&str> {
         attr(&self.model_attrs, name)
     }

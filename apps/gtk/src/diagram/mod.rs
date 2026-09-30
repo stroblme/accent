@@ -702,12 +702,14 @@ impl DiagramTab {
         };
         let d = f64::from(steps) * grid;
         let mut chosen = Vec::new();
-        match accent_drawio::clipboard::diagram_in(text) {
-            Some(model) => self.edit(|e, page| {
-                chosen = e.paste(page, &model, d, d)?;
+        let pages = accent_drawio::clipboard::pages_in(text);
+        let count = self.page_count();
+        match pages.is_empty() {
+            false => self.edit(|e, page| {
+                chosen = e.paste(page, &pages, d, d)?;
                 Ok(())
             }),
-            None => {
+            true => {
                 let at = self.view.insert_point(grid);
                 let (w, h) = text_size(&self.view, text);
                 let rect = accent_drawio::Rect::new(at.x + d, at.y + d, w + grid, h + grid);
@@ -718,6 +720,9 @@ impl DiagramTab {
                     Ok(())
                 });
             }
+        }
+        if self.page_count() != count {
+            self.emit(&self.on_pages);
         }
         if !chosen.is_empty() {
             self.select(chosen);
