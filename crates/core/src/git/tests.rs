@@ -1447,7 +1447,7 @@ fn a_repo_without_submodules_lists_none() {
 }
 
 #[test]
-fn a_gitlink_with_no_gitmodules_is_still_listed() {
+fn a_gitlink_gitmodules_does_not_map_is_still_listed() {
     if !have_git() {
         return;
     }
@@ -1475,6 +1475,14 @@ fn a_gitlink_with_no_gitmodules_is_still_listed() {
         seen,
         [("gone", '-', oid.as_str()), ("lib", ' ', oid.as_str())]
     );
+
+    // A `.gitmodules` that maps `lib` alone: `git submodule status` dies on `gone`.
+    write_file(
+        dir,
+        ".gitmodules",
+        "[submodule \"lib\"]\n\tpath = lib\n\turl = ./lib\n",
+    );
+    assert_eq!(submodules(&open(dir)).unwrap(), subs);
 }
 
 #[test]
