@@ -156,9 +156,13 @@ impl App {
                 // so the root level is queryable long before the reconcile ends. Without this the
                 // tree of a cold vault stays empty for the whole two seconds. Throttled, and
                 // deliberately not marking the tags pane dirty: that is a whole-pane rebuild and
-                // it can wait for `Reconciled`.
+                // it can wait for `Reconciled`. Not while a host is still being connected to (see
+                // `Reconciled`).
                 let now = glib::monotonic_time();
-                if p.phase == Phase::Index && now - self.tree_painted.get() >= TREE_REPAINT {
+                if p.phase == Phase::Index
+                    && !self.offline()
+                    && now - self.tree_painted.get() >= TREE_REPAINT
+                {
                     self.tree_painted.set(now);
                     if let Some(tree) = self.tree.get() {
                         tree.refresh();
@@ -201,7 +205,12 @@ impl App {
                         self.statusbar.set_indexing(statusbar::Indexing::Idle);
                     }
                 }
-                if let Some(tree) = self.tree.get() {
+                // A host's walk reports while the link to it is still being made, when every
+                // folder the tree asked after would fail "still connecting"; `Connected` refills
+                // the tree once the host answers.
+                if !self.offline()
+                    && let Some(tree) = self.tree.get()
+                {
                     tree.refresh();
                 }
                 self.refresh_corpus();
