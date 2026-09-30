@@ -15,6 +15,7 @@ mod find;
 mod git;
 mod image;
 mod keys;
+mod loose;
 mod memory;
 mod outline;
 mod panes;
@@ -259,6 +260,9 @@ use tags::bench_tags;
 /// the made note with an edit still in its buffer, printing whether each menu offered its item,
 /// whether the tab stayed and what was said; then every other window and what it holds, and what
 /// the made note says on disk, before removing it. On a remote vault neither item is offered.
+/// `=loose:` writes a note into `loose-drill/` and opens it in a window of its own from its tree
+/// row, where no vault is behind it, and prints what the Outline pane there holds and the headings
+/// it lists (`loose::bench_loose`), before removing the folder.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
@@ -679,6 +683,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rels) = rels.strip_prefix("apart:") {
                 return bench_apart(&app, rels);
+            }
+            if rels == "loose:" {
+                return loose::bench_loose(&app);
             }
             return bench_tabs(&app, &rels);
         }

@@ -809,7 +809,7 @@ fn bench_tab_line(page: &adw::TabPage) -> String {
 
 /// What the Outline pane holds, by widget type — or by title where that is one of its status
 /// pages, "No Outline" being the empty state a closed document has to leave behind.
-fn bench_outline(app: &Rc<App>) -> String {
+pub(super) fn bench_outline(app: &Rc<App>) -> String {
     let Some(sidebar) = app.sidebar.get() else {
         return "no sidebar".to_string();
     };

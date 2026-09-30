@@ -1504,31 +1504,27 @@ impl App {
         ));
 
         // A file inside the vault gets a document on the language layer; a loose file has no
-        // vault to open it on.
-        if let Some(vault) = self
-            .vault()
-            .filter(|_| !doc::is_loose_key(&tab.rel()))
-            .cloned()
-        {
-            lang::attach(
-                &tab,
-                vault,
-                lang::Hooks {
-                    on_symbols: Rc::new(glib::clone!(
-                        #[weak(rename_to = app)]
-                        self,
-                        move |tab: &Rc<Tab>| {
-                            // The pinned title is drawn from the same symbols, so it is redrawn
-                            // whether or not this tab is the one being looked at.
-                            tab.update_sticky();
-                            if app.is_active(tab) {
-                                app.sync_outline();
-                            }
+        // vault to open it on, and a loose note outlines itself.
+        lang::attach(
+            &tab,
+            self.vault()
+                .filter(|_| !doc::is_loose_key(&tab.rel()))
+                .cloned(),
+            lang::Hooks {
+                on_symbols: Rc::new(glib::clone!(
+                    #[weak(rename_to = app)]
+                    self,
+                    move |tab: &Rc<Tab>| {
+                        // The pinned title is drawn from the same symbols, so it is redrawn
+                        // whether or not this tab is the one being looked at.
+                        tab.update_sticky();
+                        if app.is_active(tab) {
+                            app.sync_outline();
                         }
-                    )),
-                },
-            );
-        }
+                    }
+                )),
+            },
+        );
 
         // A pasted or dropped image is written into the vault, which a loose note has none of.
         if tab.flavour().is_note() && self.vault().is_some() && !doc::is_loose_key(&tab.rel()) {
