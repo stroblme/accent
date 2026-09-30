@@ -22,6 +22,7 @@ pub mod route;
 pub mod scene;
 pub mod shapes;
 pub mod style;
+pub mod text;
 mod xml;
 
 pub use edit::{Editor, ZOrder};

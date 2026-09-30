@@ -103,6 +103,52 @@ pub fn html_to_runs(html: &str, math: bool) -> Vec<Run> {
     if math { find_math(runs) } else { runs }
 }
 
+/// `html` cut into its markup and its text, in order and each piece as written, `true` marking
+/// text: the same reading [`html_to_runs`] makes, for a rewrite that changes a label's text and
+/// keeps its tags (`crate::text::edit_labels`). A script or a style is markup, content and all.
+pub(crate) fn html_pieces(html: &str) -> Vec<(bool, &str)> {
+    let mut pieces: Vec<(bool, &str)> = Vec::new();
+    let (mut rest, mut text_from) = (html, 0);
+    let at = |rest: &str| html.len() - rest.len();
+    while let Some((_, len)) = html_char(rest) {
+        let markup_end = if let Some(comment) = rest.strip_prefix("<!--") {
+            Some(
+                comment
+                    .find("-->")
+                    .map_or(html.len(), |end| at(comment) + end + 3),
+            )
+        } else if let Some((tag, after)) = Tag::read(rest) {
+            let name = tag.name.as_str();
+            let end = match (tag.close, name == "script" || name == "style") {
+                (false, true) => after
+                    .to_ascii_lowercase()
+                    .find(&format!("</{name}"))
+                    .map_or(html.len(), |end| at(after) + end),
+                _ => at(after),
+            };
+            Some(end)
+        } else {
+            None
+        };
+        match markup_end {
+            Some(end) => {
+                let start = at(rest);
+                if start > text_from {
+                    pieces.push((true, &html[text_from..start]));
+                }
+                pieces.push((false, &html[start..end]));
+                text_from = end;
+                rest = &html[end..];
+            }
+            None => rest = &rest[len..],
+        }
+    }
+    if text_from < html.len() {
+        pieces.push((true, &html[text_from..]));
+    }
+    pieces
+}
+
 /// A plain label as runs: one text run per line.
 pub fn plain_to_runs(text: &str, math: bool) -> Vec<Run> {
     let mut runs = Vec::new();
@@ -393,7 +439,7 @@ fn entity(s: &str) -> Option<(char, usize)> {
 }
 
 /// HTML text with its character references decoded.
-fn decode(mut s: &str) -> String {
+pub(crate) fn decode(mut s: &str) -> String {
     let mut out = String::new();
     while let Some((c, len)) = html_char(s) {
         out.push(c);
