@@ -10,12 +10,12 @@ use anyhow::{Context, Result};
 
 use accent_core::index::Index;
 use accent_core::walk::{self, FileKind};
-use accent_core::{git, search::Regex};
+use accent_core::{git, search};
 
 use super::{Local, Msg};
 use crate::language::notes;
 use crate::paths::conflict_pairs;
-use crate::{Backlink, FileRow, Location, Match, PdfLink, Repo, SearchHit, fs, locked};
+use crate::{Backlink, FileRow, Location, Match, Options, PdfLink, Repo, SearchHit, fs, locked};
 
 impl Local {
     /// Direct children of one directory ("" is the vault root): one level per call, so the tree
@@ -81,16 +81,23 @@ impl Local {
             .search_mid_word(query, limit, include_ignored, skip)
     }
 
-    /// Exact search: one row per match of `re`, capped at `limit`, plus how many there are in
-    /// all, which is what a [`replace_all`](Self::replace_all) under the same `include_ignored`
-    /// would rewrite. `include_ignored` means what it does in [`search`](Self::search).
+    /// Exact search: one row per match of `query` under `options`, capped at `limit`, plus how
+    /// many there are in all, which is what a [`replace_all`](Self::replace_all) under the same
+    /// `include_ignored` would rewrite. `include_ignored` means what it does in
+    /// [`search`](Self::search).
+    ///
+    /// The pattern is compiled here, where the files are, because a `Regex` does not cross the
+    /// wire: a remote caller sends what the user typed and the toggles, and case-insensitivity
+    /// lives in the builder rather than in the pattern string.
     pub fn grep(
         &self,
-        re: &Regex,
+        query: &str,
+        options: Options,
         limit: usize,
         include_ignored: bool,
     ) -> Result<(Vec<Match>, usize)> {
-        self.searcher().grep(re, limit, include_ignored)
+        let re = search::pattern(query, options)?;
+        self.searcher().grep(&re, limit, include_ignored)
     }
 
     /// The same exact search over the files the index does not hold at all: those under a
@@ -128,10 +135,12 @@ impl Local {
     /// ponytail: the walk runs per query, with no cache, for as long as All is on.
     pub fn grep_unindexed(
         &self,
-        re: &Regex,
+        query: &str,
+        options: Options,
         limit: usize,
         stop: &(dyn Fn() -> bool + Sync),
     ) -> Result<Vec<Match>> {
+        let re = &search::pattern(query, options)?;
         // Collected before the walk: the guard must not be held across file I/O.
         let known: HashSet<String> = self.searcher().file_paths(true)?.into_iter().collect();
         let opts = walk::ScanOptions {

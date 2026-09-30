@@ -8,6 +8,7 @@
 //! Everything is synchronous. A `git status` on a cold cache takes long enough to drop frames,
 //! so callers run these off the main thread.
 
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -1492,7 +1493,7 @@ fn rev(repo: &Repo, spec: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out).trim().to_string())
 }
 
-pub fn stage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
+pub fn stage(repo: &Repo, paths: &[impl Borrow<str>]) -> Result<(), Error> {
     write(repo, &["add"], paths)
 }
 
@@ -1504,7 +1505,7 @@ pub fn stage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
 /// directory row be unstaged as one path, and `-f` is load-bearing — the safety check refuses a
 /// path whose index content differs from both the worktree and HEAD, and with no HEAD that would
 /// be any file edited after it was staged.
-pub fn unstage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
+pub fn unstage(repo: &Repo, paths: &[impl Borrow<str>]) -> Result<(), Error> {
     match unborn(repo) {
         true => write(repo, &["rm", "--cached", "-r", "-f", "-q"], paths),
         false => write(repo, &["restore", "--staged"], paths),
@@ -1522,7 +1523,7 @@ fn unborn(repo: &Repo) -> bool {
     .is_err()
 }
 
-pub fn discard(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
+pub fn discard(repo: &Repo, paths: &[impl Borrow<str>]) -> Result<(), Error> {
     write(repo, &["restore", "--worktree"], paths)
 }
 
@@ -1579,8 +1580,9 @@ pub fn stage_text(repo: &Repo, path: &str, text: &str) -> Result<(), Error> {
 
 /// The paths go in over stdin, NUL-separated, rather than on the command line, which the kernel
 /// caps at 2 MB: a Stage All over an untracked tree of 60 000 files was refused before git ran.
-/// Nor can a note called `-f` be read as an option there.
-fn write(repo: &Repo, verb: &[&str], paths: &[&str]) -> Result<(), Error> {
+/// Nor can a note called `-f` be read as an option there. Borrowed or owned strings alike, so a
+/// caller holding `String`s, as the rpc server does, passes them as they are.
+fn write(repo: &Repo, verb: &[&str], paths: &[impl Borrow<str>]) -> Result<(), Error> {
     let args = [verb, &["--pathspec-from-file=-", "--pathspec-file-nul"]].concat();
     let mut child = command(&repo.root, &args, false)
         .stdin(Stdio::piped())
