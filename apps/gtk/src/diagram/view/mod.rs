@@ -55,6 +55,12 @@ pub enum Edit {
         id: CellId,
         degrees: f64,
     },
+    /// Put the source end (else the target end) of edge `id` on `end`.
+    End {
+        id: CellId,
+        source: bool,
+        end: End,
+    },
 }
 
 glib::wrapper! {

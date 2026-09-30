@@ -592,6 +592,10 @@ impl DiagramTab {
                 self.select(vec![id]);
                 self.edit_label();
             }
+            Edit::End { id, source, end } => self.edit(|e, page| {
+                let on = (end.0.as_deref(), end.1);
+                e.set_end(page, &id, source, on, end.2.as_ref())
+            }),
             Edit::Rotate { id, degrees } => {
                 let value = props::rotation(degrees);
                 self.edit(|e, page| e.set_style(page, &[id], "rotation", value.as_deref()));

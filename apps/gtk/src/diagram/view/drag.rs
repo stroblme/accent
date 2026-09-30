@@ -11,11 +11,13 @@ use super::{DiagramView, Edit};
 use crate::diagram::geometry::{self, DEFAULT_SIZE, HANDLE, Handle, Sheet, TOLERANCE};
 use crate::diagram::tools::Tool;
 
-/// What a press on the one selected shape's frame takes hold of.
+/// What a press on the one selected cell's handles takes hold of.
 #[derive(Debug, Clone, Copy)]
 enum Grip {
     Rotate,
     Resize(Handle),
+    /// An edge's source end, or with `false` its target end.
+    End(bool),
 }
 
 /// A drag under way, in page units.
@@ -40,6 +42,13 @@ pub(super) enum Drag {
         rotation: f64,
         /// The shapes its size and sides snap to.
         guides: Vec<Neighbour>,
+    },
+    /// Dragging the source end (else the target end) of edge `id`, whose other end is at
+    /// `other`.
+    End {
+        id: CellId,
+        source: bool,
+        other: Point,
     },
     /// Turning shape `id`, whose unturned rectangle is `rect`, by its rotate handle.
     Rotate {
@@ -81,10 +90,22 @@ impl DiagramView {
             Tool::Select => {
                 if let [id] = selection.as_slice()
                     && let Some(grip) = self.grip_at(&sheet, id, p)
-                    && let Some(rect) = sheet.rect(id)
                 {
                     let (id, rotation) = (id.clone(), sheet.rotation(id));
+                    let rect = sheet.rect(&id).unwrap_or_default();
                     return Some(match grip {
+                        Grip::End(source) => {
+                            let route = sheet.scene.route(&id).unwrap_or_default();
+                            let other = match source {
+                                true => route.last(),
+                                false => route.first(),
+                            };
+                            Drag::End {
+                                id,
+                                source,
+                                other: other.copied().unwrap_or(p),
+                            }
+                        }
                         Grip::Rotate => Drag::Rotate { id, rect },
                         Grip::Resize(handle) => Drag::Resize {
                             from: p,
@@ -151,17 +172,40 @@ impl DiagramView {
         }
     }
 
-    /// The grip of the one selected shape `id` under page point `p`, found in the shape's own
-    /// frame: its rotate handle first, then a resize handle.
+    /// The grip of the one selected cell `id` under page point `p`: an edge's ends; a shape's
+    /// rotate handle first, then a resize handle, found in the shape's own frame.
     fn grip_at(&self, sheet: &Sheet, id: &str, p: Point) -> Option<Grip> {
-        let r = sheet.rect(id).filter(|_| !sheet.is_pinned(id))?;
         let frame = self.imp().frame.get();
+        if sheet.is_edge(id) && !sheet.is_pinned(id) {
+            let route = sheet.scene.route(id)?;
+            let near = |q: &Point| frame.to_content(*q).distance(frame.to_content(p)) <= HANDLE;
+            return match (route.first(), route.last()) {
+                (Some(a), _) if near(a) => Some(Grip::End(true)),
+                (_, Some(b)) if near(b) => Some(Grip::End(false)),
+                _ => None,
+            };
+        }
+        let r = sheet.rect(id).filter(|_| !sheet.is_pinned(id))?;
         let local = frame.to_content(rotate(p, r.centre(), -sheet.rotation(id)));
         let b = frame.rect(&r);
         if sheet.is_turnable(id) && geometry::rotate_handle(&b).distance(local) <= HANDLE {
             return Some(Grip::Rotate);
         }
         geometry::handle_at(&b, local, HANDLE).map(Grip::Resize)
+    }
+
+    /// What an edge end dragged to `p`, its other end at `other`, lands on: as a connector's end
+    /// does ([`Sheet::end_at`]), dangling on the grid unless `free`.
+    pub(super) fn end_to(&self, p: Point, other: Point, free: bool) -> geometry::End {
+        let Some(sheet) = self.sheet() else {
+            return (None, p, None);
+        };
+        let scale = self.scale();
+        let mut end = sheet.end_at(p, other, TOLERANCE / scale, HANDLE / scale);
+        if let Some(g) = self.grid(free).filter(|_| end.0.is_none()) {
+            end.1 = Point::new(geometry::snap(p.x, g), geometry::snap(p.y, g));
+        }
+        end
     }
 
     /// The turn a rotate handle dragged to `pointer` gives the shape at `rect` (page units).
@@ -279,6 +323,11 @@ impl DiagramView {
                 id: id.clone(),
                 degrees: self.turn_to(rect, p, free),
             }),
+            Drag::End { id, source, other } => Some(Edit::End {
+                id: id.clone(),
+                source: *source,
+                end: self.end_to(p, *other, free),
+            }),
             _ => None,
         }
     }
@@ -350,6 +399,7 @@ impl DiagramView {
                     _ => None,
                 };
                 match grip {
+                    Some((Grip::End(_), _)) => Some("pointer"),
                     Some((Grip::Rotate, _)) => Some("grab"),
                     // A turned handle shows the cursor of the way it now points.
                     Some((Grip::Resize(h), rotation)) => Some(h.turned(rotation).cursor()),

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::Error;
 use crate::geom::{Point, Rect};
 use crate::model::{Cell, CellId, File, Geometry, Page, guid};
+use crate::route::Constraint;
 use crate::scene::Scene;
 use crate::style::Style;
 
@@ -174,6 +175,18 @@ impl Editor {
         drawn: &Scene,
     ) -> Result<(), Error> {
         self.edit(page, |p, _| move_cells(p, ids, dx, dy, drawn))
+    }
+
+    /// [`set_end`] on page `page`.
+    pub fn set_end(
+        &mut self,
+        page: usize,
+        id: &str,
+        source: bool,
+        on: (Option<&str>, Point),
+        constraint: Option<&Constraint>,
+    ) -> Result<(), Error> {
+        self.edit(page, |p, _| set_end(p, id, source, on, constraint))
     }
 
     /// [`resize`] on page `page`.
@@ -530,6 +543,61 @@ pub fn resize(page: &mut Page, id: &str, rect: Rect) -> Result<(), Error> {
     Ok(())
 }
 
+/// Put the source end (else the target end) of edge `id` on `on`: on shape `on.0`, pinned at
+/// `constraint` when there is one and floating on its outline otherwise
+/// (`mxEdgeHandler.connect`); with no shape, dangling at the absolute point `on.1`
+/// (`changeTerminalPoint`). The `exit` or `entry` keys say which, as `setConnectionConstraint`
+/// writes them.
+// mxGraph.setConnectionConstraint, mxGraph.js 7163-7213; mxEdgeHandler.js 1984-2046
+pub fn set_end(
+    page: &mut Page,
+    id: &str,
+    source: bool,
+    (on, at): (Option<&str>, Point),
+    constraint: Option<&Constraint>,
+) -> Result<(), Error> {
+    check(page, [id].into_iter().chain(on))?;
+    let origin = page.origin_of(id);
+    let cell = cell_mut(page, id)?;
+    if !cell.edge {
+        return Err(Error::Refused("only an edge has ends"));
+    }
+    let end = if source { "exit" } else { "entry" };
+    for key in ["X", "Y", "Dx", "Dy", "Perimeter"] {
+        cell.style.set(&format!("{end}{key}"), None);
+    }
+    if let Some(c) = constraint.filter(|_| on.is_some()) {
+        let keys = [
+            ("X", c.point.x),
+            ("Y", c.point.y),
+            ("Dx", c.dx),
+            ("Dy", c.dy),
+        ];
+        for (key, n) in keys {
+            cell.style.set(&format!("{end}{key}"), Some(&n.to_string()));
+        }
+        cell.style
+            .set(&format!("{end}Perimeter"), (!c.perimeter).then_some("0"));
+    }
+    if on.is_none() {
+        let g = cell.geometry.get_or_insert_with(|| Geometry {
+            relative: true,
+            ..Geometry::default()
+        });
+        let local = Some(Point::new(at.x - origin.x, at.y - origin.y));
+        match source {
+            true => g.source_point = local,
+            false => g.target_point = local,
+        }
+    }
+    let on = on.map(str::to_string);
+    match source {
+        true => cell.source = on,
+        false => cell.target = on,
+    }
+    Ok(())
+}
+
 /// Set (or with `None` remove) several style keys on every cell in `ids`: a connector's route
 /// is two of them.
 pub fn set_styles(
@@ -840,6 +908,41 @@ mod tests {
         assert!(matches!(
             start_move(&mut whole, &list(&["nope"]), &drawn),
             Err(Error::NoCell(_))
+        ));
+    }
+
+    #[test]
+    fn an_end_pins_floats_or_dangles() {
+        let mut e = editor();
+        let pin = Constraint {
+            point: Point::new(0.5, 0.0),
+            dx: 0.0,
+            dy: 0.0,
+            perimeter: false,
+        };
+        e.set_end(0, "e", false, (Some("a"), Point::default()), Some(&pin))
+            .unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert_eq!(cell.target.as_deref(), Some("a"));
+        let style = cell.style.to_string();
+        assert!(
+            style.contains("entryX=0.5") && style.contains("entryPerimeter=0"),
+            "{style}"
+        );
+        // Floating on b: the constraint goes.
+        e.set_end(0, "e", false, (Some("b"), Point::default()), None)
+            .unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert!(!cell.style.to_string().contains("entry"));
+        // Dangling: the point is the end.
+        e.set_end(0, "e", true, (None, Point::new(5.0, 6.0)), None)
+            .unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert_eq!(cell.source, None);
+        assert_eq!(geometry(&e, "e").source_point, Some(Point::new(5.0, 6.0)));
+        assert!(matches!(
+            e.set_end(0, "a", true, (None, Point::default()), None),
+            Err(Error::Refused(_))
         ));
     }
 

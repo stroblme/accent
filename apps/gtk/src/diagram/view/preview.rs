@@ -101,6 +101,9 @@ fn apply(
             Ok(())
         }
         Edit::Resize { id, rect } => edit::resize(page, id, *rect),
+        Edit::End { id, source, end } => {
+            edit::set_end(page, id, *source, (end.0.as_deref(), end.1), end.2.as_ref())
+        }
         Edit::Rotate { id, degrees } => {
             let value = props::rotation(*degrees);
             let ids = std::slice::from_ref(id);

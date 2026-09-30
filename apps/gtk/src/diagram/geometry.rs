@@ -676,6 +676,19 @@ impl Sheet {
             .map(|(_, id, at, c)| (id.clone(), at, c))
     }
 
+    /// What an edge end dropped at `p` attaches to, its other end being at `other`: the
+    /// connection point within `reach` that pins it, else the shape under it when `other` is
+    /// outside that shape, else nothing (see [`Sheet::connect_ends`]).
+    pub fn end_at(&self, p: Point, other: Point, tolerance: f64, reach: f64) -> End {
+        match self.anchor_near(p, reach) {
+            Some((id, at, c)) => (Some(id), at, Some(c)),
+            None => {
+                let under = self.vertex_at(p, tolerance);
+                (under.filter(|v| !self.contains(v, other)), p, None)
+            }
+        }
+    }
+
     /// What a connector drawn from `press` to `release` attaches to at either end. An end
     /// dropped within `reach` of a connection point is pinned there. Otherwise it takes the
     /// shape under it only when the other end is outside that shape: a line drawn within a
@@ -688,17 +701,8 @@ impl Sheet {
         tolerance: f64,
         reach: f64,
     ) -> (End, End) {
-        let end = |p: Point, other: Point| -> End {
-            match self.anchor_near(p, reach) {
-                Some((id, at, c)) => (Some(id), at, Some(c)),
-                None => {
-                    let under = self.vertex_at(p, tolerance);
-                    (under.filter(|v| !self.contains(v, other)), p, None)
-                }
-            }
-        };
-        let source = end(press, release);
-        let mut target = end(release, press);
+        let source = self.end_at(press, release, tolerance, reach);
+        let mut target = self.end_at(release, press, tolerance, reach);
         if target.0.is_some() && target.0 == source.0 {
             target = (None, release, None);
         }
