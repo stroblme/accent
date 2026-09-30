@@ -1009,7 +1009,9 @@ fn free_slot(lanes: &mut Vec<Option<Lane>>) -> usize {
 /// command costs about as much as `git status` (30 ms on a 40 000-file repository) and the Git
 /// pane asks on every refresh, so the common case must not pay for it. Where the index may still
 /// hold a gitlink — broken, with no `.gitmodules` to say where it comes from, and refused by
-/// `git submodule status` for it — the index is asked instead ([`gitlinks`]).
+/// `git submodule status` for it — the index is asked instead ([`gitlinks`]). So is it where
+/// `git submodule status` refuses: one gitlink `.gitmodules` does not map is enough for it to
+/// list none, and the index lists them all, the mapped ones without their describe.
 pub fn submodules(repo: &Repo) -> Result<Vec<Submodule>, Error> {
     if !repo.root.join(".gitmodules").exists() {
         return match may_hold_gitlink(&repo.git_dir) {
@@ -1017,7 +1019,13 @@ pub fn submodules(repo: &Repo) -> Result<Vec<Submodule>, Error> {
             false => Ok(Vec::new()),
         };
     }
-    let out = run(&repo.root, &["submodule", "status"], true)?;
+    let out = match run(&repo.root, &["submodule", "status"], true) {
+        Err(Error::Git(e)) => {
+            tracing::debug!("git submodule status: {e}");
+            return gitlinks(repo);
+        }
+        out => out?,
+    };
     Ok(String::from_utf8_lossy(&out)
         .lines()
         .filter_map(parse_submodule)
