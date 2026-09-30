@@ -819,6 +819,13 @@ impl Shell {
             // Refused rather than dropped: a drag must never be the thing that loses an edit.
             return return_page(into, &from, page, &format!("Save failed: {e}"));
         }
+        // A diagram the same way, a label still being typed going into its cell first.
+        if let Doc::Diagram(d) = &doc {
+            d.finish_label();
+            if let Err(e) = from.flush_diagram(d) {
+                return return_page(into, &from, page, &format!("Save failed: {e}"));
+            }
+        }
         // Opened before the old page goes, so a pane that the drop has just split off never
         // stands empty and closes itself out from under the note arriving in it. A pinned tab is
         // pinned there too, as one moved into another pane is.

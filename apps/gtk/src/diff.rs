@@ -15,6 +15,7 @@
 use accent_core::diff::{self, DiffLine, Op, Row};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ops::{Range, RangeInclusive};
@@ -1244,6 +1245,29 @@ impl Compare {
         }
     }
 
+    /// Put the editor's page on the companion beside it: the margins, so the first row of each
+    /// starts level, the line spacing, and the tab width the Indent Width preference sets. The
+    /// heading markers hang in the left margin and are measured in the font, so they are hung
+    /// again where the margin moves and, with `refont`, after a font change, which only the
+    /// editor's tab hears of. The bottom margin is [`Compare::relayout`]'s.
+    pub fn follow_editor(&self, refont: bool) {
+        let Some(mine) = self.editable else {
+            return;
+        };
+        let (from, companion) = (&self.pane(mine).view, self.pane(mine.other()));
+        let to = &companion.view;
+        let rehang = refont || to.left_margin() != from.left_margin();
+        to.set_top_margin(from.top_margin());
+        to.set_left_margin(from.left_margin());
+        to.set_right_margin(from.right_margin());
+        to.set_pixels_above_lines(from.pixels_above_lines());
+        to.set_pixels_below_lines(from.pixels_below_lines());
+        to.set_tab_width(from.tab_width());
+        if rehang {
+            editor::rehang_companion(companion.flavour, &companion.buffer, to);
+        }
+    }
+
     /// The bottom margin the page gives `side`, without the blank a relayout left under a side
     /// with no line: the editor's own, which a companion beside it takes as well. A margin
     /// someone else has set since — the zoom — is the page's whole.
@@ -1291,15 +1315,7 @@ impl Compare {
         if let Some(mine) = self.editable {
             reclaim(&self.pane(mine).buffer);
         }
-        // The companion takes the editor's page margins, so the first row of each starts level.
-        if let Some(mine) = self.editable {
-            let (from, to) = (&self.pane(mine).view, &self.pane(mine.other()).view);
-            to.set_top_margin(from.top_margin());
-            to.set_left_margin(from.left_margin());
-            to.set_right_margin(from.right_margin());
-            to.set_pixels_above_lines(from.pixels_above_lines());
-            to.set_pixels_below_lines(from.pixels_below_lines());
-        }
+        self.follow_editor(false);
         let lines = self.lines.borrow();
         let rows = self.rows.borrow();
         let starts = self.starts.borrow();

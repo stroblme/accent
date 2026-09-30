@@ -37,11 +37,14 @@ impl App {
             }
             return;
         }
-        self.start_save(tab, explicit, Self::save_tab, Self::land_save);
+        let text = tab.for_disk();
+        self.start_save(tab, explicit, Self::save_tab, Self::land_save, move || text);
     }
 
     /// The save a note and a diagram share, once the tab's own save has let it through: `again`
     /// is that save, for one asked for meanwhile, and `land` is how the tab takes the answer in.
+    /// `contents` makes what the file should hold, on the worker: a diagram's model is serialised
+    /// there rather than on the main thread.
     ///
     /// The write runs on a worker and lands later ([`Self::land_flight`]): every window shares the
     /// one main thread, and on a remote vault a save is a round trip that held all of them, once
@@ -53,6 +56,7 @@ impl App {
         explicit: bool,
         again: fn(&Rc<Self>, &Rc<T>, bool),
         land: fn(&Rc<Self>, &Rc<T>, bool) -> Option<bool>,
+        contents: impl FnOnce() -> String + Send + 'static,
     ) {
         let save = tab.save_state();
         if save.flight.borrow().is_some() {
@@ -60,7 +64,7 @@ impl App {
             save.save_again.set(Some(asked || explicit));
             return;
         }
-        let (write, text, expected) = (self.writer(tab), tab.for_disk(), save.etag.get());
+        let (write, expected) = (self.writer(tab), save.etag.get());
         let (tx, answer) = std::sync::mpsc::channel();
         *save.flight.borrow_mut() = Some(editor::Flight {
             started: save.edits.get(),
@@ -72,7 +76,7 @@ impl App {
         // write that has to wait for this one may be asked for in this same turn, and would wait
         // on a worker that had not begun. The answer goes through the channel; the worker's own
         // end is only the news that it is there.
-        let worker = gio::spawn_blocking(move || tx.send(write(&text, expected)));
+        let worker = gio::spawn_blocking(move || tx.send(write(&contents(), expected)));
         let (app, saved) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
             let _ = worker.await;

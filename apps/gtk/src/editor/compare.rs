@@ -76,12 +76,18 @@ pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &so
 pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     sync_scheme(buffer);
     match flavour {
-        Flavour::Note => {
-            highlight::restyle(buffer, view);
-            highlight::hang(buffer, view);
-        }
+        Flavour::Note => highlight::restyle(buffer, view),
         Flavour::Csv => highlight::restyle_csv(buffer),
         Flavour::Code => {}
+    }
+    rehang_companion(flavour, buffer, view);
+}
+
+/// A companion's heading markers and wrap indents measured again, against its left margin and in
+/// its font: what [`Tab::rehang`] does for the editor.
+pub fn rehang_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
+    if flavour.is_note() {
+        highlight::hang(buffer, view);
     }
     wrap::measure(view);
 }
@@ -165,6 +171,7 @@ impl Tab {
             shut,
         });
         self.show_chevrons();
+        self.update_sticky();
         self.set_clamp();
         self.page.set_title(&self.tab_title());
         compare
@@ -191,6 +198,7 @@ impl Tab {
             self.content.remove(widget);
         }
         self.content.append(&self.document);
+        self.update_sticky();
         self.set_clamp();
         self.page.set_title(&self.tab_title());
         // The banner's button comes back, if the comparison had taken it.

@@ -792,6 +792,73 @@ pub(super) fn bench_compare_left(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// The page a comparison's companion shares with the editor beside it. The note is a heading over
+/// eighty lines, written out and then changed at line 70, so the comparison with its disk copy
+/// hides the heading in the run it collapses and opens scrolled past it. Prints whether the sticky
+/// block title is up (only the editor's column has one, and it showed there empty, over the first
+/// row, its heading being hidden), and the `h1` marker's hang and the tab width on both sides
+/// (`page=editor/companion`, the two equal) as the comparison opened and again after a zoom and a
+/// new Indent Width: the companion hung its markers against a left margin of 0 and kept a tab width
+/// of 4. Then the sticky title again once the comparison has gone and the editor is scrolled past
+/// the heading. Writes the note, so point it at a scratch vault.
+pub(super) fn bench_compare_page(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let body: String = (1..=80).map(|i| format!("line {i}\n")).collect();
+        tab.set_text(&format!("# Heading\n{body}"));
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_page write_failed {e}");
+            return bench_quit(&app);
+        }
+        let changed = body.replace("line 70\n", "line seventy\n");
+        tab.set_text(&format!("# Heading\n{changed}"));
+        app.compare_with_disk(&tab);
+        wait(1200).await;
+        let Some(companion) = tab.comparison().and_then(|c| pane_view(c.widget(), true)) else {
+            println!("bench compare_page none");
+            return bench_quit(&app);
+        };
+        let page = |view: &gtk::TextView| {
+            let hang = view.buffer().tag_table().lookup("hang1");
+            let tabs = view
+                .downcast_ref::<sourceview5::View>()
+                .map(|v| v.tab_width());
+            format!(
+                "{:?},{tabs:?}",
+                hang.map(|tag| (tag.left_margin(), tag.indent()))
+            )
+        };
+        let say = |what: &str| {
+            println!(
+                "bench compare_page {what} sticky={} page={}/{}",
+                tab.sticky_shown(),
+                page(tab.view.upcast_ref()),
+                page(&companion)
+            )
+        };
+        tab.update_sticky();
+        say("opened");
+        app.set_zoom(1.5);
+        tab.set_indent_width(2);
+        wait(800).await;
+        say("zoomed");
+        tab.leave_compare();
+        wait(300).await;
+        if let Some(adj) = tab.view.vadjustment() {
+            adj.set_value(adj.upper() / 2.0);
+        }
+        wait(300).await;
+        println!("bench compare_page left sticky={}", tab.sticky_shown());
+        bench_quit(&app);
+    });
+}
+
 /// A note with its first section folded, compared with its disk copy, which differs only at the
 /// end: the run the comparison collapses reaches over the fold's end. It asks for the iter at every
 /// pixel row of the editor, as GtkSourceView asks at the top and bottom of the screen on every

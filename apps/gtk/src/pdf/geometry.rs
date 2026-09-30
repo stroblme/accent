@@ -148,10 +148,8 @@ pub fn fit_scale(sizes: &[(f32, f32)], zoom: PdfZoom, vw: f32, vh: f32) -> f32 {
 /// One zoom step in or out from the zoom `from`. The arithmetic is the document's, so a page
 /// steps in the same tenths a note does however far a fit mode left it from one.
 ///
-/// `from` is a zoom, not a layout scale: reading the step back out of [`Layout::scale`] means
-/// dividing an `f32` by [`PT_TO_PX`], and past 230 % the drift that leaves is larger than
-/// [`crate::zoom::stepped_zoom`]'s epsilon, so the next tenth is the one the page is already at and
-/// the zoom stops moving.
+/// `from` is a zoom, not a layout scale: one read back out of [`Layout::scale`] is an `f32`
+/// divided by [`PT_TO_PX`], a hair off the tenth the page was asked at.
 pub fn stepped(from: f64, out: bool) -> PdfZoom {
     PdfZoom::Scale(crate::zoom::stepped_zoom(from, out).clamp(MIN_SCALE, MAX_SCALE))
 }

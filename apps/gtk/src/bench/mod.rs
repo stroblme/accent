@@ -30,7 +30,7 @@ use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_folds,
     bench_compare_gutter, bench_compare_left, bench_compare_lines, bench_compare_pads,
-    bench_compare_pick, bench_compare_row,
+    bench_compare_page, bench_compare_pick, bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -150,7 +150,9 @@ use tags::bench_tags;
 /// is gone. `=left:<rel>` leaves a comparison with the disk copy and scrolls the editor once the
 /// copy's column is freed (see `compare::bench_compare_left`). `=folds:<rel>` compares a note
 /// whose folded section ends inside a collapsed run and asks for the iter at every pixel row
-/// (`compare::bench_compare_folds`).
+/// (`compare::bench_compare_folds`). `=page:<rel>` prints the sticky title and the page the
+/// companion shares with the editor, across a zoom and a new Indent Width
+/// (`compare::bench_compare_page`).
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
@@ -527,6 +529,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("folds:") {
                 return bench_compare_folds(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("page:") {
+                return bench_compare_page(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),

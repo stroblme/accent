@@ -415,7 +415,8 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A differing hunk carries Take / Keep Both buttons on the Theirs pane, so a merge is a click or a keystroke into the note itself. A sync conflict and a changed-on-disk note keep the Keep Theirs / Keep Mine bar under the panes; Keep Mine on a changed-on-disk note writes against the version it showed. The banner that asked drops its button while its comparison is on screen.
 - A staged change or a commit compares two texts that are not files, in a transient tab of two read-only panes keyed by what it compares, so asking twice updates one tab. It opens as the pane's preview, a list of changed files otherwise stacking a tab per click, and is re-read when the Git pane refreshes.
 - A selection in the working-tree comparison puts Stage Selected Lines on the view's menu, in a section of its own, and one in a staged comparison Unstage Selected Lines: exactly the changed rows the selection covers go in or out, a row with no line on the selection's side going with the line above it. Without a selection the entry is absent.
-- Every comparison follows the document zoom, page margins included.
+- Every comparison follows the document zoom, page margins included. A read-only side beside the editor takes the editor's page whatever moves it: its heading markers hang in the same margin, and a tab is as wide as the Indent Width makes it there.
+- The sticky block title stays off while a comparison is up: the other side has none, and one over the editor's first row alone puts the two first rows out of level.
 
 ### Language servers
 
@@ -613,7 +614,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 - Zoom In `Ctrl++` (also `Ctrl+=` and the keypad), Zoom Out `Ctrl+-`, Reset `Ctrl+0`, and `Ctrl+scroll` over a document, a PDF, an image, the preview or a terminal — never the chrome, which keeps the system interface font.
 - The chords go to the active tab: a PDF fits its pages, an image is given a size of its own and centred, a terminal scales its own font (a grid of columns, not a page of prose), a document scales the display-wide one, and a status page and a diff have no zoom. The preview is zoomed with the editor, so presentation follows.
-- A step is a tenth for the document font, a PDF page and an image alike, from the chord, the wheel or a pinch, and lands on the next tenth: a page fitted at 137 % steps to 140 %. A pinch follows the fingers in the same tenths, around the point between them. A step is taken from the zoom asked for, never read back off the rendered pixels, whose rounding would leave it stuck.
+- A step is a tenth for the document font, a PDF page and an image alike, from the chord, the wheel or a pinch, and lands on the next tenth: a page fitted at 137 % steps to 140 %. A pinch follows the fingers in the same tenths, around the point between them. A step is taken from the zoom asked for, never read back off the rendered pixels, and counted in whole percent, so a zoom a hair off its tenth still moves.
+- A wheel notch keeps what is under the pointer under it, on a PDF page and an image alike. A chord, having no pointer, keeps a PDF's reading position, the view's top-left corner, and the middle of an image's view, as a diagram's. A page or an image narrower than the view is centred in it, so that point stays put only once it fills the view.
 - The range is a tenth to eight times for a page or an image, a half to triple for the document font.
 - The readout at the end of the status bar is the Reset control: clicking it is `Ctrl+0` — 100 % for a document, Fit Height for a PDF, though a PDF opens at Fit Width.
 - Fit Height fills the viewport's height with one page, edge to edge, landing on the top of the page being read: any margin would only show the next page. A pane too narrow for that fits the width, so the whole page stays on screen.
