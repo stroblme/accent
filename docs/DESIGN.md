@@ -130,7 +130,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 **Properties**
 
-- The diagram's own widget: `AdwPreferencesGroup` rows for the selected cells — Shape (fill and line colour, each with a switch for having one; line width, dashed, rounded, shadow, opacity), Text (size, colour, bold/italic/underline, alignment), Line for an edge (route, arrow heads), Style (one cell's raw style string, applied on Enter) — and with nothing selected, the page (name, background, size).
+- The diagram's own widget: `AdwPreferencesGroup` rows for the selected cells — Shape (fill, gradient and line colour, each with a switch for having one, the gradient greyed without a fill and its direction shown while there is one; line width, dashed, rounded, shadow, opacity; flex arrows alone show only the fill and the gradient), Text (size, colour, bold/italic/underline, alignment), Line for an edge (route, arrow heads), Style (one cell's raw style string, applied on Enter) — and with nothing selected, the page (name, background, size).
 - Every row is one undo step; spin rows wait for a burst of steps to settle.
 - GTK's own colour chooser is the whole picker: it cannot be given a palette, so none is imitated.
 - The pane leaves by showing Outline first, so the stack never shows nothing. Its icon is `document-properties-symbolic`.
