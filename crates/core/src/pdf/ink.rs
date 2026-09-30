@@ -47,20 +47,57 @@ pub(super) enum Seg {
 pub struct Drawn {
     pub(super) segs: Vec<Seg>,
     pub(super) style: InkStyle,
+    pub(super) extra: Extra,
+}
+
+/// What another editor's stroke carries besides what it draws, which a stroke drawn again puts
+/// back: the strokes of its `/InkList`, in top-left page points, its note (`/Contents`) and its
+/// author (`/T`). Nothing, for ours and for the pieces a cut leaves.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(super) struct Extra {
+    pub(super) ink_list: Vec<Vec<(f32, f32)>>,
+    pub(super) contents: Option<String>,
+    pub(super) author: Option<String>,
+}
+
+impl Extra {
+    /// The same under `m`: the `/InkList` goes with the stroke.
+    pub(super) fn transformed(&self, m: Matrix) -> Extra {
+        Extra {
+            ink_list: (self.ink_list.iter())
+                .map(|stroke| stroke.iter().map(|&p| apply(m, p)).collect())
+                .collect(),
+            ..self.clone()
+        }
+    }
 }
 
 impl Drawn {
     /// The same stroke along another path, drawn straight from point to point: a piece of it.
     pub(super) fn along(&self, points: &[(f32, f32)]) -> Drawn {
-        let segs = points.iter().enumerate().map(|(i, &p)| match i {
-            0 => Seg::Move(p),
-            _ => Seg::Line(p),
-        });
         Drawn {
-            segs: segs.collect(),
+            segs: polyline(points),
             style: self.style,
+            extra: Extra::default(),
         }
     }
+}
+
+/// Straight lines through `points`, a lone point being a dot: a zero-length line, which the
+/// round cap draws.
+pub(super) fn polyline(points: &[(f32, f32)]) -> Vec<Seg> {
+    let mut segs: Vec<Seg> = points
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| match i {
+            0 => Seg::Move(p),
+            _ => Seg::Line(p),
+        })
+        .collect();
+    if let [Seg::Move(p)] = segs[..] {
+        segs.push(Seg::Line(p));
+    }
+    segs
 }
 
 /// Drop points closer than `min` to the last one kept.

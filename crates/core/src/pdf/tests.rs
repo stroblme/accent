@@ -82,17 +82,19 @@ fn pdf_of(objs: &[String]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// One 200 x 100 pt page carrying an `/Ink` the way another editor may write one: its
-/// appearance stream draws a line from (10, 10) to (40, 40) in a box of its own, `[0 0 50 50]`,
-/// which the viewer fits onto the annotation's `/Rect` at (100, 20). Read back, the line is in
-/// that box's space and nowhere near where it shows.
+/// One 200 x 100 pt page carrying an `/Ink` the way another editor may write one: two strokes,
+/// with a note and an author, whose appearance stream draws them as two paths — a line from
+/// (10, 10) to (40, 40), and one from (15, 40) to (45, 10) — in a box of its own, `[0 0 50 50]`,
+/// which the viewer fits onto the annotation's `/Rect` at (100, 20). Read back, the lines are in
+/// that box's space and nowhere near where they show; the `/InkList` has them where they do.
 fn foreign_ink_pdf() -> Vec<u8> {
-    let stream = "1 0 0 RG 2 w 10 10 m 40 40 l S";
+    let stream = "1 0 0 RG 2 w 10 10 m 40 40 l S 15 40 m 45 10 l S";
     pdf_of(&[
         "<</Type/Catalog/Pages 2 0 R>>".to_string(),
         "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
         "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Annots[4 0 R]>>".to_string(),
-        "<</Type/Annot/Subtype/Ink/Rect[100 20 150 70]/C[1 0 0]/InkList[[110 30 140 60]]\
+        "<</Type/Annot/Subtype/Ink/Rect[100 20 150 70]/C[1 0 0]\
+         /InkList[[110 30 140 60][115 60 145 30]]/Contents(two lines)/T(Ada)\
          /AP<</N 5 0 R>>/F 4>>"
             .to_string(),
         format!(
@@ -742,6 +744,62 @@ fn a_cut_line_comes_back_in_two() {
     assert_eq!(doc.annotation_count(0).unwrap(), before + 2);
 }
 
+/// Ink drawn in a space of its own answers to the pointer where it shows, by its `/InkList`,
+/// which is in the page's own points, and not where its appearance stream draws it.
+#[test]
+fn ink_drawn_in_its_own_space_is_hit_where_it_shows() {
+    let Some((_dir, doc)) = open_pdf(&foreign_ink_pdf()) else {
+        return;
+    };
+    let inks = doc.inks(0).unwrap();
+    // The `/InkList` runs from (110, 30) to (140, 60), bottom-left page origin.
+    assert!(
+        swept(&inks[0].points, (100.0, 55.0), (150.0, 55.0), 2.0),
+        "{:?}",
+        inks[0].points
+    );
+    assert!(!swept(&inks[0].points, (0.0, 75.0), (60.0, 75.0), 4.0));
+}
+
+/// Another editor's stroke taken off — an erase — and drawn again — its undo — comes back with
+/// its `/InkList`, its note and its author, every stroke of it where it showed, and so it stays
+/// through a save.
+#[test]
+fn a_foreign_stroke_taken_off_and_drawn_again_comes_back_whole() {
+    let Some((dir, mut doc)) = open_pdf(&foreign_ink_pdf()) else {
+        return;
+    };
+    let (drawn, _) = doc.take_ink(0, 0).unwrap();
+    assert_eq!(doc.annotation_count(0).unwrap(), 0);
+    doc.redraw_ink(0, &drawn).unwrap();
+    let doc = reopen(&dir, &doc);
+    {
+        let p = doc.page(0).unwrap();
+        let a = p.annotations().get(0).unwrap();
+        assert_eq!(a.contents().as_deref(), Some("two lines"));
+        assert_eq!(a.creator().as_deref(), Some("Ada"));
+        let strokes = super::annot::ink_list(&p, 0, 100.0);
+        assert_eq!(
+            strokes,
+            [
+                vec![(110.0, 70.0), (140.0, 40.0)],
+                vec![(115.0, 40.0), (145.0, 70.0)]
+            ]
+        );
+    }
+    let inks = doc.inks(0).unwrap();
+    for (from, to) in [
+        ((100.0, 55.0), (150.0, 55.0)),
+        ((130.0, 30.0), (130.0, 80.0)),
+    ] {
+        assert!(
+            swept(&inks[0].points, from, to, 2.0),
+            "{:?}",
+            inks[0].points
+        );
+    }
+}
+
 /// Ink drawn in a space of its own is read there, so a cut would draw its pieces somewhere else:
 /// it is not cuttable, and a cut leaves it alone.
 #[test]
@@ -756,9 +814,9 @@ fn ink_drawn_in_its_own_space_is_not_cut() {
         "{:?} is outside {:?}",
         inks[0].points, inks[0].bounds
     );
-    // Straight across the line where it was read, which a cuttable stroke would lose a piece to.
-    assert!(swept(&inks[0].points, (0.0, 75.0), (60.0, 75.0), 4.0));
-    let cut = doc.cut_ink(0, inks[0].index, (0.0, 75.0), (60.0, 75.0), 4.0);
+    // Straight across the line where it shows, which a cuttable stroke would lose a piece to.
+    assert!(swept(&inks[0].points, (100.0, 55.0), (150.0, 55.0), 4.0));
+    let cut = doc.cut_ink(0, inks[0].index, (100.0, 55.0), (150.0, 55.0), 4.0);
     assert!(cut.unwrap().is_none());
     assert_eq!(doc.annotation_count(0).unwrap(), 1);
 }
