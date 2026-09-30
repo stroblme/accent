@@ -1,6 +1,7 @@
 //! accent desktop app: GTK4 + libadwaita shell.
 //!
-//! `accent [vault-dir] [note.md]`. Without a path the start screen picks a vault; with one,
+//! `accent --help` lists the launch forms, which [`shell::Shell::command_line`] reads. Without a
+//! path the last vault opens again, or the start screen when there is none. On a vault,
 //! [`accent_api::Vault`] opens the index and the tree is filled straight from it, while the
 //! worker thread reconciles and watches in the background. The window is never blocked, and every
 //! change the vault reports arrives here as an [`Event`].
