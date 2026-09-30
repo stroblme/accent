@@ -19,8 +19,8 @@ use webkit6::prelude::*;
 ///
 /// `=anchor:<rel>` instead zooms the image around a point two fifths into the view, as a
 /// Ctrl+wheel there does, forty steps in from the fit and ten out, then once in by the chord,
-/// printing after each where in the image the point is (`under`, in fractions of it) and the
-/// top-left corner for the chord. Once the image is larger than the view, neither moves.
+/// printing after each where in the image the point is (`under`, in fractions of it), and the
+/// middle of the view for the chord. Once the image is larger than the view, neither moves.
 pub(super) fn bench_image(app: &Rc<App>, arg: &str) {
     if let Some(rels) = arg.strip_prefix("zoom:") {
         return zoom_svgs(app, rels);
@@ -114,10 +114,14 @@ fn zoom_around(app: &Rc<App>, rel: &str) {
                 anchor_state(&image, &scroller, at, &format!("out={out}"));
             }
         }
-        anchor_state(&image, &scroller, (0.0, 0.0), "before_chord");
+        let middle = (
+            f64::from(scroller.width()) / 2.0,
+            f64::from(scroller.height()) / 2.0,
+        );
+        anchor_state(&image, &scroller, middle, "before_chord");
         let _ = WidgetExt::activate_action(&app.window, "win.zoom-in", None);
         glib::timeout_future(Duration::from_millis(100)).await;
-        anchor_state(&image, &scroller, (0.0, 0.0), "chord");
+        anchor_state(&image, &scroller, middle, "chord");
         bench_quit(&app);
     });
 }

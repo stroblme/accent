@@ -19,8 +19,7 @@ impl App {
     /// step to be the zoom the image is already at.
     ///
     /// A step keeps what is under `at` (a point in the scroller, the pointer's) where it is, as a
-    /// PDF page does; a chord has no pointer and keeps the top-left corner, as a PDF keeps the
-    /// reading position.
+    /// PDF page does; a chord has no pointer and keeps the middle of the view, as a diagram does.
     pub fn zoom_image(
         self: &Rc<Self>,
         image: &Rc<doc::Viewer>,
@@ -38,7 +37,11 @@ impl App {
         if let (Some(size), Ok(scroller)) =
             (size, image.page.child().downcast::<gtk::ScrolledWindow>())
         {
-            keep_under(&scroller, size, at.unwrap_or_default());
+            let middle = (
+                f64::from(scroller.width()) / 2.0,
+                f64::from(scroller.height()) / 2.0,
+            );
+            keep_under(&scroller, size, at.unwrap_or(middle));
         }
         self.refresh_zoom();
         // `show_image` draws an SVG at its zoom (`look::drawn_zoom`), and does nothing for an
@@ -140,7 +143,8 @@ pub fn set_image_zoom(picture: &gtk::Picture, zoom: Option<f64>) -> Option<(i32,
     let size = zoom.and_then(|zoom| {
         let paintable = picture.paintable()?;
         let (w, h) = (paintable.intrinsic_width(), paintable.intrinsic_height());
-        (w > 0 && h > 0).then(|| ((f64::from(w) * zoom) as i32, (f64::from(h) * zoom) as i32))
+        let side = |n: i32| (f64::from(n) * zoom).round() as i32;
+        (w > 0 && h > 0).then(|| (side(w), side(h)))
     });
     match size {
         Some((w, h)) => {
