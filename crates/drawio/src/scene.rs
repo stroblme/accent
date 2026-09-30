@@ -35,6 +35,15 @@ pub enum Paint {
         start: Point,
         end: Point,
     },
+    /// A two-stop gradient from `centre` out to the ellipse of `radii`, turned `rotation`
+    /// degrees about the centre; `to` beyond it.
+    Radial {
+        from: Color,
+        to: Color,
+        centre: Point,
+        radii: (f64, f64),
+        rotation: f64,
+    },
 }
 
 /// How an outline is stroked. Joins are mitred and caps butt, as in draw.io's SVG.
@@ -317,7 +326,6 @@ impl<'a> Builder<'a> {
         let opacity = style.num("opacity", 100.0) / 100.0;
         let shape = style.shape();
         let known = shapes::is_known(shape);
-        let fill = paint(&style, rect, rotation);
         let mut stroke = stroke(&style);
         if !known && let Some(s) = stroke.as_mut() {
             // ponytail: a stencil or a shape not ported yet is drawn as its box, dashed so it
@@ -333,7 +341,10 @@ impl<'a> Builder<'a> {
             false => shapes::vertex("label", rect, &style),
         };
         for (i, mut part) in parts.into_iter().enumerate() {
-            let fill = fill.clone().filter(|_| part.fill);
+            let fill = part
+                .fill
+                .then(|| paint(&style, &part.path, rect.centre(), rotation))
+                .flatten();
             let stroke = stroke.clone().filter(|_| part.stroke);
             if fill.is_none() && stroke.is_none() && !hittable {
                 continue;
@@ -453,11 +464,6 @@ impl<'a> Builder<'a> {
         let line = stroke(&style);
         if style.shape() == "flexArrow" {
             // A band, filled; its outline is stroked only if it has a stroke colour.
-            let fill = paint(
-                &style,
-                geom::bounds_of(points.iter().copied()).unwrap_or_default(),
-                0.0,
-            );
             let width = style.num("strokeWidth", 1.0);
             for (i, part) in shapes::flex_arrow(&points, &style, width)
                 .into_iter()
@@ -466,8 +472,11 @@ impl<'a> Builder<'a> {
                 self.prims.push(Prim::Path {
                     cell: cell.id.clone(),
                     locked,
+                    fill: part
+                        .fill
+                        .then(|| paint(&style, &part.path, Point::default(), 0.0))
+                        .flatten(),
                     path: part.path,
-                    fill: fill.clone().filter(|_| part.fill),
                     stroke: line.clone().filter(|_| part.stroke),
                     opacity,
                     shadow: shadow && i == 0,
@@ -741,17 +750,31 @@ fn point_along(points: &[Point], x: f64, y: f64, offset: Point) -> Point {
     )
 }
 
-/// A cell's fill: its colour at its `fillOpacity`, as a gradient when it has a `gradientColor`
-/// (running `gradientDirection`, south by default, across the unrotated `bounds`).
-fn paint(style: &Resolved, bounds: Rect, rotation: f64) -> Option<Paint> {
+/// A cell's fill of `outline`: its colour at its `fillOpacity`, as a gradient when it has a
+/// `gradientColor`, running `gradientDirection` (south by default, or `radial` from the centre)
+/// across the outline's own box before it is turned `rotation` degrees about `centre`. draw.io's
+/// SVG gradient is in `objectBoundingBox` units of each path it fills
+/// (`mxSvgCanvas2D.createSvgGradient`), so a level arrow's south gradient crosses its band.
+fn paint(style: &Resolved, outline: &[PathCmd], centre: Point, rotation: f64) -> Option<Paint> {
     let alpha = style.num("fillOpacity", 100.0) / 100.0;
     let from = style.color("fillColor")?.fade(alpha);
-    let Some(to) = style.color("gradientColor") else {
+    let gradient = style.color("gradientColor");
+    let Some((to, bounds)) = gradient.and_then(|to| Some((to, geom::path_bounds(outline)?))) else {
         return Some(Paint::Solid(from));
     };
+    let to = to.fade(alpha);
     let (l, t, r, b) = (bounds.x, bounds.y, bounds.right(), bounds.bottom());
     let mid = bounds.centre();
     let (start, end) = match style.get("gradientDirection").unwrap_or("south") {
+        "radial" => {
+            return Some(Paint::Radial {
+                from,
+                to,
+                centre: geom::rotate(mid, centre, rotation),
+                radii: (bounds.w / 2.0, bounds.h / 2.0),
+                rotation,
+            });
+        }
         "north" => (Point::new(mid.x, b), Point::new(mid.x, t)),
         "east" => (Point::new(l, mid.y), Point::new(r, mid.y)),
         "west" => (Point::new(r, mid.y), Point::new(l, mid.y)),
@@ -759,9 +782,9 @@ fn paint(style: &Resolved, bounds: Rect, rotation: f64) -> Option<Paint> {
     };
     Some(Paint::Linear {
         from,
-        to: to.fade(alpha),
-        start: geom::rotate(start, mid, rotation),
-        end: geom::rotate(end, mid, rotation),
+        to,
+        start: geom::rotate(start, centre, rotation),
+        end: geom::rotate(end, centre, rotation),
     })
 }
 
@@ -1026,6 +1049,50 @@ mod tests {
         let style = crate::style::Style::parse("dashed=1;dashPattern=1e999 -2 NaN 3;");
         let dash = stroke(&style.resolve(false)).unwrap().dash;
         assert_eq!(dash, Some(vec![3.0]));
+    }
+
+    #[test]
+    fn a_gradient_runs_its_direction_across_the_outline_it_fills() {
+        let fill = |cell: Cell| match &scene(&page(vec![cell])).prims[0] {
+            Prim::Path { fill, .. } => fill.clone().expect("a fill"),
+            other => panic!("{other:?}"),
+        };
+        let colours = "fillColor=#ffffff;gradientColor=#000000;";
+        // A level arrow's route has no height; draw.io's SVG spans each outline's own box, so
+        // the default south still runs across the band, top to bottom.
+        let arrow = Cell::new_edge(
+            "e",
+            "1",
+            (None, Point::new(0.0, 50.0)),
+            (None, Point::new(200.0, 50.0)),
+            &format!("shape=flexArrow;endArrow=none;{colours}"),
+        );
+        match fill(arrow) {
+            Paint::Linear { start, end, .. } => {
+                assert_eq!((start.x, start.y, end.y), (end.x, 45.0, 55.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        let r = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let shape = |direction: &str| {
+            let style = format!("{colours}gradientDirection={direction};");
+            fill(Cell::new_vertex("v", "1", r, &style, ""))
+        };
+        match shape("west") {
+            Paint::Linear { start, end, .. } => {
+                assert_eq!(
+                    (start, end),
+                    (Point::new(100.0, 20.0), Point::new(0.0, 20.0))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        match shape("radial") {
+            Paint::Radial { centre, radii, .. } => {
+                assert_eq!((centre, radii), (Point::new(50.0, 20.0), (50.0, 20.0)));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
