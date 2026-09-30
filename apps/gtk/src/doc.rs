@@ -13,7 +13,7 @@ use std::rc::Rc;
 use accent_core::path::{FileType, file_type};
 use gtk::gdk;
 
-use crate::diff::DiffTab;
+use crate::difftab::DiffTab;
 use crate::editor::Tab;
 use crate::fileops;
 use crate::look::Look;

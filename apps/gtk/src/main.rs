@@ -20,6 +20,7 @@ mod diagnostics;
 mod diagram;
 mod dialogs;
 mod diff;
+mod difftab;
 mod doc;
 mod editor;
 mod events;
@@ -595,7 +596,7 @@ impl App {
             .collect()
     }
 
-    fn diffs(&self) -> Vec<Rc<diff::DiffTab>> {
+    fn diffs(&self) -> Vec<Rc<difftab::DiffTab>> {
         self.docs
             .borrow()
             .iter()

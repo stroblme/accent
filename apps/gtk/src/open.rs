@@ -1018,7 +1018,7 @@ impl App {
         title: &str,
         old: (&str, &str),
         new: (&str, &str),
-    ) -> Rc<diff::DiffTab> {
+    ) -> Rc<difftab::DiffTab> {
         if let Some(Doc::Diff(tab)) = self.doc_for(key) {
             tab.set_texts(old.1, new.1);
             self.reveal_page(&tab.page);
@@ -1029,7 +1029,7 @@ impl App {
             _ => flavour_of(file),
         };
         let font = self.config.borrow().editor_font.clone();
-        let tab = diff::DiffTab::open(
+        let tab = difftab::DiffTab::open(
             &self.tabs(),
             key,
             file,
