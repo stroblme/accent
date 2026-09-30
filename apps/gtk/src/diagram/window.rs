@@ -215,6 +215,7 @@ impl App {
             "diagram-undo" => tab.undo(),
             "diagram-redo" => tab.redo(),
             "diagram-delete" => tab.delete(),
+            "diagram-delete-all" => tab.delete_all(),
             "diagram-duplicate" => tab.duplicate(),
             "diagram-group" => tab.group(),
             "diagram-copy" => tab.copy(),

@@ -604,7 +604,18 @@ impl DiagramTab {
         }
     }
 
+    /// Delete the selection as draw.io's Delete does: the edges on it stay, let go of it where
+    /// they are drawn.
     pub fn delete(self: &Rc<Self>) {
+        let ids = self.selection();
+        if !ids.is_empty() {
+            let shown = self.view.sheet().unwrap_or_default();
+            self.edit(|e, page| e.remove(page, &ids, &shown.scene));
+        }
+    }
+
+    /// Delete the selection with every edge on it, as draw.io's Delete All (`Ctrl+Delete`).
+    pub fn delete_all(self: &Rc<Self>) {
         let ids = self.selection();
         if !ids.is_empty() {
             self.edit(|e, page| e.delete(page, &ids));
@@ -1205,6 +1216,9 @@ impl DiagramTab {
                     gdk::Key::c if ctrl => tab.run("win.diagram-copy"),
                     gdk::Key::x if ctrl => tab.run("win.diagram-cut"),
                     gdk::Key::v if ctrl => tab.run("win.diagram-paste"),
+                    gdk::Key::Delete | gdk::Key::BackSpace if ctrl => {
+                        tab.run("win.diagram-delete-all")
+                    }
                     gdk::Key::Delete | gdk::Key::BackSpace => tab.run("win.diagram-delete"),
                     gdk::Key::Return | gdk::Key::KP_Enter if !ctrl => {
                         tab.run("win.diagram-edit-label")
