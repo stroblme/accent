@@ -111,6 +111,8 @@ pub fn open(
         .build();
     let overlay = gtk::Overlay::builder().child(&scroller).build();
     let ring = tools::DiagramRing::new();
+    // Select is in hand from the start, and its button says so.
+    ring.set_tool(Tool::Select);
     overlay.add_overlay(ring.widget());
     let banner = adw::Banner::builder()
         .title("This diagram changed on disk")
