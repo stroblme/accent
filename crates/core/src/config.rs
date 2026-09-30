@@ -301,10 +301,11 @@ pub struct Session {
     pub view: String,
     /// Document zoom, 1.0 being the font as GNOME sets it.
     pub zoom: f64,
-    /// Notes opened in this vault, most recent first. Filesystem mtime is what the index can
-    /// offer, and it says when a note last changed, not when it was last read; the palette wants
-    /// the second, so the window records it.
-    pub recent_notes: Vec<String>,
+    /// Files opened in this vault, most recent first. Filesystem mtime is what the index can
+    /// offer, and it says when a file last changed, not when it was last read; the palette wants
+    /// the second, so the window records it. Called `recent_notes` in older files.
+    #[serde(alias = "recent_notes")]
+    pub recent_files: Vec<String>,
     /// Full action names of the commands run from the palette or a menu, most recent first.
     pub recent_commands: Vec<String>,
     /// Where each PDF this vault has opened was left, keyed by vault-relative path.
@@ -331,7 +332,7 @@ impl Default for Session {
             sidebar_width: 280,
             view: "editor".to_string(),
             zoom: 1.0,
-            recent_notes: Vec::new(),
+            recent_files: Vec::new(),
             recent_commands: Vec::new(),
             pdf: BTreeMap::new(),
             diagram: BTreeMap::new(),
@@ -1200,7 +1201,7 @@ daily_dir = "Daily"
             sidebar_width: 320,
             view: "preview".to_string(),
             zoom: 1.2,
-            recent_notes: vec!["Daily/2026-09-03.md".to_string()],
+            recent_files: vec!["Daily/2026-09-03.md".to_string()],
             recent_commands: vec!["win.save".to_string()],
             pdf: BTreeMap::from([(
                 "Attachments/paper.pdf".to_string(),
@@ -1243,7 +1244,7 @@ daily_dir = "Daily"
             assert_eq!(back.sidebar_width, 320);
             assert_eq!(back.view, "preview");
             assert_eq!(back.zoom, 1.2);
-            assert_eq!(back.recent_notes, s.recent_notes);
+            assert_eq!(back.recent_files, s.recent_files);
             assert_eq!(back.recent_commands, s.recent_commands);
             assert_eq!(back.terminals, s.terminals);
             assert_eq!(back.pinned, s.pinned);
@@ -1260,8 +1261,8 @@ daily_dir = "Daily"
     }
 
     /// A state file from another version must still load: one written before `zoom` existed gets
-    /// the default, and the `pane` every file written until now carries is simply dropped — which
-    /// sidebar pane was showing is no longer restored.
+    /// the default, the `pane` every file written until now carries is simply dropped — which
+    /// sidebar pane was showing is no longer restored — and `recent_notes` is `recent_files`.
     #[test]
     fn session_from_another_version_loads() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1274,13 +1275,14 @@ daily_dir = "Daily"
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(
                 &path,
-                r#"{"open":["a.md"],"active":"a.md","sidebar":true,"sidebar_width":280,"view":"editor","pane":"git"}"#,
+                r#"{"open":["a.md"],"active":"a.md","sidebar":true,"sidebar_width":280,"view":"editor","pane":"git","recent_notes":["a.md","b.pdf"]}"#,
             )
             .unwrap();
 
             let back = Session::load(&vault);
             assert_eq!(back.open, ["a.md"]);
             assert_eq!(back.zoom, 1.0);
+            assert_eq!(back.recent_files, ["a.md", "b.pdf"]);
             // No layout was written then, so every tab comes back into one pane.
             assert_eq!(back.layout, None);
             assert_eq!(back.panes(), Some(pane(&["a.md"], None)));
