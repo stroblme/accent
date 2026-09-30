@@ -5,6 +5,33 @@ use std::f64::consts::{FRAC_PI_2, PI};
 
 use crate::geom::{Point, Rect};
 
+/// Which outline an end attaches to: the `perimeter` a vertex's style names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PerimeterKind {
+    #[default]
+    Rectangle,
+    Ellipse,
+}
+
+impl PerimeterKind {
+    /// The perimeter registered under `name` (mxStyleRegistry.js 70-74), the rectangle's for
+    /// any other.
+    pub fn named(name: Option<&str>) -> PerimeterKind {
+        match name {
+            Some("ellipsePerimeter") => PerimeterKind::Ellipse,
+            _ => PerimeterKind::Rectangle,
+        }
+    }
+
+    /// The point on the outline filling `bounds` on the way to `next`.
+    pub fn point(self, bounds: Rect, next: Point, orthogonal: bool) -> Point {
+        match self {
+            PerimeterKind::Rectangle => rectangle(bounds, next, orthogonal),
+            PerimeterKind::Ellipse => ellipse(bounds, next, orthogonal),
+        }
+    }
+}
+
 /// The point on `bounds`' outline on the way to `next` (`mxPerimeter.RectanglePerimeter`).
 /// `orthogonal` projects straight across instead of towards the centre.
 // mxPerimeter.js 84-153
