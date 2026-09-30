@@ -441,31 +441,29 @@ impl Shell {
             self.open_vault(gtk_app, PathBuf::from(root), note);
             return glib::ExitCode::SUCCESS;
         }
-        // Resolved against the *invoking* process's directory, not this one's: a second
-        // `accent notes/x.md` is forwarded here by the single instance, whose cwd is its own.
-        let path = match command_line.create_file_for_arg(arg).path() {
-            Some(path) => path,
-            None => {
-                // `printerr_literal` needs glib 2.80, which this build does not enable; a
-                // local invocation is the only one that has a terminal to print to anyway.
-                eprintln!("cannot resolve: {}", arg.to_string_lossy());
-                return glib::ExitCode::FAILURE;
-            }
+        let Some(path) = resolve(command_line, arg) else {
+            return glib::ExitCode::FAILURE;
         };
-        match path.canonicalize() {
-            Ok(root) if root.is_dir() => {
-                let note = args.get(2).and_then(|a| a.to_str()).map(str::to_string);
-                self.open_vault(gtk_app, root, note);
-            }
-            // A file rather than a folder: opened where it belongs, which is how accent works as
-            // the system's PDF viewer and text editor.
-            Ok(file) => self.open_file(gtk_app, file),
-            Err(e) => {
-                eprintln!("cannot open {}: {e}", path.display());
-                return glib::ExitCode::FAILURE;
+        if path.is_dir() {
+            let note = args.get(2).and_then(|a| a.to_str()).map(str::to_string);
+            self.open_vault(gtk_app, path, note);
+            return glib::ExitCode::SUCCESS;
+        }
+        // Files rather than a folder: the first opened where it belongs, which is how accent works
+        // as the system's PDF viewer and text editor, and the rest as tabs beside it, since Files
+        // hands over every file picked at once. One the window's vault does not hold opens there
+        // from outside it.
+        let Some(app) = self.open_file(gtk_app, path) else {
+            return glib::ExitCode::SUCCESS;
+        };
+        let mut code = glib::ExitCode::SUCCESS;
+        for arg in &args[2..] {
+            match resolve(command_line, arg) {
+                Some(path) => app.open_path(&app.key_for(&path)),
+                None => code = glib::ExitCode::FAILURE,
             }
         }
-        glib::ExitCode::SUCCESS
+        code
     }
 
     /// Open Folder…: the picker, straight away.
@@ -848,8 +846,9 @@ impl Shell {
     }
 
     /// Open `path` wherever it belongs: in the window whose vault contains it, or in the window
-    /// kept for documents that are in no vault — never the one `accent --terminal` opened.
-    fn open_file(self: &Rc<Self>, gtk_app: &adw::Application, path: PathBuf) {
+    /// kept for documents that are in no vault — never the one `accent --terminal` opened. The
+    /// window it went to, which files opened with it follow.
+    fn open_file(self: &Rc<Self>, gtk_app: &adw::Application, path: PathBuf) -> Option<Rc<App>> {
         let inside = self.windows.borrow().iter().find_map(|app| {
             let rel = path.strip_prefix(app.key.borrow().vault()?).ok()?;
             Some((app.clone(), rel.to_string_lossy().into_owned()))
@@ -857,13 +856,12 @@ impl Shell {
         if let Some((app, rel)) = inside {
             app.window.present();
             app.open_path(&rel);
-            return;
+            return Some(app);
         }
-        let Some(app) = self.loose_window(gtk_app, Loose::Documents) else {
-            return;
-        };
+        let app = self.loose_window(gtk_app, Loose::Documents)?;
         app.window.present();
         app.open_path(&path.to_string_lossy());
+        Some(app)
     }
 
     /// The window with no vault of this `kind`, built if this is the first thing to want one since
@@ -894,19 +892,21 @@ const FLAGS: [&str; 3] = ["--terminal", "-t", "--new-window"];
 /// What `accent --help` prints: every form [`Shell::command_line`] takes.
 const USAGE: &str = "\
 Usage:
-  accent [PATH [NOTE]]          Open a vault or a file
+  accent [PATH [NOTE]]          Open a vault, and NOTE in it
+  accent FILE...                Open files, all in one window
   accent -t, --terminal [DIR]   Open a shell at DIR, or at home
   accent terminal://NAME [DIR]  Open terminal session NAME, and a shell at DIR
   accent --new-window           Show the start screen
   accent -h, --help             Print this help
   accent --version              Print the version
 
-PATH is a folder, opened as a vault; an ssh://[USER@]HOST[:PORT]/PATH address,
-a vault on that host; or a file (a note, PDF, image, diagram or any text),
-opened in the window of the open vault that holds it, else in a window without
-a vault. NOTE, a path inside the vault, opens in a tab. Without PATH the last
-vault opens, or the start screen if there is none. DIR may be an ssh://
-address, for a shell on that host. A session NAME not seen before is made.
+PATH is a folder, opened as a vault, or an ssh://[USER@]HOST[:PORT]/PATH
+address, a vault on that host. NOTE, a path inside the vault, opens in a tab.
+Without PATH the last vault opens, or the start screen if there is none. The
+first FILE (a note, PDF, image, diagram or any text) opens in the window of the
+open vault that holds it, else in a window without a vault, and the others as
+tabs in the same window. DIR may be an ssh:// address, for a shell on that
+host. A session NAME not seen before is made.
 ";
 
 /// What the launching process answers itself, before `app.run` hands the arguments to the
@@ -938,6 +938,21 @@ fn terminal_cwd(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
         .skip(1)
         .map(|arg| arg.as_os_str())
         .find(|arg| !arg.to_str().is_some_and(|arg| FLAGS.contains(&arg)))
+}
+
+/// A path named on the command line, resolved against the *invoking* process's directory, not
+/// this one's: a second `accent notes/x.md` is forwarded here by the single instance, whose cwd
+/// is its own. `None`, said on stderr, where it names nothing.
+fn resolve(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) -> Option<PathBuf> {
+    let Some(path) = command_line.create_file_for_arg(arg).path() else {
+        // `printerr_literal` needs glib 2.80, which this build does not enable; a local
+        // invocation is the only one that has a terminal to print to anyway.
+        eprintln!("cannot resolve: {}", arg.to_string_lossy());
+        return None;
+    };
+    path.canonicalize()
+        .inspect_err(|e| eprintln!("cannot open {}: {e}", path.display()))
+        .ok()
 }
 
 /// Where a shell was asked for on the command line: on a host, as an `ssh://` address read back
