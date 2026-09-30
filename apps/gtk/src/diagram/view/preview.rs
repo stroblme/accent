@@ -74,7 +74,7 @@ impl Live {
         if let Err(e) = apply(&mut page, edit, self.moving.as_ref()) {
             tracing::debug!("diagram preview refused: {e}");
         }
-        let scene = accent_drawio::scene(&page);
+        let scene = accent_drawio::scene_with(&page, &sheet.ctx);
         let cache = match self.shown {
             None => sheet_cache.carried(&sheet.scene.prims, &scene.prims),
             Some(_) => self.cache.carried(&self.scene.prims, &scene.prims),
