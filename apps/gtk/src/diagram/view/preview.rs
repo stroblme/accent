@@ -45,7 +45,7 @@ impl Preview {
     fn start(sheet: &Sheet, edit: &Edit) -> Preview {
         let mut base = sheet.page.clone();
         let moving = match edit {
-            Edit::Move { ids, .. } => match edit::start_move(&mut base, ids) {
+            Edit::Move { ids, .. } => match edit::start_move(&mut base, ids, &sheet.scene) {
                 Ok(moving) if moving.count <= MAX_LIVE => Some(moving),
                 _ => return Preview::Boxed,
             },

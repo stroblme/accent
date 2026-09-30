@@ -549,9 +549,7 @@ impl DiagramTab {
     fn apply(self: &Rc<Self>, edit: Edit) {
         match edit {
             Edit::Select(ids) => self.select(ids),
-            Edit::Move { ids, delta } => {
-                self.edit(|e, page| e.move_cells(page, &ids, delta.x, delta.y));
-            }
+            Edit::Move { ids, delta } => self.move_cells(&ids, delta.x, delta.y),
             Edit::Resize { id, rect } => self.edit(|e, page| e.resize(page, &id, rect)),
             Edit::Add { tool, rect } => {
                 let style = tool.style(&self.options.get());
@@ -625,8 +623,14 @@ impl DiagramTab {
     pub fn nudge(self: &Rc<Self>, dx: f64, dy: f64) {
         let ids = self.selection();
         if !ids.is_empty() {
-            self.edit(|e, page| e.move_cells(page, &ids, dx, dy));
+            self.move_cells(&ids, dx, dy);
         }
+    }
+
+    /// Move `ids` by `dx`, `dy`, an edge letting go of a shape where the canvas draws its end.
+    fn move_cells(self: &Rc<Self>, ids: &[CellId], dx: f64, dy: f64) {
+        let shown = self.view.sheet().unwrap_or_default();
+        self.edit(|e, page| e.move_cells(page, ids, dx, dy, &shown.scene));
     }
 
     pub fn reorder(self: &Rc<Self>, z: accent_drawio::ZOrder) {
