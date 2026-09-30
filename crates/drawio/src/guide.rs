@@ -1,12 +1,14 @@
-// The snapping here is derived from draw.io mxgraph/src/util/mxGuide.js (Apache-2.0, Copyright (c)
-// 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see
-// crates/drawio/NOTICE.
-//! draw.io's guides for a move (`mxGuide.move`): the moved box's sides and middle snap to those of
-//! the other shapes and to the page's middle, and its gaps to the shapes before and after it in a
-//! row or a column snap to the gap those keep between them; each snap shows as a line. An axis no
+// The snapping here is derived from draw.io mxgraph/src/util/mxGuide.js and the size guides of
+// js/grapheditor/Graph.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io
+// AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
+//! draw.io's guides. For a move (`mxGuide.move`): the moved box's sides and middle snap to those
+//! of the other shapes and to the page's middle, and its gaps to the shapes before and after it
+//! in a row or a column snap to the gap those keep between them. For a resize (the size guides,
+//! Graph.js 27871-28476): the size a handle changes snaps to another shape's, and otherwise the
+//! side it drags to another shape's side or middle. Each snap shows as a line, and an axis no
 //! guide takes snaps to the grid. In page units, `px` being a screen pixel's worth.
 
-use crate::geom::{Point, Rect};
+use crate::geom::{Point, Rect, rotate};
 
 /// A line to draw, in page units.
 pub type Line = (Point, Point);
@@ -308,6 +310,206 @@ fn equal_gap(
     Some((result, lines))
 }
 
+/// A shape a resize may take the size of, or line a side up with: its box as it shows, and the
+/// turn the size mark on it takes (none for a quarter turn, whose box is already turned).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Neighbour {
+    pub rect: Rect,
+    pub turn: f64,
+}
+
+/// The sides of a box a resize handle drags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sides {
+    pub left: bool,
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+}
+
+/// What a resize snapped to, for [`Resized::lines`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Resized {
+    /// The shapes whose width and whose height the box took.
+    width: Option<Neighbour>,
+    height: Option<Neighbour>,
+    /// A dragged side on another shape's side or middle, across x and across y: where, and that
+    /// shape's box.
+    edge_x: Option<(f64, Rect)>,
+    edge_y: Option<(f64, Rect)>,
+    /// The resized shape is turned a quarter, so its width is measured against their heights.
+    swap: bool,
+}
+
+/// Snap `result`, `bounds` resized by dragging `sides` and in the shape's own frame (unturned),
+/// to `shapes`, the nearest first (`mxVertexHandler.union` with the size guides): a size the
+/// handle changes to the size of a shape within the tolerance (`snapSize`), and where no size
+/// snapped, on an unturned shape, a dragged side to a shape's side or middle (`snapEdges`). The
+/// side not dragged stays where it is.
+pub fn snap_resize(
+    result: &mut Rect,
+    bounds: &Rect,
+    sides: Sides,
+    rotation: f64,
+    shapes: &[Neighbour],
+    grid: Option<f64>,
+    px: f64,
+) -> Resized {
+    let tolerance = grid.map_or(TOLERANCE, |g| g / 2.0);
+    let swap = rotation.rem_euclid(180.0) == 90.0;
+    let mut snapped = Resized {
+        swap,
+        ..Resized::default()
+    };
+    // The size of the shape nearest in size within the tolerance, the nearest shape winning a tie
+    // (`getSizeGuideMatch`).
+    let size_match = |size: f64, width: bool| {
+        let mut best: Option<(Neighbour, f64, f64)> = None;
+        for n in shapes {
+            let value = if width != swap { n.rect.w } else { n.rect.h };
+            let diff = (value - size).abs();
+            if value >= 1.0 && diff <= tolerance && best.is_none_or(|b| diff < b.2) {
+                best = Some((*n, value, diff));
+            }
+        }
+        best
+    };
+    // A changed width keeps the side not dragged: the left one unless the handle drags it.
+    if (sides.left || sides.right)
+        && let Some((n, width, _)) = size_match(result.w, true)
+    {
+        let kept = match sides.left {
+            true => (result.right() - bounds.right()).abs() <= 0.01,
+            false => (result.x - bounds.x).abs() <= 0.01,
+        };
+        if kept {
+            if sides.left {
+                result.x = result.right() - width;
+            }
+            result.w = width;
+            snapped.width = Some(n);
+        }
+    }
+    if (sides.top || sides.bottom)
+        && let Some((n, height, _)) = size_match(result.h, false)
+    {
+        let kept = match sides.top {
+            true => (result.bottom() - bounds.bottom()).abs() <= 0.01,
+            false => (result.y - bounds.y).abs() <= 0.01,
+        };
+        if kept {
+            if sides.top {
+                result.y = result.bottom() - height;
+            }
+            result.h = height;
+            snapped.height = Some(n);
+        }
+    }
+    if rotation != 0.0 {
+        return snapped;
+    }
+    // The side or middle of a shape nearest `value` within the tolerance (`getEdgeGuideMatch`).
+    let tolerance = tolerance.max(2.0 * px);
+    let edge_match = |value: f64, horizontal: bool| {
+        let mut best: Option<(f64, Rect, f64)> = None;
+        for n in shapes {
+            let (s, l) = span(&n.rect, horizontal);
+            for at in [s, s + l / 2.0, s + l] {
+                let diff = (at - value).abs();
+                if diff <= tolerance && best.is_none_or(|b| diff < b.2) {
+                    best = Some((at, n.rect, diff));
+                }
+            }
+        }
+        best.map(|(at, by, _)| (at, by))
+    };
+    if snapped.width.is_none() {
+        if sides.left && (result.right() - bounds.right()).abs() <= 0.01 {
+            if let Some((at, by)) = edge_match(result.x, true)
+                && result.right() - at >= 1.0
+            {
+                (result.w, result.x) = (result.right() - at, at);
+                snapped.edge_x = Some((at, by));
+            }
+        } else if sides.right
+            && (result.x - bounds.x).abs() <= 0.01
+            && let Some((at, by)) = edge_match(result.right(), true)
+            && at - result.x >= 1.0
+        {
+            result.w = at - result.x;
+            snapped.edge_x = Some((at, by));
+        }
+    }
+    if snapped.height.is_none() {
+        if sides.top && (result.bottom() - bounds.bottom()).abs() <= 0.01 {
+            if let Some((at, by)) = edge_match(result.y, false)
+                && result.bottom() - at >= 1.0
+            {
+                (result.h, result.y) = (result.bottom() - at, at);
+                snapped.edge_y = Some((at, by));
+            }
+        } else if sides.bottom
+            && (result.y - bounds.y).abs() <= 0.01
+            && let Some((at, by)) = edge_match(result.bottom(), false)
+            && at - result.y >= 1.0
+        {
+            result.h = at - result.y;
+            snapped.edge_y = Some((at, by));
+        }
+    }
+    snapped
+}
+
+impl Resized {
+    /// The lines that show the snaps, the resized box being `shown` turned `rotation`
+    /// (`redrawSizeGuides`): a size taken marked across both boxes, and a side lined up with
+    /// another shape's by a line along both.
+    pub fn lines(&self, shown: &Rect, rotation: f64) -> Vec<Line> {
+        let mut lines = Vec::new();
+        if let Some(n) = &self.width {
+            lines.extend(size_mark(shown, rotation, true));
+            lines.extend(size_mark(&n.rect, n.turn, !self.swap));
+        }
+        if let Some(n) = &self.height {
+            lines.extend(size_mark(shown, rotation, false));
+            lines.extend(size_mark(&n.rect, n.turn, self.swap));
+        }
+        if let Some((x, by)) = &self.edge_x {
+            let (top, bottom) = (shown.y.min(by.y), shown.bottom().max(by.bottom()));
+            lines.push((Point::new(*x, top), Point::new(*x, bottom)));
+        }
+        if let Some((y, by)) = &self.edge_y {
+            let (left, right) = (shown.x.min(by.x), shown.right().max(by.right()));
+            lines.push((Point::new(left, *y), Point::new(right, *y)));
+        }
+        lines
+    }
+}
+
+/// A box's width (or height) marked by a line through its middle with a tick at either end,
+/// turned `turn` degrees about the middle (`createSizeGuideShape`).
+fn size_mark(r: &Rect, turn: f64, horizontal: bool) -> [Line; 3] {
+    let c = r.centre();
+    let (p1, p2, d) = match horizontal {
+        true => (
+            Point::new(r.x, c.y),
+            Point::new(r.right(), c.y),
+            Point::new(0.0, SHIFT),
+        ),
+        false => (
+            Point::new(c.x, r.y),
+            Point::new(c.x, r.bottom()),
+            Point::new(SHIFT, 0.0),
+        ),
+    };
+    let at = |p: Point, k: f64| rotate(Point::new(p.x + k * d.x, p.y + k * d.y), c, turn);
+    [
+        (at(p1, 0.0), at(p2, 0.0)),
+        (at(p1, -1.0), at(p1, 1.0)),
+        (at(p2, -1.0), at(p2, 1.0)),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +606,51 @@ mod tests {
             None,
         );
         assert_eq!(d.x, 100.0, "80 on either side");
+    }
+
+    fn neighbour(x: f64, y: f64, w: f64, h: f64) -> Neighbour {
+        Neighbour {
+            rect: Rect::new(x, y, w, h),
+            turn: 0.0,
+        }
+    }
+
+    const RIGHT: Sides = Sides {
+        left: false,
+        top: false,
+        right: true,
+        bottom: false,
+    };
+
+    #[test]
+    fn a_resize_takes_a_neighbour_s_size_and_marks_both() {
+        let bounds = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let shapes = [neighbour(200.0, 0.0, 83.0, 40.0)];
+        // Dragged to 80 wide on the grid; the neighbour's 83 is within half the grid.
+        let mut r = Rect::new(0.0, 0.0, 80.0, 40.0);
+        let snapped = snap_resize(&mut r, &bounds, RIGHT, 0.0, &shapes, Some(10.0), 1.0);
+        assert_eq!(r, Rect::new(0.0, 0.0, 83.0, 40.0));
+        let lines = snapped.lines(&r, 0.0);
+        assert_eq!(lines.len(), 6, "a line and two ticks on each box");
+        assert_eq!(lines[0], (Point::new(0.0, 20.0), Point::new(83.0, 20.0)));
+        assert_eq!(lines[3], (Point::new(200.0, 20.0), Point::new(283.0, 20.0)));
+    }
+
+    #[test]
+    fn a_dragged_side_lines_up_with_a_neighbour_s_middle() {
+        let bounds = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let shapes = [neighbour(50.0, 100.0, 40.0, 40.0)];
+        let mut r = Rect::new(0.0, 0.0, 72.0, 40.0);
+        let snapped = snap_resize(&mut r, &bounds, RIGHT, 0.0, &shapes, Some(10.0), 1.0);
+        assert_eq!(r.w, 70.0);
+        let lines = snapped.lines(&r, 0.0);
+        assert_eq!(
+            lines,
+            vec![(Point::new(70.0, 0.0), Point::new(70.0, 140.0))]
+        );
+        // A turned shape takes sizes only.
+        let mut r = Rect::new(0.0, 0.0, 72.0, 40.0);
+        let snapped = snap_resize(&mut r, &bounds, RIGHT, 30.0, &shapes, Some(10.0), 1.0);
+        assert_eq!((r.w, snapped), (72.0, Resized::default()));
     }
 }

@@ -1,11 +1,12 @@
 //! What the canvas draws over the page: the selection, its handles, the connection points in
 //! reach and whatever a drag is doing.
 
-use accent_drawio::Rect;
 use accent_drawio::geom::{self, rotate};
+use accent_drawio::guide;
+use accent_drawio::{Point, Rect};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{graphene, gsk};
+use gtk::{gdk, graphene, gsk};
 
 use super::drag::Drag;
 use super::preview::Preview;
@@ -152,16 +153,7 @@ impl DiagramView {
                     stroke.set_dash(&[3.0, 3.0]);
                     snapshot.append_stroke(&builder.to_path(), &stroke, &accent);
                 }
-                // The guides, a pixel wide whatever the zoom.
-                if !lines.is_empty() {
-                    let builder = gsk::PathBuilder::new();
-                    for (a, b) in lines {
-                        let (a, b) = (frame.to_content(a), frame.to_content(b));
-                        builder.move_to(a.x as f32, a.y as f32);
-                        builder.line_to(b.x as f32, b.y as f32);
-                    }
-                    snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
-                }
+                guide_lines(snapshot, frame, &lines, &accent);
             }
             Drag::Band { from, .. } => {
                 let r = frame.rect(&Rect::from_corners(*from, pointer));
@@ -192,7 +184,33 @@ impl DiagramView {
                 builder.line_to(b.x as f32, b.y as f32);
                 snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
             }
-            Drag::Resize { .. } | Drag::Rotate { .. } | Drag::Pan { .. } => {}
+            Drag::Resize {
+                from,
+                handle,
+                rect,
+                rotation,
+                guides,
+                ..
+            } => {
+                let delta = Point::new(pointer.x - from.x, pointer.y - from.y);
+                let (_, lines) = self.resize_to(rect, *rotation, *handle, delta, guides, free);
+                guide_lines(snapshot, frame, &lines, &accent);
+            }
+            Drag::Rotate { .. } | Drag::Pan { .. } => {}
         }
     }
+}
+
+/// The guides, a pixel wide whatever the zoom.
+fn guide_lines(snapshot: &gtk::Snapshot, frame: &Frame, lines: &[guide::Line], colour: &gdk::RGBA) {
+    if lines.is_empty() {
+        return;
+    }
+    let builder = gsk::PathBuilder::new();
+    for (a, b) in lines {
+        let (a, b) = (frame.to_content(*a), frame.to_content(*b));
+        builder.move_to(a.x as f32, a.y as f32);
+        builder.line_to(b.x as f32, b.y as f32);
+    }
+    snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), colour);
 }

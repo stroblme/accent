@@ -2,6 +2,7 @@
 //! when it ends.
 
 use accent_drawio::geom::rotate;
+use accent_drawio::guide::{self, Neighbour};
 use accent_drawio::{CellId, Point, Rect};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -37,6 +38,8 @@ pub(super) enum Drag {
         rect: Rect,
         /// The shape's turn, in degrees: its handles are in its own frame.
         rotation: f64,
+        /// The shapes its size and sides snap to.
+        guides: Vec<Neighbour>,
     },
     /// Turning shape `id`, whose unturned rectangle is `rect`, by its rotate handle.
     Rotate {
@@ -85,10 +88,14 @@ impl DiagramView {
                         Grip::Rotate => Drag::Rotate { id, rect },
                         Grip::Resize(handle) => Drag::Resize {
                             from: p,
-                            id,
                             handle,
                             rect,
                             rotation,
+                            guides: match sheet.guides {
+                                true => sheet.size_guides(&id, &self.guide_area()),
+                                false => Vec::new(),
+                            },
+                            id,
                         },
                     });
                 }
@@ -175,7 +182,7 @@ impl DiagramView {
         bounds: &Rect,
         guides: &[Rect],
         free: bool,
-    ) -> (Point, Vec<accent_drawio::guide::Line>) {
+    ) -> (Point, Vec<guide::Line>) {
         let raw = Point::new(to.x - from.x, to.y - from.y);
         let Some(sheet) = self.sheet().filter(|_| !free) else {
             return (raw, Vec::new());
@@ -186,12 +193,52 @@ impl DiagramView {
             return (snapped.unwrap_or(raw), Vec::new());
         }
         let (w, h) = sheet.scene.page_size;
-        let targets = accent_drawio::guide::Targets {
+        let targets = guide::Targets {
             shapes: guides,
             page: Rect::new(0.0, 0.0, w, h),
         };
         let px = 1.0 / self.scale();
-        accent_drawio::guide::snap(bounds, raw, &targets, sheet.grid, px)
+        guide::snap(bounds, raw, &targets, sheet.grid, px)
+    }
+
+    /// `rect`, turned `rotation`, resized by dragging `handle` by `delta`, and the lines that
+    /// show the guides it snapped to: on the grid and the size guides unless `free` (Alt, as in
+    /// draw.io, Graph.js 27881) or the page has its guides off.
+    pub(super) fn resize_to(
+        &self,
+        rect: &Rect,
+        rotation: f64,
+        handle: Handle,
+        delta: Point,
+        guides: &[Neighbour],
+        free: bool,
+    ) -> (Rect, Vec<guide::Line>) {
+        let grid = self.grid(free);
+        let guided = !free && !guides.is_empty() && self.sheet().is_some_and(|s| s.guides);
+        let px = 1.0 / self.scale();
+        let mut snapped = None;
+        let resized = geometry::resize_rotated(rect, rotation, handle, delta, grid, |r, bounds| {
+            if guided {
+                let sides = handle.sides();
+                snapped = Some(guide::snap_resize(
+                    r, bounds, sides, rotation, guides, grid, px,
+                ));
+            }
+        });
+        let lines = snapped.map_or(Vec::new(), |s| s.lines(&resized, rotation));
+        (resized, lines)
+    }
+
+    /// Where guides may be seen, in page units: what is on screen and half as much again all
+    /// round (`getSizeGuideStates`).
+    fn guide_area(&self) -> Rect {
+        let near = self.page_at(0.0, 0.0);
+        let scale = self.scale();
+        let (w, h) = (
+            f64::from(self.width()) / scale,
+            f64::from(self.height()) / scale,
+        );
+        Rect::new(near.x - w / 2.0, near.y - h / 2.0, 2.0 * w, 2.0 * h)
     }
 
     pub(super) fn grid(&self, free: bool) -> Option<f64> {
@@ -218,12 +265,14 @@ impl DiagramView {
                 handle,
                 rect,
                 rotation,
+                guides,
             } => {
                 let delta = Point::new(p.x - from.x, p.y - from.y);
-                let grid = self.grid(free);
                 Some(Edit::Resize {
                     id: id.clone(),
-                    rect: geometry::resize_rotated(rect, *rotation, *handle, delta, grid),
+                    rect: self
+                        .resize_to(rect, *rotation, *handle, delta, guides, free)
+                        .0,
                 })
             }
             Drag::Rotate { id, rect } => Some(Edit::Rotate {
