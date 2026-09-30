@@ -625,6 +625,221 @@ pub(super) fn cylinder_margins(rect: Rect, style: &Resolved) -> Margins {
     }
 }
 
+/// `partialRectangle`: a filled box stroked only along the sides `top`, `right`, `bottom` and
+/// `left` leave on, all by default (`PartialRectangleShape`, Shapes.js 4544-4640), as ER tables
+/// draw their rows.
+// ponytail: draw.io caps these strokes square, so two sides meet on a full corner; they are
+// capped butt here. A table cell's grid lines drawn back over its fill are not drawn.
+pub(super) fn partial_rectangle(b: Rect, style: &Resolved) -> Vec<Part> {
+    let side = |key: &str| style.get(key).is_none_or(|v| v == "1");
+    let corners = [
+        Point::new(b.x, b.y),
+        Point::new(b.right(), b.y),
+        Point::new(b.right(), b.bottom()),
+        Point::new(b.x, b.bottom()),
+    ];
+    // Each side on draws a line from the corner before it; one off moves on.
+    let mut sides = vec![PathCmd::MoveTo(corners[0])];
+    for (i, key) in ["top", "right", "bottom", "left"].into_iter().enumerate() {
+        let to = corners[(i + 1) % 4];
+        sides.push(match side(key) {
+            true => PathCmd::LineTo(to),
+            false => PathCmd::MoveTo(to),
+        });
+    }
+    vec![Part::filled(rect(b), Fill::Cell), Part::line(sides)]
+}
+
+/// `folder`: a box with a tab `tabWidth` by `tabHeight` on its top, at the right unless
+/// `tabPosition=left`, and a small triangle under the tab with `folderSymbol=triangle`
+/// (`FolderShape`, Shapes.js 1006-1107). Rounded, its corners are `arcSize` of the shorter side
+/// (units with `absoluteArcSize`).
+pub(super) fn folder(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let tab_h = style.num("tabHeight", 20.0).min(h).max(0.0);
+    let arc = folder_arc(w, h, tab_h, style);
+    let tab_w = style
+        .num("tabWidth", 60.0)
+        .min(w)
+        .max(0.0)
+        .max(arc)
+        .min(w - arc);
+    let r = if style.flag("rounded", false) {
+        arc
+    } else {
+        0.0
+    };
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    let mut path = match style.get("tabPosition") {
+        Some("left") => polyline(&[p(r, tab_h), p(r, 0.0), p(tab_w, 0.0), p(tab_w, tab_h)]),
+        _ => polyline(&[
+            p(w - tab_w, tab_h),
+            p(w - tab_w, 0.0),
+            p(w - r, 0.0),
+            p(w - r, tab_h),
+        ]),
+    };
+    if r > 0.0 {
+        path.extend([
+            PathCmd::MoveTo(p(0.0, r + tab_h)),
+            quarter(p(0.0, r + tab_h), p(0.0, tab_h), p(r, tab_h)),
+            PathCmd::LineTo(p(w - r, tab_h)),
+            quarter(p(w - r, tab_h), p(w, tab_h), p(w, r + tab_h)),
+            PathCmd::LineTo(p(w, h - r)),
+            quarter(p(w, h - r), p(w, h), p(w - r, h)),
+            PathCmd::LineTo(p(r, h)),
+            quarter(p(r, h), p(0.0, h), p(0.0, h - r)),
+        ]);
+    } else {
+        path.extend(polyline(&[p(0.0, tab_h), p(w, tab_h), p(w, h), p(0.0, h)]));
+    }
+    path.push(PathCmd::Close);
+    let mut parts = vec![Part::body(path)];
+    if style.get("folderSymbol") == Some("triangle") {
+        let mut mark = polyline(&[
+            p(w - 30.0, tab_h + 20.0),
+            p(w - 20.0, tab_h + 10.0),
+            p(w - 10.0, tab_h + 20.0),
+        ]);
+        mark.push(PathCmd::Close);
+        parts.push(Part::line(mark));
+    }
+    parts
+}
+
+/// A folder's corner: `arcSize` (a share, 0.1 by default) of the shorter side, or units with
+/// `absoluteArcSize`, within half the width and half the body.
+fn folder_arc(w: f64, h: f64, tab_h: f64, style: &Resolved) -> f64 {
+    let mut arc = style.num("arcSize", 0.1);
+    if !style.flag("absoluteArcSize", false) {
+        arc *= w.min(h);
+    }
+    arc.min(w * 0.5).min((h - tab_h) * 0.5)
+}
+
+/// With `boundedLbl=1` a folder's label keeps below the tab, or with `labelInHeader=1` in it
+/// (Shapes.js 1506-1548).
+pub(super) fn folder_margins(rect: Rect, style: &Resolved) -> Margins {
+    let tab_h = style.num("tabHeight", 15.0);
+    if !style.flag("labelInHeader", false) {
+        return Margins {
+            top: rect.h.min(tab_h),
+            ..Margins::default()
+        };
+    }
+    let tab_w = style.num("tabWidth", 15.0);
+    let arc = match style.flag("rounded", false) {
+        true => folder_arc(rect.w, rect.h, tab_h, style),
+        false => 0.0,
+    };
+    let (beside, below) = (rect.w.min(rect.w - tab_w), rect.h.min(rect.h - tab_h));
+    match style.get("tabPosition") {
+        Some("left") => Margins {
+            left: arc,
+            top: 0.0,
+            right: beside,
+            bottom: below,
+        },
+        _ => Margins {
+            left: beside,
+            top: 0.0,
+            right: arc,
+            bottom: below,
+        },
+    }
+}
+
+/// `component`: UML's component box with two jetties `jettyWidth` by `jettyHeight` on its left
+/// (`ComponentShape`, Shapes.js 3841-3892, painted as `mxCylinder`).
+pub(super) fn component(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let dx = style.num("jettyWidth", 32.0);
+    let dy = style.num("jettyHeight", 12.0);
+    let (x0, x1) = (dx / 2.0, dx);
+    let (y0, y1) = (0.3 * h - dy / 2.0, 0.7 * h - dy / 2.0);
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    let mut body = polyline(&[
+        p(x0, 0.0),
+        p(w, 0.0),
+        p(w, h),
+        p(x0, h),
+        p(x0, y1 + dy),
+        p(0.0, y1 + dy),
+        p(0.0, y1),
+        p(x0, y1),
+        p(x0, y0 + dy),
+        p(0.0, y0 + dy),
+        p(0.0, y0),
+        p(x0, y0),
+    ]);
+    body.push(PathCmd::Close);
+    let mut jetties = polyline(&[p(x0, y0), p(x1, y0), p(x1, y0 + dy), p(x0, y0 + dy)]);
+    jetties.extend(polyline(&[
+        p(x0, y1),
+        p(x1, y1),
+        p(x1, y1 + dy),
+        p(x0, y1 + dy),
+    ]));
+    vec![Part::body(body), Part::line(jetties)]
+}
+
+/// `plus`: a box with a cross in it (`PlusShape`, Shapes.js 2341-2367).
+pub(super) fn plus(b: Rect, style: &Resolved) -> Vec<Part> {
+    let border = (b.w / 5.0).min(b.h / 5.0) + 1.0;
+    let c = b.centre();
+    let mut cross = polyline(&[
+        Point::new(c.x, b.y + border),
+        Point::new(c.x, b.bottom() - border),
+    ]);
+    cross.extend(polyline(&[
+        Point::new(b.x + border, c.y),
+        Point::new(b.right() - border, c.y),
+    ]));
+    vec![Part::body(rectangle(b, style)), Part::line(cross)]
+}
+
+/// `startState` and `endState`: UML's initial state, a filled disc a little inside its box, and
+/// its final state, the same in a ring (`StateShape` and `StartStateShape`, Shapes.js
+/// 3919-3958).
+pub(super) fn state(b: Rect, ring: bool) -> Vec<Part> {
+    let inset = 4.0_f64.min(b.w / 5.0).min(b.h / 5.0);
+    let mut parts = Vec::new();
+    if b.w > 0.0 && b.h > 0.0 {
+        let disc = Rect::new(
+            b.x + inset,
+            b.y + inset,
+            b.w - 2.0 * inset,
+            b.h - 2.0 * inset,
+        );
+        parts.push(Part::body(ellipse(disc)));
+    }
+    if ring {
+        parts.push(Part::line(ellipse(b)));
+    }
+    parts
+}
+
+/// `offPageConnector`: a box whose foot is a point `size` of the height deep
+/// (`OffPageConnectorShape`, Shapes.js 4354-4373).
+pub(super) fn off_page_connector(b: Rect, style: &Resolved) -> Vec<Part> {
+    let (w, h) = (b.w, b.h);
+    let s = h * style.num("size", 3.0 / 8.0).clamp(0.0, 1.0);
+    let pts = [(0.0, 0.0), (w, 0.0), (w, h - s), (w / 2.0, h), (0.0, h - s)];
+    vec![Part::body(polygon(b, style, &pts, &[]))]
+}
+
+/// `waypoint`: a dot `size` across in the stroke's colour, grown by the stroke, in a box that
+/// takes clicks and is not drawn (`WaypointShape`, Shapes.js 603-624).
+pub(super) fn waypoint(b: Rect, style: &Resolved) -> Vec<Part> {
+    let s = (style.num("size", 6.0) - 2.0).max(0.0) + 2.0 * style.num("strokeWidth", 1.0);
+    let dot = Rect::new(b.x + (b.w - s) * 0.5, b.y + (b.h - s) * 0.5, s, s);
+    let ink = style.color("strokeColor").map_or(Fill::None, Fill::Own);
+    vec![
+        Part::filled(ellipse(dot), ink),
+        Part::filled(rect(b), Fill::None),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,6 +1046,11 @@ mod tests {
         for shape in [
             "document",
             "internalStorage",
+            "folder",
+            "component",
+            "plus",
+            "startState",
+            "offPageConnector",
             "card",
             "tape",
             "or",
@@ -850,5 +1070,62 @@ mod tests {
             assert!(R.grow(1e-9).contains_rect(&all), "{shape}: {all:?}");
             assert!(body.w > 0.0 && body.h > 0.0, "{shape}");
         }
+    }
+
+    #[test]
+    fn a_partial_rectangle_strokes_only_the_sides_left_on() {
+        let parts = vertex(
+            "partialRectangle",
+            R,
+            &style("shape=partialRectangle;top=0;", false),
+        );
+        assert_eq!(parts[0].fill, Fill::Cell);
+        assert!(!parts[0].stroke, "the fill is not outlined");
+        let p = Point::new;
+        assert_eq!(
+            parts[1].path,
+            [
+                PathCmd::MoveTo(p(0.0, 0.0)),
+                PathCmd::MoveTo(p(100.0, 0.0)),
+                PathCmd::LineTo(p(100.0, 50.0)),
+                PathCmd::LineTo(p(0.0, 50.0)),
+                PathCmd::LineTo(p(0.0, 0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_folders_tab_sits_right_or_left_and_its_label_below_it() {
+        let tab = |s: &str| corners(&vertex("folder", R, &style(s, false))[0].path)[..4].to_vec();
+        let p = Point::new;
+        assert_eq!(
+            tab("shape=folder;"),
+            [p(40.0, 20.0), p(40.0, 0.0), p(100.0, 0.0), p(100.0, 20.0)]
+        );
+        assert_eq!(
+            tab("shape=folder;tabPosition=left;tabWidth=30;tabHeight=10;"),
+            [p(0.0, 10.0), p(0.0, 0.0), p(30.0, 0.0), p(30.0, 10.0)]
+        );
+        let s = style("shape=folder;boundedLbl=1;", false);
+        assert_eq!(
+            super::super::label_bounds("folder", R, &s, false),
+            Rect::new(0.0, 15.0, 100.0, 35.0)
+        );
+    }
+
+    #[test]
+    fn a_waypoint_is_a_dot_in_the_stroke_colour() {
+        let parts = vertex("waypoint", R, &style("shape=waypoint;size=6;", false));
+        assert!(matches!(parts[0].fill, Fill::Own(_)));
+        let dot = path_bounds(&parts[0].path).unwrap();
+        // `size` less 2, and the stroke on either side.
+        assert!(same_box(dot, Rect::new(47.0, 22.0, 6.0, 6.0)), "{dot:?}");
+        assert_eq!(
+            parts[1].fill,
+            Fill::None,
+            "an unpainted box that takes clicks"
+        );
+        let end = vertex("endState", R, &style("shape=endState;", false));
+        assert_eq!(end.len(), 2, "a disc in a ring");
     }
 }
