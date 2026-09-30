@@ -55,6 +55,17 @@ pub enum Edit {
         id: CellId,
         degrees: f64,
     },
+    /// Put the source end (else the target end) of edge `id` on `end`.
+    End {
+        id: CellId,
+        source: bool,
+        end: End,
+    },
+    /// Give edge `id` these waypoints, in page units.
+    Points {
+        id: CellId,
+        points: Vec<Point>,
+    },
 }
 
 glib::wrapper! {

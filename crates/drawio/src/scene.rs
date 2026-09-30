@@ -216,16 +216,6 @@ pub fn scene_with(page: &Page, ctx: &Context) -> Scene {
     }
 }
 
-/// The points each edge drawn on `page` runs through, absolute and first end first: where its
-/// ends are on the page (mxGraph's `absolutePoints`).
-pub(crate) fn routes(page: &Page) -> HashMap<CellId, Vec<Point>> {
-    Builder::run(page, &Context::default())
-        .edge_points
-        .into_iter()
-        .map(|(id, points)| (id.to_string(), points))
-        .collect()
-}
-
 impl<'a> Builder<'a> {
     /// Every visible layer of `page` walked, bottom first.
     fn run(page: &'a Page, ctx: &'a Context) -> Builder<'a> {

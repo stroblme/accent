@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use crate::Error;
 use crate::geom::{Point, Rect};
 use crate::model::{Cell, CellId, File, Geometry, Page, guid};
+use crate::route::Constraint;
+use crate::scene::Scene;
 use crate::style::Style;
 
 /// Where [`Editor::reorder`] moves cells among their siblings.
@@ -163,15 +165,33 @@ impl Editor {
         })
     }
 
-    /// [`move_cells`] on page `page`.
+    /// [`move_cells`] on page `page`, drawn as `drawn`.
     pub fn move_cells(
         &mut self,
         page: usize,
         ids: &[CellId],
         dx: f64,
         dy: f64,
+        drawn: &Scene,
     ) -> Result<(), Error> {
-        self.edit(page, |p, _| move_cells(p, ids, dx, dy))
+        self.edit(page, |p, _| move_cells(p, ids, dx, dy, drawn))
+    }
+
+    /// [`set_end`] on page `page`.
+    pub fn set_end(
+        &mut self,
+        page: usize,
+        id: &str,
+        source: bool,
+        on: (Option<&str>, Point),
+        constraint: Option<&Constraint>,
+    ) -> Result<(), Error> {
+        self.edit(page, |p, _| set_end(p, id, source, on, constraint))
+    }
+
+    /// [`set_points`] on page `page`.
+    pub fn set_points(&mut self, page: usize, id: &str, points: &[Point]) -> Result<(), Error> {
+        self.edit(page, |p, _| set_points(p, id, points))
     }
 
     /// [`resize`] on page `page`.
@@ -459,20 +479,27 @@ impl Editor {
 /// points. A cell inside another that moves goes with it, and so does an edge whose both ends
 /// move. A label on an edge stays where it is along the edge. An edge moved without the shape
 /// one of its ends is on lets go of that shape, the end staying where it is drawn and moving
-/// with the rest, as mxGraph's `disconnectOnMove` has it.
-pub fn move_cells(page: &mut Page, ids: &[CellId], dx: f64, dy: f64) -> Result<(), Error> {
-    start_move(page, ids)?.shift(page, dx, dy);
+/// with the rest, as mxGraph's `disconnectOnMove` has it; `drawn` is the page's display list,
+/// which says where the ends are.
+pub fn move_cells(
+    page: &mut Page,
+    ids: &[CellId],
+    dx: f64,
+    dy: f64,
+    drawn: &Scene,
+) -> Result<(), Error> {
+    start_move(page, ids, drawn)?.shift(page, dx, dy);
     Ok(())
 }
 
 /// The first half of [`move_cells`], the part that does not depend on how far: check `ids` and
-/// let the edges among them go of the shapes they leave. Letting go routes the page, so a drag
+/// let the edges among them go of the shapes they leave, where `drawn` has their ends. A drag
 /// does it once and [`Moving::shift`]s a copy of the result on each frame.
-pub fn start_move(page: &mut Page, ids: &[CellId]) -> Result<Moving, Error> {
+pub fn start_move(page: &mut Page, ids: &[CellId], drawn: &Scene) -> Result<Moving, Error> {
     check(page, ids)?;
     let top: HashSet<CellId> = topmost(page, ids).into_iter().collect();
     let moved = with_subtrees(page, top.iter().cloned());
-    disconnect(page, &top, &moved);
+    disconnect(page, &top, &moved, drawn);
     let moves = |end: &Option<CellId>| end.as_ref().is_some_and(|id| moved.contains(id));
     let between = page
         .cells
@@ -518,6 +545,81 @@ pub fn resize(page: &mut Page, id: &str, rect: Rect) -> Result<(), Error> {
         (g.x, g.y) = (rect.x - origin.x, rect.y - origin.y);
         (g.width, g.height) = (rect.w, rect.h);
     }
+    Ok(())
+}
+
+/// Put the source end (else the target end) of edge `id` on `on`: on shape `on.0`, pinned at
+/// `constraint` when there is one and floating on its outline otherwise
+/// (`mxEdgeHandler.connect`); with no shape, dangling at the absolute point `on.1`
+/// (`changeTerminalPoint`). The `exit` or `entry` keys say which, as `setConnectionConstraint`
+/// writes them.
+// mxGraph.setConnectionConstraint, mxGraph.js 7163-7213; mxEdgeHandler.js 1984-2046
+pub fn set_end(
+    page: &mut Page,
+    id: &str,
+    source: bool,
+    (on, at): (Option<&str>, Point),
+    constraint: Option<&Constraint>,
+) -> Result<(), Error> {
+    check(page, [id].into_iter().chain(on))?;
+    let origin = page.origin_of(id);
+    let cell = cell_mut(page, id)?;
+    if !cell.edge {
+        return Err(Error::Refused("only an edge has ends"));
+    }
+    let end = if source { "exit" } else { "entry" };
+    for key in ["X", "Y", "Dx", "Dy", "Perimeter"] {
+        cell.style.set(&format!("{end}{key}"), None);
+    }
+    if let Some(c) = constraint.filter(|_| on.is_some()) {
+        let keys = [
+            ("X", c.point.x),
+            ("Y", c.point.y),
+            ("Dx", c.dx),
+            ("Dy", c.dy),
+        ];
+        for (key, n) in keys {
+            cell.style.set(&format!("{end}{key}"), Some(&n.to_string()));
+        }
+        cell.style
+            .set(&format!("{end}Perimeter"), (!c.perimeter).then_some("0"));
+    }
+    if on.is_none() {
+        let g = cell.geometry.get_or_insert_with(|| Geometry {
+            relative: true,
+            ..Geometry::default()
+        });
+        let local = Some(Point::new(at.x - origin.x, at.y - origin.y));
+        match source {
+            true => g.source_point = local,
+            false => g.target_point = local,
+        }
+    }
+    let on = on.map(str::to_string);
+    match source {
+        true => cell.source = on,
+        false => cell.target = on,
+    }
+    Ok(())
+}
+
+/// Give edge `id` the waypoints `points`, absolute, none for an empty list
+/// (`mxEdgeHandler.changePoints`).
+pub fn set_points(page: &mut Page, id: &str, points: &[Point]) -> Result<(), Error> {
+    check(page, [id])?;
+    let origin = page.origin_of(id);
+    let cell = cell_mut(page, id)?;
+    if !cell.edge {
+        return Err(Error::Refused("only an edge has waypoints"));
+    }
+    let local = points
+        .iter()
+        .map(|p| Point::new(p.x - origin.x, p.y - origin.y));
+    let g = cell.geometry.get_or_insert_with(|| Geometry {
+        relative: true,
+        ..Geometry::default()
+    });
+    g.points = (!points.is_empty()).then(|| local.collect());
     Ok(())
 }
 
@@ -594,13 +696,11 @@ fn topmost(page: &Page, ids: &[CellId]) -> Vec<CellId> {
         .collect()
 }
 
-/// Move a geometry as `mxGeometry.translate` does: a vertex's position, an edge's end points
-/// and waypoints. A relative geometry, a label on an edge, keeps its place along the edge.
 /// Let go of the shapes the edges among `top` leave behind: each end whose shape is not in
-/// `moved` becomes a point of its own where the end is drawn now, for the move to take along.
+/// `moved` becomes a point of its own where `drawn` has the end now, for the move to take along.
 /// Its `exit`/`entry` keys stay, as draw.io leaves them.
 // mxGraph.disconnectGraph, mxGraph.js 7459-7535; mxGraph.disconnectOnMove, 1557
-fn disconnect(page: &mut Page, top: &HashSet<CellId>, moved: &HashSet<CellId>) {
+fn disconnect(page: &mut Page, top: &HashSet<CellId>, moved: &HashSet<CellId>, drawn: &Scene) {
     let stays = |end: &Option<CellId>| end.as_ref().is_some_and(|id| !moved.contains(id));
     let edges: Vec<CellId> = page
         .cells
@@ -611,10 +711,9 @@ fn disconnect(page: &mut Page, top: &HashSet<CellId>, moved: &HashSet<CellId>) {
     if edges.is_empty() {
         return;
     }
-    let routes = crate::scene::routes(page);
     for id in edges {
         // An edge not drawn (on a hidden layer) has no end to keep.
-        let Some(drawn) = routes.get(&id).filter(|p| p.len() >= 2) else {
+        let Some(route) = drawn.route(&id).filter(|p| p.len() >= 2) else {
             continue;
         };
         let origin = page.origin_of(&id);
@@ -628,10 +727,10 @@ fn disconnect(page: &mut Page, top: &HashSet<CellId>, moved: &HashSet<CellId>) {
             ..Geometry::default()
         });
         if from {
-            g.source_point = local(drawn[0]);
+            g.source_point = local(route[0]);
         }
         if to {
-            g.target_point = local(drawn[drawn.len() - 1]);
+            g.target_point = local(route[route.len() - 1]);
         }
         if from {
             cell.source = None;
@@ -642,6 +741,8 @@ fn disconnect(page: &mut Page, top: &HashSet<CellId>, moved: &HashSet<CellId>) {
     }
 }
 
+/// Move a geometry as `mxGeometry.translate` does: a vertex's position, an edge's end points
+/// and waypoints. A relative geometry, a label on an edge, keeps its place along the edge.
 fn translate(g: &mut Geometry, dx: f64, dy: f64) {
     if !g.relative {
         g.x += dx;
@@ -660,6 +761,7 @@ fn translate(g: &mut Geometry, dx: f64, dy: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::scene;
 
     /// An editor on one page holding `cells` after the root and the layer.
     fn open(cells: impl IntoIterator<Item = Cell>) -> Editor {
@@ -788,8 +890,9 @@ mod tests {
     #[test]
     fn an_edge_moved_on_its_own_lets_go_of_its_shapes_where_it_is_drawn() {
         let mut e = editor();
-        let drawn = crate::scene::routes(e.page(0).unwrap())["e"].clone();
-        e.move_cells(0, &list(&["e"]), 10.0, 5.0).unwrap();
+        let shown = scene(e.page(0).unwrap());
+        let drawn = shown.route("e").unwrap().to_vec();
+        e.move_cells(0, &list(&["e"]), 10.0, 5.0, &shown).unwrap();
         let cell = e.page(0).unwrap().cell("e").unwrap();
         assert_eq!(
             (cell.source.as_deref(), cell.target.as_deref()),
@@ -802,7 +905,9 @@ mod tests {
         assert_eq!(g.points, Some(vec![Point::new(80.0, 65.0)]));
         // Moved with one of its shapes, it keeps that end and lets go of the other.
         let mut e = editor();
-        e.move_cells(0, &list(&["a", "e"]), 10.0, 0.0).unwrap();
+        let drawn = scene(e.page(0).unwrap());
+        e.move_cells(0, &list(&["a", "e"]), 10.0, 0.0, &drawn)
+            .unwrap();
         let cell = e.page(0).unwrap().cell("e").unwrap();
         assert_eq!(
             (cell.source.as_deref(), cell.target.as_deref()),
@@ -815,19 +920,59 @@ mod tests {
         let page = editor().page(0).unwrap().clone();
         let ids = list(&["a", "e"]);
         let (mut started, mut whole) = (page.clone(), page.clone());
-        let moving = start_move(&mut started, &ids).unwrap();
+        let drawn = scene(&page);
+        let moving = start_move(&mut started, &ids, &drawn).unwrap();
         assert_eq!(moving.count, 2);
         for (dx, dy) in [(10.0, 5.0), (-30.0, 20.0)] {
             let mut shifted = started.clone();
             moving.shift(&mut shifted, dx, dy);
             let mut moved = page.clone();
-            move_cells(&mut moved, &ids, dx, dy).unwrap();
+            move_cells(&mut moved, &ids, dx, dy, &drawn).unwrap();
             assert_eq!(shifted, moved);
         }
         assert!(matches!(
-            start_move(&mut whole, &list(&["nope"])),
+            start_move(&mut whole, &list(&["nope"]), &drawn),
             Err(Error::NoCell(_))
         ));
+    }
+
+    #[test]
+    fn an_end_pins_floats_or_dangles() {
+        let mut e = editor();
+        let pin = Constraint {
+            point: Point::new(0.5, 0.0),
+            dx: 0.0,
+            dy: 0.0,
+            perimeter: false,
+        };
+        e.set_end(0, "e", false, (Some("a"), Point::default()), Some(&pin))
+            .unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert_eq!(cell.target.as_deref(), Some("a"));
+        let style = cell.style.to_string();
+        assert!(
+            style.contains("entryX=0.5") && style.contains("entryPerimeter=0"),
+            "{style}"
+        );
+        // Floating on b: the constraint goes.
+        e.set_end(0, "e", false, (Some("b"), Point::default()), None)
+            .unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert!(!cell.style.to_string().contains("entry"));
+        // Dangling: the point is the end.
+        e.set_end(0, "e", true, (None, Point::new(5.0, 6.0)), None)
+            .unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert_eq!(cell.source, None);
+        assert_eq!(geometry(&e, "e").source_point, Some(Point::new(5.0, 6.0)));
+        assert!(matches!(
+            e.set_end(0, "a", true, (None, Point::default()), None),
+            Err(Error::Refused(_))
+        ));
+        e.set_points(0, "e", &[Point::new(1.0, 2.0)]).unwrap();
+        assert_eq!(geometry(&e, "e").points, Some(vec![Point::new(1.0, 2.0)]));
+        e.set_points(0, "e", &[]).unwrap();
+        assert_eq!(geometry(&e, "e").points, None);
     }
 
     #[test]
@@ -844,7 +989,9 @@ mod tests {
                 "",
             )
             .unwrap();
-        e.move_cells(0, &list(&["a", "b"]), 10.0, 5.0).unwrap();
+        let drawn = scene(e.page(0).unwrap());
+        e.move_cells(0, &list(&["a", "b"]), 10.0, 5.0, &drawn)
+            .unwrap();
         assert_eq!(geometry(&e, "a").rect(), Rect::new(10.0, 5.0, 40.0, 40.0));
         assert_eq!(geometry(&e, "b").x, 110.0);
         assert_eq!(geometry(&e, "e").points, Some(vec![Point::new(80.0, 65.0)]));
@@ -857,7 +1004,8 @@ mod tests {
         let g = e.add_vertex(0, None, group, "group", "").unwrap();
         let inner = Rect::new(310.0, 10.0, 10.0, 10.0);
         let inner = e.add_vertex(0, Some(&g), inner, "", "").unwrap();
-        e.move_cells(0, &[g.clone(), inner.clone()], 5.0, 0.0)
+        let drawn = scene(e.page(0).unwrap());
+        e.move_cells(0, &[g.clone(), inner.clone()], 5.0, 0.0, &drawn)
             .unwrap();
         assert_eq!(geometry(&e, &g).x, 305.0);
         assert_eq!(
@@ -946,7 +1094,7 @@ mod tests {
     #[test]
     fn failed_edits_leave_no_undo_step() {
         let mut e = editor();
-        let r = e.move_cells(0, &list(&["a", "nope"]), 1.0, 1.0);
+        let r = e.move_cells(0, &list(&["a", "nope"]), 1.0, 1.0, &Scene::default());
         assert!(matches!(r, Err(Error::NoCell(_))));
         assert_eq!(geometry(&e, "a").x, 0.0);
         let r = e.set_style(2, &list(&["a"]), "rounded", None);

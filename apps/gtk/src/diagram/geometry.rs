@@ -5,6 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use accent_drawio::geom::rotate;
+use accent_drawio::guide::Neighbour;
+use accent_drawio::handle::{self, Kind, Knob, Terminal};
 use accent_drawio::{CellId, Constraint, Context, Page, PathCmd, Point, Prim, Rect, Scene};
 
 pub const MIN_SCALE: f64 = 0.1;
@@ -113,20 +115,25 @@ pub fn snap_move(origin: Point, delta: Point, grid: f64) -> Point {
 /// shape's own frame, the box resized there, and the result placed so that the side the handle
 /// does not hold stays where it was on the page — draw.io's rule. On the grid, a turned shape's
 /// size snaps rather than its edges, which the placing moves off the grid anyway
-/// (`mxVertexHandler.union`, 1703-1709).
+/// (`mxVertexHandler.union`, 1703-1709). `snap` then has the box in the shape's own frame, `r`
+/// beside it, before it is placed: the size guides, which work there as draw.io's do.
 pub fn resize_rotated(
     r: &Rect,
     rotation: f64,
     handle: Handle,
     delta: Point,
     grid: Option<f64>,
+    snap: impl FnOnce(&mut Rect, &Rect),
 ) -> Rect {
     if rotation == 0.0 {
-        return resize_by(r, handle, delta, grid);
+        let mut out = resize_by(r, handle, delta, grid);
+        snap(&mut out, r);
+        return out;
     }
     let origin = Point::default();
     let local = resize_by(r, handle, rotate(delta, origin, -rotation), None);
-    let local = grid.map_or(local, |g| snap_size(&local, handle, g));
+    let mut local = grid.map_or(local, |g| snap_size(&local, handle, g));
+    snap(&mut local, r);
     let (old, new) = (r.centre(), local.centre());
     let shift = rotate(Point::new(new.x - old.x, new.y - old.y), origin, rotation);
     let centre = Point::new(old.x + shift.x, old.y + shift.y);
@@ -285,6 +292,17 @@ impl Handle {
             Handle::SouthWest => "sw-resize",
             Handle::South => "s-resize",
             Handle::SouthEast => "se-resize",
+        }
+    }
+
+    /// The sides the handle drags, as the guides take them.
+    pub fn sides(self) -> accent_drawio::guide::Sides {
+        let (left, top, right, bottom) = self.edges();
+        accent_drawio::guide::Sides {
+            left,
+            top,
+            right,
+            bottom,
         }
     }
 
@@ -511,18 +529,7 @@ impl Sheet {
     /// all of them when the parent holds fewer than two cells — none of them moving along.
     pub fn guide_boxes(&self, moving: &[CellId], pressed: &str) -> Vec<Rect> {
         let page = &self.page;
-        let cells: HashMap<&str, &accent_drawio::Cell> =
-            page.cells.iter().map(|c| (c.id.as_str(), c)).collect();
-        let parent_of = |id: &str| cells.get(id).and_then(|c| c.parent.as_deref());
-        // A cell's layer: the parent of its outermost ancestor below one.
-        let layer_of = |id: &str| {
-            let mut top = id;
-            while let Some(p) = self.parent(top) {
-                top = p;
-            }
-            parent_of(top)
-        };
-        let (parent, layer) = (parent_of(pressed), layer_of(pressed));
+        let parent = page.cell(pressed).and_then(|c| c.parent.as_deref());
         let few = page
             .cells
             .iter()
@@ -539,7 +546,65 @@ impl Sheet {
                 _ => None,
             })
             .collect();
-        // Shown: it and everything above it, its layer included.
+        self.layer_shapes(pressed)
+            .into_iter()
+            .filter(|c| !moving.iter().any(|m| self.is_within(&c.id, m)))
+            .filter(|c| {
+                let id = Some(c.id.as_str());
+                few || id == parent
+                    || c.parent.as_deref() == parent
+                    || joined.contains(c.id.as_str())
+            })
+            .filter_map(|c| self.guide_box(&c.id))
+            .collect()
+    }
+
+    /// The shapes a resize of `id` takes a size from or lines a side up with
+    /// (`mxVertexHandler.getSizeGuideStates`): the others shown on its layer and not inside it,
+    /// within `area` — guides nobody can see snap nothing — the nearest first.
+    pub fn size_guides(&self, id: &str, area: &Rect) -> Vec<Neighbour> {
+        let Some(own) = self.guide_box(id) else {
+            return Vec::new();
+        };
+        let away = |r: &Rect| {
+            let (a, b) = (r.centre(), own.centre());
+            (a.x - b.x).powi(2) + (a.y - b.y).powi(2)
+        };
+        let mut shapes: Vec<Neighbour> = self
+            .layer_shapes(id)
+            .into_iter()
+            .filter(|c| !self.is_within(&c.id, id))
+            .filter_map(|c| {
+                let rect = self.guide_box(&c.id)?;
+                let turn = self.rotation(&c.id);
+                let turn = if turn.rem_euclid(180.0) == 90.0 {
+                    0.0
+                } else {
+                    turn
+                };
+                Some(Neighbour { rect, turn })
+            })
+            .filter(|n| n.rect.w > 0.0 && n.rect.h > 0.0 && n.rect.intersects(area))
+            .collect();
+        shapes.sort_by(|a, b| away(&a.rect).total_cmp(&away(&b.rect)));
+        shapes
+    }
+
+    /// The shapes shown on `id`'s layer, `id` among them: each vertex placed by a geometry of
+    /// its own (not along an edge or on its parent) that is visible, and so is everything it is
+    /// in. draw.io takes the guides from the layer new cells go into; this is `id`'s.
+    fn layer_shapes(&self, id: &str) -> Vec<&accent_drawio::Cell> {
+        let page = &self.page;
+        let cells: HashMap<&str, &accent_drawio::Cell> =
+            page.cells.iter().map(|c| (c.id.as_str(), c)).collect();
+        // A cell's layer: the parent of its outermost ancestor below one.
+        let layer_of = |id: &str| {
+            let mut top = id;
+            while let Some(p) = self.parent(top) {
+                top = p;
+            }
+            cells.get(top).and_then(|c| c.parent.as_deref())
+        };
         let shown = |id: &str| {
             let mut at = cells.get(id).copied();
             while let Some(cell) = at {
@@ -550,18 +615,11 @@ impl Sheet {
             }
             true
         };
+        let layer = layer_of(id);
         page.cells
             .iter()
             .filter(|c| c.vertex && c.geometry.as_ref().is_some_and(|g| !g.relative))
             .filter(|c| shown(&c.id) && layer_of(&c.id) == layer)
-            .filter(|c| !moving.iter().any(|m| self.is_within(&c.id, m)))
-            .filter(|c| {
-                let id = Some(c.id.as_str());
-                few || id == parent
-                    || c.parent.as_deref() == parent
-                    || joined.contains(c.id.as_str())
-            })
-            .filter_map(|c| self.guide_box(&c.id))
             .collect()
     }
 
@@ -619,6 +677,67 @@ impl Sheet {
             .map(|(_, id, at, c)| (id.clone(), at, c))
     }
 
+    /// The handles between the ends of edge `id` and where they sit, the route being `route`
+    /// (the page's, or a drag's preview's): none for an edge that cannot be bent (`bendable=0`,
+    /// locked).
+    pub fn knobs(&self, id: &str, route: &[Point]) -> Vec<(Knob, Point, bool)> {
+        match self.edge_kind(id) {
+            Some(kind) if !self.is_pinned(id) => {
+                handle::knobs(kind, route, !self.waypoints(id).is_empty())
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// How edge `id`'s middle is handled; `None` for anything else or an edge that cannot be
+    /// bent.
+    pub fn edge_kind(&self, id: &str) -> Option<Kind> {
+        let cell = self.page.cell(id).filter(|c| c.edge)?;
+        let style = cell.style.resolve(true);
+        let is_loop = cell.source.is_some() && cell.source == cell.target;
+        let kind = handle::kind(&style, is_loop);
+        // ponytail: a straight edge's bends and virtual bends come with the next change.
+        let staged = !matches!(kind, Kind::Bends { .. });
+        (style.get("bendable") != Some("0") && staged).then_some(kind)
+    }
+
+    /// Edge `id`'s waypoints, absolute.
+    pub fn waypoints(&self, id: &str) -> Vec<Point> {
+        let origin = self.page.origin_of(id);
+        let points = self
+            .page
+            .cell(id)
+            .and_then(|c| c.geometry.as_ref()?.points.clone());
+        let at = |p: Point| Point::new(p.x + origin.x, p.y + origin.y);
+        points.unwrap_or_default().into_iter().map(at).collect()
+    }
+
+    /// The shapes edge `id`'s source and target ends are on, and whether each is pinned there.
+    pub fn terminals(&self, id: &str) -> [Option<Terminal>; 2] {
+        let Some(cell) = self.page.cell(id) else {
+            return [None, None];
+        };
+        let end = |on: &Option<CellId>, key: &str| {
+            let rect = self.rect(on.as_deref()?)?;
+            let pinned = cell.style.get(key).is_some();
+            Some(Terminal { rect, pinned })
+        };
+        [end(&cell.source, "exitX"), end(&cell.target, "entryX")]
+    }
+
+    /// What an edge end dropped at `p` attaches to, its other end being at `other`: the
+    /// connection point within `reach` that pins it, else the shape under it when `other` is
+    /// outside that shape, else nothing (see [`Sheet::connect_ends`]).
+    pub fn end_at(&self, p: Point, other: Point, tolerance: f64, reach: f64) -> End {
+        match self.anchor_near(p, reach) {
+            Some((id, at, c)) => (Some(id), at, Some(c)),
+            None => {
+                let under = self.vertex_at(p, tolerance);
+                (under.filter(|v| !self.contains(v, other)), p, None)
+            }
+        }
+    }
+
     /// What a connector drawn from `press` to `release` attaches to at either end. An end
     /// dropped within `reach` of a connection point is pinned there. Otherwise it takes the
     /// shape under it only when the other end is outside that shape: a line drawn within a
@@ -631,17 +750,8 @@ impl Sheet {
         tolerance: f64,
         reach: f64,
     ) -> (End, End) {
-        let end = |p: Point, other: Point| -> End {
-            match self.anchor_near(p, reach) {
-                Some((id, at, c)) => (Some(id), at, Some(c)),
-                None => {
-                    let under = self.vertex_at(p, tolerance);
-                    (under.filter(|v| !self.contains(v, other)), p, None)
-                }
-            }
-        };
-        let source = end(press, release);
-        let mut target = end(release, press);
+        let source = self.end_at(press, release, tolerance, reach);
+        let mut target = self.end_at(release, press, tolerance, reach);
         if target.0.is_some() && target.0 == source.0 {
             target = (None, release, None);
         }
@@ -742,7 +852,14 @@ mod tests {
         // A quarter turn: the east handle sits at the bottom on the page.
         let r = Rect::new(0.0, 0.0, 100.0, 20.0);
         let before = corners(&r, r.centre(), 90.0);
-        let after = resize_rotated(&r, 90.0, Handle::East, Point::new(0.0, 10.0), Some(10.0));
+        let after = resize_rotated(
+            &r,
+            90.0,
+            Handle::East,
+            Point::new(0.0, 10.0),
+            Some(10.0),
+            |_, _| {},
+        );
         assert!(
             (after.w - 110.0).abs() < 1e-9 && (after.h - 20.0).abs() < 1e-9,
             "{after:?}"
@@ -753,7 +870,15 @@ mod tests {
             assert!(a.distance(b) < 1e-9, "{a:?} vs {b:?}");
         }
         assert_eq!(
-            resize_rotated(&r, 0.0, Handle::East, Point::new(4.0, 0.0), Some(10.0)).w,
+            resize_rotated(
+                &r,
+                0.0,
+                Handle::East,
+                Point::new(4.0, 0.0),
+                Some(10.0),
+                |_, _| {}
+            )
+            .w,
             100.0
         );
     }
@@ -892,12 +1017,26 @@ mod tests {
     #[test]
     fn a_turned_shape_resizes_to_a_size_on_the_grid() {
         let r = Rect::new(3.0, 7.0, 100.0, 20.0);
-        let after = resize_rotated(&r, 90.0, Handle::East, Point::new(0.0, 14.0), Some(10.0));
+        let after = resize_rotated(
+            &r,
+            90.0,
+            Handle::East,
+            Point::new(0.0, 14.0),
+            Some(10.0),
+            |_, _| {},
+        );
         assert!(
             (after.w - 110.0).abs() < 1e-9 && (after.h - 20.0).abs() < 1e-9,
             "{after:?}"
         );
-        let free = resize_rotated(&r, 90.0, Handle::East, Point::new(0.0, 14.0), None);
+        let free = resize_rotated(
+            &r,
+            90.0,
+            Handle::East,
+            Point::new(0.0, 14.0),
+            None,
+            |_, _| {},
+        );
         assert!((free.w - 114.0).abs() < 1e-9, "{free:?}");
     }
 

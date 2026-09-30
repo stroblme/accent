@@ -1,11 +1,12 @@
 //! What the canvas draws over the page: the selection, its handles, the connection points in
 //! reach and whatever a drag is doing.
 
-use accent_drawio::Rect;
 use accent_drawio::geom::{self, rotate};
+use accent_drawio::guide;
+use accent_drawio::{Point, Rect};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{graphene, gsk};
+use gtk::{gdk, graphene, gsk};
 
 use super::drag::Drag;
 use super::preview::Preview;
@@ -14,6 +15,10 @@ use crate::diagram::geometry::{self, Frame, HANDLE, Handle, Sheet, TOLERANCE};
 use crate::diagram::paint;
 use crate::diagram::tools::Tool;
 use crate::theme;
+
+/// How strong a faded handle is drawn: a virtual bend, or a handle of an edge with no waypoints
+/// of its own (draw.io's `virtualBendOpacity`, 40).
+const FADED_ALPHA: f32 = 0.4;
 
 impl DiagramView {
     /// The selection, its handles and whatever a drag is doing, over the page.
@@ -37,10 +42,13 @@ impl DiagramView {
         // Where the live preview has the selection: its frames and handles go with it, as
         // draw.io's do (`mxGraphHandler.redrawHandles`).
         let preview = imp.preview.borrow();
-        let shown = match preview.as_ref() {
-            Some(Preview::Live(live)) => live.shown.as_ref(),
+        let live = match preview.as_ref() {
+            Some(Preview::Live(live)) => Some(live),
             _ => None,
         };
+        let shown = live.and_then(|live| live.shown.as_ref());
+        // An edge is where the page on screen draws it.
+        let drawn = live.map_or(&sheet.scene, |live| &live.scene);
         let placed = |id: &str, r: Rect| match shown {
             Some(Edit::Move { ids, delta }) if ids.iter().any(|m| sheet.is_within(id, m)) => {
                 (r.translate(delta.x, delta.y), sheet.rotation(id))
@@ -74,9 +82,34 @@ impl DiagramView {
             snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
         };
         for id in selection.iter() {
-            if let Some(r) = sheet.frame_of(id) {
+            if sheet.is_edge(id) {
+                if let Some(r) = drawn.bounds_of(id) {
+                    turned(&r, 0.0);
+                }
+            } else if let Some(r) = sheet.frame_of(id) {
                 let (r, rotation) = placed(id, r);
                 turned(&r, rotation);
+            }
+        }
+        let faded = theme::at(accent, FADED_ALPHA);
+        let handle = |at: Point, colour: &gdk::RGBA| {
+            let at = frame.to_content(at);
+            let square = Rect::new(at.x - HANDLE / 2.0, at.y - HANDLE / 2.0, HANDLE, HANDLE);
+            snapshot.append_color(colour, &paint::grect(&square));
+        };
+        let square = |at: Point| handle(at, &accent);
+        // A lone edge's handles: its ends and those between them, where it is drawn now.
+        if let [id] = selection.as_slice()
+            && sheet.is_edge(id)
+            && !sheet.is_pinned(id)
+            && !moving
+            && let Some(route) = drawn.route(id)
+        {
+            for (_, at, dim) in sheet.knobs(id, route) {
+                handle(at, if dim { &faded } else { &accent });
+            }
+            for at in [route.first(), route.last()].into_iter().flatten() {
+                square(*at);
             }
         }
         if let [id] = selection.as_slice()
@@ -86,9 +119,7 @@ impl DiagramView {
         {
             let (r, rotation) = placed(id, r);
             for h in Handle::ALL {
-                let at = frame.to_content(rotate(h.at(&r), r.centre(), rotation));
-                let square = Rect::new(at.x - HANDLE / 2.0, at.y - HANDLE / 2.0, HANDLE, HANDLE);
-                snapshot.append_color(&accent, &paint::grect(&square));
+                square(rotate(h.at(&r), r.centre(), rotation));
             }
             // The rotate handle, a ring beyond the top-right corner, turned with the frame.
             if sheet.is_turnable(id) {
@@ -102,9 +133,9 @@ impl DiagramView {
                 snapshot.append_stroke(&ring.to_path(), &gsk::Stroke::new(1.5), &accent);
             }
         }
-        // The connector in hand: the shape under the pointer shows its connection points as
-        // draw.io's small crosses, and the one an end would pin to is lit.
-        if imp.tool.get() == Tool::Connector {
+        // The connector in hand, or an edge's end: the shape under the pointer shows its
+        // connection points as draw.io's small crosses, and the one an end would pin to is lit.
+        if imp.tool.get() == Tool::Connector || matches!(drag.as_ref(), Some(Drag::End { .. })) {
             let (tolerance, reach) = (TOLERANCE / frame.scale, HANDLE / frame.scale);
             let near = sheet.anchor_near(pointer, reach);
             let shape = match &near {
@@ -152,16 +183,7 @@ impl DiagramView {
                     stroke.set_dash(&[3.0, 3.0]);
                     snapshot.append_stroke(&builder.to_path(), &stroke, &accent);
                 }
-                // The guides, a pixel wide whatever the zoom.
-                if !lines.is_empty() {
-                    let builder = gsk::PathBuilder::new();
-                    for (a, b) in lines {
-                        let (a, b) = (frame.to_content(a), frame.to_content(b));
-                        builder.move_to(a.x as f32, a.y as f32);
-                        builder.line_to(b.x as f32, b.y as f32);
-                    }
-                    snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
-                }
+                guide_lines(snapshot, frame, &lines, &accent);
             }
             Drag::Band { from, .. } => {
                 let r = frame.rect(&Rect::from_corners(*from, pointer));
@@ -192,7 +214,33 @@ impl DiagramView {
                 builder.line_to(b.x as f32, b.y as f32);
                 snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
             }
-            Drag::Resize { .. } | Drag::Rotate { .. } | Drag::Pan { .. } => {}
+            Drag::Resize {
+                from,
+                handle,
+                rect,
+                rotation,
+                guides,
+                ..
+            } => {
+                let delta = Point::new(pointer.x - from.x, pointer.y - from.y);
+                let (_, lines) = self.resize_to(rect, *rotation, *handle, delta, guides, free);
+                guide_lines(snapshot, frame, &lines, &accent);
+            }
+            Drag::Rotate { .. } | Drag::End { .. } | Drag::Knob { .. } | Drag::Pan { .. } => {}
         }
     }
+}
+
+/// The guides, a pixel wide whatever the zoom.
+fn guide_lines(snapshot: &gtk::Snapshot, frame: &Frame, lines: &[guide::Line], colour: &gdk::RGBA) {
+    if lines.is_empty() {
+        return;
+    }
+    let builder = gsk::PathBuilder::new();
+    for (a, b) in lines {
+        let (a, b) = (frame.to_content(*a), frame.to_content(*b));
+        builder.move_to(a.x as f32, a.y as f32);
+        builder.line_to(b.x as f32, b.y as f32);
+    }
+    snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), colour);
 }

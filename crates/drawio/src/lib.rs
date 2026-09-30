@@ -12,6 +12,7 @@ mod base64;
 pub mod edit;
 pub mod geom;
 pub mod guide;
+pub mod handle;
 mod hit;
 pub mod label;
 mod marker;

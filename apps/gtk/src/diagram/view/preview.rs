@@ -6,7 +6,7 @@
 //! instead, as draw.io's does.
 
 use accent_drawio::edit::{self, Moving};
-use accent_drawio::{Page, Rect, Scene};
+use accent_drawio::{Page, Point, Rect, Scene};
 use gtk::subclass::prelude::*;
 
 use super::{DiagramView, Edit};
@@ -45,7 +45,7 @@ impl Preview {
     fn start(sheet: &Sheet, edit: &Edit) -> Preview {
         let mut base = sheet.page.clone();
         let moving = match edit {
-            Edit::Move { ids, .. } => match edit::start_move(&mut base, ids) {
+            Edit::Move { ids, .. } => match edit::start_move(&mut base, ids, &sheet.scene) {
                 Ok(moving) if moving.count <= MAX_LIVE => Some(moving),
                 _ => return Preview::Boxed,
             },
@@ -101,6 +101,10 @@ fn apply(
             Ok(())
         }
         Edit::Resize { id, rect } => edit::resize(page, id, *rect),
+        Edit::Points { id, points } => edit::set_points(page, id, points),
+        Edit::End { id, source, end } => {
+            edit::set_end(page, id, *source, (end.0.as_deref(), end.1), end.2.as_ref())
+        }
         Edit::Rotate { id, degrees } => {
             let value = props::rotation(*degrees);
             let ids = std::slice::from_ref(id);
@@ -111,6 +115,20 @@ fn apply(
 }
 
 impl DiagramView {
+    /// The route edge `id` takes once `edit` is made: the live preview's, brought to `edit` if
+    /// no frame has shown it yet.
+    pub(super) fn route_after(&self, edit: &Edit, id: &str) -> Option<Vec<Point>> {
+        let imp = self.imp();
+        let sheet = self.sheet()?;
+        let mut preview = imp.preview.borrow_mut();
+        let preview = preview.get_or_insert_with(|| Preview::start(&sheet, edit));
+        let Preview::Live(live) = preview else {
+            return None;
+        };
+        live.show(edit, &sheet, &imp.cache);
+        live.scene.route(id).map(<[Point]>::to_vec)
+    }
+
     /// Bring the preview up to the pointer, once a frame: started on the first frame a move, a
     /// resize or a turn is past the slop, gone once none is.
     pub(super) fn update_preview(&self, sheet: &Sheet) {
