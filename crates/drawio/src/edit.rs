@@ -189,6 +189,11 @@ impl Editor {
         self.edit(page, |p, _| set_end(p, id, source, on, constraint))
     }
 
+    /// [`set_points`] on page `page`.
+    pub fn set_points(&mut self, page: usize, id: &str, points: &[Point]) -> Result<(), Error> {
+        self.edit(page, |p, _| set_points(p, id, points))
+    }
+
     /// [`resize`] on page `page`.
     pub fn resize(&mut self, page: usize, id: &str, rect: Rect) -> Result<(), Error> {
         self.edit(page, |p, _| resize(p, id, rect))
@@ -598,6 +603,26 @@ pub fn set_end(
     Ok(())
 }
 
+/// Give edge `id` the waypoints `points`, absolute, none for an empty list
+/// (`mxEdgeHandler.changePoints`).
+pub fn set_points(page: &mut Page, id: &str, points: &[Point]) -> Result<(), Error> {
+    check(page, [id])?;
+    let origin = page.origin_of(id);
+    let cell = cell_mut(page, id)?;
+    if !cell.edge {
+        return Err(Error::Refused("only an edge has waypoints"));
+    }
+    let local = points
+        .iter()
+        .map(|p| Point::new(p.x - origin.x, p.y - origin.y));
+    let g = cell.geometry.get_or_insert_with(|| Geometry {
+        relative: true,
+        ..Geometry::default()
+    });
+    g.points = (!points.is_empty()).then(|| local.collect());
+    Ok(())
+}
+
 /// Set (or with `None` remove) several style keys on every cell in `ids`: a connector's route
 /// is two of them.
 pub fn set_styles(
@@ -944,6 +969,10 @@ mod tests {
             e.set_end(0, "a", true, (None, Point::default()), None),
             Err(Error::Refused(_))
         ));
+        e.set_points(0, "e", &[Point::new(1.0, 2.0)]).unwrap();
+        assert_eq!(geometry(&e, "e").points, Some(vec![Point::new(1.0, 2.0)]));
+        e.set_points(0, "e", &[]).unwrap();
+        assert_eq!(geometry(&e, "e").points, None);
     }
 
     #[test]

@@ -61,6 +61,11 @@ pub enum Edit {
         source: bool,
         end: End,
     },
+    /// Give edge `id` these waypoints, in page units.
+    Points {
+        id: CellId,
+        points: Vec<Point>,
+    },
 }
 
 glib::wrapper! {

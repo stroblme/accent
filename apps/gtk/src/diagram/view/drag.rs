@@ -3,6 +3,7 @@
 
 use accent_drawio::geom::rotate;
 use accent_drawio::guide::{self, Neighbour};
+use accent_drawio::handle::{self, Kind, Knob, Terminal};
 use accent_drawio::{CellId, Point, Rect};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -18,6 +19,8 @@ enum Grip {
     Resize(Handle),
     /// An edge's source end, or with `false` its target end.
     End(bool),
+    /// A handle between an edge's ends.
+    Knob(Knob),
 }
 
 /// A drag under way, in page units.
@@ -49,6 +52,15 @@ pub(super) enum Drag {
         id: CellId,
         source: bool,
         other: Point,
+    },
+    /// Dragging a handle between the ends of edge `id`, whose route, ends and waypoints were
+    /// `route`, `ends` and `waypoints` when it was pressed.
+    Knob {
+        id: CellId,
+        knob: Knob,
+        route: Vec<Point>,
+        ends: [Option<Terminal>; 2],
+        waypoints: Vec<Point>,
     },
     /// Turning shape `id`, whose unturned rectangle is `rect`, by its rotate handle.
     Rotate {
@@ -106,6 +118,13 @@ impl DiagramView {
                                 other: other.copied().unwrap_or(p),
                             }
                         }
+                        Grip::Knob(knob) => Drag::Knob {
+                            route: sheet.scene.route(&id).unwrap_or_default().to_vec(),
+                            ends: sheet.terminals(&id),
+                            waypoints: sheet.waypoints(&id),
+                            id,
+                            knob,
+                        },
                         Grip::Rotate => Drag::Rotate { id, rect },
                         Grip::Resize(handle) => Drag::Resize {
                             from: p,
@@ -179,10 +198,13 @@ impl DiagramView {
         if sheet.is_edge(id) && !sheet.is_pinned(id) {
             let route = sheet.scene.route(id)?;
             let near = |q: &Point| frame.to_content(*q).distance(frame.to_content(p)) <= HANDLE;
+            // The ends, then the handles between them, a faded one last.
+            let mut knobs = sheet.knobs(id, route);
+            knobs.sort_by_key(|k| k.2);
             return match (route.first(), route.last()) {
                 (Some(a), _) if near(a) => Some(Grip::End(true)),
                 (_, Some(b)) if near(b) => Some(Grip::End(false)),
-                _ => None,
+                _ => knobs.iter().find(|k| near(&k.1)).map(|k| Grip::Knob(k.0)),
             };
         }
         let r = sheet.rect(id).filter(|_| !sheet.is_pinned(id))?;
@@ -323,12 +345,81 @@ impl DiagramView {
                 id: id.clone(),
                 degrees: self.turn_to(rect, p, free),
             }),
+            Drag::Knob {
+                id,
+                knob,
+                route,
+                ends,
+                waypoints,
+            } => {
+                let at = self.aim(p, route, *ends, free);
+                let points = match knob {
+                    Knob::Segment { index, .. } => {
+                        handle::segment_points(&handle::segments(route), *index, at, *ends)
+                    }
+                    _ => {
+                        let scale = self.scale();
+                        // The other handles a bend dropped on goes.
+                        let sheet = self.sheet()?;
+                        let others = [route.first(), route.last()].into_iter().flatten().copied();
+                        let bends = sheet.knobs(id, route).into_iter().filter_map(|k| {
+                            matches!(k.0, Knob::Bend(_))
+                                .then_some(k.1)
+                                .filter(|_| k.0 != *knob)
+                        });
+                        let handles: Vec<Point> = others.chain(bends).collect();
+                        let reach = HANDLE / 2.0 / scale;
+                        let tolerance = if free { 0.0 } else { TOLERANCE / scale };
+                        handle::bend_points(
+                            waypoints, route, *knob, at, &handles, *ends, reach, tolerance,
+                        )
+                    }
+                };
+                Some(Edit::Points {
+                    id: id.clone(),
+                    points,
+                })
+            }
             Drag::End { id, source, other } => Some(Edit::End {
                 id: id.clone(),
                 source: *source,
                 end: self.end_to(p, *other, free),
             }),
             _ => None,
+        }
+    }
+
+    /// The pointer as an edge's handle takes it: onto a shape's middle or the route's points
+    /// within 2 px, else the grid, unless `free` (`handle::aim`).
+    fn aim(&self, p: Point, route: &[Point], ends: [Option<Terminal>; 2], free: bool) -> Point {
+        match free {
+            true => p,
+            false => handle::aim(p, route, ends, self.grid(free), 1.0 / self.scale()),
+        }
+    }
+
+    /// The edit a drag's release makes of `edit`, what it asked for as the pointer went: a
+    /// segment's waypoints become the corners of the route through them
+    /// (`mxEdgeSegmentHandler.updatePreviewState`), or the route jumps on release.
+    fn settled(&self, drag: &Drag, edit: Edit, p: Point, free: bool) -> Edit {
+        let Drag::Knob {
+            id,
+            knob: Knob::Segment { .. },
+            route,
+            ends,
+            ..
+        } = drag
+        else {
+            return edit;
+        };
+        let Some(routed) = self.route_after(&edit, id) else {
+            return edit;
+        };
+        let at = self.aim(p, route, *ends, free);
+        let points = handle::merged_points(&routed, at, route, *ends, 1.0 / self.scale());
+        Edit::Points {
+            id: id.clone(),
+            points,
         }
     }
 
@@ -341,7 +432,7 @@ impl DiagramView {
             None => q,
         };
         if let Some(edit) = self.drag_edit(&drag, p, free).filter(|_| moved) {
-            return self.emit(edit);
+            return self.emit(self.settled(&drag, edit, p, free));
         }
         match drag {
             Drag::Move {
@@ -398,8 +489,13 @@ impl DiagramView {
                     [id] => self.grip_at(&sheet, id, p).map(|g| (g, sheet.rotation(id))),
                     _ => None,
                 };
+                let elbow = match imp.selection.borrow().as_slice() {
+                    [id] => sheet.edge_kind(id),
+                    _ => None,
+                };
                 match grip {
                     Some((Grip::End(_), _)) => Some("pointer"),
+                    Some((Grip::Knob(knob), _)) => Some(knob_cursor(knob, elbow)),
                     Some((Grip::Rotate, _)) => Some("grab"),
                     // A turned handle shows the cursor of the way it now points.
                     Some((Grip::Resize(h), rotation)) => Some(h.turned(rotation).cursor()),
@@ -418,5 +514,20 @@ impl DiagramView {
             imp.pointer.set(p);
             self.queue_draw();
         }
+    }
+}
+
+/// The pointer over a handle between an edge's ends, as draw.io's: a segment's and the elbow's
+/// the way they move, a bend's a hand, a virtual bend's a cross.
+fn knob_cursor(knob: Knob, kind: Option<Kind>) -> &'static str {
+    let across = |vertical: bool| if vertical { "col-resize" } else { "row-resize" };
+    match knob {
+        Knob::Segment { vertical, .. } => across(vertical),
+        Knob::Elbow => match kind {
+            Some(Kind::Elbow { vertical: true }) => "row-resize",
+            _ => "col-resize",
+        },
+        Knob::Bend(_) => "pointer",
+        Knob::Virtual(_) => "crosshair",
     }
 }

@@ -592,6 +592,7 @@ impl DiagramTab {
                 self.select(vec![id]);
                 self.edit_label();
             }
+            Edit::Points { id, points } => self.edit(|e, page| e.set_points(page, &id, &points)),
             Edit::End { id, source, end } => self.edit(|e, page| {
                 let on = (end.0.as_deref(), end.1);
                 e.set_end(page, &id, source, on, end.2.as_ref())

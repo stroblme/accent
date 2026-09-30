@@ -16,6 +16,10 @@ use crate::diagram::paint;
 use crate::diagram::tools::Tool;
 use crate::theme;
 
+/// How strong a faded handle is drawn: a virtual bend, or a handle of an edge with no waypoints
+/// of its own (draw.io's `virtualBendOpacity`, 40).
+const FADED_ALPHA: f32 = 0.4;
+
 impl DiagramView {
     /// The selection, its handles and whatever a drag is doing, over the page.
     pub(super) fn paint_overlays(&self, snapshot: &gtk::Snapshot, sheet: &Sheet, frame: &Frame) {
@@ -87,18 +91,23 @@ impl DiagramView {
                 turned(&r, rotation);
             }
         }
-        let square = |at: Point| {
+        let faded = theme::at(accent, FADED_ALPHA);
+        let handle = |at: Point, colour: &gdk::RGBA| {
             let at = frame.to_content(at);
             let square = Rect::new(at.x - HANDLE / 2.0, at.y - HANDLE / 2.0, HANDLE, HANDLE);
-            snapshot.append_color(&accent, &paint::grect(&square));
+            snapshot.append_color(colour, &paint::grect(&square));
         };
-        // A lone edge's handles: its ends.
+        let square = |at: Point| handle(at, &accent);
+        // A lone edge's handles: its ends and those between them, where it is drawn now.
         if let [id] = selection.as_slice()
             && sheet.is_edge(id)
             && !sheet.is_pinned(id)
             && !moving
             && let Some(route) = drawn.route(id)
         {
+            for (_, at, dim) in sheet.knobs(id, route) {
+                handle(at, if dim { &faded } else { &accent });
+            }
             for at in [route.first(), route.last()].into_iter().flatten() {
                 square(*at);
             }
@@ -217,7 +226,7 @@ impl DiagramView {
                 let (_, lines) = self.resize_to(rect, *rotation, *handle, delta, guides, free);
                 guide_lines(snapshot, frame, &lines, &accent);
             }
-            Drag::Rotate { .. } | Drag::End { .. } | Drag::Pan { .. } => {}
+            Drag::Rotate { .. } | Drag::End { .. } | Drag::Knob { .. } | Drag::Pan { .. } => {}
         }
     }
 }

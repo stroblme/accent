@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use accent_drawio::geom::rotate;
 use accent_drawio::guide::Neighbour;
+use accent_drawio::handle::{self, Kind, Knob, Terminal};
 use accent_drawio::{CellId, Constraint, Context, Page, PathCmd, Point, Prim, Rect, Scene};
 
 pub const MIN_SCALE: f64 = 0.1;
@@ -674,6 +675,54 @@ impl Sheet {
             .filter(|(d, ..)| *d <= reach)
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, id, at, c)| (id.clone(), at, c))
+    }
+
+    /// The handles between the ends of edge `id` and where they sit, the route being `route`
+    /// (the page's, or a drag's preview's): none for an edge that cannot be bent (`bendable=0`,
+    /// locked).
+    pub fn knobs(&self, id: &str, route: &[Point]) -> Vec<(Knob, Point, bool)> {
+        match self.edge_kind(id) {
+            Some(kind) if !self.is_pinned(id) => {
+                handle::knobs(kind, route, !self.waypoints(id).is_empty())
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// How edge `id`'s middle is handled; `None` for anything else or an edge that cannot be
+    /// bent.
+    pub fn edge_kind(&self, id: &str) -> Option<Kind> {
+        let cell = self.page.cell(id).filter(|c| c.edge)?;
+        let style = cell.style.resolve(true);
+        let is_loop = cell.source.is_some() && cell.source == cell.target;
+        let kind = handle::kind(&style, is_loop);
+        // ponytail: a straight edge's bends and virtual bends come with the next change.
+        let staged = !matches!(kind, Kind::Bends { .. });
+        (style.get("bendable") != Some("0") && staged).then_some(kind)
+    }
+
+    /// Edge `id`'s waypoints, absolute.
+    pub fn waypoints(&self, id: &str) -> Vec<Point> {
+        let origin = self.page.origin_of(id);
+        let points = self
+            .page
+            .cell(id)
+            .and_then(|c| c.geometry.as_ref()?.points.clone());
+        let at = |p: Point| Point::new(p.x + origin.x, p.y + origin.y);
+        points.unwrap_or_default().into_iter().map(at).collect()
+    }
+
+    /// The shapes edge `id`'s source and target ends are on, and whether each is pinned there.
+    pub fn terminals(&self, id: &str) -> [Option<Terminal>; 2] {
+        let Some(cell) = self.page.cell(id) else {
+            return [None, None];
+        };
+        let end = |on: &Option<CellId>, key: &str| {
+            let rect = self.rect(on.as_deref()?)?;
+            let pinned = cell.style.get(key).is_some();
+            Some(Terminal { rect, pinned })
+        };
+        [end(&cell.source, "exitX"), end(&cell.target, "entryX")]
     }
 
     /// What an edge end dropped at `p` attaches to, its other end being at `other`: the
