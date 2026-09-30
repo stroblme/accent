@@ -16,10 +16,17 @@ pub(super) fn bench_loose(app: &Rc<App>) {
         println!("bench loose needs a local vault");
         return bench_quit(app);
     }
-    let (dir, note) = (vault.root().join(DIR), format!("{DIR}/n.md"));
-    let text = "# Loose\n\ntext\n\n## Beside\n\nmore\n";
-    let written =
-        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("n.md"), text));
+    let (dir, note) = (vault.root().join(DIR), format!("{DIR}/n/n.md"));
+    // Its images beside it and under it, then one above its folder, named by a relative link and
+    // through a symlink out of the folder.
+    let text = "# Loose\n\ntext\n\n## Beside\n\n![](dot.png)\n\n![[dot.png]]\n\n\
+        ![](sub/dot.png)\n\n## Above\n\n![](../above.png)\n\n![](out.png)\n";
+    let written = std::fs::create_dir_all(dir.join("n/sub"))
+        .and_then(|_| std::fs::write(dir.join("n/n.md"), text))
+        .and_then(|_| std::fs::write(dir.join("n/dot.png"), png(4, 3)))
+        .and_then(|_| std::fs::write(dir.join("n/sub/dot.png"), png(4, 3)))
+        .and_then(|_| std::fs::write(dir.join("above.png"), png(4, 3)))
+        .and_then(|_| std::os::unix::fs::symlink("../above.png", dir.join("n/out.png")));
     if let Err(e) = written {
         println!("bench loose cannot write {note}: {e}");
         return bench_quit(app);
@@ -37,6 +44,15 @@ pub(super) fn bench_loose(app: &Rc<App>) {
                 "bench loose_outline pane={:?} rows={rows:?}",
                 panes::bench_outline(&apart)
             );
+            apart.set_mode(Mode::Split);
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            let root = format!("accent://file/{}/", dir.display());
+            for (src, .., loaded) in image::page_images(&apart).await {
+                println!(
+                    "bench loose_preview {} loaded={loaded}",
+                    src.replace(&root, "…/")
+                );
+            }
         }
         let _ = std::fs::remove_dir_all(dir);
         bench_quit(&app);
@@ -66,4 +82,11 @@ async fn opened_apart(app: &Rc<App>, rel: &str) -> Option<Rc<App>> {
     }
     println!("bench loose {rel} did not open apart");
     None
+}
+
+/// A `w`×`h` PNG of one grey, which the drill tells apart from another by its size.
+fn png(w: i32, h: i32) -> glib::Bytes {
+    let pixels = glib::Bytes::from_owned(vec![128u8; (w * h * 4) as usize]);
+    let format = gdk::MemoryFormat::R8g8b8a8;
+    gdk::MemoryTexture::new(w, h, format, &pixels, (w * 4) as usize).save_to_png_bytes()
 }

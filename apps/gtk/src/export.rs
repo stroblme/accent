@@ -183,10 +183,12 @@ impl App {
                     .to_str()
                     .to_string();
                 let (resolve, css) = (app.asset_resolver(), preview::paper_css());
+                let note = tab.rel();
                 // Fetching an image is a round trip on a remote vault, and the page may hold many.
                 let write = move || {
-                    let body =
-                        inline_images(&html, |uri| data_uri(&preview::asset(&*resolve, uri)?));
+                    let body = inline_images(&html, |uri| {
+                        data_uri(&preview::asset(&*resolve, &note, uri)?)
+                    });
                     accent_core::fs::write_bytes(
                         &dest,
                         standalone(&title, &css, &body).as_bytes(),
