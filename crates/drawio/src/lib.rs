@@ -16,6 +16,7 @@ pub mod label;
 mod marker;
 pub mod model;
 mod perimeter;
+mod placeholders;
 pub mod route;
 pub mod scene;
 pub mod shapes;
@@ -26,8 +27,9 @@ pub use edit::{Editor, ZOrder};
 pub use geom::{PathCmd, Point, Rect};
 pub use label::{Marks, Run};
 pub use model::{Cell, CellId, File, Page};
+pub use placeholders::{Context, Now};
 pub use route::{Constraint, anchors};
-pub use scene::{Align, Font, ImageSource, Paint, Prim, Scene, Stroke, VAlign, scene};
+pub use scene::{Align, Font, ImageSource, Paint, Prim, Scene, Stroke, VAlign, scene, scene_with};
 pub use style::{Color, Resolved, Style, presets};
 pub use xml::decode_data_uri;
 
