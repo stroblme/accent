@@ -166,6 +166,7 @@ impl Index {
             for id in &removed {
                 delete_file_rows(&tx, *id)?;
             }
+            write_bodies(&tx)?;
             tx.commit()?;
         }
 
@@ -330,6 +331,7 @@ impl Index {
         for id in &ids {
             delete_file_rows(&tx, *id)?;
         }
+        write_bodies(&tx)?;
         tx.commit()?;
         Ok(ids.len())
     }
@@ -533,23 +535,29 @@ fn upsert(
     }
     // Set aside for [`write_bodies`], which the caller runs before it commits.
     if let Some(body) = text.as_ref() {
-        tx.prepare_cached("INSERT INTO temp.bodies(file_id, body, title) VALUES(?1,?2,?3)")?
-            .execute(params![id, body, title.as_deref().unwrap_or_default()])?;
+        tx.prepare_cached(
+            "INSERT OR REPLACE INTO temp.bodies(file_id, body, title) VALUES(?1,?2,?3)",
+        )?
+        .execute(params![id, body, title.as_deref().unwrap_or_default()])?;
     }
     Ok(id)
 }
 
-/// Write the bodies [`upsert`] set aside into `notes`, and through its trigger into both FTS
-/// tables, in one statement.
+/// Rewrite the `notes` rows [`upsert`] and [`clear_derived`] set aside — each file's old body out,
+/// its new one in where it has one — and through the triggers both FTS tables, one statement
+/// each way.
 ///
 /// FTS5 writes the terms it holds in memory out as a new segment at every statement savepoint,
-/// which the statements of a batch after a note's insert open: a body inserted per file was a
+/// which the statements of a batch after a note's write open: a body written per file was a
 /// segment per note in each table, and merging them back was half of a first index (the
 /// generated vault, 41 683 files: 23.5 s → 12.2 s). The rows, the triggers and the index they
 /// build are the same.
 fn write_bodies(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.prepare_cached("DELETE FROM notes WHERE file_id IN (SELECT file_id FROM temp.bodies)")?
+        .execute([])?;
     tx.prepare_cached(
-        "INSERT INTO notes(file_id, body, title) SELECT file_id, body, title FROM temp.bodies",
+        "INSERT INTO notes(file_id, body, title)
+         SELECT file_id, body, title FROM temp.bodies WHERE body IS NOT NULL",
     )?
     .execute([])?;
     tx.prepare_cached("DELETE FROM temp.bodies")?.execute([])?;
@@ -572,8 +580,9 @@ fn diagram_labels(read: crate::fs::Read) -> Option<crate::fs::Read> {
 /// Everything a file's content produced, so a re-read starts clean — and a file that could not
 /// be read keeps no stale body to be found by.
 ///
-/// The `notes` row is deleted here and inserted afresh rather than `REPLACE`d: REPLACE would only
-/// fire the FTS delete trigger with `recursive_triggers` on.
+/// The `notes` row goes with the caller's [`write_bodies`], and is deleted there and inserted
+/// afresh rather than `REPLACE`d: REPLACE would only fire the FTS delete trigger with
+/// `recursive_triggers` on.
 fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     tx.prepare_cached("DELETE FROM links WHERE src_file = ?1")?
         .execute([id])?;
@@ -583,7 +592,7 @@ fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
         .execute([id])?;
     tx.prepare_cached("DELETE FROM note_aliases WHERE file_id = ?1")?
         .execute([id])?;
-    tx.prepare_cached("DELETE FROM notes WHERE file_id = ?1")?
+    tx.prepare_cached("INSERT OR REPLACE INTO temp.bodies(file_id) VALUES(?1)")?
         .execute([id])?;
     Ok(())
 }
@@ -891,11 +900,15 @@ mod tests {
 
         fs::write(vault.path().join("a.md"), "# Alpha\ncompletely new text\n").unwrap();
         fs::remove_file(vault.path().join("c.pdf")).unwrap();
+        fs::remove_file(vault.path().join("sub/Beta.md")).unwrap();
         let s = ix.reconcile(vault.path(), |_| {}).unwrap();
-        assert_eq!(s.updated, 1, "{s:?}");
-        assert_eq!(s.removed, 1, "{s:?}");
+        assert_eq!(s.updated, 2, "a.md, and the folder Beta.md left: {s:?}");
+        assert_eq!(s.removed, 2, "{s:?}");
         assert!(ix.get_file("c.pdf").unwrap().is_none());
         assert!(ix.get_file("a.md").unwrap().is_some());
+        // The removed note's body is gone from both FTS tables, whole word and mid-word.
+        assert!(ix.search("ferris", 10, false).unwrap().is_empty());
+        assert!(ix.search("erri", 10, false).unwrap().is_empty());
     }
 
     #[test]

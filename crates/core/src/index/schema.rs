@@ -152,10 +152,11 @@ CREATE INDEX idx_files_kind_mt  ON files(kind, mtime_ns DESC);
 CREATE INDEX idx_aliases_file   ON aliases(file_id);
 "#;
 
-/// Where a batch's note bodies wait to be written together (`reconcile::write_bodies`): a temp
+/// The `notes` rows a transaction rewrites, waiting to be written together
+/// (`reconcile::write_bodies`): each file's new body, or `NULL` where it has none now. A temp
 /// table, so it is the connection's own and never in the file.
 pub(super) const BODIES: &str = r#"
-CREATE TEMP TABLE bodies(file_id INTEGER PRIMARY KEY, body TEXT NOT NULL, title TEXT NOT NULL);
+CREATE TEMP TABLE bodies(file_id INTEGER PRIMARY KEY, body TEXT, title TEXT);
 "#;
 
 pub(super) const DROP_ALL: &str = r#"
