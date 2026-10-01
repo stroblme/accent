@@ -495,9 +495,11 @@ pub(super) fn bench_git_press(app: &Rc<App>, path: &str) {
 /// row hovered, clicked open and shut with the pointer moved off each time, the keyboard walked
 /// off it and back, left there past GTK's three seconds of visible focus, Tabbed into its first
 /// button and back, its Copy Commit ID clicked and the row clicked once more; then the Changes
-/// list's `src` folder pressed, walked back to and clicked. Point it at the repository the default
-/// drill wants. Every pointer step but the hover and a press still held ends `commit=false
-/// folder=false`, and every keyboard step on a row prints that row's buttons out.
+/// list's `src` folder pressed, walked off and back to, unfolded with Return and clicked, each fold
+/// keeping the keyboard on its row (`on=folder`, `src=` its chevron and the list's rows). Point it
+/// at the repository the default drill wants. Every pointer step but the hover and a press still
+/// held ends `commit=false folder=false`, and every keyboard step on a row prints that row's
+/// buttons out.
 pub(super) fn bench_git_focus(app: &Rc<App>) {
     app.show_pane("git");
     let app = app.clone();
@@ -546,6 +548,19 @@ pub(super) fn bench_git_focus(app: &Rc<App>) {
                 .and_downcast::<gtk::Revealer>()
                 .is_some_and(|r| r.reveals_child())
         };
+        // Whether the `src` row's chevron says it is open, and how many rows the list holds.
+        let chevron = |stack: Option<gtk::Widget>| {
+            let chevron = stack
+                .and_downcast::<gtk::Stack>()
+                .and_then(|s| s.visible_child()?.first_child())
+                .and_downcast::<gtk::Image>();
+            let open = chevron.and_then(|c| c.icon_name()).as_deref() == Some("go-down-symbolic");
+            format!(
+                "{}/{}",
+                if open { "open" } else { "shut" },
+                git.changes_rows()
+            )
+        };
         let say = |step: &str| {
             let focus = gtk::prelude::GtkWindowExt::focus(&app.window);
             let within = |row: Option<gtk::Widget>| {
@@ -568,14 +583,15 @@ pub(super) fn bench_git_focus(app: &Rc<App>) {
             });
             println!(
                 "bench git_focus {step} commit={} folder={} focus={} on={on} focused_row={} \
-                 visible={} toasts={} history_rows={}",
+                 visible={} toasts={} history_rows={} src={}",
                 revealed(commit()),
                 revealed(folder()),
                 focus.as_ref().map_or("none", |f| f.type_().name()),
                 revealed(row.and_then(|r| r.first_child())),
                 app.window.gets_focus_visible(),
                 app.toasted.get(),
-                git.log_rows()
+                git.log_rows(),
+                chevron(folder())
             );
         };
         let click = |w| format!("move {}; down; up; sleep 0.3; move {off}", spot(w));
@@ -589,7 +605,9 @@ pub(super) fn bench_git_focus(app: &Rc<App>) {
         say("key_down");
         xtest("key Up").await;
         say("key_up");
-        glib::timeout_future(Duration::from_millis(3500)).await;
+        // GTK's visible focus outlasts a key by three seconds; the buttons stay out past it.
+        let keys_shown = || app.window.gets_focus_visible();
+        wait_for(|| !keys_shown(), 5000).await;
         say("key_idle");
         xtest("key Tab").await;
         say("key_tab");
@@ -601,14 +619,20 @@ pub(super) fn bench_git_focus(app: &Rc<App>) {
         say("commit_button_click");
         xtest(&click(commit())).await;
         say("commit_click_after_keys");
-        // A press let go of off the row, which focuses it without folding it until the release;
-        // the release redraws the list, which hands the focus to its header.
+        // A press let go of off the row, which focuses it without folding it until the release.
+        // The release folds it in place, so the row keeps the focus and the mark the press left,
+        // and its buttons go with the pointer. Past the keys' visible focus first, which the
+        // folder steps would otherwise read set or not by how long the steps above took.
+        wait_for(|| !keys_shown(), 5000).await;
         xtest(&format!("move {}; down", spot(folder()))).await;
         say("folder_down");
         xtest(&format!("move {off}; up")).await;
         say("folder_press");
         xtest("key Down").await;
         say("folder_key");
+        // Back to it and Return, which unfolds it as a click does and leaves the keyboard on it.
+        xtest("key Up; key Return").await;
+        say("folder_enter");
         xtest(&click(folder())).await;
         say("folder_click");
         bench_quit(&app);
