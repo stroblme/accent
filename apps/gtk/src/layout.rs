@@ -464,10 +464,10 @@ impl App {
         // matches rather than letting the bar count them.
         if let Some(pdf) = self.pdf_of(pane) {
             match op {
-                find::PreviewOp::Find(text) => pdf.find(&text),
+                find::PreviewOp::Find(text, options) => pdf.find(&text, options),
                 find::PreviewOp::Next => pdf.step_match(true),
                 find::PreviewOp::Previous => pdf.step_match(false),
-                find::PreviewOp::Clear => pdf.find(""),
+                find::PreviewOp::Clear => pdf.find("", Default::default()),
                 // Only the Return moves a PDF. A live preview under a half-typed page number
                 // renders pages nobody asked to read, and it has already left the page Back is
                 // supposed to return to, so the committed jump would have nothing to remember.
@@ -483,7 +483,7 @@ impl App {
             return;
         };
         match op {
-            find::PreviewOp::Find(text) => preview.find(&text),
+            find::PreviewOp::Find(text, options) => preview.find(&text, options),
             find::PreviewOp::Next => preview.find_next(),
             find::PreviewOp::Previous => preview.find_previous(),
             find::PreviewOp::Clear => preview.find_clear(),

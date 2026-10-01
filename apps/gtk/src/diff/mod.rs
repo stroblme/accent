@@ -203,6 +203,21 @@ fn line_starts(text: &str) -> Vec<i32> {
     starts
 }
 
+/// Where `a` and `b` differ, in characters: how much they share at the start, and where in each
+/// what they share at the end begins.
+fn differing(a: &str, b: &str) -> (usize, usize, usize) {
+    let start = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    let (na, nb) = (a.chars().count(), b.chars().count());
+    let end = a
+        .chars()
+        .rev()
+        .zip(b.chars().rev())
+        .take(na.min(nb) - start)
+        .take_while(|(x, y)| x == y)
+        .count();
+    (start, na - end, nb - end)
+}
+
 /// The lines, 1-based and inclusive, a selection of the characters `from..to` covers, `starts`
 /// being [`line_starts`]: the one it begins in to the one holding its last character, so a
 /// selection taken to the start of the next line does not take that line too.
@@ -230,6 +245,9 @@ enum Anchor {
     /// Centred in the blank space a hidden run left at this row.
     Gap(usize),
 }
+
+/// What an entry [`Compare::offer`] puts on the panes' menus does with a selection.
+pub type OnLines = Box<dyn Fn(Side, RangeInclusive<usize>, &str, &str)>;
 
 /// Where the view is kept until the rows are laid: see [`Compare::keep`].
 #[derive(Clone, Copy)]
@@ -604,52 +622,57 @@ impl Compare {
         self.lay(false);
     }
 
-    /// Put `label` on both panes' context menus, there while the pane has a selection. `act` is
-    /// handed that pane's side, the lines of its text the selection covers (1-based, inclusive)
-    /// and both texts as they stand. Once per comparison: [`Compare::leave`] takes it off again.
+    /// Put `entries` on both panes' context menus, there while the pane has a selection: each an
+    /// action `diff.<name>`, its label, and what it does, which is handed that pane's side, the
+    /// lines of its text the selection covers (1-based, inclusive) and both texts as they stand.
+    /// Once per comparison: [`Compare::leave`] takes them off again.
     ///
-    /// The entry joins whatever menu the view had, which on the editor is the spell checker's
-    /// suggestions, and hides rather than greys out: `hidden-when` follows the action, and the
+    /// The entries join whatever menu the view had, which on the editor is the spell checker's
+    /// suggestions, and hide rather than grey out: `hidden-when` follows the action, and the
     /// action follows the selection, so a menu opened from the keyboard is right too.
-    pub fn offer(
-        &self,
-        label: &str,
-        act: impl Fn(Side, RangeInclusive<usize>, &str, &str) + 'static,
-    ) {
+    pub fn offer(&self, entries: Vec<(&str, &str, OnLines)>) {
         if !self.offered.borrow().is_empty() {
             return;
         }
-        let act = Rc::new(act);
+        let entries: Vec<(&str, &str, Rc<OnLines>)> = entries
+            .into_iter()
+            .map(|(name, label, act)| (name, label, Rc::new(act)))
+            .collect();
         for side in [Side::Old, Side::New] {
             let pane = self.pane(side);
-            let action = gio::SimpleAction::new("selection", None);
-            action.set_enabled(pane.buffer.has_selection());
-            let (weak, act) = (self.weak.clone(), act.clone());
-            action.connect_activate(move |_, _| {
-                let Some(compare) = weak.upgrade() else {
-                    return;
-                };
-                let texts = [compare.text(Side::Old), compare.text(Side::New)];
-                if let Some((from, to)) = compare.pane(side).buffer.selection_bounds() {
-                    let lines =
-                        lines_between(&line_starts(&texts[side.idx()]), from.offset(), to.offset());
-                    act(side, lines, &texts[0], &texts[1]);
+            let (group, section) = (gio::SimpleActionGroup::new(), gio::Menu::new());
+            let mut actions = Vec::new();
+            for (name, label, act) in &entries {
+                let action = gio::SimpleAction::new(name, None);
+                action.set_enabled(pane.buffer.has_selection());
+                let (weak, act) = (self.weak.clone(), act.clone());
+                action.connect_activate(move |_, _| {
+                    let Some(compare) = weak.upgrade() else {
+                        return;
+                    };
+                    let texts = [compare.text(Side::Old), compare.text(Side::New)];
+                    if let Some((from, to)) = compare.pane(side).buffer.selection_bounds() {
+                        let starts = line_starts(&texts[side.idx()]);
+                        let lines = lines_between(&starts, from.offset(), to.offset());
+                        act(side, lines, &texts[0], &texts[1]);
+                    }
+                });
+                group.add_action(&action);
+                let item = gio::MenuItem::new(Some(label), Some(&format!("diff.{name}")));
+                item.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
+                section.append_item(&item);
+                actions.push(action);
+            }
+            pane.view.insert_action_group("diff", Some(&group));
+            let id = pane.buffer.connect_has_selection_notify(move |b| {
+                for action in &actions {
+                    action.set_enabled(b.has_selection());
                 }
             });
-            let group = gio::SimpleActionGroup::new();
-            group.add_action(&action);
-            pane.view.insert_action_group("diff", Some(&group));
-            let id = pane
-                .buffer
-                .connect_has_selection_notify(move |b| action.set_enabled(b.has_selection()));
             self.handlers
                 .borrow_mut()
                 .push((pane.buffer.clone().upcast(), id));
 
-            let item = gio::MenuItem::new(Some(label), Some("diff.selection"));
-            item.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
-            let section = gio::Menu::new();
-            section.append_item(&item);
             let menu = gio::Menu::new();
             menu.append_section(None, &section);
             let previous = pane.view.extra_menu();
@@ -876,6 +899,27 @@ impl Compare {
         if !self.unfold.is_active() {
             self.opened.borrow_mut().clear();
         }
+        self.refresh();
+    }
+
+    /// Make the editor's side read `text`, as one undo step that rewrites only the stretch between
+    /// what the two share at either end, so the caret and the folds outside it stay put. Nothing
+    /// without an editor's side.
+    pub fn rewrite_mine(&self, text: &str) {
+        let Some(mine) = self.editable else {
+            return;
+        };
+        let (start, end, new_end) = differing(&self.text(mine), text);
+        let insert: String = text.chars().skip(start).take(new_end - start).collect();
+        let buffer = &self.pane(mine).buffer;
+        buffer.begin_user_action();
+        let (mut a, mut b) = (
+            buffer.iter_at_offset(start as i32),
+            buffer.iter_at_offset(end as i32),
+        );
+        buffer.delete(&mut a, &mut b);
+        buffer.insert(&mut a, &insert);
+        buffer.end_user_action();
         self.refresh();
     }
 
@@ -1457,6 +1501,18 @@ impl Compare {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_texts_differ_between_what_they_share_at_either_end() {
+        assert_eq!(differing("a\nB\nc\n", "a\nb\nc\n"), (2, 3, 3));
+        assert_eq!(differing("ä\nb\nadded\n", "ä\nb\n"), (4, 10, 4));
+        assert_eq!(
+            differing("aa", "aaa"),
+            (2, 2, 3),
+            "the shared end never overlaps the start"
+        );
+        assert_eq!(differing("same", "same"), (4, 4, 4));
+    }
 
     /// U+2029 is an ordinary character to the diff and a line break to `GtkTextBuffer`, so a
     /// line number and a buffer line stop agreeing the moment a note carries one. Every line is
