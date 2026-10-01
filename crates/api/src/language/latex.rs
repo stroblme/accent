@@ -7,9 +7,10 @@
 //! toc's entries in order instead ([`Toc`]), from the file's own `.aux`, which is where a
 //! document and every file it `\include`s leave theirs: beside it for a build in place, and for a
 //! build into another directory (latexmk's `-outdir`) in a `build/` or `out/` next to it or next to
-//! a folder above it, which mirrors the folders below. The numbers are the ones the PDF shows,
-//! whatever the class makes of them (IEEEtran's `I-A`, memoir's `\chapternumberline`, a changed
-//! `secnumdepth`), and like the PDF's they are the last build's.
+//! a folder above it, or in the `$out_dir` or `$aux_dir` a `latexmkrc` there names, which mirrors
+//! the folders below. The numbers are the ones the PDF shows, whatever the class makes of them
+//! (IEEEtran's `I-A`, memoir's `\chapternumberline`, a changed `secnumdepth`), and like the PDF's
+//! they are the last build's.
 //!
 //! Counting the headings in the text instead would stay current between builds, but it cannot
 //! number an `\include`d chapter, the chapters before it being in other files, nor anything a
@@ -18,11 +19,11 @@
 //! A file with no `.aux` of its own (an `\input` one) is numbered by the document that reads it,
 //! whose `.aux` lists its headings among its own. texlab knows that document by its dependency
 //! graph; here it is whichever `.aux` from the file's folder up to the vault root, or in a
-//! `build/` or `out/` in one of them ([`Tocs::of`]), lists most of the file's headings by level and
-//! title, in order ([`tidy`]). Titles are all it goes by, so a file `\input` twice, or two files
-//! headed alike, read the first place the toc has them. With none listing any, the file keeps
-//! texlab's numbers, less the one on a `\paragraph`, a `\subparagraph` or a starred heading, which
-//! LaTeX never numbers.
+//! `build/`, an `out/` or a `latexmkrc`'s folder in one of them ([`Tocs::of`]), lists most of the
+//! file's headings by level and title, in order ([`tidy`]). Titles are all it goes by, so a file
+//! `\input` twice, or two files headed alike, read the first place the toc has them. With none
+//! listing any, the file keeps texlab's numbers, less the one on a `\paragraph`, a
+//! `\subparagraph` or a starred heading, which LaTeX never numbers.
 //!
 //! Every name is put on one line, texlab sending a title written over two lines as written.
 //!
@@ -127,15 +128,16 @@ pub(super) struct Tocs(Mutex<HashMap<PathBuf, (SystemTime, Arc<Toc>)>>);
 
 impl Tocs {
     /// The tocs that may number `file`, below `root`: its own build's, and when it has none, the
-    /// [`NEAR`] nearest others, from its folder up to `root`, each folder before its `build/` and
-    /// `out/`. Only a toc that lists a heading counts.
+    /// [`NEAR`] nearest others, from its folder up to `root`, each folder before its `build/`,
+    /// `out/` and those its `latexmkrc` names. Only a toc that lists a heading counts.
     pub(super) fn of(&self, root: &Path, file: &Path) -> (Option<Arc<Toc>>, Vec<Arc<Toc>>) {
         let (Some(dir), Some(stem)) = (file.parent(), file.file_stem()) else {
             return (None, Vec::new());
         };
         let mut name = stem.to_os_string();
         name.push(".aux");
-        // Beside the file, or where a build into `build/` or `out/` above it mirrors its folder.
+        // Beside the file, or where a build into `build/`, `out/` or a `latexmkrc`'s folder above
+        // it mirrors its folder.
         let own = build_dirs(root, dir)
             .find_map(|(folder, below)| self.read(&folder.join(below).join(&name)));
         if own.is_some() {
@@ -594,10 +596,10 @@ mod tests {
         );
     }
 
-    /// The file's own build is found beside it, in a `build/` or `out/` there, or where an
-    /// out-of-directory build of the document mirrors its folder; any other `.aux` from its
-    /// folder up to the vault root is a candidate, nearest first, one listing nothing is not,
-    /// and a rebuild is read again.
+    /// The file's own build is found beside it, in a `build/` or `out/` there or a folder a
+    /// `latexmkrc` names, or where an out-of-directory build of the document mirrors its folder;
+    /// any other `.aux` from its folder up to the vault root is a candidate, nearest first, one
+    /// listing nothing is not, and a rebuild is read again.
     #[test]
     fn the_builds_around_a_file_are_found_and_read_again_once_rebuilt() {
         let vault = tempfile::tempdir().unwrap();
@@ -639,6 +641,12 @@ mod tests {
             .set_modified(later)
             .unwrap();
         assert_eq!(keys(&tocs.of(root, &intro).1), ["Out", "Rebuilt"]);
+
+        // Wherever the `latexmkrc` beside the document sends its `.aux` files.
+        write("report/latexmkrc", "$aux_dir = 'tmp';\n");
+        write("report/tmp/report.aux", &line("section", "1", "Aux"));
+        let (own, _) = tocs.of(root, &root.join("report/report.tex"));
+        assert_eq!(keys(&own.into_iter().collect::<Vec<_>>()), ["Aux"]);
     }
 
     /// An article as texlab 5.26 outlines it, with the `.aux` pdflatex wrote for it (hyperref

@@ -22,6 +22,9 @@ const SP_PER_BP: f32 = 65781.76;
 /// Where a build into another directory beside the sources goes (`latexmk -outdir=build`).
 const OUT_DIRS: [&str; 2] = ["build", "out"];
 
+/// The rc file latexmk reads in the folder it runs in, the first of these it finds.
+const RC_FILES: [&str; 2] = ["latexmkrc", ".latexmkrc"];
+
 /// What a SyncTeX file is called beside its PDF, compressed first.
 const EXTENSIONS: [&str; 2] = [".synctex.gz", ".synctex"];
 
@@ -524,7 +527,8 @@ pub fn near(root: &Path, tex: &Path, build: impl Fn(&Path) -> Option<PathBuf>) -
 }
 
 /// Where a LaTeX build of a file in `dir` may have written what it makes, nearest first: each
-/// folder from `dir` up to `root`, and after each its `build/` and `out/`, each with the part of
+/// folder from `dir` up to `root`, and after each its `build/` and `out/` and the `$out_dir` and
+/// `$aux_dir` a latexmk rc file there names (`rc_dirs`) inside `root`, each with the part of
 /// `dir` below that folder, which a build into another directory mirrors. The outline's `.aux`
 /// lookup reads the same folders.
 pub fn build_dirs<'a>(root: &'a Path, dir: &'a Path) -> impl Iterator<Item = (PathBuf, &'a Path)> {
@@ -532,10 +536,51 @@ pub fn build_dirs<'a>(root: &'a Path, dir: &'a Path) -> impl Iterator<Item = (Pa
         .take_while(move |at| at.starts_with(root))
         .flat_map(move |at| {
             let below = dir.strip_prefix(at).unwrap_or(Path::new(""));
-            std::iter::once(at.to_path_buf())
-                .chain(OUT_DIRS.map(|out| at.join(out)))
-                .map(move |folder| (folder, below))
+            let mut folders = vec![at.to_path_buf()];
+            folders.extend(OUT_DIRS.map(|out| at.join(out)));
+            let rc = RC_FILES
+                .iter()
+                .find_map(|name| std::fs::read_to_string(at.join(name)).ok());
+            for named in rc.as_deref().map(rc_dirs).unwrap_or_default() {
+                let folder = normal(&at.join(named));
+                if folder.starts_with(root) && !folders.contains(&folder) {
+                    folders.push(folder);
+                }
+            }
+            folders.into_iter().map(move |folder| (folder, below))
         })
+}
+
+/// The folders a latexmk rc file sends a build to: its `$out_dir`, then its `$aux_dir`, each
+/// where the last assignment to it is a plain string (`$out_dir = 'build';`). Anything computed,
+/// an interpolation, a concatenation, another variable, is not followed, and it forgets a plain
+/// value before it.
+fn rc_dirs(rc: &str) -> Vec<&str> {
+    let (mut out, mut aux) = (None, None);
+    for line in rc.lines() {
+        for statement in line.split(';').map(str::trim) {
+            if statement.starts_with('#') {
+                break;
+            }
+            let Some((name, value)) = statement.split_once('=') else {
+                continue;
+            };
+            let slot = match name.trim() {
+                "$out_dir" => &mut out,
+                "$aux_dir" => &mut aux,
+                _ => continue,
+            };
+            *slot = literal(value.trim());
+        }
+    }
+    out.into_iter().chain(aux).collect()
+}
+
+/// The text of a Perl string literal with nothing in it to interpolate or escape.
+fn literal(value: &str) -> Option<&str> {
+    let quote = value.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let text = value.strip_prefix(quote)?.strip_suffix(quote)?;
+    (!text.is_empty() && !text.contains([quote, '\\', '$', '@'])).then_some(text)
 }
 
 #[cfg(test)]
@@ -678,5 +723,55 @@ mod tests {
         write("thesis/chapters/fig.pdf");
         assert_eq!(beside(&fig_pdf), None);
         assert_eq!(near(root, &chapter, beside), [main]);
+    }
+
+    /// A latexmk rc file's `$out_dir` and `$aux_dir` are read where each is a plain string, the
+    /// last assignment winning as in Perl; anything computed is left alone.
+    #[test]
+    fn a_latexmkrc_names_the_folders_a_build_goes_to() {
+        assert_eq!(rc_dirs("$out_dir = 'build';\n"), ["build"]);
+        assert_eq!(
+            rc_dirs("$pdf_mode = 1;\n$aux_dir=\"tmp\" ; # the rest\n$out_dir = '_out/pdf';"),
+            ["_out/pdf", "tmp"]
+        );
+        assert_eq!(rc_dirs("$out_dir = 'a'; $out_dir = 'b';"), ["b"]);
+        // A computed value forgets the plain one before it: the build goes wherever that says.
+        assert!(rc_dirs("$out_dir = 'a';\n$out_dir = $ENV{OUT};").is_empty());
+        for rc in [
+            "$out_dir = \"$ENV{HOME}/build\";",
+            "$out_dir = 'a' . 'b';",
+            "$out_dir = 'it\\'s';",
+            "# $out_dir = 'build';",
+            "$out_dir = '';",
+            "$out_dir == 'build';",
+        ] {
+            assert!(rc_dirs(rc).is_empty(), "{rc}");
+        }
+    }
+
+    /// A build sent elsewhere by the `.latexmkrc` above the sources is found as `build/`'s is,
+    /// mirroring the folders below; one that would leave the vault is not looked in.
+    #[test]
+    fn a_build_where_a_latexmkrc_sends_it_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        write("thesis/.latexmkrc", "$out_dir = '_pdf';\n");
+        write("thesis/main.tex", "");
+        write("thesis/_pdf/main.pdf", "");
+        let main = write("thesis/_pdf/main.synctex.gz", "");
+        assert_eq!(near(root, &root.join("thesis/main.tex"), beside), [main]);
+        let chapter = root.join("thesis/chapters");
+        assert!(
+            build_dirs(root, &chapter).any(|(folder, below)| folder == root.join("thesis/_pdf")
+                && below == Path::new("chapters"))
+        );
+        write("latexmkrc", "$out_dir = '../elsewhere';\n");
+        assert!(build_dirs(root, root).all(|(folder, _)| folder.starts_with(root)));
     }
 }

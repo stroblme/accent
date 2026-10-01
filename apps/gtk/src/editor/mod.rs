@@ -39,14 +39,16 @@ pub use banner::Alert;
 use compare::Comparing;
 pub use compare::{companion, overlay_view, rehang_companion, restyle_companion, style_companion};
 #[cfg(feature = "bench")]
+pub(crate) use drag::ENDED as DRAG_ENDED;
+#[cfg(feature = "bench")]
 pub(crate) use drag::content as drag_content;
 use follow::Follow;
 #[cfg(feature = "bench")]
 pub(crate) use keys::press;
 use lines::primary_paste;
+pub(crate) use lines::{caret_to_click, line_clipboard, pressed_at};
 #[cfg(feature = "bench")]
 pub(crate) use lines::{delete_line, duplicate_line, newline_below, paste_primary, toggle_comment};
-pub(crate) use lines::{line_clipboard, pressed_at};
 use open::build;
 pub use open::open;
 pub use page::default_font;
@@ -98,6 +100,26 @@ pub fn spell_adapter(
     let adapter = libspelling::TextBufferAdapter::new(buffer, &libspelling::Checker::default());
     view.insert_action_group("spelling", Some(&adapter));
     view.set_extra_menu(Some(&adapter.menu_model()));
+    // The suggestions are the caret's word's, and a secondary click puts the caret on the word
+    // clicked ([`caret_to_click`]): asked again at once rather than after the adapter's own pause
+    // on a caret move, so the menu opening on this press already holds them. The caret is put
+    // here too, whichever of the two presses runs first.
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    let weak = adapter.downgrade();
+    click.connect_pressed(move |click, presses, x, y| {
+        if let (Some(view), Some(adapter)) = (
+            click.widget().and_downcast::<sourceview5::View>(),
+            weak.upgrade(),
+        ) && presses == 1
+        {
+            lines::place_at_click(&view, x, y);
+            adapter.update_corrections();
+        }
+    });
+    view.add_controller(click);
     adapter
 }
 
@@ -334,6 +356,9 @@ pub struct Tab {
     monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while we replace the buffer text ourselves, so `changed` does not mark it dirty.
     loading: Cell<bool>,
+    /// How many times [`Tab::set_text`] has replaced the whole text, which puts every mark in
+    /// the buffer at its start: a history place's mark from before one says nothing.
+    replaced: Cell<u32>,
     /// The last template pushed into the view, kept only to ask whether its stops are still being
     /// walked: a snippet drops its buffer when it finishes, so that is the question's answer.
     snippet: RefCell<Option<sourceview5::Snippet>>,
@@ -513,11 +538,18 @@ impl Tab {
     /// file used to hold until the next keystroke.
     pub fn set_text(self: &Rc<Self>, text: &str) {
         self.save.edits.set(self.save.edits.get() + 1);
+        self.replaced.set(self.replaced.get() + 1);
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
         self.analyse();
         lang::changed(self);
+    }
+
+    /// How many times the whole text has been replaced, by a reload or the like: a mark set
+    /// before the last one is at the start of the text rather than where it was.
+    pub fn replaced(&self) -> u32 {
+        self.replaced.get()
     }
 
     /// Whether the buffer is being replaced by us rather than typed in. The handlers that watch
@@ -845,6 +877,15 @@ impl Tab {
         if let Some(compare) = self.comparison() {
             compare.follow_editor(false);
         }
+    }
+
+    /// The spelling suggestions' menu, for `ACCENT_BENCH_KEYS=menu:`.
+    #[cfg(feature = "bench")]
+    pub fn spell_menu(&self) -> Option<gtk::gio::MenuModel> {
+        self.spell
+            .borrow()
+            .as_ref()
+            .map(|adapter| adapter.menu_model())
     }
 
     pub fn set_spellcheck(&self, on: bool) {

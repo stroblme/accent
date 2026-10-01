@@ -1086,3 +1086,81 @@ pub(in crate::bench) fn bench_compare_folds(app: &Rc<App>, rel: &str) {
         bench_quit(&app);
     });
 }
+
+/// A paragraph under a blank line, padded below on the disk copy's side where the note's is
+/// longer, is made a row longer on the note's side and laid out at once, as a scroll lays out what
+/// is on screen; then the comparison is laid again eight times before GTK lays out anything else,
+/// as relayouts faster than GTK's idle are, and the padding the blank line and the paragraph carry
+/// on the disk copy's side (`above/below`) is printed after each pass and once GTK has caught up.
+/// The blank line was laid out with the paragraph's padding, and each pass handed both its pads
+/// back to the paragraph: twice as much every pass, until a line's height overflowed GTK's `int`.
+/// The claim: none on the blank line, no doubling, and the longer row's padding once caught up.
+pub(in crate::bench) fn bench_compare_runaway(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let words = |n: usize| vec!["bravo"; n].join(" ");
+        let keep: String = (1..=6).map(|i| format!("keep {i}\n")).collect();
+        // Enough lines under it for the view to scroll, each changed so no run of them is hidden.
+        let tail = |end: &str| -> String { (1..=40).map(|i| format!("tail {i}{end}\n")).collect() };
+        tab.set_text(&format!("{keep}\n{}\n{}", words(10), tail("")));
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_runaway write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.buffer
+            .set_text(&format!("{keep}\n{}\n{}", words(40), tail(".")));
+        app.compare_with_disk(&tab);
+        wait(1500).await;
+        let (Some(compare), Some(disk)) = (
+            tab.comparison(),
+            tab.comparison().and_then(|c| pane_view(c.widget(), true)),
+        ) else {
+            println!("bench compare_runaway none");
+            return bench_quit(&app);
+        };
+        // The disk copy's paragraph and the blank line over it, as `above/below` pixels each.
+        let pads = || {
+            let buffer = disk.buffer();
+            [6, 7].map(|n| {
+                let (mut above, mut below) = (0, 0);
+                let at = buffer.iter_at_line(n).expect("bench line");
+                for tag in at.tags() {
+                    let Some(name) = tag.name() else { continue };
+                    if let Some(px) = name.strip_prefix("diff-pad-above-") {
+                        above = px.parse().unwrap_or(0);
+                    } else if let Some(px) = name.strip_prefix("diff-pad-below-") {
+                        below = px.parse().unwrap_or(0);
+                    }
+                }
+                format!("{above}/{below}")
+            })
+        };
+        let [blank, para] = pads();
+        println!("bench compare_runaway settled blank={blank} para={para}");
+        let mut end = tab.buffer.iter_at_line(7).expect("bench line");
+        end.forward_to_line_end();
+        tab.buffer.insert(&mut end, &format!(" {}", words(12)));
+        let adjustment = compare.vadjustment();
+        let value = adjustment.value();
+        adjustment.set_value(value + 1.0);
+        adjustment.set_value(value);
+        for pass in 0..8 {
+            compare.refresh();
+            let [blank, para] = pads();
+            println!("bench compare_runaway pass={pass} blank={blank} para={para}");
+        }
+        wait(1500).await;
+        let [blank, para] = pads();
+        println!(
+            "bench compare_runaway caught_up blank={blank} para={para} {}",
+            bench_compare_line(&compare)
+        );
+        bench_quit(&app);
+    });
+}

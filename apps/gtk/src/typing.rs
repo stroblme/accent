@@ -110,6 +110,18 @@ pub fn continuation(line: &str) -> Option<Continue> {
 ///
 /// Indent, bullet, digits and `>` are all ASCII, so the byte count is the character count.
 pub fn wrap_column(line: &str, tab_width: usize, level: usize, markers: bool) -> usize {
+    match wrap_head(line, tab_width, markers) {
+        (0, "") => 0,
+        (columns, "") => columns + level,
+        (columns, marker) => columns + marker.len(),
+    }
+}
+
+/// What a wrapped row of `line` hangs behind, in two parts: the column its indent reaches, and
+/// the list, task or quote marker after it with the spaces behind it, empty where there is none
+/// or `markers` says the line is not a note's. [`wrap_column`] counts the marker in columns;
+/// `wrap::measure` lays it out in the view's font, where a proportional face's `-` is no space.
+pub fn wrap_head(line: &str, tab_width: usize, markers: bool) -> (usize, &str) {
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
     let columns = line[..indent].bytes().fold(0, |column, byte| match byte {
         b'\t' => (column / tab_width + 1) * tab_width,
@@ -119,11 +131,7 @@ pub fn wrap_column(line: &str, tab_width: usize, level: usize, markers: bool) ->
         true => marker_width(&line[indent..]),
         false => 0,
     };
-    match (columns, marker) {
-        (0, 0) => 0,
-        (_, 0) => columns + level,
-        _ => columns + marker,
-    }
+    (columns, &line[indent..indent + marker])
 }
 
 /// Whether `line` holds nothing but its indent and a list, task or quote marker: what Return on a
@@ -522,6 +530,23 @@ mod tests {
         assert_eq!(code("  \tbody();"), 8, "a tab after spaces stops at 4");
         assert_eq!(code(" * a comment"), 5, "a star in code is not a bullet");
         assert_eq!(code("fn main() {"), 0);
+    }
+
+    /// The marker a wrap hangs behind is handed over as text, for the view to measure in its own
+    /// font, with the column its indent reaches.
+    #[test]
+    fn a_wrap_hangs_behind_the_marker_text_after_its_indent() {
+        let head = |line| wrap_head(line, 8, true);
+        assert_eq!(head("- item"), (0, "- "));
+        assert_eq!(head("  10.  item"), (2, "10.  "));
+        assert_eq!(head("\t> quoted"), (8, "> "));
+        assert_eq!(head("  - [ ] task"), (2, "- "));
+        assert_eq!(head("    continued"), (4, ""));
+        assert_eq!(
+            wrap_head("- item", 8, false),
+            (0, ""),
+            "code has no markers"
+        );
     }
 
     /// What Return on a list item leaves behind, and so the line ghost text stays off.

@@ -58,6 +58,7 @@ pub(super) fn build(
     // process's one manager is given nowhere to look, before the first Tab ever asks it.
     view.set_enable_snippets(true);
     sourceview5::SnippetManager::default().set_search_path(&[]);
+    caret_to_click(&view);
     view.set_show_line_numbers(false);
     // The Indent Width preference's default, which `Tab::set_indent_width` replaces in a tab. A
     // companion beside a tab takes the tab's (`diff::Compare::follow_editor`) and two companions
@@ -284,6 +285,7 @@ pub fn open(
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
+        replaced: Cell::new(0),
         snippet: RefCell::new(None),
         paste_link,
         debounce: crate::widgets::Debounce::new(DEBOUNCE),

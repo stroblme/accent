@@ -9,7 +9,11 @@
 //! band the block's first line is given above itself, and are laid again after each find and
 //! whenever GTK reflows the lines.
 
-use crate::{diff, highlight::Offsets, theme};
+use crate::{
+    diff,
+    highlight::{self, Offsets},
+    theme,
+};
 use accent_core::conflict::{self, Block, Take};
 use gtk::{gdk, glib, prelude::*};
 use std::cell::{Cell, RefCell};
@@ -41,8 +45,9 @@ const BODY_ALPHA: f32 = 0.16;
 const HEAD_ALPHA: f32 = 0.35;
 
 /// The current, base and incoming sides' tints, each with its marker line's, from the resolved
-/// foreground: the editor's tags and the preview's boxes (`preview.rs`) alike.
-pub(crate) fn tints(fg: gdk::RGBA) -> [(gdk::RGBA, gdk::RGBA); 3] {
+/// foreground and laid over `page`: the editor's tags and the preview's boxes (`preview.rs`)
+/// alike. The incoming side is the theme's own blue where it has one ([`theme::incoming_on`]).
+pub(crate) fn tints(fg: gdk::RGBA, page: gdk::RGBA) -> [(gdk::RGBA, gdk::RGBA); 3] {
     let side = |hue| {
         (
             diff::tint(hue, fg, BODY_ALPHA),
@@ -55,7 +60,7 @@ pub(crate) fn tints(fg: gdk::RGBA) -> [(gdk::RGBA, gdk::RGBA); 3] {
             theme::at(fg, BODY_ALPHA / 2.0),
             theme::at(fg, HEAD_ALPHA / 2.0),
         ),
-        side(diff::INCOMING_HUE),
+        theme::incoming_on(page).unwrap_or_else(|| side(diff::INCOMING_HUE)),
     ]
 }
 
@@ -194,7 +199,10 @@ impl Conflicts {
             (BASE, BASE_HEAD),
             (INCOMING, INCOMING_HEAD),
         ];
-        for ((body, head), (tint, head_tint)) in tags.into_iter().zip(tints(self.view.color())) {
+        let page = highlight::page(adw::StyleManager::default().is_dark());
+        for ((body, head), (tint, head_tint)) in
+            tags.into_iter().zip(tints(self.view.color(), page))
+        {
             self.tag(body).set_paragraph_background_rgba(Some(&tint));
             self.tag(head)
                 .set_paragraph_background_rgba(Some(&head_tint));

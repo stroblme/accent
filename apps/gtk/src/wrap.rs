@@ -7,7 +7,10 @@
 //! wrapped row starts that many pixels right of it, the trick `highlight::hang` pulls heading
 //! markers into the gutter with. A tag's indent is pixels and not a function of the line it lands
 //! on, so there is one tag per column, `wrap1`..`wrap32`, each given its width in the view's font by
-//! [`measure`]; a line that would hang deeper hangs at the last.
+//! [`measure`]; a line that would hang deeper hangs at the last. A note's list and quote markers
+//! hang at their own width rather than a column's, which in a proportional face is not their
+//! character count in spaces: a tag per indent and marker, `wrap2:- `, made the first time a line
+//! asks for it and measured with the marker laid out as the note draws it ([`marker_tag`]).
 //!
 //! A line's paragraph values are the ones on its first character, so that is the character
 //! [`retag`] checks, and a tag goes on whole lines. [`follow`] keeps the tags in step with the text:
@@ -19,6 +22,8 @@ use crate::{highlight, typing};
 use gtk::pango;
 use gtk::prelude::*;
 use sourceview5::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -35,6 +40,28 @@ fn name(column: usize) -> String {
     format!("wrap{column}")
 }
 
+/// A marker tag's name: `wrap2:- ` hangs a line behind a bullet two columns in.
+fn marker_name(columns: usize, marker: &str) -> String {
+    format!("wrap{columns}:{marker}")
+}
+
+/// The indent and marker a marker tag was made for, read back out of its name.
+fn marker_of(name: &str) -> Option<(usize, &str)> {
+    let (columns, marker) = name.strip_prefix("wrap")?.split_once(':')?;
+    Some((columns.parse().ok()?, marker))
+}
+
+/// Whether `tag` is one of this module's, a column's or a marker's.
+fn is_wrap(tag: &gtk::TextTag) -> bool {
+    tag.name().is_some_and(|name| name.starts_with("wrap"))
+}
+
+thread_local! {
+    /// Each marker's width in Pango units, by the font and the space's width it was laid out at:
+    /// every restyle measures the tags again, and a font that has not changed is a lookup.
+    static WIDTHS: RefCell<HashMap<(String, i32, String), i32>> = RefCell::new(HashMap::new());
+}
+
 /// Create the tags in `buffer`'s table (idempotent). Before anything a flavour installs: a note's
 /// heading tags set an indent of their own, and a tag added later outranks an earlier one, which
 /// is how an indented ATX heading keeps the hang that pulls its `#` markers out.
@@ -49,11 +76,11 @@ pub fn install(buffer: &sourceview5::Buffer) {
 
 /// Give every tag its width in `view`'s font, a space per column: the unit GtkSourceView sets its
 /// tab stops in, so a tab-indented line lines up exactly, and in the monospaced face code always
-/// has and a note has by default, every character's advance. Called again on every font or zoom
-/// change. A tag whose width has not moved is left alone, because setting one lays out again every
-/// line it is on.
+/// has and a note has by default, every character's advance. A marker tag adds its marker as laid
+/// out ([`hang`]). Called again on every font or zoom change. A tag whose width has not moved is
+/// left alone, because setting one lays out again every line it is on.
 pub fn measure(view: &sourceview5::View) {
-    let space = view.create_pango_layout(Some(" ")).size().0;
+    let space = space(view);
     let table = view.buffer().tag_table();
     for column in 1..=COLUMNS {
         let Some(tag) = table.lookup(&name(column)) else {
@@ -64,6 +91,70 @@ pub fn measure(view: &sourceview5::View) {
             tag.set_indent(indent);
         }
     }
+    let mut marked = Vec::new();
+    table.foreach(|tag| marked.push(tag.clone()));
+    for tag in marked {
+        let Some(name) = tag.name() else {
+            continue;
+        };
+        if let Some((columns, marker)) = marker_of(&name) {
+            let indent = hang(view, space, columns, marker);
+            if tag.indent() != indent {
+                tag.set_indent(indent);
+            }
+        }
+    }
+}
+
+/// A space's width in `view`'s font, in Pango units.
+fn space(view: &sourceview5::View) -> i32 {
+    view.create_pango_layout(Some(" ")).size().0
+}
+
+/// The indent that hangs a line's wrapped rows behind `marker`, `columns` into the line: the
+/// marker laid out in the view's font as the note draws it, its bullet or number bold (the
+/// `listmarker` tag), a quote's `>` italic with the rest of the quote, the spaces after either
+/// plain. In a monospaced face that is the marker's width in spaces, as a column tag's.
+fn hang(view: &sourceview5::View, space: i32, columns: usize, marker: &str) -> i32 {
+    let font = view
+        .pango_context()
+        .font_description()
+        .map(|font| font.to_string())
+        .unwrap_or_default();
+    let key = (font, space, marker.to_string());
+    let width = WIDTHS.with_borrow(|widths| widths.get(&key).copied());
+    let width = width.unwrap_or_else(|| {
+        let layout = view.create_pango_layout(Some(marker));
+        let attrs = pango::AttrList::new();
+        attrs.insert(match marker.starts_with('>') {
+            true => pango::AttrInt::new_style(pango::Style::Italic).upcast(),
+            false => {
+                let mut bold = pango::AttrInt::new_weight(pango::Weight::Bold).upcast();
+                bold.set_end_index(marker.trim_end_matches(' ').len() as u32);
+                bold
+            }
+        });
+        layout.set_attributes(Some(&attrs));
+        let width = layout.size().0;
+        WIDTHS.with_borrow_mut(|widths| widths.insert(key, width));
+        width
+    });
+    -pango::units_to_double(space * columns as i32 + width).round() as i32
+}
+
+/// The tag a note's line hangs behind `marker` with, `columns` into it, made the first time a line
+/// asks for it. Under every other tag, as the column tags are, so a heading's hang outranks it.
+fn marker_tag(view: &sourceview5::View, columns: usize, marker: &str) -> gtk::TextTag {
+    let table = view.buffer().tag_table();
+    let name = marker_name(columns, marker);
+    if let Some(tag) = table.lookup(&name) {
+        return tag;
+    }
+    let tag = gtk::TextTag::new(Some(&name));
+    table.add(&tag);
+    tag.set_priority(0);
+    tag.set_indent(hang(view, space(view), columns, marker));
+    tag
 }
 
 /// Tag every line of `view` now, and from then on the lines each edit touches: an insertion's
@@ -190,8 +281,18 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
                 .iter_at_line(line)
                 .is_some_and(|start| start.has_tag(tag))
         });
-        let column = typing::wrap_column(text, tab_width, level, markers && !fenced).min(COLUMNS);
-        column.checked_sub(1).and_then(|index| tags.get(index))
+        let markers = markers && !fenced;
+        let column = typing::wrap_column(text, tab_width, level, markers);
+        match typing::wrap_head(text, tab_width, markers) {
+            (columns, marker) if !marker.is_empty() && column <= COLUMNS => {
+                Some(marker_tag(view, columns, marker))
+            }
+            _ => column
+                .min(COLUMNS)
+                .checked_sub(1)
+                .and_then(|index| tags.get(index))
+                .cloned(),
+        }
     };
     let line_end = |line| crate::editor::line_end(&buffer, line);
     if last - first < COLUMNS as i32 {
@@ -203,13 +304,9 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
             let mut head = start;
             head.forward_chars(HEAD_CHARS);
             let want = want(&buffer.text(&start, &head.min(end), true), line);
-            let have: Vec<gtk::TextTag> = start
-                .tags()
-                .into_iter()
-                .filter(|tag| tags.contains(tag))
-                .collect();
+            let have: Vec<gtk::TextTag> = start.tags().into_iter().filter(is_wrap).collect();
             if have.len() == usize::from(want.is_some())
-                && want.is_none_or(|tag| have.contains(tag))
+                && want.as_ref().is_none_or(|tag| have.contains(tag))
             {
                 continue;
             }
@@ -217,7 +314,7 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
                 buffer.remove_tag(tag, &start, &end);
             }
             if let Some(tag) = want {
-                buffer.apply_tag(tag, &start, &end);
+                buffer.apply_tag(&tag, &start, &end);
             }
         }
         return;
@@ -228,7 +325,13 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
     let end = line_end(last);
     // Only the tags that are there: a removal lays out every line of the range again, whether it
     // took anything off or not, and freshly inserted text usually has none.
-    for tag in tags {
+    let mut all = Vec::new();
+    buffer.tag_table().foreach(|tag| {
+        if is_wrap(tag) {
+            all.push(tag.clone());
+        }
+    });
+    for tag in &all {
         let mut toggle = start;
         if start.has_tag(tag) || (toggle.forward_to_tag_toggle(Some(tag)) && toggle < end) {
             buffer.remove_tag(tag, &start, &end);
@@ -246,7 +349,7 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
         if to < wants.len() && wants[to] == wants[from] {
             continue;
         }
-        if let (Some(tag), Some(start)) = (wants[from], buffer.iter_at_line(first + from as i32)) {
+        if let (Some(tag), Some(start)) = (&wants[from], buffer.iter_at_line(first + from as i32)) {
             buffer.apply_tag(tag, &start, &line_end(first + to as i32 - 1));
         }
         from = to;

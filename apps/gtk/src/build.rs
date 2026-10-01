@@ -298,7 +298,6 @@ pub fn build_window(
         sidebar_column,
         sidebar_header,
         toolbar,
-        editor_column,
         header,
         modes,
         drawing_button: drawing.clone(),
@@ -656,7 +655,7 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
         }),
         trash: Box::new(move |keys| {
             if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {
-                fileops::trash_all(&ops, keys.to_vec());
+                fileops::discard_all(&ops, keys.to_vec());
             }
         }),
         changed: Box::new(move || {
@@ -967,7 +966,9 @@ thread_local! {
 /// over the document. `.accent-idle-pane` is on every pane's tab bar but the active one's
 /// (`App::mark_active_pane`): its selected tab is outlined rather than filled, so two panes do not
 /// show two identical pills. Not under the pointer, where it takes Adwaita's hover fill like any
-/// other tab, and not on a bar of one tab, which Adwaita draws with no pill at all.
+/// other tab, and not on a bar of one tab, which Adwaita draws with no pill at all. A toast's
+/// transform eases over `widgets::FADE_MS` where animations are on, for the lift presentation
+/// mode gives the toasts over the status bar (`App::lift_toasts`).
 ///
 /// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
 /// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
@@ -1004,7 +1005,8 @@ thread_local! {
 // A GtkSourceView assistant is never narrower than 1 px: GtkSourceView empties a hover that is up
 // before asking the providers again, and the view's allocations present it meanwhile at what it
 // measures, 0 wide when empty, which `gdk_popup_present` refuses with a critical.
-/// Registers the icons compiled into the binary and points the theme at them.
+/// Registers the icons compiled into the binary and points the theme at them, and GtkSourceView
+/// at the language specs beside them.
 ///
 /// A GResource rather than hicolor: the completion list and the file lists need their icons
 /// long before anyone runs `make install`, and the theme keeps answering for every Adwaita name
@@ -1016,6 +1018,10 @@ fn install_icons() {
             tracing::warn!("icons: {e}");
             return;
         }
+        // Ahead of GtkSourceView's own, so our `latex.lang` is the one read (the first file of an
+        // id wins), and before any tab asks for a language: the path cannot change once read.
+        sourceview5::LanguageManager::default()
+            .prepend_search_path("resource:///io/github/stroblme/Accent/language-specs/");
         let Some(display) = gdk::Display::default() else {
             return;
         };
@@ -1033,8 +1039,10 @@ fn install_chrome_css() {
             true => format!(
                 ".chrome-fade, paned > separator {{ transition: opacity {ms}ms ease; }} \
                  scrolledwindow > undershoot {{ transition: box-shadow {ms}ms ease, \
-                   background-image {ms}ms ease; }} ",
-                ms = fade::RAMP_MS
+                   background-image {ms}ms ease; }} \
+                 toastoverlay > toast {{ transition: transform {lift}ms ease-out; }} ",
+                ms = fade::RAMP_MS,
+                lift = crate::widgets::FADE_MS
             ),
             false => String::new(),
         };

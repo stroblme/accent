@@ -217,6 +217,18 @@ pub const UNFOCUSED_SELECTION_ALPHA: f32 = 0.1;
 /// this is about how strong the colour is, not about whether the text survives.
 pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
 
+/// A conflict block's incoming side and its marker line over `page` where the theme has a blue of
+/// its own for it, or `None` for the one derived from the foreground (`conflict::tints`).
+///
+/// Solarized's light page only: its cream cancels a light wash of the derived blue, mixed with an
+/// ink that is a blue-grey itself, into grey. Solarized's own blue, the terminal's, reads there at
+/// a little more strength, which its ink allows: base00 keeps 3.3:1 on the side and 3.0:1 on the
+/// marker line, against its own 4.1:1 on the page.
+pub fn incoming_on(page: gdk::RGBA) -> Option<(gdk::RGBA, gdk::RGBA)> {
+    let blue = rgb(SOLARIZED_ANSI[4]);
+    (rgb_of(page) == rgb(LIGHT_BASE)).then(|| (rgba(blue, 0.2), rgba(blue, 0.27)))
+}
+
 /// A colour written down as bytes, painted at `alpha`. The one place a byte becomes a channel.
 pub fn rgba(rgb: [u8; 3], alpha: f32) -> gdk::RGBA {
     let channel = |v: u8| f32::from(v) / 255.0;
@@ -374,6 +386,29 @@ mod tests {
             );
         }
         assert!(contrast("#0000c0", VIEW_DARK) < 3.0);
+    }
+
+    /// Solarized's light page alone has a blue of its own for a conflict's incoming side, and its
+    /// ink keeps 3:1 on both tints, laid over the page.
+    #[test]
+    fn only_solarized_light_has_its_own_incoming_blue() {
+        let page = |hex| rgba(rgb(hex), 1.0);
+        for other in [VIEW_LIGHT, VIEW_DARK, DARK_BASE] {
+            assert!(incoming_on(page(other)).is_none(), "{other}");
+        }
+        let cream = page(LIGHT_BASE);
+        let (side, line) = incoming_on(cream).expect("Solarized light");
+        for tint in [side, line] {
+            let laid = |t: f32, p: f32| t * tint.alpha() + p * (1.0 - tint.alpha());
+            let [r, g, b] = rgb_of(gdk::RGBA::new(
+                laid(tint.red(), cream.red()),
+                laid(tint.green(), cream.green()),
+                laid(tint.blue(), cream.blue()),
+                1.0,
+            ));
+            let ratio = contrast(LIGHT_TEXT, &format!("#{r:02x}{g:02x}{b:02x}"));
+            assert!(ratio >= 3.0, "{ratio:.2}:1 at {}", tint.alpha());
+        }
     }
 
     #[test]

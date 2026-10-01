@@ -160,6 +160,10 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             app.retarget_find(&pane);
             app.set_active_pane(&pane);
             app.sync_active();
+            // Under F5 the tab come to the front is the one presented, keyboard and all.
+            if app.presenting.get().is_some() {
+                app.focus_presented();
+            }
             app.save_session_soon();
         }
     ));
@@ -623,14 +627,24 @@ pub fn wire_window(app: &Rc<App>) {
         app,
         #[upgrade_or]
         glib::Propagation::Proceed,
-        move |_, key, _, state| {
+        move |keys, key, _, state| {
             app.on_key(key, state);
             // A held `Ctrl+Tab` is what is up while it is held, ahead of presentation: Escape
             // takes the chord back and nothing else.
-            match key == gdk::Key::Escape && (app.cancel_cycle() || escape_first(&app)) {
-                true => glib::Propagation::Stop,
-                false => glib::Propagation::Proceed,
+            if key == gdk::Key::Escape && (app.cancel_cycle() || escape_first(&app)) {
+                return glib::Propagation::Stop;
             }
+            // Presentation's own chord leaves it from a presented shell too, which is handed
+            // every chord outside its reserved set, F5 included (`actions::reserved`).
+            if app.presenting.get().is_some()
+                && keys
+                    .current_event()
+                    .is_some_and(|event| ends_presenting(&app, &event))
+            {
+                app.set_presenting(false);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
         }
     ));
     // The other half of `Ctrl+Tab`: an action activation says nothing about the modifier still
@@ -750,6 +764,14 @@ pub fn escape_first(app: &Rc<App>) -> bool {
     }
     app.set_presenting(false);
     true
+}
+
+/// Whether `event` is the chord Presentation Mode is bound to, as the table has it now.
+fn ends_presenting(app: &App, event: &gdk::Event) -> bool {
+    actions::accels_for(&app.config.borrow(), "win.present")
+        .iter()
+        .filter_map(|accel| gtk::ShortcutTrigger::parse_string(accel))
+        .any(|trigger| trigger.trigger(event, false) == gdk::KeyMatch::Exact)
 }
 
 /// An Escape nothing closer to the focus wanted: the active pane's find bar goes first, then the

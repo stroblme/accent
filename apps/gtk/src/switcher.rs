@@ -58,8 +58,10 @@ impl Switcher {
         self.list.upcast_ref()
     }
 
+    /// Whether the card is up: its own visibility, which `show` and `hide` set, rather than
+    /// whether it is on screen, which its pane decides too.
     pub fn shown(&self) -> bool {
-        self.list.is_visible()
+        self.list.get_visible()
     }
 
     /// Run `show` once the chord has been held for [`DELAY`], unless that is already coming.

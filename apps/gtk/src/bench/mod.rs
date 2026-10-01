@@ -9,6 +9,7 @@ mod chrome;
 mod compare;
 mod diagnostics;
 mod diagram;
+mod dismiss;
 mod export;
 mod files;
 mod find;
@@ -20,6 +21,7 @@ mod memory;
 mod outline;
 mod panes;
 mod pdf;
+mod present;
 mod replace;
 mod scroll;
 mod search;
@@ -33,7 +35,8 @@ use compare::{
     bench_compare, bench_compare_clicks, bench_compare_conflict, bench_compare_diag,
     bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_left,
     bench_compare_lines, bench_compare_pads, bench_compare_page, bench_compare_pick,
-    bench_compare_press, bench_compare_row, bench_compare_stale, bench_compare_unfold,
+    bench_compare_press, bench_compare_row, bench_compare_runaway, bench_compare_stale,
+    bench_compare_unfold,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -51,13 +54,13 @@ use git::{
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
 use keys::{
-    bench_box_drag, bench_hold, bench_keys, bench_list, bench_occurrence_keys, bench_shell_keys,
-    bench_term,
+    bench_box_drag, bench_hold, bench_keys, bench_list, bench_menu_caret, bench_occurrence_keys,
+    bench_shell_keys, bench_term,
 };
 use outline::bench_outline;
 use panes::{
-    bench_apart, bench_collapse, bench_cycle, bench_layout, bench_layout_pick, bench_panes,
-    bench_pin, bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
+    bench_apart, bench_back, bench_collapse, bench_cycle, bench_layout, bench_layout_pick,
+    bench_panes, bench_pin, bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_deep,
@@ -68,8 +71,8 @@ use replace::bench_replace;
 use scroll::bench_scroll;
 use search::bench_search;
 use style::{
-    bench_drag_fold, bench_follow, bench_numbers, bench_occurrences, bench_reveal, bench_seam,
-    bench_style, bench_theme, bench_wrap,
+    bench_drag_fold, bench_follow, bench_listing, bench_numbers, bench_occurrences, bench_reveal,
+    bench_seam, bench_style, bench_theme, bench_wrap,
 };
 use tags::bench_tags;
 
@@ -78,6 +81,8 @@ use tags::bench_tags;
 /// first rows its query shows. Both run headless under
 /// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
+/// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` clicks outside each dialog through XTEST
+/// instead (`dismiss::bench_dismiss`).
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
@@ -115,7 +120,11 @@ use tags::bench_tags;
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
 /// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
 /// for XTEST presses of the keys that step through a note, the preview and a PDF, and prints
-/// whether each one faded the chrome (see `chrome::bench_chrome_keys`). `ACCENT_BENCH_PATHS=1`
+/// whether each one faded the chrome (see `chrome::bench_chrome_keys`).
+/// `=present:<note>,<pdf>,<image>,<side>` presents a note, a PDF, an image and a shell from one of
+/// two panes and prints what F5 shows, the find bar, a held `Ctrl+Tab`'s card, Escape over it, a
+/// toast against the status bar, and the layout leaving F5 puts back (see
+/// `present::bench_present`). `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
@@ -125,8 +134,10 @@ use tags::bench_tags;
 /// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
 /// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK; then
-/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`) and draws the view
-/// with its top row on a partly hidden line (`case=screen`).
+/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`), draws the view
+/// with its top row on a partly hidden line (`case=screen`), and draws it at the top over hidden
+/// first lines with the layout's height overflowed below zero (`case=overflow`).
+/// `=listing:<rel>` prints how a LaTeX file's listings are coloured (`style::bench_listing`).
 /// Every form of it runs only on a scratch vault under `/tmp` (`scratch_only`).
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
@@ -168,6 +179,9 @@ use tags::bench_tags;
 /// `=unfold:<rel>` presses Show All Unchanged Lines and lets it go, in the note's tab and in a tab
 /// of two blobs, printing the hidden runs and the line at the top of the view each time
 /// (`compare::bench_compare_unfold`).
+/// `=runaway:<rel>` lays a comparison again eight times before GTK lays out what it re-padded,
+/// printing the padding of a paragraph under a blank line after each
+/// (`compare::bench_compare_runaway`).
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
@@ -274,6 +288,10 @@ use tags::bench_tags;
 /// `Ctrl+Tab` chord's state whenever it changes, with the ms since the chord began: whether the
 /// card is up, its rows with the lit one, the tab in front and the pane's order; and once, where
 /// the card's third row is (`cycle aim row2=x,y`), for a click on it with Ctrl held.
+/// `=back:<a>,<b>` puts the caret on line 10 of `a`, goes to `b`, writes three lines above that
+/// place in `a` and goes Back, printing where the caret landed against where the text it left
+/// went; then Forward, `a`'s whole text replaced as a reload replaces it, and Back again, which
+/// lands on the line and column the place was taken at.
 /// `=loose:<rel_pdf>` writes a note and its images into `loose-drill/` and opens the note in a
 /// window of its own from its tree row, where no vault is behind it, and prints what the Outline
 /// pane there holds and the headings it lists, then whether each image in its preview loaded:
@@ -601,6 +619,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = rel.strip_prefix("unfold:") {
                 return bench_compare_unfold(&app, rel);
             }
+            if let Some(rel) = rel.strip_prefix("runaway:") {
+                return bench_compare_runaway(&app, rel);
+            }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
                 None => bench_compare(&app, &rel),
@@ -722,6 +743,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rels) = rels.strip_prefix("cycle:") {
                 return bench_cycle(&app, rels);
             }
+            if let Some(rels) = rels.strip_prefix("back:") {
+                return bench_back(&app, rels);
+            }
             if let Some(pdf) = rels.strip_prefix("loose:") {
                 return loose::bench_loose(&app, pdf);
             }
@@ -780,6 +804,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rels) = notes.strip_prefix("keys:") {
                 return bench_chrome_keys(&app, rels);
             }
+            if let Some(rels) = notes.strip_prefix("present:") {
+                return present::bench_present(&app, rels);
+            }
             return bench_chrome(&app, &notes);
         }
         if let Some(arg) = keys {
@@ -788,6 +815,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = arg.strip_prefix("box:") {
                 return bench_box_drag(&app, rel);
+            }
+            if let Some(rel) = arg.strip_prefix("menu:") {
+                return bench_menu_caret(&app, rel);
             }
             return match arg.as_str() {
                 "1" => bench_keys(&app),
@@ -822,6 +852,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = rel.strip_prefix("seam:") {
                 return bench_seam(&app, rel);
             }
+            if let Some(rel) = rel.strip_prefix("listing:") {
+                return bench_listing(&app, rel);
+            }
             return match rel.strip_prefix("wrap:") {
                 Some(rels) => bench_wrap(&app, rels),
                 None => bench_style(&app, &rel),
@@ -834,6 +867,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             bench_quit(&app);
             return;
         };
+        if let Some(rels) = query.strip_prefix("dismiss:") {
+            return dismiss::bench_dismiss(&app, rels);
+        }
         let t0 = Instant::now();
         let _ = WidgetExt::activate_action(&app.window, "win.palette-files", None);
         println!("bench switcher_open_ms {:.1}", ms_since(t0));

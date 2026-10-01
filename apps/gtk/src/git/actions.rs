@@ -734,7 +734,8 @@ impl Panel {
     /// passes `None` and itself. An untracked file has nothing in the index to go back to, so what
     /// "discard" means for it is that the file itself goes — to the trash, which is at least
     /// recoverable, and all of a folder's in one go: a folder holding nothing tracked goes whole
-    /// ([`Panel::trash_untracked`]).
+    /// ([`Panel::trash_untracked`]). A remote vault has no trash, so there it is deleted, which
+    /// this one question says, and nothing asks again.
     pub(super) fn discard(self: &Rc<Self>, folder: Option<&str>, entries: Vec<Entry>) {
         let Some(repo) = ({
             let state = self.state.borrow();
@@ -758,6 +759,7 @@ impl Panel {
             tracked.len(),
             untracked.len(),
             kept.len(),
+            !self.hooks.vault.is_remote(),
         );
         let listed: Vec<String> = untracked.into_iter().map(|e| e.path).collect();
         let under = folder.map(str::to_string);
@@ -828,16 +830,25 @@ fn to_trash(named: Vec<String>, listed: &[String]) -> Vec<String> {
 /// What the Discard confirmation says will happen. A file's own row names the file; a folder's
 /// names the folder and how many files of each kind it takes, the ones that go back to the index
 /// and the untracked ones that go to the trash, and how many repositories of their own it leaves
-/// alone; Discard All, the folder `""`, says the same of the whole section.
-fn discard_body(what: &str, folder: bool, tracked: usize, untracked: usize, kept: usize) -> String {
-    let undone = match tracked {
-        0 => "",
-        _ => " This cannot be undone.",
+/// alone; Discard All, the folder `""`, says the same of the whole section. Where there is no
+/// `trash` (a remote vault) the untracked files are deleted permanently, and it says that instead.
+fn discard_body(
+    what: &str,
+    folder: bool,
+    tracked: usize,
+    untracked: usize,
+    kept: usize,
+    trash: bool,
+) -> String {
+    let undone = match tracked > 0 || (untracked > 0 && !trash) {
+        false => "",
+        true => " This cannot be undone.",
     };
     if !folder {
-        return match untracked {
-            0 => format!("{what} goes back to what the index holds.{undone}"),
-            _ => format!("{what} is not tracked, so it moves to the trash."),
+        return match (untracked, trash) {
+            (0, _) => format!("{what} goes back to what the index holds.{undone}"),
+            (_, true) => format!("{what} is not tracked, so it moves to the trash."),
+            (_, false) => format!("{what} is not tracked, so it is deleted permanently.{undone}"),
         };
     }
     let back = match tracked {
@@ -845,10 +856,12 @@ fn discard_body(what: &str, folder: bool, tracked: usize, untracked: usize, kept
         1 => Some("1 file goes back to what the index holds".to_string()),
         n => Some(format!("{n} files go back to what the index holds")),
     };
-    let trashed = match untracked {
-        0 => None,
-        1 => Some("1 untracked file moves to the trash".to_string()),
-        n => Some(format!("{n} untracked files move to the trash")),
+    let trashed = match (untracked, trash) {
+        (0, _) => None,
+        (1, true) => Some("1 untracked file moves to the trash".to_string()),
+        (n, true) => Some(format!("{n} untracked files move to the trash")),
+        (1, false) => Some("1 untracked file is deleted permanently".to_string()),
+        (n, false) => Some(format!("{n} untracked files are deleted permanently")),
     };
     let parts = back
         .into_iter()
@@ -918,30 +931,53 @@ mod tests {
     #[test]
     fn a_folder_discard_says_how_many_files_go_where() {
         assert_eq!(
-            discard_body("a.md", false, 1, 0, 0),
+            discard_body("a.md", false, 1, 0, 0, true),
             "a.md goes back to what the index holds. This cannot be undone."
         );
         assert_eq!(
-            discard_body("new.md", false, 0, 1, 0),
+            discard_body("new.md", false, 0, 1, 0, true),
             "new.md is not tracked, so it moves to the trash."
         );
         assert_eq!(
-            discard_body("src", true, 3, 1, 0),
+            discard_body("src", true, 3, 1, 0, true),
             "In src, 3 files go back to what the index holds and 1 untracked file moves to the \
              trash. This cannot be undone."
         );
         assert_eq!(
-            discard_body("src", true, 0, 2, 0),
+            discard_body("src", true, 0, 2, 0, true),
             "In src, 2 untracked files move to the trash."
         );
         assert_eq!(
-            discard_body("", true, 3, 2, 0),
+            discard_body("", true, 3, 2, 0, true),
             "3 files go back to what the index holds and 2 untracked files move to the trash. \
              This cannot be undone."
         );
         assert_eq!(
-            discard_body("", true, 0, 2, 1),
+            discard_body("", true, 0, 2, 1, true),
             "2 untracked files move to the trash. 1 repository of its own is left as it is."
+        );
+    }
+
+    /// A remote vault has no trash, so its untracked files are deleted, and the one question
+    /// says so: nothing asks again.
+    #[test]
+    fn without_a_trash_the_discard_says_untracked_files_are_deleted() {
+        assert_eq!(
+            discard_body("new.md", false, 0, 1, 0, false),
+            "new.md is not tracked, so it is deleted permanently. This cannot be undone."
+        );
+        assert_eq!(
+            discard_body("src", true, 0, 1, 0, false),
+            "In src, 1 untracked file is deleted permanently. This cannot be undone."
+        );
+        assert_eq!(
+            discard_body("", true, 3, 2, 0, false),
+            "3 files go back to what the index holds and 2 untracked files are deleted \
+             permanently. This cannot be undone."
+        );
+        assert_eq!(
+            discard_body("a.md", false, 1, 0, 0, false),
+            discard_body("a.md", false, 1, 0, 0, true)
         );
     }
 

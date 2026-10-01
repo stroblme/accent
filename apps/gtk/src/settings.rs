@@ -102,6 +102,7 @@ fn page(
     actions.add_action(&action);
     dialog.insert_action_group("preferences", Some(&actions));
     dialog.present(Some(parent));
+    crate::dialogs::close_on_outside_press(dialog.upcast_ref());
 }
 
 /// Put a page of rows reading `config` into `dialog`, in place of the one it has.

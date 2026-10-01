@@ -327,13 +327,6 @@ impl Bar {
             }
         ));
         this.bar.add_controller(keys);
-        // F5 over a note lends the bar to the editor column and takes it back (`App::hoist_find`),
-        // which is when the rendered preview starts and stops being what it searches.
-        this.bar.connect_parent_notify(glib::clone!(
-            #[weak(rename_to = bar)]
-            this,
-            move |_| bar.sync_toggles()
-        ));
         this.bar.connect_search_mode_enabled_notify(glib::clone!(
             #[weak(rename_to = bar)]
             this,

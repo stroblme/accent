@@ -233,6 +233,48 @@ pub enum Spot {
 pub struct Place {
     pub key: String,
     pub at: Spot,
+    /// In a text tab, a mark where the caret was, which moves with the edits around it, so Back
+    /// lands on the character the reader left; `at` is where it was then, which is gone to where
+    /// the mark says nothing ([`Held::iter_in`]). Shared by the copies of the place.
+    pub mark: Option<Rc<Held>>,
+}
+
+/// A place's mark in a text buffer, taken out of the buffer once the last place holding it goes:
+/// its entry leaving the history, which its tab closing does ([`Nav::forget`]).
+#[derive(Debug, PartialEq)]
+pub struct Held {
+    mark: gtk::TextMark,
+    /// The tab's count of whole-text replacements when the mark was set (`Tab::replaced`).
+    replaced: u32,
+}
+
+impl Held {
+    /// An anonymous mark at `iter`, with left gravity: text typed where the reader was goes
+    /// after the place, as it went after the caret they left there.
+    pub fn at(buffer: &gtk::TextBuffer, iter: &gtk::TextIter, replaced: u32) -> Held {
+        Held {
+            mark: buffer.create_mark(None, iter, true),
+            replaced,
+        }
+    }
+
+    /// Where the place is now in `buffer`: `None` where the mark is not one of its marks any
+    /// more, or the whole text has been replaced since (`replaced` being the tab's count now),
+    /// which leaves every mark at the start.
+    pub fn iter_in(&self, buffer: &gtk::TextBuffer, replaced: u32) -> Option<gtk::TextIter> {
+        let ours = !self.mark.is_deleted() && self.mark.buffer().as_ref() == Some(buffer);
+        (ours && replaced == self.replaced).then(|| buffer.iter_at_mark(&self.mark))
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.mark.buffer()
+            && !self.mark.is_deleted()
+        {
+            buffer.delete_mark(&self.mark);
+        }
+    }
 }
 
 /// Whether `next` merges into `last` instead of being pushed behind it: the same document, near
@@ -535,7 +577,13 @@ impl Pane {
         drop.set_types(&[adw::TabPage::static_type(), String::static_type()]);
         hint.add_controller(drop.clone());
 
-        let overlay = gtk::Overlay::builder().child(&tabs).build();
+        // Expanding of its own, not only through the tab view, which presentation mode hides
+        // under the rendered note it lays over it (`Pane::cover`).
+        let overlay = gtk::Overlay::builder()
+            .child(&tabs)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
         overlay.add_overlay(&hint);
         let switcher = Switcher::new();
         overlay.add_overlay(switcher.widget());
@@ -577,17 +625,17 @@ impl Pane {
         self.column.upcast_ref()
     }
 
-    /// Put the find bar back between the tab bar and the document, after presentation mode has
-    /// borrowed it (`App::hoist_find`). A no-op while it is already there.
-    pub fn hold_find(&self) {
-        let bar = self.find.widget();
-        if bar.parent().as_ref() == Some(self.widget()) {
+    /// Lay `widget` over this pane's document, above its tabs and under the drop sheet and the
+    /// `Ctrl+Tab` card, which go on working over it: presentation mode shows a note rendered here,
+    /// where the note is. Taken from another pane's document if it covers one; anywhere else it
+    /// must have been taken out of first. A no-op while it is already here.
+    pub fn cover(&self, widget: &gtk::Widget) {
+        if widget.parent().as_ref() == Some(self.overlay.upcast_ref()) {
             return;
         }
-        if let Some(old) = bar.parent().and_downcast::<gtk::Box>() {
-            old.remove(bar);
-        }
-        self.column.insert_child_after(bar, Some(&self.bar));
+        widget.unparent();
+        self.overlay.add_overlay(widget);
+        widget.insert_after(&self.overlay, Some(&self.tabs));
     }
 
     /// The document area, whose size the drop zones are measured in.
@@ -898,6 +946,27 @@ pub fn detach(pane: &Pane) {
     replace(&grandparent, paned.upcast_ref(), &sibling);
 }
 
+/// Show `only` alone, where it is in the pane tree, or every pane again with `None`: each branch
+/// beside the way up from it is hidden. A `GtkPaned` with one child hidden gives the other all of
+/// its room without working out a position, so every divider is where it was once the branches
+/// come back. A node changes only if it has to, so a sibling is not mapped to be hidden again.
+pub fn isolate(panes: &[Rc<Pane>], only: Option<&Pane>) {
+    let mut path = Vec::new();
+    let mut at = only.map(|pane| pane.widget().clone());
+    while let Some(node) = at {
+        at = node.parent().filter(|parent| parent.is::<gtk::Paned>());
+        path.push(node);
+    }
+    for pane in panes {
+        let mut node = pane.widget().clone();
+        while let Some(paned) = node.parent().and_downcast::<gtk::Paned>() {
+            let beside = !path.contains(&node) && path.contains(paned.upcast_ref());
+            node.set_visible(!beside);
+            node = paned.upcast();
+        }
+    }
+}
+
 /// Swap one child of a pane tree node for another. A node is either the bin at the root or a
 /// paned; nothing else ever holds a pane column.
 fn replace(parent: &gtk::Widget, old: &gtk::Widget, new: &gtk::Widget) {
@@ -1008,6 +1077,7 @@ mod tests {
         Place {
             key: key.to_string(),
             at: Spot::Caret(line, 1),
+            mark: None,
         }
     }
 
@@ -1030,6 +1100,7 @@ mod tests {
         // A PDF is coarser: a page is as near as its places get.
         let page = |n| Place {
             key: "p.pdf".to_string(),
+            mark: None,
             at: Spot::Page(Anchor {
                 page: n,
                 u: 0.0,
@@ -1076,6 +1147,7 @@ mod tests {
         // A page edit takes the places in its document with the pages, and no other.
         let page = |key: &str, n| Place {
             key: key.to_string(),
+            mark: None,
             at: Spot::Page(Anchor {
                 page: n,
                 u: 0.0,

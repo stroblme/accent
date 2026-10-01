@@ -135,12 +135,18 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
 }
 
 /// The pointer's half of `drop_fold`, held for XTEST: a section folded under its heading and
-/// selected whole, where to press on it and where to let it go at the end of the note, and after
-/// eight seconds what the note holds. A move has to carry the hidden body and take all of it away
-/// from where it was, so `hidden body` is in the note once, after `plain line`. Drive it in steps
-/// with pauses between them — `move X0 Y0; down`, a move past the drag threshold, then
-/// `sleep 0.3; move X1 Y1; sleep 0.5; up` — because XDND's position and status messages have to go
-/// round before the release, and `xtest.py`'s one-shot `drag` lets go too soon.
+/// selected whole, where to press on it and where to let it go at the end of the note, and five
+/// seconds later what the note holds and the action a drag of ours ended with, ten times, every
+/// other one meant to be driven with Ctrl held. A move has to carry the hidden body and take all
+/// of it away from where it was, so `hidden body` is in the note once, after `plain line`; a copy
+/// leaves it twice. Each round says whether the drag was ours (`ended=Some`), and `lost=true`
+/// where the hidden body left the note; the last line counts the rounds whose drag was GTK's own
+/// (`gtk`, the note changed with no drag of ours ending), that changed nothing (`missed`) and that
+/// lost text (`lost`), the invariant being that a drag never takes away text it does not carry.
+/// Drive it in steps with pauses between them — `move X0 Y0; down`, a move past the drag
+/// threshold, then `sleep 0.3; move X1 Y1; sleep 0.5; up` — because XDND's position and status
+/// messages have to go round before the release, and `xtest.py`'s one-shot `drag` lets go too
+/// soon.
 pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
     const FOLDED: &str = "# One\nhidden body\n# Two\nplain line\n";
     app.open_path(rel);
@@ -150,18 +156,10 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
         let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
-        tab.set_text(FOLDED);
-        let fold = accent_api::Fold {
-            start_line: 0,
-            end_line: 1,
-        };
-        crate::fold::fold(tab.buffer.upcast_ref(), fold);
         let at = |needle: &str| {
             let offset = FOLDED.find(needle).expect("bench needle") as i32;
             tab.buffer.iter_at_offset(offset)
         };
-        tab.buffer.select_range(&at("# One"), &at("# Two"));
-        glib::timeout_future(Duration::from_millis(300)).await;
         // Screen coordinates: under Xvfb with no window manager the window sits at 0,0.
         let screen = |iter: &gtk::TextIter| {
             let r = tab.view.iter_location(iter);
@@ -175,15 +173,35 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
             let (sx, sy) = app.window.surface_transform();
             ((p.x() as f64 + sx) as i32, (p.y() as f64 + sy) as i32)
         };
-        let mut end = tab.buffer.end_iter();
-        end.backward_char();
-        println!(
-            "bench drag_fold press={:?} release={:?}",
-            screen(&at("One")),
-            screen(&end)
-        );
-        glib::timeout_future(Duration::from_secs(8)).await;
-        println!("bench drag_fold text={:?}", tab.text());
+        let (mut gtk, mut missed, mut lost) = (0, 0, 0);
+        for round in 0..10 {
+            let kind = ["plain", "ctrl"][round % 2];
+            tab.set_text(FOLDED);
+            let fold = accent_api::Fold {
+                start_line: 0,
+                end_line: 1,
+            };
+            crate::fold::fold(tab.buffer.upcast_ref(), fold);
+            tab.buffer.select_range(&at("# One"), &at("# Two"));
+            tab.view.grab_focus();
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let mut end = tab.buffer.end_iter();
+            end.backward_char();
+            crate::editor::DRAG_ENDED.set(None);
+            println!(
+                "bench drag_fold {round} {kind} press={:?} release={:?}",
+                screen(&at("One")),
+                screen(&end)
+            );
+            glib::timeout_future(Duration::from_secs(5)).await;
+            let (ended, text) = (crate::editor::DRAG_ENDED.get(), tab.text());
+            let gone = !text.contains("hidden body");
+            gtk += usize::from(ended.is_none() && text != FOLDED);
+            missed += usize::from(ended.is_none() && text == FOLDED);
+            lost += usize::from(gone);
+            println!("bench drag_fold {round} {kind} ended={ended:?} lost={gone} text={text:?}");
+        }
+        println!("bench drag_fold summary rounds=10 gtk={gtk} missed={missed} lost={lost}");
         bench_quit(&app);
     });
 }
@@ -303,6 +321,38 @@ pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
             "bench seam case=screen top_in_line={}",
             tab.view.visible_rect().y() - top
         );
+        // The layout's height wrapped below zero, as a comparison's runaway padding took it, with
+        // the first lines hidden as a comparison's collapsed run hides them: GTK clamps every row
+        // it is asked about into that height, which finds hidden line 0 whatever the row, and the
+        // ask at the screen's bottom row walked on from there.
+        let body: String = (0..60).map(|i| format!("body line {i}\n")).collect();
+        tab.set_text(&format!("# One\n{body}"));
+        if let Some(tag) = tab.buffer.tag_table().lookup(crate::fold::TAG) {
+            let to = tab.buffer.iter_at_line(5).expect("bench line");
+            tab.buffer.apply_tag(&tag, &tab.buffer.start_iter(), &to);
+        }
+        let huge = gtk::TextTag::builder()
+            .pixels_above_lines(i32::MAX / 2)
+            .pixels_below_lines(i32::MAX / 2)
+            .build();
+        tab.buffer.tag_table().add(&huge);
+        let line = tab.buffer.iter_at_line(30).expect("bench line");
+        let mut end = line;
+        end.forward_char();
+        tab.buffer.apply_tag(&huge, &line, &end);
+        if let Some(adjustment) = tab.view.vadjustment() {
+            adjustment.set_value(0.0);
+        }
+        glib::timeout_future(Duration::from_millis(200)).await;
+        if let Some(parent) = tab.view.parent() {
+            parent.snapshot_child(&tab.view, &gtk::Snapshot::new());
+        }
+        let (y, height) = tab.view.line_yrange(&tab.buffer.end_iter());
+        println!(
+            "bench seam case=overflow layout_height={} visible_y={}",
+            y + height,
+            tab.view.visible_rect().y()
+        );
         bench_quit(&app);
     });
 }
@@ -366,10 +416,10 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
 /// first character, that tag's indent, and how far right of the line's first screen row its second
 /// one starts: the hang as GTK laid it out, `None` for a line that does not wrap. Each tab stays up
 /// for four seconds, for a screenshot; a note is first given a fence opened above everything, and
-/// closed again, with every line's tag printed each time. The last one, meant to be code, is then
-/// filled with 10k indented lines, three to a depth as code's blocks come, and the fill, a
-/// keystroke, a Return and a new indent width are timed, each with the tag it left on the line it
-/// touched.
+/// closed again, with every line's tag printed each time. The last one is then filled with 10k
+/// indented lines, three to a depth as code's blocks come — in a note, list and quote items behind
+/// a bullet, a number or a `>` in turn — and the fill, a keystroke, a Return, a restyle's measure
+/// and a new indent width are timed, each with the tag it left on the line it touched.
 pub(super) fn bench_wrap(app: &Rc<App>, rels: &str) {
     let app = app.clone();
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
@@ -425,8 +475,18 @@ fn bench_wrap_line(tab: &Rc<Tab>, line: i32) -> String {
         .then(|| tab.view.iter_location(&row).x() - tab.view.iter_location(&start).x());
     let mut head = start;
     head.forward_chars(12);
+    // On a note's list or quote line, how far right its text starts behind the marker on the first
+    // row, which is where the hang should put the rows after it.
+    let text = tab.buffer.text(&start, &line_end(&tab.buffer, line), true);
+    let (_, marker) = crate::typing::wrap_head(&text, 8, tab.flavour().is_note());
+    let text_x = (!marker.is_empty()).then(|| {
+        let indent = text.len() - text.trim_start_matches([' ', '\t']).len();
+        let mut at = start;
+        at.forward_chars((indent + marker.len()) as i32);
+        tab.view.iter_location(&at).x() - tab.view.iter_location(&start).x()
+    });
     format!(
-        "line={line} head={:?} tag={:?} indent={:?} hang={hang:?}",
+        "line={line} head={:?} tag={:?} indent={:?} hang={hang:?} text_x={text_x:?}",
         tab.buffer
             .text(&start, &head.min(line_end(&tab.buffer, line)), true),
         tag.as_ref().and_then(|tag| tag.name()),
@@ -449,12 +509,18 @@ fn bench_wrap_tag(tab: &Rc<Tab>, line: i32) -> Option<String> {
 
 fn bench_wrap_cost(tab: &Rc<Tab>) {
     let lines = 10_000;
+    let note = tab.flavour().is_note();
     let body: String = (0..lines)
-        .map(|i| {
-            format!(
+        .map(|i| match note {
+            true => format!(
+                "{}{} item {i} of a list\n",
+                "  ".repeat(i / 3 % 6),
+                ["-", "1.", ">"][i % 3]
+            ),
+            false => format!(
                 "{}let value_{i} = compute({i});\n",
                 "    ".repeat(1 + i / 3 % 6)
-            )
+            ),
         })
         .collect();
     let t0 = Instant::now();
@@ -468,6 +534,10 @@ fn bench_wrap_cost(tab: &Rc<Tab>) {
         "bench wrap_cost lines={lines} fill_ms={fill:.1} recheck_ms={recheck:.1} line1={:?}",
         bench_wrap_tag(tab, 1)
     );
+    // What every restyle asks of the wrap tags with the font unchanged.
+    let t0 = Instant::now();
+    crate::wrap::measure(&tab.view);
+    println!("bench wrap_measure us={}", t0.elapsed().as_micros());
     let line = 5000;
     tab.buffer.place_cursor(&line_end(&tab.buffer, line));
     let t0 = Instant::now();
@@ -1359,4 +1429,78 @@ fn bench_tag_ranges(tab: &Rc<Tab>, tag: &gtk::TextTag) -> Vec<(i32, i32)> {
         }
         ranges.push((start, iter.offset()));
     }
+}
+
+/// `ACCENT_BENCH_STYLE=listing:<rel>` opens the LaTeX file at `rel` and prints each line as runs
+/// of the GtkSourceView context classes and the foreground the syntax colours give it
+/// (`"def"[no-spell-check;#c64600]`, `-` where none does): what `latex.lang` makes of the listings
+/// in it. Then `bench listing shot <theme>` under the default theme and Solarized, each held a
+/// second and a half for a screenshot.
+pub(super) fn bench_listing(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(600)).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let buffer = &tab.buffer;
+        buffer.ensure_highlight(&buffer.start_iter(), &buffer.end_iter());
+        println!(
+            "bench listing language={:?}",
+            buffer.language().map(|l| l.id())
+        );
+        for line in 0..buffer.line_count() {
+            println!("bench listing {line} {}", bench_listing_runs(buffer, line));
+        }
+        for theme in [Theme::System, Theme::Solarized] {
+            crate::theme::apply(theme);
+            app.restyle_all();
+            glib::timeout_future(Duration::from_millis(300)).await;
+            println!("bench listing shot {theme:?}");
+            glib::timeout_future(Duration::from_millis(1500)).await;
+        }
+        bench_quit(&app);
+    });
+}
+
+/// One line of `buffer` as runs of equal context classes and syntax foreground.
+fn bench_listing_runs(buffer: &sourceview5::Buffer, line: i32) -> String {
+    let Some(mut iter) = buffer.iter_at_line(line) else {
+        return String::new();
+    };
+    let look = |iter: &gtk::TextIter| {
+        let fg = iter
+            .tags()
+            .iter()
+            .filter_map(|tag| tag.foreground_rgba().filter(|_| tag.is_foreground_set()))
+            .next_back()
+            .map_or("-".to_string(), |c| {
+                let byte = |v: f32| (v * 255.0).round() as u8;
+                format!(
+                    "#{:02x}{:02x}{:02x}",
+                    byte(c.red()),
+                    byte(c.green()),
+                    byte(c.blue())
+                )
+            });
+        (buffer.context_classes_at_iter(iter).join(","), fg)
+    };
+    let mut runs = Vec::new();
+    let mut text = String::new();
+    let mut current = look(&iter);
+    while !iter.ends_line() {
+        let now = look(&iter);
+        if now != current {
+            runs.push(format!("{text:?}[{};{}]", current.0, current.1));
+            text.clear();
+            current = now;
+        }
+        text.push(iter.char());
+        iter.forward_char();
+    }
+    if !text.is_empty() {
+        runs.push(format!("{text:?}[{};{}]", current.0, current.1));
+    }
+    runs.join(" ")
 }
