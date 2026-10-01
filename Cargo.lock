@@ -79,6 +79,7 @@ dependencies = [
  "ignore",
  "libc",
  "memchr",
+ "miniz_oxide",
  "notify",
  "notify-debouncer-full",
  "nucleo-matcher",

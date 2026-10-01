@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use accent_core::path;
+use accent_core::synctex::build_dirs;
 use accent_core::walk::FileKind;
 use accent_lsp::types::DocumentSymbol;
 
@@ -64,9 +65,6 @@ const LEVELS: [&str; 7] = [
 
 /// How many `.aux` files around a file with none of its own are read for the one numbering it.
 const NEAR: usize = 16;
-
-/// Where a build into another directory is usually put, beside the document.
-const OUT_DIRS: [&str; 2] = ["build", "out"];
 
 /// `symbols` as texlab answered them for `text`, put right: numbered by `own`, the toc of the
 /// file's own build, or else by the one of `near` that lists most of its headings, the nearest of
@@ -137,21 +135,13 @@ impl Tocs {
         };
         let mut name = stem.to_os_string();
         name.push(".aux");
-        let up = || dir.ancestors().take_while(|at| at.starts_with(root));
-        // A folder, and where a build into another directory beside it goes.
-        let builds =
-            |at: &Path| std::iter::once(at.to_path_buf()).chain(OUT_DIRS.map(|o| at.join(o)));
         // Beside the file, or where a build into `build/` or `out/` above it mirrors its folder.
-        let own = up().find_map(|at| {
-            let below = dir.strip_prefix(at).ok()?;
-            builds(at)
-                .map(|build| build.join(below).join(&name))
-                .find_map(|aux| self.read(&aux))
-        });
+        let own = build_dirs(root, dir)
+            .find_map(|(folder, below)| self.read(&folder.join(below).join(&name)));
         if own.is_some() {
             return (own, Vec::new());
         }
-        let auxes = up().flat_map(builds).flat_map(|folder| {
+        let auxes = build_dirs(root, dir).flat_map(|(folder, _)| {
             let mut auxes: Vec<PathBuf> = std::fs::read_dir(folder)
                 .into_iter()
                 .flatten()
