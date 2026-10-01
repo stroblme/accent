@@ -27,8 +27,8 @@ const INK_SAVE: std::time::Duration = std::time::Duration::from_secs(1);
 /// will not open, or opens with the pages written so far.
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// The page commands, each on the page being read: the page's own menu and the status bar's page
-/// count offer the same three.
+/// The page commands, each on the page the page's own menu was opened on, or else the page being
+/// read ([`PdfTab::command_page`]): that menu and the status bar's page count offer the same three.
 pub const PAGE_ACTIONS: [&str; 3] = [
     "win.pdf-add-page-before",
     "win.pdf-add-page-after",
@@ -124,8 +124,9 @@ pub struct PdfTab {
     pub(super) notes: RefCell<Vec<PdfLink>>,
     /// A page and selection to show once the glyphs for it arrive: Follow Link into a PDF.
     pub(super) pending_show: Cell<Option<(usize, Option<[usize; 4]>)>>,
-    /// The page and point the page's menu was opened on or Ctrl was clicked at, for Go to Source,
-    /// until the menu has gone. See [`PdfTab::source_point`].
+    /// The page and point the page's menu was opened on or Ctrl was clicked at, for Go to Source
+    /// and the page commands, until the menu has gone. See [`PdfTab::source_point`] and
+    /// [`PdfTab::command_page`].
     pub(super) pointed: Cell<Option<(usize, f32, f32)>>,
     /// The line of text Show in PDF asked for while the document was still opening.
     pub(super) spot: Cell<Option<(usize, pdf::Rect)>>,
@@ -390,6 +391,14 @@ impl PdfTab {
     /// The page being read: the one under the middle of the reading view.
     pub fn current_page(&self) -> usize {
         self.view.current_page()
+    }
+
+    /// The page Add Page Before, Add Page After and Delete Page act on: the one the page's menu
+    /// was opened on, else, from the palette or the status bar's page count, the page being read.
+    pub fn command_page(&self) -> usize {
+        self.pointed
+            .take()
+            .map_or_else(|| self.current_page(), |(page, ..)| page)
     }
 
     /// The widget a reader's keys have to reach: the reading view, which is where [`Self::wire_keys`]
@@ -773,10 +782,10 @@ impl PdfTab {
         self.ask(Request::Save(None));
     }
 
-    /// A blank page before or `after` the one being read, the size of the page before it. After
-    /// the last page it is a notebook's answer to running out of paper.
+    /// A blank page before or `after` the [`PdfTab::command_page`], the size of the page before
+    /// it. After the last page it is a notebook's answer to running out of paper.
     pub fn add_page(self: &Rc<Self>, after: bool) {
-        let at = self.current_page() + usize::from(after);
+        let at = self.command_page() + usize::from(after);
         self.edit_pages(pdf::PageEdit::Insert(at));
     }
 
@@ -1308,9 +1317,9 @@ impl PdfTab {
     /// Copy and Copy Link to Selection when there is a selection, then Add Page Before, Add Page
     /// After, Delete Page and Export Highlights, which are about the document rather than about
     /// what is selected and so are always offered — a read-only or remote document says so in a
-    /// toast rather than by hiding the row. The page commands act on the page being read, as they
-    /// do from the status bar's page count, not on the page under the pointer. The drawing tools
-    /// are not here: they are the ring, which the header's Drawing button opens.
+    /// toast rather than by hiding the row. The page commands act on the page under the pointer,
+    /// where the status bar's page count and the palette act on the page being read. The drawing
+    /// tools are not here: they are the ring, which the header's Drawing button opens.
     ///
     /// `win.` actions rather than a group of the tab's own: that is what gives them a row in the
     /// palette and a rebindable accelerator, which is the whole argument of DESIGN.md's keyboard
