@@ -288,6 +288,7 @@ impl App {
                 // up, so the presentation never reflows under the pointer.
                 self.toolbar.set_extend_content_to_bottom_edge(true);
                 self.apply_layout();
+                self.focus_presented();
             }
             (false, Some(before)) => {
                 self.presenting.set(None);
@@ -363,6 +364,27 @@ impl App {
             });
         }
         crate::widgets::set_class(&self.toasts, "accent-lifted", by.is_some());
+    }
+
+    /// Give the keyboard to what F5 shows, on F5 and on every tab a held `Ctrl+Tab` steps to, so
+    /// it reads its own keys as it does outside presentation: Space, Page Down, the arrows, Home
+    /// and End through the rendered note, a PDF or an image, typing into a shell. F5 and Escape
+    /// leave presentation ahead of it all the same (`wire::wire_window`).
+    pub(crate) fn focus_presented(&self) {
+        let widget: gtk::Widget = match self.active_doc() {
+            Some(Doc::Text(_)) => match self.preview.borrow().as_ref() {
+                Some(preview) => preview.widget().clone(),
+                None => return,
+            },
+            // An image's scroller pages it with the keys a document scrolls by.
+            Some(Doc::Image(image)) => image.page.child(),
+            _ => return self.focus_document(&self.pane()),
+        };
+        // From an idle, as `focus_document` does: the preview has only just been laid over the
+        // pane, and a widget not mapped yet is not one GTK hands the keyboard to.
+        glib::idle_add_local_once(move || {
+            widget.grab_focus();
+        });
     }
 
     fn ensure_preview(self: &Rc<Self>) {

@@ -2,6 +2,7 @@
 //! it, and what leaving it puts back.
 
 use super::*;
+use webkit6::prelude::WebViewExt;
 
 /// `ACCENT_BENCH_CHROME=present:<note>,<pdf>,<image>,<side>` lays out two panes, the note, the
 /// PDF, the image and a shell on the left and `<side>` on the right, and presents each of the
@@ -25,14 +26,14 @@ use super::*;
 ///   `note_toast_up` and `note_toast_down` follow both on the frames between.
 ///
 /// Then `split` and `split_after`: the note alone in Split view, its divider off the middle,
-/// presented and left again. Last the note is presented once more for real keys: at
-/// `bench present keys_focus` the window wants the X input focus, and at `keys_ready` a held
-/// `Ctrl+Tab` pressed twice and Escape before Ctrl comes up, then one held and let go, under
-/// Xvfb `build-aux/xtest.py :N "move 500 400; focus"` and `xtest.py :N "keydown ctrl; key Tab;
-/// key Tab; sleep 0.6; key Escape; keyup ctrl; sleep 0.5; keydown ctrl; key Tab; sleep 0.6;
-/// keyup ctrl"`; every change of the chord, the card and what is presented prints as
-/// `bench present keys`. `bench present shot <case>` is a second and a half held for a
-/// screenshot.
+/// presented and left again. Last, presenting again, real keys: a held `Ctrl+Tab` pressed twice
+/// and Escape before Ctrl comes up, then one held and let go, every change of the chord, the card
+/// and what is presented printing as `bench present keys`; Page Down over the presented note and
+/// PDF (`<kind>_page_down`, the note's `scrollY` or the PDF's page before and after); and F5 and
+/// Escape pressed in the presented shell (`shell_F5`, `shell_Escape`, both to read
+/// `presenting=false`). `bench present xtest <steps>` asks for those steps, under Xvfb
+/// `build-aux/xtest.py :N "<steps>"`, the first of them giving the window the X input focus.
+/// `bench present shot <case>` is a second and a half held for a screenshot.
 pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
     if rels.len() != 4 {
@@ -198,7 +199,7 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
         // The chord by real keys over the presented note: Escape while it is held, then a release
         // on the tab it stepped to.
         app.set_presenting(true);
-        println!("bench present keys_focus");
+        println!("bench present xtest move 500 400; focus");
         for _ in 0..100 {
             if app.window.is_active() {
                 break;
@@ -206,7 +207,10 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
             glib::timeout_future(Duration::from_millis(100)).await;
         }
         glib::timeout_future(Duration::from_millis(500)).await;
-        println!("bench present keys_ready");
+        println!(
+            "bench present xtest keydown ctrl; key Tab; key Tab; sleep 0.6; key Escape; keyup ctrl; \
+             sleep 0.5; keydown ctrl; key Tab; sleep 0.6; keyup ctrl"
+        );
         let mut last = String::new();
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(6) {
@@ -224,8 +228,59 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
             }
             glib::timeout_future(Duration::from_millis(20)).await;
         }
+
+        // Page Down read by what is presented, brought to the front as a click on the card would.
+        for (kind, rel) in [("note", &rels[0]), ("pdf", &rels[1])] {
+            if let Some(page) = page(rel) {
+                app.reveal_page(&page);
+            }
+            glib::timeout_future(Duration::from_millis(1200)).await;
+            let before = position(&app).await;
+            println!("bench present xtest key Page_Down");
+            glib::timeout_future(Duration::from_millis(1200)).await;
+            let after = position(&app).await;
+            println!(
+                "bench present {kind}_page_down before={before} after={after} moved={} {}",
+                before != after,
+                screen(&app)
+            );
+        }
+        // F5 and Escape leave from a presented shell, which has every other key.
+        let shell = app
+            .docs()
+            .into_iter()
+            .find(|doc| doc.terminal().is_some())
+            .map(|doc| doc.page().clone());
+        for key in ["F5", "Escape"] {
+            app.set_presenting(true);
+            if let Some(shell) = &shell {
+                app.reveal_page(shell);
+            }
+            glib::timeout_future(Duration::from_millis(800)).await;
+            let focus = gtk::prelude::GtkWindowExt::focus(&app.window).map(|f| f.type_().name());
+            println!("bench present xtest key {key}");
+            glib::timeout_future(Duration::from_millis(800)).await;
+            println!(
+                "bench present shell_{key} focus={focus:?} presenting={}",
+                app.presenting.get().is_some()
+            );
+        }
         bench_quit(&app);
     });
+}
+
+/// How far the presented note is scrolled, or which page of the presented PDF is in view.
+async fn position(app: &Rc<App>) -> String {
+    if let Some(pdf) = app.active_pdf() {
+        return pdf.page_label().unwrap_or_default();
+    }
+    let view = app.preview.borrow().as_ref().map(|p| p.view().clone());
+    let Some(view) = view else {
+        return "none".into();
+    };
+    view.evaluate_javascript_future("scrollY", None, None)
+        .await
+        .map_or("?".into(), |y| format!("scrollY={}", y.to_double()))
 }
 
 /// A pause for a screenshot of the note and the PDF, which are the two looks worth comparing.
