@@ -230,8 +230,7 @@ fn bench_git_stage(app: &Rc<App>) {
             else {
                 continue;
             };
-            let (heading, body) = (dialog.heading().unwrap_or_default(), dialog.body());
-            println!("bench git_dialog {heading:?} {body:?}");
+            print_dialog(&dialog);
             dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
             dialog.close();
             settle().await;
@@ -275,8 +274,7 @@ fn bench_git_stage(app: &Rc<App>) {
             else {
                 continue;
             };
-            let (heading, body) = (dialog.heading().unwrap_or_default(), dialog.body());
-            println!("bench git_dialog {heading:?} {body:?}");
+            print_dialog(&dialog);
             dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
             dialog.close();
             settle().await;
@@ -289,6 +287,19 @@ fn bench_git_stage(app: &Rc<App>) {
         );
         bench_quit(&app);
     });
+}
+
+/// A question's heading and body, and the response that goes ahead: its label and whether it
+/// is drawn destructive.
+fn print_dialog(dialog: &adw::AlertDialog) {
+    let go = crate::dialogs::CONFIRM;
+    println!(
+        "bench git_dialog {:?} {:?} {:?} {:?}",
+        dialog.heading().unwrap_or_default(),
+        dialog.body(),
+        dialog.response_label(go),
+        dialog.response_appearance(go)
+    );
 }
 
 /// The section headers on screen: their title, their bulk button's icon and tooltip, the Discard

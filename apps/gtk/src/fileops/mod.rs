@@ -928,8 +928,8 @@ pub fn trash(ops: &Rc<Ops>, rel: &str) {
 }
 
 /// [`trash`] for several paths at once: one toast for all of them and, where there is no trash,
-/// one question. The Git pane's Discard on a folder takes its untracked files away through this,
-/// and a toast or a dialog per file would be one per file.
+/// one question. A marked set in the tree goes through this, and a toast or a dialog per file
+/// would be one per file.
 pub fn trash_all(ops: &Rc<Ops>, rels: Vec<String>) {
     // What lands in the trash should be what the user last saw, so every dirty tab under it is
     // written out before the file moves — a folder takes the notes inside it, and their unsaved
@@ -967,6 +967,17 @@ pub fn trash_all(ops: &Rc<Ops>, rels: Vec<String>) {
             confirm_delete(&ops, refused);
         }
     });
+}
+
+/// [`trash_all`] for the Git pane's Discard, whose own question has already said what becomes of
+/// the untracked files: on a remote vault, which has no trash, that they are deleted permanently,
+/// so they are, without the Delete Permanently? question after it.
+pub fn discard_all(ops: &Rc<Ops>, rels: Vec<String>) {
+    if !ops.vault.is_remote() {
+        return trash_all(ops, rels);
+    }
+    (ops.unmark)();
+    delete_all(ops, rels);
 }
 
 /// The paths a batch of moves takes from.
@@ -1029,36 +1040,38 @@ fn confirm_delete(ops: &Rc<Ops>, rels: Vec<String>) {
         &body,
         "Delete",
         true,
-        move || {
-            // A round trip per path on a remote vault, so on a worker; each tab closes once its file
-            // is gone.
-            let vault = ops.vault.clone();
-            glib::spawn_future_local(async move {
-                let done = crate::work::off_thread("delete", move || {
-                    rels.into_iter()
-                        .map(|rel| (vault.delete(&rel), rel))
-                        .collect::<Vec<_>>()
-                })
-                .await;
-                let Some(done) = done else {
-                    return (ops.toast)("Cannot delete");
-                };
-                let mut deleted = Vec::new();
-                for (answer, rel) in done {
-                    match answer {
-                        Ok(()) => {
-                            (ops.close)(&rel);
-                            deleted.push(rel);
-                        }
-                        Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
-                    }
-                }
-                if !deleted.is_empty() {
-                    (ops.toast)(&format!("Deleted {}", several(&deleted)));
-                }
-            });
-        },
+        move || delete_all(&ops, rels),
     );
+}
+
+/// Delete for good, with one toast for the lot. A round trip per path on a remote vault, so on a
+/// worker; each tab closes once its file is gone.
+fn delete_all(ops: &Rc<Ops>, rels: Vec<String>) {
+    let (ops, vault) = (ops.clone(), ops.vault.clone());
+    glib::spawn_future_local(async move {
+        let done = crate::work::off_thread("delete", move || {
+            rels.into_iter()
+                .map(|rel| (vault.delete(&rel), rel))
+                .collect::<Vec<_>>()
+        })
+        .await;
+        let Some(done) = done else {
+            return (ops.toast)("Cannot delete");
+        };
+        let mut deleted = Vec::new();
+        for (answer, rel) in done {
+            match answer {
+                Ok(()) => {
+                    (ops.close)(&rel);
+                    deleted.push(rel);
+                }
+                Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
+            }
+        }
+        if !deleted.is_empty() {
+            (ops.toast)(&format!("Deleted {}", several(&deleted)));
+        }
+    });
 }
 
 // ------------------------------------------------------------- clipboard and the file manager

@@ -108,8 +108,9 @@ pub struct Hooks {
     /// it. That call answers whether the comparison is worth keeping; `false` takes it down again
     /// ([`Panel::show`]).
     pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>) -> bool>)>,
-    /// Move vault files to the trash, with one toast for the lot. Vault keys only, which is what
-    /// leaves an untracked file outside the vault without a Discard button.
+    /// Move vault files to the trash, with one toast for the lot, or delete them on a remote
+    /// vault, which has none, without asking again: Discard's question has said so. Vault keys
+    /// only, which is what leaves an untracked file outside the vault without a Discard button.
     pub trash: Box<dyn Fn(&[String])>,
     /// A refresh landed and the pane's answers changed.
     pub changed: Box<dyn Fn()>,
