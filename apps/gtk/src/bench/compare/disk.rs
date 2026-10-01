@@ -733,8 +733,15 @@ pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
             ("old", &disk),
             ("new", &edited),
         );
-        wait(1200).await;
         let compare = diff.comparison();
+        // Until it has gone to its first change: a press before that is kept from moving the
+        // view, and the opening's own move lands in the middle of it.
+        for _ in 0..200 {
+            if compare.settled() {
+                break;
+            }
+            wait(50).await;
+        }
         let Some(views) = pane_view(compare.widget(), true).and_then(|v| both_columns(compare, &v))
         else {
             println!("bench compare_unfold blobs none");
