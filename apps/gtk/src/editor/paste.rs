@@ -12,7 +12,73 @@ use gtk::{gio, glib};
 /// address.
 pub(super) fn link(clipboard: &str, selection: &str, flavour: Flavour) -> Option<String> {
     let url = clipboard.trim();
-    (could_link(selection, flavour) && is_url(url)).then(|| format!("[{selection}]({url})"))
+    (could_link(selection, flavour) && is_url(url))
+        .then(|| format!("[{}]({})", link_text(selection), destination(url)))
+}
+
+/// The selection as a link's text: a bracket it would end the text at escaped, and a backslash
+/// at its end, which would escape the closing one. The selection is markdown already, so a
+/// bracket it escapes itself stays as it is, and so does all of a code span, where a backslash is
+/// a backslash.
+fn link_text(selection: &str) -> String {
+    let mut out = String::with_capacity(selection.len());
+    let mut rest = selection;
+    // How many backslashes run up to here: an odd count escapes the next character.
+    let mut slashes = 0;
+    while let Some(c) = rest.chars().next() {
+        if c == '`' && slashes % 2 == 0 {
+            let taken = code_span(rest);
+            out.push_str(&rest[..taken]);
+            rest = &rest[taken..];
+            slashes = 0;
+            continue;
+        }
+        if matches!(c, '[' | ']') && slashes % 2 == 0 {
+            out.push('\\');
+        }
+        slashes = if c == '\\' { slashes + 1 } else { 0 };
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    if slashes % 2 == 1 {
+        out.push('\\');
+    }
+    out
+}
+
+/// How much of `rest`, which starts with a backtick, a code span takes: up to the next run of
+/// exactly as many backticks, or the run alone where none closes it, which is then text.
+fn code_span(rest: &str) -> usize {
+    let run = rest.len() - rest.trim_start_matches('`').len();
+    let mut at = run;
+    while let Some(found) = rest[at..].find('`') {
+        let start = at + found;
+        let len = rest[start..].len() - rest[start..].trim_start_matches('`').len();
+        if len == run {
+            return start + len;
+        }
+        at = start + len;
+    }
+    run
+}
+
+/// The address as a link's destination: as it is, unless a space, a parenthesis left open or
+/// shut too often, or an angle bracket would end it or read as something else; then between `<`
+/// and `>`, CommonMark's other form, with the angle brackets in it escaped.
+fn destination(url: &str) -> String {
+    let mut depth = 0i32;
+    let balanced = url.chars().all(|c| {
+        depth += match c {
+            '(' => 1,
+            ')' => -1,
+            _ => 0,
+        };
+        depth >= 0
+    }) && depth == 0;
+    match balanced && !url.contains([' ', '<', '>']) {
+        true => url.to_string(),
+        false => format!("<{}>", url.replace('<', "\\<").replace('>', "\\>")),
+    }
 }
 
 /// What the file and the selection decide on their own, before the clipboard is read: prose,
@@ -138,5 +204,66 @@ mod tests {
         assert_eq!(linked("https://a.org", "two\nlines"), None, "lines");
         assert_eq!(linked("https://a.org", "https://b.org"), None, "a url");
         assert_eq!(linked("https://a.org", "  "), None, "blank");
+    }
+
+    /// A bracket in the selection or a parenthesis the address leaves open would end the link
+    /// early: the text's are escaped, and such an address goes between `<` and `>`.
+    #[test]
+    fn a_link_is_written_so_it_reads_back_whole() {
+        let linked = |clip, sel| link(clip, sel, Flavour::Note).unwrap();
+        let cases = [
+            (
+                "https://a.org/x",
+                "see [1]",
+                r"[see \[1\]](https://a.org/x)",
+                "see [1]",
+            ),
+            ("https://a.org/x", r"a\", r"[a\\](https://a.org/x)", r"a\"),
+            (
+                "https://a.org/x",
+                r"kept \]",
+                r"[kept \]](https://a.org/x)",
+                "kept ]",
+            ),
+            (
+                "https://a.org/x",
+                "`a[0]` b",
+                "[`a[0]` b](https://a.org/x)",
+                "<code>a[0]</code> b",
+            ),
+            (
+                "https://a.org/f(x",
+                "open",
+                "[open](<https://a.org/f(x>)",
+                "open",
+            ),
+            (
+                "https://a.org/x)",
+                "shut",
+                "[shut](<https://a.org/x)>)",
+                "shut",
+            ),
+            (
+                "https://a.org/<b>",
+                "angle",
+                r"[angle](<https://a.org/\<b\>>)",
+                "angle",
+            ),
+            (
+                "https://a.org/f(x)",
+                "plain",
+                "[plain](https://a.org/f(x))",
+                "plain",
+            ),
+        ];
+        for (url, selection, written, shown) in cases {
+            assert_eq!(linked(url, selection), written);
+            // What the preview makes of it: one link, to the address, around the selection.
+            let html = accent_core::markdown::to_html(&linked(url, selection));
+            assert_eq!(html.matches("<a ").count(), 1, "{html}");
+            let href = url.replace('<', "%3C").replace('>', "%3E");
+            assert!(html.contains(&format!("href=\"{href}\"")), "{html}");
+            assert!(html.contains(&format!(">{shown}</a>")), "{html}");
+        }
     }
 }

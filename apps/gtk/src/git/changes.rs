@@ -108,7 +108,11 @@ impl Panel {
             let Some(panel) = weak.upgrade() else {
                 return;
             };
-            if let Some(row) = boxed::<Row>(view.model().and_then(|m| m.item(position))) {
+            let item = view.model().and_then(|m| m.item(position));
+            if let Some(row) = boxed::<Row>(item.clone()) {
+                if let (Row::Folder { path, open, .. }, Some(item)) = (&row, item) {
+                    turn(view, item, path, !open);
+                }
                 panel.activate(&row);
             }
         });
@@ -211,6 +215,50 @@ impl Panel {
             Some(sides) => self.compare(&entry.path, key, sides),
             None => (self.hooks.open)(key),
         }
+    }
+}
+
+/// Turn a folder row's chevron where it stands, and its item with it, so that the redraw its
+/// activation asks for splices only the rows under it. Spliced out itself, the row took the
+/// keyboard focus with it, which landed wherever GTK put it, and a new row stood in its place
+/// without the mark the press left on the old one ([`reveal_on_hover`]), so its buttons came out
+/// with the pointer gone.
+///
+/// The row is the one with the keyboard focus, which the press or the key that activated it gave
+/// it; where the focus is on anything else, the redraw replaces the row as it does any other.
+fn turn(view: &gtk::ListView, item: glib::Object, path: &str, open: bool) {
+    let (focus, view) = (view.root().and_then(|root| root.focus()), view.upcast_ref());
+    let stack = focus
+        .and_then(|f| {
+            std::iter::successors(Some(f), |w| w.parent())
+                .find(|w| w.parent().as_ref() == Some(view))
+        })
+        .and_then(|row| row.first_child())
+        .and_downcast::<gtk::Stack>()
+        .filter(|s| {
+            s.visible_child_name().as_deref() == Some("folder")
+                && s.tooltip_text().as_deref() == Some(path)
+        });
+    let (Some(stack), Ok(item)) = (stack, item.downcast::<glib::BoxedAnyObject>()) else {
+        return;
+    };
+    let chevron = stack
+        .visible_child()
+        .and_then(|folder| folder.first_child());
+    if let Some(chevron) = chevron.and_downcast::<gtk::Image>() {
+        chevron.set_icon_name(Some(chevron_icon(open)));
+    }
+    if let Row::Folder { open: shown, .. } = &mut *item.borrow_mut::<Row>() {
+        *shown = open;
+    }
+}
+
+/// A folder row's chevron: the fold chevrons' pair rather than `pan-*`, for the reason the branch
+/// button gives.
+fn chevron_icon(open: bool) -> &'static str {
+    match open {
+        true => "go-down-symbolic",
+        false => "go-next-symbolic",
     }
 }
 
@@ -521,11 +569,7 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
             else {
                 return;
             };
-            // The fold chevrons' pair rather than `pan-*`, for the reason the branch button gives.
-            chevron.set_icon_name(Some(match open {
-                true => "go-down-symbolic",
-                false => "go-next-symbolic",
-            }));
+            chevron.set_icon_name(Some(chevron_icon(open)));
             text.set_text(&label);
             folder.set_margin_start(depth as i32 * INDENT);
             stack.set_tooltip_text(Some(&path));

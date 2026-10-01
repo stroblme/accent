@@ -112,16 +112,26 @@ impl App {
     /// Where a document is being read: the caret in a text tab, the reading anchor in a PDF, and
     /// the document itself for anything with no position of its own.
     fn place_of(doc: &Doc) -> Place {
+        let mut mark = None;
         let at = match doc {
             Doc::Text(tab) => {
                 let iter = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+                mark = Some(Rc::new(Held::at(
+                    tab.buffer.upcast_ref(),
+                    &iter,
+                    tab.replaced(),
+                )));
                 Spot::Caret(iter.line() + 1, iter.line_offset() + 1)
             }
             Doc::Pdf(pdf) => Spot::Page(pdf.anchor()),
             Doc::Diagram(d) => Spot::Sheet(d.page_index()),
             _ => Spot::Whole,
         };
-        Place { key: doc.key(), at }
+        Place {
+            key: doc.key(),
+            at,
+            mark,
+        }
     }
 
     /// Where the reader is in `pane` right now.
@@ -198,7 +208,18 @@ impl App {
         tracing::debug!("navigating to {to:?}");
         pane.tabs.set_selected_page(doc.page());
         match (&doc, to.at) {
-            (Doc::Text(tab), Spot::Caret(line, column)) => tab.goto_line(line, column),
+            // The mark, which has followed the edits since; the line and column it was at
+            // where it can say nothing.
+            (Doc::Text(tab), Spot::Caret(line, column)) => {
+                let marked = to
+                    .mark
+                    .as_ref()
+                    .and_then(|held| held.iter_in(tab.buffer.upcast_ref(), tab.replaced()));
+                match marked {
+                    Some(iter) => tab.jump_to(&iter, 0.25),
+                    None => tab.goto_line(line, column),
+                }
+            }
             (Doc::Pdf(pdf), Spot::Page(anchor)) => pdf.scroll_to(anchor),
             (Doc::Diagram(d), Spot::Sheet(page)) => d.show_page(page),
             _ => {}

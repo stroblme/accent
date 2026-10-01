@@ -51,13 +51,13 @@ use git::{
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
 use keys::{
-    bench_box_drag, bench_hold, bench_keys, bench_list, bench_occurrence_keys, bench_shell_keys,
-    bench_term,
+    bench_box_drag, bench_hold, bench_keys, bench_list, bench_menu_caret, bench_occurrence_keys,
+    bench_shell_keys, bench_term,
 };
 use outline::bench_outline;
 use panes::{
-    bench_apart, bench_collapse, bench_cycle, bench_layout, bench_layout_pick, bench_panes,
-    bench_pin, bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
+    bench_apart, bench_back, bench_collapse, bench_cycle, bench_layout, bench_layout_pick,
+    bench_panes, bench_pin, bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_deep,
@@ -274,6 +274,10 @@ use tags::bench_tags;
 /// `Ctrl+Tab` chord's state whenever it changes, with the ms since the chord began: whether the
 /// card is up, its rows with the lit one, the tab in front and the pane's order; and once, where
 /// the card's third row is (`cycle aim row2=x,y`), for a click on it with Ctrl held.
+/// `=back:<a>,<b>` puts the caret on line 10 of `a`, goes to `b`, writes three lines above that
+/// place in `a` and goes Back, printing where the caret landed against where the text it left
+/// went; then Forward, `a`'s whole text replaced as a reload replaces it, and Back again, which
+/// lands on the line and column the place was taken at.
 /// `=loose:<rel_pdf>` writes a note and its images into `loose-drill/` and opens the note in a
 /// window of its own from its tree row, where no vault is behind it, and prints what the Outline
 /// pane there holds and the headings it lists, then whether each image in its preview loaded:
@@ -722,6 +726,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rels) = rels.strip_prefix("cycle:") {
                 return bench_cycle(&app, rels);
             }
+            if let Some(rels) = rels.strip_prefix("back:") {
+                return bench_back(&app, rels);
+            }
             if let Some(pdf) = rels.strip_prefix("loose:") {
                 return loose::bench_loose(&app, pdf);
             }
@@ -788,6 +795,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = arg.strip_prefix("box:") {
                 return bench_box_drag(&app, rel);
+            }
+            if let Some(rel) = arg.strip_prefix("menu:") {
+                return bench_menu_caret(&app, rel);
             }
             return match arg.as_str() {
                 "1" => bench_keys(&app),

@@ -88,7 +88,7 @@ use events::start_events;
 use gtk::{gdk, gio, glib, graphene};
 use layout::{Collapsed, Mode, Presenting};
 use open::Opened;
-use panes::{Pane, Place, Side, Spot, Zone};
+use panes::{Held, Pane, Place, Side, Spot, Zone};
 // The widget and the tab kept the names the rest of the window calls them by when
 // they moved into `pdf/`.
 pub(crate) use pdf as pdfview;

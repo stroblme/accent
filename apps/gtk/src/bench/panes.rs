@@ -491,6 +491,81 @@ pub(super) fn bench_tabs(app: &Rc<App>, rels: &str) {
     });
 }
 
+/// See `ACCENT_BENCH_TABS=back:` above.
+pub(super) fn bench_back(app: &Rc<App>, rels: &str) {
+    let Some((a, b)) = rels.split_once(',') else {
+        return bench_quit(app);
+    };
+    let (a, b) = (a.to_string(), b.to_string());
+    app.open_path(&a);
+    app.open_path(&b);
+    let landed = {
+        let (app, a, b) = (app.clone(), a.clone(), b.clone());
+        move || app.tab_for(&a).is_some() && app.tab_for(&b).is_some()
+    };
+    let app = app.clone();
+    bench_layout_when(landed, move || {
+        glib::spawn_future_local(async move {
+            let (Some(left), Some(right)) = (app.tab_for(&a), app.tab_for(&b)) else {
+                return bench_quit(&app);
+            };
+            let own = left.text();
+            // The reader is on line 10 of `a`, then goes to `b`, which records where they were.
+            app.reveal_page(&left.page);
+            left.goto_line(10, 5);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let caret = |tab: &Rc<Tab>| tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+            let was = caret(&left);
+            let word = |at: &gtk::TextIter| {
+                let mut end = *at;
+                end.forward_chars(12);
+                left.buffer.text(at, &end, true).to_string()
+            };
+            let (offset, text) = (was.offset(), word(&was));
+            println!("bench back left offset={offset} text={text:?}");
+            app.reveal_page(&right.page);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            // Three lines written above that place while `a` is in the background.
+            let inserted = "one\ntwo\nthree\n";
+            left.buffer.insert(&mut left.buffer.start_iter(), inserted);
+            bench_step(&app, "win.back").await;
+            let at = caret(&left);
+            println!(
+                "bench back landed front={:?} offset={} expected={} line={} text={:?}",
+                app.active().map(|t| t.rel()),
+                at.offset(),
+                offset + inserted.chars().count() as i32,
+                at.line() + 1,
+                word(&at),
+            );
+            // Away again, and the whole text replaced as a reload replaces it: the mark says
+            // nothing now, and the line and column it was taken at are what is left.
+            bench_step(&app, "win.forward").await;
+            left.set_text(&own);
+            bench_step(&app, "win.back").await;
+            let at = caret(&left);
+            println!(
+                "bench back replaced front={:?} offset={} line={} column={} text={:?}",
+                app.active().map(|t| t.rel()),
+                at.offset(),
+                at.line() + 1,
+                at.line_offset() + 1,
+                word(&at),
+            );
+            // Put back as an edit, which the autosave writes over the one the inserted lines had.
+            left.buffer.set_text(&own);
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            bench_quit(&app);
+        });
+    });
+}
+
+/// Fire `action` on the window and give it a moment to land.
+async fn bench_step(app: &Rc<App>, action: &str) {
+    let _ = WidgetExt::activate_action(&app.window, action, None);
+    glib::timeout_future(Duration::from_millis(300)).await;
+}
+
 /// See `ACCENT_BENCH_TABS=cycle:` above.
 pub(super) fn bench_cycle(app: &Rc<App>, rels: &str) {
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();

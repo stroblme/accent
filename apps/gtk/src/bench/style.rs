@@ -136,11 +136,15 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
 
 /// The pointer's half of `drop_fold`, held for XTEST: a section folded under its heading and
 /// selected whole, where to press on it and where to let it go at the end of the note, and after
-/// eight seconds what the note holds. A move has to carry the hidden body and take all of it away
-/// from where it was, so `hidden body` is in the note once, after `plain line`. Drive it in steps
-/// with pauses between them — `move X0 Y0; down`, a move past the drag threshold, then
-/// `sleep 0.3; move X1 Y1; sleep 0.5; up` — because XDND's position and status messages have to go
-/// round before the release, and `xtest.py`'s one-shot `drag` lets go too soon.
+/// eight seconds what the note holds and the action a drag of ours ended with, three times:
+/// `first`, `plain` and `ctrl`. A move has to carry the hidden body and take all of it away from
+/// where it was, so `hidden body` is in the note once, after `plain line`; a drag with Ctrl held
+/// copies, leaving it twice. Under XTEST some drags, the first of a run every time, are GTK's own
+/// (`ended=None`, the hidden body lost; NOTEPAD), so read the rounds that end with an action.
+/// Drive it in steps with pauses between them — `move X0 Y0; down`, a move past the drag
+/// threshold, then `sleep 0.3; move X1 Y1; sleep 0.5; up` — because XDND's position and status
+/// messages have to go round before the release, and `xtest.py`'s one-shot `drag` lets go too
+/// soon.
 pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
     const FOLDED: &str = "# One\nhidden body\n# Two\nplain line\n";
     app.open_path(rel);
@@ -150,18 +154,10 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
         let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
         };
-        tab.set_text(FOLDED);
-        let fold = accent_api::Fold {
-            start_line: 0,
-            end_line: 1,
-        };
-        crate::fold::fold(tab.buffer.upcast_ref(), fold);
         let at = |needle: &str| {
             let offset = FOLDED.find(needle).expect("bench needle") as i32;
             tab.buffer.iter_at_offset(offset)
         };
-        tab.buffer.select_range(&at("# One"), &at("# Two"));
-        glib::timeout_future(Duration::from_millis(300)).await;
         // Screen coordinates: under Xvfb with no window manager the window sits at 0,0.
         let screen = |iter: &gtk::TextIter| {
             let r = tab.view.iter_location(iter);
@@ -175,15 +171,31 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
             let (sx, sy) = app.window.surface_transform();
             ((p.x() as f64 + sx) as i32, (p.y() as f64 + sy) as i32)
         };
-        let mut end = tab.buffer.end_iter();
-        end.backward_char();
-        println!(
-            "bench drag_fold press={:?} release={:?}",
-            screen(&at("One")),
-            screen(&end)
-        );
-        glib::timeout_future(Duration::from_secs(8)).await;
-        println!("bench drag_fold text={:?}", tab.text());
+        for round in ["first", "plain", "ctrl"] {
+            tab.set_text(FOLDED);
+            let fold = accent_api::Fold {
+                start_line: 0,
+                end_line: 1,
+            };
+            crate::fold::fold(tab.buffer.upcast_ref(), fold);
+            tab.buffer.select_range(&at("# One"), &at("# Two"));
+            tab.view.grab_focus();
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let mut end = tab.buffer.end_iter();
+            end.backward_char();
+            crate::editor::DRAG_ENDED.set(None);
+            println!(
+                "bench drag_fold {round} press={:?} release={:?}",
+                screen(&at("One")),
+                screen(&end)
+            );
+            glib::timeout_future(Duration::from_secs(8)).await;
+            println!(
+                "bench drag_fold {round} ended={:?} text={:?}",
+                crate::editor::DRAG_ENDED.get(),
+                tab.text()
+            );
+        }
         bench_quit(&app);
     });
 }

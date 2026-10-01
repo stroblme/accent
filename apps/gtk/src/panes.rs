@@ -233,6 +233,48 @@ pub enum Spot {
 pub struct Place {
     pub key: String,
     pub at: Spot,
+    /// In a text tab, a mark where the caret was, which moves with the edits around it, so Back
+    /// lands on the character the reader left; `at` is where it was then, which is gone to where
+    /// the mark says nothing ([`Held::iter_in`]). Shared by the copies of the place.
+    pub mark: Option<Rc<Held>>,
+}
+
+/// A place's mark in a text buffer, taken out of the buffer once the last place holding it goes:
+/// its entry leaving the history, which its tab closing does ([`Nav::forget`]).
+#[derive(Debug, PartialEq)]
+pub struct Held {
+    mark: gtk::TextMark,
+    /// The tab's count of whole-text replacements when the mark was set (`Tab::replaced`).
+    replaced: u32,
+}
+
+impl Held {
+    /// An anonymous mark at `iter`, with left gravity: text typed where the reader was goes
+    /// after the place, as it went after the caret they left there.
+    pub fn at(buffer: &gtk::TextBuffer, iter: &gtk::TextIter, replaced: u32) -> Held {
+        Held {
+            mark: buffer.create_mark(None, iter, true),
+            replaced,
+        }
+    }
+
+    /// Where the place is now in `buffer`: `None` where the mark is not one of its marks any
+    /// more, or the whole text has been replaced since (`replaced` being the tab's count now),
+    /// which leaves every mark at the start.
+    pub fn iter_in(&self, buffer: &gtk::TextBuffer, replaced: u32) -> Option<gtk::TextIter> {
+        let ours = !self.mark.is_deleted() && self.mark.buffer().as_ref() == Some(buffer);
+        (ours && replaced == self.replaced).then(|| buffer.iter_at_mark(&self.mark))
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.mark.buffer()
+            && !self.mark.is_deleted()
+        {
+            buffer.delete_mark(&self.mark);
+        }
+    }
 }
 
 /// Whether `next` merges into `last` instead of being pushed behind it: the same document, near
@@ -1008,6 +1050,7 @@ mod tests {
         Place {
             key: key.to_string(),
             at: Spot::Caret(line, 1),
+            mark: None,
         }
     }
 
@@ -1030,6 +1073,7 @@ mod tests {
         // A PDF is coarser: a page is as near as its places get.
         let page = |n| Place {
             key: "p.pdf".to_string(),
+            mark: None,
             at: Spot::Page(Anchor {
                 page: n,
                 u: 0.0,
@@ -1076,6 +1120,7 @@ mod tests {
         // A page edit takes the places in its document with the pages, and no other.
         let page = |key: &str, n| Place {
             key: key.to_string(),
+            mark: None,
             at: Spot::Page(Anchor {
                 page: n,
                 u: 0.0,
