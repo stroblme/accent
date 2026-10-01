@@ -70,8 +70,8 @@ use replace::bench_replace;
 use scroll::bench_scroll;
 use search::bench_search;
 use style::{
-    bench_drag_fold, bench_follow, bench_numbers, bench_occurrences, bench_reveal, bench_seam,
-    bench_style, bench_theme, bench_wrap,
+    bench_drag_fold, bench_follow, bench_listing, bench_numbers, bench_occurrences, bench_reveal,
+    bench_seam, bench_style, bench_theme, bench_wrap,
 };
 use tags::bench_tags;
 
@@ -135,6 +135,7 @@ use tags::bench_tags;
 /// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK; then
 /// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`) and draws the view
 /// with its top row on a partly hidden line (`case=screen`).
+/// `=listing:<rel>` prints how a LaTeX file's listings are coloured (`style::bench_listing`).
 /// Every form of it runs only on a scratch vault under `/tmp` (`scratch_only`).
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
@@ -842,6 +843,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("seam:") {
                 return bench_seam(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("listing:") {
+                return bench_listing(&app, rel);
             }
             return match rel.strip_prefix("wrap:") {
                 Some(rels) => bench_wrap(&app, rels),

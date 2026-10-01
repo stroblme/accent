@@ -1398,3 +1398,77 @@ fn bench_tag_ranges(tab: &Rc<Tab>, tag: &gtk::TextTag) -> Vec<(i32, i32)> {
         ranges.push((start, iter.offset()));
     }
 }
+
+/// `ACCENT_BENCH_STYLE=listing:<rel>` opens the LaTeX file at `rel` and prints each line as runs
+/// of the GtkSourceView context classes and the foreground the syntax colours give it
+/// (`"def"[no-spell-check;#c64600]`, `-` where none does): what `latex.lang` makes of the listings
+/// in it. Then `bench listing shot <theme>` under the default theme and Solarized, each held a
+/// second and a half for a screenshot.
+pub(super) fn bench_listing(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(600)).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let buffer = &tab.buffer;
+        buffer.ensure_highlight(&buffer.start_iter(), &buffer.end_iter());
+        println!(
+            "bench listing language={:?}",
+            buffer.language().map(|l| l.id())
+        );
+        for line in 0..buffer.line_count() {
+            println!("bench listing {line} {}", bench_listing_runs(buffer, line));
+        }
+        for theme in [Theme::System, Theme::Solarized] {
+            crate::theme::apply(theme);
+            app.restyle_all();
+            glib::timeout_future(Duration::from_millis(300)).await;
+            println!("bench listing shot {theme:?}");
+            glib::timeout_future(Duration::from_millis(1500)).await;
+        }
+        bench_quit(&app);
+    });
+}
+
+/// One line of `buffer` as runs of equal context classes and syntax foreground.
+fn bench_listing_runs(buffer: &sourceview5::Buffer, line: i32) -> String {
+    let Some(mut iter) = buffer.iter_at_line(line) else {
+        return String::new();
+    };
+    let look = |iter: &gtk::TextIter| {
+        let fg = iter
+            .tags()
+            .iter()
+            .filter_map(|tag| tag.foreground_rgba().filter(|_| tag.is_foreground_set()))
+            .next_back()
+            .map_or("-".to_string(), |c| {
+                let byte = |v: f32| (v * 255.0).round() as u8;
+                format!(
+                    "#{:02x}{:02x}{:02x}",
+                    byte(c.red()),
+                    byte(c.green()),
+                    byte(c.blue())
+                )
+            });
+        (buffer.context_classes_at_iter(iter).join(","), fg)
+    };
+    let mut runs = Vec::new();
+    let mut text = String::new();
+    let mut current = look(&iter);
+    while !iter.ends_line() {
+        let now = look(&iter);
+        if now != current {
+            runs.push(format!("{text:?}[{};{}]", current.0, current.1));
+            text.clear();
+            current = now;
+        }
+        text.push(iter.char());
+        iter.forward_char();
+    }
+    if !text.is_empty() {
+        runs.push(format!("{text:?}[{};{}]", current.0, current.1));
+    }
+    runs.join(" ")
+}
