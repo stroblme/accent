@@ -5,6 +5,7 @@
 
 use super::*;
 use accent_core::synctex::{self, Synctex};
+use std::time::SystemTime;
 
 /// How many SyncTeX files stay read, the last ones asked about: each is held whole, and a long
 /// document's is megabytes.
@@ -14,6 +15,40 @@ thread_local! {
     /// The SyncTeX files read, oldest first, each with the etag it was read at: a rebuild is
     /// read again, and nothing else is.
     static READ: RefCell<Vec<(PathBuf, Etag, Arc<Synctex>)>> = const { RefCell::new(Vec::new()) };
+    /// The builds accent goes on taking for their PDF's after writing into it, by the PDF's path.
+    /// Remembered while accent runs, through a tab closed and opened again.
+    static TRUSTED: RefCell<HashMap<PathBuf, Trust>> = RefCell::new(HashMap::new());
+}
+
+/// A PDF's build as accent last found it, and what accent has written into the PDF since: ink and
+/// highlights move no text, so the SyncTeX file stays true however much newer the PDF is, and a
+/// page put in, taken out or moved does not, until the next build.
+#[derive(Clone)]
+struct Trust {
+    /// The SyncTeX file, and when it was written.
+    file: PathBuf,
+    built: SystemTime,
+    /// The PDF as accent's own last write left it, if accent has written it since.
+    written: Option<Etag>,
+    moved: bool,
+}
+
+/// The SyncTeX file that is the build of the PDF at `pdf`: one no older than it
+/// ([`synctex::beside`]), or the one it was built with where only accent's own ink and highlights
+/// have been written into it since ([`Trust`]).
+fn build_of(pdf: &Path) -> Option<PathBuf> {
+    let trust = TRUSTED.with_borrow(|trusted| trusted.get(pdf).cloned());
+    if trust.as_ref().is_some_and(|trust| trust.moved) {
+        return None;
+    }
+    synctex::beside(pdf).or_else(|| {
+        let trust = trust?;
+        let built = std::fs::metadata(&trust.file)
+            .and_then(|m| m.modified())
+            .ok();
+        let ours = trust.written.is_some() && trust.written == Etag::of(pdf).ok();
+        (ours && built == Some(trust.built)).then_some(trust.file)
+    })
 }
 
 /// The SyncTeX file at `path`, read on a worker unless the one kept is what is there now.
@@ -104,7 +139,7 @@ impl App {
             return;
         };
         let line = tab.cursor_line();
-        let builds = synctex::near(&self.root(), &tex);
+        let builds = synctex::near(&self.root(), &tex, build_of);
         let app = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let mut found = None;
@@ -157,7 +192,7 @@ impl App {
             .is_some_and(|pdf| self.synctex_of(pdf).is_some());
         let show = (doc.as_ref().and_then(Doc::tab))
             .and_then(|tab| self.local_tex(&tab.rel()))
-            .is_some_and(|tex| !synctex::near(&self.root(), &tex).is_empty());
+            .is_some_and(|tex| !synctex::near(&self.root(), &tex, build_of).is_empty());
         for (name, on) in [("pdf-go-to-source", source), ("show-in-pdf", show)] {
             let action = self.window.lookup_action(name);
             if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
@@ -166,9 +201,32 @@ impl App {
         }
     }
 
-    /// A PDF opened or read again, which a LaTeX build does to it: Show in PDF's mark lands once
-    /// its pages are there, its SyncTeX file is read again if one is kept, and the offer follows.
+    /// A PDF opened or read again, which a LaTeX build does to it: a build no older than it is
+    /// trusted afresh, one only accent's own last write made older stays trusted, and any other
+    /// is not; Show in PDF's mark lands once its pages are there, its SyncTeX file is read again if
+    /// one is kept, and the offer follows.
     pub(crate) fn synctex_opened(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
+        if self.is_local_pdf(pdf) {
+            let path = pdf.path();
+            let fresh = synctex::beside(&path).and_then(|file| {
+                let built = std::fs::metadata(&file).and_then(|m| m.modified()).ok()?;
+                Some(Trust {
+                    file,
+                    built,
+                    written: None,
+                    moved: false,
+                })
+            });
+            TRUSTED.with_borrow_mut(|trusted| match fresh {
+                Some(trust) => drop(trusted.insert(path, trust)),
+                None => {
+                    let ours = |trust: &Trust| trust.written == Etag::of(&path).ok();
+                    if !trusted.get(&path).is_some_and(ours) {
+                        trusted.remove(&path);
+                    }
+                }
+            });
+        }
         pdf.show_pending_spot();
         self.sync_synctex(self.active_doc());
         if let Some(file) = self.synctex_of(pdf)
@@ -215,13 +273,39 @@ impl App {
         tab.view.add_controller(press);
     }
 
-    /// The SyncTeX file of a local vault's PDF, where it has one ([`synctex::beside`]).
+    /// accent wrote into a PDF itself, ink, highlights or pages: a trusted build stays trusted
+    /// through it, the write being accent's own, unless pages moved ([`App::synctex_repaged`]).
+    pub(crate) fn synctex_written(&self, pdf: &pdftab::PdfTab) {
+        let path = pdf.path();
+        TRUSTED.with_borrow_mut(|trusted| {
+            if let Some(trust) = trusted.get_mut(&path) {
+                trust.written = Etag::of(&path).ok();
+            }
+        });
+    }
+
+    /// A page of a PDF was put in, taken out or moved, or such an edit undone or made again: its
+    /// build names pages that are no longer where they were, until the next build.
+    pub(crate) fn synctex_repaged(&self, pdf: &pdftab::PdfTab) {
+        TRUSTED.with_borrow_mut(|trusted| {
+            if let Some(trust) = trusted.get_mut(&pdf.path()) {
+                trust.moved = true;
+            }
+        });
+        self.sync_synctex(self.active_doc());
+    }
+
+    /// The SyncTeX file of a local vault's PDF, where it has one ([`build_of`]).
     fn synctex_of(&self, pdf: &pdftab::PdfTab) -> Option<PathBuf> {
+        self.is_local_pdf(pdf)
+            .then(|| build_of(&pdf.path()))
+            .flatten()
+    }
+
+    /// Whether `pdf` is a local vault's, whose own file the tab reads.
+    fn is_local_pdf(&self, pdf: &pdftab::PdfTab) -> bool {
         let key = pdf.key();
-        if doc::is_loose_key(&key) || self.on_host(&key) {
-            return None;
-        }
-        synctex::beside(&pdf.path())
+        !doc::is_loose_key(&key) && !self.on_host(&key)
     }
 
     /// The path of `key` on this machine, where it is a `.tex` of a local vault.

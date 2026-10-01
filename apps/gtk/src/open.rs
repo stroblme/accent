@@ -326,7 +326,10 @@ impl App {
         pdf.connect_saved(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |pdf| app.push_pdf(pdf)
+            move |pdf| {
+                app.synctex_written(pdf);
+                app.push_pdf(pdf);
+            }
         ));
         pdf.connect_export(glib::clone!(
             #[weak(rename_to = app)]
@@ -337,7 +340,10 @@ impl App {
         pdf.connect_repaged(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |pdf, edit, step| app.repaged(pdf, edit, step)
+            move |pdf, edit, step| {
+                app.synctex_repaged(pdf);
+                app.repaged(pdf, edit, step);
+            }
         ));
         pdf.connect_choice(glib::clone!(
             #[weak(rename_to = app)]
@@ -566,7 +572,8 @@ impl App {
         }
     }
 
-    /// A blank page before or `after` the one being read in the open PDF.
+    /// A blank page before or `after` the one the page's menu was opened on in the open PDF, else
+    /// the one being read.
     ///
     /// Explicit rather than automatic: a stroke cannot reach past the last page to ask for one —
     /// the view clamps a drag to the page under it — so a drawing runs on with Add Page After on
@@ -576,13 +583,15 @@ impl App {
         pdf.add_page(after);
     }
 
-    /// Take out the page being read, at once: Undo puts it back. Never the last one.
+    /// Take out the page the page's menu was opened on, else the page being read, at once: Undo
+    /// puts it back. Never the last one.
     pub fn pdf_delete_page(self: &Rc<Self>) {
         let Some(pdf) = self.active_pdf() else { return };
+        let page = pdf.command_page();
         if pdf.page_count() < 2 {
             return self.cannot("delete the page", "a PDF keeps at least one page");
         }
-        pdf.edit_pages(PageEdit::Delete(pdf.current_page()));
+        pdf.edit_pages(PageEdit::Delete(page));
     }
 
     /// Move the page being read one place towards the end (`down`) or the start of the document.

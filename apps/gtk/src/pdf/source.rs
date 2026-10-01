@@ -25,10 +25,28 @@ impl PdfTab {
 
     /// Bring `rect` of `page` into view and mark it as a selection is drawn, until [`MARK`] has
     /// passed or a selection replaces it. A jump, so Back returns to where the reader was; a
-    /// document still opening does it once its pages are known ([`PdfTab::show_pending_spot`]).
+    /// document still opening does it once its pages are known ([`PdfTab::show_pending_spot`]),
+    /// and pages not laid out yet, the view never having had a size (it was behind the spinner),
+    /// on the first frame after it has one.
     pub fn show_spot(self: &Rc<Self>, page: usize, rect: pdf::Rect) {
         if self.opening() {
             return self.spot.set(Some((page, rect)));
+        }
+        if self.view.width() <= 1 {
+            self.view.add_tick_callback(glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move |view, _| match view.width() <= 1 {
+                    true => glib::ControlFlow::Continue,
+                    false => {
+                        tab.show_spot(page, rect);
+                        glib::ControlFlow::Break
+                    }
+                }
+            ));
+            return;
         }
         self.jumping();
         self.clear_selection();
@@ -52,6 +70,18 @@ impl PdfTab {
     #[cfg(feature = "bench")]
     pub fn point_at(&self, page: usize, x: f32, y: f32) {
         self.pointed.set(Some((page, x, y)));
+    }
+
+    /// A stroke of the pen through `points` of `page`, as a drag with it draws one. Only drills
+    /// ask.
+    #[cfg(feature = "bench")]
+    pub fn draw(&self, page: usize, points: Vec<(f32, f32)>) {
+        let style = self.view.ink_style(super::Mode::Pen);
+        self.ask(super::protocol::Request::Ink {
+            page,
+            points,
+            style,
+        });
     }
 
     /// The line of text Show in PDF marks, while it is marked. Only drills ask.
