@@ -1010,11 +1010,12 @@ fn top(view: &gtk::TextView) -> String {
 /// the toggle's title row by tooltip (`row=["Show All Unchanged Lines", "Stop Comparing"]`), and
 /// for each press the hidden runs and the line at the top of the view before and after
 /// (`on hidden=10->0 top="line 181"@-250->"line 181"@-250`): every run opens, and letting go
-/// hides them all again, the one opened by hand too, the line at the top back where it was once
-/// the rows are laid (`away` counts the frames of fifty it was not). Then at the start of the file, where
-/// the first run opens downwards from the top of the view and collapses again under it
-/// (`start on … top="line 17 "@24->"line 1 w"@24`). Writes the note, so point it at a scratch
-/// vault.
+/// hides them all again, the one opened by hand too, the line at the top staying where it was
+/// in every frame painted meanwhile (`away=0/…`, see [`painted`]). Then at the start of the file,
+/// where the first run opens downwards from the top of the view and collapses again under it
+/// (`start on … top="line 17 "@24->"line 1 w"@24`), and last the two blobs read again three lines
+/// longer at the top, as the Git pane's refresh reads them (`reread`). Writes the note, so point it
+/// at a scratch vault.
 pub(super) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1046,6 +1047,10 @@ pub(super) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         };
         let view: &gtk::TextView = tab.view.upcast_ref();
+        let Some(views) = both_columns(&compare, view) else {
+            println!("bench compare_unfold columns none");
+            return bench_quit(&app);
+        };
         let buttons = overlaid(view, "⋯");
         if let Some((y, button)) = buttons.get(buttons.len() / 2).cloned() {
             centre(&compare, view, y).await;
@@ -1056,7 +1061,7 @@ pub(super) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
         for on in [true, false] {
             println!(
                 "bench compare_unfold editor {}",
-                bench_unfold(&compare, view, on).await
+                bench_unfold(&compare, &views, on).await
             );
         }
         // The run over the file's first lines collapses again under the top of the view.
@@ -1065,7 +1070,7 @@ pub(super) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
         for on in [true, false] {
             println!(
                 "bench compare_unfold start {}",
-                bench_unfold(&compare, view, on).await
+                bench_unfold(&compare, &views, on).await
             );
         }
         tab.leave_compare();
@@ -1078,7 +1083,8 @@ pub(super) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
         );
         wait(1200).await;
         let compare = diff.comparison();
-        let Some(view) = pane_view(compare.widget(), true) else {
+        let Some(views) = pane_view(compare.widget(), true).and_then(|v| both_columns(compare, &v))
+        else {
             println!("bench compare_unfold blobs none");
             return bench_quit(&app);
         };
@@ -1086,9 +1092,14 @@ pub(super) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
         for on in [true, false] {
             println!(
                 "bench compare_unfold blobs {}",
-                bench_unfold(compare, &view, on).await
+                bench_unfold(compare, &views, on).await
             );
         }
+        // The Git pane's refresh reading both blobs again, each three lines longer at the top,
+        // which keeps the line at the top of the view the same way.
+        let longer = |text: &str| format!("new 1\nnew 2\nnew 3\n{text}");
+        let reread = painted(&views, || diff.set_texts(&longer(&disk), &longer(&edited))).await;
+        println!("bench compare_unfold reread {reread}");
         bench_quit(&app);
     });
 }
@@ -1114,25 +1125,65 @@ fn bench_row(compare: &diff::Compare) -> String {
     format!("row={tips:?}")
 }
 
-/// Press (`on`) or let go of the toggle and say how the hidden runs and the line at the top of
-/// `view` moved, once fifty frames have gone by.
-async fn bench_unfold(compare: &diff::Compare, view: &gtk::TextView, on: bool) -> String {
+/// `view` and the comparison's other column, in that order.
+fn both_columns(compare: &diff::Compare, view: &gtk::TextView) -> Option<[gtk::TextView; 2]> {
+    let other = [true, false]
+        .into_iter()
+        .filter_map(|end| pane_view(compare.widget(), end))
+        .find(|other| other != view)?;
+    Some([view.clone(), other])
+}
+
+/// Press (`on`) or let go of the toggle and say how the hidden runs moved, and the lines at the top
+/// of `views` (see [`painted`]).
+async fn bench_unfold(compare: &diff::Compare, views: &[gtk::TextView; 2], on: bool) -> String {
     let Some(toggle) = unfold_toggle(compare) else {
         return "toggle=none".to_string();
     };
-    let (hidden, before) = (compare.counts().2, top(view));
-    toggle.set_active(on);
-    let mut away = 0;
-    for _ in 0..50 {
-        glib::timeout_future(Duration::from_millis(16)).await;
-        away += usize::from(top(view) != before);
-    }
+    let hidden = compare.counts().2;
+    let tops = painted(views, || toggle.set_active(on)).await;
     let what = if on { "on" } else { "off" };
     format!(
-        "{what} hidden={hidden}->{} top={before}->{} sensitive={} away={away}",
+        "{what} hidden={hidden}->{} {tops} sensitive={}",
         compare.counts().2,
-        top(view),
         toggle.is_sensitive()
+    )
+}
+
+/// Run `act` and say where the line at the top of the first of `views` was before and is once
+/// fifty frames have gone by, and in how many of the frames painted meanwhile (`frames`) the line
+/// at the top of each view was neither where it was before nor where it ends
+/// (`away=<first>/<other>`): a view shown somewhere else on the way. It used to be both, for the
+/// frames GTK took to lay out the lines above.
+async fn painted(views: &[gtk::TextView; 2], act: impl FnOnce()) -> String {
+    let tops = || views.each_ref().map(top);
+    let before = tops();
+    let seen: Rc<RefCell<Vec<[String; 2]>>> = Rc::default();
+    let clock = views[0].frame_clock();
+    let id = clock.as_ref().map(|clock| {
+        let (seen, views) = (seen.clone(), views.clone());
+        clock.connect_after_paint(move |_| seen.borrow_mut().push(views.each_ref().map(top)))
+    });
+    act();
+    for _ in 0..50 {
+        glib::timeout_future(Duration::from_millis(16)).await;
+    }
+    if let (Some(clock), Some(id)) = (clock, id) {
+        clock.disconnect(id);
+    }
+    let after = tops();
+    let seen = seen.borrow();
+    let away = [0, 1].map(|i| {
+        let elsewhere = |tops: &&[String; 2]| tops[i] != before[i] && tops[i] != after[i];
+        seen.iter().filter(elsewhere).count()
+    });
+    format!(
+        "top={}->{} frames={} away={}/{}",
+        before[0],
+        after[0],
+        seen.len(),
+        away[0],
+        away[1]
     )
 }
 

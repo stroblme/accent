@@ -238,9 +238,9 @@ enum Keep {
     FirstHunk,
     /// The scroll a hidden run was opened at, held there: see [`Compare::open_run`].
     Scroll(f64),
-    /// Line `.1` of side `.0`, its row `.2` pixels below the top of the view, the scroll held at
-    /// `.3` meanwhile: see [`Compare::set_side`].
-    Line(Side, usize, i32, f64),
+    /// Line `.1` of side `.0`, its row `.2` pixels below the top of the view: see
+    /// [`Compare::set_side`] and [`Compare::hold_line`].
+    Line(Side, usize, i32),
 }
 
 /// What a relayout measured: every row's natural height per side (`None` where the side has no
@@ -486,14 +486,15 @@ impl Compare {
             }
         });
         connect(vadj.clone().upcast(), id);
-        // A scroll held by `Compare::open_run` or `set_side` goes back to where it is held.
+        // A scroll held by `Compare::open_run`, or a line kept by `set_side`, goes back to where
+        // it is held.
         let w = weak.clone();
         let id = vadj.connect_value_changed(move |adj| {
-            if let Some(Keep::Scroll(value) | Keep::Line(.., value)) =
-                w.upgrade().and_then(|c| c.keep.get())
-                && adj.value() != value
-            {
-                adj.set_value(value);
+            let Some(c) = w.upgrade() else { return };
+            match c.keep.get() {
+                Some(Keep::Scroll(value)) if adj.value() != value => adj.set_value(value),
+                Some(Keep::Line(side, n, at)) => c.hold_line(side, n, at),
+                _ => {}
             }
         });
         connect(vadj.upcast(), id);
@@ -576,8 +577,25 @@ impl Compare {
             .enumerate()
             .rev()
             .find_map(|(r, row)| Some((r, side.number(&lines[side.of(row)?])?)))?;
-        let value = self.panes[0].scroller.vadjustment().value();
-        Some(Keep::Line(side, n, grid.tops[row] - seen, value))
+        Some(Keep::Line(side, n, grid.tops[row] - seen))
+    }
+
+    /// Scroll so line `n` of `side` starts `at` pixels below the top of the view where GTK has it
+    /// now, which is where it is drawn: what keeps a [`Keep::Line`] on screen while the rows are
+    /// laid. GTK lays out the lines that opened, hid or grew above it a few at a time, and keeps
+    /// each view's own top line in place as it does, both on the one scroll they share; a scroll
+    /// held where it was showed the lines above for as long as that took.
+    fn hold_line(&self, side: Side, n: usize, at: i32) {
+        let pane = self.pane(side);
+        let Some(line) = pane.buffer.iter_at_line(n as i32 - 1) else {
+            return;
+        };
+        let y = pane.view.line_yrange(&line).0;
+        let adj = self.panes[0].scroller.vadjustment();
+        let value = adj.value() + f64::from(y - pane.view.visible_rect().y() - at);
+        if value != adj.value() {
+            adj.set_value(value);
+        }
     }
 
     /// Re-read both buffers and lay the diff over them: the tints, the emphasis, the hidden runs
@@ -1139,7 +1157,7 @@ impl Compare {
             Some(Keep::FirstHunk) => self.reveal_first_hunk(),
             // Held all along, and the rows above the run have not moved.
             Some(Keep::Scroll(_)) => self.keep.set(None),
-            Some(Keep::Line(side, n, at, _)) => {
+            Some(Keep::Line(side, n, at)) => {
                 self.keep.set(None);
                 let row = {
                     let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
