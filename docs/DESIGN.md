@@ -791,12 +791,14 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ## Motion
 
-- libadwaita's defaults only: no custom easing, no staggered reveals, nothing animating on load. The only timings we own are debounces, which keep the main loop free.
+- Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, and the PDF's "Cannot Open" page. Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, the tabs a held `Ctrl+Tab` steps through, or a layout change (F9, a split, the preview). All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it. The other timings we own are debounces, which keep the main loop free.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.
 
 | Timer | Value | Where |
 |---|---|---|
 | Re-highlight after a keystroke | 150 ms | `editor/mod.rs::DEBOUNCE` |
+| A switch's crossfade, a page's fade in | 150 ms | `widgets.rs::FADE_MS` |
+| A PDF still opening shows a spinner | 160 ms | `pdf/tab.rs::OPENING` |
 | End-of-line messages cut again after a width change | 150 ms | `editor/mod.rs::DEBOUNCE` |
 | Palette query | 50 ms | `palette.rs::DEBOUNCE` |
 | Search progress pulse | 80 ms | `sidebar/search.rs::PULSE` |
