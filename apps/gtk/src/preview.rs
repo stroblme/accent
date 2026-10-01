@@ -13,6 +13,7 @@ use crate::look::{self, Look, Served};
 use crate::theme;
 use accent_core::markdown::{self, percent_decode};
 use accent_core::path::parent_dir;
+use accent_core::search::Options;
 use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -26,10 +27,19 @@ use webkit6::prelude::*;
 /// Adwaita Sans and about 62 of Cantarell, so both GNOME document fonts land in the range.
 const COLUMN_CH: u32 = 56;
 
-/// The find bar's own settings, matching the editor's `SearchSettings`: case-insensitive and
-/// wrapping.
-const FIND_OPTIONS: webkit6::FindOptions =
-    webkit6::FindOptions::CASE_INSENSITIVE.union(webkit6::FindOptions::WRAP_AROUND);
+/// What WebKit's find is told under the find bar's toggles: wrapping always, without regard to case
+/// unless Match Case is down, and Match Whole Word as matches at a word's start, the nearest WebKit
+/// has (`foo` finds `food`). A regular expression it cannot match: the query stays literal.
+fn find_options(options: Options) -> webkit6::FindOptions {
+    let mut find = webkit6::FindOptions::WRAP_AROUND;
+    if !options.case {
+        find |= webkit6::FindOptions::CASE_INSENSITIVE;
+    }
+    if options.word {
+        find |= webkit6::FindOptions::AT_WORD_STARTS;
+    }
+    find
+}
 /// WebKit's own guard against a query that matches the whole page; the counter says "500+" past it.
 const FIND_LIMIT: u32 = 500;
 
@@ -151,9 +161,10 @@ struct Inner {
     loaded: Cell<bool>,
     /// A line asked for while the page was still loading.
     pending: Cell<Option<u32>>,
-    /// What the find bar is looking for, kept because every re-render reloads the page and
-    /// WebKit's find dies with it.
+    /// What the find bar is looking for, and under which of its toggles, kept because every
+    /// re-render reloads the page and WebKit's find dies with it.
     query: RefCell<Option<String>>,
+    options: Cell<Options>,
     /// Matches WebKit last counted, and which of them the reader is on (1-based, 0 for none).
     /// `WebKitFindController` reports a total and never a position, so the position is ours to
     /// keep: [`Inner::refind`] starts every fresh search from the top, and the two step methods
@@ -207,8 +218,9 @@ impl Inner {
             report_js,
         );
         // Counting first is the order WebKit's own MiniBrowser uses; `search` reports no total.
-        finder.count_matches(text, FIND_OPTIONS.bits(), FIND_LIMIT);
-        finder.search(text, FIND_OPTIONS.bits(), FIND_LIMIT);
+        let options = find_options(self.options.get()).bits();
+        finder.count_matches(text, options, FIND_LIMIT);
+        finder.search(text, options, FIND_LIMIT);
     }
 
     /// Move the counter one match on and say so.
@@ -262,7 +274,7 @@ fn report_js(result: Result<webkit6::javascriptcore::Value, glib::Error>) {
     }
 }
 
-/// One match on from `at` (1-based), wrapping at either end because [`FIND_OPTIONS`] tells WebKit
+/// One match on from `at` (1-based), wrapping at either end because [`find_options`] tells WebKit
 /// to wrap. 0 in, 0 out: nothing found is nowhere to step.
 fn stepped(at: u32, total: u32, forward: bool) -> u32 {
     match (total, forward) {
@@ -423,6 +435,7 @@ impl Preview {
             loaded: Cell::new(false),
             pending: Cell::new(None),
             query: RefCell::new(None),
+            options: Cell::new(Options::default()),
             total: Cell::new(0),
             at: Cell::new(0),
             report: RefCell::new(None),
@@ -614,10 +627,11 @@ impl Preview {
     // instead of the buffer. WebKit does the searching; the find bar only decides which of the
     // two it is talking to.
 
-    /// Highlight and jump to the first match of `text`; an empty query clears the search. The
-    /// query is remembered, so it survives the re-render an edit triggers.
-    pub fn find(&self, text: &str) {
+    /// Highlight and jump to the first match of `text` under the find bar's toggles; an empty query
+    /// clears the search. Both are remembered, so they survive the re-render an edit triggers.
+    pub fn find(&self, text: &str, options: Options) {
         *self.inner.query.borrow_mut() = Some(text.to_string());
+        self.inner.options.set(options);
         if text.is_empty() {
             return self.find_clear();
         }

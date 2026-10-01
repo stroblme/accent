@@ -215,7 +215,12 @@ fn render_loop(
                         send(view, Reply::Outline(outline));
                     }
                 }
-                Request::Search { query, text, from } => {
+                Request::Search {
+                    query,
+                    text,
+                    options,
+                    from,
+                } => {
                     // An empty query is the bar being cleared or closed: it has already pushed
                     // aside whatever was running, and there is nothing to look for.
                     if text.is_empty() {
@@ -234,6 +239,7 @@ fn render_loop(
                                 let rest = Request::Search {
                                     query,
                                     text,
+                                    options,
                                     from: at,
                                 };
                                 interrupt(&mut queue, rest, newer);
@@ -242,7 +248,7 @@ fn render_loop(
                             Err(TryRecvError::Disconnected) => return None,
                             Err(TryRecvError::Empty) => {}
                         }
-                        match doc.search(at, &text) {
+                        match doc.search(at, &text, options) {
                             Ok(hits) if !hits.is_empty() => send(
                                 view,
                                 Reply::Found {
@@ -658,6 +664,7 @@ mod tests {
         Request::Search {
             query,
             text: "q".to_string(),
+            options: Default::default(),
             from,
         }
     }

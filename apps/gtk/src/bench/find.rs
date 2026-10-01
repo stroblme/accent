@@ -20,10 +20,10 @@ type Step = Box<dyn Fn(&Rc<App>, &Rc<Bar>)>;
 /// The box the press selects must read `sel=Some((0, n))` — the whole of it — in both lines of
 /// all three cases.
 ///
-/// `ACCENT_BENCH_FIND=options` is [`bench_find_options`] instead.
+/// `ACCENT_BENCH_FIND=options[:<rel_pdf>]` is [`bench_find_options`] instead.
 pub(super) fn bench_find(app: &Rc<App>, rel: &str) {
-    if rel == "options" {
-        return bench_find_options(app);
+    if let Some(pdf) = rel.strip_prefix("options") {
+        return bench_find_options(app, pdf.strip_prefix(':'));
     }
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -75,17 +75,21 @@ const TEXT: &str = "Foo foo food foo_bar\nÄ foo(1) FOO(22)\n";
 /// the Search pane's, being its matcher: `plain` 6 matches, `case` 4, `word` 4 (neither `food`
 /// nor `foo_bar`), `case_word` 2, `regex` (`fo+\(`) 2, `invalid` (`foo(`) `Invalid pattern`
 /// with `invalid=true`. `replaced` is Replace All of `(\w+)\((\d+)\)` by `$2-$1`, which must
-/// read `Ä 1-foo 22-FOO` on the second line. `presenting` opens the bar over the rendered preview,
-/// where the toggles are off-limits: `toggles=false`. The note is closed, which writes it, and
-/// removed before the drill quits.
-fn bench_find_options(app: &Rc<App>) {
+/// read `Ä 1-foo 22-FOO` on the second line. Then the bar over the rendered preview, where Regular
+/// Expression is off-limits (`regex=false`) and Whole Word is word starts, as its tooltip says:
+/// `preview_plain` 6 for `foo`, `preview_case` 4, `preview_word` 6 (`food` and `foo_bar` start
+/// with it), `preview_case_word` 4, and for `oo` 6, 5 by case and 0 at word starts. With a PDF,
+/// the generated vault's `Attachments/pages.pdf` ("Page 1" to "Page 5"), the same over it, where
+/// Whole Word is whole words: `page` 5 and 0 by case, `Page` 5 by case, `Pag` 5 and 0 as a whole
+/// word. The note is closed, which writes it, and removed before the drill quits.
+fn bench_find_options(app: &Rc<App>, pdf: Option<&str>) {
     let path = app.root().join(NOTE);
     if let Err(e) = std::fs::write(&path, TEXT) {
         println!("bench find options wrote=false {e}");
         return bench_quit(app);
     }
     app.open_path(NOTE);
-    let app = app.clone();
+    let (app, pdf) = (app.clone(), pdf.map(str::to_string));
     glib::timeout_add_local_once(Duration::from_millis(600), move || {
         let bar = app.pane().find.clone();
         let set = |bar: &Rc<Bar>, case: bool, word: bool, regex: bool| {
@@ -124,21 +128,86 @@ fn bench_find_options(app: &Rc<App>) {
                 println!("bench find options case=replaced text={text:?}");
                 app.set_presenting(true);
                 bar.open(Mode::Find);
-                println!(
-                    "bench find options case=presenting toggles={}",
-                    bar.toggles()[0].is_sensitive()
-                );
-                app.set_presenting(false);
-                if let Some(tab) = app.active() {
-                    app.close_page(&tab.page);
-                }
             }),
-            Box::new(|app, _| {
-                let _ = std::fs::remove_file(app.root().join(NOTE));
-            }),
+            // WebKit's first page load, which a find waits for.
+            Box::new(|_, _| {}),
+            Box::new(|_, _| {}),
+            Box::new(|_, bar| toggles("preview", bar)),
         ];
-        run(app, bar, steps.into());
+        let mut steps: VecDeque<Step> = steps.into();
+        walk(
+            &mut steps,
+            "preview",
+            &[
+                ("plain", "foo", false, false),
+                ("case", "foo", true, false),
+                ("word", "foo", false, true),
+                ("case_word", "foo", true, true),
+                ("plain", "oo", false, false),
+                ("case", "oo", true, false),
+                ("word", "oo", false, true),
+            ],
+        );
+        steps.push_back(Box::new(|app, _| {
+            app.set_presenting(false);
+            if let Some(tab) = app.active() {
+                app.close_page(&tab.page);
+            }
+            let _ = std::fs::remove_file(app.root().join(NOTE));
+        }));
+        if let Some(pdf) = pdf {
+            steps.push_back(Box::new(move |app, bar| {
+                app.open_path(&pdf);
+                bar.open(Mode::Find);
+            }));
+            steps.push_back(Box::new(|_, _| {}));
+            steps.push_back(Box::new(|_, bar| toggles("pdf", bar)));
+            walk(
+                &mut steps,
+                "pdf",
+                &[
+                    ("plain", "page", false, false),
+                    ("case", "page", true, false),
+                    ("case", "Page", true, false),
+                    ("plain", "Pag", false, false),
+                    ("word", "Pag", false, true),
+                ],
+            );
+        }
+        run(app, bar, steps);
     });
+}
+
+/// For each of `walk`, a step setting the toggles to Match Case and Match Whole Word as it says
+/// (Regular Expression off) and typing its query, and one printing the readout as `<place>_<label>`.
+fn walk(
+    steps: &mut VecDeque<Step>,
+    place: &'static str,
+    walk: &[(&'static str, &'static str, bool, bool)],
+) {
+    for &(label, query, case, word) in walk {
+        steps.push_back(Box::new(move |_, bar| {
+            for (button, on) in bar.toggles().iter().zip([case, word, false]) {
+                button.set_active(on);
+            }
+            typed(bar, query);
+        }));
+        steps.push_back(Box::new(move |_, bar| {
+            readout(&format!("{place}_{label}"), bar)
+        }));
+    }
+}
+
+/// Which toggles take a click over `place`, and what Match Whole Word says it does there.
+fn toggles(place: &str, bar: &Rc<Bar>) {
+    let [case, word, regex] = bar.toggles();
+    println!(
+        "bench find options case={place} toggles case={} word={} regex={} word_tooltip={:?}",
+        case.is_sensitive(),
+        word.is_sensitive(),
+        regex.is_sensitive(),
+        word.tooltip_text().unwrap_or_default()
+    );
 }
 
 /// What the bar reads out for the query in its box.

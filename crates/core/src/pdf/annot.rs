@@ -46,7 +46,7 @@ pub fn highlight_quads(
             .map(|(_, quads)| quads)
             .or_else(|| {
                 let text = link.alias.as_deref()?;
-                let hits = doc.search(page, text).ok()?;
+                let hits = doc.search(page, text, Default::default()).ok()?;
                 // The link's own line number is still a hint at where on the page it was, even
                 // when its numbering no longer fits: the nearest hit to that line, rather than
                 // the first on the page, is what a second copy of the same phrase above it used

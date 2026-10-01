@@ -11,6 +11,7 @@ use super::selection::pages_of;
 use super::{self as pdfview, Anchor, PdfView, PdfZoom, Reply, Span, render};
 use accent_api::{KeptLink, PdfLink};
 use accent_core::pdf;
+use accent_core::search::Options;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::{Cell, RefCell};
@@ -164,9 +165,9 @@ pub struct PdfTab {
     pub(super) pending: Cell<Option<Place>>,
     /// Which search these results belong to, so a stale page's answer is dropped.
     pub(super) query: Cell<u64>,
-    /// What was searched for last, so a page edit can run it again: the matches are filed by
-    /// page like everything else.
-    pub(super) searched: RefCell<String>,
+    /// What was searched for last, under which of the find bar's toggles, so a page edit can run
+    /// it again: the matches are filed by page like everything else.
+    pub(super) searched: RefCell<(String, Options)>,
     pub(super) matches: RefCell<Vec<(usize, pdf::Rect)>>,
     pub(super) current: Cell<Option<usize>>,
     pub(super) on_zoom: Hook,
@@ -293,7 +294,7 @@ pub fn open(
         outline: RefCell::new(Vec::new()),
         preview: RefCell::new(None),
         query: Cell::new(0),
-        searched: RefCell::new(String::new()),
+        searched: RefCell::default(),
         matches: RefCell::new(Vec::new()),
         current: Cell::new(None),
         on_zoom: RefCell::new(None),
@@ -933,9 +934,10 @@ impl PdfTab {
         self.organize.pane.clone().upcast()
     }
 
-    /// Search the whole document. An empty query clears what is shown.
-    pub fn find(self: &Rc<Self>, text: &str) {
-        *self.searched.borrow_mut() = text.to_string();
+    /// Search the whole document, by case and by whole words where `options` says so. An empty
+    /// query clears what is shown.
+    pub fn find(self: &Rc<Self>, text: &str, options: Options) {
+        *self.searched.borrow_mut() = (text.to_string(), options);
         self.matches.borrow_mut().clear();
         self.current.set(None);
         self.view.set_marks(std::collections::HashMap::new());
@@ -946,6 +948,7 @@ impl PdfTab {
         self.ask(Request::Search {
             query: self.query.get(),
             text: text.to_string(),
+            options,
             from: 0,
         });
         self.emit(&self.on_matches);
@@ -1606,9 +1609,9 @@ impl PdfTab {
                     self.ask_inks();
                 }
                 self.ask(Request::Links(self.view.current_page()));
-                let searched = self.searched.borrow().clone();
+                let (searched, options) = self.searched.borrow().clone();
                 if !searched.is_empty() {
-                    self.find(&searched);
+                    self.find(&searched, options);
                 }
                 // The page count changed, or the page the reader is on did, with no scroll.
                 self.emit(&self.on_page);

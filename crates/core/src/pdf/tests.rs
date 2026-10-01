@@ -3,6 +3,7 @@ use std::ops::Range;
 use super::ink::{Seg, flatten, segments_of};
 use super::text::{item_offset, line_groups};
 use super::*;
+use crate::search::Options;
 
 /// A two-page PDF built by hand so the tests need no fixture: a line of Helvetica on each
 /// page, an internal link from page 1 to page 2, a URI link on page 2, and a two-level
@@ -1117,15 +1118,38 @@ fn outline_is_flat_with_depths() {
 #[test]
 fn search_is_case_insensitive_and_empty_safe() {
     let Some((_d, doc)) = open_tiny() else { return };
-    let hits = doc.search(1, "second").unwrap();
+    let plain = Options::default();
+    let hits = doc.search(1, "second", plain).unwrap();
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert!(
         hits[0].iter().any(|r| r.width() > 0.0 && r.height() > 0.0),
         "{:?}",
         hits[0]
     );
-    assert!(doc.search(1, "").unwrap().is_empty(), "empty query");
-    assert!(doc.search(0, "second").unwrap().is_empty(), "other page");
+    assert!(doc.search(1, "", plain).unwrap().is_empty(), "empty query");
+    assert!(
+        doc.search(0, "second", plain).unwrap().is_empty(),
+        "other page"
+    );
+}
+
+/// The find bar's Match Case and Match Whole Word, over "Second page".
+#[test]
+fn search_matches_case_and_whole_words_when_asked() {
+    let Some((_d, doc)) = open_tiny() else { return };
+    let count = |query, case, word| {
+        let options = Options {
+            case,
+            word,
+            regex: false,
+        };
+        doc.search(1, query, options).unwrap().len()
+    };
+    assert_eq!(count("second", true, false), 0);
+    assert_eq!(count("Second", true, false), 1);
+    assert_eq!(count("Secon", false, false), 1);
+    assert_eq!(count("Secon", false, true), 0);
+    assert_eq!(count("second", false, true), 1);
 }
 
 // The Adwaita dark view background with its foreground, the pair a dark theme renders onto.
