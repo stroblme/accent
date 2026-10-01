@@ -298,7 +298,6 @@ pub fn build_window(
         sidebar_column,
         sidebar_header,
         toolbar,
-        editor_column,
         header,
         modes,
         drawing_button: drawing.clone(),

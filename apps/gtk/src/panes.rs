@@ -577,7 +577,13 @@ impl Pane {
         drop.set_types(&[adw::TabPage::static_type(), String::static_type()]);
         hint.add_controller(drop.clone());
 
-        let overlay = gtk::Overlay::builder().child(&tabs).build();
+        // Expanding of its own, not only through the tab view, which presentation mode hides
+        // under the rendered note it lays over it (`Pane::cover`).
+        let overlay = gtk::Overlay::builder()
+            .child(&tabs)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
         overlay.add_overlay(&hint);
         let switcher = Switcher::new();
         overlay.add_overlay(switcher.widget());
@@ -619,17 +625,17 @@ impl Pane {
         self.column.upcast_ref()
     }
 
-    /// Put the find bar back between the tab bar and the document, after presentation mode has
-    /// borrowed it (`App::hoist_find`). A no-op while it is already there.
-    pub fn hold_find(&self) {
-        let bar = self.find.widget();
-        if bar.parent().as_ref() == Some(self.widget()) {
+    /// Lay `widget` over this pane's document, above its tabs and under the drop sheet and the
+    /// `Ctrl+Tab` card, which go on working over it: presentation mode shows a note rendered here,
+    /// where the note is. Taken from another pane's document if it covers one; anywhere else it
+    /// must have been taken out of first. A no-op while it is already here.
+    pub fn cover(&self, widget: &gtk::Widget) {
+        if widget.parent().as_ref() == Some(self.overlay.upcast_ref()) {
             return;
         }
-        if let Some(old) = bar.parent().and_downcast::<gtk::Box>() {
-            old.remove(bar);
-        }
-        self.column.insert_child_after(bar, Some(&self.bar));
+        widget.unparent();
+        self.overlay.add_overlay(widget);
+        widget.insert_after(&self.overlay, Some(&self.tabs));
     }
 
     /// The document area, whose size the drop zones are measured in.
@@ -938,6 +944,27 @@ pub fn detach(pane: &Pane) {
     paned.set_start_child(gtk::Widget::NONE);
     paned.set_end_child(gtk::Widget::NONE);
     replace(&grandparent, paned.upcast_ref(), &sibling);
+}
+
+/// Show `only` alone, where it is in the pane tree, or every pane again with `None`: each branch
+/// beside the way up from it is hidden. A `GtkPaned` with one child hidden gives the other all of
+/// its room without working out a position, so every divider is where it was once the branches
+/// come back. A node changes only if it has to, so a sibling is not mapped to be hidden again.
+pub fn isolate(panes: &[Rc<Pane>], only: Option<&Pane>) {
+    let mut path = Vec::new();
+    let mut at = only.map(|pane| pane.widget().clone());
+    while let Some(node) = at {
+        at = node.parent().filter(|parent| parent.is::<gtk::Paned>());
+        path.push(node);
+    }
+    for pane in panes {
+        let mut node = pane.widget().clone();
+        while let Some(paned) = node.parent().and_downcast::<gtk::Paned>() {
+            let beside = !path.contains(&node) && path.contains(paned.upcast_ref());
+            node.set_visible(!beside);
+            node = paned.upcast();
+        }
+    }
 }
 
 /// Swap one child of a pane tree node for another. A node is either the bin at the root or a

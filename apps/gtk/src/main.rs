@@ -310,9 +310,6 @@ struct App {
     /// The editor column: presentation mode unreveals its top bars, which is the header. The tab
     /// bars belong to the panes and go with `content`.
     toolbar: adw::ToolbarView,
-    /// What `toolbar` holds: the connection bar, the toasts, and — only while presentation mode
-    /// has the panes off screen — the find bar of the pane being presented.
-    editor_column: gtk::Box,
     header: adw::HeaderBar,
     modes: gtk::ToggleButton,
     /// The header's Drawing toggle, shown only over a PDF.
@@ -627,6 +624,11 @@ impl App {
     /// Keep the window subtitle, the References pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.retarget_find(&self.pane());
+        // F5 presents whatever comes to the front as it presented the tab it began on: a held
+        // `Ctrl+Tab` steps through the presented pane's tabs.
+        if self.presenting.get().is_some() {
+            self.lay_out();
+        }
         // The tools belong to the window, so they follow the tab in front, and so do SyncTeX's
         // two commands.
         self.sync_drawing();
@@ -684,8 +686,11 @@ impl App {
             }
         }
         // The preview is about notes. A source file, an image or a status page leaves it empty
-        // rather than showing the last note's.
-        let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
+        // rather than showing the last note's. F5 presents any tab with a buffer through it.
+        let note = doc
+            .tab()
+            .filter(|t| t.flavour().is_note() || self.presenting.get().is_some())
+            .cloned();
         self.refresh_references();
         self.sync_status();
         self.sync_outline();

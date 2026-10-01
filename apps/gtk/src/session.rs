@@ -540,7 +540,7 @@ impl App {
     }
 
     /// The panes as the session records them, read off the widget tree, which is the layout.
-    /// While presentation mode has the panes off screen, or a split has no size yet, there is no
+    /// While presentation mode hides every pane but one, or a split has no size yet, there is no
     /// ratio to read and the stored layout stands.
     pub(crate) fn layout(&self) -> Option<Layout> {
         let root = self

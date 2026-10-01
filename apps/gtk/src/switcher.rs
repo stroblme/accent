@@ -58,8 +58,8 @@ impl Switcher {
         self.list.upcast_ref()
     }
 
-    /// Whether the card is up: its own visibility, not whether it is on screen, which a pane taken
-    /// off screen (a note presented) says no to while the card is still up in it.
+    /// Whether the card is up: its own visibility, which `show` and `hide` set, rather than
+    /// whether it is on screen, which its pane decides too.
     pub fn shown(&self) -> bool {
         self.list.get_visible()
     }
