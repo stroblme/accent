@@ -135,12 +135,14 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
 }
 
 /// The pointer's half of `drop_fold`, held for XTEST: a section folded under its heading and
-/// selected whole, where to press on it and where to let it go at the end of the note, and after
-/// eight seconds what the note holds and the action a drag of ours ended with, three times:
-/// `first`, `plain` and `ctrl`. A move has to carry the hidden body and take all of it away from
-/// where it was, so `hidden body` is in the note once, after `plain line`; a drag with Ctrl held
-/// copies, leaving it twice. Under XTEST some drags, the first of a run every time, are GTK's own
-/// (`ended=None`, the hidden body lost; NOTEPAD), so read the rounds that end with an action.
+/// selected whole, where to press on it and where to let it go at the end of the note, and five
+/// seconds later what the note holds and the action a drag of ours ended with, ten times, every
+/// other one meant to be driven with Ctrl held. A move has to carry the hidden body and take all
+/// of it away from where it was, so `hidden body` is in the note once, after `plain line`; a copy
+/// leaves it twice. Each round says whether the drag was ours (`ended=Some`), and `lost=true`
+/// where the hidden body left the note; the last line counts the rounds whose drag was GTK's own
+/// (`gtk`, the note changed with no drag of ours ending), that changed nothing (`missed`) and that
+/// lost text (`lost`), the invariant being that a drag never takes away text it does not carry.
 /// Drive it in steps with pauses between them — `move X0 Y0; down`, a move past the drag
 /// threshold, then `sleep 0.3; move X1 Y1; sleep 0.5; up` — because XDND's position and status
 /// messages have to go round before the release, and `xtest.py`'s one-shot `drag` lets go too
@@ -171,7 +173,9 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
             let (sx, sy) = app.window.surface_transform();
             ((p.x() as f64 + sx) as i32, (p.y() as f64 + sy) as i32)
         };
-        for round in ["first", "plain", "ctrl"] {
+        let (mut gtk, mut missed, mut lost) = (0, 0, 0);
+        for round in 0..10 {
+            let kind = ["plain", "ctrl"][round % 2];
             tab.set_text(FOLDED);
             let fold = accent_api::Fold {
                 start_line: 0,
@@ -185,17 +189,19 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
             end.backward_char();
             crate::editor::DRAG_ENDED.set(None);
             println!(
-                "bench drag_fold {round} press={:?} release={:?}",
+                "bench drag_fold {round} {kind} press={:?} release={:?}",
                 screen(&at("One")),
                 screen(&end)
             );
-            glib::timeout_future(Duration::from_secs(8)).await;
-            println!(
-                "bench drag_fold {round} ended={:?} text={:?}",
-                crate::editor::DRAG_ENDED.get(),
-                tab.text()
-            );
+            glib::timeout_future(Duration::from_secs(5)).await;
+            let (ended, text) = (crate::editor::DRAG_ENDED.get(), tab.text());
+            let gone = !text.contains("hidden body");
+            gtk += usize::from(ended.is_none() && text != FOLDED);
+            missed += usize::from(ended.is_none() && text == FOLDED);
+            lost += usize::from(gone);
+            println!("bench drag_fold {round} {kind} ended={ended:?} lost={gone} text={text:?}");
         }
+        println!("bench drag_fold summary rounds=10 gtk={gtk} missed={missed} lost={lost}");
         bench_quit(&app);
     });
 }

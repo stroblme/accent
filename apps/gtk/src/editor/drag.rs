@@ -23,22 +23,31 @@ thread_local! {
     pub(crate) static ENDED: Cell<Option<gdk::DragAction>> = const { Cell::new(None) };
 }
 
-/// Take the drags GTK's own would carry less of.
+/// Take the drags GTK's own would carry less of, every one of them: a drag never takes away text it
+/// does not carry.
 ///
 /// A press on the selection is where GTK's click gesture claims the sequence for its drag gesture,
 /// which denies every gesture on the view it is not grouped with, so this one joins that group.
 /// It is added after GTK's, and a widget runs the controllers of one phase newest first, so it sees
 /// the press before GTK's gestures change anything, and the motion that crosses the drag
-/// threshold before GTK's drag gesture does. Denying the sequence once the drag is ours is what
-/// GTK's own drag does to its gesture, and the group shares it, so GTK starts none. The capture
-/// phase would not do: a claimed gesture there stops the event, and GTK's drag never moved.
+/// threshold before GTK's drag gesture does: both decide as GTK does, the press on the selection
+/// by the place nearest the pointer and without Shift, the threshold in fractions of a pixel, so
+/// none of GTK's drags is one this gesture let by. On that motion every controller on the view is
+/// reset, as GtkDragSource resets them when its drag begins: GTK's drag gesture lets go before the
+/// motion reaches it, and the release, which goes to the drag, leaves no gesture holding the press
+/// and missing the next one. The capture phase would not do: a claimed gesture there stops the
+/// event, and GTK's drag never moved.
 pub(super) fn install(view: &sourceview5::View) {
-    // GtkTextView's own drag gesture: the only `GtkGestureDrag` on the view, GtkSourceView adding
-    // none. Looked up once, before this one is added.
+    // GtkTextView's own drag gesture: the oldest `GtkGestureDrag` on the view, made with it, the
+    // list running newest first. Not merely the first found, which is the column's box drag
+    // (`multicaret::box_drag`): grouped with that one, this gesture was denied with it on every
+    // press and cancelled by GTK's claim, and GTK's own drag, which carries only what shows, took
+    // the selection away hidden lines and all. Looked up once, before this one is added.
     let controllers = view.observe_controllers();
     let theirs = (0..)
         .map_while(|i| controllers.item(i))
-        .find_map(|c| c.downcast::<gtk::GestureDrag>().ok());
+        .filter_map(|c| c.downcast::<gtk::GestureDrag>().ok())
+        .last();
     drop(controllers);
     let gesture = gtk::GestureDrag::builder()
         .button(gdk::BUTTON_PRIMARY)
@@ -51,11 +60,16 @@ pub(super) fn install(view: &sourceview5::View) {
         #[strong]
         armed,
         move |gesture, x, y| {
+            let extends = gesture
+                .current_event_state()
+                .contains(gdk::ModifierType::SHIFT_MASK);
             let ours = gesture
                 .widget()
                 .and_downcast::<sourceview5::View>()
                 .is_some_and(|view| {
-                    pressed_in_selection(&view, x, y) && content(&view.buffer()).is_some()
+                    !extends
+                        && pressed_in_selection(&view, x, y)
+                        && content(&view.buffer()).is_some()
                 });
             armed.set(ours);
         }
@@ -65,17 +79,20 @@ pub(super) fn install(view: &sourceview5::View) {
         let Some(view) = gesture.widget().and_downcast::<sourceview5::View>() else {
             return;
         };
-        let Some((x, y)) = gesture.start_point() else {
-            return;
-        };
-        if !armed.get()
-            || !view.drag_check_threshold(x as i32, y as i32, (x + dx) as i32, (y + dy) as i32)
-        {
+        // `gtk_drag_check_threshold_double`, as GTK's drag gesture asks on the same motion.
+        let threshold = f64::from(view.settings().gtk_dnd_drag_threshold());
+        if !armed.get() || (dx.abs() <= threshold && dy.abs() <= threshold) {
             return;
         }
         armed.set(false);
-        if begin(&view, gesture, dx, dy, &started) {
-            gesture.set_state(gtk::EventSequenceState::Denied);
+        begin(&view, gesture, dx, dy, &started);
+        // Started or not, no other drag does, GTK's carrying only what shows: every controller on
+        // the view lets go of the press, GTK's drag gesture before this motion reaches it.
+        let controllers = view.observe_controllers();
+        for controller in (0..).map_while(|i| controllers.item(i)) {
+            if let Ok(controller) = controller.downcast::<gtk::EventController>() {
+                controller.reset();
+            }
         }
     });
     view.add_controller(gesture.clone());
@@ -135,20 +152,10 @@ fn drop_target(flight: Flight) -> gtk::DropTarget {
 }
 
 /// Where a drop at widget `x`, `y` goes in, as GtkTextView answers its own drag there
-/// (`gtk_text_view_drag_motion`): the place nearest the pointer, the end of the row beside it,
-/// anywhere the text takes one but on the selection, either end included.
+/// (`gtk_text_view_drag_motion`): anywhere the text takes one but on the selection, either end
+/// included.
 fn drop_point(view: &sourceview5::View, x: f64, y: f64) -> Option<gtk::TextIter> {
-    let (x, y) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-    if crate::fold::aborts_at(view, y) {
-        return None;
-    }
-    let at = match view.iter_at_position(x, y) {
-        Some((mut at, trailing)) => {
-            at.forward_chars(trailing);
-            at
-        }
-        None => pressed_at(view, x, y),
-    };
+    let at = at_pixel(view, x, y)?;
     let on_selection = view
         .buffer()
         .selection_bounds()
@@ -157,13 +164,30 @@ fn drop_point(view: &sourceview5::View, x: f64, y: f64) -> Option<gtk::TextIter>
 }
 
 /// Whether a press at widget `x`, `y` was on the selection, which is where GTK's own gesture
-/// starts a drag rather than a new selection.
+/// starts a drag rather than a new selection: the place it takes the press for is in it, the end
+/// left out (`gtk_text_view_click_gesture_pressed`).
 fn pressed_in_selection(view: &sourceview5::View, x: f64, y: f64) -> bool {
-    let (x, y) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-    let at = pressed_at(view, x, y);
+    let at = at_pixel(view, x, y);
     view.buffer()
         .selection_bounds()
-        .is_some_and(|(start, end)| at.in_range(&start, &end))
+        .is_some_and(|(start, end)| at.is_some_and(|at| at.in_range(&start, &end)))
+}
+
+/// The place nearest widget `x`, `y`, or the end of the row beside it, as GTK takes a pointer's
+/// place (`gtk_text_layout_get_iter_at_pixel`). `None` where asking would abort
+/// (`fold::aborts_at`).
+fn at_pixel(view: &sourceview5::View, x: f64, y: f64) -> Option<gtk::TextIter> {
+    let (x, y) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+    if crate::fold::aborts_at(view, y) {
+        return None;
+    }
+    Some(match view.iter_at_position(x, y) {
+        Some((mut at, trailing)) => {
+            at.forward_chars(trailing);
+            at
+        }
+        None => pressed_at(view, x, y),
+    })
 }
 
 /// The drag of ours under way from a view, if one is.
@@ -196,28 +220,22 @@ impl Dragged {
     }
 }
 
-/// Start the drag, or say it could not be: then GTK's own gesture starts one on the same motion.
-fn begin(
-    view: &sourceview5::View,
-    gesture: &gtk::GestureDrag,
-    dx: f64,
-    dy: f64,
-    flight: &Flight,
-) -> bool {
+/// Start the drag, unless there is no selection, nothing hidden in it, or no surface to drag from.
+fn begin(view: &sourceview5::View, gesture: &gtk::GestureDrag, dx: f64, dy: f64, flight: &Flight) {
     let buffer = view.buffer();
     let (Some(content), Some((start, end))) = (content(&buffer), buffer.selection_bounds()) else {
-        return false;
+        return;
     };
     let surface = view.native().and_then(|native| native.surface());
     let (Some(surface), Some(device)) = (surface, gesture.device()) else {
-        return false;
+        return;
     };
     let actions = match view.is_editable() {
         true => gdk::DragAction::COPY | gdk::DragAction::MOVE,
         false => gdk::DragAction::COPY,
     };
     let Some(drag) = gdk::Drag::begin(&surface, &device, &content, actions, dx, dy) else {
-        return false;
+        return;
     };
     // What GTK's icon shows: the text as it reads on screen, a few lines of it.
     let icon = gtk::Label::builder()
@@ -252,5 +270,4 @@ fn begin(
         dragged.finish(false);
         drag.drop_done(false);
     });
-    true
 }
