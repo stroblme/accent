@@ -1195,6 +1195,102 @@ pub(super) fn bench_occurrence_keys(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// One step of [`bench_menu_caret`]: its name, the character to press on, and how the note is set
+/// up for it.
+type MenuStep<'a> = (&'static str, i32, Box<dyn Fn() + 'a>);
+
+/// What a secondary click does to the caret and the selection before its menu opens, and what the
+/// menu then acts on: the steps print `menu_ready <step> <x>,<y>` for an XTEST press there
+/// (`xtest.py :N "move X Y; down 3; up 3; sleep 0.6; key Escape"`), and the state a second
+/// later: the caret, the selection, how many carets, the spelling suggestions offered, and after
+/// `copy` what `Ctrl+C` put on the clipboard. The note's own text goes back at the end; the last
+/// step is a Ctrl+click on a wikilink, printing the tab it opened.
+pub(super) fn bench_menu_caret(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        println!("bench menu focus_window");
+        for _ in 0..100 {
+            if app.window.is_active() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(tab) = app.active() else {
+            return bench_quit(&app);
+        };
+        let own = tab.text();
+        tab.set_text("first line here\nsecond line with a wrod\nthird line\nsee [[2024-01-02]]\n");
+        tab.set_spellcheck(true);
+        let buffer = tab.buffer.clone();
+        let at = |offset: i32| buffer.iter_at_offset(offset);
+        // The middle of the character at `offset`, in the window's coordinates.
+        let aim = |offset: i32| {
+            let rect = tab.view.iter_location(&at(offset));
+            let (x, y) = tab.view.buffer_to_window_coords(
+                gtk::TextWindowType::Widget,
+                rect.x() + rect.width() / 2,
+                rect.y() + rect.height() / 2,
+            );
+            tab.view
+                .compute_point(&app.window, &graphene::Point::new(x as f32, y as f32))
+                .map(|p| format!("{:.0},{:.0}", p.x(), p.y()))
+                .unwrap_or_default()
+        };
+        let select = |from: i32, to: i32| buffer.select_range(&at(to), &at(from));
+        let column = || tab.view.downcast_ref::<multicaret::View>().cloned();
+        let steps: [MenuStep; 5] = [
+            // On the selection: it stays, and so does the caret.
+            ("inside", 2, Box::new(|| select(0, 5))),
+            // Off it, on a misspelt word: the caret goes there and the menu is that word's.
+            ("word", 37, Box::new(|| select(0, 5))),
+            // With nothing selected, on another line: Copy is that line's.
+            ("copy", 42, Box::new(|| buffer.place_cursor(&at(0)))),
+            // A column of carets, clicked off every selection: one caret, at the click.
+            (
+                "column",
+                47,
+                Box::new(|| {
+                    buffer.place_cursor(&at(2));
+                    if let Some(column) = column() {
+                        column.add_caret(true);
+                    }
+                }),
+            ),
+            // Ctrl+click on a wikilink, the primary button: Go to Definition.
+            ("follow", 60, Box::new(|| buffer.place_cursor(&at(0)))),
+        ];
+        for (step, offset, set) in steps {
+            set();
+            tab.view.grab_focus();
+            glib::timeout_future(Duration::from_millis(300)).await;
+            println!("bench menu_ready {step} {}", aim(offset));
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            let caret = buffer.iter_at_mark(&buffer.get_insert()).offset();
+            let selected = buffer
+                .selection_bounds()
+                .map(|(start, end)| (start.offset(), end.offset()));
+            let carets = column().map_or(1, |c| c.caret_positions().len());
+            let spelling = tab
+                .spell_menu()
+                .map(|menu| crate::fileops::labels(&menu))
+                .unwrap_or_default();
+            let clip = match step {
+                "copy" => tab.view.clipboard().read_text_future().await.ok().flatten(),
+                _ => None,
+            };
+            println!(
+                "bench menu {step} caret={caret} selected={selected:?} carets={carets} \
+                 spelling={spelling:?} clipboard={clip:?} front={:?}",
+                app.active().map(|t| t.rel())
+            );
+        }
+        tab.set_text(&own);
+        bench_quit(&app);
+    });
+}
+
 /// Whatever else answers to `Alt+J` and `Ctrl+Shift+L`, and to `Ctrl+Shift+W`, which Outline Pane
 /// took from `Ctrl+Shift+L`: the actions the application binds them to, and any shortcut on the
 /// view itself.

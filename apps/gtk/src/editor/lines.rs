@@ -451,6 +451,50 @@ fn arm_menu_items(view: &sourceview5::View) {
     });
 }
 
+/// A secondary click puts the caret where it lands before the menu opens, as VS Code does, so
+/// the menu is about the place clicked: Cut and Copy with nothing selected take that line, Paste
+/// goes there, and the spelling suggestions are that word's. One landing on a selection, any of a
+/// column's, leaves everything where it is, the menu then being about the selection; one landing
+/// off them all lets a column of carets go, down to the one at the click. In the capture phase
+/// and unclaimed, so GTK's own gesture still opens the menu, after this.
+pub(crate) fn caret_to_click(view: &sourceview5::View) {
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    click.connect_pressed(|click, presses, x, y| {
+        if let Some(view) = click.widget().and_downcast::<sourceview5::View>()
+            && presses == 1
+        {
+            place_at_click(&view, x, y);
+        }
+    });
+    view.add_controller(click);
+}
+
+/// The caret to the press at widget `x`, `y` of `view`, unless it lands on a selection
+/// ([`caret_to_click`]). Placed as a middle-click paste lands ([`pressed_at`]).
+pub(crate) fn place_at_click(view: &sourceview5::View, x: f64, y: f64) {
+    let (x, y) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+    let at = pressed_at(view, x, y);
+    let buffer = view.buffer();
+    let column = view.downcast_ref::<multicaret::View>();
+    let selections = match column {
+        Some(column) => column.selections(),
+        None => buffer.selection_bounds().into_iter().collect(),
+    };
+    if selections
+        .iter()
+        .any(|(start, end)| start != end && at.in_range(start, end))
+    {
+        return;
+    }
+    if let Some(column) = column {
+        column.clear_carets();
+    }
+    buffer.place_cursor(&at);
+}
+
 /// Middle-click paste, as plain text like every other way in. GTK's own reads the primary
 /// selection as a `GtkTextBuffer`, and when that is this buffer's selection it inserts it run by
 /// run with each run's tags: the highlighter re-derives its own, but a fold's tag came along and

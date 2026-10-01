@@ -51,8 +51,8 @@ use git::{
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
 use keys::{
-    bench_box_drag, bench_hold, bench_keys, bench_list, bench_occurrence_keys, bench_shell_keys,
-    bench_term,
+    bench_box_drag, bench_hold, bench_keys, bench_list, bench_menu_caret, bench_occurrence_keys,
+    bench_shell_keys, bench_term,
 };
 use outline::bench_outline;
 use panes::{
@@ -788,6 +788,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = arg.strip_prefix("box:") {
                 return bench_box_drag(&app, rel);
+            }
+            if let Some(rel) = arg.strip_prefix("menu:") {
+                return bench_menu_caret(&app, rel);
             }
             return match arg.as_str() {
                 "1" => bench_keys(&app),
