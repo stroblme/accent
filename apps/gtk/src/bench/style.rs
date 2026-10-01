@@ -366,10 +366,10 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
 /// first character, that tag's indent, and how far right of the line's first screen row its second
 /// one starts: the hang as GTK laid it out, `None` for a line that does not wrap. Each tab stays up
 /// for four seconds, for a screenshot; a note is first given a fence opened above everything, and
-/// closed again, with every line's tag printed each time. The last one, meant to be code, is then
-/// filled with 10k indented lines, three to a depth as code's blocks come, and the fill, a
-/// keystroke, a Return and a new indent width are timed, each with the tag it left on the line it
-/// touched.
+/// closed again, with every line's tag printed each time. The last one is then filled with 10k
+/// indented lines, three to a depth as code's blocks come — in a note, list and quote items behind
+/// a bullet, a number or a `>` in turn — and the fill, a keystroke, a Return, a restyle's measure
+/// and a new indent width are timed, each with the tag it left on the line it touched.
 pub(super) fn bench_wrap(app: &Rc<App>, rels: &str) {
     let app = app.clone();
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
@@ -425,8 +425,18 @@ fn bench_wrap_line(tab: &Rc<Tab>, line: i32) -> String {
         .then(|| tab.view.iter_location(&row).x() - tab.view.iter_location(&start).x());
     let mut head = start;
     head.forward_chars(12);
+    // On a note's list or quote line, how far right its text starts behind the marker on the first
+    // row, which is where the hang should put the rows after it.
+    let text = tab.buffer.text(&start, &line_end(&tab.buffer, line), true);
+    let (_, marker) = crate::typing::wrap_head(&text, 8, tab.flavour().is_note());
+    let text_x = (!marker.is_empty()).then(|| {
+        let indent = text.len() - text.trim_start_matches([' ', '\t']).len();
+        let mut at = start;
+        at.forward_chars((indent + marker.len()) as i32);
+        tab.view.iter_location(&at).x() - tab.view.iter_location(&start).x()
+    });
     format!(
-        "line={line} head={:?} tag={:?} indent={:?} hang={hang:?}",
+        "line={line} head={:?} tag={:?} indent={:?} hang={hang:?} text_x={text_x:?}",
         tab.buffer
             .text(&start, &head.min(line_end(&tab.buffer, line)), true),
         tag.as_ref().and_then(|tag| tag.name()),
@@ -449,12 +459,18 @@ fn bench_wrap_tag(tab: &Rc<Tab>, line: i32) -> Option<String> {
 
 fn bench_wrap_cost(tab: &Rc<Tab>) {
     let lines = 10_000;
+    let note = tab.flavour().is_note();
     let body: String = (0..lines)
-        .map(|i| {
-            format!(
+        .map(|i| match note {
+            true => format!(
+                "{}{} item {i} of a list\n",
+                "  ".repeat(i / 3 % 6),
+                ["-", "1.", ">"][i % 3]
+            ),
+            false => format!(
                 "{}let value_{i} = compute({i});\n",
                 "    ".repeat(1 + i / 3 % 6)
-            )
+            ),
         })
         .collect();
     let t0 = Instant::now();
@@ -468,6 +484,10 @@ fn bench_wrap_cost(tab: &Rc<Tab>) {
         "bench wrap_cost lines={lines} fill_ms={fill:.1} recheck_ms={recheck:.1} line1={:?}",
         bench_wrap_tag(tab, 1)
     );
+    // What every restyle asks of the wrap tags with the font unchanged.
+    let t0 = Instant::now();
+    crate::wrap::measure(&tab.view);
+    println!("bench wrap_measure us={}", t0.elapsed().as_micros());
     let line = 5000;
     tab.buffer.place_cursor(&line_end(&tab.buffer, line));
     let t0 = Instant::now();
