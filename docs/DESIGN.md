@@ -203,7 +203,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 - The same view, told what it is by an `editor::Flavour` of `Note`, `Code` or `Csv`: one tab type, not two, and a code tab gets none of the markdown tags.
 - Code takes a GtkSourceView language guessed from the path and the content type, so `LICENSE` and `Makefile` open as what they are; bracket matching, auto-indent, and a four-space tab that stays a real tab where a makefile needs one.
-- It wraps as prose does: nothing in a document scrolls sideways. A wrapped row starts one indent level deeper than its line (VS Code's `wrappingIndent: "indent"`), so it cannot pass for the next line; a note does the same, hanging a list item's rows under its text, except in a fenced block, whose lines wrap as code's do whatever they open with. `Alt+Z` unwraps one tab for as long as it is open, for a generated file whose columns are the point.
+- It wraps as prose does: nothing in a document scrolls sideways. A wrapped row starts one indent level deeper than its line (VS Code's `wrappingIndent: "indent"`), so it cannot pass for the next line; a note does the same, hanging a list item's rows under its text (its marker measured in the note's font as drawn, so a proportional face's `-` is not taken for a space), except in a fenced block, whose lines wrap as code's do whatever they open with. `Alt+Z` unwraps one tab for as long as it is open, for a generated file whose columns are the point.
 - A CSV is code whose columns are coloured by the hue rotation (Colour).
 
 ### Unreadable file
