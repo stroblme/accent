@@ -39,6 +39,8 @@ pub use banner::Alert;
 use compare::Comparing;
 pub use compare::{companion, overlay_view, rehang_companion, restyle_companion, style_companion};
 #[cfg(feature = "bench")]
+pub(crate) use drag::ENDED as DRAG_ENDED;
+#[cfg(feature = "bench")]
 pub(crate) use drag::content as drag_content;
 use follow::Follow;
 #[cfg(feature = "bench")]
