@@ -94,7 +94,7 @@ fn tags(side: Side, op: Op) -> Option<(&'static str, &'static str)> {
 /// scroller is named so the two columns can share one vertical adjustment.
 pub struct Pane {
     pub root: gtk::Widget,
-    pub header: gtk::Widget,
+    pub header: gtk::Box,
     pub view: sourceview5::View,
     pub buffer: sourceview5::Buffer,
     pub scroller: gtk::ScrolledWindow,
@@ -104,7 +104,8 @@ pub struct Pane {
     pub pool: Rc<Pool>,
 }
 
-/// A pane's title bar, with room for one control beside it.
+/// A pane's title bar, with room for one control beside it. The comparison puts its Show All
+/// Unchanged Lines in front of that control on one of the two.
 pub fn header(title: &str, trailing: Option<&gtk::Widget>) -> gtk::Box {
     let label = gtk::Label::builder()
         .label(title)
@@ -151,7 +152,7 @@ pub fn pane(
     root.append(&scroller);
     Pane {
         root: root.upcast(),
-        header: header.upcast(),
+        header,
         view,
         buffer,
         scroller,
@@ -333,6 +334,8 @@ pub struct Compare {
     /// Lines the user asked to see, by their number on the side that is not typed into, which
     /// survives the edits that move everything else. A run holding one stays open.
     opened: RefCell<HashSet<usize>>,
+    /// Show All Unchanged Lines, in the title row: while it is down nothing is hidden.
+    unfold: gtk::ToggleButton,
     overlays: RefCell<Vec<(Side, gtk::Widget, Anchor)>>,
     /// The grid the last relayout laid down, kept for [`Compare::misaligned`].
     grid: RefCell<Grid>,
@@ -400,6 +403,20 @@ impl Compare {
         columns.add_widget(&old.root);
         columns.add_widget(&new.root);
 
+        // Beside Stop Comparing on the editor's title row, or at the end of the right one's. A
+        // click leaves the keyboard in the text.
+        let unfold = gtk::ToggleButton::builder()
+            .icon_name("view-reveal-symbolic")
+            .tooltip_text("Show All Unchanged Lines")
+            .css_classes(["flat"])
+            .focus_on_click(false)
+            .build();
+        let host = match editable {
+            Some(Side::Old) => &old.header,
+            _ => &new.header,
+        };
+        host.insert_child_after(&unfold, host.first_child().as_ref());
+
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
         paned.set_start_child(Some(&old.root));
         paned.set_end_child(Some(&new.root));
@@ -419,6 +436,7 @@ impl Compare {
             starts: RefCell::new([Vec::new(), Vec::new()]),
             hidden: RefCell::new(Vec::new()),
             opened: RefCell::new(HashSet::new()),
+            unfold,
             overlays: RefCell::new(Vec::new()),
             grid: RefCell::new(Grid::default()),
             pending: RefCell::new(None),
@@ -495,6 +513,13 @@ impl Compare {
             let id = buffer.connect_changed(reclaim);
             connect(buffer.upcast(), id);
         }
+
+        let w = weak.clone();
+        this.unfold.connect_toggled(move |_| {
+            if let Some(c) = w.upgrade() {
+                c.toggle_all();
+            }
+        });
 
         for pane in &this.panes {
             *pane.pool.owner.borrow_mut() = this.weak.clone();
@@ -680,7 +705,14 @@ impl Compare {
             (side, buffer.iter_at_mark(&buffer.get_insert()).offset())
         });
         let mut hidden = Vec::new();
-        for gap in diff::gaps(&lines, &rows, CONTEXT) {
+        let gaps = diff::gaps(&lines, &rows, CONTEXT);
+        self.unfold.set_sensitive(!gaps.is_empty());
+        let all = self.unfold.is_active();
+        for gap in gaps {
+            // Show All Unchanged Lines is down.
+            if all {
+                continue;
+            }
             let number = |r: usize| {
                 keyed
                     .of(&rows[r])
@@ -812,6 +844,20 @@ impl Compare {
         let value = self.panes[0].scroller.vadjustment().value();
         self.keep.set(Some(Keep::Scroll(value)));
         self.opened.borrow_mut().insert(key);
+        self.refresh();
+    }
+
+    /// Every run opened, as Show All Unchanged Lines goes down, or every one hidden again as it
+    /// comes up, those opened one by one too, but for the one holding the caret. The line at the
+    /// top of the view stays there, as a re-read side's does ([`Compare::set_side`]).
+    fn toggle_all(&self) {
+        if !matches!(self.keep.get(), Some(Keep::FirstHunk)) {
+            self.keep
+                .set(self.top_line(self.editable.unwrap_or(Side::New)));
+        }
+        if !self.unfold.is_active() {
+            self.opened.borrow_mut().clear();
+        }
         self.refresh();
     }
 

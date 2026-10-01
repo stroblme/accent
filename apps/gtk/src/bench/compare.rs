@@ -979,26 +979,161 @@ pub(super) fn bench_compare_gap(app: &Rc<App>, rel: &str) {
             bench_gap(compare, &view, None).await
         );
         // The Git pane's refresh reading both blobs again, each three lines longer at the top.
-        let top = || {
-            let seen = view.visible_rect();
-            let (at, y) = view.line_at_y(seen.y());
-            let mut end = at;
-            end.forward_to_line_end();
-            let text: String = view
-                .buffer()
-                .text(&at, &end, true)
-                .chars()
-                .take(8)
-                .collect();
-            format!("{text:?}@{}", y - seen.y())
-        };
-        let before = top();
+        let before = top(&view);
         let longer = |text: &str| format!("new 1\nnew 2\nnew 3\n{text}");
         diff.set_texts(&longer(&disk), &longer(&edited));
         wait(800).await;
-        println!("bench compare_gap reread top={before}->{}", top());
+        println!("bench compare_gap reread top={before}->{}", top(&view));
         bench_quit(&app);
     });
+}
+
+/// The line at the top of `view`, its first eight characters, and how far above the top its row
+/// starts.
+fn top(view: &gtk::TextView) -> String {
+    let seen = view.visible_rect();
+    let (at, y) = view.line_at_y(seen.y());
+    let mut end = at;
+    end.forward_to_line_end();
+    let text: String = view
+        .buffer()
+        .text(&at, &end, true)
+        .chars()
+        .take(8)
+        .collect();
+    format!("{text:?}@{}", y - seen.y())
+}
+
+/// Show All Unchanged Lines pressed and let go, over a note of 400 lines changed at every
+/// fortieth compared with its disk copy, the middle run opened from its button first and that
+/// button's row put halfway down the view; then over a tab of two blobs. Prints the controls in
+/// the toggle's title row by tooltip (`row=["Show All Unchanged Lines", "Stop Comparing"]`), and
+/// for each press the hidden runs and the line at the top of the view before and after
+/// (`on hidden=10->0 top="line 181"@-250->"line 181"@-250`): every run opens, and letting go
+/// hides them all again, the one opened by hand too, the line at the top back where it was once
+/// the rows are laid (`away` counts the frames of fifty it was not). Then at the start of the file, where
+/// the first run opens downwards from the top of the view and collapses again under it
+/// (`start on … top="line 17 "@24->"line 1 w"@24`). Writes the note, so point it at a scratch
+/// vault.
+pub(super) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let text = |changed: bool| -> String {
+            (1..=400)
+                .map(|i| match changed && i % 40 == 20 {
+                    true => format!("line {i} changed\n"),
+                    false => format!("line {i} {}\n", "wrapping words ".repeat(i % 7 * 5)),
+                })
+                .collect()
+        };
+        let (disk, edited) = (text(false), text(true));
+        tab.set_text(&disk);
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_unfold write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.set_text(&edited);
+        app.compare_with_disk(&tab);
+        wait(1200).await;
+        let Some(compare) = tab.comparison() else {
+            println!("bench compare_unfold none");
+            return bench_quit(&app);
+        };
+        let view: &gtk::TextView = tab.view.upcast_ref();
+        let buttons = overlaid(view, "⋯");
+        if let Some((y, button)) = buttons.get(buttons.len() / 2).cloned() {
+            centre(&compare, view, y).await;
+            button.emit_clicked();
+            wait(800).await;
+        }
+        println!("bench compare_unfold editor {}", bench_row(&compare));
+        for on in [true, false] {
+            println!(
+                "bench compare_unfold editor {}",
+                bench_unfold(&compare, view, on).await
+            );
+        }
+        // The run over the file's first lines collapses again under the top of the view.
+        compare.vadjustment().set_value(0.0);
+        wait(500).await;
+        for on in [true, false] {
+            println!(
+                "bench compare_unfold start {}",
+                bench_unfold(&compare, view, on).await
+            );
+        }
+        tab.leave_compare();
+        let diff = app.open_diff(
+            "diff:unfold",
+            "unfold.md",
+            "unfold",
+            ("old", &disk),
+            ("new", &edited),
+        );
+        wait(1200).await;
+        let compare = diff.comparison();
+        let Some(view) = pane_view(compare.widget(), true) else {
+            println!("bench compare_unfold blobs none");
+            return bench_quit(&app);
+        };
+        println!("bench compare_unfold blobs {}", bench_row(compare));
+        for on in [true, false] {
+            println!(
+                "bench compare_unfold blobs {}",
+                bench_unfold(compare, &view, on).await
+            );
+        }
+        bench_quit(&app);
+    });
+}
+
+/// The comparison's Show All Unchanged Lines toggle.
+fn unfold_toggle(compare: &diff::Compare) -> Option<gtk::ToggleButton> {
+    find_widget(compare.widget(), &|w| w.is::<gtk::ToggleButton>())?
+        .downcast()
+        .ok()
+}
+
+/// The tooltips of the controls in the toggle's title row, in order.
+fn bench_row(compare: &diff::Compare) -> String {
+    let Some(row) = unfold_toggle(compare).and_then(|t| t.parent()) else {
+        return "row=none".to_string();
+    };
+    let mut tips = Vec::new();
+    let mut child = row.first_child();
+    while let Some(c) = child {
+        tips.extend(c.tooltip_text().map(|t| t.to_string()));
+        child = c.next_sibling();
+    }
+    format!("row={tips:?}")
+}
+
+/// Press (`on`) or let go of the toggle and say how the hidden runs and the line at the top of
+/// `view` moved, once fifty frames have gone by.
+async fn bench_unfold(compare: &diff::Compare, view: &gtk::TextView, on: bool) -> String {
+    let Some(toggle) = unfold_toggle(compare) else {
+        return "toggle=none".to_string();
+    };
+    let (hidden, before) = (compare.counts().2, top(view));
+    toggle.set_active(on);
+    let mut away = 0;
+    for _ in 0..50 {
+        glib::timeout_future(Duration::from_millis(16)).await;
+        away += usize::from(top(view) != before);
+    }
+    let what = if on { "on" } else { "off" };
+    format!(
+        "{what} hidden={hidden}->{} top={before}->{} sensitive={} away={away}",
+        compare.counts().2,
+        top(view),
+        toggle.is_sensitive()
+    )
 }
 
 /// Scroll the button of the hidden run `pick` on `view` (the middle one for `None`) halfway down
