@@ -35,7 +35,8 @@ use compare::{
     bench_compare, bench_compare_clicks, bench_compare_conflict, bench_compare_diag,
     bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_left,
     bench_compare_lines, bench_compare_pads, bench_compare_page, bench_compare_pick,
-    bench_compare_press, bench_compare_row, bench_compare_stale, bench_compare_unfold,
+    bench_compare_press, bench_compare_row, bench_compare_runaway, bench_compare_stale,
+    bench_compare_unfold,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -133,8 +134,9 @@ use tags::bench_tags;
 /// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
 /// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK; then
-/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`) and draws the view
-/// with its top row on a partly hidden line (`case=screen`).
+/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`), draws the view
+/// with its top row on a partly hidden line (`case=screen`), and draws it at the top over hidden
+/// first lines with the layout's height overflowed below zero (`case=overflow`).
 /// `=listing:<rel>` prints how a LaTeX file's listings are coloured (`style::bench_listing`).
 /// Every form of it runs only on a scratch vault under `/tmp` (`scratch_only`).
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
@@ -177,6 +179,9 @@ use tags::bench_tags;
 /// `=unfold:<rel>` presses Show All Unchanged Lines and lets it go, in the note's tab and in a tab
 /// of two blobs, printing the hidden runs and the line at the top of the view each time
 /// (`compare::bench_compare_unfold`).
+/// `=runaway:<rel>` lays a comparison again eight times before GTK lays out what it re-padded,
+/// printing the padding of a paragraph under a blank line after each
+/// (`compare::bench_compare_runaway`).
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
@@ -613,6 +618,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("unfold:") {
                 return bench_compare_unfold(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("runaway:") {
+                return bench_compare_runaway(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),

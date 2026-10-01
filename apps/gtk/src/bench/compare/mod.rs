@@ -12,7 +12,7 @@ mod git;
 pub(super) use disk::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_folds,
     bench_compare_gap, bench_compare_gutter, bench_compare_left, bench_compare_page,
-    bench_compare_press, bench_compare_unfold,
+    bench_compare_press, bench_compare_runaway, bench_compare_unfold,
 };
 pub(super) use git::{
     bench_compare_clicks, bench_compare_lines, bench_compare_pads, bench_compare_pick,

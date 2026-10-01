@@ -321,6 +321,38 @@ pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
             "bench seam case=screen top_in_line={}",
             tab.view.visible_rect().y() - top
         );
+        // The layout's height wrapped below zero, as a comparison's runaway padding took it, with
+        // the first lines hidden as a comparison's collapsed run hides them: GTK clamps every row
+        // it is asked about into that height, which finds hidden line 0 whatever the row, and the
+        // ask at the screen's bottom row walked on from there.
+        let body: String = (0..60).map(|i| format!("body line {i}\n")).collect();
+        tab.set_text(&format!("# One\n{body}"));
+        if let Some(tag) = tab.buffer.tag_table().lookup(crate::fold::TAG) {
+            let to = tab.buffer.iter_at_line(5).expect("bench line");
+            tab.buffer.apply_tag(&tag, &tab.buffer.start_iter(), &to);
+        }
+        let huge = gtk::TextTag::builder()
+            .pixels_above_lines(i32::MAX / 2)
+            .pixels_below_lines(i32::MAX / 2)
+            .build();
+        tab.buffer.tag_table().add(&huge);
+        let line = tab.buffer.iter_at_line(30).expect("bench line");
+        let mut end = line;
+        end.forward_char();
+        tab.buffer.apply_tag(&huge, &line, &end);
+        if let Some(adjustment) = tab.view.vadjustment() {
+            adjustment.set_value(0.0);
+        }
+        glib::timeout_future(Duration::from_millis(200)).await;
+        if let Some(parent) = tab.view.parent() {
+            parent.snapshot_child(&tab.view, &gtk::Snapshot::new());
+        }
+        let (y, height) = tab.view.line_yrange(&tab.buffer.end_iter());
+        println!(
+            "bench seam case=overflow layout_height={} visible_y={}",
+            y + height,
+            tab.view.visible_rect().y()
+        );
         bench_quit(&app);
     });
 }

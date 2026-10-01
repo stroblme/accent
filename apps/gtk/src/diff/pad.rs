@@ -171,7 +171,13 @@ pub(super) fn carried(view: &sourceview5::View, at: &gtk::TextIter) -> (i32, i32
 /// character left when the first is deleted, where tags on the first character alone were lost
 /// to either edit and the line was laid out bare for a frame. The paragraph's own newline is left
 /// out because a tag ending at the next line's start is taken by text typed there. The first
-/// paragraph has no newline before it: [`reclaim_start`] makes up for that.
+/// paragraph has no newline before it, and one under a blank line leaves that line's newline to
+/// it: [`reclaim`] makes up for both.
+///
+/// A blank line is laid out with the spacing its one character carries, so a paragraph's tags on
+/// it padded the blank line too, and a relayout run before GTK had laid it out again took both of
+/// the paragraph's pads off the blank line's height and gave them to the paragraph as padding
+/// above: twice the padding on every such pass, until a line's height overflowed GTK's `int`.
 pub(super) fn pad(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -181,10 +187,11 @@ pub(super) fn pad(
     below: i32,
 ) -> bool {
     let first = buffer.iter_at_offset(from);
-    let (start, end) = (
-        buffer.iter_at_offset((from - 1).max(0)),
-        buffer.iter_at_offset((to - 1).max(from + 1)),
-    );
+    let mut start = first;
+    if start.backward_char() && start.starts_line() {
+        start = first;
+    }
+    let end = buffer.iter_at_offset((to - 1).max(from + 1));
     let (had_above, had_below) = carried(view, &first);
     let mut changed = false;
     for (px, had, prefix, base) in [
@@ -223,8 +230,8 @@ pub(super) fn reclaim(buffer: &sourceview5::Buffer) {
 ///
 /// [`pad`] starts a paragraph's tags at the newline before it, so text typed at its start lands
 /// inside them. Two paragraphs cannot both own that newline, though: the first line of all has
-/// none, and a padded blank line's own padding sits on the newline the paragraph under it would
-/// start from, which [`pad`] takes back for the blank line. There the tags begin at the
+/// none, and the newline before a paragraph under a blank line is the blank line's only
+/// character, which [`pad`] leaves to the blank line. There the tags begin at the
 /// paragraph's own first character and a character typed ahead of them goes in outside: GTK lays
 /// the line out bare for a frame, and the relayout, finding no padding on its first character,
 /// measures it at the height it had last been laid out at, padding and all. Stretched back over
