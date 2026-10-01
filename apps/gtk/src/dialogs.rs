@@ -31,6 +31,42 @@ pub(crate) fn choose(
     dialog.present(parent);
 }
 
+/// Close `dialog` on a primary press outside it, as Escape closes it: what a palette and
+/// Preferences do, never an alert, whose question waits for its answer.
+///
+/// libadwaita closes a dialog so only as a bottom sheet: a floating one's dimming is a
+/// `GtkWindowHandle`, which drags or maximises the window instead (adw-floating-sheet.c). The
+/// dimming is part of the dialog, which spans the window, and while a dialog is up no press
+/// reaches the window's own controllers, so the gesture is the dialog's, in the capture phase
+/// ahead of the dimming. A press is outside where the widget under it is not the dialog's child
+/// or inside it; a press in a popover comes from a surface of its own and never is. The press is
+/// claimed, so nothing under the dimming acts on it.
+pub(crate) fn close_on_outside_press(dialog: &adw::Dialog) {
+    let gesture = gtk::GestureClick::new();
+    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+    gesture.connect_pressed(|gesture, _, x, y| {
+        let Some(dialog) = gesture.widget().and_downcast::<adw::Dialog>() else {
+            return;
+        };
+        let on_dialog = gesture
+            .current_event()
+            .and_then(|event| event.surface())
+            .is_some_and(|surface| Some(surface) == dialog.native().and_then(|n| n.surface()));
+        let outside = on_dialog
+            && dialog
+                .pick(x, y, gtk::PickFlags::DEFAULT)
+                .zip(dialog.child())
+                .is_some_and(|(hit, child)| hit != child && !hit.is_ancestor(&child));
+        if !outside {
+            gesture.set_state(gtk::EventSequenceState::Denied);
+            return;
+        }
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        dialog.close();
+    });
+    dialog.add_controller(gesture);
+}
+
 /// Put the keyboard in `entry`, and then let `place` set its caret or its selection. Called after
 /// `choose` has presented the dialog, so the entry is in a window that can focus it.
 ///

@@ -9,6 +9,7 @@ mod chrome;
 mod compare;
 mod diagnostics;
 mod diagram;
+mod dismiss;
 mod export;
 mod files;
 mod find;
@@ -79,6 +80,8 @@ use tags::bench_tags;
 /// first rows its query shows. Both run headless under
 /// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
+/// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` clicks outside each dialog through XTEST
+/// instead (`dismiss::bench_dismiss`).
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
@@ -852,6 +855,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             bench_quit(&app);
             return;
         };
+        if let Some(rels) = query.strip_prefix("dismiss:") {
+            return dismiss::bench_dismiss(&app, rels);
+        }
         let t0 = Instant::now();
         let _ = WidgetExt::activate_action(&app.window, "win.palette-files", None);
         println!("bench switcher_open_ms {:.1}", ms_since(t0));
