@@ -1005,7 +1005,8 @@ thread_local! {
 // A GtkSourceView assistant is never narrower than 1 px: GtkSourceView empties a hover that is up
 // before asking the providers again, and the view's allocations present it meanwhile at what it
 // measures, 0 wide when empty, which `gdk_popup_present` refuses with a critical.
-/// Registers the icons compiled into the binary and points the theme at them.
+/// Registers the icons compiled into the binary and points the theme at them, and GtkSourceView
+/// at the language specs beside them.
 ///
 /// A GResource rather than hicolor: the completion list and the file lists need their icons
 /// long before anyone runs `make install`, and the theme keeps answering for every Adwaita name
@@ -1017,6 +1018,10 @@ fn install_icons() {
             tracing::warn!("icons: {e}");
             return;
         }
+        // Ahead of GtkSourceView's own, so our `latex.lang` is the one read (the first file of an
+        // id wins), and before any tab asks for a language: the path cannot change once read.
+        sourceview5::LanguageManager::default()
+            .prepend_search_path("resource:///io/github/stroblme/Accent/language-specs/");
         let Some(display) = gdk::Display::default() else {
             return;
         };

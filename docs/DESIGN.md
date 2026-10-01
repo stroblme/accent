@@ -203,6 +203,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 - The same view, told what it is by an `editor::Flavour` of `Note`, `Code` or `Csv`: one tab type, not two, and a code tab gets none of the markdown tags.
 - Code takes a GtkSourceView language guessed from the path and the content type, so `LICENSE` and `Makefile` open as what they are; bracket matching, auto-indent, and a four-space tab that stays a real tab where a makefile needs one.
+- A LaTeX listing is coloured as the language it names, `\begin{lstlisting}[language=Python]` and `\begin{minted}{python}` alike, by accent's own `latex.lang` (`apps/gtk/data/language-specs/`, GtkSourceView 5.20's with its listing context changed), which the language manager reads ahead of GtkSourceView's: the stock one greys every listing as verbatim, so it reads as a comment. A listing in a language its table does not name, or in none, is plain text. A default set by `\lstset{language=…}` is not followed, a language spec having no way to carry it from the preamble to the listing.
 - It wraps as prose does: nothing in a document scrolls sideways. A wrapped row starts one indent level deeper than its line (VS Code's `wrappingIndent: "indent"`), so it cannot pass for the next line; a note does the same, hanging a list item's rows under its text (its marker measured in the note's font as drawn, so a proportional face's `-` is not taken for a space), except in a fenced block, whose lines wrap as code's do whatever they open with. `Alt+Z` unwraps one tab for as long as it is open, for a generated file whose columns are the point.
 - A CSV is code whose columns are coloured by the hue rotation (Colour).
 
@@ -291,6 +292,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Palette
 
 - One `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code's convention).
+- A primary click outside it closes it as Escape does, and does nothing else: no tab switches and no caret moves under it. libadwaita closes only a bottom sheet so, a floating dialog's dimming being a window handle, so the dialog's own capture-phase gesture does it (`dialogs::close_on_outside_press`), Preferences' and About's too (Dismiss).
 - Go to File also lists each note a link names that is not written yet, after the files at the same score and marked Not created; picking one follows it as the link would, offering New File with its path typed in.
 - It finds a note by its front matter's `aliases:` (or `alias:`), behind a file at the same score: the row reads the alias over the note's path, and picking it opens the note.
 - A typed query also ranks the files this window opened that the index does not list (a gitignored build output, a file in an unwalked folder); one whose file has gone leaves the history.
@@ -355,6 +357,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Preferences
 
 - `AdwPreferencesDialog` of `AdwPreferencesGroup` / `AdwSwitchRow`, an `AdwComboRow` each for the theme and the focus mode (its subtitle saying what the level fades), and a destructive `AdwButtonRow` for Restore Defaults.
+- A click outside it closes it, as one outside the palette does (Palette).
 - This Vault holds three folder rows: Templates, New Files and Attachments. The Attachments row keeps `./` and `/` as typed, those being the note's folder and the vault root.
 - The document font's Reset is an icon button (`document-revert-symbolic`): the font button already shows the whole font name, and a text button would leave it nowhere to go.
 - There is one config per process, so a change made anywhere — the dialog, the palette, the drawing ring, a rebound shortcut, Leave Out of Search — takes effect in every window at once, redoing only what it moved, and is written a second later, so a run of picks is one write.
@@ -674,6 +677,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - While a `Ctrl+Tab` chord is held it goes back to the tab the chord started from and does nothing else, ahead of everything: the chord is what is up, its card on screen or not.
 - In presentation mode it ends presentation and does nothing else, ahead of the rest, so a presented shell or preview cannot keep it.
 - Otherwise it brings the hidden chrome back, takes no key from anyone, and the nearest thing over the document takes it: a signature popover; failing that, the focused pane's find or go-to-line bar, from the bar or the document (only that pane's, so a query in the other half of a split survives); failing that, the comparison the pane's tab hosts stops, as Stop Comparing does. A diff that is a tab of its own is closed like any tab.
+- A primary click outside the palette, Preferences or About closes it, as Escape does, and reaches nothing under it, a bottom sheet in a window under 450 × 360 px included. An `AdwAlertDialog` stays, its question waiting for an answer, and so does a dialog under one (Preferences under Restore Defaults' question): libadwaita keeps an alert floating at every window size, and a floating dialog's dimming closes nothing.
 - It has no `GAction` and no palette entry: it names no one thing.
 
 ### Panes

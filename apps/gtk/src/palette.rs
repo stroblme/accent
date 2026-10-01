@@ -883,45 +883,9 @@ pub fn present(
             });
         }
     });
-    // libadwaita does not close a floating dialog when the click lands outside it: its dimming
-    // widget is targetable but carries no gesture, so `sheet.close`, Escape and an explicit
-    // `close()` are the only ways out (adw-floating-sheet.c). One capture-phase gesture on the
-    // window adds the behaviour every other palette has. Capture, because the widget under the
-    // pointer would otherwise consume the press on its way back up.
-    let outside = parent.as_ref().root().map(|root| {
-        let gesture = gtk::GestureClick::new();
-        gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
-        gesture.connect_pressed({
-            let (root, dialog) = (root.clone(), dialog.downgrade());
-            move |_, _, x, y| {
-                let Some(dialog) = dialog.upgrade() else {
-                    return;
-                };
-                let inside = root.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|hit| {
-                    let dialog = dialog.upcast_ref::<gtk::Widget>();
-                    &hit == dialog
-                        || hit.is_ancestor(dialog)
-                        // The rebind prompt is a dialog of its own, stacked on this one: a click
-                        // in it is not a click outside the palette.
-                        || hit.ancestor(adw::Dialog::static_type()).is_some()
-                });
-                if !inside {
-                    dialog.close();
-                }
-            }
-        });
-        root.add_controller(gesture.clone());
-        (root, gesture)
-    });
-
     dialog.connect_closed({
         let debounce = debounce.clone();
-        move |_| {
-            debounce.cancel();
-            if let Some((root, gesture)) = &outside {
-                root.remove_controller(gesture);
-            }
-        }
+        move |_| debounce.cancel()
     });
 
     let on_pick = Rc::new(on_pick);
@@ -998,6 +962,7 @@ pub fn present(
     entry.add_controller(keys);
 
     dialog.present(Some(parent));
+    crate::dialogs::close_on_outside_press(&dialog);
     entry.grab_focus();
 }
 

@@ -44,5 +44,8 @@
     <!-- The same tabler folder and file the completion kinds draw, under the file lists' names. -->
     <file alias="icons/scalable/actions/filetype-folder-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
     <file alias="icons/scalable/actions/filetype-file-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>
+    <!-- GtkSourceView's LaTeX with its listings in the language they name, read ahead of the one
+         GtkSourceView ships: `install_icons` puts this folder first on its search path. -->
+    <file>language-specs/latex.lang</file>
   </gresource>
 </gresources>

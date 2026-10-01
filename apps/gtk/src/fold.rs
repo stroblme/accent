@@ -138,13 +138,18 @@ pub fn hiding(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> Vec<gtk::TextTa
 /// left partly hidden, and in the frames after lines are hidden — a fold shut, a comparison's run
 /// collapsed — which keep the height they were drawn at until GTK measures them again.
 /// `line_at_y` finds the same line without that walk.
+///
+/// GTK first clamps `y` into the layout's height, so `y` can be past the line it finds: past the
+/// end of the text, or anywhere when that height has gone wrong (a comparison's padding once
+/// overflowed it to below zero, which finds the first line for every `y`). The walk aborts there
+/// all the same, but on the buffer's last line, where it runs off the end of the text instead.
 pub fn aborts_at(view: &impl IsA<gtk::TextView>, y: i32) -> bool {
     let (start, top) = view.line_at_y(y);
     let (_, height) = view.line_yrange(&start);
     let mut next = start;
-    next.forward_line();
+    let last = !next.forward_line();
     top < y
-        && y < top + height
+        && (y < top + height || !last)
         && hiders(&view.buffer()).any(|tag| {
             let mut toggle = start;
             start.has_tag(&tag) || (toggle.forward_to_tag_toggle(Some(&tag)) && toggle < next)
