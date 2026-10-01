@@ -269,8 +269,8 @@ pub fn apply_lines(old: &str, new: &str, side: Side, picked: RangeInclusive<usiz
 }
 
 /// `new` with the changes it makes on `side`'s lines `picked` undone, and no others: Unstage
-/// Selected Lines, `old` being HEAD and `new` the index. The selection is read as
-/// [`apply_lines`] reads it.
+/// Selected Lines, `old` being HEAD and `new` the index, and Revert Selected Lines, `old` being
+/// the index and `new` the working tree. The selection is read as [`apply_lines`] reads it.
 pub fn revert_lines(old: &str, new: &str, side: Side, picked: RangeInclusive<usize>) -> String {
     mix(old, new, side, &picked, false)
 }

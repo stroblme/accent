@@ -1428,13 +1428,15 @@ pub(super) fn bench_compare_folds(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Stage Selected Lines and Unstage Selected Lines, end to end. It makes a repository in the
-/// vault root and commits the note as twelve lines, so point it at a throwaway vault. The tab then
-/// rewrites line 3 and adds a line under line 9, and the working tree is compared with the index;
-/// line 3 is selected in the editor and staged, then selected in the Index pane of the staged
-/// comparison and unstaged. It prints the entry each pane's menu offers and what the index holds
-/// after each step, then leaves line 3 selected in the working-tree comparison for eight seconds,
-/// for `build-aux/xtest.py` to open the menu on with a secondary click (`hold` says when).
+/// Stage, Unstage and Revert Selected Lines, end to end. It makes a repository in the vault root
+/// and commits the note as twelve lines, so point it at a throwaway vault. The tab then rewrites
+/// line 3 and adds a line under line 9, and the working tree is compared with the index; line 3
+/// is selected in the editor and staged, then selected in the Index pane of the staged comparison
+/// and unstaged. It prints the entries each pane's menu offers and what the index holds after
+/// each step. Then the added line is selected in the editor and reverted, which takes it out of
+/// the buffer, the index untouched, and an undo puts it back (`reverted gone=true … undone=true`).
+/// Last it leaves line 3 selected in the working-tree comparison for eight seconds, for
+/// `build-aux/xtest.py` to open the menu on with a secondary click (`hold` says when).
 pub(super) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1492,11 +1494,11 @@ pub(super) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
                 pane_view(compare.widget(), false),
                 Some(tab.view.clone().upcast())
             ]
-            .map(|v| v.and_then(label)),
+            .map(|v| v.map(labels)),
             bench_compare_line(&compare)
         );
         select_line(&tab.buffer, 2);
-        let _ = tab.view.activate_action("diff.selection", None);
+        let _ = tab.view.activate_action("diff.stage", None);
         wait(1500).await;
         println!(
             "bench compare_lines staged index={:?} {}",
@@ -1513,12 +1515,12 @@ pub(super) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
         let views = [false, true].map(|end| pane_view(staged.comparison().widget(), end));
         println!(
             "bench compare_lines staged_tab menus={:?} {}",
-            views.clone().map(|v| v.and_then(label)),
+            views.clone().map(|v| v.map(labels)),
             bench_compare_line(staged.comparison())
         );
         if let [_, Some(view)] = views {
             select_line(&view.buffer(), 2);
-            let _ = view.activate_action("diff.selection", None);
+            let _ = view.activate_action("diff.unstage", None);
         }
         wait(1500).await;
         println!(
@@ -1528,6 +1530,21 @@ pub(super) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
         );
 
         app.reveal_page(&tab.page);
+        wait(800).await;
+        select_line(&tab.buffer, 9);
+        let _ = tab.view.activate_action("diff.revert", None);
+        wait(300).await;
+        let has_9b = |tab: &Tab| tab.text().contains("line 9b");
+        println!(
+            "bench compare_lines reverted gone={} index={:?} {}",
+            !has_9b(&tab),
+            git(&["show", &index]),
+            bench_compare_line(&compare)
+        );
+        tab.buffer.undo();
+        wait(300).await;
+        println!("bench compare_lines undone={}", has_9b(&tab));
+
         select_line(&tab.buffer, 2);
         println!("bench compare_lines hold");
         wait(8000).await;
@@ -1547,12 +1564,21 @@ pub(super) fn pane_view(paned: &gtk::Widget, end: bool) -> Option<gtk::TextView>
         .ok()
 }
 
-/// The first entry of the context menu a view adds to GTK's own, which is in a section.
-fn label(view: gtk::TextView) -> Option<String> {
-    view.extra_menu()?
-        .item_link(0, "section")?
-        .item_attribute_value(0, "label", None)?
-        .get::<String>()
+/// The entries of the section a view adds to GTK's own context menu, first.
+fn labels(view: gtk::TextView) -> Vec<String> {
+    let Some(section) = view
+        .extra_menu()
+        .and_then(|menu| menu.item_link(0, "section"))
+    else {
+        return Vec::new();
+    };
+    (0..section.n_items())
+        .filter_map(|i| {
+            section
+                .item_attribute_value(i, "label", None)?
+                .get::<String>()
+        })
+        .collect()
 }
 
 /// Select line `n` (from 0) whole, its newline included.
