@@ -40,6 +40,8 @@ chrono.workspace = true
 # `setsid` and `kill` for git's process group: a git stopped part way takes its hooks and its ssh
 # with it (`git::bounded`).
 libc = "0.2"
+# Already compiled in for `accent-drawio`; it inflates a `.synctex.gz` (`synctex`).
+miniz_oxide = "0.8"
 pdfium-render = { version = "0.9", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
 
 [dev-dependencies]

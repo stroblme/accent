@@ -124,6 +124,11 @@ pub struct PdfTab {
     pub(super) notes: RefCell<Vec<PdfLink>>,
     /// A page and selection to show once the glyphs for it arrive: Follow Link into a PDF.
     pub(super) pending_show: Cell<Option<(usize, Option<[usize; 4]>)>>,
+    /// The page and point the page's menu was opened on or Ctrl was clicked at, for Go to Source,
+    /// until the menu has gone. See [`PdfTab::source_point`].
+    pub(super) pointed: Cell<Option<(usize, f32, f32)>>,
+    /// The line of text Show in PDF asked for while the document was still opening.
+    pub(super) spot: Cell<Option<(usize, pdf::Rect)>>,
     /// A save is already scheduled, so a burst of strokes costs one write.
     pub(super) save_pending: Cell<bool>,
     /// A write of this document is on its way somewhere else — the ssh upload of a remote
@@ -262,6 +267,8 @@ pub fn open(
         ranges: RefCell::new(Vec::new()),
         notes: RefCell::new(Vec::new()),
         pending_show: Cell::new(None),
+        pointed: Cell::new(None),
+        spot: Cell::new(None),
         save_pending: Cell::new(false),
         uploading: Cell::new(false),
         upload_again: Cell::new(false),
@@ -1168,7 +1175,7 @@ impl PdfTab {
         view.connect_clicked(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |view, x, y| tab.clicked_highlight(view, x, y)
+            move |view, x, y, state| tab.clicked_highlight(view, x, y, state)
         ));
         view.connect_select(glib::clone!(
             #[weak(rename_to = tab)]
@@ -1266,6 +1273,9 @@ impl PdfTab {
 
     /// The page's own menu, on a secondary click over it.
     ///
+    /// Go to Source first, about the point the menu was opened on, where the window leaves it
+    /// enabled — a LaTeX build in a local vault (`App::sync_synctex`) — and hidden elsewhere.
+    ///
     /// Copy and Copy Link to Selection when there is a selection, then Add Page Before, Add Page
     /// After, Delete Page and Export Highlights, which are about the document rather than about
     /// what is selected and so are always offered — a read-only or remote document says so in a
@@ -1291,10 +1301,19 @@ impl PdfTab {
     }
 
     /// Put the menu under the pointer, at a point in the view's coordinates.
-    pub(crate) fn selection_menu(&self, x: f64, y: f64) -> gtk::PopoverMenu {
+    pub(crate) fn selection_menu(self: &Rc<Self>, x: f64, y: f64) -> gtk::PopoverMenu {
         let menu = gio::Menu::new();
         // Window actions, in sections, the way the terminal's menu is built: that is what puts
         // them in the palette and lets them be rebound, which a tab-local group could not.
+        self.pointed.set(self.view.page_point(x, y));
+        let source = gio::MenuItem::new(
+            Some(crate::actions::label_of("win.pdf-go-to-source")),
+            Some("win.pdf-go-to-source"),
+        );
+        source.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
+        let open = gio::Menu::new();
+        open.append_item(&source);
+        menu.append_section(None, &open);
         if !self.selected.borrow().is_empty() {
             let clipboard = gio::Menu::new();
             for action in ["win.pdf-copy", "win.pdf-copy-link"] {
@@ -1316,7 +1335,16 @@ impl PdfTab {
         let at = gtk::graphene::Point::new(x as f32, y as f32);
         let at = self.view.compute_point(&self.host, &at).unwrap_or(at);
         let anchor = gtk::gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
-        crate::widgets::popup_menu(&self.host, &menu, Some(anchor))
+        let popover = crate::widgets::popup_menu(&self.host, &menu, Some(anchor));
+        // From an idle: an item's action runs after `closed`, and Go to Source reads the point.
+        popover.connect_closed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_| {
+                glib::idle_add_local_once(move || tab.pointed.set(None));
+            }
+        ));
+        popover
     }
 
     /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own;

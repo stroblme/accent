@@ -216,6 +216,10 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-redo", "Redo PDF Edit", &[]),
     ("win.pdf-copy-link", "Copy Link to Selection", &[]),
     ("win.pdf-export-highlights", "Export Highlights to PDF", &[]),
+    // SyncTeX, both ways between a LaTeX build's PDF and its sources (`synctex.rs`); Ctrl+click
+    // on a page is Go to Source too, as in every LaTeX viewer.
+    ("win.pdf-go-to-source", "Go to Source", &[]),
+    ("win.show-in-pdf", "Show in PDF", &[]),
     ("win.pdf-draw", "Drawing", &["<Control><Shift>i"]),
     ("win.pdf-pen", "Pen", &[]),
     ("win.pdf-highlighter", "Highlighter", &[]),
@@ -461,6 +465,8 @@ impl App {
             "pdf-next-page" => self.with_pdf(|pdf| pdf.next_page()),
             "pdf-previous-page" => self.with_pdf(|pdf| pdf.previous_page()),
             "pdf-export-highlights" => self.export_highlights(),
+            "pdf-go-to-source" => self.go_to_source(),
+            "show-in-pdf" => self.show_in_pdf(),
             // A diagram's ring is its own, not the window's drawing state.
             "pdf-draw" => {
                 let out = match self.active_diagram() {

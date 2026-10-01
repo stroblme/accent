@@ -151,9 +151,22 @@ impl PdfTab {
     /// A click that was not a drag: open the note whose link paints a highlight here.
     ///
     /// After the link handler, which answers on the press — a link inside a highlight is still a
-    /// link, and following it is what a click on one has always meant.
-    pub(super) fn clicked_highlight(self: &Rc<Self>, view: &PdfView, x: f64, y: f64) {
+    /// link, and following it is what a click on one has always meant. With Ctrl held it is Go
+    /// to Source instead, every LaTeX viewer's SyncTeX click, which does nothing where the window
+    /// has disabled it, on a PDF with no SyncTeX file.
+    pub(super) fn clicked_highlight(
+        self: &Rc<Self>,
+        view: &PdfView,
+        x: f64,
+        y: f64,
+        state: gtk::gdk::ModifierType,
+    ) {
         if self.link_at(view, x, y).is_some() {
+            return;
+        }
+        if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            self.pointed.set(view.page_point(x, y));
+            let _ = view.activate_action("win.pdf-go-to-source", None);
             return;
         }
         let Some(at) = view.highlight_at(x, y) else {
