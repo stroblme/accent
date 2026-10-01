@@ -154,7 +154,11 @@ impl Sidebar {
         on_reference: impl Fn(&str) + 'static,
     ) -> Sidebar {
         let on_open: OnOpen = Rc::new(on_open);
-        let stack = adw::ViewStack::builder().vexpand(true).build();
+        let stack = adw::ViewStack::builder()
+            .vexpand(true)
+            .enable_transitions(true)
+            .transition_duration(crate::widgets::FADE_MS)
+            .build();
 
         // Every pane but the outline is a view of an index, so without one there is nothing for
         // them to show and they are not built at all.

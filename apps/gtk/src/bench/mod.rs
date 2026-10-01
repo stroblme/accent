@@ -24,6 +24,7 @@ mod replace;
 mod scroll;
 mod search;
 mod style;
+mod synctex;
 mod tags;
 
 use attach::bench_attach;
@@ -32,7 +33,7 @@ use compare::{
     bench_compare, bench_compare_clicks, bench_compare_conflict, bench_compare_diag,
     bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_left,
     bench_compare_lines, bench_compare_pads, bench_compare_page, bench_compare_pick,
-    bench_compare_press, bench_compare_row, bench_compare_stale,
+    bench_compare_press, bench_compare_row, bench_compare_stale, bench_compare_unfold,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -164,6 +165,9 @@ use tags::bench_tags;
 /// companion shares with the editor, across a zoom and a new Indent Width
 /// (`compare::bench_compare_page`). `=press:<rel>` prints where to press the overlaid buttons with
 /// XTEST and where the carets are after each press (`compare::bench_compare_press`).
+/// `=unfold:<rel>` presses Show All Unchanged Lines and lets it go, in the note's tab and in a tab
+/// of two blobs, printing the hidden runs and the line at the top of the view each time
+/// (`compare::bench_compare_unfold`).
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
@@ -236,7 +240,11 @@ use tags::bench_tags;
 /// `percent` across the break between the first two pages and prints, each second for 20 s, the
 /// tiles wanted, those on screen not yet sharp, and those that landed and landed again; then how
 /// many wheel notches and Page Downs at that zoom arrived on a tile not yet sharp
-/// (`pdf::bench_pdf_deep`); point it at a text document of a few pages.
+/// (`pdf::bench_pdf_deep`); point it at a text document of a few pages. `=synctex:<rel_path>`
+/// goes to the source from points of a LaTeX build's first two pages through Go to Source, as
+/// the page's menu does, and back with Show in PDF from the line it landed on, printing each
+/// line and line of text, or the toast (`synctex::bench_synctex`); point it at a `-synctex=1`
+/// build of an article in a scratch vault.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -585,6 +593,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = rel.strip_prefix("press:") {
                 return bench_compare_press(&app, rel);
             }
+            if let Some(rel) = rel.strip_prefix("unfold:") {
+                return bench_compare_unfold(&app, rel);
+            }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
                 None => bench_compare(&app, &rel),
@@ -617,6 +628,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("renaming:") {
                 return bench_pdf_renaming(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("synctex:") {
+                return synctex::bench_synctex(&app, rel);
             }
             return match rel.strip_prefix("stale:") {
                 Some(rel) => bench_pdf_stale(&app, rel),

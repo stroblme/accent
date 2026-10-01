@@ -60,6 +60,7 @@ mod sidebar;
 mod signature;
 mod start;
 mod statusbar;
+mod synctex;
 mod terminal;
 mod theme;
 mod tree;
@@ -625,8 +626,10 @@ impl App {
     /// Keep the window subtitle, the References pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.retarget_find(&self.pane());
-        // The tools belong to the window, so they follow the tab in front.
+        // The tools belong to the window, so they follow the tab in front, and so do SyncTeX's
+        // two commands.
         self.sync_drawing();
+        self.sync_synctex(self.active_doc());
         // The tree's selection follows the tab in front, so the sidebar says which file is open
         // rather than which row the pointer last crossed. A diff, a terminal and a file from
         // outside the vault have no row to point at, and clear it.

@@ -2,6 +2,7 @@
 //! the tags, plus the repository discovery that reads the same directory listing.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::channel;
@@ -30,31 +31,7 @@ impl Local {
     /// `id == 0`, which is what tells them apart. It happens here rather than in the tree so
     /// that a vault on another machine gets it too: this runs on the host holding the files.
     pub fn list_dir(&self, rel: &str) -> Result<Vec<FileRow>> {
-        let mut rows = self.index().list_files(rel)?;
-        let held: HashSet<&str> = rows.iter().map(|r| r.rel_path.as_str()).collect();
-        // Non-fatal: a directory that vanished mid-listing must not blank the rows the index did
-        // answer for.
-        let extra = walk::unindexed_children(&self.root, rel, &held).unwrap_or_else(|e| {
-            tracing::debug!(dir = rel, "listing the unindexed children: {e}");
-            Vec::new()
-        });
-        if extra.is_empty() {
-            return Ok(rows);
-        }
-        rows.extend(extra.into_iter().map(|(rel_path, kind, why)| FileRow {
-            id: 0,
-            rel_path,
-            kind,
-            title: None,
-            size: 0,
-            mtime_ns: 0,
-            dependency: why == walk::Unindexed::Dependency,
-        }));
-        // `Index::list_files` orders directories first and then by path, case-insensitively; the
-        // merged listing has to come out the same way or the disk rows would land in a block of
-        // their own at the end. `sort_by_cached_key` folds each path once rather than per compare.
-        rows.sort_by_cached_key(|r| (r.kind != FileKind::Dir, r.rel_path.to_ascii_lowercase()));
-        Ok(rows)
+        list_dir(&self.index(), &self.root, rel)
     }
 
     /// Ranked full-text search. On the search connection, so a slow query cannot block the tree.
@@ -309,6 +286,35 @@ impl Local {
             .map(|(_, copy)| copy)
             .collect())
     }
+}
+
+/// [`Local::list_dir`] on any reader of the index of the vault at `root`.
+pub(crate) fn list_dir(index: &Index, root: &Path, rel: &str) -> Result<Vec<FileRow>> {
+    let mut rows = index.list_files(rel)?;
+    let held: HashSet<&str> = rows.iter().map(|r| r.rel_path.as_str()).collect();
+    // Non-fatal: a directory that vanished mid-listing must not blank the rows the index did
+    // answer for.
+    let extra = walk::unindexed_children(root, rel, &held).unwrap_or_else(|e| {
+        tracing::debug!(dir = rel, "listing the unindexed children: {e}");
+        Vec::new()
+    });
+    if extra.is_empty() {
+        return Ok(rows);
+    }
+    rows.extend(extra.into_iter().map(|(rel_path, kind, why)| FileRow {
+        id: 0,
+        rel_path,
+        kind,
+        title: None,
+        size: 0,
+        mtime_ns: 0,
+        dependency: why == walk::Unindexed::Dependency,
+    }));
+    // `Index::list_files` orders directories first and then by path, case-insensitively; the
+    // merged listing has to come out the same way or the disk rows would land in a block of
+    // their own at the end. `sort_by_cached_key` folds each path once rather than per compare.
+    rows.sort_by_cached_key(|r| (r.kind != FileKind::Dir, r.rel_path.to_ascii_lowercase()));
+    Ok(rows)
 }
 
 // ----------------------------------------------------------------------- git

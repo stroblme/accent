@@ -18,8 +18,8 @@ use anyhow::Result;
 
 use super::external::line_of;
 use super::{
-    Completion, Completions, Fold, Fut, Hover, Kind, Language, Location, Pos, Range, Signature,
-    Support, Symbol,
+    Completion, Completions, Fold, Fut, Hover, Kind, Language, Listing, Location, Pos, Range,
+    Signature, Support, Symbol, latex,
 };
 use crate::locked;
 
@@ -153,6 +153,12 @@ impl Words {
         locked(&self.docs).get(rel).map(|doc| doc.text.clone())
     }
 
+    fn line(&self, rel: &str, line: u32) -> Option<String> {
+        locked(&self.docs)
+            .get(rel)
+            .map(|doc| line_of(&doc.text, line).to_string())
+    }
+
     /// The words that continue what is being typed: the document's own, most used first, then
     /// the dictionary's, in its order. The word under the caret is never offered to itself.
     pub(crate) fn completion(&self, rel: &str, pos: Pos) -> Completions {
@@ -236,7 +242,8 @@ pub(crate) type Respawn =
 /// A prose document's providers, answering as one: the primary (a language server, or the index
 /// for a note) for everything it does, with the words appended to its completion and the ghost
 /// session answering beside both. A file with no primary at all (a `.txt`, a `.tex` without
-/// texlab) still gets its words.
+/// texlab) still gets its words. Inside a LaTeX `\input{…}` the folder's files take the words'
+/// place.
 ///
 /// The ghost session hears the document's whole life — open, change, close — because it answers
 /// about the buffer as it is now. What it does not hear is every save: it re-reads the vault on
@@ -252,6 +259,8 @@ pub(crate) struct Layered {
     /// The protocol's name for the document's language, to open it on a fresh ghost session.
     language_id: OnceLock<String>,
     words: Words,
+    /// The vault's listing, for a LaTeX document's `\input{` ([`latex::inputs`]).
+    listing: Option<Arc<Listing>>,
     /// The document was saved since the ghost session last heard about it.
     stale: AtomicBool,
 }
@@ -260,6 +269,7 @@ impl Layered {
     pub(crate) fn new(
         primary: Option<Arc<dyn Language>>,
         ghost: Option<(Arc<dyn Language>, Respawn)>,
+        listing: Option<Arc<Listing>>,
     ) -> Layered {
         let (ghost, respawn) = ghost.unzip();
         Layered {
@@ -268,8 +278,31 @@ impl Layered {
             respawn,
             language_id: OnceLock::new(),
             words: Words::default(),
+            listing,
             stale: AtomicBool::new(false),
         }
+    }
+
+    /// The files `\input{` may name that texlab leaves out, while the caret is inside its braces.
+    fn inputs(&self, rel: &str, pos: Pos) -> Option<Completions> {
+        let listing = self.listing.as_ref()?;
+        let line = self.words.line(rel, pos.line)?;
+        let (dir, start) = latex::input_dir(rel, &line, pos.character)?;
+        let rows = listing.list_dir(&dir).unwrap_or_else(|e| {
+            tracing::debug!(dir, "listing for \\input: {e:#}");
+            Vec::new()
+        });
+        let replace = Range {
+            start: Pos {
+                line: pos.line,
+                character: start,
+            },
+            end: pos,
+        };
+        Some(Completions {
+            items: latex::inputs(rows, replace),
+            ..Completions::default()
+        })
     }
 
     /// Tell the ghost session something, if there is one. A failure is logged and goes no
@@ -382,7 +415,11 @@ impl Language for Layered {
                 Some(p) => p.completion(&rel, pos, trigger).await?,
                 None => Completions::default(),
             };
-            let words = self.words.completion(&rel, pos);
+            // A path has no use for prose words.
+            let words = match self.inputs(&rel, pos) {
+                Some(files) => files,
+                None => self.words.completion(&rel, pos),
+            };
             let taken: HashSet<String> = answer.items.iter().map(|c| c.label.clone()).collect();
             answer.items.extend(
                 words
@@ -593,7 +630,7 @@ mod tests {
                 Box::pin(async move { next.map(|g| g as Arc<dyn Language>) })
             }
         });
-        let doc = Layered::new(Some(primary.clone()), Some((first.clone(), respawn)));
+        let doc = Layered::new(Some(primary.clone()), Some((first.clone(), respawn)), None);
         let at = Pos::default();
         let suggest = || accent_lsp::runtime().block_on(doc.inline_completion("a.md", at));
 

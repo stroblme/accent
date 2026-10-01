@@ -293,6 +293,7 @@ impl App {
                 }
                 // And the pages are there to paint the notes' highlights onto.
                 app.sync_pdf_links(pdf);
+                app.synctex_opened(pdf);
             }
         ));
         pdf.connect_mode(glib::clone!(
@@ -1550,6 +1551,7 @@ impl App {
         if tab.flavour().is_note() && self.vault().is_some() && !doc::is_loose_key(&tab.rel()) {
             self.wire_attachments(&tab);
         }
+        self.offer_show_in_pdf(&tab);
 
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.
         if doc::is_loose_key(&tab.rel()) {

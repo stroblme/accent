@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use accent_core::index::Index;
 use accent_core::markdown;
 use anyhow::Result;
 use serde::de::DeserializeOwned;
@@ -415,10 +416,37 @@ pub(crate) struct Languages {
     /// When the ghost session was started within the last [`GHOST_WINDOW`]; `None` once the
     /// vault has given up on it.
     ghost_starts: Mutex<Option<Vec<Instant>>>,
+    /// The folders a LaTeX document's `\input{` lists.
+    listing: Arc<Listing>,
+}
+
+/// The vault's listing of a folder, the file tree's own ([`crate::local::list_dir`]), for a
+/// completion that offers files. It reads the index on a connection of its own, opened by the
+/// first such completion, so it never waits on the tree's.
+pub(crate) struct Listing {
+    root: PathBuf,
+    db: PathBuf,
+    index: Mutex<Option<Index>>,
+}
+
+impl Listing {
+    pub(crate) fn list_dir(&self, rel: &str) -> Result<Vec<crate::FileRow>> {
+        let mut index = locked(&self.index);
+        let index = match &mut *index {
+            Some(index) => index,
+            none => none.insert(Index::open(&self.db)?),
+        };
+        crate::local::list_dir(index, &self.root, rel)
+    }
 }
 
 impl Languages {
     pub(crate) fn new(root: PathBuf, db: PathBuf, events: Sender<Event>) -> Arc<Languages> {
+        let listing = Arc::new(Listing {
+            root: root.clone(),
+            db: db.clone(),
+            index: Mutex::new(None),
+        });
         Arc::new(Languages {
             root,
             db,
@@ -427,6 +455,7 @@ impl Languages {
             docs: Mutex::new(HashMap::new()),
             ghost: AtomicBool::new(true),
             ghost_starts: Mutex::new(Some(Vec::new())),
+            listing,
         })
     }
 
@@ -673,7 +702,10 @@ impl Languages {
             // even with no primary at all.
             let provider: Arc<dyn Language> = match (primary, prose) {
                 (Some(primary), false) => primary,
-                (primary, true) => Arc::new(words::Layered::new(primary, ghost)),
+                (primary, true) => {
+                    let listing = (language == "latex").then(|| me.listing.clone());
+                    Arc::new(words::Layered::new(primary, ghost, listing))
+                }
                 (None, false) => {
                     return Ok(Support {
                         missing,

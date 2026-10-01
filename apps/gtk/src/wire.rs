@@ -137,6 +137,12 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         pane,
         move |tabs| {
             if let Some(page) = tabs.selected_page() {
+                // A tab picked in the pane the reader is in fades in. Not one put back by a
+                // restore or landing in another pane, and not each one a held `Ctrl+Tab` steps
+                // through: that one is on screen from its step on.
+                if Rc::ptr_eq(&app.pane(), &pane) && !app.restoring() && !pane.stepping_to(&page) {
+                    crate::widgets::fade_in(&page.child());
+                }
                 // The tab being left is still the front of the MRU order until `touch` runs, and
                 // it still holds its caret, so this is where the reader was.
                 if let Some(left) = pane.recent().first().filter(|p| **p != page) {

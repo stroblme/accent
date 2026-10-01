@@ -18,6 +18,7 @@ pub mod path;
 pub mod pdf;
 pub mod recolour;
 pub mod search;
+pub mod synctex;
 pub mod template;
 pub mod walk;
 pub mod watch;

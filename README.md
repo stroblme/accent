@@ -4,6 +4,12 @@
   <img src="https://raw.githubusercontent.com/stroblme/accent/refs/heads/main/data/icons/logo.svg" width="160" alt="Accent logo">
 </p>
 
+<p align="center">
+  <a href="https://github.com/stroblme/accent/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/stroblme/accent/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License: GPL-3.0-or-later"></a>
+  <a href="https://github.com/stroblme/accent/releases/latest"><img src="https://img.shields.io/github/v/release/stroblme/accent" alt="Latest release"></a>
+</p>
+
 Accent is a home for Markdown notes and PDFs. Keep your work in ordinary folders, connect ideas with links and tags, and read them on Linux or Android. Both native apps share a Rust core.
 
 - Write and search notes, use templates, and browse links and tags.

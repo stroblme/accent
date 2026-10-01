@@ -180,6 +180,21 @@ pub(crate) fn claim_press(button: &gtk::Button) {
     button.set_focus_on_click(false);
 }
 
+/// How long a switch crossfades and a page fades in (DESIGN.md, Motion).
+pub(crate) const FADE_MS: u32 = 150;
+
+/// Fade `widget` in from nothing over [`FADE_MS`], easing out. It is libadwaita's animation, which
+/// lands at once with `gtk-enable-animations` off or the widget unmapped. It keeps itself until it
+/// is done: one let go part way would leave the widget part transparent.
+pub(crate) fn fade_in(widget: &impl IsA<gtk::Widget>) {
+    let target = adw::PropertyAnimationTarget::new(widget.upcast_ref::<gtk::Widget>(), "opacity");
+    let fade = adw::TimedAnimation::new(widget, 0.0, 1.0, FADE_MS, target);
+    fade.set_easing(adw::Easing::EaseOutCubic);
+    let kept = RefCell::new(Some(fade.clone()));
+    fade.connect_done(move |_| drop(kept.take()));
+    fade.play();
+}
+
 /// A progress bar stepped by a timer of ours, GTK4 having no indeterminate mode (DESIGN.md,
 /// Loading). Every timer it starts is removed when the work ends and when the bar's window
 /// closes: a leaked `glib::timeout` keeps firing.

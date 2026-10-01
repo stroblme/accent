@@ -305,12 +305,13 @@ impl PdfView {
         *self.imp().on_pressed.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Called when a press turns out to have been a click rather than the start of a drag.
+    /// Called when a press turns out to have been a click rather than the start of a drag, with
+    /// the modifiers held.
     ///
     /// A highlight opens the note that holds it, and that must not fire on every drag that
     /// happens to begin inside one — so it waits for the release, unlike the link handler above,
     /// which answers on the press because following a link is what a press on one means.
-    pub fn connect_clicked(&self, f: impl Fn(&PdfView, f64, f64) + 'static) {
+    pub fn connect_clicked(&self, f: impl Fn(&PdfView, f64, f64, gdk::ModifierType) + 'static) {
         *self.imp().on_clicked.borrow_mut() = Some(Box::new(f));
     }
 
@@ -742,6 +743,13 @@ impl PdfView {
         self.queue_draw();
     }
 
+    /// The boxes the selection paints, as [`PdfView::set_selection`] was handed them. Only drills
+    /// ask.
+    #[cfg(feature = "bench")]
+    pub fn selection(&self) -> Vec<(usize, Vec<accent_core::pdf::Rect>)> {
+        self.imp().selection.borrow().clone()
+    }
+
     /// Called with the page and the point a drag started and ended on, which need not be the
     /// same page.
     pub fn connect_select(&self, f: impl Fn(&PdfView, Span) + 'static) {
@@ -1039,6 +1047,7 @@ mod imp {
 
     type Wants = Box<dyn Fn(&super::PdfView, f32, bool, Vec<Want>)>;
     type Coords = Box<dyn Fn(&super::PdfView, f64, f64)>;
+    type Click = Box<dyn Fn(&super::PdfView, f64, f64, gdk::ModifierType)>;
     type Page = Box<dyn Fn(usize)>;
     type Zoomed = Box<dyn Fn()>;
     type OnReply = Box<dyn Fn(&super::PdfView, Reply)>;
@@ -1134,7 +1143,7 @@ mod imp {
         pub on_select: RefCell<Option<OnSelect>>,
         pub on_goto: RefCell<Option<Page>>,
         pub on_pressed: RefCell<Option<Coords>>,
-        pub on_clicked: RefCell<Option<Coords>>,
+        pub on_clicked: RefCell<Option<Click>>,
         pub on_ink: RefCell<Option<Stroke>>,
         pub on_erase: RefCell<Option<At>>,
         pub on_transform: RefCell<Option<Transform>>,
@@ -1361,7 +1370,7 @@ mod imp {
             drag.connect_drag_end(glib::clone!(
                 #[weak]
                 obj,
-                move |_, dx, dy| {
+                move |drag, dx, dy| {
                     let from = obj.imp().drag_from.replace(None);
                     let mode = obj.imp().drag_mode.get();
                     if mode == super::Mode::Adjust {
@@ -1401,7 +1410,7 @@ mod imp {
                         && !obj.imp().thumbnails.get()
                         && let Some(f) = obj.imp().on_clicked.borrow().as_ref()
                     {
-                        f(&obj, x, y);
+                        f(&obj, x, y, drag.current_event_state());
                     }
                 }
             ));

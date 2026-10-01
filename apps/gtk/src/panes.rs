@@ -625,6 +625,14 @@ impl Pane {
         *self.history.borrow_mut() = order;
     }
 
+    /// Whether `page` is where a held `Ctrl+Tab` has just stepped, as opposed to a tab picked any
+    /// other way.
+    pub fn stepping_to(&self, page: &adw::TabPage) -> bool {
+        self.cycling
+            .get()
+            .is_some_and(|at| self.recent().get(at) == Some(page))
+    }
+
     /// Which tab to show once `page` goes: the most recently used one that is left.
     pub fn survivor(&self, page: &adw::TabPage) -> Option<adw::TabPage> {
         self.recent().into_iter().find(|p| p != page)

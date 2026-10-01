@@ -133,7 +133,7 @@ impl Tab {
         holder.append(&self.document);
         let editor = diff::Pane {
             root: holder.clone().upcast(),
-            header: header.upcast(),
+            header,
             view: self.view.clone(),
             buffer: self.buffer.clone(),
             scroller: self.scroller.clone(),
