@@ -1242,6 +1242,13 @@ impl Compare {
         (top(Side::New) - top(Side::Old)).round() as i32
     }
 
+    /// Whether the rows are laid and the view is where the comparison was keeping it: what a drill
+    /// waits for before it acts on a comparison just opened.
+    #[cfg(feature = "bench")]
+    pub fn settled(&self) -> bool {
+        self.keep.get().is_none() && self.pending.borrow().is_none()
+    }
+
     /// Whether the first hunk's first line is inside its view right now, on the first side that
     /// has a line in it: what a comparison has to open on.
     #[cfg(feature = "bench")]
