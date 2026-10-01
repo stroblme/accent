@@ -31,8 +31,9 @@ pub(crate) fn choose(
     dialog.present(parent);
 }
 
-/// Close `dialog` on a primary press outside it, as Escape closes it: what a palette and
-/// Preferences do, never an alert, whose question waits for its answer.
+/// Close `dialog` on a primary press outside it, as Escape closes it: what a palette, Preferences
+/// and About do, never an alert, whose question waits for its answer. An `AdwAlertDialog` is
+/// floating at every window size (its template says so), so nothing closes it on such a press.
 ///
 /// libadwaita closes a dialog so only as a bottom sheet: a floating one's dimming is a
 /// `GtkWindowHandle`, which drags or maximises the window instead (adw-floating-sheet.c). The

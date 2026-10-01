@@ -292,7 +292,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Palette
 
 - One `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code's convention).
-- A primary click outside it closes it as Escape does, and does nothing else: no tab switches and no caret moves under it. libadwaita closes only a bottom sheet so, a floating dialog's dimming being a window handle, so the dialog's own capture-phase gesture does it (`dialogs::close_on_outside_press`), Preferences' too (Dismiss).
+- A primary click outside it closes it as Escape does, and does nothing else: no tab switches and no caret moves under it. libadwaita closes only a bottom sheet so, a floating dialog's dimming being a window handle, so the dialog's own capture-phase gesture does it (`dialogs::close_on_outside_press`), Preferences' and About's too (Dismiss).
 - Go to File also lists each note a link names that is not written yet, after the files at the same score and marked Not created; picking one follows it as the link would, offering New File with its path typed in.
 - It finds a note by its front matter's `aliases:` (or `alias:`), behind a file at the same score: the row reads the alias over the note's path, and picking it opens the note.
 - A typed query also ranks the files this window opened that the index does not list (a gitignored build output, a file in an unwalked folder); one whose file has gone leaves the history.
@@ -677,7 +677,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - While a `Ctrl+Tab` chord is held it goes back to the tab the chord started from and does nothing else, ahead of everything: the chord is what is up, its card on screen or not.
 - In presentation mode it ends presentation and does nothing else, ahead of the rest, so a presented shell or preview cannot keep it.
 - Otherwise it brings the hidden chrome back, takes no key from anyone, and the nearest thing over the document takes it: a signature popover; failing that, the focused pane's find or go-to-line bar, from the bar or the document (only that pane's, so a query in the other half of a split survives); failing that, the comparison the pane's tab hosts stops, as Stop Comparing does. A diff that is a tab of its own is closed like any tab.
-- A primary click outside the palette or Preferences closes it, as Escape does, and reaches nothing under it. An `AdwAlertDialog` stays, its question waiting for an answer, and so does a dialog under one (Preferences under Restore Defaults' question). In a window narrower than 450 px or shorter than 360 px every dialog is libadwaita's bottom sheet, which closes on that click itself, an alert included.
+- A primary click outside the palette, Preferences or About closes it, as Escape does, and reaches nothing under it, a bottom sheet in a window under 450 × 360 px included. An `AdwAlertDialog` stays, its question waiting for an answer, and so does a dialog under one (Preferences under Restore Defaults' question): libadwaita keeps an alert floating at every window size, and a floating dialog's dimming closes nothing.
 - It has no `GAction` and no palette entry: it names no one thing.
 
 ### Panes

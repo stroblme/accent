@@ -18,8 +18,9 @@ const CLOSING: [(&str, &str); 4] = [
 /// down; up"`), then whether the dialog closed, whether the tab in front and its caret are what
 /// they were, and whether the dialog was let go. Then a click on the palette's own entry, which
 /// leaves it up; one outside Preferences with Restore Defaults' question over it, and one outside
-/// an alert alone, both of which stay; and last the same two points with no dialog up, which move
-/// the caret and switch the tab, so the points are shown to be live.
+/// an alert alone, both of which stay; one outside About, which closes; the same two points with
+/// no dialog up, which move the caret and switch the tab, so the points are shown to be live; and
+/// last the same in a small window ([`bench_dismiss_small`]).
 pub(super) fn bench_dismiss(app: &Rc<App>, rels: &str) {
     let Some((a, b)) = rels.split_once(',') else {
         return bench_quit(app);
@@ -203,6 +204,30 @@ pub(super) fn bench_dismiss(app: &Rc<App>, rels: &str) {
         }
         glib::timeout_future(Duration::from_millis(300)).await;
 
+        // About closes as the palette does.
+        let _ = WidgetExt::activate_action(&app.window, "win.about", None);
+        glib::timeout_future(Duration::from_millis(600)).await;
+        let sheet = app
+            .window
+            .visible_dialog()
+            .and_then(|d| d.child())
+            .and_then(|c| c.compute_bounds(&window));
+        if let Some(aim) = aims
+            .iter()
+            .find(|p| !sheet.is_some_and(|r| r.contains_point(p)))
+        {
+            ready("about", aim);
+            wait(|| app.window.visible_dialog().is_some()).await;
+        }
+        println!(
+            "bench dismiss about closed={}",
+            app.window.visible_dialog().is_none()
+        );
+        if let Some(dialog) = app.window.visible_dialog() {
+            dialog.force_close();
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+
         // With no dialog up the same points are live: the text takes the caret, the tab the pane.
         for (case, aim) in ["text", "tab"].into_iter().zip(&aims) {
             ready(case, aim);
@@ -213,8 +238,89 @@ pub(super) fn bench_dismiss(app: &Rc<App>, rels: &str) {
                 front().unwrap_or_default()
             );
         }
+
+        bench_dismiss_small(&app).await;
         bench_quit(&app);
     });
+}
+
+/// The window under 450 x 360 px, where libadwaita makes a dialog a bottom sheet: the palette is
+/// one and still closes on a click above it, and an alert stays floating, a click outside it
+/// answering nothing, and closes on Escape (`bench dismiss_key <case> <x> <y> Escape`, for an
+/// XTEST press with the window given the keyboard) with its close response.
+async fn bench_dismiss_small(app: &Rc<App>) {
+    app.window.set_default_size(420, 340);
+    glib::timeout_future(Duration::from_millis(800)).await;
+    let window = app.window.clone().upcast::<gtk::Widget>();
+    let (sx, sy) = app.window.surface_transform();
+    println!(
+        "bench dismiss small window={}x{}",
+        window.width(),
+        window.height()
+    );
+    let shape = |dialog: &adw::Dialog| match dialog.has_css_class("bottom-sheet") {
+        true => "bottom-sheet",
+        false => "floating",
+    };
+    // The window's top-left corner, which neither the sheet nor a floating alert reaches.
+    let corner = (sx + 15.0, sy + 15.0);
+
+    let _ = WidgetExt::activate_action(&app.window, "win.palette-files", None);
+    glib::timeout_future(Duration::from_millis(800)).await;
+    if let Some(dialog) = app.window.visible_dialog() {
+        println!("bench dismiss small_palette shape={}", shape(&dialog));
+        println!(
+            "bench dismiss_ready small_palette {} {}",
+            corner.0, corner.1
+        );
+        wait(|| app.window.visible_dialog().is_some()).await;
+    }
+    println!(
+        "bench dismiss small_palette closed={}",
+        app.window.visible_dialog().is_none()
+    );
+    if let Some(dialog) = app.window.visible_dialog() {
+        dialog.force_close();
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
+
+    let answer = Rc::new(RefCell::new(None));
+    let dialog = crate::dialogs::alert(
+        "Discard Changes?",
+        "A question a click outside never answers.",
+        &[
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            ("discard", "Discard", adw::ResponseAppearance::Destructive),
+        ],
+        "cancel",
+    );
+    crate::dialogs::choose(&dialog, Some(&app.window), {
+        let answer = answer.clone();
+        move |response| *answer.borrow_mut() = Some(response.to_string())
+    });
+    glib::timeout_future(Duration::from_millis(800)).await;
+    let up = || app.window.visible_dialog().is_some();
+    println!(
+        "bench dismiss small_alert shape={}",
+        shape(dialog.upcast_ref())
+    );
+    println!("bench dismiss_ready small_alert {} {}", corner.0, corner.1);
+    wait(up).await;
+    println!(
+        "bench dismiss small_alert stayed={} answer={:?}",
+        up(),
+        answer.borrow()
+    );
+    println!(
+        "bench dismiss_key small_alert {} {} Escape",
+        corner.0, corner.1
+    );
+    wait(up).await;
+    println!(
+        "bench dismiss small_alert escape closed={} answer={:?}",
+        !up(),
+        answer.borrow()
+    );
 }
 
 /// Up to four seconds for the click, for as long as `up` says the dialog it waits on is up, and

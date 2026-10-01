@@ -1509,5 +1509,6 @@ impl App {
             .comments("Markdown and PDF knowledge editor.")
             .build();
         about.present(Some(&self.window));
+        dialogs::close_on_outside_press(about.upcast_ref());
     }
 }
