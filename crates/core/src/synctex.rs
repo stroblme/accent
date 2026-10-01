@@ -483,11 +483,11 @@ pub fn pdf_of(synctex: &Path) -> Option<PathBuf> {
     Some(synctex.with_file_name(format!("{stem}.pdf")))
 }
 
-/// The SyncTeX files that may hold `tex`, below `root`, nearest first, each the build of a PDF
-/// beside it ([`beside`]): the build of `tex` itself, then every other one in the folders
-/// [`build_dirs`] names, for a file `\input` by another. Whether one lists `tex` is for
-/// [`Synctex::has_input`] to say once it is read.
-pub fn near(root: &Path, tex: &Path) -> Vec<PathBuf> {
+/// The SyncTeX files that may hold `tex`, below `root`, nearest first, each the one `build` takes
+/// for the build of the PDF beside it ([`beside`], unless the caller knows more): the build of
+/// `tex` itself, then every other one in the folders [`build_dirs`] names, for a file `\input` by
+/// another. Whether one lists `tex` is for [`Synctex::has_input`] to say once it is read.
+pub fn near(root: &Path, tex: &Path, build: impl Fn(&Path) -> Option<PathBuf>) -> Vec<PathBuf> {
     let (Some(dir), Some(stem)) = (tex.parent(), tex.file_stem()) else {
         return Vec::new();
     };
@@ -512,7 +512,7 @@ pub fn near(root: &Path, tex: &Path) -> Vec<PathBuf> {
     });
     let mut found: Vec<PathBuf> = Vec::new();
     for file in own.chain(others) {
-        let built = pdf_of(&file).and_then(|pdf| beside(&pdf));
+        let built = pdf_of(&file).and_then(|pdf| build(&pdf));
         if built.as_ref() == Some(&file) && !found.contains(&file) {
             found.push(file);
             if found.len() == NEAR {
@@ -664,16 +664,19 @@ mod tests {
             Some(main.clone())
         );
         assert_eq!(pdf_of(&fig), Some(fig_pdf.clone()));
-        assert_eq!(near(root, &chapter), [fig.clone(), main.clone()]);
+        assert_eq!(near(root, &chapter, beside), [fig.clone(), main.clone()]);
         assert_eq!(
-            near(root, &root.join("thesis/main.tex")),
+            near(root, &root.join("thesis/main.tex"), beside),
             vec![main.clone()]
         );
-        assert_eq!(near(&root.join("thesis/chapters"), &chapter), vec![fig]);
+        assert_eq!(
+            near(&root.join("thesis/chapters"), &chapter, beside),
+            vec![fig]
+        );
         // A PDF written since its SyncTeX file, rebuilt without one, has none.
         std::thread::sleep(std::time::Duration::from_millis(20));
         write("thesis/chapters/fig.pdf");
         assert_eq!(beside(&fig_pdf), None);
-        assert_eq!(near(root, &chapter), [main]);
+        assert_eq!(near(root, &chapter, beside), [main]);
     }
 }

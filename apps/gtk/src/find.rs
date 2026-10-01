@@ -30,6 +30,10 @@ pub const TOGGLES: [(&str, &str); 3] = [
     (".*", "Use Regular Expression"),
 ];
 
+/// Match Whole Word's tooltip over the rendered preview, where WebKit's find can only hold a match
+/// to the start of a word (`AT_WORD_STARTS`), so `foo` finds `food` there.
+const WORD_STARTS: &str = "Match Whole Word (word starts in the preview)";
+
 /// A flat text toggle, the look every query toggle has.
 pub fn toggle((label, tooltip): (&str, &str)) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::builder()
@@ -51,7 +55,9 @@ pub fn options([case, word, regex]: [&gtk::ToggleButton; 3]) -> Options {
 
 /// What the bar wants done to the rendered preview while presentation mode is on.
 pub enum PreviewOp {
-    Find(String),
+    /// A query, and the toggles: Match Case and Match Whole Word, Regular Expression being a
+    /// buffer's alone.
+    Find(String, Options),
     Next,
     Previous,
     Clear,
@@ -94,10 +100,9 @@ pub struct Bar {
     bar: gtk::SearchBar,
     rows: gtk::Stack,
     query: gtk::SearchEntry,
-    /// This bar's own [`TOGGLES`], and the group they sit in. The bar's rather than the tab's or
-    /// the Search pane's: each bar keeps what it was set to.
+    /// This bar's own [`TOGGLES`]. The bar's rather than the tab's or the Search pane's: each bar
+    /// keeps what it was set to.
     toggles: [gtk::ToggleButton; 3],
-    toggle_group: gtk::Box,
     replace: gtk::Entry,
     replace_row: gtk::Box,
     matches: gtk::Label,
@@ -213,7 +218,6 @@ impl Bar {
             rows,
             query: query.clone(),
             toggles: toggles.clone(),
-            toggle_group,
             replace: replace.clone(),
             replace_row,
             matches,
@@ -422,13 +426,20 @@ impl Bar {
         options([case, word, regex])
     }
 
-    /// The toggles are a buffer's alone. The rendered preview and a PDF are searched for the
-    /// query as written, without regard to case, which is all WebKit's find and ours over a PDF's
-    /// text do, so there the toggles are shown off-limits rather than quietly ignored, and keep
-    /// what they were set to for the next note.
+    /// Over the rendered preview and a PDF, Match Case and Match Whole Word follow as WebKit's
+    /// find and pdfium's do — whole words being word starts in the preview, which the tooltip
+    /// says — and Regular Expression is shown off-limits rather than quietly ignored, neither
+    /// having one, keeping what it was set to for the next note.
     fn sync_toggles(&self) {
         let presenting = self.presenting();
-        self.toggle_group.set_sensitive(!presenting);
+        let [_, word, regex] = &self.toggles;
+        regex.set_sensitive(!presenting);
+        // A PDF is counted in pages; the preview, like a buffer, is not.
+        let preview = presenting && self.wiring.get().is_some_and(|w| (w.pages)().is_none());
+        word.set_tooltip_text(Some(match preview {
+            true => WORD_STARTS,
+            false => TOGGLES[1].1,
+        }));
         if presenting {
             self.query.remove_css_class("error");
         }
@@ -540,7 +551,7 @@ impl Bar {
         self.mark_once();
         self.sync_toggles();
         if self.presenting() {
-            return self.to_preview(PreviewOp::Find(text.to_string()));
+            return self.to_preview(PreviewOp::Find(text.to_string(), self.options()));
         }
         let Some(tab) = self.tab() else { return };
         // What the two boxes have selected, to put back below. The query box says `search-changed`

@@ -61,7 +61,9 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
 /// and opened in a tab first, and after every step its links' pages are printed as the file and
 /// the tab's buffer hold them, with what the toast said, if it said anything; it is renamed
 /// between the delete and its Undo, which finds the links the delete left by the new name. Then
-/// the items of the two
+/// Delete Page and Add Page Before from the page's menu opened on the third page while the first
+/// is read, each undone, with the page being read and the pages after each. Then the items of
+/// the two
 /// menus that offer them: the page's own, without a selection and with one, and the status bar's
 /// page count, opened as a click does. What a headless run cannot reach is the pointer's half: the
 /// drag itself, the buttons on hover, the drop bar and the scroll at the strip's edge.
@@ -124,6 +126,21 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
             }
         }
         println!("bench pages history={:?}", pdf.history());
+        // The page's menu acts on the page it was opened on, the third here while the first is
+        // being read, and Undo puts that page back where it was.
+        for (step, action) in [
+            ("menu_deleted", "win.pdf-delete-page"),
+            ("menu_before", "win.pdf-add-page-before"),
+        ] {
+            pdf.goto_page(0);
+            pdf.point_at(2, 100.0, 100.0);
+            let _ = WidgetExt::activate_action(&app.window, action, None);
+            written(&app).await;
+            println!("bench pages {step} {}", pages_read(&pdf));
+            let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
+            written(&app).await;
+            println!("bench pages {step}_undone {}", pages_read(&pdf));
+        }
         let items = |menu: gtk::PopoverMenu| {
             let items = menu.menu_model().map(|m| fileops::labels(&m));
             menu.popdown();

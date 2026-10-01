@@ -384,10 +384,15 @@ fn more_layout() -> gtk::Label {
 ///
 /// The same surface a changed file's actions have: hidden until the pointer or the keyboard is on
 /// the row (`changes::reveal_on_hover`), in a revealer so they measure nothing while they are away
-/// and the summary reads out to the whole width of the pane. Like those, they hold the
-/// `GtkListItem` rather than the row's data, because the data under a recycled row is replaced
-/// without the widgets being rebuilt.
+/// and the summary reads out to the whole width of the pane, made the first time it reveals them
+/// ([`revealed_actions`]). Like those, they hold the `GtkListItem` rather than the row's data,
+/// because the data under a recycled row is replaced without the widgets being rebuilt.
 fn commit_actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
+    let panel = panel.clone();
+    revealed_actions(item, move |item| commit_buttons(item, &panel))
+}
+
+fn commit_buttons(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     for (icon, tooltip, detach) in [
         ("go-jump-symbolic", "Check Out Commit", true),
@@ -412,10 +417,7 @@ fn commit_actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
         ));
         actions.append(&button);
     }
-    gtk::Revealer::builder()
-        .child(&actions)
-        .transition_type(gtk::RevealerTransitionType::SlideLeft)
-        .build()
+    actions
 }
 
 fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {

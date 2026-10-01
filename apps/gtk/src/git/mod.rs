@@ -1105,6 +1105,30 @@ fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
     })
 }
 
+/// A row's buttons in a revealer that makes them, with `build`, the first time it reveals them, and
+/// keeps them. A list makes rows for its first 200 items whether anyone points at them or not, and
+/// picking another repository has GTK take every one of them apart again, so only the rows someone
+/// has been on pay for their buttons. The keyboard landing on a row reveals them
+/// ([`changes::reveal_on_hover`]), so they are there before Tab moves on to them.
+fn revealed_actions(
+    item: &gtk::ListItem,
+    build: impl Fn(&gtk::ListItem) -> gtk::Box + 'static,
+) -> gtk::Revealer {
+    let revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideLeft)
+        .build();
+    revealer.connect_reveal_child_notify(glib::clone!(
+        #[weak]
+        item,
+        move |revealer| {
+            if revealer.child().is_none() && revealer.reveals_child() {
+                revealer.set_child(Some(&build(&item)));
+            }
+        }
+    ));
+    revealer
+}
+
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name(icon)

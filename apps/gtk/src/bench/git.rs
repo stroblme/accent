@@ -88,8 +88,9 @@ pub(super) fn bench_git_init(app: &Rc<App>) {
 ///
 /// Then it picks every repository twice over, the second round all seen before, and prints what
 /// each pick drew at once — history rows and the branch button — how long until the history was
-/// on screen, and the toasts a click on its first row at once raised: a repository seen before is
-/// drawn from what the pane held about it, and its rows are its own.
+/// on screen, the longest the main loop went without turning until its lists were full
+/// (`stall_ms`), and the toasts a click on its first row at once raised: a repository seen before
+/// is drawn from what the pane held about it, and its rows are its own.
 pub(super) fn bench_git_switch(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -116,6 +117,18 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
         app.show_pane("git");
         let names = git.repo_names();
         for (at, name) in names.iter().enumerate().chain(names.iter().enumerate()) {
+            // The longest the main loop went without turning, from the pick until its lists are
+            // full: a tick asked for every millisecond, and the widest gap between two of them.
+            let (worst, last) = (Rc::new(Cell::new(0.0)), Rc::new(Cell::new(Instant::now())));
+            let beat = glib::timeout_add_local(Duration::from_millis(1), {
+                let (worst, last) = (worst.clone(), last.clone());
+                move || {
+                    let now = Instant::now();
+                    let gap = (now - last.replace(now)).as_secs_f64() * 1000.0;
+                    worst.set(f64::max(worst.get(), gap));
+                    glib::ControlFlow::Continue
+                }
+            });
             let (t, said) = (Instant::now(), app.toasted.get());
             git.select_repo(at as u32);
             let (rows, branch) = (git.log_rows(), git.shown_branch());
@@ -123,8 +136,11 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
             wait_for(|| git.log_rows() > 0, 10000).await;
             let shown = t.elapsed().as_millis();
             glib::timeout_future(Duration::from_millis(1500)).await;
+            beat.remove();
             println!(
-                "bench git_switch repo={name} rows={rows} branch={branch} shown_ms={shown} toasts={}",
+                "bench git_switch repo={name} rows={rows} branch={branch} shown_ms={shown} \
+                 stall_ms={:.1} toasts={}",
+                worst.get(),
                 app.toasted.get() - said
             );
         }
@@ -397,6 +413,7 @@ async fn bench_git_commit(app: &Rc<App>, list: Option<gtk::Widget>) {
     let Some(list_row) = row.parent() else {
         return println!("bench git_commit_row unparented");
     };
+    make_buttons(&row);
     let mut tooltips = Vec::new();
     let mut child = revealer.child().and_then(|box_| box_.first_child());
     while let Some(button) = child {
@@ -609,12 +626,34 @@ fn change_row(list: &gtk::Widget, path: &str) -> Option<gtk::Widget> {
     })
 }
 
-/// The button of `row` that `tooltip` names, where the row shows it.
+/// The button of `row` that `tooltip` names, where the row shows it, its buttons made first.
 pub(super) fn row_button(row: &gtk::Widget, tooltip: &str) -> Option<gtk::Button> {
+    make_buttons(row);
     find_widget(row, &|w| {
         w.is::<gtk::Button>() && w.is_visible() && w.tooltip_text().as_deref() == Some(tooltip)
     })
     .and_downcast::<gtk::Button>()
+}
+
+/// A row of the Git pane's lists makes its buttons the first time it reveals them, so every
+/// revealer under `row` that has none yet is revealed and put back, as a pointer passing over the
+/// row would.
+fn make_buttons(row: &gtk::Widget) {
+    let mut todo = vec![row.clone()];
+    while let Some(widget) = todo.pop() {
+        if let Some(revealer) = widget.downcast_ref::<gtk::Revealer>()
+            && revealer.child().is_none()
+        {
+            let shown = revealer.reveals_child();
+            revealer.set_reveal_child(true);
+            revealer.set_reveal_child(shown);
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
 }
 
 /// Close the window while git runs, and print what the close did (DESIGN.md, States).

@@ -6,6 +6,7 @@ use std::sync::mpsc::Sender;
 
 use accent_api::PdfLink;
 use accent_core::pdf;
+use accent_core::search::Options;
 
 use super::cache::{TileKey, Want};
 
@@ -124,6 +125,8 @@ pub enum Request {
     Search {
         query: u64,
         text: String,
+        /// The find bar's Match Case and Match Whole Word.
+        options: Options,
         /// The first page still to look at. A query the reader interrupted comes back with this
         /// moved on, so it finishes the document instead of stopping where it was pushed aside.
         from: usize,

@@ -384,10 +384,23 @@ fn revealers(row: &gtk::Widget) -> Vec<gtk::Revealer> {
 }
 
 /// A row's Stage / Unstage / Discard buttons, the same three on a file and on a folder. They show
-/// while the pointer or the keyboard is on the row, and the binder picks which of them the row
-/// offers. In a revealer, which is what keeps them from reserving their width while they are away
-/// ([`reveal_on_hover`]).
+/// while the pointer or the keyboard is on the row, and [`fit`] picks which of them the row offers.
+/// In a revealer, which is what keeps them from reserving their width while they are away
+/// ([`reveal_on_hover`]), and which makes them the first time it reveals them
+/// ([`revealed_actions`]): they are eight of a row's thirteen widgets.
 fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
+    let panel = panel.clone();
+    revealed_actions(item, move |item| {
+        let buttons = action_buttons(item, &panel);
+        if let Some(row) = boxed::<Row>(item.item()) {
+            fit(&buttons, &row);
+        }
+        buttons
+    })
+}
+
+/// The three buttons of [`actions`], each acting on whatever row `item` holds when it is pressed.
+fn action_buttons(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     for (icon, tooltip, act) in [
         ("list-add-symbolic", "Stage", Act::Stage),
@@ -407,13 +420,10 @@ fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
         ));
         actions.append(&button);
     }
-    gtk::Revealer::builder()
-        .child(&actions)
-        .transition_type(gtk::RevealerTransitionType::SlideLeft)
-        .build()
+    actions
 }
 
-/// The buttons inside an [`actions`] revealer, which is what the binder sets up.
+/// The buttons inside an [`actions`] revealer, once it has revealed them.
 fn buttons(revealer: Option<gtk::Widget>) -> Option<gtk::Box> {
     revealer
         .and_downcast::<gtk::Revealer>()?
@@ -495,17 +505,13 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
         }
         Row::Folder {
             label,
-            section,
             depth,
             path,
             open,
-            discardable,
+            ..
         } => {
             let folder = layout(&stack, "folder", || folder_layout(item, weak));
-            let (Some(chevron), Some(buttons)) = (
-                folder.first_child().and_downcast::<gtk::Image>(),
-                buttons(folder.last_child()),
-            ) else {
+            let Some(chevron) = folder.first_child().and_downcast::<gtk::Image>() else {
                 return;
             };
             let Some(text) = folder
@@ -515,10 +521,6 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
             else {
                 return;
             };
-            // None in Merge Conflicts, for the reason its header has no Stage All: a conflict is
-            // resolved one file at a time.
-            buttons.set_visible(section != Section::Conflicts);
-            offer(&buttons, section, discardable);
             // The fold chevrons' pair rather than `pan-*`, for the reason the branch button gives.
             chevron.set_icon_name(Some(match open {
                 true => "go-down-symbolic",
@@ -531,13 +533,10 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
         Row::Entry {
             entry: e,
             section,
-            key,
             depth,
+            ..
         } => {
             let entry = layout(&stack, "entry", || entry_layout(item, weak));
-            let Some(actions) = buttons(entry.last_child()) else {
-                return;
-            };
             entry.set_margin_start(inset(depth, panel.tree.get()));
             let directory = match depth {
                 0 => split_name(&e.path).0,
@@ -556,14 +555,9 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
                 false => e.path.clone(),
             };
             stack.set_tooltip_text(Some(&tip));
-            actions.set_visible(!own);
-            offer(&actions, section, discardable(&e, &key));
         }
         Row::Submodule(sub) => {
             let entry = layout(&stack, "entry", || entry_layout(item, weak));
-            let Some(actions) = buttons(entry.last_child()) else {
-                return;
-            };
             entry.set_margin_start(0);
             let directory = sub
                 .describe
@@ -577,8 +571,38 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
                 directory,
             );
             stack.set_tooltip_text(Some(&sub.oid));
-            actions.set_visible(false);
         }
+    }
+    // A row that has revealed its buttons before keeps them, fitted to every row bound to it since.
+    let shown = stack.visible_child().and_then(|layout| layout.last_child());
+    if let (Some(buttons), Some(row)) = (buttons(shown), boxed::<Row>(item.item())) {
+        fit(&buttons, &row);
+    }
+}
+
+/// Which of a row's [`actions`] it shows: on a folder, none in Merge Conflicts, for the reason its
+/// header has no Stage All — a conflict is resolved one file at a time; on a file, none for a
+/// repository of its own; on a submodule none at all.
+fn fit(buttons: &gtk::Box, row: &Row) {
+    match row {
+        Row::Folder {
+            section,
+            discardable,
+            ..
+        } => {
+            buttons.set_visible(*section != Section::Conflicts);
+            offer(buttons, *section, *discardable);
+        }
+        Row::Entry {
+            entry,
+            section,
+            key,
+            ..
+        } => {
+            buttons.set_visible(!own_repository(&entry.path));
+            offer(buttons, *section, discardable(entry, key));
+        }
+        _ => buttons.set_visible(false),
     }
 }
 

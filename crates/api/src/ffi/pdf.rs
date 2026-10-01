@@ -231,7 +231,10 @@ impl PdfSession {
     /// Every hit of `text` on one page, each as the lines it runs over. One page per call, so a
     /// caller walking a long document can stop between them.
     pub fn search(&self, page: u32, text: String) -> Answer<Vec<SearchLine>> {
-        self.with(|s| Ok(convert::all(s.doc.search(page as usize, &text)?)))
+        self.with(|s| {
+            let found = s.doc.search(page as usize, &text, Default::default())?;
+            Ok(convert::all(found))
+        })
     }
 
     /// The `/Highlight` annotations the file itself carries, which are the exported ones.

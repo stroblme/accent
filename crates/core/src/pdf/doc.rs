@@ -10,6 +10,7 @@ use pdfium_render::prelude::*;
 use super::{Glyph, Link, LinkTarget, Outline, Rect, RgbaImage, Theme, lock, pdfium};
 use crate::fs::Etag;
 use crate::recolour::recolour;
+use crate::search::Options;
 
 pub struct PdfDoc {
     // `Option` only so that `Drop` can close the document while still holding `CALLS`; it is
@@ -359,8 +360,10 @@ impl PdfDoc {
     }
 
     /// Text matches on one page: one entry per match, one rect per line the match spans.
-    /// Case-insensitive; an empty query finds nothing.
-    pub fn search(&self, page: usize, query: &str) -> Result<Vec<Vec<Rect>>> {
+    /// Without regard to case unless `options` says Match Case, and only whole words where it
+    /// says Match Whole Word; the query is literal whatever it says of a regular expression,
+    /// which pdfium has no way to match. An empty query finds nothing.
+    pub fn search(&self, page: usize, query: &str, options: Options) -> Result<Vec<Vec<Rect>>> {
         if query.is_empty() {
             return Ok(Vec::new());
         }
@@ -369,7 +372,12 @@ impl PdfDoc {
         let page_height = p.height().value;
         let text = p.text().map_err(|e| anyhow!("text page {page}: {e:?}"))?;
         let search = text
-            .search(query, &PdfSearchOptions::new())
+            .search(
+                query,
+                &PdfSearchOptions::new()
+                    .match_case(options.case)
+                    .match_whole_word(options.word),
+            )
             .map_err(|e| anyhow!("search page {page}: {e:?}"))?;
         Ok(search
             .iter(PdfSearchDirection::SearchForward)

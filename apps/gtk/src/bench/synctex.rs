@@ -87,8 +87,40 @@ pub(super) fn bench_synctex(app: &Rc<App>, rel: &str) {
             tex.map(|tab| format!("{}:{}", tab.rel(), tab.cursor_line())),
             app.active_pdf().map(|pdf| pdf.geometry())
         );
+        accent_writes(&app, &rel).await;
         bench_quit(&app);
     });
+}
+
+/// accent's own writes into the PDF: a stroke leaves the build trusted, through the tab closed and
+/// opened again, and a page added takes it away, an Undo of it too, each printed as the window
+/// offers Go to Source once it has looked again, as a tab switch makes it.
+async fn accent_writes(app: &Rc<App>, rel: &str) {
+    let saved = || glib::timeout_future(Duration::from_millis(1500));
+    let offer = |step: &str| {
+        app.sync_synctex(app.active_doc());
+        println!("bench synctex {step} {}", offered(app));
+    };
+    let Some(pdf) = app.active_pdf() else {
+        return println!("bench synctex no_pdf");
+    };
+    pdf.draw(0, vec![(60.0, 60.0), (90.0, 80.0)]);
+    saved().await;
+    offer("inked");
+    app.close_page(&pdf.page);
+    let Some(pdf) = super::pdf::opened(app, rel).await else {
+        return println!("bench synctex no_pdf");
+    };
+    offer("inked_reopened");
+    pdf.edit_pages(accent_core::pdf::PageEdit::Insert(pdf.page_count()));
+    // Before the save lands, which is when the page is in the file.
+    glib::timeout_future(Duration::from_millis(300)).await;
+    offer("added");
+    saved().await;
+    offer("added_saved");
+    let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
+    saved().await;
+    offer("added_undone");
 }
 
 /// Whether the two commands are enabled as the window stands.

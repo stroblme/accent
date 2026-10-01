@@ -1,6 +1,7 @@
 //! The comparisons a row opens, and keeping the open ones current.
 
 use super::*;
+use crate::diff::OnLines;
 use accent_core::diff;
 
 impl Panel {
@@ -125,18 +126,18 @@ impl Panel {
         }
     }
 
-    /// Stage Selected Lines on a comparison of the working tree with the index, Unstage Selected
-    /// Lines on one of the index with HEAD, and nothing on the rest. What is written either way
-    /// is the index's text with the selected changes made or undone, worked out from the two
-    /// texts on screen, which are what the selection was made in.
-    fn offer_lines(self: &Rc<Self>, compare: &Compare, what: &What) {
-        let (label, unstage) = match what.sides {
-            Sides::Worktree => ("Stage Selected Lines", false),
-            Sides::Staged { .. } => ("Unstage Selected Lines", true),
+    /// Stage Selected Lines and Revert Selected Lines on a comparison of the working tree with
+    /// the index, Unstage Selected Lines on one of the index with HEAD, and nothing on the rest.
+    /// What is staged or unstaged is the index's text with the selected changes made or undone,
+    /// worked out from the two texts on screen, which are what the selection was made in.
+    fn offer_lines(self: &Rc<Self>, compare: &Rc<Compare>, what: &What) {
+        let (name, label, unstage) = match what.sides {
+            Sides::Worktree => ("stage", "Stage Selected Lines", false),
+            Sides::Staged { .. } => ("unstage", "Unstage Selected Lines", true),
             Sides::Deleted | Sides::Commit { .. } => return,
         };
         let (panel, repo, rel) = (Rc::downgrade(self), what.repo.clone(), what.rel.clone());
-        compare.offer(label, move |side, lines, old, new| {
+        let stage: OnLines = Box::new(move |side, lines, old, new| {
             let Some(panel) = panel.upgrade() else {
                 return;
             };
@@ -150,6 +151,25 @@ impl Panel {
             }
             panel.stage_text(repo.clone(), rel.clone(), text, unstage);
         });
+        let mut entries = vec![(name, label, stage)];
+        // The working tree is the file's own tab, so its side of the comparison is the editor:
+        // the selected lines go back to the index's there, as an edit Ctrl+Z takes back, and are
+        // saved as any edit is.
+        if !unstage {
+            let (panel, compare) = (Rc::downgrade(self), Rc::downgrade(compare));
+            let revert: OnLines = Box::new(move |side, lines, old, new| {
+                let (Some(panel), Some(compare)) = (panel.upgrade(), compare.upgrade()) else {
+                    return;
+                };
+                let text = diff::revert_lines(old, new, side, lines);
+                if text == new {
+                    return (panel.hooks.toast)("No changes in the selection");
+                }
+                compare.rewrite_mine(&text);
+            });
+            entries.push(("revert", "Revert Selected Lines", revert));
+        }
+        compare.offer(entries);
     }
 
     /// The working-tree comparison of `key`, for the bench: the vault root is the repository,
