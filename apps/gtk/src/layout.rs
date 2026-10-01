@@ -58,6 +58,12 @@ pub struct Presenting {
     pub sidebar: bool,
 }
 
+thread_local! {
+    /// The rule [`App::lift_toasts`] lifts the toasts by, on the display, and the height it was
+    /// written for: written again only when the status bar's height changes, with the text size.
+    static LIFT: RefCell<Option<(gtk::CssProvider, i32)>> = const { RefCell::new(None) };
+}
+
 /// What a window narrower than [`COLLAPSE`] puts back when it widens: whether the sidebar was up,
 /// and where the divider was. The divider has to be kept as well as the sidebar, because
 /// `GtkPaned` clamps it to a window narrower than it, and a dragged 400 px came back as 349 from a
@@ -289,6 +295,7 @@ impl App {
                 for pdf in self.pdfs() {
                     pdf.set_presenting(false);
                 }
+                self.lift_toasts(None);
                 self.sidebar_column.set_visible(before.sidebar);
                 self.toolbar.set_reveal_top_bars(true);
                 self.toolbar.set_reveal_bottom_bars(true);
@@ -323,6 +330,39 @@ impl App {
                 self.toolbar.contains(x, y) && y >= f64::from(self.toolbar.height() - height)
             });
         self.toolbar.set_reveal_bottom_bars(over);
+        // The toasts are part of the document the bar comes up over, so they go up with it.
+        self.lift_toasts(over.then_some(height));
+    }
+
+    /// Lift the toasts by `by` pixels, the status bar's height while it shows over a presented
+    /// document, or put them back down with `None`. A class over a rule written for that height,
+    /// so a toast that comes up while the bar shows goes up too, and the move eases over
+    /// `widgets::FADE_MS` (`build::install_chrome_css`).
+    fn lift_toasts(&self, by: Option<i32>) {
+        if let Some(by) = by {
+            LIFT.with_borrow_mut(|lift| {
+                if lift.as_ref().is_some_and(|(_, at)| *at == by) {
+                    return;
+                }
+                let provider = match lift.take() {
+                    Some((provider, _)) => provider,
+                    None => {
+                        let provider = gtk::CssProvider::new();
+                        gtk::style_context_add_provider_for_display(
+                            &WidgetExt::display(&self.window),
+                            &provider,
+                            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                        );
+                        provider
+                    }
+                };
+                provider.load_from_string(&format!(
+                    "toastoverlay.accent-lifted > toast {{ transform: translateY(-{by}px); }}"
+                ));
+                *lift = Some((provider, by));
+            });
+        }
+        crate::widgets::set_class(&self.toasts, "accent-lifted", by.is_some());
     }
 
     fn ensure_preview(self: &Rc<Self>) {

@@ -719,7 +719,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Presentation hides the sidebar, the other panes, the tab bars and both header bars, and shows the note rendered. The presented pane stays where it is in the pane tree with the branches beside it hidden, so its find bar and its `Ctrl+Tab` card stay its own and every divider is where it was afterwards; the rendered note is the preview laid over the pane's tabs. A tab that draws its own document — a PDF, an image, a diff, a terminal — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards. `Esc` leaves it, and the keyboard goes back to the document in front.
 - It does not resize the window: fullscreen stays `F11`'s, so the two compose.
 - The bars go through `AdwToolbarView::set_reveal_top_bars(false)`, not the opacity fade, which would leave an empty band; the pointer-motion reveal is off meanwhile.
-- The status bar alone comes back while the pointer rests on its strip at the bottom of the document column, over the document rather than pushing it up, so nothing reflows under the pointer; it goes when the pointer leaves the strip or the window.
+- The status bar alone comes back while the pointer rests on its strip at the bottom of the document column, over the document rather than pushing it up, so nothing reflows under the pointer; it goes when the pointer leaves the strip or the window. The toasts go up by its height while it shows and back down after it, so neither covers the other.
 - It is not saved in the session: a window restored without chrome would be hard to leave.
 
 ### Window
@@ -797,13 +797,13 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ## Motion
 
-- Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, and the card a held `Ctrl+Tab` shows. Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, the tabs a held `Ctrl+Tab` steps through, or a layout change (F9, a split, the preview). All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it. The other timings we own are debounces, which keep the main loop free.
+- Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, and the card a held `Ctrl+Tab` shows; the toasts slide out of the status bar's way over the same 150 ms in presentation mode. Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, the tabs a held `Ctrl+Tab` steps through, or a layout change (F9, a split, the preview). All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it. The other timings we own are debounces, which keep the main loop free.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.
 
 | Timer | Value | Where |
 |---|---|---|
 | Re-highlight after a keystroke | 150 ms | `editor/mod.rs::DEBOUNCE` |
-| A switch's crossfade, a page's fade in | 150 ms | `widgets.rs::FADE_MS` |
+| A switch's crossfade, a page's fade in, the toasts' lift over the status bar | 150 ms | `widgets.rs::FADE_MS` |
 | A PDF still opening shows a spinner | 160 ms | `pdf/tab.rs::OPENING` |
 | A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |
 | End-of-line messages cut again after a width change | 150 ms | `editor/mod.rs::DEBOUNCE` |
