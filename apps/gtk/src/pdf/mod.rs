@@ -4,8 +4,9 @@
 //! `geometry` lays the pages out, `cache` holds the rendered tiles, `tools` is the drawing
 //! tools' pure geometry and `ring` their options on the drawing ring, `protocol` is what crosses
 //! the channel to the render thread, `view` is the widget and `tab` the reader around it,
-//! `organize` moves, inserts and deletes pages from the thumbnail strip, and `export` writes the
-//! copy Export as PDF and Print hand on. Nothing under `view` calls pdfium.
+//! `organize` moves, inserts and deletes pages from the thumbnail strip, `export` writes the
+//! copy Export as PDF and Print hand on, and `source` is the page's half of SyncTeX. Nothing under
+//! `view` calls pdfium.
 //!
 //! The names below are what the rest of the window says `pdfview::` and `pdftab::` to reach.
 
@@ -18,6 +19,7 @@ pub mod protocol;
 pub mod render;
 pub mod ring;
 pub mod selection;
+mod source;
 pub mod tab;
 pub mod tools;
 pub mod view;
