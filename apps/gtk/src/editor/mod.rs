@@ -964,6 +964,19 @@ impl Tab {
         self.view.downcast_ref::<multicaret::View>()
     }
 
+    /// How many characters the selection holds, every caret's together. GTK's offsets count
+    /// characters, so no text is read whatever the size of the selection.
+    pub fn selected_chars(&self) -> usize {
+        let spans = match self.ghost_view() {
+            Some(view) => view.selections(),
+            None => self.buffer.selection_bounds().into_iter().collect(),
+        };
+        spans
+            .iter()
+            .map(|(start, end)| (end.offset() - start.offset()) as usize)
+            .sum()
+    }
+
     /// Whether this tab was built with ghost text wanted; read once by `ghost::install`.
     pub fn ghost_text_wanted(&self) -> bool {
         self.ghost_text.get()

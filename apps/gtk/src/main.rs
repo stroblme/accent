@@ -912,7 +912,19 @@ impl App {
             Some(Doc::Diagram(d)) => d.save.modified.get(),
             _ => false,
         });
+        self.sync_selection();
         self.sync_branch();
+    }
+
+    /// The status bar's count of what is selected in the text tab in front, or nothing where
+    /// nothing is.
+    fn sync_selection(&self) {
+        let chars = match self.active_doc() {
+            Some(Doc::Text(tab)) => tab.selected_chars(),
+            _ => 0,
+        };
+        let text = (chars > 0).then(|| statusbar::characters_label(chars));
+        self.statusbar.set_selected(text.as_deref());
     }
 
     /// Re-colour what this window paints itself rather than through GTK's CSS, after the theme or

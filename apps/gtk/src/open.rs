@@ -1524,6 +1524,35 @@ impl App {
                 }
             }
         ));
+        // The selection's count, once a turn however many marks moved: a column of carets moves
+        // one each, and taking a caret away deletes its marks.
+        let counting = Rc::new(Cell::new(false));
+        let count = Rc::new(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[weak]
+            tab,
+            move || {
+                if counting.replace(true) {
+                    return;
+                }
+                let counting = counting.clone();
+                // Ahead of the frame, and of GTK's own idles, which lay out a long note for
+                // seconds after it is selected whole.
+                glib::idle_add_local_full(glib::Priority::HIGH_IDLE, move || {
+                    counting.set(false);
+                    if app.is_active(&tab) {
+                        app.sync_selection();
+                    }
+                    glib::ControlFlow::Break
+                });
+            }
+        ));
+        tab.buffer.connect_mark_set({
+            let count = count.clone();
+            move |_, _, _| count()
+        });
+        tab.buffer.connect_mark_deleted(move |_, _| count());
         // The chrome hides on the keystroke itself, not on the debounce that follows it.
         tab.buffer.connect_changed(glib::clone!(
             #[weak(rename_to = app)]

@@ -66,6 +66,8 @@ pub struct Bar {
     /// The zoom readout, which is also the control that resets it.
     zoom: gtk::Button,
     zoom_label: gtk::Label,
+    /// How much is selected in a text tab, while anything is.
+    selected: gtk::Label,
 }
 
 impl Bar {
@@ -99,6 +101,7 @@ impl Bar {
         // and Fit Height for a PDF.
         let zoom_label = label(true);
         let zoom = bar_button(&zoom_label, Some("win.zoom-reset"), "Reset Zoom");
+        let selected = label(true);
 
         row.append(&progress);
         row.append(&index);
@@ -110,6 +113,8 @@ impl Bar {
         row.append(&unsaved);
         row.append(&facts);
         row.append(&zoom);
+        // Last, at the corner: it comes and goes with the selection, and moves nothing as it does.
+        row.append(&selected);
 
         Bar {
             row,
@@ -128,6 +133,7 @@ impl Bar {
             facts,
             zoom,
             zoom_label,
+            selected,
         }
     }
 
@@ -283,6 +289,11 @@ impl Bar {
         self.zoom.set_visible(text.is_some());
     }
 
+    /// What a selection in a text tab holds ([`characters_label`]), or `None` for none.
+    pub fn set_selected(&self, text: Option<&str>) {
+        set(&self.selected, text);
+    }
+
     /// The zoom control itself, which the window hangs its Fit Width / Fit Height menu off.
     pub fn zoom(&self) -> &gtk::Widget {
         self.zoom.upcast_ref()
@@ -346,6 +357,13 @@ pub fn words_label(count: usize) -> String {
     match count {
         1 => "1 word".to_string(),
         n => format!("{n} words"),
+    }
+}
+
+pub fn characters_label(count: usize) -> String {
+    match count {
+        1 => "1 character".to_string(),
+        n => format!("{n} characters"),
     }
 }
 
@@ -466,6 +484,12 @@ mod tests {
         assert_eq!(words_label(0), "0 words");
         assert_eq!(words_label(1), "1 word");
         assert_eq!(words_label(42), "42 words");
+    }
+
+    #[test]
+    fn characters_label_says_one_character_in_the_singular() {
+        assert_eq!(characters_label(1), "1 character");
+        assert_eq!(characters_label(42), "42 characters");
     }
 
     #[test]
