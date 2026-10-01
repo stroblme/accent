@@ -223,9 +223,20 @@ pub fn open(
     overlay.add_overlay(ring.widget());
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
     host.append(&overlay);
-    let stack = gtk::Stack::new();
+    let stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .transition_duration(crate::widgets::FADE_MS)
+        .build();
     stack.add_named(&host, Some("view"));
     stack.add_named(&status, Some("status"));
+    // In place of the empty pages while a document is slow to open: see [`OPENING`].
+    let spinner = adw::Spinner::builder()
+        .width_request(32)
+        .height_request(32)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    stack.add_named(&spinner, Some("opening"));
 
     let page = tabs.append(&stack);
     page.set_title(title);
@@ -333,8 +344,26 @@ pub fn open(
     // vault the bytes are still to be fetched. The tab goes up empty and fills in when the render
     // thread reports back, so the window is on screen in the time it takes to build a widget.
     tab.stack.set_visible_child_name("view");
+    glib::timeout_add_local_once(
+        OPENING,
+        glib::clone!(
+            #[weak]
+            tab,
+            move || {
+                let empty = tab.stack.visible_child_name().as_deref() == Some("view");
+                if empty && tab.pending.get().is_some() {
+                    tab.stack.set_visible_child_name("opening");
+                }
+            }
+        ),
+    );
     tab
 }
+
+/// How long a document may take to open before a spinner takes the place of its empty pages: as
+/// long as a search waits before its progress bar (DESIGN.md, Loading), so one that opens at once
+/// never shows one.
+const OPENING: std::time::Duration = std::time::Duration::from_millis(160);
 
 impl PdfTab {
     pub fn key(&self) -> String {
@@ -1602,8 +1631,16 @@ impl PdfTab {
                 self.view.set_sizes(sizes.clone());
                 self.thumbs.set_sizes(sizes);
                 match self.pending.take() {
-                    // The document just opened: go where the session left the reader.
-                    Some(place) => self.view.goto_page(place.page, None),
+                    // The document just opened: go where the session left the reader, the pages
+                    // fading in, or crossfading from the spinner that was up in their place. A
+                    // reload, which a LaTeX build makes every few seconds, just shows them.
+                    Some(place) => {
+                        self.view.goto_page(place.page, None);
+                        match self.stack.visible_child_name().as_deref() {
+                            Some("opening") => self.stack.set_visible_child_name("view"),
+                            _ => crate::widgets::fade_in(&self.view),
+                        }
+                    }
                     None => self.view.scroll_to(anchor),
                 }
                 self.ask(Request::Outline);
