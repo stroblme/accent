@@ -10,6 +10,6 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 # Reading only: the writer is a string builder of our own over `quick_xml::escape`.
-quick-xml = "0.41"
+quick-xml = "0.42"
 # Raw inflate for the compressed `<diagram>` form; we never write it.
 miniz_oxide = "0.9"
