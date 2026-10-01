@@ -26,12 +26,24 @@ impl App {
         out: Option<bool>,
         at: Option<(f64, f64)>,
     ) {
+        let zoom = out
+            .zip(image_zoom(image))
+            .map(|(out, from)| stepped_zoom(from, out));
+        self.zoom_image_to(image, zoom, at);
+    }
+
+    /// Draw an image at `zoom`, or fitted to the window with `None`, keeping what is under `at`
+    /// where it is: a step's, or a pinch's, which hands over the zoom its fingers reached.
+    pub fn zoom_image_to(
+        self: &Rc<Self>,
+        image: &Rc<doc::Viewer>,
+        zoom: Option<f64>,
+        at: Option<(f64, f64)>,
+    ) {
         let Some(picture) = picture_of(&image.page) else {
             return;
         };
-        let zoom = out.zip(image_zoom(image, &picture)).map(|(out, from)| {
-            stepped_zoom(from, out).clamp(pdfview::MIN_SCALE, pdfview::MAX_SCALE)
-        });
+        let zoom = zoom.map(|zoom| zoom.clamp(pdfview::MIN_SCALE, pdfview::MAX_SCALE));
         image.zoom.set(zoom);
         let size = set_image_zoom(&picture, zoom);
         if let (Some(size), Ok(scroller)) =
@@ -109,10 +121,11 @@ impl App {
 }
 
 /// What an image is drawn at: its own zoom, or the scale the window fitted it to.
-fn image_zoom(image: &doc::Viewer, picture: &gtk::Picture) -> Option<f64> {
+pub fn image_zoom(image: &doc::Viewer) -> Option<f64> {
     if let Some(zoom) = image.zoom.get() {
         return Some(zoom);
     }
+    let picture = picture_of(&image.page)?;
     let paintable = picture.paintable()?;
     let (w, h) = (paintable.intrinsic_width(), paintable.intrinsic_height());
     if w <= 0 || h <= 0 {

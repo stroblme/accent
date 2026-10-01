@@ -107,7 +107,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use wire::{choice_row, wire_pane, wire_tree, wire_window, written_at};
-use zoom::{picture_of, stepped_zoom, zoom_on_wheel};
+use zoom::{picture_of, stepped_zoom, zoom_on_pinch, zoom_on_wheel};
 
 const APP_ID: &str = "io.github.stroblme.Accent";
 

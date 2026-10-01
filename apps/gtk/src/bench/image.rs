@@ -20,7 +20,9 @@ use webkit6::prelude::*;
 /// `=anchor:<rel>` instead zooms the image around a point two fifths into the view, as a
 /// Ctrl+wheel there does, forty steps in from the fit and ten out, then once in by the chord,
 /// printing after each where in the image the point is (`under`, in fractions of it), and the
-/// middle of the view for the chord. Once the image is larger than the view, neither moves.
+/// middle of the view for the chord. Once the image is larger than the view, neither moves. Then
+/// two pinches around the same point, to one and a half times the zoom and back to half of that,
+/// handed the zoom the fingers reached as a pinch hands it over (`App::zoom_image_to`).
 pub(super) fn bench_image(app: &Rc<App>, arg: &str) {
     if let Some(rels) = arg.strip_prefix("zoom:") {
         return zoom_svgs(app, rels);
@@ -122,6 +124,13 @@ fn zoom_around(app: &Rc<App>, rel: &str) {
         let _ = WidgetExt::activate_action(&app.window, "win.zoom-in", None);
         glib::timeout_future(Duration::from_millis(100)).await;
         anchor_state(&image, &scroller, middle, "chord");
+        for scale in [1.5, 0.5] {
+            let from = crate::zoom::image_zoom(&image).unwrap_or(1.0);
+            let zoom = crate::zoom::pinched_zoom(from, scale);
+            app.zoom_image_to(&image, Some(zoom), Some(at));
+            glib::timeout_future(Duration::from_millis(100)).await;
+            anchor_state(&image, &scroller, at, &format!("pinch={scale}"));
+        }
         bench_quit(&app);
     });
 }
