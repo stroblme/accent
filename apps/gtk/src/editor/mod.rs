@@ -354,6 +354,9 @@ pub struct Tab {
     monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while we replace the buffer text ourselves, so `changed` does not mark it dirty.
     loading: Cell<bool>,
+    /// How many times [`Tab::set_text`] has replaced the whole text, which puts every mark in
+    /// the buffer at its start: a history place's mark from before one says nothing.
+    replaced: Cell<u32>,
     /// The last template pushed into the view, kept only to ask whether its stops are still being
     /// walked: a snippet drops its buffer when it finishes, so that is the question's answer.
     snippet: RefCell<Option<sourceview5::Snippet>>,
@@ -533,11 +536,18 @@ impl Tab {
     /// file used to hold until the next keystroke.
     pub fn set_text(self: &Rc<Self>, text: &str) {
         self.save.edits.set(self.save.edits.get() + 1);
+        self.replaced.set(self.replaced.get() + 1);
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
         self.analyse();
         lang::changed(self);
+    }
+
+    /// How many times the whole text has been replaced, by a reload or the like: a mark set
+    /// before the last one is at the start of the text rather than where it was.
+    pub fn replaced(&self) -> u32 {
+        self.replaced.get()
     }
 
     /// Whether the buffer is being replaced by us rather than typed in. The handlers that watch

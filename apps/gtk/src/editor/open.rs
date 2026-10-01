@@ -285,6 +285,7 @@ pub fn open(
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
+        replaced: Cell::new(0),
         snippet: RefCell::new(None),
         paste_link,
         debounce: crate::widgets::Debounce::new(DEBOUNCE),

@@ -532,8 +532,12 @@ impl App {
         if let Some(Doc::Terminal(term)) = self.doc_for_page(page) {
             term.kill();
         }
-        if let Some((pane, doc)) = self.pane_of(page).zip(self.doc_for_page(page)) {
-            pane.nav.borrow_mut().forget(&doc.key());
+        // Every pane's: a tab moved out of one leaves its places there, and a caret's place
+        // holds a mark in its buffer.
+        if let Some(doc) = self.doc_for_page(page) {
+            for pane in self.panes.borrow().iter() {
+                pane.nav.borrow_mut().forget(&doc.key());
+            }
         }
         self.docs.borrow_mut().retain(|d| d.page() != page);
         self.pinned.borrow_mut().retain(|p| p != page);

@@ -640,7 +640,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Back / Forward `Alt+Left` / `Alt+Right`, and the mouse's side buttons (8 and 9) through the same actions.
 - **One history per pane**, of places rather than tabs: a document and a position in it, a caret or a PDF's page anchor. Back may switch tabs within the pane and never moves the keyboard to another pane, which owns its document as it owns its find bar. A PDF's page edit takes its places with the pages.
 - What goes in is a jump — a wikilink followed, a search hit opened, Go to Definition or References landing, a page or line typed into Go to Line, a find's first step (so Back returns to where the search began), a switch to another document in the pane — and an edit, coalesced: keystrokes within ten lines and ten seconds of the last entry replace it, so a typed paragraph leaves one mark.
-- A hundred places. Closing a tab drops its places, nothing being left to go back into.
+- A hundred places. Closing a tab drops its places, in every pane, nothing being left to go back into.
+- **A caret's place is a mark in its buffer**, so Back lands on the character the reader left however the text around it was edited since; a mark dies with its place. Where the whole text was replaced since, a reload from disk, it lands on the line and column the place was taken at.
 
 ### Zoom
 
