@@ -20,12 +20,12 @@ DATADIR   ?= $(PREFIX)/share
 # libpdfium is a 7 MB binary, so it is not in git: `make pdfium` fetches the matching build from
 # bblanchon/pdfium-binaries. Bump PDFIUM_BUILD and every checksum below it together; the release
 # publishes one per asset.
-PDFIUM_BUILD  := 8035
+PDFIUM_BUILD  := 8076
 PDFIUM_RELEASE := https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$(PDFIUM_BUILD)
 # The desktop build follows the machine rather than assuming x86-64.
 PDFIUM_ARCH   := $(if $(filter aarch64,$(shell uname -m)),arm64,x64)
 PDFIUM_URL    := $(PDFIUM_RELEASE)/pdfium-linux-$(PDFIUM_ARCH).tgz
-PDFIUM_SHA256_x64   := 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
+PDFIUM_SHA256_x64   := d9d67bc40af03aef4fe28a60b19b1086f28ace019c8c9caf19cb7fe3d14ceca3
 PDFIUM_SHA256_arm64 :=
 PDFIUM_SHA256 := $(PDFIUM_SHA256_$(PDFIUM_ARCH))
 PDFIUM_LIB    := vendor/pdfium/libpdfium.so
@@ -35,8 +35,8 @@ PDFIUM_LIB    := vendor/pdfium/libpdfium.so
 # then finds it by name — which is how `Pdfium::bind_to_system_library` gets hold of it.
 ANDROID_ABIS  := arm64-v8a x86_64
 JNI_LIBS      := android/app/src/main/jniLibs
-PDFIUM_SHA256_android_arm64-v8a := 22280f42b38dc86919c93988d5cef8e39e0ab6d880a7b953531ed9775724bcdf
-PDFIUM_SHA256_android_x86_64    := 67a1865b961e9c58d1ada607e8b40c685685cc34de29aa6242c0ba588f4691ff
+PDFIUM_SHA256_android_arm64-v8a := b7a6919dc130dfdf7e409bd1762ed2a306408c4faee1173668837fc446217bf7
+PDFIUM_SHA256_android_x86_64    := 9d043689096c7cdd4ca98fff95599be115b2a38feba0c68d2a79ba5eedbda415
 # `jniLibs` is named by ABI, the pdfium release by architecture.
 PDFIUM_ASSET_arm64-v8a := arm64
 PDFIUM_ASSET_x86_64    := x64
