@@ -1073,6 +1073,9 @@ fn install_chrome_css() {
                background-color: transparent; \
                box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 25%, transparent); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
+             .accent-switcher {{ background-color: var(--popover-bg-color); \
+               color: var(--popover-fg-color); border-radius: 12px; \
+               box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
              .accent-statusbar {{ padding: 6px 12px; }} \
              .accent-ring-tool, .accent-ring-hub {{ min-width: 0; min-height: 0; padding: 0; \
                box-shadow: 0 1px 4px var(--shade-color); }} \

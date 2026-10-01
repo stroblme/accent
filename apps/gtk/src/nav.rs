@@ -38,10 +38,55 @@ impl App {
     /// were last used. Per pane, because a pane owns its tab view and its bar is what says which
     /// notes are in it; a window-wide order would have to move the keyboard across a split, which
     /// is not what a split is for.
-    pub fn cycle_tab(&self, forward: bool) {
+    ///
+    /// Held a moment, the chord lists the pane's tabs on a card over it; a quick flip to the last
+    /// note shows nothing.
+    pub fn cycle_tab(self: &Rc<Self>, forward: bool) {
         let pane = self.pane();
         if let Some(page) = pane.step(forward) {
             pane.tabs.set_selected_page(&page);
+        }
+        if pane.switcher.shown() {
+            return self.show_switcher(&pane);
+        }
+        let (app, held) = (Rc::downgrade(self), Rc::downgrade(&pane));
+        pane.switcher.soon(move || {
+            if let (Some(app), Some(pane)) = (app.upgrade(), held.upgrade())
+                && pane.cycling().is_some()
+            {
+                app.show_switcher(&pane);
+            }
+        });
+    }
+
+    /// Fill `pane`'s card with its tabs.
+    fn show_switcher(&self, pane: &Pane) {
+        let entries: Vec<switcher::Entry> = pane
+            .recent()
+            .iter()
+            .map(|page| self.switcher_entry(page))
+            .collect();
+        pane.switcher.show(&entries, pane.cycling().unwrap_or(0));
+    }
+
+    /// A file by its file-type icon and its folder, as the file lists show it; a shell or a
+    /// comparison by its tab's own icon and title.
+    fn switcher_entry(&self, page: &adw::TabPage) -> switcher::Entry {
+        let name = page.title().to_string();
+        match self.doc_for_page(page).filter(|doc| !doc.is_transient()) {
+            Some(doc) => {
+                let key = doc.key();
+                switcher::Entry {
+                    icon: Some(gio::ThemedIcon::new(doc::icon_for(&key)).upcast()),
+                    name,
+                    folder: accent_core::path::parent_dir(&key).to_string(),
+                }
+            }
+            None => switcher::Entry {
+                icon: page.icon(),
+                name,
+                folder: String::new(),
+            },
         }
     }
 
@@ -52,6 +97,14 @@ impl App {
         for pane in self.panes.borrow().iter() {
             pane.end_cycle();
         }
+    }
+
+    /// Escape with Ctrl still held: the chord goes back to the tab it started from. Says whether
+    /// a chord was in flight, which is then all the press does.
+    pub fn cancel_cycle(&self) -> bool {
+        // A copy: going back selects a tab, and the selection handlers reach the panes too.
+        let panes = self.panes.borrow().clone();
+        panes.iter().any(|pane| pane.cancel_cycle())
     }
 
     // --- back and forward ---------------------------------------------------------------------

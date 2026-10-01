@@ -278,7 +278,8 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A tab dragged into another window moves there, its buffer written first. One vault never having two windows, it arrives from another vault and is adopted as a file from outside a vault: it edits and saves, without index, backlinks or wikilink resolution. A shell, a comparison and a remote vault's file cannot be reopened elsewhere, so they go back to their window with a toast; so does a tab let go outside every window.
 - **Move to New Window** on the tab menu is the same move into a window built for it, with no vault (Window without a vault); the Files tree's **Open in New Window** opens a file in such a window and leaves it open wherever else it is. Neither is offered where the move above is refused: on a shell, a comparison or anything of a remote vault's.
 - **Which tab is selected is decided by use, not position.** Each pane keeps its tabs in most-recently-selected order: `Ctrl+Tab` steps along it and `Ctrl+Shift+Tab` back, and closing a tab falls back to the most recently used one left. Per pane, because a window-wide order would move the keyboard across a split.
-- While Ctrl is held each Tab steps one deeper without reordering, so three presses are three tabs back; the release commits the tab landed on, and a press past the end comes round. Nothing is shown meanwhile — VS Code's idiom without its overlay, for a chord mostly used for the last two notes. A selection from anywhere else ends the chord, so a lost release never strands the pane.
+- While Ctrl is held each Tab steps one deeper without reordering, so three presses are three tabs back; the release commits the tab landed on, and a press past the end comes round. A selection from anywhere else ends the chord, so a lost release never strands the pane.
+- **A chord held 200 ms lists the pane's tabs** on a card centred over that pane, VS Code's overlay: most recently used first, a file by its file-type icon, its name and its folder dimmed, as the file lists show it, a shell or a comparison by its tab's own icon and title, and the tab the release will land on highlighted. A quick flip to the last note never shows it. Ten rows at most, fewer where the pane is shorter, scrolled to keep the highlighted one on the card. The card takes no keyboard, so the chord's keys stay the window's over a shell too: a click on a row ends the chord there, and Escape ends it back on the tab it started from. Over its pane, not the window, so a split's other panes stay clear; a `.navigation-sidebar` list, the palette's rows, on the popover's surface (`switcher.rs`).
 - **A tab opened by browsing is a preview** (VS Code's idiom): a click on a tree row, a search hit, a tag, a backlink, an outline heading or a Git changed file, and a wikilink followed. A pane holds at most one and the next such open replaces it, so clicking down a list leaves one tab, not twenty. What the reader named is kept: the palette, Open File…, a drop, a rename, the command line, the session.
 - A preview is kept once edited, double-clicked, its eye clicked, or moved out of its pane — each the reader saying they want it. A restored tab is always kept.
 - **The eye is the mark**: `view-reveal-symbolic` in the indicator slot, tooltipped Preview — Click to Keep, gone once kept. `AdwTabPage` takes no style class and no title markup, so VS Code's italics are not available and the indicator is the one slot that can speak and be clicked. Outside this vault wins the slot, saying more. A preview alone in a pane has no bar to double-click, which costs nothing: it is replaced in place, and editing still keeps it.
@@ -666,7 +667,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 ### Dismiss
 
 - `Escape` is the way out of whatever is up, one thing per press.
-- In presentation mode it ends presentation and does nothing else, ahead of everything, so a presented shell or preview cannot keep it.
+- While a `Ctrl+Tab` chord is held it goes back to the tab the chord started from and does nothing else, ahead of everything: the chord is what is up, its card on screen or not.
+- In presentation mode it ends presentation and does nothing else, ahead of the rest, so a presented shell or preview cannot keep it.
 - Otherwise it brings the hidden chrome back, takes no key from anyone, and the nearest thing over the document takes it: a signature popover; failing that, the focused pane's find or go-to-line bar, from the bar or the document (only that pane's, so a query in the other half of a split survives); failing that, the comparison the pane's tab hosts stops, as Stop Comparing does. A diff that is a tab of its own is closed like any tab.
 - It has no `GAction` and no palette entry: it names no one thing.
 
@@ -791,7 +793,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ## Motion
 
-- Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, and the PDF's "Cannot Open" page. Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, the tabs a held `Ctrl+Tab` steps through, or a layout change (F9, a split, the preview). All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it. The other timings we own are debounces, which keep the main loop free.
+- Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, and the card a held `Ctrl+Tab` shows. Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, the tabs a held `Ctrl+Tab` steps through, or a layout change (F9, a split, the preview). All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it. The other timings we own are debounces, which keep the main loop free.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.
 
 | Timer | Value | Where |
@@ -799,6 +801,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 | Re-highlight after a keystroke | 150 ms | `editor/mod.rs::DEBOUNCE` |
 | A switch's crossfade, a page's fade in | 150 ms | `widgets.rs::FADE_MS` |
 | A PDF still opening shows a spinner | 160 ms | `pdf/tab.rs::OPENING` |
+| A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |
 | End-of-line messages cut again after a width change | 150 ms | `editor/mod.rs::DEBOUNCE` |
 | Palette query | 50 ms | `palette.rs::DEBOUNCE` |
 | Search progress pulse | 80 ms | `sidebar/search.rs::PULSE` |
