@@ -1053,9 +1053,10 @@ fn dim(c: gdk::RGBA, alpha: f32) -> String {
 fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) -> String {
     let (text, accent) = (css_rgba(fg), css_rgba(accent));
     let (surface, quote, rule) = (dim(fg, 0.07), dim(fg, 0.6), dim(fg, 0.15));
+    let page = gdk::RGBA::parse(bg).unwrap_or(gdk::RGBA::WHITE);
     let tints: String = ["current", "base", "incoming"]
         .into_iter()
-        .zip(crate::conflict::tints(fg))
+        .zip(crate::conflict::tints(fg, page))
         .map(|(side, (body, head))| {
             format!(
                 ".conflict-{side} {{ background: {}; }}\n\
@@ -1163,9 +1164,10 @@ mod tests {
     #[test]
     fn theme_css_tints_a_conflict_as_the_editor_does() {
         let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0);
+        let page = gdk::RGBA::parse(theme::view_bg(false)).unwrap();
         for (side, (body, head)) in ["current", "base", "incoming"]
             .into_iter()
-            .zip(crate::conflict::tints(FG))
+            .zip(crate::conflict::tints(FG, page))
         {
             let rule = format!(".conflict-{side} {{ background: {}; }}", css_rgba(body));
             assert!(css.contains(&rule), "{rule} in {css}");
