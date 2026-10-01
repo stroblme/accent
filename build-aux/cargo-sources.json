@@ -1614,14 +1614,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/notify-debouncer-full/notify-debouncer-full-0.6.0.crate",
-        "sha256": "375bd3a138be7bfeff3480e4a623df4cbfb55b79df617c055cd810ba466fa078",
-        "dest": "cargo/vendor/notify-debouncer-full-0.6.0"
+        "url": "https://static.crates.io/crates/notify-debouncer-full/notify-debouncer-full-0.7.0.crate",
+        "sha256": "c02b49179cfebc9932238d04d6079912d26de0379328872846118a0fa0dbb302",
+        "dest": "cargo/vendor/notify-debouncer-full-0.7.0"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"375bd3a138be7bfeff3480e4a623df4cbfb55b79df617c055cd810ba466fa078\", \"files\": {}}",
-        "dest": "cargo/vendor/notify-debouncer-full-0.6.0",
+        "contents": "{\"package\": \"c02b49179cfebc9932238d04d6079912d26de0379328872846118a0fa0dbb302\", \"files\": {}}",
+        "dest": "cargo/vendor/notify-debouncer-full-0.7.0",
         "dest-filename": ".cargo-checksum.json"
     },
     {

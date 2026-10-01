@@ -22,7 +22,7 @@ rusqlite = { version = "0.38", features = ["bundled", "functions"] }
 nucleo-matcher = "0.3"
 ignore = "0.4"
 notify = "8"
-notify-debouncer-full = "0.6"
+notify-debouncer-full = "0.7"
 tempfile.workspace = true
 # `simd` for the scanner and `html` for the preview, on top of the workspace's plain parser.
 pulldown-cmark = { workspace = true, features = ["simd", "html"] }
