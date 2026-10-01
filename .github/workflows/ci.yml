@@ -10,7 +10,7 @@ jobs:
     name: core + api + cli
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # rust-analyzer (with rust-src, the std it reads) is for accent-api's end-to-end LSP tests.
       # Without the component rustup's `rust-analyzer` proxy is still on PATH, so the tests do
       # not skip: the proxy exits at once and they fail.
@@ -47,7 +47,7 @@ jobs:
           gtksourceview5-devel webkitgtk6.0-devel libspelling-devel vte291-gtk4-devel
           xorg-x11-server-Xvfb dbus-daemon
           dejavu-sans-fonts
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -79,7 +79,7 @@ jobs:
       # them with. r27+ links 16 KB pages by default; `.cargo/config.toml` asks for them anyway.
       NDK_VERSION: 28.2.13676358
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # rust-analyzer and rust-src: `make android-check` runs accent-api's LSP tests too.
       - uses: dtolnay/rust-toolchain@stable
         with:
