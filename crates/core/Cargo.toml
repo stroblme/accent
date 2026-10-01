@@ -41,7 +41,7 @@ chrono.workspace = true
 # with it (`git::bounded`).
 libc = "0.2"
 # Already compiled in for `accent-drawio`; it inflates a `.synctex.gz` (`synctex`).
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 # Held at 0.9.3: 0.9.4 makes `PdfiumLibraryBindingsAccessor` crate-private again, and the raw calls
 # pdfium-render does not wrap (`/InkList` in `pdf::annot`, `FPDF_MovePages` in `pdf::pages`) reach
 # pdfium through it.
