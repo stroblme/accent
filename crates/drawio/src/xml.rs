@@ -80,17 +80,17 @@ fn tree(xml: &str) -> Result<Element, Error> {
             }
             Event::Text(text) => {
                 if let Some(top) = open.last_mut() {
-                    top.text.push_str(&text.xml10_content().map_err(xml_error)?);
+                    top.text.push_str(&text.xml10_content());
                 }
             }
             Event::CData(data) => {
                 if let Some(top) = open.last_mut() {
-                    top.text.push_str(&data.decode().map_err(xml_error)?);
+                    top.text.push_str(&data);
                 }
             }
             // `&lt;`, `&#10;` and the like between runs of text.
             Event::GeneralRef(reference) => {
-                let reference = format!("&{};", reference.decode().map_err(xml_error)?);
+                let reference = format!("&{};", &*reference);
                 let text = quick_xml::escape::unescape(&reference).map_err(xml_error)?;
                 if let Some(top) = open.last_mut() {
                     top.text.push_str(&text);
@@ -128,18 +128,13 @@ fn element(start: &BytesStart) -> Result<Element, Error> {
         let value = attr
             .normalized_value(XmlVersion::Implicit1_0)
             .map_err(xml_error)?;
-        attrs.push((utf8(attr.key.as_ref()), value.into_owned()));
+        attrs.push((attr.key.into_inner().to_string(), value.into_owned()));
     }
     Ok(Element {
-        name: utf8(start.name().as_ref()),
+        name: start.name().into_inner().to_string(),
         attrs,
         ..Element::default()
     })
-}
-
-/// Names come out of a `&str`, so they are always UTF-8.
-fn utf8(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn xml_error(e: impl std::fmt::Display) -> Error {
@@ -679,6 +674,15 @@ mod tests {
         assert_eq!(extra.attr("key"), Some("k"));
         let g = file.pages[1].cell("s").unwrap().geometry.clone().unwrap();
         assert_eq!(g.attrs, [("foo".into(), "1".into())]);
+    }
+
+    #[test]
+    fn a_carriage_return_in_text_survives_a_round_trip() {
+        // Written as it is, `\r` would be read back as `\n`: XML reads every line ending as one.
+        let file = parse(FIXTURE.replace("kept &amp;", "kept&#13;&amp;").as_bytes()).unwrap();
+        let extra = &file.pages[0].cell("u").unwrap().extra[0];
+        assert_eq!(extra.text, "kept\r& <safe>");
+        assert_eq!(parse(write(&file).as_bytes()).unwrap(), file);
     }
 
     #[test]

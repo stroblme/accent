@@ -39,15 +39,15 @@ modules:
 
   # Cargo feature `pdf`. pdfium-render dlopen()s libpdfium.so at runtime and accent-core looks
   # next to the binary first (crates/core/src/pdf.rs), so /app/bin/accent finds /app/lib/accent
-  # with no environment variable. Build 8035 matches what `make pdfium` puts in vendor/pdfium.
+  # with no environment variable. Build 8076 matches what `make pdfium` puts in vendor/pdfium.
   - name: pdfium
     buildsystem: simple
     build-commands:
       - install -Dm755 lib/libpdfium.so -t /app/lib/accent
     sources:
       - type: archive
-        url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-x64.tgz
-        sha256: 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
+        url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8076/pdfium-linux-x64.tgz
+        sha256: d9d67bc40af03aef4fe28a60b19b1086f28ace019c8c9caf19cb7fe3d14ceca3
         # The archive has no top-level directory: lib/ and LICENSE sit at its root.
         strip-components: 0
 

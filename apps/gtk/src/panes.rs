@@ -12,6 +12,7 @@
 
 use crate::find;
 use crate::pdfview::Anchor;
+use crate::switcher::Switcher;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
 use std::cell::{Cell, RefCell};
@@ -494,6 +495,9 @@ pub struct Pane {
     /// How deep into `history` a held `Ctrl+Tab` has walked, `None` when no chord is in flight.
     /// See [`Pane::step`].
     cycling: Cell<Option<usize>>,
+    /// The card a chord held a moment lists `history` on, `cycling` highlighted. An overlay child
+    /// over the document, so a split's other panes stay clear.
+    pub switcher: Switcher,
     /// Back and forward across this pane's documents. See [`Nav`].
     pub nav: RefCell<Nav>,
     /// The preview tab, if this pane has one: the tab a single click in the sidebar or a followed
@@ -533,6 +537,8 @@ impl Pane {
 
         let overlay = gtk::Overlay::builder().child(&tabs).build();
         overlay.add_overlay(&hint);
+        let switcher = Switcher::new();
+        overlay.add_overlay(switcher.widget());
 
         let find = find::Bar::new();
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -553,10 +559,17 @@ impl Pane {
             drop,
             history: RefCell::new(Vec::new()),
             cycling: Cell::new(None),
+            switcher,
             nav: RefCell::new(Nav::default()),
             preview: RefCell::new(None),
         });
         pane.wire_preview();
+        let weak = Rc::downgrade(&pane);
+        pane.switcher.connect_pick(move |at| {
+            if let Some(pane) = weak.upgrade() {
+                pane.pick(at);
+            }
+        });
         pane
     }
 
@@ -619,6 +632,7 @@ impl Pane {
                 return;
             }
             self.cycling.set(None);
+            self.switcher.hide();
         }
         let mut order = self.recent();
         to_front(&mut order, page);
@@ -640,13 +654,8 @@ impl Pane {
 
     /// One step of `Ctrl+Tab`: one deeper into the order the tabs were last used in, the order
     /// itself left alone until the chord ends. Three presses are three tabs back, and
-    /// `Ctrl+Shift+Tab` walks the same cursor the other way.
-    ///
-    /// ponytail: nothing is shown on screen while the chord is held. This is the cheap half of
-    /// VS Code's idiom — the deferred reorder without the modal overlay that lists the tabs and
-    /// says where the cursor is, which is a widget, a keyboard grab and a paint of its own. The
-    /// overlay is the upgrade path; the order it would list is [`Pane::recent`] and the cursor it
-    /// would highlight is `cycling`, so it is a view over what is already here.
+    /// `Ctrl+Shift+Tab` walks the same cursor the other way. The card held chords show
+    /// ([`Pane::switcher`]) lists [`Pane::recent`] and highlights this cursor.
     pub fn step(&self, forward: bool) -> Option<adw::TabPage> {
         let order = self.recent();
         let at = cycle_to(order.len(), self.cycling.get().unwrap_or(0), forward);
@@ -654,15 +663,45 @@ impl Pane {
         order.get(at).cloned()
     }
 
+    /// Where a held `Ctrl+Tab` has walked to in [`Pane::recent`], `None` with no chord in flight.
+    pub fn cycling(&self) -> Option<usize> {
+        self.cycling.get()
+    }
+
     /// Ctrl came up: the tab the chord landed on is the most recently used one now. A no-op when
     /// no chord is in flight, which is what every other Ctrl release is.
     pub fn end_cycle(&self) {
+        self.switcher.hide();
         if self.cycling.take().is_none() {
             return;
         }
         if let Some(page) = self.tabs.selected_page() {
             self.touch(&page);
         }
+    }
+
+    /// End the chord on the `at`th tab in [`Pane::recent`], as if Ctrl had come up there: a
+    /// click on the card's row. Stepped to rather than picked, so it does not fade in either.
+    pub fn pick(&self, at: usize) {
+        let Some(page) = self.recent().get(at).cloned() else {
+            return;
+        };
+        if self.cycling.get().is_none() {
+            return;
+        }
+        self.cycling.set(Some(at));
+        self.tabs.set_selected_page(&page);
+        self.end_cycle();
+    }
+
+    /// Escape while the chord is held: back to the tab it started from, the order as it was.
+    /// Says whether there was a chord to call off.
+    pub fn cancel_cycle(&self) -> bool {
+        let held = self.cycling.get().is_some();
+        if held {
+            self.pick(0);
+        }
+        held
     }
 
     // --- preview tabs ----------------------------------------------------------------------

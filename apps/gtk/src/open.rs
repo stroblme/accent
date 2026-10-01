@@ -856,6 +856,29 @@ impl App {
                 }
             ),
         );
+        // Two fingers zoom it in the wheel's tenths, around the point between them, as a PDF
+        // page does; on the scroller for the same reason.
+        let (viewer, pinched) = (Rc::downgrade(&image), Rc::downgrade(&image));
+        zoom_on_pinch(
+            &scroller,
+            move || {
+                pinched
+                    .upgrade()
+                    .and_then(|image| zoom::image_zoom(&image))
+                    .unwrap_or(1.0)
+            },
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |zoom, at| {
+                    if let Some(image) = viewer.upgrade()
+                        && image.zoom.get() != Some(zoom)
+                    {
+                        app.zoom_image_to(&image, Some(zoom), Some(at));
+                    }
+                }
+            ),
+        );
         // The decoder needs real bytes, and the protocol deliberately carries none.
         let viewer = Rc::downgrade(&image);
         self.local_copy(key, path, move |app, copy| {
