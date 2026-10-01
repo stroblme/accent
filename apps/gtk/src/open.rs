@@ -326,7 +326,10 @@ impl App {
         pdf.connect_saved(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |pdf| app.push_pdf(pdf)
+            move |pdf| {
+                app.synctex_written(pdf);
+                app.push_pdf(pdf);
+            }
         ));
         pdf.connect_export(glib::clone!(
             #[weak(rename_to = app)]
@@ -337,7 +340,10 @@ impl App {
         pdf.connect_repaged(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |pdf, edit, step| app.repaged(pdf, edit, step)
+            move |pdf, edit, step| {
+                app.synctex_repaged(pdf);
+                app.repaged(pdf, edit, step);
+            }
         ));
         pdf.connect_choice(glib::clone!(
             #[weak(rename_to = app)]
