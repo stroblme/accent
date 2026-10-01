@@ -491,6 +491,70 @@ pub(super) fn bench_tabs(app: &Rc<App>, rels: &str) {
     });
 }
 
+/// See `ACCENT_BENCH_TABS=cycle:` above.
+pub(super) fn bench_cycle(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    for rel in &rels {
+        app.open_path(rel);
+    }
+    let landed = {
+        let (app, rels) = (app.clone(), rels.clone());
+        move || rels.iter().all(|rel| app.doc_for(rel).is_some())
+    };
+    let app = app.clone();
+    bench_layout_when(landed, move || {
+        // A shell in front, so the chords start where a terminal has the keyboard.
+        app.open_terminal();
+        glib::spawn_future_local(async move {
+            println!("bench cycle focus_window");
+            for _ in 0..100 {
+                if app.window.is_active() {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(100)).await;
+            }
+            glib::timeout_future(Duration::from_millis(800)).await;
+            println!("bench cycle ready");
+            let (mut last, mut since, mut aimed) = (String::new(), None, false);
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(25) {
+                let pane = app.pane();
+                let held = pane.cycling().is_some();
+                since = match held {
+                    true => since.or_else(|| Some(Instant::now())),
+                    false => None,
+                };
+                let state = bench_cycle_state(&app, &pane);
+                if state != last {
+                    let ms = since.map_or(0, |t: Instant| t.elapsed().as_millis());
+                    println!("bench cycle ms={ms} {state}");
+                    last = state;
+                }
+                if !aimed && let Some((x, y)) = pane.switcher.row_centre(2, &app.window) {
+                    println!("bench cycle aim row2={x:.0},{y:.0}");
+                    aimed = true;
+                }
+                glib::timeout_future(Duration::from_millis(10)).await;
+            }
+            bench_quit(&app);
+        });
+    });
+}
+
+/// Whether a chord is held, the card's rows with the lit one, the tab in front, the pane's order
+/// and who has the keyboard.
+fn bench_cycle_state(app: &Rc<App>, pane: &Pane) -> String {
+    let (rows, lit) = pane.switcher.rows();
+    let front = pane.tabs.selected_page().map(|p| p.title().to_string());
+    let order: Vec<String> = pane.recent().iter().map(|p| p.title().into()).collect();
+    let focus = gtk::prelude::GtkWindowExt::focus(&app.window).map(|w| w.type_().name());
+    format!(
+        "held={} card={} rows={rows:?} lit={lit:?} front={front:?} order={order:?} focus={focus:?}",
+        pane.cycling().is_some(),
+        pane.switcher.shown(),
+    )
+}
+
 /// One step of [`bench_pin`], named for its printout.
 type PinStep = (&'static str, Box<dyn Fn(&Rc<App>, &[adw::TabPage])>);
 

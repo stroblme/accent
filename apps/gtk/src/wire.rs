@@ -625,7 +625,9 @@ pub fn wire_window(app: &Rc<App>) {
         glib::Propagation::Proceed,
         move |_, key, _, state| {
             app.on_key(key, state);
-            match key == gdk::Key::Escape && escape_first(&app) {
+            // A held `Ctrl+Tab` is what is up while it is held, ahead of presentation: Escape
+            // takes the chord back and nothing else.
+            match key == gdk::Key::Escape && (app.cancel_cycle() || escape_first(&app)) {
                 true => glib::Propagation::Stop,
                 false => glib::Propagation::Proceed,
             }

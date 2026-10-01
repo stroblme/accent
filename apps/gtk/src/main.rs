@@ -60,6 +60,7 @@ mod sidebar;
 mod signature;
 mod start;
 mod statusbar;
+mod switcher;
 mod synctex;
 mod terminal;
 mod theme;
