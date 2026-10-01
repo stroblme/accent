@@ -23,6 +23,8 @@ use crate::{Event, VaultConfig, language, locked};
 mod files;
 mod index;
 
+pub(crate) use index::list_dir;
+
 /// One open vault: the index, the watcher, and the worker thread that owns both writers.
 pub(crate) struct Local {
     root: PathBuf,

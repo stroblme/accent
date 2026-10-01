@@ -30,6 +30,9 @@
 //! its child: an `aligned` in a labelled `equation` is a second row under the first. Only an
 //! environment with a `\label` is listed; one without gives its place to what is inside it, which
 //! keeps a label written in the inner environment listed.
+//!
+//! Inside `\input{…}` texlab offers only the `.tex` files; [`inputs`] lists the rest of the folder
+//! being typed, an exported plot's `.pgf` say, which the document's words layer adds to its answer.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -37,11 +40,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use accent_core::path;
+use accent_core::walk::FileKind;
 use accent_lsp::types::DocumentSymbol;
 
-use super::byte_of;
 use super::external::Encoding;
-use crate::locked;
+use super::{Completion, Kind, Range, byte_of};
+use crate::{FileRow, locked};
 
 /// The protocol's `Constant`, which is texlab's kind for a display-math environment.
 const EQUATION: u32 = 14;
@@ -355,6 +360,58 @@ impl Toc {
         best.filter(|&(listed, ..)| listed > 0)
             .map(|(listed, _, start)| (start, listed))
     }
+}
+
+/// Where `\input{` is being typed when the caret, at `character` on `line`, is inside its
+/// braces: the vault path of the folder named so far, read from the folder of the document at
+/// `rel` as LaTeX reads it, and the column the file name being typed starts at. `None` outside
+/// the braces, and for a folder outside the vault.
+pub(super) fn input_dir(rel: &str, line: &str, character: u32) -> Option<(String, u32)> {
+    const INPUT: &str = r"\input{";
+    let head: String = line.chars().take(character as usize).collect();
+    let open = head.rfind(INPUT)? + INPUT.len();
+    let typed = &head[open..];
+    if typed.contains('}') {
+        return None;
+    }
+    let (folder, start) = match typed.rfind('/') {
+        Some(at) => (&typed[..at], open + at + 1),
+        None => ("", open),
+    };
+    let dir = path::parent_dir(rel);
+    path::stays_inside(dir, folder).then(|| {
+        let column = head[..start].chars().count() as u32;
+        (path::resolve(dir, folder), column)
+    })
+}
+
+/// What `\input{` offers beside texlab, which lists the `.tex` files and the folders: the
+/// folder's other files, by their whole name, since LaTeX adds `.tex` only to a name without an
+/// extension, and its folders, to go on into. `rows` is the folder's listing; a dot-named or a
+/// sync-conflict row is left out, as the file tree leaves it out.
+pub(super) fn inputs(rows: Vec<FileRow>, replace: Range) -> Vec<Completion> {
+    rows.into_iter()
+        .filter(|row| row.kind != FileKind::Conflict)
+        .filter_map(|row| {
+            let name = path::basename(&row.rel_path);
+            let tex = row.kind != FileKind::Dir && name.ends_with(".tex");
+            (!tex && !name.starts_with('.')).then(|| Completion {
+                label: name.to_string(),
+                kind: match row.kind {
+                    FileKind::Dir => Kind::Folder,
+                    _ => Kind::File,
+                },
+                detail: None,
+                doc: None,
+                filter: None,
+                insert: name.to_string(),
+                is_snippet: false,
+                replace,
+                extra_edits: Vec::new(),
+                resolve: None,
+            })
+        })
+        .collect()
 }
 
 /// The control word `text` starts with, without its backslash, and what follows it.
@@ -721,6 +778,53 @@ mod tests {
 
     /// Shaped as texlab 5.26 answers: an `aligned` in a labelled `equation`, a labelled `align`,
     /// a label written inside a `split`, and a bare `\[ … \]`.
+    #[test]
+    fn input_is_typed_from_the_documents_folder() {
+        let at = |line: &str| input_dir("thesis/main.tex", line, line.chars().count() as u32);
+        assert_eq!(at(r"\input{"), Some(("thesis".into(), 7)));
+        assert_eq!(at(r"Ä \input{fig/pl"), Some(("thesis/fig".into(), 13)));
+        assert_eq!(at(r"\input{../data/x"), Some(("data".into(), 15)));
+        assert_eq!(at(r"\input{a} b"), None, "past the braces");
+        assert_eq!(at(r"\include{"), None);
+        assert_eq!(at(r"\input{../../x"), None, "outside the vault");
+    }
+
+    #[test]
+    fn input_offers_the_files_texlab_leaves_out() {
+        let row = |rel: &str, kind| FileRow {
+            id: 1,
+            rel_path: rel.into(),
+            kind,
+            title: None,
+            size: 0,
+            mtime_ns: 0,
+            dependency: false,
+        };
+        let rows = vec![
+            row("fig/plots", FileKind::Dir),
+            row("fig/.cache", FileKind::Dir),
+            row("fig/a.tex", FileKind::Other),
+            row("fig/a.pgf", FileKind::Other),
+            row(
+                "fig/a.sync-conflict-20260101-000000-ABC.pgf",
+                FileKind::Conflict,
+            ),
+            row("fig/table.csv", FileKind::Other),
+        ];
+        let items: Vec<(String, Kind)> = inputs(rows, Range::default())
+            .into_iter()
+            .map(|c| (c.insert, c.kind))
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("plots".into(), Kind::Folder),
+                ("a.pgf".into(), Kind::File),
+                ("table.csv".into(), Kind::File),
+            ]
+        );
+    }
+
     #[test]
     fn only_labelled_equations_are_listed() {
         let text = "\\section{Maths}\n\\begin{equation}\\label{eq:sum}\n\\begin{aligned}\n\

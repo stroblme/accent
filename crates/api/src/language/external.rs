@@ -1542,19 +1542,26 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        let tex = "\\documentclass{article}\n\\begin{document}\n\\label{fig:abc}\n\\ref{fig:}\n\\cite{}\n\\ci\n\\bibliography{refs}\n\\end{document}\n";
+        let tex = "\\documentclass{article}\n\\begin{document}\n\\label{fig:abc}\n\\ref{fig:}\n\\cite{}\n\\ci\n\\bibliography{refs}\n\\input{}\n\\input{fig/}\n\\end{document}\n";
         std::fs::write(root.path().join("main.tex"), tex).unwrap();
+        std::fs::create_dir(root.path().join("fig")).unwrap();
+        for name in ["a.tex", "plot.pgf"] {
+            std::fs::write(root.path().join("fig").join(name), "").unwrap();
+        }
         std::fs::write(
             root.path().join("refs.bib"),
             "@article{knuth84, author = {Knuth}, title = {Literate Programming}, year = 1984}\n",
         )
         .unwrap();
-        let (vault, _events) = crate::Vault::open_at(
+        let (vault, events) = crate::Vault::open_at(
             root.path(),
             &cache.path().join("index.db"),
             crate::VaultConfig::default(),
         )
         .unwrap();
+        // `\input{` lists the folder from the index.
+        let reconciled = |e: &crate::Event| matches!(e, crate::Event::Reconciled(_));
+        assert!(crate::tests::wait_for(&events, reconciled, crate::tests::BUDGET).is_some());
         accent_lsp::runtime().block_on(async {
             let support = vault
                 .open_document("main.tex", "latex", tex.to_string())
@@ -1622,6 +1629,24 @@ mod tests {
                 commands.items.iter().any(|c| c.label == "cite"),
                 "\\ci offers cite"
             );
+            // texlab's `.tex` files and folders, and the other files beside them, once each.
+            let input = |line, character| {
+                let pos = Pos { line, character };
+                let answer = vault.completion("main.tex", pos, Some('{'));
+                async move {
+                    let mut labels: Vec<String> = answer
+                        .await
+                        .unwrap()
+                        .items
+                        .into_iter()
+                        .map(|c| c.label)
+                        .collect();
+                    labels.sort();
+                    labels
+                }
+            };
+            assert_eq!(input(7, 7).await, ["fig", "main.tex", "refs.bib"]);
+            assert_eq!(input(8, 11).await, ["a.tex", "plot.pgf"]);
         });
         drop(vault);
     }
