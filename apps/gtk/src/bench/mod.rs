@@ -20,6 +20,7 @@ mod memory;
 mod outline;
 mod panes;
 mod pdf;
+mod present;
 mod replace;
 mod scroll;
 mod search;
@@ -115,7 +116,11 @@ use tags::bench_tags;
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
 /// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
 /// for XTEST presses of the keys that step through a note, the preview and a PDF, and prints
-/// whether each one faded the chrome (see `chrome::bench_chrome_keys`). `ACCENT_BENCH_PATHS=1`
+/// whether each one faded the chrome (see `chrome::bench_chrome_keys`).
+/// `=present:<note>,<pdf>,<image>,<side>` presents a note, a PDF, an image and a shell from one of
+/// two panes and prints what F5 shows, the find bar, a held `Ctrl+Tab`'s card, Escape over it, a
+/// toast against the status bar, and the layout leaving F5 puts back (see
+/// `present::bench_present`). `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
@@ -786,6 +791,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(notes) = chrome {
             if let Some(rels) = notes.strip_prefix("keys:") {
                 return bench_chrome_keys(&app, rels);
+            }
+            if let Some(rels) = notes.strip_prefix("present:") {
+                return present::bench_present(&app, rels);
             }
             return bench_chrome(&app, &notes);
         }

@@ -298,7 +298,6 @@ pub fn build_window(
         sidebar_column,
         sidebar_header,
         toolbar,
-        editor_column,
         header,
         modes,
         drawing_button: drawing.clone(),
@@ -967,7 +966,9 @@ thread_local! {
 /// over the document. `.accent-idle-pane` is on every pane's tab bar but the active one's
 /// (`App::mark_active_pane`): its selected tab is outlined rather than filled, so two panes do not
 /// show two identical pills. Not under the pointer, where it takes Adwaita's hover fill like any
-/// other tab, and not on a bar of one tab, which Adwaita draws with no pill at all.
+/// other tab, and not on a bar of one tab, which Adwaita draws with no pill at all. A toast's
+/// transform eases over `widgets::FADE_MS` where animations are on, for the lift presentation
+/// mode gives the toasts over the status bar (`App::lift_toasts`).
 ///
 /// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
 /// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
@@ -1033,8 +1034,10 @@ fn install_chrome_css() {
             true => format!(
                 ".chrome-fade, paned > separator {{ transition: opacity {ms}ms ease; }} \
                  scrolledwindow > undershoot {{ transition: box-shadow {ms}ms ease, \
-                   background-image {ms}ms ease; }} ",
-                ms = fade::RAMP_MS
+                   background-image {ms}ms ease; }} \
+                 toastoverlay > toast {{ transition: transform {lift}ms ease-out; }} ",
+                ms = fade::RAMP_MS,
+                lift = crate::widgets::FADE_MS
             ),
             false => String::new(),
         };

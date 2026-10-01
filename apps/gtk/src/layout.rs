@@ -58,6 +58,12 @@ pub struct Presenting {
     pub sidebar: bool,
 }
 
+thread_local! {
+    /// The rule [`App::lift_toasts`] lifts the toasts by, on the display, and the height it was
+    /// written for: written again only when the status bar's height changes, with the text size.
+    static LIFT: RefCell<Option<(gtk::CssProvider, i32)>> = const { RefCell::new(None) };
+}
+
 /// What a window narrower than [`COLLAPSE`] puts back when it widens: whether the sidebar was up,
 /// and where the divider was. The divider has to be kept as well as the sidebar, because
 /// `GtkPaned` clamps it to a window narrower than it, and a dragged 400 px came back as 349 from a
@@ -155,6 +161,9 @@ impl App {
     }
 
     pub fn set_mode(self: &Rc<Self>, mode: Mode) {
+        // Leaving F5 sets the mode it began in again, which brings the preview back where its
+        // divider was rather than on screen anew.
+        let opened = mode == Mode::Split && self.mode.get() != Mode::Split;
         self.mode.set(mode);
         self.modes.set_icon_name(mode.icon());
         // Setting `active` re-enters the toggled handler, which compares against `self.mode` and
@@ -162,65 +171,65 @@ impl App {
         self.modes.set_active(mode == Mode::Split);
         self.show_chrome();
         self.apply_layout();
+        if opened {
+            self.even_split();
+        }
         self.save_session_soon();
     }
 
-    /// Which of the editor column and the preview are on screen. Split shows both; presenting
-    /// shows the preview alone, whatever mode the user will come back to — unless the tab renders
-    /// itself, in which case it is the thing being presented and the preview stays away.
+    /// [`App::lay_out`], and the tab in front rendered wherever the preview shows.
     fn apply_layout(self: &Rc<Self>) {
-        let presenting = self.presenting.get().is_some();
-        // A PDF, an image, a diff, a terminal: anything that is not a note in a buffer. There is
-        // nothing for the preview to render, so hiding the document column would present a blank
-        // window.
-        let own_view = presenting && self.active().is_none();
-        if self.shows_preview() && !own_view {
-            self.ensure_preview();
-        }
-        self.content.set_visible(!presenting || own_view);
-        self.hoist_find(presenting && !own_view);
-        if let Some(preview) = self.preview.borrow().as_ref() {
-            preview
-                .widget()
-                .set_visible(self.shows_preview() && !own_view);
-        }
-        // The tab bars go with the rest of the chrome, since the column they live in stays. The
-        // restore is unconditional: `AdwTabBar` reveals and hides itself, and leaving it hidden
-        // here would take that decision away from it for good.
-        for pane in self.panes.borrow().iter() {
-            pane.bar.set_visible(!own_view);
-        }
-        if self.mode.get() == Mode::Split && !presenting {
-            self.even_split();
-        }
+        self.lay_out();
         if let Some(tab) = self.active() {
             self.render(&tab);
         }
     }
 
-    /// Lend the presented pane's find bar to the editor column, or give every bar back.
-    ///
-    /// A bar lives in its pane, and presentation mode takes the whole pane tree off screen — the
-    /// one thing the old window-wide bar had over this. `Ctrl+F` over a rendered note still has to
-    /// reach something visible, so the pane being presented lends its bar to the column above for
-    /// as long as that lasts. A tab that draws its own document keeps its pane, and its bar with
-    /// it, so this only ever moves one bar and only while a *note* is being presented.
-    fn hoist_find(&self, up: bool) {
+    /// What is on screen, and where the preview is. Split shows the preview beside the pane tree.
+    /// Presenting shows the active pane alone, where it is in the tree and without its tab bar,
+    /// whatever mode the user will come back to; a tab with a buffer is shown rendered, the
+    /// preview laid over the pane's tabs (`Pane::cover`), so the pane's find bar and its
+    /// `Ctrl+Tab` card go on being its own over the rendered note. A tab that draws its own
+    /// document — a PDF, an image, a diff, a terminal — is the thing presented, as it is, a PDF
+    /// fitted to a whole page meanwhile. Laid out again whenever another tab comes to the front
+    /// while presenting (`App::sync_active`).
+    pub(crate) fn lay_out(self: &Rc<Self>) {
+        let presenting = self.presenting.get().is_some();
         let active = self.pane();
-        let column: &gtk::Widget = self.editor_column.upcast_ref();
-        for pane in self.panes.borrow().iter() {
-            let bar = pane.find.widget();
-            if !(up && Rc::ptr_eq(pane, &active)) {
-                pane.hold_find();
-            } else if bar.parent().as_ref() != Some(column) {
-                if let Some(old) = bar.parent().and_downcast::<gtk::Box>() {
-                    old.remove(bar);
+        let rendered = presenting && self.active().is_some();
+        if rendered || self.mode.get() == Mode::Split && !presenting {
+            self.ensure_preview();
+        }
+        let panes = self.panes.borrow().clone();
+        panes::isolate(&panes, presenting.then_some(&*active));
+        // The restore is unconditional: `AdwTabBar` reveals and hides itself, and leaving it
+        // hidden here would take that decision away from it for good.
+        for pane in &panes {
+            pane.bar.set_visible(!presenting);
+            pane.tabs
+                .set_visible(!(rendered && Rc::ptr_eq(pane, &active)));
+        }
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            let widget = preview.widget();
+            let split = widget.parent().as_ref() == Some(self.paned.upcast_ref());
+            match presenting {
+                true => {
+                    if split {
+                        self.paned.set_end_child(gtk::Widget::NONE);
+                    }
+                    active.cover(widget);
                 }
-                self.editor_column.append(bar);
-                // Above the document, not below it: appending put it after the toasts.
-                self.editor_column
-                    .reorder_child_after(&self.toasts, Some(bar));
+                // Back from the pane presented last, which may have closed since.
+                false if !split => {
+                    widget.unparent();
+                    self.paned.set_end_child(Some(widget));
+                }
+                false => {}
             }
+            widget.set_visible(rendered || self.mode.get() == Mode::Split && !presenting);
+        }
+        if let Some(pdf) = self.active_pdf().filter(|_| presenting) {
+            pdf.set_presenting(true);
         }
     }
 
@@ -228,7 +237,7 @@ impl App {
     /// whatever position it was left at, and one that has never been allocated has none at all, so
     /// the editor's natural width could take the whole row and the preview open with nothing to
     /// show: the "clicked the button and nothing happened" report. Presentation mode never hit it,
-    /// because there the editor column is hidden outright.
+    /// because there the preview is laid over the presented pane instead.
     fn even_split(self: &Rc<Self>) {
         if self.centre_handle() {
             return;
@@ -257,19 +266,12 @@ impl App {
         self.mode.get() == Mode::Split || self.presenting.get().is_some()
     }
 
-    /// F5: the document alone, with the sidebar, the tab bars and both header bars gone. A state
-    /// of the window rather than a [`Mode`], because it is a way of looking at the current tab
-    /// instead of a layout to work in, and it is deliberately not part of the session: a window
-    /// restored chromeless would be hard to get out of.
-    ///
-    /// A note is presented through the preview, rendered. A tab that draws its own document — a
-    /// PDF, an image, a diff, a terminal — is presented as it is: `apply_layout` keeps the
-    /// document column and takes the tab bars instead.
+    /// F5: the document alone, with the sidebar, the other panes, the tab bars and both header
+    /// bars gone. A state of the window rather than a [`Mode`], because it is a way of looking at
+    /// the current tab instead of a layout to work in, and it is deliberately not part of the
+    /// session: a window restored chromeless would be hard to get out of. [`App::lay_out`] says
+    /// what each kind of tab looks like meanwhile.
     pub fn set_presenting(self: &Rc<Self>, on: bool) {
-        // A PDF presents itself: one whole page, and the zoom it had back afterwards.
-        if let Some(pdf) = self.active_pdf() {
-            pdf.set_presenting(on);
-        }
         match (on, self.presenting.get()) {
             (true, None) => {
                 // Presentation owns the chrome from here, so whatever typing faded comes back
@@ -286,18 +288,28 @@ impl App {
                 // up, so the presentation never reflows under the pointer.
                 self.toolbar.set_extend_content_to_bottom_edge(true);
                 self.apply_layout();
+                self.focus_presented();
             }
             (false, Some(before)) => {
                 self.presenting.set(None);
+                // Each PDF gets the zoom it had back, those a held `Ctrl+Tab` presented too.
+                for pdf in self.pdfs() {
+                    pdf.set_presenting(false);
+                }
+                self.lift_toasts(None);
                 self.sidebar_column.set_visible(before.sidebar);
                 self.toolbar.set_reveal_top_bars(true);
                 self.toolbar.set_reveal_bottom_bars(true);
                 self.toolbar.set_extend_content_to_bottom_edge(false);
                 // Puts the layout back and, with presenting cleared, lets the chrome show again.
                 self.set_mode(before.mode);
+                // A note presented rendered had its editor hidden, which took the keyboard away.
+                self.focus_document(&self.pane());
             }
             _ => {}
         }
+        // The bar searches the rendered note while one is presented, which its toggles say.
+        self.retarget_find(&self.pane());
     }
 
     /// While presenting, the status bar shows for as long as the pointer is over the strip at the
@@ -319,6 +331,60 @@ impl App {
                 self.toolbar.contains(x, y) && y >= f64::from(self.toolbar.height() - height)
             });
         self.toolbar.set_reveal_bottom_bars(over);
+        // The toasts are part of the document the bar comes up over, so they go up with it.
+        self.lift_toasts(over.then_some(height));
+    }
+
+    /// Lift the toasts by `by` pixels, the status bar's height while it shows over a presented
+    /// document, or put them back down with `None`. A class over a rule written for that height,
+    /// so a toast that comes up while the bar shows goes up too, and the move eases over
+    /// `widgets::FADE_MS` (`build::install_chrome_css`).
+    fn lift_toasts(&self, by: Option<i32>) {
+        if let Some(by) = by {
+            LIFT.with_borrow_mut(|lift| {
+                if lift.as_ref().is_some_and(|(_, at)| *at == by) {
+                    return;
+                }
+                let provider = match lift.take() {
+                    Some((provider, _)) => provider,
+                    None => {
+                        let provider = gtk::CssProvider::new();
+                        gtk::style_context_add_provider_for_display(
+                            &WidgetExt::display(&self.window),
+                            &provider,
+                            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                        );
+                        provider
+                    }
+                };
+                provider.load_from_string(&format!(
+                    "toastoverlay.accent-lifted > toast {{ transform: translateY(-{by}px); }}"
+                ));
+                *lift = Some((provider, by));
+            });
+        }
+        crate::widgets::set_class(&self.toasts, "accent-lifted", by.is_some());
+    }
+
+    /// Give the keyboard to what F5 shows, on F5 and on every tab a held `Ctrl+Tab` steps to, so
+    /// it reads its own keys as it does outside presentation: Space, Page Down, the arrows, Home
+    /// and End through the rendered note, a PDF or an image, typing into a shell. F5 and Escape
+    /// leave presentation ahead of it all the same (`wire::wire_window`).
+    pub(crate) fn focus_presented(&self) {
+        let widget: gtk::Widget = match self.active_doc() {
+            Some(Doc::Text(_)) => match self.preview.borrow().as_ref() {
+                Some(preview) => preview.widget().clone(),
+                None => return,
+            },
+            // An image's scroller pages it with the keys a document scrolls by.
+            Some(Doc::Image(image)) => image.page.child(),
+            _ => return self.focus_document(&self.pane()),
+        };
+        // From an idle, as `focus_document` does: the preview has only just been laid over the
+        // pane, and a widget not mapped yet is not one GTK hands the keyboard to.
+        glib::idle_add_local_once(move || {
+            widget.grab_focus();
+        });
     }
 
     fn ensure_preview(self: &Rc<Self>) {

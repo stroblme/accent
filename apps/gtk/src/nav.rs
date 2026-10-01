@@ -458,9 +458,6 @@ impl App {
         if self.panes.borrow().len() <= 1 {
             return;
         }
-        // Whatever presentation mode borrowed goes with the pane rather than being left behind
-        // in a column that no longer has an owner for it.
-        pane.hold_find();
         panes::detach(pane);
         self.panes.borrow_mut().retain(|p| !Rc::ptr_eq(p, pane));
         if Rc::ptr_eq(&self.pane(), pane)

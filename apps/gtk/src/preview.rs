@@ -623,7 +623,7 @@ impl Preview {
 
     // --- find ----------------------------------------------------------------------------
     //
-    // Presentation mode hides the editor column, so Ctrl+F has to address the rendered page
+    // Presentation mode hides the editor under the rendered page, so Ctrl+F has to address it
     // instead of the buffer. WebKit does the searching; the find bar only decides which of the
     // two it is talking to.
 
