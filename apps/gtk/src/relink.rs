@@ -4,8 +4,10 @@
 //! The notes are rewritten through the vault, where the files are, as a rename's links are
 //! (`Vault::repage_links`); the page edit is already made by then, so there is nothing to ask.
 
+use crate::doc::{self, Doc};
 use crate::pdftab::PdfTab;
-use crate::{App, doc, pdfview};
+use crate::{App, pdfview};
+use accent_api::rpc::RpcError;
 use accent_api::{PageEdit, RepageReport};
 use gtk::glib;
 use std::rc::Rc;
@@ -32,8 +34,20 @@ impl App {
         self.relink(pdf);
     }
 
+    /// The link to the host is back: the page edits made while it was down rewrite the notes now.
+    pub(crate) fn relink_all(self: &Rc<Self>) {
+        for pdf in self.docs().iter().filter_map(Doc::pdf) {
+            self.relink(pdf);
+        }
+    }
+
     /// Rewrite the notes for the oldest page edit not yet followed, unless a rewrite is already
     /// out, whose landing runs this again.
+    ///
+    /// One the host was never asked, the link being down, goes back to the front of the queue
+    /// for [`relink_all`](Self::relink_all), and nothing is said: the banner says the link went.
+    /// One the link dropped under may have been carried out, and is not asked again: twice would
+    /// move the links twice.
     fn relink(self: &Rc<Self>, pdf: &Rc<PdfTab>) {
         let (Some(vault), Some(ops)) = (self.vault().cloned(), self.ops().cloned()) else {
             return;
@@ -61,8 +75,9 @@ impl App {
         let (app, pdf, rel) = (self.clone(), pdf.clone(), pdf.key());
         glib::spawn_future_local(async move {
             let name = doc::file_name(&rel).to_string();
+            let asked = keep.clone();
             let done =
-                crate::work::off_thread("relink", move || vault.repage_links(&rel, edit, &keep))
+                crate::work::off_thread("relink", move || vault.repage_links(&rel, edit, &asked))
                     .await;
             match done {
                 Some(Ok(report)) => {
@@ -76,6 +91,15 @@ impl App {
                     if let Some(message) = relink_message(&report, unsaved) {
                         app.relinked(&pdf, &message);
                     }
+                }
+                Some(Err(e)) if e.downcast_ref::<RpcError>().is_some_and(RpcError::unasked) => {
+                    let mut relinks = pdf.relinks.borrow_mut();
+                    relinks.running = false;
+                    relinks.queue.push_front((edit, step));
+                    if let PageEdit::Insert(_) = edit {
+                        relinks.left.insert(step, keep);
+                    }
+                    return;
                 }
                 Some(Err(e)) => app.cannot(&format!("update the links into {name}"), e),
                 None => app.toast(&format!("Cannot update the links into {name}")),

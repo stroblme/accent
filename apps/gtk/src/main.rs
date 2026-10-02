@@ -250,6 +250,10 @@ struct App {
     /// overlay is showing, and "it says so once rather than once a save" is a count.
     #[cfg(feature = "bench")]
     toasted: Cell<usize>,
+    /// The last toast that carried a button, for a drill to press: a toast is not a widget until
+    /// the overlay shows it, and it may be queued behind another.
+    #[cfg(feature = "bench")]
+    buttoned: RefCell<Option<adw::Toast>>,
     /// Raised across the window when a remote vault stops answering, with a way back. A banner
     /// rather than a toast because it is a state that persists and needs a decision, and one
     /// across the window rather than per tab because it is every tab that is affected.
@@ -458,6 +462,8 @@ impl App {
             .button_label(button)
             .build();
         toast.connect_button_clicked(move |_| act());
+        #[cfg(feature = "bench")]
+        self.buttoned.replace(Some(toast.clone()));
         self.toasts.add_toast(toast);
     }
 

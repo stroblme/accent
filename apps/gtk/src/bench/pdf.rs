@@ -588,12 +588,7 @@ fn links_read(app: &Rc<App>, pdf: &pdftab::PdfTab, note: &str, said: &Cell<usize
 /// and the pages are measured on the render thread after a fetch that takes as long as the link
 /// does. A local vault passes straight through both.
 pub(super) async fn opened(app: &Rc<App>, rel: &str) -> Option<Rc<pdftab::PdfTab>> {
-    for _ in 0..150 {
-        if !app.offline() {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(100)).await;
-    }
+    online(app).await;
     app.open_path(rel);
     for _ in 0..150 {
         if let Some(pdf) = app.active_pdf().filter(|pdf| pdf.page_count() > 0) {
@@ -662,10 +657,7 @@ async fn bench_pdf_renamed(app: &Rc<App>) {
     );
     // Rebuilt by something else, as a LaTeX run does: a one-page document written over the new
     // name, which the reader must follow rather than the copy it had.
-    let blank = std::env::temp_dir().join(format!("accent-bench-{}-blank.pdf", std::process::id()));
-    let rebuilt = accent_core::pdf::blank_pdf((595.0, 842.0))
-        .and_then(|bytes| Ok(std::fs::write(&blank, bytes)?))
-        .and_then(|()| Ok(vault.upload(&blank, &pdf.key())?));
+    let rebuilt = rebuild(&vault, &pdf.key());
     let started = std::time::Instant::now();
     while rebuilt.is_ok() && pdf.page_count() != 1 && started.elapsed() < Duration::from_secs(15) {
         glib::timeout_future(Duration::from_millis(100)).await;
@@ -675,8 +667,29 @@ async fn bench_pdf_renamed(app: &Rc<App>) {
         pdf.page_count(),
         started.elapsed().as_millis()
     );
-    let _ = std::fs::remove_file(&blank);
     bench_quit(app);
+}
+
+/// Write a one-page document over `key` from outside the tab, as a LaTeX run rebuilding it does.
+fn rebuild(vault: &accent_api::Vault, key: &str) -> anyhow::Result<()> {
+    let blank = std::env::temp_dir().join(format!("accent-bench-{}-blank.pdf", std::process::id()));
+    let rebuilt = accent_core::pdf::blank_pdf((595.0, 842.0))
+        .and_then(|bytes| Ok(std::fs::write(&blank, bytes)?))
+        .and_then(|()| Ok(vault.upload(&blank, key)?));
+    let _ = std::fs::remove_file(&blank);
+    rebuilt
+}
+
+/// Press the button on the last toast that had one, as a click on it does, if it says `label`.
+fn press_toast(app: &Rc<App>, label: &str) -> bool {
+    let toast = app.buttoned.borrow().clone();
+    match toast.filter(|t| t.button_label().as_deref() == Some(label)) {
+        Some(toast) => {
+            toast.emit_by_name::<()>("button-clicked", &[]);
+            true
+        }
+        None => false,
+    }
 }
 
 /// What the vault's own copy of `key` holds, fetched past the cache the reader is drawing on.
@@ -696,7 +709,7 @@ fn vault_pages(app: &Rc<App>, key: &str) -> String {
 
 /// The etag gate on the way back to a host: a page added to a document whose host copy has
 /// moved since it was fetched must not overwrite it, and the ink must not be dropped either — it
-/// goes beside the original in the vault, as `<name> (edited).pdf`.
+/// goes beside the original in the vault, as `<name> (edited).pdf`, and the tab moves onto it.
 ///
 /// The move is made by stamping the cached copy with an etag the host never had, rather than by
 /// really writing on the host: a host-side write is reported by its own watcher, and the refetch
@@ -704,7 +717,7 @@ fn vault_pages(app: &Rc<App>, key: &str) -> String {
 /// the stamp against the host, so this is the same input from where it stands.
 ///
 /// A second page is added after the first refusal, which is the reader who keeps drawing: it
-/// must write the same copy again rather than a numbered one, and it must not toast again.
+/// must go into that copy as any write does, neither into a numbered one nor with a toast.
 pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -717,11 +730,24 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         };
         let stamp = accent_api::ssh::stamp_path(remote.url(), &key);
-        // An `Etag` as the stamp file spells one, written by hand because the app does not link
-        // serde_json: what matters is only that it is not the one the host will report.
-        let moved = stamp
-            .as_ref()
-            .map(|stamp| std::fs::write(stamp, br#"{"mtime_ns":1,"size":1,"ino":1}"#));
+        // The stamp as the file spells one, written by hand because the app does not link
+        // serde_json: the copy's own etag as it is, and a host's it will never report.
+        let copy = accent_core::fs::Etag::of(&pdf.path());
+        let moved = stamp.as_ref().zip(copy.ok()).map(|(stamp, copy)| {
+            let etag = |e: accent_core::fs::Etag| {
+                format!(
+                    r#"{{"mtime_ns":{},"size":{},"ino":{}}}"#,
+                    e.mtime_ns, e.size, e.ino
+                )
+            };
+            let host = accent_core::fs::Etag {
+                mtime_ns: 1,
+                size: 1,
+                ino: 1,
+            };
+            let stamped = format!(r#"{{"host":{},"copy":{}}}"#, etag(host), etag(copy));
+            std::fs::write(stamp, stamped)
+        });
         println!(
             "bench pdf stale opened pages={} in_vault {} moved={moved:?}",
             pdf.page_count(),
@@ -735,7 +761,8 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         written(&app).await;
         println!(
-            "bench pdf stale refused pages={} in_vault {} edited {} said={} {:?} kept={}",
+            "bench pdf stale refused key={:?} pages={} in_vault {} edited {} said={} {:?} kept={}",
+            pdf.key(),
             pdf.page_count(),
             vault_pages(&app, &key),
             vault_pages(&app, &first),
@@ -746,7 +773,8 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         written(&app).await;
         println!(
-            "bench pdf stale again pages={} in_vault {} edited {} said={} numbered={}",
+            "bench pdf stale again key={:?} pages={} in_vault {} edited {} said={} numbered={}",
+            pdf.key(),
             pdf.page_count(),
             vault_pages(&app, &key),
             vault_pages(&app, &first),
@@ -761,9 +789,12 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
 /// The write-back's failure arm: the host will not take the upload at all, which is neither the
 /// etag refusal nor a conflict copy. The document and its folder are made read-only on the host
 /// behind the app's back, and a page is added twice: both saves fail, and only the first says so.
-/// Then the host takes writes again, a third page goes up and says nothing, and a failure after
-/// that one is news again. Each `chmod` of the folder also sets off a rescan on the host, whose
-/// "Indexed …" toast is in the count: +2, +0, +1, +2 is one failure said per streak.
+/// Then the host takes writes again and the toast's Retry is pressed, which must send both pages
+/// without another stroke. A failure after that is news again; and the host's file changing
+/// while that page has not gone up (a LaTeX build, here a one-page document written over it) must
+/// not fetch over the page: it goes beside the original as `(edited)`, and the tab with it. Each
+/// `chmod` of the folder also sets off a rescan on the host, whose "Indexed …" toast is in the
+/// count: +2, +0, +1, +2 is one failure said per streak.
 pub(super) fn bench_pdf_failed(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -775,28 +806,18 @@ pub(super) fn bench_pdf_failed(app: &Rc<App>, rel: &str) {
             println!("bench pdf failed not_remote");
             return bench_quit(&app);
         };
-        let path = vault.resolve(&key).unwrap_or_default();
-        let (file, dir) = (
-            accent_api::ssh::quote(&path.to_string_lossy()),
-            accent_api::ssh::quote(&path.parent().unwrap_or(&path).to_string_lossy()),
-        );
-        let host = |mode: &str| {
-            let argv = accent_api::ssh::run(
-                remote.url(),
-                remote.control_path(),
-                &format!("chmod {mode} {file} {dir}"),
-            );
-            std::process::Command::new(&argv[0])
-                .args(&argv[1..])
-                .status()
-                .is_ok_and(|s| s.success())
-        };
+        let host = |mode: &str| chmod_on_host(&vault, &remote, &key, mode);
         let add = || WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        let edited = accent_api::remote::edited_name(&key, 1);
         let step = |name: &str| {
             println!(
-                "bench pdf failed {name} pages={} in_vault {} said={} {:?}",
+                "bench pdf failed {name} key={:?} pages={} unsent={} in_vault {} edited {} said={} \
+                 {:?}",
+                pdf.key(),
                 pdf.page_count(),
+                pdf.unsent(),
                 vault_pages(&app, &key),
+                vault_pages(&app, &edited),
                 app.toasted.get(),
                 bench_said(&app)
             )
@@ -810,26 +831,67 @@ pub(super) fn bench_pdf_failed(app: &Rc<App>, rel: &str) {
         written(&app).await;
         step("again");
         println!("bench pdf failed writable={}", host("u+w"));
-        let _ = add();
+        println!(
+            "bench pdf failed retry pressed={}",
+            press_toast(&app, "Retry")
+        );
         written(&app).await;
-        step("sent");
+        step("retried");
         println!("bench pdf failed read_only={}", host("a-w"));
         let _ = add();
         written(&app).await;
         step("refused_after");
         println!("bench pdf failed writable={}", host("u+w"));
+        let rebuilt = rebuild(&vault, &key);
+        // The host's watcher reports the write, and the tab answers it.
+        let started = Instant::now();
+        while pdf.key() == key
+            && pdf.page_count() != 1
+            && started.elapsed() < Duration::from_secs(8)
+        {
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        written(&app).await;
+        println!("bench pdf failed rebuilt={rebuilt:?}");
+        step("rebuilt");
         bench_quit(&app);
     });
 }
 
+/// `chmod <mode>` on the host, of the document `key` and its folder, behind the app's back.
+fn chmod_on_host(
+    vault: &accent_api::Vault,
+    remote: &accent_api::remote::Remote,
+    key: &str,
+    mode: &str,
+) -> bool {
+    let path = vault.resolve(key).unwrap_or_default();
+    let (file, dir) = (
+        accent_api::ssh::quote(&path.to_string_lossy()),
+        accent_api::ssh::quote(&path.parent().unwrap_or(&path).to_string_lossy()),
+    );
+    let argv = accent_api::ssh::run(
+        remote.url(),
+        remote.control_path(),
+        &format!("chmod {mode} {file} {dir}"),
+    );
+    std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// The link dropped mid-draw: a page is added and the vault's ssh master ended at once, so the
-/// save lands while the link is down. The automatic reconnect is called off, as a refusal calls it
-/// off, to keep the link down for as long as that takes. The banner says the link went, so
-/// nothing more is said; then Reconnect Now brings the vault back, and the page must reach the
-/// host without another stroke.
+/// save and the rewrite of the notes' page links land while the link is down. The automatic
+/// reconnect is called off, as a refusal calls it off, to keep the link down for as long as that
+/// takes. The banner says the link went, so nothing more is said; then Reconnect Now brings the
+/// vault back, and the page must reach the host and the links follow it without another stroke.
+/// A note linking into pages 1 to 3 is written first, so point it at a document of three pages
+/// or more: the page goes in after the first, so 1, 2, 3, 2, 1 become 1, 3, 4, 3, 1.
 pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
+        // Opened first, which waits for the host; the note's tab then comes in front of it.
         let (Some(pdf), Some(vault)) = (opened(&app, &rel).await, app.vault().cloned()) else {
             println!("bench pdf dropped no_tab");
             return bench_quit(&app);
@@ -838,11 +900,15 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
             println!("bench pdf dropped not_remote");
             return bench_quit(&app);
         };
+        let note = linked_note(&app, &key).await;
+        app.open_path(&key);
+        let said = Cell::new(app.toasted.get());
         println!(
-            "bench pdf dropped opened pages={} in_vault {} said={}",
+            "bench pdf dropped opened pages={} in_vault {} said={} {}",
             pdf.page_count(),
             vault_pages(&app, &key),
-            app.toasted.get()
+            app.toasted.get(),
+            links_read(&app, &pdf, &note, &said)
         );
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         let argv = accent_api::ssh::exit(remote.url(), remote.control_path());
@@ -867,6 +933,7 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
             app.toasted.get(),
             bench_said(&app)
         );
+        said.set(app.toasted.get());
         app.reconnect_now();
         for _ in 0..200 {
             if !app.offline() {
@@ -876,10 +943,80 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
         }
         written(&app).await;
         println!(
-            "bench pdf dropped back offline={} pages={} unsent={} in_vault {} said={}",
+            "bench pdf dropped back offline={} pages={} unsent={} in_vault {} said={} {}",
             app.offline(),
             pdf.page_count(),
             pdf.unsent(),
+            vault_pages(&app, &key),
+            app.toasted.get(),
+            links_read(&app, &pdf, &note, &said)
+        );
+        bench_quit(&app);
+    });
+}
+
+/// A drawn-on PDF closed at once: a page is added and the tab closed in the same turn, so the
+/// write the close flushes lands after the tab has gone. It must still reach the vault, which on a
+/// remote vault is an upload nobody is left to ask for. On a remote vault the same again with
+/// the host's folder read-only, so the page cannot go: it must go up when the document is next
+/// opened, the host taking writes again by then.
+pub(super) fn bench_pdf_closed(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench pdf closed no_tab");
+            return bench_quit(&app);
+        };
+        let (key, page) = (pdf.key(), pdf.page.clone());
+        println!(
+            "bench pdf closed opened pages={} in_vault {}",
+            pdf.page_count(),
+            vault_pages(&app, &key)
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        // The drill's own hold on the tab would keep it alive past the close.
+        drop(pdf);
+        app.close_page(&page);
+        written(&app).await;
+        println!(
+            "bench pdf closed gone open={} in_vault {} said={} {:?}",
+            app.doc_for(&key).is_some(),
+            vault_pages(&app, &key),
+            app.toasted.get(),
+            bench_said(&app)
+        );
+        let Some(remote) = app.vault().and_then(|v| v.remote()).cloned() else {
+            return bench_quit(&app);
+        };
+        let vault = app.vault().cloned().expect("a remote vault");
+        let Some(pdf) = opened(&app, &key).await else {
+            println!("bench pdf closed no_tab");
+            return bench_quit(&app);
+        };
+        let page = pdf.page.clone();
+        println!(
+            "bench pdf closed read_only={}",
+            chmod_on_host(&vault, &remote, &key, "a-w")
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        drop(pdf);
+        app.close_page(&page);
+        written(&app).await;
+        println!(
+            "bench pdf closed refused in_vault {} said={} {:?}",
+            vault_pages(&app, &key),
+            app.toasted.get(),
+            bench_said(&app)
+        );
+        println!(
+            "bench pdf closed writable={}",
+            chmod_on_host(&vault, &remote, &key, "u+w")
+        );
+        let pdf = opened(&app, &key).await;
+        written(&app).await;
+        println!(
+            "bench pdf closed reopened pages={:?} in_vault {} said={}",
+            pdf.map(|pdf| pdf.page_count()),
             vault_pages(&app, &key),
             app.toasted.get()
         );
@@ -1002,4 +1139,14 @@ pub(super) fn bench_drawing(app: &Rc<App>) {
         );
         bench_quit(&app);
     });
+}
+
+/// Once a remote vault answers; a local one at once.
+async fn online(app: &Rc<App>) {
+    for _ in 0..150 {
+        if !app.offline() {
+            return;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
 }

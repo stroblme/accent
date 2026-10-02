@@ -381,7 +381,10 @@ impl App {
         self.local_copy(key, path, move |app, copy| {
             let Some(pdf) = reader.upgrade() else { return };
             match copy {
-                Ok(copy) => pdf.load(&copy),
+                Ok(copy) => {
+                    pdf.load(&copy);
+                    app.push_pdf(&pdf);
+                }
                 Err(e) => app.gone(pdf.key(), &pdf.page, e),
             }
         });
@@ -397,7 +400,10 @@ impl App {
     /// The render thread saves into the file it was handed, which there is the ssh cache copy:
     /// until this runs the document on the host has none of the ink. Blocking ssh I/O, so it is a
     /// worker like every other remote call, and one at a time per tab — the strokes that land
-    /// while it is out collapse into one more upload after it.
+    /// while it is out collapse into one more upload after it. A copy with nothing unsent sends
+    /// nothing, so a tab just opened asks too: an earlier one, or the last session, may have left
+    /// strokes the host never took. The tab is held until the answer, which a tab closed after its
+    /// last stroke still has to hear.
     pub(crate) fn push_pdf(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
         let key = pdf.key();
         let Some(remote) = self
@@ -411,14 +417,11 @@ impl App {
         if !pdf.claim_upload() {
             return;
         }
-        let (weak_app, weak_pdf) = (Rc::downgrade(self), Rc::downgrade(pdf));
-        let edited = pdf.conflict_copy();
+        let (weak_app, pdf) = (Rc::downgrade(self), pdf.clone());
         glib::spawn_future_local(async move {
             let asked = key.clone();
-            let sent =
-                crate::work::off_thread("upload", move || remote.push(&asked, edited.as_deref()))
-                    .await;
-            let (Some(app), Some(pdf)) = (weak_app.upgrade(), weak_pdf.upgrade()) else {
+            let sent = crate::work::off_thread("upload", move || remote.push(&asked)).await;
+            let Some(app) = weak_app.upgrade() else {
                 return;
             };
             let what = format!("save {}", doc::file_name(&key));
@@ -428,29 +431,39 @@ impl App {
             match sent {
                 Some(Ok(accent_api::remote::Pushed::Sent)) => pdf.clear_conflict(),
                 // The host's copy moved while this one was being changed. Overwriting it would
-                // lose whatever moved it, so the changes went beside it in the vault instead and
-                // the reader is told what it is called — once, however long they keep drawing.
-                Some(Ok(accent_api::remote::Pushed::Conflict(copy))) => {
-                    if pdf.told_conflict(Some(copy.clone())) {
-                        app.cannot(
-                            &what,
-                            format!(
-                                "it changed on {}; your changes are saved as {}",
-                                app.host(),
-                                doc::file_name(&copy)
-                            ),
-                        );
-                    }
+                // lose whatever moved it, so the changes went beside it in the vault instead, and
+                // the tab follows them there: what is drawn next goes into the copy it shows.
+                Some(Ok(accent_api::remote::Pushed::Conflict(copy))) if !renamed => {
+                    app.cannot(
+                        &what,
+                        format!(
+                            "it changed on {}; your changes are saved as {}, which this tab now \
+                             shows",
+                            app.host(),
+                            doc::file_name(&copy)
+                        ),
+                    );
+                    app.move_onto_copy(&pdf, &copy);
                 }
+                // Renamed while it was out, so the tab is on another file: only say where.
+                Some(Ok(accent_api::remote::Pushed::Conflict(copy))) => app.cannot(
+                    &what,
+                    format!(
+                        "it changed on {}; your changes are saved as {}",
+                        app.host(),
+                        doc::file_name(&copy)
+                    ),
+                ),
                 // Not even the copy would go up. The changes are on this machine only, so say
                 // where before anything else writes over it.
                 Some(Ok(accent_api::remote::Pushed::Kept(at, why))) => {
-                    if pdf.told_conflict(None) {
-                        app.cannot(
-                            &what,
-                            format!(
-                                "it changed on {} and the copy beside it would not go either \
-                                 ({why}); your changes are kept at {}",
+                    pdf.lost_upload();
+                    if pdf.told_conflict() {
+                        app.retry_upload(
+                            &pdf,
+                            &format!(
+                                "Cannot {what}: it changed on {} and the copy beside it would \
+                                 not go either ({why}); your changes are kept at {}",
                                 app.host(),
                                 at.display()
                             ),
@@ -464,20 +477,44 @@ impl App {
                     pdf.lost_upload()
                 }
                 // It did not reach the host at all. Said once, as a refusal is: every stroke after
-                // it fails the same way until one lands.
+                // it fails the same way until one lands, or Retry is pressed.
                 Some(Err(e)) => {
                     if pdf.told_failure() {
-                        app.cannot(&what, e);
+                        app.retry_upload(&pdf, &format!("Cannot {what}: {e}"));
                     }
                 }
                 None => {
                     if pdf.told_failure() {
-                        app.cannot(&what, "the upload stopped");
+                        app.retry_upload(&pdf, &format!("Cannot {what}: the upload stopped"));
                     }
                 }
             }
             // Drawn on while it was out: once more, however many saves landed meanwhile.
             if pdf.upload_done() || (renamed && pdf.unsent()) {
+                app.push_pdf(&pdf);
+            }
+        });
+    }
+
+    /// Point the tab of `pdf` at `copy`, where its changes went up and its cached copy has gone
+    /// (`Pushed::Conflict`): as a rename moves a tab, and this tab alone, the original staying
+    /// in the vault, the recent files and any other window as it was.
+    fn move_onto_copy(self: &Rc<Self>, pdf: &pdftab::PdfTab, copy: &str) {
+        pdf.retarget(&self.root(), copy);
+        pdf.clear_conflict();
+        self.sync_active();
+        self.save_session_soon();
+    }
+
+    /// Say that a PDF's changes did not reach the host, with a Retry: nothing tells the window
+    /// that the host's folder takes writes again, and a reader who has stopped drawing would
+    /// otherwise have nothing to send them with. A failure after the Retry is said again. The
+    /// toast holds the tab, which may be closing with the last strokes.
+    fn retry_upload(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>, message: &str) {
+        let (app, pdf) = (Rc::downgrade(self), pdf.clone());
+        self.toast_with(message, "Retry", move || {
+            if let Some(app) = app.upgrade() {
+                pdf.forget_told();
                 app.push_pdf(&pdf);
             }
         });
