@@ -61,7 +61,7 @@ fn serve_answers_over_the_pipe_and_stops_when_it_closes() {
         .unwrap();
         input.flush().unwrap();
     };
-    ask(1, "hello", "[{}]");
+    ask(1, "hello", "[{}, true, true]");
 
     // Events share the pipe with answers, so read past them. The index is still being built when
     // the first request lands — that is the point of it, and it is why the client waits for the
