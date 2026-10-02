@@ -378,6 +378,10 @@ methods! {
     /// this is the remote path only — permanent, and confirmed as such by the UI.
     io delete(rel: ref str) -> ();
     io create_dir(rel: ref str) -> ();
+    /// Take a file written behind the index's back into it at once, as a local write is, rather
+    /// than a watcher debounce later: what [`write_file`](Vault::write_file) asks of a host once
+    /// the bytes are there.
+    io wrote(rel: ref str) -> ();
     /// Copy a file or a whole directory inside the vault. It runs where the files are, so a
     /// paste inside a remote vault sends nothing over the link; overwriting is not its business,
     /// the caller naming a path nothing holds yet.

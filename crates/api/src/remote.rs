@@ -34,6 +34,9 @@ const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// How much of a file a transfer moves between two reports of how far it has got.
 const CHUNK: usize = 256 * 1024;
 
+/// How many documents a reconnect reopens at once: see [`Remote::reopen`].
+const REOPENING: usize = 8;
+
 /// Where a call in flight leaves its request id, so a caller that gives up on the answer can
 /// cancel it at the server.
 pub type Asked = Mutex<Option<u64>>;
@@ -426,8 +429,9 @@ impl Remote {
     /// Tell a freshly started server about the documents the window still has open, and the
     /// folders it is watching.
     ///
-    /// All at once, a thread each: the server answers every request on a thread of its own, so
-    /// ten tabs cost the reconnect one round trip rather than ten.
+    /// [`REOPENING`] at a time: the server answers every request on a thread of its own, so eight
+    /// tabs cost the reconnect one round trip rather than eight, and a hundred cost thirteen
+    /// rather than a hundred threads on each end.
     fn reopen(&self, client: &Client) {
         let unindexed: Vec<String> = self.locked(&self.unindexed).iter().cloned().collect();
         if !unindexed.is_empty()
@@ -444,15 +448,22 @@ impl Remote {
             return;
         }
         self.say("Reopening the documents");
+        let next = Mutex::new(open.iter());
         std::thread::scope(|s| {
-            for (rel, language, text) in &open {
-                s.spawn(move || {
-                    // One that will not reopen is one tab without a language, not a failed
-                    // connection.
-                    if let Err(e) = client
-                        .call::<serde_json::Value>("open_document", json!([rel, language, text]))
-                    {
-                        tracing::warn!("reopening {rel} on the new server: {e}");
+            for _ in 0..REOPENING.min(open.len()) {
+                s.spawn(|| {
+                    loop {
+                        let Some((rel, language, text)) = self.locked(&next).next() else {
+                            break;
+                        };
+                        // One that will not reopen is one tab without a language, not a failed
+                        // connection.
+                        if let Err(e) = client.call::<serde_json::Value>(
+                            "open_document",
+                            json!([rel, language, text]),
+                        ) {
+                            tracing::warn!("reopening {rel} on the new server: {e}");
+                        }
                     }
                 });
             }
@@ -706,10 +717,18 @@ impl Remote {
     }
 
     /// Write `bytes` to `rel` over the master, the way an upload goes: the host's shell creates a
-    /// new file with the mode its umask gives a new note there.
+    /// new file with the mode its umask gives a new note there. The host's index is then told, as
+    /// a local write tells its own, so an image pasted into a note is found by its name for the
+    /// embed and the preview at once, not on the host watcher's debounce, which raced the
+    /// preview's. Its watcher takes the file in all the same, so a telling that fails is no
+    /// failed write.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
         let size = bytes.len() as u64;
-        link::send(&self.put_into(rel, size, false), bytes, size, &|_, _| ())
+        link::send(&self.put_into(rel, size, false), bytes, size, &|_, _| ())?;
+        if let Err(e) = self.call::<()>("wrote", json!([rel])) {
+            tracing::debug!("telling the host's index of {rel}: {e}");
+        }
+        Ok(())
     }
 
     /// The command line that writes its stdin, `size` bytes of it, to `rel` on the host.
