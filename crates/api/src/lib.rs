@@ -131,13 +131,10 @@ pub struct RenamePlan {
     /// The notes whose links the moves would leave naming the wrong place, by their paths now.
     pub rewrites: Vec<String>,
     /// What the language servers already running asked to have changed because of the moves —
-    /// an import naming a moved module — by each file's path now. `default`, as are the fields
-    /// below, so a plan from a host that predates them still reads.
-    #[serde(default)]
+    /// an import naming a moved module — by each file's path now.
     pub imports: Vec<FileEdits>,
     /// Moved source files no running language server was asked about, whose imports nothing
     /// checked.
-    #[serde(default)]
     pub unchecked: Vec<String>,
 }
 
@@ -158,9 +155,7 @@ pub struct ReplaceReport {
     pub matches: usize,
     pub failed: Vec<(String, String)>,
     /// Whether [`Vault::undo_replace`] can put the rewritten files back: false when nothing was
-    /// rewritten, or when what they held was more than an undo keeps. Defaulted, so a host that
-    /// predates the undo still reports its rewrite, as one that cannot be undone.
-    #[serde(default)]
+    /// rewritten, or when what they held was more than an undo keeps.
     pub undoable: bool,
 }
 

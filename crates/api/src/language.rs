@@ -232,11 +232,7 @@ pub struct Fold {
 }
 
 /// What attached to an opened document.
-///
-/// `default` on the struct, because this crosses the rpc wire: a client newer than the host's
-/// `accent-cli serve` must read what an older one sends rather than fail on a missing field.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Support {
     /// Characters that open the completion popup as they are typed.
     pub completion_triggers: Vec<char>,

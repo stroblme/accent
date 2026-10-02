@@ -68,8 +68,7 @@ pub struct Status {
     /// A merge stopped part way and is waiting for a commit or an abort.
     pub merging: bool,
     /// A rebase stopped part way — one started in a terminal, since a Sync merges — and is
-    /// waiting for a continue or an abort. Defaulted, so a server that does not send it reads.
-    #[serde(default)]
+    /// waiting for a continue or an abort.
     pub rebasing: bool,
 }
 
@@ -1240,8 +1239,7 @@ pub struct Branches {
     pub remote: Vec<String>,
     /// The local branch HEAD is on; `None` when it is detached or its branch has no commit yet.
     /// [`Status`] says the same, and this is what the pane falls back on when a status did not
-    /// come back. Defaulted, so an answer from a server that does not send it still reads.
-    #[serde(default)]
+    /// come back.
     pub head: Option<String>,
 }
 
