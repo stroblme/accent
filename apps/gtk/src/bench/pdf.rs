@@ -1085,6 +1085,7 @@ pub(super) fn bench_pdf_renaming(app: &Rc<App>, rel: &str) {
 pub(super) fn bench_drawing(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
+        online(&app).await;
         let _ = WidgetExt::activate_action(&app.window, "win.new-drawing", None);
         for _ in 0..40 {
             if app.window.visible_dialog().is_some() {
@@ -1131,11 +1132,51 @@ pub(super) fn bench_drawing(app: &Rc<App>) {
             .and_then(|doc| doc.page_sizes())
             .unwrap_or_default();
         println!(
-            "bench drawing made key={:?} tool={:?} window={}x{} on_disk={sizes:?}",
+            "bench drawing made key={:?} tool={:?} window={}x{} on_disk={sizes:?} in_vault {}",
             pdf.key(),
             pdf.mode_label(),
             app.window.width(),
             app.window.height(),
+            vault_pages(&app, &pdf.key()),
+        );
+        bench_quit(&app);
+    });
+}
+
+/// Insert Sketch from the note `rel`: what the note gained, the tab it opened beside it with the
+/// tool in hand, and what the vault holds under that name — on a remote vault the host's copy.
+pub(super) fn bench_sketch(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        online(&app).await;
+        app.open_path(&rel);
+        let Some(tab) = until(|| app.tab_for(&rel)).await else {
+            println!("bench sketch no_note");
+            return bench_quit(&app);
+        };
+        let before = tab.text();
+        let started = Instant::now();
+        let _ = WidgetExt::activate_action(&app.window, "win.insert-sketch", None);
+        let held = started.elapsed().as_millis();
+        let pdf = until(|| app.active_pdf().filter(|pdf| pdf.page_count() > 0)).await;
+        let Some(pdf) = pdf else {
+            println!(
+                "bench sketch no_tab held_ms={held} note_changed={} said={} {:?}",
+                tab.text() != before,
+                app.toasted.get(),
+                bench_said(&app)
+            );
+            return bench_quit(&app);
+        };
+        println!(
+            "bench sketch made held_ms={held} after_ms={} key={:?} embedded={} tool={:?} \
+             in_vault {} said={}",
+            started.elapsed().as_millis(),
+            pdf.key(),
+            tab.text().contains(&format!("![[{}]]", pdf.key())),
+            pdf.mode_label(),
+            vault_pages(&app, &pdf.key()),
+            app.toasted.get()
         );
         bench_quit(&app);
     });

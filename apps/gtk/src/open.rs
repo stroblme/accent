@@ -550,50 +550,68 @@ impl App {
     ///
     /// A one-page PDF and not a format of our own: a sketch is then a document every reader on
     /// the machine can open, and the pen that draws on it is the one that draws on any other PDF.
+    /// Written through the vault, so on a remote one it lands on the host.
     pub fn insert_sketch(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
             return self.cannot("add a sketch", "no note is open");
         };
         let rel = tab.rel();
-        if doc::is_loose_key(&rel) || self.vault().is_some_and(|v| v.is_remote()) {
+        if doc::is_loose_key(&rel) {
             return self.needs_vault("add a sketch");
         }
-        let Some(vault) = self.vault() else { return };
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
         // Beside the note, numbered from one: there is no attachments directory to put it in, and
         // inventing one would be a setting nobody asked for.
         let stem = Path::new(&rel)
             .file_stem()
             .unwrap_or_default()
-            .to_string_lossy();
-        let dir = Path::new(&rel)
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty());
-        let key = (1..)
-            .map(|n| match dir {
-                Some(dir) => format!("{}/{stem}-sketch-{n}.pdf", dir.display()),
-                None => format!("{stem}-sketch-{n}.pdf"),
+            .to_string_lossy()
+            .into_owned();
+        let dir = accent_core::path::parent_dir(&rel).to_string();
+        let (app, tab) = (Rc::downgrade(self), Rc::downgrade(&tab));
+        glib::spawn_future_local(async move {
+            // A round trip per name tried on a remote vault, and pdfium work behind the
+            // process-wide lock a render thread may be holding: a worker's, as New Drawing's is.
+            let made = crate::work::off_thread("sketch", move || {
+                let mut n = 1;
+                let key = loop {
+                    let key = match dir.is_empty() {
+                        true => format!("{stem}-sketch-{n}.pdf"),
+                        false => format!("{dir}/{stem}-sketch-{n}.pdf"),
+                    };
+                    // A name the vault cannot answer for is not taken as free: the write would
+                    // replace whatever is there.
+                    match vault.stat(&key) {
+                        Ok(None) => break key,
+                        Ok(Some(_)) => n += 1,
+                        Err(e) => return Err(("make a sketch".to_string(), e.to_string())),
+                    }
+                };
+                let bytes = accent_core::pdf::blank_pdf(accent_core::pdf::A4)
+                    .map_err(|e| ("make a sketch".to_string(), format!("{e:#}")))?;
+                vault
+                    .write_file(&key, &bytes)
+                    .map_err(|e| (format!("write {key}"), e.to_string()))?;
+                Ok(key)
             })
-            .find(|key| !vault.exists(key));
-        let Some(key) = key else { return };
-
-        let bytes = match accent_core::pdf::blank_pdf(accent_core::pdf::A4) {
-            Ok(bytes) => bytes,
-            Err(e) => return self.cannot("make a sketch", e),
-        };
-        let path = match vault.resolve(&key) {
-            Ok(path) => path,
-            Err(e) => return self.cannot("make a sketch", e),
-        };
-        if let Err(e) = accent_core::fs::write_bytes(&path, &bytes, None) {
-            return self.cannot(&format!("write {key}"), e);
-        }
-
-        tab.buffer.insert_at_cursor(&format!("![[{key}]]"));
-        let at = self.pane_of(&tab.page).unwrap_or_else(|| self.pane());
-        self.open_beside(&at, Side::Right, &key);
-        if let Some(Doc::Pdf(pdf)) = self.doc_for(&key) {
-            pdf.set_mode(pdfview::Mode::Pen);
-        }
+            .await
+            .unwrap_or_else(|| Err(("make a sketch".to_string(), "it stopped".to_string())));
+            let (Some(app), Some(tab)) = (app.upgrade(), tab.upgrade()) else {
+                return;
+            };
+            let key = match made {
+                Ok(key) => key,
+                Err((what, why)) => return app.cannot(&what, why),
+            };
+            tab.buffer.insert_at_cursor(&format!("![[{key}]]"));
+            let at = app.pane_of(&tab.page).unwrap_or_else(|| app.pane());
+            app.open_beside(&at, Side::Right, &key);
+            if let Some(Doc::Pdf(pdf)) = app.doc_for(&key) {
+                pdf.set_mode(pdfview::Mode::Pen);
+            }
+        });
     }
 
     /// A drawing New Drawing has just written: open it and put the pen down, which is what it

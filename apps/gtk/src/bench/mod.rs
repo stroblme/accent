@@ -66,7 +66,7 @@ use panes::{
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_closed,
     bench_pdf_deep, bench_pdf_dropped, bench_pdf_failed, bench_pdf_pages, bench_pdf_renaming,
-    bench_pdf_render, bench_pdf_stale, bench_pdf_strip,
+    bench_pdf_render, bench_pdf_stale, bench_pdf_strip, bench_sketch,
 };
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -280,7 +280,9 @@ use tags::bench_tags;
 /// build of an article in a scratch vault.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
-/// tab it opened has in hand.
+/// tab it opened has in hand, and what the vault holds under its name. `=sketch:<rel_note>` fires
+/// Insert Sketch in that note and prints how long the main loop was held, whether the note embeds
+/// what it made, the tab it opened and what the vault holds under that name.
 /// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
 /// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
 /// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
@@ -490,7 +492,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let memory = std::env::var("ACCENT_BENCH_MEMORY").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
-    let drawing = std::env::var("ACCENT_BENCH_DRAWING").is_ok();
+    let drawing = std::env::var("ACCENT_BENCH_DRAWING").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let suggest = std::env::var("ACCENT_BENCH_SUGGEST").ok();
@@ -544,7 +546,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && compare.is_none()
         && memory.is_none()
         && pdf.is_none()
-        && !drawing
+        && drawing.is_none()
         && tabs.is_none()
         && occur.is_none()
         && suggest.is_none()
@@ -690,8 +692,11 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 None => bench_pdf(&app, &rel),
             };
         }
-        if drawing {
-            return bench_drawing(&app);
+        if let Some(arg) = drawing {
+            return match arg.strip_prefix("sketch:") {
+                Some(rel) => bench_sketch(&app, rel),
+                None => bench_drawing(&app),
+            };
         }
         if let Some(rel) = transfer {
             return bench_transfer(&app, &rel);
