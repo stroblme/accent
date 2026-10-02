@@ -500,6 +500,279 @@ fn pads_texts() -> (String, String) {
     (index, work)
 }
 
+/// Typing by real keys into a working-tree comparison of 400 lines, the editor being its right
+/// column: changed at every fortieth line from line 20 and staged, so a run hides between each two
+/// changes. The lines wrap to a few rows each, which puts the note above the 16 KB under which the
+/// editor lays the comparison again on each keystroke rather than on its debounce; `short:` makes
+/// them one or two rows, under it. The middle run is opened from its button and XTEST types into it
+/// and around it, each step asked for as `bench compare_typing xtest <steps>`: `inside` three
+/// letters at the end of its middle line, `back` three BackSpaces that make that line unchanged
+/// again, `newline` a Return there and `join` a BackSpace that takes the new line out again,
+/// `above` and `below` three letters on the changed line before and after the run; then three
+/// letters in the middle of the run above it, opened by a jump into it as a search hit or the
+/// outline makes (`jump`), and of the last run, opened from its button with the view at the end of
+/// the file (`end`). For each it prints the hidden runs before and after, whether the run opened is
+/// still open, and over every frame painted until a second and a half after the last key: where the
+/// line typed into starts below the top of the view before and after (`line_y`), in how many frames
+/// it was anywhere else (`jumped`) or its partner in the other column off its row (`skewed`), in
+/// how many some row on screen had its two lines at different heights once the edit was laid over
+/// (`uneven`, the first such row as `row:old_y/new_y`), and in how many either view had to skip
+/// drawing (`blank`, see `fold::aborts_at`). Makes a repository in the vault root and stages the
+/// note, so point it at a throwaway vault.
+pub(in crate::bench) fn bench_compare_typing(app: &Rc<App>, rel: &str) {
+    let (short, rel) = match rel.strip_prefix("short:") {
+        Some(rel) => (true, rel),
+        None => (false, rel),
+    };
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let text = |changed: bool| -> String {
+            (1..=400)
+                .map(|i| match changed && i % 40 == 20 {
+                    true => format!("line {i} changed\n"),
+                    false if short => format!("line {i} {}\n", "word ".repeat(i % 7)),
+                    false => format!("line {i} {}\n", "wrapping words ".repeat(i % 7 * 5)),
+                })
+                .collect()
+        };
+        tab.set_text(&text(false));
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_typing write_failed {e}");
+            return bench_quit(&app);
+        }
+        for args in [["init", "-q", ""], ["add", "--", rel.as_str()]] {
+            std::process::Command::new("git")
+                .args(args.iter().filter(|a| !a.is_empty()))
+                .current_dir(app.root())
+                .status()
+                .ok();
+        }
+        // The watcher's debounce and a repository discovery that runs git per directory.
+        wait(4000).await;
+        let Some(git) = app.git.get().filter(|git| git.has_repos()) else {
+            println!("bench compare_typing no_repo");
+            return bench_quit(&app);
+        };
+        tab.set_text(&text(true));
+        git.compare_worktree(&rel);
+        for _ in 0..200 {
+            wait(50).await;
+            if tab.comparison().is_some_and(|c| c.settled()) {
+                break;
+            }
+        }
+        let (Some(compare), Some(theirs)) = (
+            tab.comparison(),
+            tab.comparison().and_then(|c| pane_view(c.widget(), false)),
+        ) else {
+            println!("bench compare_typing none");
+            return bench_quit(&app);
+        };
+        println!("bench compare_typing xtest move 300 15; focus");
+        for _ in 0..100 {
+            if app.window.is_active() {
+                break;
+            }
+            wait(100).await;
+        }
+        let Some((first, last)) = open_run(&tab, &compare, None).await else {
+            return bench_quit(&app);
+        };
+        let middle = (first + last) / 2;
+        let cases = [
+            ("inside", middle, middle, "type abc", 3),
+            (
+                "back",
+                middle,
+                middle,
+                "key BackSpace; key BackSpace; key BackSpace",
+                3,
+            ),
+            ("newline", middle, middle, "key Return", 1),
+            ("join", middle, middle + 1, "key BackSpace", 1),
+            ("above", first - 4, first - 4, "type abc", 3),
+            ("below", last + 4, last + 4, "type abc", 3),
+        ];
+        let open = |first: i32, last: i32| (first..=last).all(|n| !gap_hides(&tab, n));
+        for (name, track, caret, steps, keys) in cases {
+            let runs = compare.counts().2;
+            let typed = typed(&tab, &compare, &theirs, (track, caret), steps, keys).await;
+            println!(
+                "bench compare_typing {name} hidden={runs}->{} open={} {typed}",
+                compare.counts().2,
+                open(first, last)
+            );
+        }
+        // The run above, by a jump into it as a search hit or the outline makes, and the last.
+        let Some(above) = (0..first).rev().find(|&n| gap_hides(&tab, n)) else {
+            return bench_quit(&app);
+        };
+        let jump = tab.buffer.iter_at_line(above - 8).expect("bench line");
+        for name in ["jump", "end"] {
+            let run = match name {
+                "jump" => opened(&tab, || tab.jump_to(&jump, 0.5)).await,
+                _ => open_run(&tab, &compare, Some(usize::MAX)).await,
+            };
+            let Some((first, last)) = run else {
+                return bench_quit(&app);
+            };
+            let (middle, runs) = ((first + last) / 2, compare.counts().2);
+            let typed = typed(&tab, &compare, &theirs, (middle, middle), "type abc", 3).await;
+            println!(
+                "bench compare_typing {name} hidden={runs}->{} open={} {typed}",
+                compare.counts().2,
+                open(first, last)
+            );
+        }
+        bench_quit(&app);
+    });
+}
+
+/// Whether line `n` of `tab` is in a comparison's hidden run.
+fn gap_hides(tab: &Tab, n: i32) -> bool {
+    let gap = tab.buffer.tag_table().lookup(diff::TAG_GAP);
+    tab.buffer
+        .iter_at_line(n)
+        .zip(gap)
+        .is_some_and(|(at, gap)| at.has_tag(&gap))
+}
+
+/// Press the button of the hidden run `pick` on the editor's column (the middle one for `None`,
+/// the last for anything past it), its row halfway down the view, and say which lines it opened.
+async fn open_run(tab: &Tab, compare: &diff::Compare, pick: Option<usize>) -> Option<(i32, i32)> {
+    let view = tab.view.upcast_ref::<gtk::TextView>();
+    let buttons = disk::overlaid(view, "⋯");
+    let at = pick
+        .unwrap_or(buttons.len() / 2)
+        .min(buttons.len().saturating_sub(1));
+    let (y, button) = buttons.get(at).cloned()?;
+    disk::centre(compare, view, y).await;
+    opened(tab, || button.emit_clicked()).await
+}
+
+/// Run `open` and say which hidden lines it opened, first and last.
+async fn opened(tab: &Tab, open: impl FnOnce()) -> Option<(i32, i32)> {
+    let shut: Vec<i32> = (0..tab.buffer.line_count())
+        .filter(|&n| gap_hides(tab, n))
+        .collect();
+    open();
+    glib::timeout_future(Duration::from_millis(800)).await;
+    let opened: Vec<i32> = shut.into_iter().filter(|&n| !gap_hides(tab, n)).collect();
+    let run = (*opened.first()?, *opened.last()?);
+    println!("bench compare_typing opened={}..={}", run.0, run.1);
+    Some(run)
+}
+
+/// What a frame showed: where the line typed into and its partner start below the top of their
+/// views, the first row on screen whose two lines were at different heights, and whether a view
+/// skipped drawing.
+type Frame = (i32, i32, Option<String>, bool);
+
+/// Put the caret at the end of line `at.1`, halfway down the view, ask for `steps` by XTEST, and
+/// say what every frame painted until a second and a half after the `keys`th change showed of line
+/// `at.0`: see [`bench_compare_typing`]. Its partner in `theirs` is the line of the same number,
+/// which every case leaves it. Halfway down, so that GTK has no reason to scroll to the caret.
+async fn typed(
+    tab: &Rc<Tab>,
+    compare: &Rc<diff::Compare>,
+    theirs: &gtk::TextView,
+    at: (i32, i32),
+    steps: &str,
+    keys: u32,
+) -> String {
+    let (buffer, mine) = (&tab.buffer, tab.view.upcast_ref::<gtk::TextView>());
+    let (Some(line), Some(partner), Some(mut caret)) = (
+        buffer.iter_at_line(at.0),
+        theirs.buffer().iter_at_line(at.0),
+        buffer.iter_at_line(at.1),
+    ) else {
+        return "line=none".to_string();
+    };
+    if !caret.ends_line() {
+        caret.forward_to_line_end();
+    }
+    buffer.place_cursor(&caret);
+    disk::centre(compare, mine, mine.iter_location(&caret).y()).await;
+    tab.view.grab_focus();
+    let marks = [
+        buffer.create_mark(None, &line, true),
+        theirs.buffer().create_mark(None, &partner, true),
+    ];
+    let sample = {
+        let (views, marks, compare) = (
+            [mine.clone(), theirs.clone()],
+            marks.clone(),
+            compare.clone(),
+        );
+        move || {
+            let [line, partner] = [0, 1].map(|i| {
+                let (view, mark) = (&views[i], &marks[i]);
+                view.iter_location(&view.buffer().iter_at_mark(mark)).y() - view.visible_rect().y()
+            });
+            let blank = views.iter().any(|view| {
+                let seen = view.visible_rect();
+                [seen.y(), seen.y() + seen.height()]
+                    .into_iter()
+                    .any(|y| crate::fold::aborts_at(view, y))
+            });
+            let uneven = compare.uneven().filter(|(n, _)| *n > 0).map(|(_, row)| row);
+            (line, partner, uneven, blank)
+        }
+    };
+    let before = sample();
+    let seen: Rc<RefCell<Vec<Frame>>> = Rc::default();
+    let Some(clock) = mine.frame_clock() else {
+        return "clock=none".to_string();
+    };
+    let painted = clock.connect_after_paint({
+        let (seen, sample) = (seen.clone(), sample.clone());
+        move |_| seen.borrow_mut().push(sample())
+    });
+    let changes = Rc::new(Cell::new(0));
+    let changed = buffer.connect_changed({
+        let changes = changes.clone();
+        move |_| changes.set(changes.get() + 1)
+    });
+    println!("bench compare_typing xtest {steps}");
+    for _ in 0..100 {
+        if changes.get() >= keys {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    clock.disconnect(painted);
+    buffer.disconnect(changed);
+    let (after, seen) = (sample(), seen.take());
+    buffer.delete_mark(&marks[0]);
+    theirs.buffer().delete_mark(&marks[1]);
+    let count = |f: &dyn Fn(&Frame) -> bool| seen.iter().filter(|s| f(s)).count();
+    let first = seen.iter().find_map(|s| s.2.clone()).unwrap_or_default();
+    format!(
+        "line={} keys={}/{keys} frames={} line_y={}->{} jumped={} skewed={} uneven={}{} blank={}",
+        at.0,
+        changes.get(),
+        seen.len(),
+        before.0,
+        after.0,
+        count(&|s| s.0 != before.0),
+        count(&|s| s.0 != s.1),
+        count(&|s| s.2.is_some()),
+        if first.is_empty() {
+            String::new()
+        } else {
+            format!("@{first}")
+        },
+        count(&|s| s.3),
+    )
+}
+
 /// A Changes row clicked right after another repository is picked (`=pick:<rel>`). Point it at a
 /// vault whose root repository has `<rel>` changed and a second repository beside it: the drill
 /// picks the second one in the chooser and activates `<rel>`'s row at once, before the refresh

@@ -26,6 +26,7 @@ mod replace;
 mod scroll;
 mod search;
 mod style;
+mod suggest;
 mod synctex;
 mod tags;
 
@@ -36,7 +37,7 @@ use compare::{
     bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_left,
     bench_compare_lines, bench_compare_pads, bench_compare_page, bench_compare_pick,
     bench_compare_press, bench_compare_row, bench_compare_runaway, bench_compare_stale,
-    bench_compare_unfold,
+    bench_compare_typing, bench_compare_unfold,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -116,6 +117,10 @@ use tags::bench_tags;
 /// is the popup's once one is, that "up" reads false against both a view taken off screen under
 /// one and a forged `show`, and that Return still continues a list after them. The popup wants the X input focus, which under Xvfb is
 /// `build-aux/xtest.py :<display> "move 700 500; focus"` run beside it.
+/// `ACCENT_BENCH_SUGGEST=escape:<rel>` types a word for the popup and paints ghost text, with the
+/// find bar open and with the note compared with its disk copy, and asks for an XTEST Escape over
+/// each, printing what it put away (see `suggest::bench_suggest_escape`). Only on a scratch vault
+/// under `/tmp`.
 /// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
 /// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
@@ -181,7 +186,10 @@ use tags::bench_tags;
 /// (`compare::bench_compare_unfold`).
 /// `=runaway:<rel>` lays a comparison again eight times before GTK lays out what it re-padded,
 /// printing the padding of a paragraph under a blank line after each
-/// (`compare::bench_compare_runaway`).
+/// (`compare::bench_compare_runaway`). `=typing:<rel>` types by XTEST into and around a run opened
+/// in a long working-tree comparison, `=typing:short:<rel>` in one under 16 KB, printing what the
+/// frames meanwhile showed of the line typed into and its partner
+/// (`compare::bench_compare_typing`).
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
@@ -474,6 +482,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let drawing = std::env::var("ACCENT_BENCH_DRAWING").is_ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
+    let suggest = std::env::var("ACCENT_BENCH_SUGGEST").ok();
     let theme = std::env::var("ACCENT_BENCH_THEME").ok();
     let numbers = std::env::var("ACCENT_BENCH_NUMBERS").ok();
     let reveal = std::env::var("ACCENT_BENCH_REVEAL").ok();
@@ -527,6 +536,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !drawing
         && tabs.is_none()
         && occur.is_none()
+        && suggest.is_none()
         && theme.is_none()
         && numbers.is_none()
         && reveal.is_none()
@@ -571,7 +581,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = compare {
             // These make a repository in the vault root, or stage and commit in the one there.
-            if ["lines:", "row:", "left:", "pads:", "clicks"]
+            if ["lines:", "row:", "left:", "pads:", "clicks", "typing:"]
                 .iter()
                 .any(|mode| rel.starts_with(mode))
             {
@@ -621,6 +631,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("runaway:") {
                 return bench_compare_runaway(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("typing:") {
+                return bench_compare_typing(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
@@ -754,6 +767,13 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = occur {
             scratch_only(&app, "ACCENT_BENCH_OCCUR");
             return bench_occurrences(&app, &rel);
+        }
+        if let Some(arg) = suggest {
+            if let Some(rel) = arg.strip_prefix("escape:") {
+                scratch_only(&app, "ACCENT_BENCH_SUGGEST");
+                return suggest::bench_suggest_escape(&app, rel);
+            }
+            return bench_quit(&app);
         }
         if let Some(rel) = theme {
             return bench_theme(&app, &rel);

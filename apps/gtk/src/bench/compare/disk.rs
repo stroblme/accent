@@ -897,7 +897,7 @@ async fn bench_gap(compare: &diff::Compare, view: &gtk::TextView, pick: Option<u
 
 /// The shown buttons laid over `view` whose label starts with `label`, top to bottom, each with
 /// the `y` it starts at in buffer coordinates.
-fn overlaid(view: &gtk::TextView, label: &str) -> Vec<(i32, gtk::Button)> {
+pub(super) fn overlaid(view: &gtk::TextView, label: &str) -> Vec<(i32, gtk::Button)> {
     let mut buttons = Vec::new();
     let mut stack = vec![view.clone().upcast::<gtk::Widget>()];
     while let Some(widget) = stack.pop() {
@@ -922,7 +922,7 @@ fn overlaid(view: &gtk::TextView, label: &str) -> Vec<(i32, gtk::Button)> {
 }
 
 /// Scroll the comparison so buffer `y` of `view` is halfway down it, as far as it goes.
-async fn centre(compare: &diff::Compare, view: &gtk::TextView, y: i32) {
+pub(super) async fn centre(compare: &diff::Compare, view: &gtk::TextView, y: i32) {
     let (adj, seen) = (compare.vadjustment(), view.visible_rect());
     adj.set_value(adj.value() + f64::from(y - seen.y()) - adj.page_size() / 2.0);
     glib::timeout_future(Duration::from_millis(500)).await;
