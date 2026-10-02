@@ -1031,7 +1031,8 @@ requests! {
 ///
 /// The round trip runs on a blocking thread, where `abort` does nothing, so dropping the task
 /// sends the server a `cancel` for that request id instead: a completion the user has typed past
-/// is dropped where the language server is, rather than computed into a pipe nobody reads.
+/// is dropped where the language server is, rather than computed into a pipe nobody reads, and
+/// the blocking thread is let go at once rather than when the host answers.
 fn remote_task<T: DeserializeOwned + Send + 'static>(
     r: Arc<Remote>,
     method: &'static str,

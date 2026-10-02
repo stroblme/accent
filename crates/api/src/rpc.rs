@@ -317,7 +317,14 @@ impl Client {
 
     /// Tell the server this request has no reader left. A notification, with no id of its own:
     /// there is no answer to it, and a request that has already finished simply is not there.
+    ///
+    /// Its caller is let go at once, answered "cancelled", rather than left waiting for an answer
+    /// nobody reads: a ghost-text request waits on a blocking thread of its own, and a fast typist
+    /// on a slow link would otherwise pile them up, one per pause, each until the host answered.
     pub fn cancel(&self, id: u64) {
+        if let Some(waiter) = locked(&self.pending).remove(&id) {
+            let _ = waiter.send(Err(RpcError::failed("cancelled")));
+        }
         let _ = emit(
             &self.out,
             &json!({"jsonrpc": "2.0", "method": "cancel", "params": [id]}),
@@ -335,9 +342,10 @@ impl Client {
             return Err(RpcError::disconnected("not connected"));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        *locked(asked) = Some(id);
         let (tx, rx) = channel();
         locked(&self.pending).insert(id, tx);
+        // Only once there is a waiter to let go: a cancel in between would find none.
+        *locked(asked) = Some(id);
 
         let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         if let Err(e) = emit(&self.out, &line) {
@@ -1087,16 +1095,63 @@ mod tests {
         server.join().unwrap();
     }
 
+    /// A call given up on lets its caller go at once rather than when the host answers, or at the
+    /// deadline when it never does.
+    #[test]
+    fn a_cancelled_call_lets_its_caller_go_at_once() {
+        let (server_in, client_out) = std::io::pipe().unwrap();
+        let (client_in, server_out) = std::io::pipe().unwrap();
+        // A host that reads every request and answers none.
+        let server =
+            std::thread::spawn(
+                move || {
+                    for _ in BufReader::new(server_in).lines().map_while(Result::ok) {}
+                },
+            );
+        let client = Arc::new(Client::new(
+            Box::new(client_out),
+            Box::new(client_in),
+            channel().0,
+            Box::new(|| {}),
+        ));
+        let asked: Arc<Mutex<Option<u64>>> = Arc::default();
+        let call = std::thread::spawn({
+            let (client, asked) = (client.clone(), asked.clone());
+            move || {
+                let t = Instant::now();
+                let answer = client.call_tracked::<Value>("slow", json!([]), &asked, DEADLINE);
+                (answer, t.elapsed())
+            }
+        });
+        let id = loop {
+            if let Some(id) = *locked(&asked) {
+                break id;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        client.cancel(id);
+        let (answer, took) = call.join().unwrap();
+        assert!(answer.is_err());
+        assert!(took < Duration::from_secs(1), "the caller waited {took:?}");
+        // The host's end first: the reader the shutdown joins ends with it.
+        drop(server_out);
+        client.shutdown();
+        server.join().unwrap();
+    }
+
     /// A link that goes while a call is out leaves it unknown whether the host did what it was
     /// asked; one refused before it was sent did nothing, and only that one is asked again.
     #[test]
     fn a_call_the_link_dropped_is_not_unasked() {
         let (server_in, client_out) = std::io::pipe().unwrap();
         let (client_in, server_out) = std::io::pipe().unwrap();
-        // A host that reads the request and goes without answering it.
+        // A host that reads the request and goes without answering it. The client's first ping
+        // may come before it, and is no request.
         let server = std::thread::spawn(move || {
-            let mut line = String::new();
-            BufReader::new(server_in).read_line(&mut line).unwrap();
+            let _request = BufReader::new(server_in)
+                .lines()
+                .map_while(Result::ok)
+                .find(|line| line.contains("\"id\""));
             drop(server_out);
         });
         let client = Client::new(
