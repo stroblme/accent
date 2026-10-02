@@ -475,6 +475,12 @@ fn render_loop(
                     let _ = done.send(copied.map_err(|e| format!("{e:#}")));
                 }
                 Request::Reload => {
+                    // Reported changed and still the file this document was read from or last
+                    // wrote: a `chmod`, a remote copy fetched again as it was. Read again, it
+                    // would drop whatever has been drawn since the last save.
+                    if etag.is_some() && accent_core::fs::Etag::of(&path).ok() == etag {
+                        continue;
+                    }
                     // A file that will not open takes the document with it: what it showed is
                     // of a file that is not there any more. The tab waits for the next write.
                     match open(&path) {
