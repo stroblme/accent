@@ -112,11 +112,14 @@ pub enum Event {
         items: Vec<Diagnostic>,
     },
     /// A language provider started or finished a background job worth waiting for — the
-    /// ghost-text index rebuilding, and nothing else today. `what` is what to call it on screen.
-    /// Shown where the vault's own indexing is shown, and yielding to it: this one is optional.
+    /// ghost-text index rebuilding, and nothing else today. `what` is what to call it on screen,
+    /// and `message` how far the job says it has got, in its own words ("1200 files"), while it
+    /// says so. Shown where the vault's own indexing is shown, and yielding to it: this one is
+    /// optional.
     Busy {
         what: String,
         busy: bool,
+        message: Option<String>,
     },
 }
 

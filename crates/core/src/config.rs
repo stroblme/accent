@@ -18,6 +18,7 @@ macro_rules! example {
     () => {
         r#"recent_vaults = ["/home/me/Notes"]
 spellcheck = true
+word_suggestions = true
 ghost_text = true
 minimap = false
 line_numbers = false
@@ -97,6 +98,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editor_font: Option<String>,
     pub spellcheck: bool,
+    /// Offer words as one is typed in prose: the document's own, then the system dictionary's.
+    pub word_suggestions: bool,
     /// Suggest the rest of the line as the caret sits, from what the vault already says. Needs
     /// `merl-rt` on the path; the switch only says whether to ask for it.
     pub ghost_text: bool,
@@ -234,6 +237,7 @@ impl Default for Config {
             recent_vaults: Vec::new(),
             editor_font: None,
             spellcheck: true,
+            word_suggestions: true,
             ghost_text: true,
             minimap: false,
             line_numbers: false,
@@ -956,6 +960,7 @@ daily_template = "DailyNote.md"
         let c = Config::read(&p).unwrap();
         assert_eq!(c.recent_vaults, [PathBuf::from("/home/me/Notes")]);
         assert!(c.spellcheck);
+        assert!(c.word_suggestions);
         assert!(c.ghost_text);
         assert!(!c.minimap);
         assert!(!c.line_numbers);

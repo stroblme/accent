@@ -16,7 +16,7 @@ pub(super) use disk::{
 };
 pub(super) use git::{
     bench_compare_clicks, bench_compare_lines, bench_compare_pads, bench_compare_pick,
-    bench_compare_row, bench_compare_stale,
+    bench_compare_row, bench_compare_stale, bench_compare_typing,
 };
 
 /// What the toast over the window reads, whatever it says: [`bench_said`] looks for a failure.

@@ -178,9 +178,13 @@ impl App {
                     git.rediscover();
                 }
             }
-            Event::Busy { what, busy } => {
+            Event::Busy {
+                what,
+                busy,
+                message,
+            } => {
                 self.statusbar
-                    .set_provider_busy(busy.then_some(what.as_str()));
+                    .set_provider_busy(busy.then_some(what.as_str()), message.as_deref());
             }
             Event::Reconciled(stats) => {
                 tracing::debug!(

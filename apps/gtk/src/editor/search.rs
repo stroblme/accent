@@ -508,16 +508,19 @@ impl Tab {
     }
 
     /// Select `start..end`, opening whatever hides it first, and say whether anything opened:
-    /// lines GTK has yet to measure. A comparison is laid over the text again once the caret is
-    /// there, since it keeps the run the caret is in open on both sides, where `fold::reveal`
-    /// opened it on the editor's side alone, under the other side's "unchanged lines" button.
+    /// lines GTK has yet to measure. A comparison opens the run it is in on both sides, as the
+    /// run's button does, where `fold::reveal` opened it on the editor's side alone, under the
+    /// other side's "unchanged lines" button; and so the run stays open through the edits made
+    /// there, which leave no caret in it to keep it open around.
     fn reveal_select(&self, start: &gtk::TextIter, end: &gtk::TextIter) -> bool {
         let opened = fold::reveal(self.text_buffer(), start);
         self.buffer.select_range(start, end);
         if opened {
             // The lines that came back out want their end-of-line messages back.
             self.paint_diagnostics();
-            if let Some(compare) = self.comparison() {
+            if let Some(compare) = self.comparison()
+                && !compare.open_hiding(start.offset())
+            {
                 compare.refresh();
             }
         }

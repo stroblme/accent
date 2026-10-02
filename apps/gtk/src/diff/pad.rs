@@ -10,6 +10,8 @@ use super::{ADDED_HUE, Band, REMOVED_HUE, Side};
 /// the buffer. See [`carried`].
 const PAD_ABOVE: &str = "diff-pad-above-";
 const PAD_BELOW: &str = "diff-pad-below-";
+/// A paragraph GTK has not laid out since its text or its padding changed: see [`measure`].
+pub(super) const UNMEASURED: &str = "diff-unmeasured";
 
 /// Blank space above and below each row's line in one column, that keeps it in step with the
 /// other column. See [`padding`].
@@ -120,6 +122,13 @@ pub(super) fn bands(
 /// within the pixel a wrapped paragraph's per-line rounding can add — and the caller asks again
 /// once GTK has caught up. A paragraph the buffer counts as several lines (U+2029) is measured
 /// that way too, since GTK's figure would be for its first line alone.
+///
+/// So is one marked [`UNMEASURED`], until GTK's figure agrees with it: GTK keeps the height it
+/// last laid a line out at until it lays it out again, so its figure for a line just edited is
+/// the old text's, and one for a paragraph just re-padded, less the padding it carries now, is
+/// off by the change. Read as it was, the relayout run on a keystroke itself padded the other
+/// column for the old text, and a relayout run before GTK had laid out a re-padded paragraph
+/// moved its padding by the change again on every pass.
 pub(super) fn measure(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -129,15 +138,42 @@ pub(super) fn measure(
 ) -> (i32, bool) {
     let first = buffer.iter_at_offset(from);
     let last = buffer.iter_at_offset((to - 1).max(from));
-    if first.line() == last.line() {
-        let (_, height) = view.line_yrange(&first);
-        if height > 0 {
-            return (height - padded, false);
-        }
+    let (_, height) = view.line_yrange(&first);
+    let laid = (first.line() == last.line() && height > 0).then_some(height - padded);
+    let unmeasured = buffer
+        .tag_table()
+        .lookup(UNMEASURED)
+        .filter(|tag| first.has_tag(tag));
+    if let (Some(laid), None) = (laid, &unmeasured) {
+        return (laid, false);
     }
     let (a, b) = (view.iter_location(&first), view.iter_location(&last));
     let margins = view.pixels_above_lines() + view.pixels_below_lines();
-    (b.y() + b.height() - a.y() + margins, true)
+    let own = b.y() + b.height() - a.y() + margins;
+    match (laid, unmeasured) {
+        (Some(laid), Some(tag)) if (laid - own).abs() <= 1 => {
+            let mut start = first;
+            start.backward_char();
+            buffer.remove_tag(&tag, &start, &buffer.iter_at_offset(to));
+            (laid, false)
+        }
+        _ => (own, true),
+    }
+}
+
+/// Mark the lines `from..to` touches [`UNMEASURED`], from the newline before the first of them,
+/// so that text typed at a line's start lands inside the mark: what a comparison does to an edit
+/// on its way into the buffer, and to a paragraph it re-pads.
+pub(super) fn unmeasured(
+    buffer: &impl IsA<gtk::TextBuffer>,
+    from: &gtk::TextIter,
+    to: &gtk::TextIter,
+) {
+    let (mut start, mut end) = (*from, *to);
+    start.set_line_offset(0);
+    start.backward_char();
+    end.forward_line();
+    buffer.apply_tag_by_name(UNMEASURED, &start, &end);
 }
 
 /// The padding the paragraph starting at `at` carries, above and below, over the view's own
@@ -211,6 +247,9 @@ pub(super) fn pad(
             buffer.apply_tag(&pad_tag(buffer, prefix, base + px), &start, &end);
         }
     }
+    if changed {
+        unmeasured(buffer, &first, &first);
+    }
     changed
 }
 
@@ -237,12 +276,15 @@ pub(super) fn reclaim(buffer: &sourceview5::Buffer) {
 /// measures it at the height it had last been laid out at, padding and all. Stretched back over
 /// what was typed, the tags cover the first character again and say what GTK last used.
 ///
-/// The line's own tags are the ones that end with it: the next paragraph's begins at this line's
-/// newline as well, and runs on past it.
+/// Only there: in any other line a tag beginning inside it is what is left of the paragraph an
+/// edit joined onto it, and stretched back it gave the joined line that paragraph's padding until
+/// the next relayout took it off again. The line's own tags are the ones that end with it: the
+/// next paragraph's begins at this line's newline as well, and runs on past it.
 fn reclaim_line(buffer: &sourceview5::Buffer, line: &gtk::TextIter) {
     let mut start = *line;
     start.set_line_offset(0);
-    if start.tags().iter().any(is_pad) {
+    let mut above = start;
+    if (above.backward_char() && !above.starts_line()) || start.tags().iter().any(is_pad) {
         return;
     }
     // The start of the next line, which is where a tag of this one's ends at the latest.

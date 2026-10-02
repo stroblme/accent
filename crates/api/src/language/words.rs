@@ -89,28 +89,43 @@ fn dictionary_path() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// The dictionary's stems, lower-cased, sorted, read once for the life of the process.
+/// The dictionary while word suggestions are on: read on the first word asked for, and let go
+/// when they are switched off ([`forget_dictionary`]). One for the process, as the system's
+/// dictionary is.
+static DICTIONARY: Mutex<Option<Arc<Vec<String>>>> = Mutex::new(None);
+
+/// The dictionary's stems, lower-cased and sorted, read if they are not held already.
 ///
 /// ponytail: stems only. `abandon/DSG` is offered as `abandon`; the affixes that would make
 /// `abandoned` are not expanded. Empty where no dictionary is installed.
-fn dictionary() -> &'static [String] {
-    static DICT: OnceLock<Vec<String>> = OnceLock::new();
-    DICT.get_or_init(|| {
-        let Some(path) = dictionary_path() else {
-            return Vec::new();
-        };
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let mut words: Vec<String> = text
-            .lines()
-            .skip(1)
-            .map(|l| l.split('/').next().unwrap_or_default().to_lowercase())
-            .filter(|w| w.chars().count() >= MIN_WORD && w.chars().all(is_word))
-            .collect();
-        words.sort();
-        words.dedup();
-        tracing::debug!("{} dictionary words from {}", words.len(), path.display());
-        words
-    })
+fn dictionary() -> Arc<Vec<String>> {
+    locked(&DICTIONARY)
+        .get_or_insert_with(|| Arc::new(read_dictionary()))
+        .clone()
+}
+
+/// Let the dictionary go: word suggestions are off, and nothing asks for it until they are on.
+pub(crate) fn forget_dictionary() {
+    if locked(&DICTIONARY).take().is_some() {
+        tracing::debug!("dictionary let go");
+    }
+}
+
+fn read_dictionary() -> Vec<String> {
+    let Some(path) = dictionary_path() else {
+        return Vec::new();
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut words: Vec<String> = text
+        .lines()
+        .skip(1)
+        .map(|l| l.split('/').next().unwrap_or_default().to_lowercase())
+        .filter(|w| w.chars().count() >= MIN_WORD && w.chars().all(is_word))
+        .collect();
+    words.sort();
+    words.dedup();
+    tracing::debug!("{} dictionary words from {}", words.len(), path.display());
+    words
 }
 
 /// A candidate written the way the typed prefix is: `The` completes to `Theorem`, `the` to
@@ -234,8 +249,8 @@ impl Words {
     }
 }
 
-/// Where a document's ghost session comes from once the one it was opened on has exited: the
-/// vault's, started again, or `None` once the vault has given up on it.
+/// Where a document's ghost session comes from whenever it has no live one: the vault's, started
+/// if need be, or `None` while the vault has none to give (Ghost Text off, or given up on).
 pub(crate) type Respawn =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = Option<Arc<dyn Language>>> + Send>> + Send + Sync>;
 
@@ -249,16 +264,21 @@ pub(crate) type Respawn =
 /// about the buffer as it is now. What it does not hear is every save: it re-reads the vault on
 /// one, so it is told when the user leaves the document instead. See [`Layered::settle`].
 ///
-/// A ghost session that exits is started again on the next suggestion ([`Layered::ghost`]) and
-/// the primary never hears of it: what the ghost session fails to take is no one else's failure.
+/// A ghost session that exits, or that the vault shut down with Ghost Text, is replaced on the
+/// next suggestion by whatever the vault has then ([`Layered::ghost`]), and the primary never
+/// hears of it: what the ghost session fails to take is no one else's failure.
 pub(crate) struct Layered {
     primary: Option<Arc<dyn Language>>,
-    /// The ghost session the document is open on; `None` when there is none to be had.
+    /// The ghost session the document is open on, if it has one.
     ghost: Mutex<Option<Arc<dyn Language>>>,
+    /// The vault's ghost session, asked for whenever [`Layered::ghost`] holds no live one;
+    /// `None` where there is no ghost text to be had at all (no `merl-rt`).
     respawn: Option<Respawn>,
     /// The protocol's name for the document's language, to open it on a fresh ghost session.
     language_id: OnceLock<String>,
     words: Words,
+    /// The Word Suggestions preference, the vault's: off, the words stay out of the answer.
+    words_on: Arc<AtomicBool>,
     /// The vault's listing, for a LaTeX document's `\input{` ([`latex::inputs`]).
     listing: Option<Arc<Listing>>,
     /// The document was saved since the ghost session last heard about it.
@@ -268,16 +288,18 @@ pub(crate) struct Layered {
 impl Layered {
     pub(crate) fn new(
         primary: Option<Arc<dyn Language>>,
-        ghost: Option<(Arc<dyn Language>, Respawn)>,
+        ghost: Option<Arc<dyn Language>>,
+        respawn: Option<Respawn>,
+        words_on: Arc<AtomicBool>,
         listing: Option<Arc<Listing>>,
     ) -> Layered {
-        let (ghost, respawn) = ghost.unzip();
         Layered {
             primary,
             ghost: Mutex::new(ghost),
             respawn,
             language_id: OnceLock::new(),
             words: Words::default(),
+            words_on,
             listing,
             stale: AtomicBool::new(false),
         }
@@ -305,33 +327,36 @@ impl Layered {
         })
     }
 
-    /// Tell the ghost session something, if there is one. A failure is logged and goes no
-    /// further: a `merl-rt` that has exited must not take the primary's news down with it.
+    /// Tell the ghost session something, if there is a live one. A failure is logged and goes
+    /// no further: a `merl-rt` that has exited must not take the primary's news down with it.
     fn tell_ghost(&self, tell: impl FnOnce(&dyn Language) -> Result<()>) {
         let ghost = locked(&self.ghost).clone();
-        if let Some(ghost) = ghost
+        if let Some(ghost) = ghost.filter(|g| !g.is_dead())
             && let Err(e) = tell(ghost.as_ref())
         {
             tracing::debug!("ghost text: {e:#}");
         }
     }
 
-    /// The ghost session to ask about `rel`, started again when the one the document was open
-    /// on has exited, and the document opened on the fresh one as it reads now.
+    /// The ghost session to ask about `rel`: the one the document is open on while it lives,
+    /// else the vault's, and the document opened on that one as it reads now.
     async fn ghost(&self, rel: &str) -> Option<Arc<dyn Language>> {
-        let dead = match &*locked(&self.ghost) {
-            Some(ghost) if ghost.is_dead() => ghost.clone(),
-            live => return live.clone(),
+        let gone = match &*locked(&self.ghost) {
+            Some(ghost) if !ghost.is_dead() => return Some(ghost.clone()),
+            gone => gone.clone(),
         };
         let fresh = match &self.respawn {
             Some(respawn) => respawn().await,
             None => None,
         };
         let mut slot = locked(&self.ghost);
-        match &*slot {
-            Some(ghost) if Arc::ptr_eq(ghost, &dead) => {}
-            // Another request got there first.
-            other => return other.clone(),
+        let same = match (&*slot, &gone) {
+            (Some(now), Some(gone)) => Arc::ptr_eq(now, gone),
+            (now, gone) => now.is_none() && gone.is_none(),
+        };
+        // Another request got there first.
+        if !same {
+            return slot.clone();
         }
         if let Some(ghost) = &fresh {
             let (id, text) = (self.language_id.get(), self.words.text(rel));
@@ -354,7 +379,8 @@ impl Language for Layered {
             Some(p) => p.open(rel, language_id, text)?,
             None => Support::default(),
         };
-        support.inline = locked(&self.ghost).is_some();
+        // Whether ghost text can be had here at all; whether it is on is the UI's to ask.
+        support.inline = self.respawn.is_some();
         Ok(support)
     }
 
@@ -418,7 +444,8 @@ impl Language for Layered {
             // A path has no use for prose words.
             let words = match self.inputs(&rel, pos) {
                 Some(files) => files,
-                None => self.words.completion(&rel, pos),
+                None if self.words_on.load(Ordering::Relaxed) => self.words.completion(&rel, pos),
+                None => Completions::default(),
             };
             let taken: HashSet<String> = answer.items.iter().map(|c| c.label.clone()).collect();
             answer.items.extend(
@@ -490,7 +517,6 @@ impl Language for Layered {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn the_word_before_the_caret_is_found_unless_it_is_someone_elses() {
@@ -522,6 +548,38 @@ mod tests {
         );
         assert_eq!(answer.items[0].replace.start.character, 0);
         assert_eq!(answer.items[0].replace.end.character, 3);
+    }
+
+    /// Word Suggestions off: the document's words and the dictionary's go from the answer, and
+    /// on again brings them back.
+    #[test]
+    fn word_suggestions_switched_off_offer_no_words() {
+        let on = Arc::new(AtomicBool::new(false));
+        let doc = Layered::new(None, None, None, on.clone(), None);
+        doc.open("a.md", "markdown", "theorem theory\nthe".into())
+            .unwrap();
+        let at = Pos {
+            line: 1,
+            character: 3,
+        };
+        let words = || {
+            accent_lsp::runtime()
+                .block_on(doc.completion("a.md", at, None))
+                .unwrap()
+                .items
+                .len()
+        };
+        assert_eq!(words(), 0);
+        on.store(true, Ordering::Relaxed);
+        assert!(words() >= 2, "theorem and theory");
+    }
+
+    /// The dictionary is let go, and read anew on the next word asked for.
+    #[test]
+    fn the_dictionary_is_let_go_and_read_again() {
+        let first = dictionary();
+        forget_dictionary();
+        assert!(!Arc::ptr_eq(&first, &dictionary()));
     }
 
     #[test]
@@ -611,26 +669,38 @@ mod tests {
         }
     }
 
-    /// A ghost session that exits is swapped for a fresh one on the next suggestion, the
-    /// document opened on it as it reads now, while the primary hears every change regardless.
-    /// Once the vault gives up, the document stops asking.
+    /// A ghost session that exits is swapped for the vault's next one on the next suggestion,
+    /// the document opened on it as it reads now, while the primary hears every change
+    /// regardless. While the vault has none to give (Ghost Text off, or given up on), the
+    /// document goes without and asks again next time, so one switched on again is taken up.
     #[test]
     fn a_ghost_session_that_exits_is_started_again_without_the_primary() {
-        let (primary, first, second) = (
+        let (primary, first, second, third) = (
             Fake::new("primary"),
             Fake::new("first"),
             Fake::new("second"),
+            Fake::new("third"),
         );
-        let asked = Arc::new(AtomicUsize::new(0));
+        // What the vault answers each time it is asked: a fresh session, none, then another.
+        let answers = Arc::new(Mutex::new(vec![
+            Some(third.clone()),
+            None,
+            Some(second.clone()),
+        ]));
         let respawn: Respawn = Box::new({
-            let (asked, second) = (asked.clone(), second.clone());
+            let answers = answers.clone();
             move || {
-                // The fresh session the first time, and a vault that has given up after that.
-                let next = (asked.fetch_add(1, Ordering::Relaxed) == 0).then(|| second.clone());
+                let next = locked(&answers).pop().flatten();
                 Box::pin(async move { next.map(|g| g as Arc<dyn Language>) })
             }
         });
-        let doc = Layered::new(Some(primary.clone()), Some((first.clone(), respawn)), None);
+        let doc = Layered::new(
+            Some(primary.clone()),
+            Some(first.clone()),
+            Some(respawn),
+            Arc::new(AtomicBool::new(true)),
+            None,
+        );
         let at = Pos::default();
         let suggest = || accent_lsp::runtime().block_on(doc.inline_completion("a.md", at));
 
@@ -644,15 +714,23 @@ mod tests {
         assert_eq!(second.heard(), ["open a.md one two"]);
         assert_eq!(suggest().unwrap(), Some("second".into()));
         assert_eq!(
-            asked.load(Ordering::Relaxed),
-            1,
-            "a live session is not started again"
+            locked(&answers).len(),
+            2,
+            "a live session is not asked for again"
         );
 
         second.dead.store(true, Ordering::Relaxed);
-        assert_eq!(suggest().unwrap(), None, "given up on");
-        assert_eq!(suggest().unwrap(), None);
-        assert_eq!(asked.load(Ordering::Relaxed), 2, "and not asked for again");
+        assert_eq!(suggest().unwrap(), None, "the vault has none");
+        assert_eq!(suggest().unwrap(), Some("third".into()), "and then has one");
+        assert_eq!(third.heard(), ["open a.md one two"]);
+    }
+
+    /// Without a ghost session to be had at all (merl not installed, or not prose), nothing is
+    /// armed.
+    #[test]
+    fn no_ghost_session_arms_nothing() {
+        let doc = Layered::new(None, None, None, Arc::new(AtomicBool::new(true)), None);
+        assert!(!doc.open("a.txt", "text", "one".into()).unwrap().inline);
     }
 
     #[test]

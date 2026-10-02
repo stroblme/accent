@@ -169,6 +169,15 @@ impl Vault {
         }
     }
 
+    /// Whether prose documents are offered words, their own and the dictionary's, which is read
+    /// where the vault is. Global like [`Vault::set_ghost`].
+    pub fn set_words(&self, on: bool) {
+        match &self.backend {
+            Backend::Local(v) => v.set_words(on),
+            Backend::Remote(r) => r.set_words(on),
+        }
+    }
+
     /// Ask for a full walk: after a resume, or when the UI suspects it missed something.
     ///
     /// A local vault posts to its own worker and cannot fail; a remote one is a round trip, and

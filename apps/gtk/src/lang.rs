@@ -258,20 +258,6 @@ pub fn rediagnose(tab: &Rc<Tab>) {
     });
 }
 
-/// Turn ghost text on or off under an open tab.
-///
-/// Off is immediate. On has to reopen the document when the tab was opened without a ghost
-/// session: whether there is one is decided in `open_document`, and `retarget` is the path that
-/// asks again — the same one a rename uses.
-pub fn set_ghost(tab: &Rc<Tab>, on: bool) {
-    let was = tab.lang.ghost.on.replace(on);
-    tab.set_ghost_text(on);
-    let armed = tab.lang.support().is_some_and(|s| s.inline);
-    if on && !was && !armed {
-        retarget(tab, &tab.rel());
-    }
-}
-
 /// Close the document and drop whatever is still in flight for it. Called from `Tab::drop`, so
 /// the future it spawns holds the vault handle and the path and nothing else.
 pub fn detach(tab: &Tab) {

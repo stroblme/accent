@@ -331,6 +331,20 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     });
     group.add(&spell);
 
+    let words = adw::SwitchRow::builder()
+        .title("Word Suggestions")
+        .subtitle("Offer words from the document and the dictionary as you type")
+        .active(config.borrow().word_suggestions)
+        .build();
+    words.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().word_suggestions = r.is_active();
+            save();
+        }
+    });
+    group.add(&words);
+
     let ghost = adw::SwitchRow::builder()
         .title("Ghost Text")
         .subtitle("Suggest the rest of a line from your vault; press Tab to accept")

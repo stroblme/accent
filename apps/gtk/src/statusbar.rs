@@ -176,10 +176,11 @@ impl Bar {
         &self.index
     }
 
-    /// A language provider is busy with something worth waiting for, named: "suggestions" while
-    /// the ghost-text index is rebuilt. Nothing is shown when it is idle.
-    pub fn set_provider_busy(&self, what: Option<&str>) {
-        *self.provider_busy.borrow_mut() = what.map(|w| format!("Indexing {w}…"));
+    /// A language provider is busy with something worth waiting for, named, and how far it says
+    /// it has got: "suggestions" while the ghost-text index is rebuilt, "1200 files, sorting".
+    /// Nothing is shown when it is idle.
+    pub fn set_provider_busy(&self, what: Option<&str>, progress: Option<&str>) {
+        *self.provider_busy.borrow_mut() = what.map(|w| busy_label(w, progress));
         self.show_busy();
     }
 
@@ -377,6 +378,15 @@ pub fn indexing_label(done: usize, total: usize) -> String {
     }
 }
 
+/// A language provider's line while it is busy: what it is indexing, then its own words on how
+/// far it has got, as it sends them.
+pub fn busy_label(what: &str, progress: Option<&str>) -> String {
+    match progress {
+        Some(progress) => format!("Indexing {what}… {progress}"),
+        None => format!("Indexing {what}…"),
+    }
+}
+
 /// How often a running copy's line is brought up to date with how far it has got.
 const TICK: Duration = Duration::from_millis(200);
 
@@ -490,6 +500,15 @@ mod tests {
     fn characters_label_says_one_character_in_the_singular() {
         assert_eq!(characters_label(1), "1 character");
         assert_eq!(characters_label(42), "42 characters");
+    }
+
+    #[test]
+    fn a_providers_line_carries_its_own_words_on_how_far_it_is() {
+        assert_eq!(busy_label("suggestions", None), "Indexing suggestions…");
+        assert_eq!(
+            busy_label("suggestions", Some("1200 files, sorting")),
+            "Indexing suggestions… 1200 files, sorting"
+        );
     }
 
     #[test]

@@ -552,6 +552,8 @@ async fn forward_notifications(
     // What this server has marks on screen for, so a crash can take exactly those away again.
     // A session that publishes nothing — the ghost one — therefore clears nothing.
     let mut painted: HashSet<String> = HashSet::new();
+    // Whether it said it is busy and has not yet said it is done, likewise.
+    let mut working = false;
     while let Some(n) = notifications.recv().await {
         match n.method.as_str() {
             "textDocument/publishDiagnostics" => {
@@ -576,28 +578,35 @@ async fn forward_notifications(
             }
             "$/progress" => {
                 let Some(what) = busy_as else { continue };
-                // `begin` and `end`; a `report` in between only refines a message nothing here
-                // shows, so it is not a change of state.
-                let busy = match n.params.pointer("/value/kind").and_then(Value::as_str) {
-                    Some("begin") => true,
-                    Some("end") => false,
-                    _ => continue,
+                let Some((busy, message)) = progress_of(&n.params) else {
+                    continue;
                 };
+                working = busy;
                 let what = what.to_string();
-                tracing::debug!("{what}: busy={busy}");
-                if events.send(Event::Busy { what, busy }).is_err() {
+                tracing::debug!("{what}: busy={busy} {message:?}");
+                if events
+                    .send(Event::Busy {
+                        what,
+                        busy,
+                        message,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
             _ => continue,
         }
     }
-    // The server exited, so whatever it was busy with is over. Without this a crash mid-index
-    // would leave the status bar saying so for the life of the vault.
-    if let Some(what) = busy_as {
+    // The server exited, so whatever it was busy with is over. Without this a crash or a shutdown
+    // mid-index would leave the status bar saying so for the life of the vault. Only then: one
+    // that exits idle has nothing to take back, and could take back a line its successor, started
+    // in the meantime, has just put up.
+    if let Some(what) = busy_as.filter(|_| working) {
         let _ = events.send(Event::Busy {
             what: what.to_string(),
             busy: false,
+            message: None,
         });
     }
     // And nothing will ever correct what it painted: a crash leaves errors frozen in the gutter
@@ -609,6 +618,20 @@ async fn forward_notifications(
             items: Vec::new(),
         });
     }
+}
+
+/// What a `$/progress` notification says: busy from its `begin` through each `report` and done
+/// at its `end`, with the words either of the first two carry on how far it has got ("1200
+/// files"). `None` for anything else.
+fn progress_of(params: &Value) -> Option<(bool, Option<String>)> {
+    let value = params.get("value")?;
+    let busy = match value.get("kind")?.as_str()? {
+        "begin" | "report" => true,
+        "end" => false,
+        _ => return None,
+    };
+    let message = value.get("message").and_then(Value::as_str);
+    Some((busy, message.filter(|_| busy).map(str::to_string)))
 }
 
 impl External {
@@ -1072,6 +1095,26 @@ mod tests {
         assert_eq!(out[2].replace.start.character, 8);
         assert_eq!(out[2].replace.end, pos);
         assert!(out[2].resolve.is_some(), "kept for completionItem/resolve");
+    }
+
+    /// merl's `$/progress`, as `merl.c` sends it: busy from `begin` through every `report`, with
+    /// the report's own words, and done at `end`.
+    #[test]
+    fn progress_says_busy_and_how_far() {
+        let value = |v: Value| json!({"token": "merl/index", "value": v});
+        assert_eq!(
+            progress_of(&value(json!({"kind": "begin", "title": "Indexing"}))),
+            Some((true, None))
+        );
+        assert_eq!(
+            progress_of(&value(json!({"kind": "report", "message": "1200 files"}))),
+            Some((true, Some("1200 files".to_string())))
+        );
+        assert_eq!(
+            progress_of(&value(json!({"kind": "end"}))),
+            Some((false, None))
+        );
+        assert_eq!(progress_of(&value(json!({"kind": "other"}))), None);
     }
 
     #[test]

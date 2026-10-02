@@ -149,7 +149,9 @@ impl Changed {
             theme: old.theme != new.theme,
             font: old.editor_font != new.editor_font,
             // Every vault's entries, not this window's: a `hello` too many is harmless.
-            vault: old.vaults != new.vaults || old.ghost_text != new.ghost_text,
+            vault: old.vaults != new.vaults
+                || old.ghost_text != new.ghost_text
+                || old.word_suggestions != new.word_suggestions,
             // What a focused shell is left is part of the table.
             shortcuts: old.shortcuts != new.shortcuts
                 || old.forward_keys_to_terminal != new.forward_keys_to_terminal,
@@ -1166,17 +1168,23 @@ mod tests {
                 ..Changed::default()
             }
         );
-        // Ghost text is carried to the vault alongside its settings.
+        // Ghost text and word suggestions are carried to the vault alongside its settings.
         let ghost = Config {
             ghost_text: false,
             ..Config::default()
         };
-        assert_eq!(
-            Changed::between(&old, &ghost),
-            Changed {
-                vault: true,
-                ..Changed::default()
-            }
-        );
+        let words = Config {
+            word_suggestions: false,
+            ..Config::default()
+        };
+        for new in [ghost, words] {
+            assert_eq!(
+                Changed::between(&old, &new),
+                Changed {
+                    vault: true,
+                    ..Changed::default()
+                }
+            );
+        }
     }
 }

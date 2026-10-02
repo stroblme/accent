@@ -244,7 +244,8 @@ pub struct Support {
     pub signature_triggers: Vec<char>,
     /// The language server accent looked for and did not find, so the UI can say so when asked.
     pub missing: Option<String>,
-    /// Something answers for ghost text, so the UI arms the inline path for this tab.
+    /// Ghost text can be had for this document (it is prose and `merl-rt` is installed), so the
+    /// UI arms the inline path for this tab while the Ghost Text preference is on.
     pub inline: bool,
 }
 
@@ -383,8 +384,8 @@ pub(crate) type Session = Arc<tokio::sync::OnceCell<Arc<dyn Language>>>;
 /// What a session is keyed by: the server's name and the root it was started in.
 pub(crate) type Key = (String, PathBuf);
 
-/// The open documents: each one's provider, and the session it came from.
-pub(crate) type Open = HashMap<String, (Option<Key>, Arc<dyn Language>)>;
+/// The open documents: each one's provider, the session it came from, and whether it is prose.
+pub(crate) type Open = HashMap<String, (Option<Key>, Arc<dyn Language>, bool)>;
 
 /// What opening a document settled on: the provider that answers for it, if anything does, the
 /// protocol's name for its language, a server that should have been installed and was not, and
@@ -406,16 +407,20 @@ pub(crate) struct Languages {
     pub(crate) events: Sender<Event>,
     /// One session per (server, root): the cell makes concurrent openers await one start.
     pub(crate) sessions: Mutex<HashMap<Key, Session>>,
-    /// Open document → the provider holding it, and the session it came from: the last document
-    /// to close takes that session down with it. The key is `None` for a document no session
-    /// answers for, which is a prose file with its words and nothing else.
+    /// Open document → the provider holding it, the session it came from, and whether it is
+    /// prose (and so wants the ghost session): the last document to close takes that session
+    /// down with it. The key is `None` for a document no session answers for, which is a prose
+    /// file with its words and nothing else.
     pub(crate) docs: Mutex<Open>,
-    /// Whether a prose document gets a ghost-text session; the preference behind it is global,
-    /// so a vault reads it once and every document opened after that follows.
+    /// Whether the vault runs a ghost-text session; the preference behind it is global, so a
+    /// vault is told it once and every document follows.
     pub(crate) ghost: AtomicBool,
     /// When the ghost session was started within the last [`GHOST_WINDOW`]; `None` once the
     /// vault has given up on it.
     ghost_starts: Mutex<Option<Vec<Instant>>>,
+    /// Whether prose documents are offered words (the Word Suggestions preference, global like
+    /// Ghost Text), shared with each of them.
+    words: Arc<AtomicBool>,
     /// The folders a LaTeX document's `\input{` lists.
     listing: Arc<Listing>,
 }
@@ -455,16 +460,41 @@ impl Languages {
             docs: Mutex::new(HashMap::new()),
             ghost: AtomicBool::new(true),
             ghost_starts: Mutex::new(Some(Vec::new())),
+            words: Arc::new(AtomicBool::new(true)),
             listing,
         })
     }
 
-    /// Turn ghost text on or off for documents opened from here on.
-    ///
-    /// ponytail: a session already running is left alone; it ends with the vault. Stopping one
-    /// means shutting a server down under documents that are still open.
-    pub(crate) fn set_ghost(&self, on: bool) {
-        self.ghost.store(on, Ordering::Relaxed);
+    /// Turn ghost text on or off. Off shuts the ghost session down at once, and with it merl's
+    /// index; on starts it again, indexing the vault anew, if a prose document is open to want
+    /// it, and takes back a give-up ([`Self::ghost_may_start`]). Each document takes up the
+    /// change on its next suggestion ([`words::Layered`]).
+    pub(crate) fn set_ghost(self: &Arc<Self>, on: bool) {
+        if self.ghost.swap(on, Ordering::Relaxed) == on {
+            return;
+        }
+        if on {
+            *locked(&self.ghost_starts) = Some(Vec::new());
+            if locked(&self.docs).values().any(|(_, _, prose)| *prose) {
+                let me = self.clone();
+                accent_lsp::runtime().spawn(async move { me.ghost_session().await });
+            }
+            return;
+        }
+        let key = (GHOST.to_string(), self.root.clone());
+        let running = locked(&self.sessions).remove(&key);
+        if let Some(session) = running.and_then(|cell| cell.get().cloned()) {
+            accent_lsp::runtime().spawn(async move { session.shutdown().await });
+        }
+    }
+
+    /// Offer prose documents words or not. Off lets the dictionary go too, which is read again
+    /// on the first word asked for once they are back on.
+    pub(crate) fn set_words(&self, on: bool) {
+        self.words.store(on, Ordering::Relaxed);
+        if !on {
+            words::forget_dictionary();
+        }
     }
 
     /// The session under `key`, started with `start` if it is not there yet. Concurrent openers
@@ -504,6 +534,7 @@ impl Languages {
             root.to_string_lossy().into_owned(),
         ];
         let start = async {
+            anyhow::ensure!(self.ghost.load(Ordering::Relaxed), "Ghost Text is off");
             anyhow::ensure!(
                 self.ghost_may_start(Instant::now()),
                 "{GHOST} keeps exiting"
@@ -518,6 +549,11 @@ impl Languages {
             .await
         };
         match self.session(key, start).await {
+            // Switched off while it started, before `set_ghost` had a session to shut down.
+            Ok(session) if !self.ghost.load(Ordering::Relaxed) => {
+                let _ = session.shutdown().await;
+                None
+            }
             Ok(session) => Some(session),
             Err(e) => {
                 tracing::debug!("no ghost text: {e:#}");
@@ -526,15 +562,17 @@ impl Languages {
         }
     }
 
-    /// How a document gets the ghost session again once the one it was opened on has exited:
-    /// the running one, or a fresh start. Nothing while Ghost Text is off. Weak, because the
-    /// registry holds the document's provider.
+    /// How a document gets the ghost session whenever it has no live one: the running one, or
+    /// a fresh start. Nothing while Ghost Text is off or the vault has given up on it. Weak,
+    /// because the registry holds the document's provider.
     fn respawn(self: &Arc<Self>) -> words::Respawn {
         let me = Arc::downgrade(self);
         Box::new(move || {
             let me = me.upgrade();
             Box::pin(async move {
-                let me = me.filter(|me| me.ghost.load(Ordering::Relaxed))?;
+                let me = me.filter(|me| {
+                    me.ghost.load(Ordering::Relaxed) && locked(&me.ghost_starts).is_some()
+                })?;
                 me.ghost_session().await
             })
         })
@@ -563,7 +601,7 @@ impl Languages {
     pub(crate) fn provider(&self, rel: &str) -> Result<Arc<dyn Language>> {
         locked(&self.docs)
             .get(rel)
-            .map(|(_, provider)| provider.clone())
+            .map(|(_, provider, _)| provider.clone())
             .ok_or_else(|| anyhow::anyhow!("{rel} is not open"))
     }
 
@@ -694,8 +732,9 @@ impl Languages {
             // started when it is installed and wanted. A binary that is not there is a debug
             // line and never a `missing`, because this is optional where a language server is
             // expected: nothing about the tab stops working without it.
-            let ghost = match prose && me.ghost.load(Ordering::Relaxed) && in_path(GHOST) {
-                true => me.ghost_session().await.map(|g| (g, me.respawn())),
+            let respawn = (prose && in_path(GHOST)).then(|| me.respawn());
+            let ghost = match respawn.is_some() && me.ghost.load(Ordering::Relaxed) {
+                true => me.ghost_session().await,
                 false => None,
             };
             // Prose gets its words layered under whatever the primary answers, and gets them
@@ -704,7 +743,13 @@ impl Languages {
                 (Some(primary), false) => primary,
                 (primary, true) => {
                     let listing = (language == "latex").then(|| me.listing.clone());
-                    Arc::new(words::Layered::new(primary, ghost, listing))
+                    Arc::new(words::Layered::new(
+                        primary,
+                        ghost,
+                        respawn,
+                        me.words.clone(),
+                        listing,
+                    ))
                 }
                 (None, false) => {
                     return Ok(Support {
@@ -715,7 +760,7 @@ impl Languages {
             };
             let mut support = provider.open(&rel, &language_id, text)?;
             support.missing = support.missing.or(missing);
-            locked(&me.docs).insert(rel, (key, provider));
+            locked(&me.docs).insert(rel, (key, provider, prose));
             Ok(support)
         })
     }
@@ -726,16 +771,16 @@ impl Languages {
     /// ponytail: the last close is the rule, not a wall clock. Reopening the file then pays a
     /// cold start, which is the price of not holding a rust-analyzer for a file nobody is
     /// reading. The ghost session is not counted here — it is one process for the whole vault
-    /// and its start is measured in seconds; it still ends with the vault.
+    /// and its start is measured in seconds; it ends with the vault, or with Ghost Text.
     pub(crate) fn close_document(&self, rel: String) -> Task<()> {
         let (key, provider) = match locked(&self.docs).remove(&rel) {
-            Some((key, provider)) => (key, Some(provider)),
+            Some((key, provider, _)) => (key, Some(provider)),
             None => (None, None),
         };
         let idle = key.filter(|key| {
             !locked(&self.docs)
                 .values()
-                .any(|(open, _)| open.as_ref() == Some(key))
+                .any(|(open, _, _)| open.as_ref() == Some(key))
         });
         let session = idle.and_then(|key| locked(&self.sessions).remove(&key));
         Task::spawn(async move {
@@ -1315,6 +1360,74 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: Event = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, Event::Diagnostics { items, .. } if items.len() == 1));
+    }
+
+    /// Ghost Text off ends `merl-rt` under an open note, and on starts it again, re-indexed,
+    /// without the note being opened again.
+    #[test]
+    fn ghost_text_off_ends_merl_and_on_starts_it_again() {
+        if !in_path(GHOST) {
+            eprintln!("merl-rt is not installed: skipping the ghost on/off test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let seen = "The kettle was already boiling.\n";
+        std::fs::write(root.path().join("a.md"), format!("{seen}{seen}")).unwrap();
+        let (vault, _events) = Local::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            crate::VaultConfig::default(),
+        )
+        .unwrap();
+        let typed = "The kettle was";
+        let at = Pos {
+            line: 0,
+            character: typed.chars().count() as u32,
+        };
+        let key = (GHOST.to_string(), vault.lang.root.clone());
+        let running = || {
+            locked(&vault.lang.sessions)
+                .get(&key)
+                .and_then(|cell| cell.get().cloned())
+        };
+        accent_lsp::runtime().block_on(async {
+            let support = vault
+                .open_document("b.md", "markdown", typed.to_string())
+                .await
+                .unwrap();
+            assert!(support.inline);
+            let suggest = || async { vault.inline_completion("b.md", at).await.unwrap() };
+            assert_eq!(suggest().await, Some(" already boiling.".to_string()));
+            let merl = running().expect("merl runs");
+
+            vault.set_ghost(false);
+            for _ in 0..100 {
+                if merl.is_dead() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(merl.is_dead(), "merl-rt has exited");
+            assert!(running().is_none());
+            assert_eq!(suggest().await, None, "nothing while it is off");
+
+            vault.set_ghost(true);
+            let mut got = None;
+            for _ in 0..100 {
+                got = suggest().await;
+                if got.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert_eq!(
+                got,
+                Some(" already boiling.".to_string()),
+                "a fresh merl answers"
+            );
+            assert!(running().is_some_and(|fresh| !Arc::ptr_eq(&fresh, &merl)));
+        });
     }
 
     /// Exits spread out are started again every time; a burst of them is given up on for good,

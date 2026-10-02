@@ -182,8 +182,10 @@ pub struct Remote {
     root: RwLock<PathBuf>,
     config: Mutex<VaultConfig>,
     /// Ghost text is a global preference rather than a per-vault one, so it travels beside the
-    /// config on `hello` instead of inside it, and a reconnect carries it again.
+    /// config on `hello` instead of inside it, and a reconnect carries it again. So do word
+    /// suggestions.
     ghost: Mutex<bool>,
+    words: Mutex<bool>,
     client: Mutex<Option<Arc<Client>>>,
     /// The documents the window has open, as the server was last told about them: the language
     /// they were opened as, and the text they were last sent with.
@@ -217,6 +219,7 @@ impl Remote {
             ctl,
             config: Mutex::new(cfg),
             ghost: Mutex::new(true),
+            words: Mutex::new(true),
             client: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
             unindexed: Mutex::new(BTreeSet::new()),
@@ -250,17 +253,33 @@ impl Remote {
     }
 
     pub fn set_config(&self, cfg: VaultConfig) {
-        *self.locked(&self.config) = cfg.clone();
+        *self.locked(&self.config) = cfg;
         // Best effort: the server takes it at `hello` too, so a call that fails here is corrected
         // by the next connection rather than lost.
-        let ghost = *self.locked(&self.ghost);
-        let _ = self.call::<serde_json::Value>("hello", json!([cfg, ghost]));
+        let _ = self.call::<serde_json::Value>("hello", self.hello());
     }
 
+    /// Told on every preference change, so only a change is sent on.
     pub fn set_ghost(&self, on: bool) {
-        *self.locked(&self.ghost) = on;
-        let cfg = self.config();
-        let _ = self.call::<serde_json::Value>("hello", json!([cfg, on]));
+        if std::mem::replace(&mut *self.locked(&self.ghost), on) != on {
+            let _ = self.call::<serde_json::Value>("hello", self.hello());
+        }
+    }
+
+    /// As [`Self::set_ghost`].
+    pub fn set_words(&self, on: bool) {
+        if std::mem::replace(&mut *self.locked(&self.words), on) != on {
+            let _ = self.call::<serde_json::Value>("hello", self.hello());
+        }
+    }
+
+    /// What `hello` tells the server: the vault's config, then the global preferences it acts on.
+    fn hello(&self) -> serde_json::Value {
+        json!([
+            self.config(),
+            *self.locked(&self.ghost),
+            *self.locked(&self.words)
+        ])
     }
 
     /// Try again after a failure. The master usually survives whatever killed the server, so the
@@ -890,7 +909,7 @@ impl Remote {
             self.on_lost(),
         ));
         let hello: Hello = client
-            .call("hello", json!([self.config(), *self.locked(&self.ghost)]))
+            .call("hello", self.hello())
             // The server's own refusal ("/srv/x is not a folder") or the link's failure.
             .map_err(|e| {
                 let why = format!("cannot open the vault on {}: {e}", self.url.host);

@@ -26,7 +26,7 @@ use crate::editor::{self, Flavour};
 mod pad;
 mod pool;
 
-use pad::{bands, carried, is_pad, measure, pad, padding, reclaim};
+use pad::{UNMEASURED, bands, carried, is_pad, measure, pad, padding, reclaim, unmeasured};
 pub use pool::Pool;
 use pool::Role;
 
@@ -275,7 +275,13 @@ struct Grid {
 
 fn install_tags(buffer: &sourceview5::Buffer) {
     let table = buffer.tag_table();
-    for name in [TAG_ADDED, TAG_REMOVED, TAG_ADDED_EMPH, TAG_REMOVED_EMPH] {
+    for name in [
+        TAG_ADDED,
+        TAG_REMOVED,
+        TAG_ADDED_EMPH,
+        TAG_REMOVED_EMPH,
+        UNMEASURED,
+    ] {
         if table.lookup(name).is_none() {
             table.add(&gtk::TextTag::new(Some(name)));
         }
@@ -349,8 +355,10 @@ pub struct Compare {
     starts: RefCell<[Vec<i32>; 2]>,
     /// The row ranges hidden right now, each with the key it can be opened by.
     hidden: RefCell<Vec<(Range<usize>, usize)>>,
-    /// Lines the user asked to see, by their number on the side that is not typed into, which
-    /// survives the edits that move everything else. A run holding one stays open.
+    /// Lines the user asked to see, every line of each run they opened, by their number on the
+    /// side that is not typed into, which survives the edits that move everything else. A run
+    /// holding one stays open, so an edit that splits a run or merges it with another hides
+    /// nothing that was shown.
     opened: RefCell<HashSet<usize>>,
     /// Show All Unchanged Lines, in the title row: while it is down nothing is hidden.
     unfold: gtk::ToggleButton,
@@ -530,6 +538,12 @@ impl Compare {
         if let Some(mine) = editable {
             let buffer = this.pane(mine).buffer.clone();
             let id = buffer.connect_changed(reclaim);
+            connect(buffer.clone().upcast(), id);
+            // And the lines an edit touches are marked as GTK's to lay out again, before the
+            // buffer's `changed` lays the comparison over them: see `pad::measure`.
+            let id = buffer.connect_insert_text(|buffer, at, _| unmeasured(buffer, at, at));
+            connect(buffer.clone().upcast(), id);
+            let id = buffer.connect_delete_range(unmeasured);
             connect(buffer.upcast(), id);
         }
 
@@ -761,8 +775,8 @@ impl Compare {
                     .unwrap_or(0)
             };
             let (key, last) = (number(gap.start), number(gap.end - 1));
-            // A run the user opened stays open, and so does one it has since merged into: the
-            // line they asked to see is still in it.
+            // What the user opened stays open: the part of it on either side of a line they
+            // changed since, and whatever it has since merged with.
             if self
                 .opened
                 .borrow()
@@ -884,8 +898,22 @@ impl Compare {
     fn open_run(&self, key: usize) {
         let value = self.panes[0].scroller.vadjustment().value();
         self.keep.set(Some(Keep::Scroll(value)));
-        self.opened.borrow_mut().insert(key);
+        self.open_lines(key);
         self.refresh();
+    }
+
+    /// Note every line of the hidden run keyed `key` as one the user asked to see: the run's rows
+    /// are unchanged lines, so its lines on the side not typed into count up from the key.
+    fn open_lines(&self, key: usize) {
+        let rows = self
+            .hidden
+            .borrow()
+            .iter()
+            .find(|(_, k)| *k == key)
+            .map(|(gap, _)| gap.len());
+        self.opened
+            .borrow_mut()
+            .extend(key..key + rows.unwrap_or(1));
     }
 
     /// Every run opened, as Show All Unchanged Lines goes down, or every one hidden again as it
@@ -949,7 +977,7 @@ impl Compare {
             let (start, end) = pane.buffer.bounds();
             let mut pads = Vec::new();
             pane.buffer.tag_table().foreach(|tag| {
-                if is_pad(tag) {
+                if is_pad(tag) || tag.name().as_deref() == Some(UNMEASURED) {
                     pads.push(tag.clone());
                 }
             });
@@ -1175,6 +1203,15 @@ impl Compare {
             extra,
             tops,
         };
+        // Both views laid out again in the next frame, ahead of painting either. GTK lays a view
+        // out from an idle of its own and repaints it once it has, so one column could reach the
+        // screen a frame ahead of the other: a keystroke's own line in the editor a frame after
+        // the padding that answers it beside it.
+        if repadded {
+            for view in views {
+                view.queue_allocate();
+            }
+        }
         // GTK had not laid some line out yet: ask again once it has. So too while the view waits
         // to be put somewhere for a pass that moved nothing: padding GTK has not laid out yet is
         // not in where the scroll puts a line, and each view keeps its top line where it was as it
@@ -1336,6 +1373,47 @@ impl Compare {
             .count()
     }
 
+    /// The rows on screen whose two lines GTK draws at different heights right now, and the first
+    /// of them spelled out (`row:old_y/new_y`, below the top of the view). `None` while an edit has
+    /// not been laid over yet, when the rows say nothing about the text.
+    #[cfg(feature = "bench")]
+    pub fn uneven(&self) -> Option<(usize, String)> {
+        let (lines, rows, starts) = (
+            self.lines.borrow(),
+            self.rows.borrow(),
+            self.starts.borrow(),
+        );
+        let fresh = |side: Side| {
+            starts[side.idx()].last().copied() == Some(self.pane(side).buffer.char_count())
+        };
+        if !fresh(Side::Old) || !fresh(Side::New) {
+            return None;
+        }
+        let height = self.panes[0].view.visible_rect().height();
+        let y = |r: usize, side: Side| {
+            let n = side.number(&lines[side.of(&rows[r])?])?;
+            let pane = self.pane(side);
+            let at = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
+            Some(pane.view.iter_location(&at).y() - pane.view.visible_rect().y())
+        };
+        let (mut count, mut first) = (0, String::new());
+        for r in 0..rows.len() {
+            if self.hides_row(r) {
+                continue;
+            }
+            let (Some(old), Some(new)) = (y(r, Side::Old), y(r, Side::New)) else {
+                continue;
+            };
+            if old != new && [old, new].iter().any(|y| (0..height).contains(y)) {
+                if count == 0 {
+                    first = format!("{r}:{old}/{new}");
+                }
+                count += 1;
+            }
+        }
+        Some((count, first))
+    }
+
     /// The first row [`Compare::misaligned`] counts, spelled out: which row and side, what the
     /// relayout expected, what GTK laid out, and the line. For the bench to print.
     #[cfg(feature = "bench")]
@@ -1402,9 +1480,9 @@ impl Compare {
 
     /// The same, for the run hiding `offset` in the editable pane: `true` when one was opened.
     ///
-    /// A jump that moves the caret needs none of this — [`Compare::lay`] leaves the run the caret
-    /// is in open — but Go to Line's preview moves no caret, and taking the tag off that side's
-    /// buffer alone would show the lines under the other side's "unchanged lines" button.
+    /// What a jump into the run does, and Go to Line's preview, which moves no caret for
+    /// [`Compare::lay`] to keep the run open around: taking the tag off that side's buffer alone
+    /// would show the lines under the other side's "unchanged lines" button.
     pub fn open_hiding(&self, offset: i32) -> bool {
         let Some(side) = self.editable else {
             return false;
@@ -1432,7 +1510,7 @@ impl Compare {
         let Some(key) = key else {
             return false;
         };
-        self.opened.borrow_mut().insert(key);
+        self.open_lines(key);
         self.refresh();
         true
     }

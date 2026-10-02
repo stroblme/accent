@@ -1422,16 +1422,26 @@ impl App {
     /// theme on screen first. The costly parts run only where `changed` says their inputs moved.
     fn apply_config(self: &Rc<Self>, config: &Config, changed: &shell::Changed) {
         if let Some(vault) = self.vault().filter(|_| changed.vault) {
-            // Both of these are a `hello` round trip on a remote vault, and this runs from the
+            // Each of these is a `hello` round trip on a remote vault, and this runs from the
             // preferences dialog, on the main loop. Sent from a worker and not waited for: the
             // server takes the config on `hello` too, so one that does not land is corrected by
-            // the next connection rather than lost.
-            let (vault, vault_config, ghost) =
-                (vault.clone(), config.vault(&self.root()), config.ghost_text);
-            gio::spawn_blocking(move || {
+            // the next connection rather than lost. A local vault takes them at once, so they are
+            // made here, in the order they were changed: two workers run in either order, and
+            // Ghost Text switched off and straight on again could end off.
+            let (vault, vault_config) = (vault.clone(), config.vault(&self.root()));
+            let (ghost, words) = (config.ghost_text, config.word_suggestions);
+            let remote = vault.is_remote();
+            let apply = move || {
                 vault.set_config(vault_config);
                 vault.set_ghost(ghost);
-            });
+                vault.set_words(words);
+            };
+            match remote {
+                true => {
+                    gio::spawn_blocking(apply);
+                }
+                false => apply(),
+            }
         }
         if changed.shortcuts {
             self.refresh_accels();
@@ -1441,7 +1451,7 @@ impl App {
                 tab.set_font(config.editor_font.as_deref(), self.zoom.get());
             }
             tab.set_spellcheck(config.spellcheck);
-            lang::set_ghost(&tab, config.ghost_text);
+            tab.set_ghost_text(config.ghost_text);
             tab.set_minimap(config.minimap);
             tab.set_line_numbers(config.line_numbers);
             tab.set_column_width(config.column_width);

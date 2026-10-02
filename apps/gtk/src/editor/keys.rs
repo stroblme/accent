@@ -2,13 +2,14 @@
 //!
 //! Five things in this editor want the same handful of keys — Tab, Escape, Return — and they used
 //! to take them through four capture-phase controllers on one widget, each guessing whether
-//! another had already acted. GTK runs controllers on the same widget in the order they were
-//! added, which is an order nothing here could read, so the guessing was the design.
+//! another had already acted. GTK runs controllers on the same widget newest first, which is an
+//! order nothing here could read, so the guessing was the design.
 //!
 //! This is the order, written down once:
 //!
 //! 1. **the completion popup**, which owns every key while it is up, except Return and Tab while
-//!    no row in it is selected;
+//!    no row in it is selected, and Escape puts away and stops there (on the scroller, see
+//!    [`install`]);
 //! 2. **the signature popover**, which owns Escape while it is showing;
 //! 3. **a template's Tab stops** (Tab, and Escape to stop walking them), because a snippet the
 //!    user is walking outranks both a suggestion and a list item's indent;
@@ -51,6 +52,28 @@ pub(super) fn install(tab: &Rc<Tab>) {
         }
     ));
     tab.view.add_controller(keys);
+    // Escape over the popup, a level up: GtkSourceView hides the popup on Escape from a capture
+    // controller of its own on the view and lets the press go on ("still propagate after
+    // hiding", `gtksourcecompletionlist.c`), and being added once the popup first shows, that
+    // controller runs ahead of the one above. Let on, the press reached the window's Escape
+    // (`wire::dismiss`), which closed the find bar or the comparison under the popup with it.
+    // Hidden here as GtkSourceView hides it, so no `hide` asks for a suggestion in its place.
+    let escape = gtk::EventControllerKey::new();
+    escape.set_propagation_phase(gtk::PropagationPhase::Capture);
+    escape.connect_key_pressed(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, key, _, _| match popup(&tab.view).filter(|_| key == gdk::Key::Escape) {
+            Some(popup) => {
+                popup.set_visible(false);
+                glib::Propagation::Stop
+            }
+            None => glib::Propagation::Proceed,
+        }
+    ));
+    tab.scroller.add_controller(escape);
 
     // Whether a popup is up is read off the widgets on each press ([`Tab::popup_shown`]), so
     // these two are only what happens either side of one: the suggestion goes when a popup takes
