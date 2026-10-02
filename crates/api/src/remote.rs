@@ -840,18 +840,7 @@ impl Remote {
     }
 
     fn control(&self, argv: Vec<String>) -> Result<(), String> {
-        let out = self
-            .ssh(&argv)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("cannot run ssh: {e}"))?;
-        match out.status.success() {
-            true => Ok(()),
-            false => Err(match String::from_utf8_lossy(&out.stderr).trim() {
-                "" => "ssh refused".to_string(),
-                why => why.to_string(),
-            }),
-        }
+        control(&argv)
     }
 
     // ----------------------------------------------------------- connect
@@ -918,9 +907,9 @@ impl Remote {
 
     /// What the rpc reader runs when the server's output ends unasked.
     ///
-    /// It holds the state and the channel rather than the `Remote`: were it the last holder,
-    /// dropping it there would run [`teardown`](Self::teardown), which joins the very thread it is
-    /// on. Only a connection that was up can be lost: one still being made fails its own `hello`
+    /// It holds the state and the channel rather than the `Remote`, which would then never close:
+    /// the reader ends only once the close has ended `serve`. Only a connection that was up can be
+    /// lost: one still being made fails its own `hello`
     /// and says why, or is found dead where [`start`](Self::start) would have said it was up.
     fn on_lost(&self) -> Box<dyn FnOnce() + Send> {
         let (state, events, why) = (self.state.clone(), self.events.clone(), self.lost());
@@ -936,7 +925,10 @@ impl Remote {
     fn connect(&self, quiet: bool) -> Result<(), Failure> {
         // Whatever the last attempt left running goes first: `spawn_server` overwrites both slots,
         // so without this a retry would leak an ssh child and a reader thread every time.
-        self.teardown();
+        teardown(
+            self.locked(&self.client).take(),
+            self.locked(&self.child).take(),
+        );
         link::prepare(&self.url, &self.ctl, quiet, &|what, fraction| {
             self.step(what, fraction)
         })?;
@@ -991,42 +983,6 @@ impl Remote {
     fn read_lock<'a, T>(&self, m: &'a RwLock<T>) -> std::sync::RwLockReadGuard<'a, T> {
         m.read().unwrap_or_else(|e| e.into_inner())
     }
-
-    /// Let go of the server this connection had: the rpc client, and the ssh process carrying it.
-    ///
-    /// Both the window closing and a reconnect come through here, which is what stops a retry
-    /// leaving a zombie ssh and a reader thread behind for every attempt.
-    ///
-    /// The order is what keeps a window closable. The writer goes first, so `serve` sees EOF and
-    /// exits of its own accord; the child is given a second to follow and killed if it does not —
-    /// a `Child` that is never waited for being the zombie this phase exists to avoid. Only then
-    /// is the reader thread joined, because it ends when ssh's stdout closes, and a wedged ssh
-    /// would otherwise hold the join for the fifteen seconds of a ServerAlive timeout, or forever.
-    fn teardown(&self) {
-        let client = self.locked(&self.client).take();
-        if let Some(client) = &client {
-            client.close();
-        }
-        if let Some(mut child) = self.locked(&self.child).take() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(20))
-                    }
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break;
-                    }
-                }
-            }
-        }
-        if let Some(client) = &client {
-            client.join();
-        }
-    }
 }
 
 impl Drop for Remote {
@@ -1036,11 +992,97 @@ impl Drop for Remote {
     /// too, so reopening the vault within it skips the handshake and any passphrase. Nothing of
     /// the vault's rides it meanwhile: `serve` has had its EOF, and the forwards are cancelled one
     /// by one, because a master that is only lingering still holds every forward it was given.
+    ///
+    /// On a thread of its own, which [`finish_closing`] joins: the last holder is usually a window
+    /// closing on the GTK main loop, and the close is a second's wait for a wedged server and an
+    /// ssh process per forward, 120–140 ms with one forward on a 60 ms link.
     fn drop(&mut self) {
-        self.teardown();
-        for f in std::mem::take(&mut *self.locked(&self.forwards)) {
-            let _ = self.control(ssh::cancel(&self.url, &self.ctl, f));
+        let (client, child) = (
+            self.locked(&self.client).take(),
+            self.locked(&self.child).take(),
+        );
+        let cancels: Vec<Vec<String>> = std::mem::take(&mut *self.locked(&self.forwards))
+            .into_iter()
+            .map(|f| ssh::cancel(&self.url, &self.ctl, f))
+            .collect();
+        let closing = std::thread::Builder::new()
+            .name("accent-close".to_string())
+            .spawn(move || {
+                teardown(client, child);
+                for argv in cancels {
+                    let _ = control(&argv);
+                }
+            });
+        match closing {
+            Ok(handle) => {
+                let mut closing = crate::locked(&CLOSING);
+                closing.retain(|h| !h.is_finished());
+                closing.push(handle);
+            }
+            Err(e) => tracing::warn!("closing {}: {e}", self.url),
         }
+    }
+}
+
+/// The closes of [`Remote`]s still running on their threads.
+static CLOSING: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+
+/// Wait for every remote vault dropped so far to have closed: for the app's way out, which would
+/// otherwise end the process before the forwards were cancelled and leave them on the lingering
+/// master for its minute.
+pub fn finish_closing() {
+    for handle in std::mem::take(&mut *crate::locked(&CLOSING)) {
+        let _ = handle.join();
+    }
+}
+
+/// Let go of the server a connection had: the rpc client, and the ssh process carrying it.
+///
+/// Both a vault closing and a reconnect come through here, which is what stops a retry leaving a
+/// zombie ssh and a reader thread behind for every attempt.
+///
+/// The order is what keeps a close finite. The writer goes first, so `serve` sees EOF and exits of
+/// its own accord; the child is given a second to follow and killed if it does not — a `Child`
+/// that is never waited for being the zombie this phase exists to avoid. Only then is the reader
+/// thread joined, because it ends when ssh's stdout closes, and a wedged ssh would otherwise hold
+/// the join for the fifteen seconds of a ServerAlive timeout, or forever.
+fn teardown(client: Option<Arc<Client>>, child: Option<Child>) {
+    if let Some(client) = &client {
+        client.close();
+    }
+    if let Some(mut child) = child {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(client) = &client {
+        client.join();
+    }
+}
+
+/// Run one `ssh -O` instruction to the master, saying why it was refused.
+fn control(argv: &[String]) -> Result<(), String> {
+    let out = link::command(argv)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run ssh: {e}"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(match String::from_utf8_lossy(&out.stderr).trim() {
+            "" => "ssh refused".to_string(),
+            why => why.to_string(),
+        }),
     }
 }
 

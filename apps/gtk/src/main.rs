@@ -202,10 +202,14 @@ fn main() -> glib::ExitCode {
         move |gtk_app, command_line| shell.command_line(gtk_app, command_line)
     });
     // The last window has gone, so a preference changed in the second before it would otherwise
-    // die with the timer that was to write it.
+    // die with the timer that was to write it. A remote vault closes on a thread of its own, and
+    // the process waits for it, or its forwards stay on the lingering master.
     app.connect_shutdown({
         let shell = shell.clone();
-        move |_| shell.flush_config()
+        move |_| {
+            shell.flush_config();
+            accent_api::remote::finish_closing();
+        }
     });
     app.run()
 }
