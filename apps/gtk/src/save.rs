@@ -58,17 +58,32 @@ impl App {
         land: fn(&Rc<Self>, &Rc<T>, bool) -> Option<bool>,
         contents: impl FnOnce() -> String + Send + 'static,
     ) {
+        let expected = tab.save_state().etag.get();
+        self.start_write(tab, explicit, expected, again, land, contents);
+    }
+
+    /// [`Self::start_save`] gated on `expected` rather than the tab's own etag.
+    fn start_write<T: Saves>(
+        self: &Rc<Self>,
+        tab: &Rc<T>,
+        explicit: bool,
+        expected: Option<Etag>,
+        again: fn(&Rc<Self>, &Rc<T>, bool),
+        land: impl FnOnce(&Rc<Self>, &Rc<T>, bool) -> Option<bool> + 'static,
+        contents: impl FnOnce() -> String + Send + 'static,
+    ) {
         let save = tab.save_state();
         if save.flight.borrow().is_some() {
             let asked = save.save_again.get().unwrap_or(false);
             save.save_again.set(Some(asked || explicit));
             return;
         }
-        let (write, expected) = (self.writer(tab), save.etag.get());
+        let write = self.writer(tab);
         let (tx, answer) = std::sync::mpsc::channel();
         *save.flight.borrow_mut() = Some(editor::Flight {
             started: save.edits.get(),
             expected,
+            held: save.etag.get(),
             explicit,
             answer,
         });
@@ -145,7 +160,7 @@ impl App {
         let landed = editor::landing(
             flight.started,
             save.edits.get(),
-            flight.expected,
+            flight.held,
             save.etag.get(),
             written,
         );
@@ -246,6 +261,53 @@ impl App {
         log_write(&tab.rel(), expected, &written);
         self.wrote(tab, written?, true);
         Ok(())
+    }
+
+    /// The buffer over the file, as the answer to a question about the file on disk — Overwrite,
+    /// the Save over a deleted file, Keep Mine — gated on `expected`, the etag the question was
+    /// asked against (`None`: whatever is there now). On a worker, as a save is: on a remote
+    /// vault the write is a round trip, which held every window. A save still on its way lands
+    /// first, so the two never race for the file. `said` is the toast for a write that landed.
+    fn write_answer(
+        self: &Rc<Self>,
+        tab: &Rc<Tab>,
+        expected: Option<Etag>,
+        said: &'static str,
+    ) {
+        self.land_save(tab, false);
+        let text = tab.for_disk();
+        self.start_write(
+            tab,
+            true,
+            expected,
+            Self::save_tab,
+            move |app, tab, report| app.land_answer(tab, report, said),
+            move || text,
+        );
+    }
+
+    /// [`Self::land_flight`] for [`Self::write_answer`]: the question is answered once the write
+    /// is in, whatever was typed meanwhile, which the next save writes after it.
+    fn land_answer(self: &Rc<Self>, tab: &Rc<Tab>, report: bool, said: &str) -> Option<bool> {
+        self.land_flight(
+            tab,
+            Self::file_changed,
+            |app, tab, landed, _| match landed {
+                editor::Landing::Clean(etag) | editor::Landing::Behind(etag) => {
+                    tab.save.disk_changed.set(false);
+                    tab.clear_disk_alert();
+                    app.wrote(tab, etag, matches!(landed, editor::Landing::Clean(_)));
+                    if report {
+                        app.toast(said);
+                    }
+                }
+                editor::Landing::Failed(SaveError::ChangedOnDisk { .. }) if report => {
+                    app.toast(&format!("{} changed on disk again", tab.rel()));
+                }
+                editor::Landing::Failed(e) if report => app.cannot("save", e),
+                editor::Landing::Failed(_) | editor::Landing::Stale => {}
+            },
+        )
     }
 
     /// [`save_tab`](Self::save_tab) written before it returns, for a buffer whose file is about
@@ -410,10 +472,7 @@ impl App {
             Some(&self.window),
             move |response| match response.as_str() {
                 "compare" => app.compare_with_disk(&tab),
-                "overwrite" => match app.write_tab(&tab, None) {
-                    Ok(()) => app.toast("Overwritten"),
-                    Err(e) => app.cannot("save", e),
-                },
+                "overwrite" => app.write_answer(&tab, None, "Overwritten"),
                 _ => {}
             },
         );
@@ -554,10 +613,7 @@ impl App {
             // Both sides hold work, so neither is thrown away on one click: the diff shows what
             // differs and the user picks (DESIGN.md: a choice that can lose data is a dialog).
             Some(Alert::Compare) => self.compare_with_disk(tab),
-            Some(Alert::Restore) => match self.write_tab(tab, None) {
-                Ok(()) => self.toast("Saved"),
-                Err(e) => self.cannot("save", e),
-            },
+            Some(Alert::Restore) => self.write_answer(tab, None, "Saved"),
             // Looked up again rather than remembered: the copy may have been resolved from
             // another window, or by Syncthing, since the banner went up. On a worker, being a
             // round trip on a remote vault.
@@ -644,13 +700,7 @@ impl App {
             tab,
             move |_| {
                 tab.leave_compare();
-                match app.write_tab(&tab, Some(disk_etag)) {
-                    Ok(()) => app.toast("Saved"),
-                    Err(SaveError::ChangedOnDisk { .. }) => {
-                        app.toast(&format!("{} changed on disk again", tab.rel()));
-                    }
-                    Err(e) => app.cannot("save", e),
-                }
+                app.write_answer(&tab, Some(disk_etag), "Saved");
             }
         ));
         tab.compare(
