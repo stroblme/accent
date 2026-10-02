@@ -386,8 +386,6 @@ methods! {
     /// paste inside a remote vault sends nothing over the link; overwriting is not its business,
     /// the caller naming a path nothing holds yet.
     io copy(from: ref str, to: ref str) -> ();
-    /// A host whose `accent-cli serve` predates it answers "no such method" until `make server`
-    /// uploads the new one; the rename then says so rather than moving anything.
     any plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
     any rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
     /// A note's text as Save As writes it at another path, its relative links pointed back at
@@ -430,8 +428,6 @@ methods! {
     /// all of it: what the watcher never reported under it is taken in.
     io rescan_dir(dir: ref str) -> ();
     any search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
-    /// A host whose `accent-cli serve` predates it answers "no such method", which the Search
-    /// pane takes as no mid-word matches.
     any search_mid_word(
         query: ref str,
         limit: val usize,
@@ -445,24 +441,17 @@ methods! {
     any stats() -> Stats;
     any files_with_tag(tag: ref str) -> Vec<FileRow>;
     any backlinks(rel: ref str) -> Vec<Backlink>;
-    /// A host whose `accent-cli serve` predates it answers "no such method", which the
-    /// References pane takes as none.
     any backlink_locations(rel: ref str) -> Vec<Location>;
     /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,
     /// because that is where the notes and the index are.
     any pdf_links(rel: ref str) -> Vec<PdfLink>;
     any file_paths(include_ignored: val bool) -> Vec<String>;
     any set_excluded(entries: ref [String]) -> ();
-    /// A host whose `accent-cli serve` predates the name answers "no such method", which leaves
-    /// Go to File's empty query to the window's own history.
     any recent_files(limit: val usize) -> Vec<String>;
     any resolve_link(target: ref str) -> Option<String>;
-    /// What Go to File and `[[` completion offer to write. A host whose `accent-cli serve`
-    /// predates it answers "no such method", which the palette takes as none.
+    /// What Go to File and `[[` completion offer to write.
     any missing_notes() -> Vec<String>;
-    /// `(alias, note)` for every frontmatter alias: what Go to File also finds a note by. A host
-    /// whose `accent-cli serve` predates it answers "no such method", which the palette takes as
-    /// none.
+    /// `(alias, note)` for every frontmatter alias: what Go to File also finds a note by.
     any note_aliases() -> Vec<(String, String)>;
     any conflicts() -> Vec<(String, String)>;
     any conflicts_of(rel: ref str) -> Vec<String>;
@@ -492,16 +481,14 @@ methods! {
     git git_merge = merge(repo: ref Repo, branch: ref str) -> git::Merge,
         bounded by git::TRANSFER_TIMEOUT;
     git git_merge_abort = merge_abort(repo: ref Repo) -> ();
-    /// A rebase stopped part way, carried on or given up. A host whose `accent-cli serve` predates
-    /// them answers "no such method".
+    /// A rebase stopped part way, carried on or given up.
     git git_rebase_continue = rebase_continue(repo: ref Repo) -> git::Rebase,
         bounded by git::TRANSFER_TIMEOUT;
     git git_rebase_abort = rebase_abort(repo: ref Repo) -> ();
     git git_stage = stage(repo: ref Repo, paths: ref [String]) -> ();
     git git_unstage = unstage(repo: ref Repo, paths: ref [String]) -> ();
     git git_discard = discard(repo: ref Repo, paths: ref [String]) -> ();
-    /// What Stage and Unstage Selected Lines write. A host whose `accent-cli serve` predates it
-    /// answers "no such method".
+    /// What Stage and Unstage Selected Lines write.
     git git_stage_text = stage_text(repo: ref Repo, path: ref str, text: ref str) -> (),
         bounded by git::TRANSFER_TIMEOUT;
     git git_commit = commit(repo: ref Repo, message: ref str, all: val bool) -> String,

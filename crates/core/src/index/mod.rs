@@ -97,9 +97,6 @@ pub struct FileRow {
     /// marker file (`crate::walk::Unindexed::Dependency`): somebody else's tree, listed so the
     /// reader can look at it and never edited from here. A row the index does not hold because
     /// git ignores its folder is **not** one of these — that folder is the reader's own.
-    ///
-    /// Defaulted so a vault served by an accent that predates the field still lists.
-    #[serde(default)]
     pub dependency: bool,
 }
 
@@ -117,14 +114,9 @@ pub struct SearchHit {
     pub at: Option<Range<usize>>,
     /// 1-based line the occurrence sits on, the way an editor counts lines; `None` on the one
     /// row a hit with no occurrence in the body makes, which quotes the head of the note instead.
-    ///
-    /// Defaulted, like [`Match::more`] below it, so a vault served by an accent that predates the
-    /// per-match rows still lists — as one row per file, which is what that server sends.
-    #[serde(default)]
     pub line: Option<u32>,
     /// Occurrences in this file the per-file cap left out, on its last listed row and 0 on every
     /// other: [`Match::more`] for the ranked path.
-    #[serde(default)]
     pub more: usize,
 }
 

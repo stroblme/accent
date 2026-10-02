@@ -63,8 +63,7 @@ impl App {
                         .filter(|rel| matches!(vault.stat(rel), Ok(None)))
                         .collect()
                 };
-                // A host whose `accent-cli serve` predates the method answers "no such method",
-                // which leaves the files alone. The same goes for the aliases.
+                // A question the vault cannot answer leaves the files alone, and the aliases none.
                 files.extend(vault.missing_notes().unwrap_or_default());
                 let aliases = vault.note_aliases().unwrap_or_default();
                 (
