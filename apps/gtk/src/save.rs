@@ -268,12 +268,7 @@ impl App {
     /// asked against (`None`: whatever is there now). On a worker, as a save is: on a remote
     /// vault the write is a round trip, which held every window. A save still on its way lands
     /// first, so the two never race for the file. `said` is the toast for a write that landed.
-    fn write_answer(
-        self: &Rc<Self>,
-        tab: &Rc<Tab>,
-        expected: Option<Etag>,
-        said: &'static str,
-    ) {
+    fn write_answer(self: &Rc<Self>, tab: &Rc<Tab>, expected: Option<Etag>, said: &'static str) {
         self.land_save(tab, false);
         let text = tab.for_disk();
         self.start_write(
