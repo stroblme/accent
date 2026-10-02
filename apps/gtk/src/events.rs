@@ -88,6 +88,9 @@ impl App {
                     }
                 });
             }
+            // What was drawn and has not reached the host goes up instead, beside the host's
+            // file if that has moved on: a fetch would write over it.
+            Doc::Pdf(pdf) if pdf.unsent() => self.push_pdf(pdf),
             // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
             // rather than sending the reader back to page one. On a remote vault the
             // reader has a cached copy open, which is fetched again first.
@@ -365,12 +368,14 @@ impl App {
                 self.refresh_corpus();
                 self.restore_session();
                 self.sync_active();
-                // What was drawn while the link was down reached only the file here.
+                // What was drawn while the link was down reached only the file here, and the
+                // notes' page links into it were not rewritten.
                 for pdf in self.docs().iter().filter_map(Doc::pdf) {
                     if pdf.unsent() {
                         self.push_pdf(pdf);
                     }
                 }
+                self.relink_all();
                 // A remote shell the drop ended kept its tab, and starts again in it.
                 for term in self.terminals() {
                     term.reopen();

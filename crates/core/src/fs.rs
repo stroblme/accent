@@ -27,7 +27,8 @@ impl Etag {
         Ok(Etag::from_meta(&std::fs::metadata(path)?))
     }
 
-    pub(crate) fn from_meta(m: &std::fs::Metadata) -> Etag {
+    /// The etag of a file already open, which a path could have been renamed away from since.
+    pub fn from_meta(m: &std::fs::Metadata) -> Etag {
         Etag {
             mtime_ns: m.mtime() * 1_000_000_000 + m.mtime_nsec(),
             size: m.size(),

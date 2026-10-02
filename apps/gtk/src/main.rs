@@ -202,10 +202,14 @@ fn main() -> glib::ExitCode {
         move |gtk_app, command_line| shell.command_line(gtk_app, command_line)
     });
     // The last window has gone, so a preference changed in the second before it would otherwise
-    // die with the timer that was to write it.
+    // die with the timer that was to write it. A remote vault closes on a thread of its own, and
+    // the process waits for it, or its forwards stay on the lingering master.
     app.connect_shutdown({
         let shell = shell.clone();
-        move |_| shell.flush_config()
+        move |_| {
+            shell.flush_config();
+            accent_api::remote::finish_closing();
+        }
     });
     app.run()
 }
@@ -250,6 +254,10 @@ struct App {
     /// overlay is showing, and "it says so once rather than once a save" is a count.
     #[cfg(feature = "bench")]
     toasted: Cell<usize>,
+    /// The last toast that carried a button, for a drill to press: a toast is not a widget until
+    /// the overlay shows it, and it may be queued behind another.
+    #[cfg(feature = "bench")]
+    buttoned: RefCell<Option<adw::Toast>>,
     /// Raised across the window when a remote vault stops answering, with a way back. A banner
     /// rather than a toast because it is a state that persists and needs a decision, and one
     /// across the window rather than per tab because it is every tab that is affected.
@@ -458,6 +466,8 @@ impl App {
             .button_label(button)
             .build();
         toast.connect_button_clicked(move |_| act());
+        #[cfg(feature = "bench")]
+        self.buttoned.replace(Some(toast.clone()));
         self.toasts.add_toast(toast);
     }
 

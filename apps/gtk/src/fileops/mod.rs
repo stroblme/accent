@@ -296,15 +296,23 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
 /// is what makes the file a notebook every PDF reader shows correctly, rather than one growing
 /// `/MediaBox` only we understand.
 ///
-/// Local vaults only, for the reason the pen and Insert Sketch refuse on a remote one: a PDF
-/// there is read from the ssh cache copy, so what was drawn would never reach the host. The tree
-/// menu leaves the item out on a remote vault; this is the palette's way in, and it says why.
+/// Written through the vault, so on a remote one it lands on the host, and the free name the
+/// dialog offers is a round trip per name tried there: it is found on a worker first.
 pub fn new_drawing(ops: &Rc<Ops>, dir: &str) {
-    if ops.vault.is_remote() {
-        return (ops.toast)("Open a local folder to create a drawing");
-    }
-    let current = free_drawing_name(&ops.vault, dir);
-    let entry = name_entry("Drawing name", &current);
+    let (ops, dir) = (ops.clone(), dir.to_string());
+    glib::spawn_future_local(async move {
+        let (vault, asked) = (ops.vault.clone(), dir.clone());
+        let current =
+            crate::work::off_thread("drawing name", move || free_drawing_name(&vault, &asked))
+                .await
+                .unwrap_or_default();
+        new_drawing_named(&ops, &dir, &current);
+    });
+}
+
+/// [`new_drawing`] once the name to offer is known.
+fn new_drawing_named(ops: &Rc<Ops>, dir: &str, current: &str) {
+    let entry = name_entry("Drawing name", current);
     let form = form();
     form.append(&vault_path_field(&entry, &ops.vault, dir));
     form.append(&name_preview(&entry, {
@@ -338,15 +346,20 @@ pub fn new_drawing(ops: &Rc<Ops>, dir: &str) {
             let made = crate::work::off_thread("create", {
                 let (rel, name) = (rel.clone(), name.clone());
                 move || {
-                    if vault.exists(&rel) {
-                        return Err(format!("Cannot create {name}: it already exists"));
+                    let cannot = |e: String| format!("Cannot create {name}: {e}");
+                    // A name the vault cannot answer for is not taken as free: the write would
+                    // replace whatever is there.
+                    if vault
+                        .stat(&rel)
+                        .map_err(|e| cannot(e.to_string()))?
+                        .is_some()
+                    {
+                        return Err(cannot("it already exists".to_string()));
                     }
                     make_parents(&vault, &rel)?;
-                    let cannot = |e: String| format!("Cannot create {name}: {e}");
                     let bytes = accent_core::pdf::blank_pdf(size).map_err(|e| cannot(why(&e)))?;
-                    let path = vault.resolve(&rel).map_err(|e| cannot(e.to_string()))?;
-                    accent_core::fs::write_bytes(&path, &bytes, None)
-                        .map(|_| ())
+                    vault
+                        .write_file(&rel, &bytes)
                         .map_err(|e| cannot(e.to_string()))
                 }
             })
@@ -366,7 +379,7 @@ pub fn new_drawing(ops: &Rc<Ops>, dir: &str) {
     });
     focus_name(
         &entry,
-        Some(renamed_part(&current, false).chars().count() as i32),
+        Some(renamed_part(current, false).chars().count() as i32),
     );
 }
 

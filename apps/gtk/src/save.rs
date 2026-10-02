@@ -508,10 +508,10 @@ impl App {
     /// Forget a page that is really closing. Called on every path that closes one, because
     /// `close_page_finish` does not come back through the `close-page` handler.
     pub fn forget_page(self: &Rc<Self>, page: &adw::TabPage) {
-        // A drawn-on document leaving: the render thread drains its channel before it ends, so
-        // the write still happens after the tab is gone.
+        // A drawn-on document leaving: the write lands after the tab has gone from the window,
+        // and on a remote vault still goes up.
         if let Some(Doc::Pdf(pdf)) = self.doc_for_page(page) {
-            pdf.flush();
+            pdf.flush_closing();
             if let Some(at) = pdf.ring_at() {
                 self.ring_at.set(Some(at));
             }

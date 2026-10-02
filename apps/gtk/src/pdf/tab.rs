@@ -137,12 +137,10 @@ pub struct PdfTab {
     /// vault's copy — and whether another save landed while it was. See [`PdfTab::claim_upload`].
     pub(super) uploading: Cell<bool>,
     pub(super) upload_again: Cell<bool>,
-    /// The far end refused the last upload and the reader has been told so once: the strokes
-    /// after it are refused for the same reason and say nothing. See [`PdfTab::told_conflict`].
+    /// The far end refused the last upload, and the copy beside the document too, and the reader
+    /// has been told so once: the strokes after it are refused for the same reason and say
+    /// nothing. See [`PdfTab::told_conflict`].
     pub(super) conflict_told: Cell<bool>,
-    /// The conflict copy that refusal left beside the document, for the next one to write again
-    /// rather than leaving one numbered copy per stroke.
-    pub(super) conflict_copy: RefCell<Option<String>>,
     /// The last upload did not reach the far end at all — a folder it may not write, a full
     /// disk — and the reader has been told once. See [`PdfTab::told_failure`].
     pub(super) failure_told: Cell<bool>,
@@ -286,7 +284,6 @@ pub fn open(
         uploading: Cell::new(false),
         upload_again: Cell::new(false),
         conflict_told: Cell::new(false),
-        conflict_copy: RefCell::new(None),
         failure_told: Cell::new(false),
         unsent: Cell::new(false),
         saved: Cell::new(None),
@@ -798,6 +795,23 @@ impl PdfTab {
         self.ask(Request::Pages(edit));
     }
 
+    /// The same as the tab closes, holding the tab until the write is done: its answer is what
+    /// sends a remote vault's copy back to the host (`connect_saved`), and a tab already gone
+    /// would never hear it.
+    pub fn flush_closing(self: &Rc<Self>) {
+        let (tx, rx) = channel();
+        self.ask(Request::Save(Some(tx)));
+        let tab = self.clone();
+        glib::spawn_future_local(async move {
+            while let Err(std::sync::mpsc::TryRecvError::Empty) = rx.try_recv() {
+                glib::timeout_future(std::time::Duration::from_millis(50)).await;
+            }
+            // The thread posts its answer as an idle before it lets go of `tx`, and idles of one
+            // priority run in the order they were added: this one runs after it.
+            glib::idle_add_local_once(move || drop(tab));
+        });
+    }
+
     /// The same, but wait for it — the window is closing and the process is about to end, so a
     /// write still on the render thread's queue would go with it.
     ///
@@ -874,18 +888,12 @@ impl PdfTab {
         self.upload_again.replace(false)
     }
 
-    /// The far end refused this document and left what was written at `copy`, if it could put it
-    /// anywhere. `true` the first time, which is the one the reader is told about: a reader who
-    /// keeps drawing writes once a second and every one of those is refused for the same reason,
-    /// so the rest go quietly into the same copy.
-    pub fn told_conflict(&self, copy: Option<String>) -> bool {
-        *self.conflict_copy.borrow_mut() = copy;
+    /// The far end refused this document and the copy beside it, so what was written is kept on
+    /// this machine. `true` the first time, which is the one the reader is told about: a reader
+    /// who keeps drawing writes once a second and every one of those is refused for the same
+    /// reason.
+    pub fn told_conflict(&self) -> bool {
         !self.conflict_told.replace(true)
-    }
-
-    /// Where the last refusal put what was written, for the next one to write again.
-    pub fn conflict_copy(&self) -> Option<String> {
-        self.conflict_copy.borrow().clone()
     }
 
     /// An upload of this document failed. `true` the first time, which is the one the reader is
@@ -906,14 +914,19 @@ impl PdfTab {
         self.unsent.get()
     }
 
-    /// The conflict is over — an upload landed, or the document was re-read from what the far end
-    /// now holds — so the next refusal or failure is news again, and a refusal takes a name of its
-    /// own.
+    /// The reader asked for another try: a refusal or a failure after it is news again.
+    pub fn forget_told(&self) {
+        self.conflict_told.set(false);
+        self.failure_told.set(false);
+    }
+
+    /// The conflict is over — an upload landed, the tab moved onto the copy it went into, or the
+    /// document was re-read from what the far end now holds — so the next refusal or failure is
+    /// news again.
     pub fn clear_conflict(&self) {
         self.conflict_told.set(false);
         self.failure_told.set(false);
         self.unsent.set(false);
-        *self.conflict_copy.borrow_mut() = None;
     }
 
     /// The bookmarks, for the Outline pane.

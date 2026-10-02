@@ -73,7 +73,8 @@ pub enum Pushed {
     Sent,
     /// The host's file moved on since the copy was fetched, so it was left as it is and what had
     /// been written went up *beside* it under this name in the vault: a conflict copy the tree
-    /// lists, the reader opens and either of the two can be deleted.
+    /// lists, and either of the two can be deleted. The cached copy is that file's now, so the
+    /// reader moves onto it, as onto a renamed file, and draws on there.
     Conflict(String),
     /// Neither could go to the host, so what was written is only on this machine — at this path,
     /// for this reason.
@@ -136,8 +137,22 @@ fn carry(from: &Path, to: &Path) {
     }
 }
 
-/// The stamp of one cached copy, locked for as long as this is held: the etag the host reported
-/// when the copy was last fetched or pushed.
+/// What a cached copy was when it was last fetched or pushed: the host's etag then, and the
+/// copy's own. A copy whose own etag has moved since was written here — the pen, a page edit —
+/// and holds what the host has not had.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+struct Stamped {
+    host: crate::Etag,
+    copy: crate::Etag,
+}
+
+/// Whether the copy at `dest` was written here since `stamped`, so its bytes are on this machine
+/// only. A copy never stamped is taken as fetched: there is nothing to tell it by.
+fn unsent(dest: &Path, stamped: Option<Stamped>) -> bool {
+    stamped.is_some_and(|s| crate::Etag::of(dest).is_ok_and(|now| now != s.copy))
+}
+
+/// The stamp of one cached copy, locked for as long as this is held: see [`Stamped`].
 ///
 /// A fetch and a push each hold it from the `stat` that decides what to do until the stamp is
 /// written, so two of one file take turns. Two fetches racing on a burst of watcher events could
@@ -161,15 +176,15 @@ impl Stamp {
     }
 
     /// `None` for a copy never fetched. Read once per hold: it reads from the file's position.
-    fn etag(&self) -> Option<crate::Etag> {
+    fn read(&self) -> Option<Stamped> {
         serde_json::from_reader(&self.0).ok()
     }
 
     /// Written in place: a file renamed over it would be one the next holder is not waiting on.
-    fn set(&self, etag: &crate::Etag) -> std::io::Result<()> {
+    fn set(&self, stamped: &Stamped) -> std::io::Result<()> {
         use std::os::unix::fs::FileExt;
         self.0.set_len(0)?;
-        self.0.write_all_at(&serde_json::to_vec(etag)?, 0)
+        self.0.write_all_at(&serde_json::to_vec(stamped)?, 0)
     }
 }
 
@@ -477,6 +492,10 @@ impl Remote {
     /// This is how the PDF viewer, the image tab and the preview's assets reach a remote vault:
     /// they need a real file, and the protocol deliberately carries no bytes. The etag decides —
     /// same as on disk, no transfer.
+    ///
+    /// A copy written here since it was fetched or pushed is never fetched over: what the pen drew
+    /// is in it and nowhere else. It is handed back as it is, for a [`push`](Self::push) to send,
+    /// beside the host's file if that has moved on.
     pub fn fetch(&self, rel: &str) -> std::io::Result<PathBuf> {
         self.fetch_with(rel, &|_, _| ())
     }
@@ -494,6 +513,10 @@ impl Remote {
             ));
         };
         let stamp = Stamp::hold(&stamp)?;
+        let stamped = stamp.read();
+        if unsent(&dest, stamped) {
+            return Ok(dest);
+        }
         let current: Option<crate::Etag> = self
             .call("stat", json!([rel]))
             .map_err(RpcError::io_error)?;
@@ -505,7 +528,7 @@ impl Remote {
         };
         // The remote etag against the one the cached copy was written with. Size and mtime are
         // enough here: the inode is the remote's, and it is in the etag we stored.
-        if stamp.etag() == Some(current) && dest.exists() {
+        if stamped.map(|s| s.host) == Some(current) && dest.exists() {
             return Ok(dest);
         }
 
@@ -513,7 +536,12 @@ impl Remote {
             std::fs::create_dir_all(dir)?;
         }
         self.receive(rel, &dest, current.size, progress)?;
-        let _ = stamp.set(&current);
+        if let Ok(copy) = crate::Etag::of(&dest) {
+            let _ = stamp.set(&Stamped {
+                host: current,
+                copy,
+            });
+        }
         Ok(dest)
     }
 
@@ -521,21 +549,19 @@ impl Remote {
     /// readers that write into the file they were handed rather than through the vault — the PDF
     /// pen, the page edits, Export Highlights.
     ///
-    /// The host's etag is checked against the one the copy was fetched at, because the copy was
-    /// drawn on without the host knowing: a file that moved under it is a conflict for the reader
-    /// to settle, not one to overwrite. On a match the copy goes up and the stamp is written
-    /// again from what the host says afterwards, so the fetch that follows the host's own watcher
-    /// event does not pull our bytes back over a page that is still being drawn on. On a mismatch
-    /// it goes [beside](Self::push_beside) the original instead.
+    /// A copy not written since it was fetched or last pushed has nothing to send, and costs no
+    /// round trip. Otherwise the host's etag is checked against the one the copy was fetched at,
+    /// because the copy was drawn on without the host knowing: a file that moved under it is a
+    /// conflict for the reader to settle, not one to overwrite. On a match the copy goes up and
+    /// the stamp is written again from what the host says afterwards and what was sent, so the
+    /// fetch that follows the host's own watcher event does not pull our bytes back over a page
+    /// that is still being drawn on, and a save that landed during the upload is still unsent. On
+    /// a mismatch it goes [beside](Self::push_beside) the original instead.
     ///
     /// A file no longer on the host — moved or deleted there, while the copy was being written or
     /// was on its way — is `NotFound`, and nothing goes up: under the old name it would come back.
     /// The reader that follows a rename sends it again under the new one.
-    ///
-    /// `edited` is the copy an earlier refusal of this same document already left on the host, so
-    /// that a reader who keeps drawing writes that one again rather than a numbered copy per
-    /// stroke.
-    pub fn push(&self, rel: &str, edited: Option<&str>) -> std::io::Result<Pushed> {
+    pub fn push(&self, rel: &str) -> std::io::Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
@@ -546,6 +572,10 @@ impl Remote {
             ));
         };
         let stamp = Stamp::hold(&stamp)?;
+        let stamped = stamp.read();
+        if stamped.is_some() && !unsent(&dest, stamped) {
+            return Ok(Pushed::Sent);
+        }
         let current: Option<crate::Etag> = self
             .call("stat", json!([rel]))
             .map_err(RpcError::io_error)?;
@@ -555,12 +585,12 @@ impl Remote {
                 format!("{rel} was moved or deleted"),
             ));
         };
-        if Some(current) != stamp.etag() {
-            return Ok(self.push_beside(&dest, rel, edited));
+        if Some(current) != stamped.map(|s| s.host) {
+            return Ok(self.push_beside(&dest, rel));
         }
-        self.send(&dest, rel, true, &|_, _| ())?;
-        if let Ok(Some(now)) = self.call::<Option<crate::Etag>>("stat", json!([rel])) {
-            let _ = stamp.set(&now);
+        let copy = self.send(&dest, rel, true, &|_, _| ())?;
+        if let Ok(Some(host)) = self.call::<Option<crate::Etag>>("stat", json!([rel])) {
+            let _ = stamp.set(&Stamped { host, copy });
         }
         Ok(Pushed::Sent)
     }
@@ -581,20 +611,43 @@ impl Remote {
     /// folder, the way a note's conflict copy lands in the vault, and the original is not touched.
     /// It is then a file like any other — the tree lists it, it opens and it syncs — so the reader
     /// can hold the two against each other and delete one, where a copy left in the ssh cache was
-    /// reachable only through the text of a toast.
+    /// reachable only through the text of a toast. The cached copy goes with it, under its name
+    /// and its stamp, as a rename carries one: the reader moves onto it and draws on there, and
+    /// the original is fetched afresh when it is opened again.
     ///
-    /// A second conflict on the same document takes the next free number rather than writing over
-    /// `(edited)`, whose changes nobody has looked at yet; only the refusals of one conflict, which
-    /// carry `edited`, write the same copy again. If not even the copy can go up, the bytes stay
-    /// here — the one place a `.kept.pdf` still appears — and the toast says so.
-    fn push_beside(&self, dest: &Path, rel: &str, edited: Option<&str>) -> Pushed {
-        let named = match edited {
-            Some(name) => Ok(name.to_string()),
-            None => self.free_edited_name(rel),
-        };
-        match named.and_then(|name| self.upload(dest, &name).map(|()| name)) {
-            Ok(name) => Pushed::Conflict(name),
+    /// A second conflict takes the next free number rather than writing over `(edited)`, whose
+    /// changes nobody has looked at yet. If not even the copy can go up, the bytes stay here — the
+    /// one place a `.kept.pdf` still appears — and the toast says so.
+    fn push_beside(&self, dest: &Path, rel: &str) -> Pushed {
+        let sent = self.free_edited_name(rel).and_then(|name| {
+            let copy = self.send(dest, &name, false, &|_, _| ())?;
+            Ok((name, copy))
+        });
+        match sent {
+            Ok((name, copy)) => {
+                self.adopt(dest, &name, copy);
+                Pushed::Conflict(name)
+            }
             Err(e) => keep(dest, e.to_string()),
+        }
+    }
+
+    /// The cached copy at `dest`, which went up to `name` as it was at `copy`, becomes `name`'s.
+    /// A copy whose host etag cannot be had is left unstamped, which costs its next push another
+    /// copy beside it rather than anything drawn.
+    fn adopt(&self, dest: &Path, name: &str, copy: crate::Etag) {
+        let (Some(to), Some(stamp)) = (
+            ssh::cache_path(&self.url, name),
+            ssh::stamp_path(&self.url, name),
+        ) else {
+            return;
+        };
+        let Ok(stamp) = Stamp::hold(&stamp) else {
+            return;
+        };
+        carry(dest, &to);
+        if let Ok(Some(host)) = self.call::<Option<crate::Etag>>("stat", json!([name])) {
+            let _ = stamp.set(&Stamped { host, copy });
         }
     }
 
@@ -628,21 +681,28 @@ impl Remote {
         rel: &str,
         progress: &dyn Fn(u64, u64),
     ) -> std::io::Result<()> {
-        self.send(local, rel, false, progress)
+        self.send(local, rel, false, progress).map(|_| ())
     }
 
     /// A local file to `rel` on the host, replacing only a file still there when `replace` is
-    /// set: see [`ssh::put_cmd`].
+    /// set: see [`ssh::put_cmd`]. Answers with the etag of the file that was sent, which a save
+    /// renaming another over `local` meanwhile does not change.
     fn send(
         &self,
         local: &Path,
         rel: &str,
         replace: bool,
         progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<crate::Etag> {
         let file = std::fs::File::open(local)?;
-        let total = file.metadata()?.len();
-        link::send(&self.put_into(rel, total, replace), file, total, progress)
+        let sent = crate::Etag::from_meta(&file.metadata()?);
+        link::send(
+            &self.put_into(rel, sent.size, replace),
+            file,
+            sent.size,
+            progress,
+        )?;
+        Ok(sent)
     }
 
     /// Write `bytes` to `rel` over the master, the way an upload goes: the host's shell creates a
@@ -780,18 +840,7 @@ impl Remote {
     }
 
     fn control(&self, argv: Vec<String>) -> Result<(), String> {
-        let out = self
-            .ssh(&argv)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("cannot run ssh: {e}"))?;
-        match out.status.success() {
-            true => Ok(()),
-            false => Err(match String::from_utf8_lossy(&out.stderr).trim() {
-                "" => "ssh refused".to_string(),
-                why => why.to_string(),
-            }),
-        }
+        control(&argv)
     }
 
     // ----------------------------------------------------------- connect
@@ -858,9 +907,9 @@ impl Remote {
 
     /// What the rpc reader runs when the server's output ends unasked.
     ///
-    /// It holds the state and the channel rather than the `Remote`: were it the last holder,
-    /// dropping it there would run [`teardown`](Self::teardown), which joins the very thread it is
-    /// on. Only a connection that was up can be lost: one still being made fails its own `hello`
+    /// It holds the state and the channel rather than the `Remote`, which would then never close:
+    /// the reader ends only once the close has ended `serve`. Only a connection that was up can be
+    /// lost: one still being made fails its own `hello`
     /// and says why, or is found dead where [`start`](Self::start) would have said it was up.
     fn on_lost(&self) -> Box<dyn FnOnce() + Send> {
         let (state, events, why) = (self.state.clone(), self.events.clone(), self.lost());
@@ -876,7 +925,10 @@ impl Remote {
     fn connect(&self, quiet: bool) -> Result<(), Failure> {
         // Whatever the last attempt left running goes first: `spawn_server` overwrites both slots,
         // so without this a retry would leak an ssh child and a reader thread every time.
-        self.teardown();
+        teardown(
+            self.locked(&self.client).take(),
+            self.locked(&self.child).take(),
+        );
         link::prepare(&self.url, &self.ctl, quiet, &|what, fraction| {
             self.step(what, fraction)
         })?;
@@ -931,42 +983,6 @@ impl Remote {
     fn read_lock<'a, T>(&self, m: &'a RwLock<T>) -> std::sync::RwLockReadGuard<'a, T> {
         m.read().unwrap_or_else(|e| e.into_inner())
     }
-
-    /// Let go of the server this connection had: the rpc client, and the ssh process carrying it.
-    ///
-    /// Both the window closing and a reconnect come through here, which is what stops a retry
-    /// leaving a zombie ssh and a reader thread behind for every attempt.
-    ///
-    /// The order is what keeps a window closable. The writer goes first, so `serve` sees EOF and
-    /// exits of its own accord; the child is given a second to follow and killed if it does not —
-    /// a `Child` that is never waited for being the zombie this phase exists to avoid. Only then
-    /// is the reader thread joined, because it ends when ssh's stdout closes, and a wedged ssh
-    /// would otherwise hold the join for the fifteen seconds of a ServerAlive timeout, or forever.
-    fn teardown(&self) {
-        let client = self.locked(&self.client).take();
-        if let Some(client) = &client {
-            client.close();
-        }
-        if let Some(mut child) = self.locked(&self.child).take() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(20))
-                    }
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break;
-                    }
-                }
-            }
-        }
-        if let Some(client) = &client {
-            client.join();
-        }
-    }
 }
 
 impl Drop for Remote {
@@ -976,11 +992,97 @@ impl Drop for Remote {
     /// too, so reopening the vault within it skips the handshake and any passphrase. Nothing of
     /// the vault's rides it meanwhile: `serve` has had its EOF, and the forwards are cancelled one
     /// by one, because a master that is only lingering still holds every forward it was given.
+    ///
+    /// On a thread of its own, which [`finish_closing`] joins: the last holder is usually a window
+    /// closing on the GTK main loop, and the close is a second's wait for a wedged server and an
+    /// ssh process per forward, 120–140 ms with one forward on a 60 ms link.
     fn drop(&mut self) {
-        self.teardown();
-        for f in std::mem::take(&mut *self.locked(&self.forwards)) {
-            let _ = self.control(ssh::cancel(&self.url, &self.ctl, f));
+        let (client, child) = (
+            self.locked(&self.client).take(),
+            self.locked(&self.child).take(),
+        );
+        let cancels: Vec<Vec<String>> = std::mem::take(&mut *self.locked(&self.forwards))
+            .into_iter()
+            .map(|f| ssh::cancel(&self.url, &self.ctl, f))
+            .collect();
+        let closing = std::thread::Builder::new()
+            .name("accent-close".to_string())
+            .spawn(move || {
+                teardown(client, child);
+                for argv in cancels {
+                    let _ = control(&argv);
+                }
+            });
+        match closing {
+            Ok(handle) => {
+                let mut closing = crate::locked(&CLOSING);
+                closing.retain(|h| !h.is_finished());
+                closing.push(handle);
+            }
+            Err(e) => tracing::warn!("closing {}: {e}", self.url),
         }
+    }
+}
+
+/// The closes of [`Remote`]s still running on their threads.
+static CLOSING: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+
+/// Wait for every remote vault dropped so far to have closed: for the app's way out, which would
+/// otherwise end the process before the forwards were cancelled and leave them on the lingering
+/// master for its minute.
+pub fn finish_closing() {
+    for handle in std::mem::take(&mut *crate::locked(&CLOSING)) {
+        let _ = handle.join();
+    }
+}
+
+/// Let go of the server a connection had: the rpc client, and the ssh process carrying it.
+///
+/// Both a vault closing and a reconnect come through here, which is what stops a retry leaving a
+/// zombie ssh and a reader thread behind for every attempt.
+///
+/// The order is what keeps a close finite. The writer goes first, so `serve` sees EOF and exits of
+/// its own accord; the child is given a second to follow and killed if it does not — a `Child`
+/// that is never waited for being the zombie this phase exists to avoid. Only then is the reader
+/// thread joined, because it ends when ssh's stdout closes, and a wedged ssh would otherwise hold
+/// the join for the fifteen seconds of a ServerAlive timeout, or forever.
+fn teardown(client: Option<Arc<Client>>, child: Option<Child>) {
+    if let Some(client) = &client {
+        client.close();
+    }
+    if let Some(mut child) = child {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(client) = &client {
+        client.join();
+    }
+}
+
+/// Run one `ssh -O` instruction to the master, saying why it was refused.
+fn control(argv: &[String]) -> Result<(), String> {
+    let out = link::command(argv)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run ssh: {e}"))?;
+    match out.status.success() {
+        true => Ok(()),
+        false => Err(match String::from_utf8_lossy(&out.stderr).trim() {
+            "" => "ssh refused".to_string(),
+            why => why.to_string(),
+        }),
     }
 }
 
@@ -1001,7 +1103,7 @@ fn drain(stream: impl Read + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Stamp, carry, edited_name, kept_path};
+    use super::{Stamp, Stamped, carry, edited_name, kept_path, unsent};
     use std::path::Path;
     use std::time::Duration;
 
@@ -1028,25 +1130,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes/a.pdf");
         let first = Stamp::hold(&path).unwrap();
-        assert_eq!(first.etag(), None);
+        assert_eq!(first.read(), None);
 
         let (tx, rx) = std::sync::mpsc::channel();
         let waiting = path.clone();
         std::thread::spawn(move || {
             let second = Stamp::hold(&waiting).unwrap();
-            tx.send(second.etag()).unwrap();
+            tx.send(second.read()).unwrap();
         });
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
 
-        let long = crate::Etag {
-            mtime_ns: 1_000_000_000_000,
-            size: 1_000_000,
-            ino: 1_000_000,
+        let etag = |n| crate::Etag {
+            mtime_ns: n,
+            size: n as u64,
+            ino: n as u64,
         };
-        let short = crate::Etag {
-            mtime_ns: 1,
-            size: 1,
-            ino: 1,
+        let long = Stamped {
+            host: etag(1_000_000_000_000),
+            copy: etag(1_000_000_000_000),
+        };
+        let short = Stamped {
+            host: etag(1),
+            copy: etag(2),
         };
         first.set(&long).unwrap();
         // Written in place, so a shorter one leaves nothing of the longer behind.
@@ -1056,6 +1161,31 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(5)).unwrap(),
             Some(short)
         );
+    }
+
+    /// A copy written since it was stamped holds what the host has not had, which no fetch may
+    /// overwrite; one moved along with its stamp, as a rename carries it, is still the same copy.
+    #[test]
+    fn a_copy_written_since_its_stamp_is_unsent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dest, moved) = (dir.path().join("a.pdf"), dir.path().join("b/a.pdf"));
+        std::fs::write(&dest, "fetched").unwrap();
+        let fetched = crate::Etag::of(&dest).unwrap();
+        let stamped = Some(Stamped {
+            host: fetched,
+            copy: fetched,
+        });
+        assert!(!unsent(&dest, stamped));
+        assert!(!unsent(&dest, None));
+
+        carry(&dest, &moved);
+        assert!(!unsent(&moved, stamped));
+
+        // A save replaces the file by a rename, as the render thread's does.
+        let saved = dir.path().join("b/.a.pdf.tmp");
+        std::fs::write(&saved, "drawn on").unwrap();
+        std::fs::rename(&saved, &moved).unwrap();
+        assert!(unsent(&moved, stamped));
     }
 
     /// The copy a refused upload leaves behind keeps its extension, so whatever reads that kind

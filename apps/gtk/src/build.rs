@@ -275,6 +275,8 @@ pub fn build_window(
         toasts,
         #[cfg(feature = "bench")]
         toasted: Cell::new(0),
+        #[cfg(feature = "bench")]
+        buttoned: RefCell::new(None),
         connection,
         retry: Default::default(),
         connect,

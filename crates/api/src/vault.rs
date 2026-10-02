@@ -263,9 +263,11 @@ pub(crate) const MOVE_BOUND: std::time::Duration = std::time::Duration::from_sec
 /// finishes them.
 pub(crate) const REPLACE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Turn an RPC failure into the `anyhow` error every caller of the façade already handles.
+/// Turn an RPC failure into the `anyhow` error every caller of the façade already handles. It
+/// reads as its message, and a caller that has to know whether the host was asked at all
+/// downcasts it ([`rpc::RpcError::unasked`]).
 pub(crate) fn remote_err(e: rpc::RpcError) -> anyhow::Error {
-    anyhow::anyhow!("{}", e.message)
+    anyhow::Error::new(e)
 }
 
 /// The methods that mean the same thing wherever the files are, written once.

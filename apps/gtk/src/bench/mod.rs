@@ -64,9 +64,9 @@ use panes::{
     bench_panes, bench_pin, bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
 };
 use pdf::{
-    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_deep,
-    bench_pdf_dropped, bench_pdf_failed, bench_pdf_pages, bench_pdf_renaming, bench_pdf_render,
-    bench_pdf_stale, bench_pdf_strip,
+    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_closed,
+    bench_pdf_deep, bench_pdf_dropped, bench_pdf_failed, bench_pdf_pages, bench_pdf_renaming,
+    bench_pdf_render, bench_pdf_stale, bench_pdf_strip, bench_sketch,
 };
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -228,18 +228,24 @@ use tags::bench_tags;
 /// follow. It writes to the document and moves it, so point it at a scratch copy; and point it at a
 /// document of several pages, since a one-page PDF is wholly on screen whatever the scroll offset
 /// was. `=stale:<rel_path>` is the remote vault's etag gate: it stamps the cached copy with an
-/// etag the host never had, adds a page and prints whether the host's copy is untouched and
-/// what `<name> (edited).pdf` beside it holds, then adds another and prints the same again —
-/// the second refusal must write that same copy rather than a numbered one, and must leave the
-/// toast count where the first put it. `=failed:<rel_path>` makes the document and its folder
+/// etag the host never had, adds a page and prints whether the host's copy is untouched, what
+/// `<name> (edited).pdf` beside it holds and which of the two the tab is on, then adds another
+/// and prints the same again — the page must go into that copy rather than a numbered one, and
+/// leave the toast count where the refusal put it. `=failed:<rel_path>` makes the document and its folder
 /// read-only on the host, adds two pages and prints the toast count after each (one failure said,
-/// the second quiet), then makes them writable, adds a page that goes up, and fails once more,
-/// which is said again; each `chmod` adds the host's "Indexed …" toast to the count.
-/// `=dropped:<rel_path>` adds a page and ends the vault's ssh master at once, holds the link down
-/// while the save lands, and prints what was said, then reconnects and prints whether the page
-/// reached the host. `=renaming:<rel_path>` adds a page and renames the document while its
+/// the second quiet), then makes them writable and presses the toast's Retry, which sends both,
+/// and fails once more, which is said again; then writes a one-page document over it on the host
+/// while that page has not gone up, and prints where the page went and which file the tab is on;
+/// each `chmod` adds the host's "Indexed …" toast to the count.
+/// `=dropped:<rel_path>` writes a note linking into pages 1 to 3, adds a page and ends the vault's
+/// ssh master at once, holds the link down while the save and the links' rewrite land, and prints
+/// what was said, then reconnects and prints whether the page reached the host and the links
+/// followed it. `=renaming:<rel_path>` adds a page and renames the document while its
 /// upload is still out (point it at a PDF of a few megabytes on a remote vault), then prints
-/// whether the old name came back on the host and where the page landed.
+/// whether the old name came back on the host and where the page landed. `=closed:<rel_path>`
+/// adds a page and closes the tab in the same turn, then prints what the vault holds; on a remote
+/// vault it does the same with the host's folder read-only, then opens the document again with
+/// the folder writable, which must send that page.
 /// `=pages:<rel_path>` moves the first page below the third as
 /// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
 /// page, and deletes the first through the window actions, which asks nothing, then walks
@@ -274,7 +280,9 @@ use tags::bench_tags;
 /// build of an article in a scratch vault.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
-/// tab it opened has in hand.
+/// tab it opened has in hand, and what the vault holds under its name. `=sketch:<rel_note>` fires
+/// Insert Sketch in that note and prints how long the main loop was held, whether the note embeds
+/// what it made, the tab it opened and what the vault holds under that name.
 /// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
 /// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
 /// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
@@ -484,7 +492,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let memory = std::env::var("ACCENT_BENCH_MEMORY").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
-    let drawing = std::env::var("ACCENT_BENCH_DRAWING").is_ok();
+    let drawing = std::env::var("ACCENT_BENCH_DRAWING").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let suggest = std::env::var("ACCENT_BENCH_SUGGEST").ok();
@@ -538,7 +546,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && compare.is_none()
         && memory.is_none()
         && pdf.is_none()
-        && !drawing
+        && drawing.is_none()
         && tabs.is_none()
         && occur.is_none()
         && suggest.is_none()
@@ -673,6 +681,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = rel.strip_prefix("renaming:") {
                 return bench_pdf_renaming(&app, rel);
             }
+            if let Some(rel) = rel.strip_prefix("closed:") {
+                return bench_pdf_closed(&app, rel);
+            }
             if let Some(rel) = rel.strip_prefix("synctex:") {
                 return synctex::bench_synctex(&app, rel);
             }
@@ -681,8 +692,11 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 None => bench_pdf(&app, &rel),
             };
         }
-        if drawing {
-            return bench_drawing(&app);
+        if let Some(arg) = drawing {
+            return match arg.strip_prefix("sketch:") {
+                Some(rel) => bench_sketch(&app, rel),
+                None => bench_drawing(&app),
+            };
         }
         if let Some(rel) = transfer {
             return bench_transfer(&app, &rel);

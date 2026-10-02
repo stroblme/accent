@@ -70,6 +70,9 @@ pub const FAILED: i64 = -32000;
 /// There is no link: it went away, or it was never made. Nothing was asked of anything, which is
 /// what tells a failed save apart from one the disk refused.
 pub const DISCONNECTED: i64 = -32004;
+/// The link went while the call was out: the host may have done what it was asked, and the answer
+/// is what was lost. Offline like [`DISCONNECTED`], but not a call to make again as if unasked.
+pub const LOST: i64 = -32006;
 /// The link is still being made, so there is nobody to ask yet. Not a failure of the call: the
 /// same call answers once [`Event::Connected`](crate::Event::Connected) has arrived.
 pub const CONNECTING: i64 = -32003;
@@ -114,6 +117,12 @@ impl RpcError {
 
     /// Whether the link, rather than the call, is what failed.
     pub fn is_offline(&self) -> bool {
+        matches!(self.code, DISCONNECTED | CONNECTING | LOST)
+    }
+
+    /// Whether the call never reached the host, so asking it again once the link is back cannot
+    /// do twice what it does: a rewrite of the vault, say.
+    pub fn unasked(&self) -> bool {
         matches!(self.code, DISCONNECTED | CONNECTING)
     }
 
@@ -341,9 +350,11 @@ impl Client {
         match rx.recv_timeout(deadline) {
             Ok(answer) => answer,
             // The sender was dropped: the reader thread saw EOF and cleared the map.
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(RpcError::disconnected("the connection closed"))
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(RpcError {
+                code: LOST,
+                message: "the connection closed".to_string(),
+                data: None,
+            }),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 locked(&self.pending).remove(&id);
                 // Nobody is left to read this one, and the server is still working on it: the
@@ -1074,6 +1085,32 @@ mod tests {
         );
         client.shutdown();
         server.join().unwrap();
+    }
+
+    /// A link that goes while a call is out leaves it unknown whether the host did what it was
+    /// asked; one refused before it was sent did nothing, and only that one is asked again.
+    #[test]
+    fn a_call_the_link_dropped_is_not_unasked() {
+        let (server_in, client_out) = std::io::pipe().unwrap();
+        let (client_in, server_out) = std::io::pipe().unwrap();
+        // A host that reads the request and goes without answering it.
+        let server = std::thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(server_in).read_line(&mut line).unwrap();
+            drop(server_out);
+        });
+        let client = Client::new(
+            Box::new(client_out),
+            Box::new(client_in),
+            channel().0,
+            Box::new(|| {}),
+        );
+        let e = client.call::<()>("rewrite", json!([])).unwrap_err();
+        assert!(e.is_offline() && !e.unasked(), "{e}");
+        server.join().unwrap();
+        client.join();
+        let e = client.call::<()>("rewrite", json!([])).unwrap_err();
+        assert!(e.unasked(), "{e}");
     }
 
     /// The reader is the first to know the link has gone, and says so once. An end the client

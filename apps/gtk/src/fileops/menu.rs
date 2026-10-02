@@ -61,13 +61,8 @@ pub fn context_menu(
     let dir = row_dir(row);
     menu.append_item(&item(GROUP, "New File", "new-file", dir));
     menu.append_item(&item(GROUP, "New Folder", "new-folder", dir));
-    // A blank PDF to draw on. Not offered on a remote vault: a PDF there is read from the ssh
-    // cache copy, so the pen refuses on it and the file would be one nobody can draw in (DESIGN.md,
-    // Principle 1 — an item that could do nothing is never on the menu). The palette's
-    // `win.new-drawing` still lists it and says why.
-    if !ops.vault.is_remote() {
-        menu.append_item(&item(GROUP, "New Drawing", "new-drawing", dir));
-    }
+    // A blank PDF to draw on.
+    menu.append_item(&item(GROUP, "New Drawing", "new-drawing", dir));
     // Putting files in is only worth offering where they are not here already; a folder of a
     // local vault is one the file manager can be dropped onto.
     if ops.vault.is_remote() {

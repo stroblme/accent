@@ -447,6 +447,12 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let t = Instant::now();
     drop(vault);
     let closed = t.elapsed();
+    // The close runs on a thread of its own: the window letting go of the vault is the GTK main
+    // loop's, and must not wait for the host.
+    assert!(
+        closed < Duration::from_millis(16),
+        "the close held its caller {closed:?}"
+    );
     assert!(
         eventually(|| !host_serves(&url) && !host_listens(&url, HOST_PORT)),
         "the close left the server or the forward behind"
