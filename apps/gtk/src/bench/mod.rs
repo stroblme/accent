@@ -120,7 +120,12 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_SUGGEST=escape:<rel>` types a word for the popup and paints ghost text, with the
 /// find bar open and with the note compared with its disk copy, and asks for an XTEST Escape over
 /// each, printing what it put away (see `suggest::bench_suggest_escape`). Only on a scratch vault
-/// under `/tmp`.
+/// under `/tmp`. `=ghost:<rel>` prints the status bar's busy line from a cold start, then switches
+/// Ghost Text off and on under the open note and prints the `merl-rt` processes, how long one
+/// takes to end and what the line says (see `suggest::bench_suggest_ghost`). `=words:<rel>`
+/// switches Word Suggestions on, off and on and prints the words offered and whether a word typed
+/// by XTEST brings the popup up (see `suggest::bench_suggest_words`), on a scratch vault under
+/// `/tmp`.
 /// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
 /// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
@@ -772,6 +777,13 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = arg.strip_prefix("escape:") {
                 scratch_only(&app, "ACCENT_BENCH_SUGGEST");
                 return suggest::bench_suggest_escape(&app, rel);
+            }
+            if let Some(rel) = arg.strip_prefix("ghost:") {
+                return suggest::bench_suggest_ghost(&app, rel);
+            }
+            if let Some(rel) = arg.strip_prefix("words:") {
+                scratch_only(&app, "ACCENT_BENCH_SUGGEST");
+                return suggest::bench_suggest_words(&app, rel);
             }
             return bench_quit(&app);
         }

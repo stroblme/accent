@@ -137,6 +137,10 @@ impl Local {
         self.lang.set_ghost(on);
     }
 
+    pub fn set_words(&self, on: bool) {
+        self.lang.set_words(on);
+    }
+
     /// Ask for a full walk: after a resume, or when the UI suspects it missed something.
     pub fn rescan(&self) {
         self.post(Msg::Rescan(String::new()));

@@ -30,6 +30,7 @@ pub fn build_window(
             match opened {
                 Ok((vault, events)) => {
                     vault.set_ghost(shell.config.borrow().ghost_text);
+                    vault.set_words(shell.config.borrow().word_suggestions);
                     (Some(Arc::new(vault)), Some(events))
                 }
                 Err(e) => {

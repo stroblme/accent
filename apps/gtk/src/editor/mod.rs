@@ -1024,7 +1024,7 @@ impl Tab {
     }
 
     /// The preference changed under an open tab. Off clears whatever is on screen at once; on
-    /// only arms the path, since the session behind it is decided when the document is opened.
+    /// arms the path again, the vault having started its ghost session anew (`Vault::set_ghost`).
     pub fn set_ghost_text(self: &Rc<Self>, on: bool) {
         self.ghost_text.set(on);
         self.lang.ghost.on.set(on);

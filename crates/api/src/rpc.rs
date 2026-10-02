@@ -687,9 +687,10 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
     match method {
         "hello" => {
             vault.set_config(arg(p, 0)?);
-            // Ghost text is a global preference, so it rides `hello` rather than `VaultConfig`.
-            // An older client sends nothing and gets the default.
+            // Ghost text and word suggestions are global preferences, so they ride `hello` rather
+            // than `VaultConfig`. An older client sends nothing and gets the defaults.
             vault.set_ghost(arg::<Option<bool>>(p, 1)?.unwrap_or(true));
+            vault.set_words(arg::<Option<bool>>(p, 2)?.unwrap_or(true));
             ok(Hello {
                 root: vault.root().to_path_buf(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
