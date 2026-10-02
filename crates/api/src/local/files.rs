@@ -61,6 +61,18 @@ impl Local {
         Ok(())
     }
 
+    /// Tell the worker `rel` was written behind its back, as [`write_file`](Self::write_file)
+    /// does for its own: what a remote vault's `write_file` asks once its bytes are on the host,
+    /// which they reach over ssh rather than through here.
+    pub fn wrote(&self, rel: &str) -> io::Result<()> {
+        self.resolve(rel)?;
+        self.post(Msg::Update {
+            rel: rel.to_string(),
+            own: true,
+        });
+        Ok(())
+    }
+
     /// Read any file as text, saying so when it is binary or too big to hold. What a tab opens
     /// with; [`read`](Self::read) is the note-shaped version the rename and conflict paths use.
     pub fn read_text(&self, rel: &str) -> io::Result<fs::Read> {

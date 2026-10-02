@@ -1183,7 +1183,7 @@ pub(super) fn bench_sketch(app: &Rc<App>, rel: &str) {
 }
 
 /// Once a remote vault answers; a local one at once.
-async fn online(app: &Rc<App>) {
+pub(super) async fn online(app: &Rc<App>) {
     for _ in 0..150 {
         if !app.offline() {
             return;

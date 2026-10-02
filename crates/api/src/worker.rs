@@ -341,12 +341,14 @@ impl Worker {
         if batched.rewatch {
             self.rebuild_watcher();
         }
-        if batched
+        if let Some(dir) = batched
             .made
             .iter()
-            .any(|rel| has_children(&self.root.join(rel)))
+            .filter(|rel| has_children(&self.root.join(rel)))
+            .map(String::as_str)
+            .reduce(common_dir)
         {
-            let _ = self.tx.send(Msg::Rescan(String::new()));
+            let _ = self.tx.send(Msg::Rescan(dir.to_string()));
         }
         if !batched.dirs.is_empty() {
             self.emit(Event::DirsChanged(batched.dirs.into_iter().collect()));
@@ -368,21 +370,24 @@ impl Worker {
         if let Some(dir) = self.gitignore_dir(msg) {
             return Some(dir);
         }
-        let whole = match msg {
-            Msg::Rescan(dir) => return Some(dir.clone()),
-            Msg::Resume | Msg::Fs(VaultEvent::Rescan) => true,
-            // A directory that shows up with children was moved in whole, and inotify reports
-            // nothing about what is inside it: only a walk can find those files. A directory that
-            // was renamed — by us or in a terminal — is the same story, and worse: the removal of
-            // the old name drops the subtree, and indexing the new one adds back the directory row
-            // alone, so every note under it would vanish until the next restart. An *empty* new
-            // directory needs no walk, only a watch: see `Batch::rewatch`.
-            Msg::Fs(VaultEvent::Changed(p)) => *p != self.root && has_children(p),
-            Msg::Fs(VaultEvent::Renamed { to, .. }) => *to != self.root && has_children(to),
-            Msg::Update { rel, .. } => !rel.is_empty() && has_children(&self.root.join(rel)),
-            _ => false,
+        // A directory that shows up with children was moved in whole, and inotify reports nothing
+        // about what is inside it: only a walk can find those files. A directory that was renamed
+        // — by us or in a terminal — is the same story, and worse: the removal of the old name
+        // drops the subtree, and indexing the new one adds back the directory row alone, so every
+        // note under it would vanish until the next restart. The walk is of that folder: a
+        // `chmod` or a `touch` of one reads as the same change, and walked the whole vault. An
+        // *empty* new directory needs no walk, only a watch: see `Batch::rewatch`.
+        let folder = |p: &Path| {
+            (*p != self.root && has_children(p)).then(|| self.rel(p).unwrap_or_default())
         };
-        whole.then(String::new)
+        match msg {
+            Msg::Rescan(dir) => Some(dir.clone()),
+            Msg::Resume | Msg::Fs(VaultEvent::Rescan) => Some(String::new()),
+            Msg::Fs(VaultEvent::Changed(p)) => folder(p),
+            Msg::Fs(VaultEvent::Renamed { to, .. }) => folder(to),
+            Msg::Update { rel, .. } => folder(&self.root.join(rel)),
+            _ => None,
+        }
     }
 
     /// The folder of the `.gitignore` `msg` is news about, wherever in the vault it sits.
@@ -1475,6 +1480,65 @@ mod tests {
         assert!(wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
         assert_eq!(vault.file_paths(false).unwrap(), ["sub/new.md"]);
         assert!(vault.rescan_dir("../elsewhere").is_err());
+    }
+
+    /// A `chmod` or a `touch` of a folder holding files reads as a change of the folder, as a
+    /// folder moved in does: either is a walk of that folder, never of the vault.
+    #[test]
+    fn a_folder_changed_in_place_walks_that_folder_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("top.md"), "top\n").unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        std::fs::write(root.path().join("sub/a.md"), "a\n").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+
+        let sub = f.vault.root().join("sub");
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let walked = f.wait(|e| matches!(e, Event::Reconciled(_)));
+        let Some(Event::Reconciled(stats)) = walked else {
+            panic!("no walk: {walked:?}");
+        };
+        assert_eq!((stats.dir.as_str(), stats.scanned), ("sub", 2), "{stats:?}");
+
+        // Moved in whole: inotify says nothing of what is inside, so only a walk finds it.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("moved/deep")).unwrap();
+        std::fs::write(outside.path().join("moved/deep/b.md"), "b\n").unwrap();
+        std::fs::rename(outside.path().join("moved"), f.vault.root().join("moved")).unwrap();
+        let walked = f.wait(|e| matches!(e, Event::Reconciled(_)));
+        let Some(Event::Reconciled(stats)) = walked else {
+            panic!("no walk: {walked:?}");
+        };
+        assert_eq!(stats.dir, "moved", "{stats:?}");
+        assert_eq!(
+            f.vault.file_paths(false).unwrap(),
+            ["moved/deep/b.md", "sub/a.md", "top.md"]
+        );
+    }
+
+    /// A file written behind the index's back — over ssh, on a host — is in the index once the
+    /// writer says so, with no watcher to report it: unwatched, nothing else would.
+    #[test]
+    fn a_file_said_to_be_written_is_indexed_without_a_watcher() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let (vault, events) = crate::Vault::open_unwatched_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        assert!(wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+
+        std::fs::write(root.path().join("pasted.png"), "png").unwrap();
+        vault.wrote("pasted.png").unwrap();
+        assert!(wait_for(&events, |e| matches!(e, Event::DirsChanged(_)), BUDGET).is_some());
+        assert_eq!(
+            vault.resolve_link("pasted.png").unwrap().as_deref(),
+            Some("pasted.png")
+        );
+        assert!(vault.wrote("../elsewhere.png").is_err());
     }
 
     /// A `.gitignore` open in a tab is saved a second after each pause in the typing, and each

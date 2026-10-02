@@ -4,6 +4,7 @@
 
 use super::*;
 
+mod answer;
 mod attach;
 mod chrome;
 mod compare;
@@ -30,6 +31,7 @@ mod suggest;
 mod synctex;
 mod tags;
 
+use answer::bench_answer;
 use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
@@ -378,6 +380,9 @@ use tags::bench_tags;
 /// the status bar's byte counts for each (`files::bench_transfer`).
 /// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
 /// note and prints the text and the files they left (`attach::bench_attach`).
+/// `ACCENT_BENCH_ANSWER=<rel_note>` answers Overwrite, Keep Mine and a deleted file's Save over a
+/// note it changes behind the tab's back, and prints how long each held the main loop
+/// (`answer::bench_answer`).
 /// `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>` exports a PDF that a note highlights into `$TMPDIR` and
 /// copies it for printing, and prints what each copy holds against the source
 /// (`export::bench_export_pdf`); `=note:<rel_note>` exports a note as PDF and as HTML into
@@ -518,6 +523,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
     let save_as = std::env::var("ACCENT_BENCH_SAVE_AS").ok();
     let attach = std::env::var("ACCENT_BENCH_ATTACH").ok();
+    let answer = std::env::var("ACCENT_BENCH_ANSWER").ok();
     let export = std::env::var("ACCENT_BENCH_EXPORT").ok();
     let scroll = std::env::var("ACCENT_BENCH_SCROLL").ok();
     let moving = std::env::var("ACCENT_BENCH_MOVE").ok();
@@ -527,6 +533,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && scroll.is_none()
         && moving.is_none()
         && attach.is_none()
+        && answer.is_none()
         && export.is_none()
         && save_as.is_none()
         && find.is_none()
@@ -715,6 +722,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = attach {
             return bench_attach(&app, &arg);
+        }
+        if let Some(rel) = answer {
+            return bench_answer(&app, &rel);
         }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);

@@ -130,6 +130,9 @@ pub struct Flight {
     pub started: u64,
     /// The etag the write was gated on.
     pub expected: Option<Etag>,
+    /// The etag the tab held when the write started: the one it was gated on, but for the answer
+    /// to a question about the file on disk, which writes over the file it was asked about.
+    pub held: Option<Etag>,
     /// A Ctrl+S, which says "Saved" when it lands.
     pub explicit: bool,
     pub answer: std::sync::mpsc::Receiver<Result<Etag, SaveError>>,
@@ -150,16 +153,16 @@ pub enum Landing {
     Failed(SaveError),
 }
 
-/// Decide a [`Landing`] from the tab as the save found it (`started`, `expected`) and as it is
-/// now (`edits`, `holding`).
+/// Decide a [`Landing`] from the tab as the save found it (`started`, `held`) and as it is now
+/// (`edits`, `holding`).
 pub fn landing(
     started: u64,
     edits: u64,
-    expected: Option<Etag>,
+    held: Option<Etag>,
     holding: Option<Etag>,
     written: Result<Etag, SaveError>,
 ) -> Landing {
-    if holding != expected {
+    if holding != held {
         return Landing::Stale;
     }
     match written {

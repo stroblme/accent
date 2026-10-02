@@ -306,8 +306,8 @@ fn a_remote_vault_connects_indexes_and_answers() {
     // Documents open when the link drops are open again on the new server, with the text they
     // were sent, by the time it says it is connected. The attempt is a quiet one, as the window's
     // own retries are, so nothing on the way may prompt.
-    let docs = ["One", "Two", "Three"];
-    for name in docs {
+    let docs: Vec<String> = (1..=20).map(|n| format!("Doc{n}")).collect();
+    for name in &docs {
         remote
             .call::<serde_json::Value>(
                 "open_document",
@@ -340,12 +340,12 @@ fn a_remote_vault_connects_indexes_and_answers() {
         docs.len(),
         t.elapsed()
     );
-    for name in docs {
+    for name in &docs {
         let symbols: Vec<accent_api::Symbol> = remote
             .call("symbols", serde_json::json!([format!("{name}.md")]))
             .unwrap_or_else(|e| panic!("{name}.md after the reconnect: {e}"));
         let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, [name]);
+        assert_eq!(names, [name.as_str()]);
     }
 
     // A link nothing answers to is defined where New File would write it, and one into the tree
@@ -371,12 +371,16 @@ fn a_remote_vault_connects_indexes_and_answers() {
 
     // `[[paper.pdf#` lists the PDF's bookmarks, though the host's `serve` has no PDF reader: the
     // host answers with the file and the link, and the window lists them from its own copy.
+    // A file written over ssh is in the host's index once the write returns, as a local write's
+    // is: an image pasted into a note is looked up by its name for the embed at once.
     vault.write_file("paper.pdf", &bookmarked_pdf()).unwrap();
-    assert!(
-        eventually(
-            || vault.resolve_link("paper.pdf").ok().flatten().as_deref() == Some("paper.pdf")
-        ),
-        "the host never indexed paper.pdf"
+    let t = Instant::now();
+    let found = vault.resolve_link("paper.pdf").unwrap();
+    eprintln!("paper.pdf looked up {:?} after its write", t.elapsed());
+    assert_eq!(
+        found.as_deref(),
+        Some("paper.pdf"),
+        "the first lookup after the write missed it: the host's watcher, not the write, told it"
     );
     remote
         .call::<serde_json::Value>(
