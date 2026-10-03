@@ -70,6 +70,8 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
 pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
+        // A remote vault's note is written once the host answers.
+        online(&app).await;
         let note = RefCell::new(linked_note(&app, &rel).await);
         let Some(pdf) = opened(&app, &rel).await else {
             println!("bench pages no_tab");
@@ -496,7 +498,8 @@ fn outline_row(app: &Rc<App>) -> String {
     format!("selected={text:?} in_view={in_view} focus={focus}")
 }
 
-/// The page being read, and what each page of the file on disk says: what a second reader opens.
+/// The page being read, and what each page of the file on disk says and where its bookmarks lead:
+/// what a second reader opens.
 fn pages_read(pdf: &pdftab::PdfTab) -> String {
     let text = |doc: &accent_core::pdf::PdfDoc, page| {
         let glyphs = doc.page_text(page).unwrap_or_default();
@@ -507,11 +510,18 @@ fn pages_read(pdf: &pdftab::PdfTab) -> String {
             .trim()
             .to_string()
     };
-    let on_disk: Vec<String> = accent_core::pdf::PdfDoc::open(pdf.path())
-        .map(|doc| (0..doc.page_count()).map(|p| text(&doc, p)).collect())
+    let doc = accent_core::pdf::PdfDoc::open(pdf.path());
+    let on_disk: Vec<String> = doc
+        .as_ref()
+        .map(|doc| (0..doc.page_count()).map(|p| text(doc, p)).collect())
+        .unwrap_or_default();
+    // The page each bookmark leads to, from one: a page edit must not leave one leading nowhere.
+    let marks: Vec<Option<usize>> = doc
+        .and_then(|doc| doc.outline())
+        .map(|marks| marks.iter().map(|m| m.page.map(|p| p + 1)).collect())
         .unwrap_or_default();
     format!(
-        "reading={} of {} on_disk={on_disk:?}",
+        "reading={} of {} on_disk={on_disk:?} marks={marks:?}",
         pdf.current_page() + 1,
         pdf.page_count()
     )
