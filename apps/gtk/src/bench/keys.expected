@@ -83,3 +83,21 @@ bench box_up_left [(4, 2), (3, 0), (2, 2), (1, 1), (0, 2)] carets=true
 bench box_wrap_down [(4, 6), (5, 6), (6, 6)] carets=true
 bench box_wrap_up [(6, 6), (5, 391), (4, 6)] carets=true
 bench box_click [(2, 1)] carets=false
+bench grow_down 1:6-10 2:2-2
+bench grow_down 1:6-10 2:2-2 3:6-8
+bench grow_down 1:6-10 2:2-2 3:6-8 4:6-10
+bench grow_take_back 1:6-10 2:2-2 3:6-8
+bench grow_original 1:6-10
+bench grow_up 0:6-10 1:6-10
+bench grow_typed "one twXree\nalpha X\nxy\ngamma de\nomega zeta"
+bench fold_code_down [(4, 0)] shut=true
+bench fold_code_up [(1, 0)] shut=true
+bench fold_code_down_at_end [(1, 4)] shut=true
+bench fold_prose_down [(4, 0)] shut=true
+bench fold_prose_up [(1, 0)] shut=true
+bench fold_prose_down_at_end [(1, 4)] shut=true
+bench fold_column_down [(1, 1), (4, 1)] shut=true
+bench fold_column_up [(0, 1), (1, 1)] shut=true
+bench fold_add_below [(1, 1), (2, 1)] shut=false
+bench fold_shut_over_column_0 [(0, 1), (1, 1), (1, 4)] shut=true
+bench fold_shut_over_column_3 [(1, 4), (1, 1), (0, 1)] shut=true

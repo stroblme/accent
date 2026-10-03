@@ -684,7 +684,7 @@ mod imp {
         /// Up and Down move by a line of the document where the view asked for it, and Home and
         /// End go to that line's ends: a wrapped line of code is one line to move through, not a
         /// screenful of rows. `Pages` and everything else keep GTK's display-based behaviour,
-        /// which is what they are for.
+        /// which is what they are for, but for a caret GTK leaves on a hidden line.
         fn move_cursor(&self, step: gtk::MovementStep, count: i32, extend: bool) {
             match step {
                 gtk::MovementStep::DisplayLines if self.logical_lines.get() => {
@@ -698,6 +698,18 @@ mod imp {
                 _ => {
                     self.goal.set(None);
                     self.parent_move_cursor(step, count, extend);
+                    // GTK passes over a shut block, but where nothing is shown past it — Down at
+                    // the end of the text — it lands inside, out of sight.
+                    let obj = self.obj();
+                    let buffer = obj.buffer();
+                    let insert = buffer.get_insert();
+                    if let Some(to) = crate::fold::shown(&buffer, &buffer.iter_at_mark(&insert)) {
+                        match extend {
+                            true => buffer.move_mark(&insert, &to),
+                            false => buffer.place_cursor(&to),
+                        }
+                        obj.scroll_mark_onscreen(&insert);
+                    }
                 }
             }
         }
@@ -818,7 +830,14 @@ impl View {
     /// the action grows the column away from the primary caret. Where the caret added last grew
     /// the column the other way, it is taken back instead, as JetBrains' Clone Caret does, so the
     /// opposite key undoes the column one caret at a time and adds again from the primary.
-    pub fn add_caret(&self, below: bool) {
+    ///
+    /// With the primary's selection on one line the column is a box grown from it: each caret
+    /// added selects the same columns of its line, cut short where the line is, as
+    /// [`Self::select_box`] cuts one short.
+    ///
+    /// It goes by the lines of the text, a hidden one included, which it opens (`fold::reveal`)
+    /// and answers the offset of, so the tab can lay out what came back into sight.
+    pub fn add_caret(&self, below: bool) -> Option<i32> {
         // Out of the cell before the marks go: `delete_mark` emits `mark-deleted`.
         let newest = self
             .imp()
@@ -828,19 +847,24 @@ impl View {
         if let Some(caret) = newest {
             caret.delete(&self.buffer());
             self.show_column();
-            return;
+            return None;
         }
         let buffer = self.buffer();
         let from = self.outermost(below);
         let line = from.line() + if below { 1 } else { -1 };
         if line < 0 || line >= buffer.line_count() {
-            return;
+            return None;
         }
-        let Some(mut target) = buffer.iter_at_line(line) else {
-            return;
-        };
-        let (column, goal) = vertical_step(None, from.line_offset(), line_length(&buffer, line));
+        let mut target = buffer.iter_at_line(line)?;
+        let opened = crate::fold::reveal(&buffer, &target).then(|| target.offset());
+        let (anchor, caret) = self
+            .box_columns()
+            .unwrap_or((from.line_offset(), from.line_offset()));
+        let len = line_length(&buffer, line);
+        let (column, goal) = vertical_step(None, caret, len);
         target.set_line_offset(column);
+        let mut start = target;
+        start.set_line_offset(anchor.min(len));
 
         // A caret already there would be a second one on the same character, which is one caret.
         if self
@@ -848,12 +872,23 @@ impl View {
             .iter()
             .any(|span| span.caret == target.offset())
         {
-            return;
+            return opened;
         }
-        self.push_caret(&target, &target, Some(goal), Some(below));
+        self.push_caret(&start, &target, Some(goal), Some(below));
         // One landing inside a selection is part of it.
         self.collapse();
         self.show_column();
+        opened
+    }
+
+    /// The columns the primary's selection runs between, anchor first, where it is on one line:
+    /// what Add Caret Above and Below grow a box from.
+    fn box_columns(&self) -> Option<(i32, i32)> {
+        let buffer = self.buffer();
+        let anchor = buffer.iter_at_mark(&buffer.selection_bound());
+        let at = caret(&buffer);
+        (anchor != at && anchor.line() == at.line())
+            .then(|| (anchor.line_offset(), at.line_offset()))
     }
 
     /// Add a caret selecting the next occurrence of the primary selection after the caret added
@@ -1042,6 +1077,29 @@ impl View {
         }
         self.blink_off();
         self.queue_draw();
+    }
+
+    /// Run `hide`, which hides text, keeping a column of carets up: each caret it hides comes out
+    /// to the end of the line above, where `fold::shown` puts one a move left in hidden text, and
+    /// carets meeting there merge, as VS Code keeps its cursors when a region folds over them. A
+    /// caret `hide` moves itself (`fold::fold` brings the primary out) is not a click ending it.
+    pub fn keeping_carets(&self, hide: impl FnOnce()) {
+        if !self.has_carets() {
+            return hide();
+        }
+        let buffer = self.buffer();
+        let imp = self.imp();
+        imp.busy.set(true);
+        hide();
+        for (mark, anchor) in self.pairs() {
+            if let Some(to) = crate::fold::shown(&buffer, &buffer.iter_at_mark(&mark)) {
+                buffer.move_mark(&mark, &to);
+                buffer.move_mark(&anchor, &to);
+            }
+        }
+        imp.busy.set(false);
+        self.collapse();
+        self.show_column();
     }
 
     /// The caret furthest down (or up), which is the one the next line is measured from.

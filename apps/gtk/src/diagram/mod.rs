@@ -26,7 +26,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use crate::editor::{SaveState, Saves};
-use geometry::{Sheet, Zoom};
+use geometry::{Overshoot, Sheet, Zoom};
 pub use tools::Tool;
 use view::{DiagramView, Edit};
 
@@ -58,6 +58,8 @@ pub struct DiagramTab {
     /// Whether the ring is out. A diagram's own, and out when it opens: a diagram is a surface
     /// to draw on, where a PDF is one to read.
     ring_shown: Cell<bool>,
+    /// Where the diagram was left while presentation shows it, `None` otherwise.
+    presenting: Cell<Option<DiagramPlace>>,
     editor: RefCell<Editor>,
     page_index: Cell<usize>,
     selection: RefCell<Vec<CellId>>,
@@ -141,6 +143,7 @@ pub fn open(
         spellcheck: Cell::new(false),
         font: RefCell::new(None),
         ring_shown: Cell::new(true),
+        presenting: Cell::new(None),
         editor: RefCell::new(Editor::new(file)),
         page_index: Cell::new(place.page.min(pages.saturating_sub(1))),
         selection: RefCell::new(Vec::new()),
@@ -210,6 +213,7 @@ pub fn open(
         move |_| tab.emit(&tab.on_banner)
     ));
     tab.wire_keys();
+    tab.wire_wheel();
     tab.wire_menu();
     tab
 }
@@ -302,18 +306,37 @@ impl DiagramTab {
 
     /// The next or previous page, as reading rather than a jump.
     pub fn step_page(self: &Rc<Self>, forward: bool) {
+        if let Some(next) = self.next_page(forward) {
+            self.show_page(next);
+        }
+    }
+
+    fn next_page(&self, forward: bool) -> Option<usize> {
         let i = self.page_index.get();
-        let next = match forward {
+        match forward {
             true => (i + 1 < self.page_count()).then_some(i + 1),
             false => i.checked_sub(1),
-        };
-        if let Some(next) = next {
-            self.show_page(next);
+        }
+    }
+
+    /// The next or previous page, for a wheel pushed on past the edge of this one: read on as a
+    /// continuous PDF reads, at the zoom it was read at, onto the top of the next page or the
+    /// bottom of the one before; while presenting, fitted as every page shown then is.
+    fn turn_page(self: &Rc<Self>, forward: bool) {
+        if let Some(next) = self.next_page(forward) {
+            let land = self.presenting.get().is_none().then_some(forward);
+            self.show_page_landing(next, land);
         }
     }
 
     /// Go to page `i` without a history entry: Back itself, and the paging keys.
     pub fn show_page(self: &Rc<Self>, i: usize) {
+        self.show_page_landing(i, None);
+    }
+
+    /// [`show_page`](Self::show_page), fitted, or with `land` at the zoom it is at, on the top of
+    /// the page (`Some(true)`) or its bottom.
+    fn show_page_landing(self: &Rc<Self>, i: usize, land: Option<bool>) {
         if i >= self.page_count() {
             return;
         }
@@ -322,7 +345,10 @@ impl DiagramTab {
         self.selection.borrow_mut().clear();
         self.refresh();
         self.fill_props();
-        self.view.set_zoom(Zoom::Fit);
+        match land {
+            Some(top) => self.view.land(top),
+            None => self.view.set_zoom(Zoom::Fit),
+        }
         self.emit(&self.on_page);
         self.emit(&self.on_selection);
     }
@@ -352,7 +378,7 @@ impl DiagramTab {
     }
 
     /// Put the ring out or away, where the window last had one; putting it away puts the tool
-    /// down with it.
+    /// down with it. While presenting it stays away, and comes out as asked afterwards.
     pub fn show_ring(&self, shown: bool, at: Option<(f64, f64)>) {
         self.ring_shown.set(shown);
         // One waiting at a time: every tab switch asks again, and a ring put away before its
@@ -360,7 +386,7 @@ impl DiagramTab {
         if let Some(tick) = self.ring_tick.take() {
             tick.remove();
         }
-        if !shown {
+        if !shown || self.presenting.get().is_some() {
             self.ring.set_visible(false, at);
             return self.set_tool(Tool::Select);
         }
@@ -382,6 +408,34 @@ impl DiagramTab {
     /// Where the reader dragged the ring, for the next tab's to open at.
     pub fn ring_at(&self) -> Option<(f64, f64)> {
         self.ring.at()
+    }
+
+    /// Presentation shows the page as a slide: fitted, the label being edited finished, nothing
+    /// selected, the ring away with the tool in hand, and read only, so a click never draws on it
+    /// or moves it. Leaving gives back the zoom, and the scroll on the page it began on, and the
+    /// ring as it was, `at` where the window had it; the tool stays down.
+    pub fn set_presenting(self: &Rc<Self>, on: bool, at: Option<(f64, f64)>) {
+        match (on, self.presenting.get()) {
+            (true, None) => {
+                self.presenting.set(Some(self.place()));
+                self.finish_label();
+                self.select(Vec::new());
+                self.show_ring(self.ring_shown.get(), at);
+                self.view.set_read_only(true);
+                self.view.set_zoom(Zoom::Fit);
+            }
+            (false, Some(before)) => {
+                self.presenting.set(None);
+                self.view.set_read_only(false);
+                self.view
+                    .set_zoom(before.zoom.map_or(Zoom::Fit, Zoom::Scale));
+                if before.page == self.page_index.get() {
+                    self.view.set_scroll((before.x, before.y));
+                }
+                self.show_ring(self.ring_shown.get(), at);
+            }
+            _ => {}
+        }
     }
 
     pub fn selection(&self) -> Vec<CellId> {
@@ -943,6 +997,12 @@ impl DiagramTab {
         self.view.scale()
     }
 
+    /// Whether the ring is on screen, which presentation keeps it from being.
+    #[cfg(feature = "bench")]
+    pub fn ring_visible(&self) -> bool {
+        self.ring.widget().is_visible()
+    }
+
     /// One frame of a move of `ids` by `delta` on the canvas, timed (`DiagramView::bench_move`).
     #[cfg(feature = "bench")]
     pub fn bench_move(&self, ids: &[CellId], delta: Option<Point>) -> (f64, f64) {
@@ -1127,7 +1187,12 @@ impl DiagramTab {
         secondary.connect_pressed(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |_, _, x, y| tab.menu_at(x, y)
+            // Every entry edits, and a presented page is read only.
+            move |_, _, x, y| {
+                if tab.presenting.get().is_none() {
+                    tab.menu_at(x, y);
+                }
+            }
         ));
         self.view.add_controller(secondary);
     }
@@ -1208,7 +1273,23 @@ impl DiagramTab {
                 let alt = state.contains(gdk::ModifierType::ALT_MASK);
                 let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
                 let step = if shift { 10.0 } else { 1.0 };
+                let presenting = tab.presenting.get().is_some();
                 match key {
+                    // A presented page is a slide, which Space, the arrows and the paging keys
+                    // read on through, as they do a presented PDF, and nothing edits: a chord goes
+                    // on to the window, and any other key that reaches the canvas does nothing,
+                    // an arrow included, which would move the keyboard off the page.
+                    gdk::Key::space if presenting && shift => tab.run("win.diagram-previous-page"),
+                    gdk::Key::space | gdk::Key::Right | gdk::Key::Page_Down
+                        if presenting && !ctrl =>
+                    {
+                        tab.run("win.diagram-next-page")
+                    }
+                    gdk::Key::Left | gdk::Key::Page_Up if presenting && !ctrl => {
+                        tab.run("win.diagram-previous-page")
+                    }
+                    _ if presenting && (ctrl || alt) => return glib::Propagation::Proceed,
+                    _ if presenting => {}
                     gdk::Key::z | gdk::Key::Z if ctrl && shift => tab.run("win.diagram-redo"),
                     gdk::Key::z if ctrl => tab.run("win.diagram-undo"),
                     gdk::Key::y if ctrl => tab.run("win.diagram-redo"),
@@ -1258,6 +1339,46 @@ impl DiagramTab {
             move |_| tab.view.set_panning(false)
         ));
         self.view.add_controller(focus);
+    }
+
+    /// A plain wheel pushed on past the top or bottom of the page turns it ([`Overshoot`]). Ahead
+    /// of the scrolled window, which scrolls whatever this passes on.
+    fn wire_wheel(self: &Rc<Self>) {
+        let overshoot = Rc::new(Cell::new(Overshoot::default()));
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        wheel.connect_scroll(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            #[strong]
+            overshoot,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |wheel, dx, dy| {
+                // Ctrl zooms (`zoom::zoom_on_wheel`), and Shift and a sideways swipe scroll across.
+                let held = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
+                if wheel.current_event_state().intersects(held) || dx.abs() >= dy.abs() {
+                    return glib::Propagation::Proceed;
+                }
+                let room = tab.view.has_room(dy > 0.0);
+                let ahead = tab.next_page(dy > 0.0).is_some();
+                let swipe = wheel.unit() == gdk::ScrollUnit::Surface;
+                let mut push = overshoot.get();
+                if let Some(forward) = push.scroll(dy, room, swipe) {
+                    tab.turn_page(forward);
+                }
+                overshoot.set(push);
+                // At the edge only the margin is left for the scrolled window to scroll, and a
+                // swipe it saw begin would be its own to the end (its `smooth_scroll`), never
+                // reaching here again: the push is kept while there is a page to turn to.
+                match room || !ahead {
+                    true => glib::Propagation::Proceed,
+                    false => glib::Propagation::Stop,
+                }
+            }
+        ));
+        // The fingers left the touchpad: the next swipe may turn the page again.
+        wheel.connect_scroll_end(move |_| overshoot.set(Overshoot::default()));
+        self.view.add_controller(wheel);
     }
 
     fn emit(self: &Rc<Self>, hook: &Hook) {

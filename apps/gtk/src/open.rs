@@ -726,8 +726,10 @@ impl App {
             if let Some(at) = pdf.ring_at() {
                 self.ring_at.set(Some(at));
             }
-            pdf.set_drawing(self.drawing.get(), self.ring_at.get());
-            let showing = self.drawing.get();
+            // Presenting puts the tools away and the tool in hand down, so nothing draws on what
+            // is presented; the window still knows they were out.
+            let showing = self.drawing.get() && self.presenting.get().is_none();
+            pdf.set_drawing(showing, self.ring_at.get());
             pdf.set_mode(match showing {
                 true => self.tool.get(),
                 false => pdfview::Mode::Select,
