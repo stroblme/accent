@@ -276,8 +276,8 @@ impl Remote {
     /// above are the main loop's, and a `hello` is a round trip. Recorded there in the order they
     /// were made, they are sent one `hello` at a time, each reading the values when its turn
     /// comes, so the last to reach the host carries the latest: Ghost Text switched off and
-    /// straight on again ends on. Best effort: the server takes them at `hello` on connecting
-    /// too, so one that fails is corrected by the next connection rather than lost.
+    /// straight on again ends on. One sent while the vault is still connecting fails, and the
+    /// connection, once made, sends one more for it ([`Self::start`]).
     fn send_hello(self: &Arc<Self>) {
         let remote = self.clone();
         let _ = std::thread::Builder::new()
@@ -896,6 +896,12 @@ impl Remote {
                         }
                     };
                     let _ = self.events.send(event);
+                    // A preference changed while the connection was being made had none to go
+                    // on, and the `hello` that made it may have read the values first: one more
+                    // carries them as they stand now. The server takes an unchanged one as a no-op.
+                    if !dead {
+                        self.send_hello();
+                    }
                 }
                 Err(Failure::Link(why)) => self.disconnect(&why, Event::Disconnected),
                 Err(Failure::Refused(why)) => self.disconnect(&why, Event::Refused),
