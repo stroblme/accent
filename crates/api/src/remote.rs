@@ -184,6 +184,8 @@ pub struct Remote {
     /// suggestions.
     ghost: Mutex<bool>,
     words: Mutex<bool>,
+    /// Held while a preference change's `hello` is read and sent ([`Remote::send_hello`]).
+    hellos: Mutex<()>,
     client: Mutex<Option<Arc<Client>>>,
     /// The documents the window has open, as the server was last told about them: the language
     /// they were opened as, and the text they were last sent with.
@@ -218,6 +220,7 @@ impl Remote {
             config: Mutex::new(cfg),
             ghost: Mutex::new(true),
             words: Mutex::new(true),
+            hellos: Mutex::new(()),
             client: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
             unindexed: Mutex::new(BTreeSet::new()),
@@ -250,25 +253,39 @@ impl Remote {
         self.locked(&self.config).clone()
     }
 
-    pub fn set_config(&self, cfg: VaultConfig) {
+    pub fn set_config(self: &Arc<Self>, cfg: VaultConfig) {
         *self.locked(&self.config) = cfg;
-        // Best effort: the server takes it at `hello` too, so a call that fails here is corrected
-        // by the next connection rather than lost.
-        let _ = self.call::<serde_json::Value>("hello", self.hello());
+        self.send_hello();
     }
 
     /// Told on every preference change, so only a change is sent on.
-    pub fn set_ghost(&self, on: bool) {
+    pub fn set_ghost(self: &Arc<Self>, on: bool) {
         if std::mem::replace(&mut *self.locked(&self.ghost), on) != on {
-            let _ = self.call::<serde_json::Value>("hello", self.hello());
+            self.send_hello();
         }
     }
 
     /// As [`Self::set_ghost`].
-    pub fn set_words(&self, on: bool) {
+    pub fn set_words(self: &Arc<Self>, on: bool) {
         if std::mem::replace(&mut *self.locked(&self.words), on) != on {
-            let _ = self.call::<serde_json::Value>("hello", self.hello());
+            self.send_hello();
         }
+    }
+
+    /// Tell the server the preferences as they now stand, from a thread of its own: the setters
+    /// above are the main loop's, and a `hello` is a round trip. Recorded there in the order they
+    /// were made, they are sent one `hello` at a time, each reading the values when its turn
+    /// comes, so the last to reach the host carries the latest: Ghost Text switched off and
+    /// straight on again ends on. Best effort: the server takes them at `hello` on connecting
+    /// too, so one that fails is corrected by the next connection rather than lost.
+    fn send_hello(self: &Arc<Self>) {
+        let remote = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("accent-hello".into())
+            .spawn(move || {
+                let _turn = remote.locked(&remote.hellos);
+                let _ = remote.call::<serde_json::Value>("hello", remote.hello());
+            });
     }
 
     /// What `hello` tells the server: the vault's config, then the global preferences it acts on.
