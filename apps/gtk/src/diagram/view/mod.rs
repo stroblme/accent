@@ -325,12 +325,7 @@ impl DiagramView {
 
     fn centre_page(&self) {
         let Some(sheet) = self.sheet() else { return };
-        let (pw, ph) = sheet.scene.page_size;
-        let c = self
-            .imp()
-            .frame
-            .get()
-            .to_content(Point::new(pw / 2.0, ph / 2.0));
+        let c = self.imp().frame.get().to_content(sheet.shown().centre());
         let (w, h) = (f64::from(self.width()), f64::from(self.height()));
         self.set_scroll((c.x - w / 2.0, c.y - h / 2.0));
     }
@@ -344,7 +339,10 @@ impl DiagramView {
             return;
         }
         let scale = match imp.zoom.get() {
-            Zoom::Fit => geometry::fit_scale(sheet.scene.page_size, (w, h)),
+            Zoom::Fit => {
+                let shown = sheet.shown();
+                geometry::fit_scale((shown.w, shown.h), (w, h))
+            }
             Zoom::Scale(s) => geometry::clamp_scale(s),
         };
         let (frame, size) = geometry::frame(sheet.extent, scale, (w, h));
@@ -653,16 +651,24 @@ mod imp {
             snapshot.save();
             snapshot.translate(&graphene::Point::new(-sx as f32, -sy as f32));
 
-            let (pw, ph) = sheet.scene.page_size;
-            let page = paint::grect(&frame.rect(&Rect::new(0.0, 0.0, pw, ph)));
+            // The sheet, or with none the whole canvas in the page's colour, as draw.io's.
             let paper = sheet.scene.background.unwrap_or(Color::WHITE);
-            snapshot.append_color(&paint::rgba(paper), &page);
-            let edge = theme::at(obj.color(), theme::PAGE_EDGE_ALPHA);
-            snapshot.append_border(
-                &gsk::RoundedRect::from_rect(page, 0.0),
-                &[1.0; 4],
-                &[edge; 4],
-            );
+            match sheet.page_rect {
+                Some(r) => {
+                    let page = paint::grect(&frame.rect(&r));
+                    snapshot.append_color(&paint::rgba(paper), &page);
+                    let edge = theme::at(obj.color(), theme::PAGE_EDGE_ALPHA);
+                    snapshot.append_border(
+                        &gsk::RoundedRect::from_rect(page, 0.0),
+                        &[1.0; 4],
+                        &[edge; 4],
+                    );
+                }
+                None => {
+                    let canvas = graphene::Rect::new(sx as f32, sy as f32, w as f32, h as f32);
+                    snapshot.append_color(&paint::rgba(paper), &canvas);
+                }
+            }
 
             // Only what is on screen, a prim's box being known from when the page was shown.
             let near = frame.to_page(Point::new(sx, sy));
@@ -673,7 +679,7 @@ mod imp {
                 Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Draw { .. })
             );
             if let Some(step) = sheet.grid.filter(|_| placing && self.moved.get())
-                && let Some(area) = intersection(&visible, &Rect::new(0.0, 0.0, pw, ph))
+                && let Some(area) = intersection(&visible, &sheet.page_rect.unwrap_or(visible))
             {
                 paint::grid(snapshot, &frame, area, step, paper);
             }

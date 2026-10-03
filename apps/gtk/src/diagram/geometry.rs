@@ -423,6 +423,9 @@ pub struct Sheet {
     pub bounds: Vec<Rect>,
     /// The page and the drawing together, which is what the canvas scrolls over.
     pub extent: Rect,
+    /// The sheet the page is drawn on, `None` with its page view off (`page="0"`), where the
+    /// drawing is on the canvas alone, as draw.io shows it.
+    pub page_rect: Option<Rect>,
     /// The grid a drag snaps to, `None` where the page has it off.
     pub grid: Option<f64>,
     /// Whether a move shows guides.
@@ -448,9 +451,14 @@ impl Sheet {
         let scene = accent_drawio::scene_with(page, ctx);
         let bounds: Vec<Rect> = scene.prims.iter().map(|p| p.bounds()).collect();
         let (w, h) = page.size();
+        let page_rect = page.page_view().then(|| Rect::new(0.0, 0.0, w, h));
+        // A blank page without a sheet is the size its sheet would be.
         let extent = bounds
             .iter()
-            .fold(Rect::new(0.0, 0.0, w, h), |acc, b| acc.union(b));
+            .copied()
+            .chain(page_rect)
+            .reduce(|a, b| a.union(&b))
+            .unwrap_or(Rect::new(0.0, 0.0, w, h));
         let layers: HashSet<&str> = page.layers().iter().map(|c| c.id.as_str()).collect();
         // A cell on a locked layer, or under a locked group, paints locked: pinned like one
         // locked itself.
@@ -466,6 +474,7 @@ impl Sheet {
             ctx: *ctx,
             bounds,
             extent,
+            page_rect,
             grid: page.grid(),
             guides: page.guides(),
             ..Sheet::default()
@@ -514,6 +523,11 @@ impl Sheet {
             }
         }
         sheet
+    }
+
+    /// What fitting shows and opening centres: the sheet, or the drawing where there is none.
+    pub fn shown(&self) -> Rect {
+        self.page_rect.unwrap_or(self.extent)
     }
 
     pub fn parent(&self, id: &str) -> Option<&str> {
@@ -883,6 +897,34 @@ mod tests {
         assert!((s - (500.0 - 2.0 * GAP) / 1000.0).abs() < 1e-9);
         assert_eq!(fit_scale((1.0, 1.0), (1e9, 1e9)), MAX_SCALE);
         assert_eq!(fit_scale((1e9, 1e9), (100.0, 100.0)), MIN_SCALE);
+    }
+
+    #[test]
+    fn with_its_page_view_off_a_page_is_its_drawing() {
+        let mut page = Page::blank("P", "p");
+        let (w, h) = page.size();
+        let blank = Sheet::of(&page, &Context::default());
+        let cell = |id: &str, x: f64, y: f64| {
+            accent_drawio::Cell::new_vertex(id, "1", Rect::new(x, y, 120.0, 60.0), "", "")
+        };
+        page.cells.push(cell("a", -400.0, -200.0));
+        page.cells.push(cell("b", 200.0, 100.0));
+        // On its sheet, the canvas scrolls over the sheet and the drawing, and fits the sheet.
+        let sheet = Sheet::of(&page, &Context::default());
+        assert_eq!(
+            sheet.extent,
+            Rect::new(-400.5, -200.5, w + 400.5, h + 200.5)
+        );
+        assert_eq!(sheet.shown(), Rect::new(0.0, 0.0, w, h));
+        // Off it, over the drawing alone (each box grown by half its stroke), and fits that.
+        page.set_model_attr("page", Some("0"));
+        let sheet = Sheet::of(&page, &Context::default());
+        assert_eq!(sheet.page_rect, None);
+        assert_eq!(sheet.extent, Rect::new(-400.5, -200.5, 721.0, 361.0));
+        assert_eq!(sheet.shown(), sheet.extent);
+        // A blank page is the size its sheet would be, either way.
+        page.cells.retain(|c| c.id != "a" && c.id != "b");
+        assert_eq!(Sheet::of(&page, &Context::default()).extent, blank.extent);
     }
 
     #[test]
