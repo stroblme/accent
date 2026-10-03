@@ -194,7 +194,12 @@ impl Local {
     /// to anything that moves, and the moved notes whose markdown links are relative to them.
     /// The servers are asked here, before anything moves, because they may read the disk to
     /// answer: rust-analyzer asks it whether the path is a folder.
+    ///
+    /// The index is asked once it has taken in every note written before the call, the tabs the
+    /// window has just flushed among them: a link saved a moment ago would otherwise be missed
+    /// by the plan and left naming the old place.
     pub fn plan_moves(&self, moves: &[(String, String)]) -> Result<RenamePlan> {
+        self.settle_index();
         let files = self.moved_files(moves)?;
         let mut candidates = BTreeSet::new();
         {
@@ -1170,6 +1175,16 @@ mod tests {
             .replace_all(r"hello (\w+)", opts, "bye $1", false, false)
             .unwrap();
         assert_eq!(f.read("a.md"), "bye world\n");
+    }
+
+    /// A link saved just before the rename is in the plan: the window flushes its tabs and asks
+    /// at once, before the worker has taken the save in.
+    #[test]
+    fn a_link_saved_just_before_a_rename_is_rewritten() {
+        let f = vault_of(&[("B.md", "the target\n"), ("a.md", "nothing yet\n")]);
+        f.vault.save("a.md", "see [[B]]\n", None).unwrap();
+        let plan = f.vault.plan_moves(&one("B.md", "C.md")).unwrap();
+        assert_eq!(plan.rewrites, ["a.md"]);
     }
 
     #[test]
