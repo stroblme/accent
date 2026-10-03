@@ -336,6 +336,11 @@ impl PdfView {
         *self.imp().on_page.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Called whenever [`PdfView::visible_pages`] changes.
+    pub fn connect_shown(&self, f: impl Fn() + 'static) {
+        *self.imp().on_shown.borrow_mut() = Some(Box::new(f));
+    }
+
     /// Frame `page` in a thumbnail strip: the page the reading view is on, which the strip's own
     /// scroll has no say in.
     pub fn set_framed(&self, page: usize) {
@@ -871,6 +876,14 @@ impl PdfView {
         page_at(&self.imp().layout.borrow(), middle)
     }
 
+    /// The pages at least partly on screen, first to last.
+    pub fn visible_pages(&self) -> std::ops::RangeInclusive<usize> {
+        let (_, y) = self.scroll_offset();
+        let height = self.vadjustment().map_or(0.0, |a| a.page_size());
+        let layout = self.imp().layout.borrow();
+        page_at(&layout, y)..=page_at(&layout, y + height)
+    }
+
     /// Turn a widget coordinate into a page and a point on it.
     pub fn page_point(&self, x: f64, y: f64) -> Option<(usize, f32, f32)> {
         let (cx, cy) = self.content_at(x, y);
@@ -1135,6 +1148,7 @@ mod imp {
         #[cfg(feature = "bench")]
         pub unsharp: Cell<usize>,
         pub page: Cell<usize>,
+        pub shown: RefCell<std::ops::RangeInclusive<usize>>,
         /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
         /// the same for every page of every frame until the theme changes.
         pub paper: Cell<Option<gdk::RGBA>>,
@@ -1149,6 +1163,7 @@ mod imp {
         pub on_transform: RefCell<Option<Transform>>,
         pub on_motion: RefCell<Option<Coords>>,
         pub on_page: RefCell<Option<Page>>,
+        pub on_shown: RefCell<Option<Box<dyn Fn()>>>,
         pub on_zoom: RefCell<Option<Zoomed>>,
         pub on_lowres: RefCell<Option<Lowres>>,
     }
@@ -1190,6 +1205,7 @@ mod imp {
                 #[cfg(feature = "bench")]
                 unsharp: Cell::new(0),
                 page: Cell::new(0),
+                shown: RefCell::new(0..=0),
                 paper: Cell::new(None),
                 on_wants: RefCell::new(None),
                 on_reply: RefCell::new(None),
@@ -1202,6 +1218,7 @@ mod imp {
                 on_transform: RefCell::new(None),
                 on_motion: RefCell::new(None),
                 on_page: RefCell::new(None),
+                on_shown: RefCell::new(None),
                 on_zoom: RefCell::new(None),
                 on_lowres: RefCell::new(None),
             }
@@ -1236,9 +1253,10 @@ mod imp {
             colour
         }
 
-        /// Report the page being read when it changes, for the header and the thumbnail frame.
-        /// A strip reports nothing: it frames the page the reading view hands it
-        /// ([`super::PdfView::set_framed`]), not the one in the middle of its own viewport.
+        /// Report the page being read when it changes, for the header and the thumbnail frame,
+        /// and the pages on screen when they do, for the drawing tools. A strip reports nothing:
+        /// it frames the page the reading view hands it ([`super::PdfView::set_framed`]), not the
+        /// one in the middle of its own viewport.
         fn notice_page(&self) {
             if self.thumbnails.get() {
                 return;
@@ -1249,6 +1267,12 @@ mod imp {
                 if let Some(f) = self.on_page.borrow().as_ref() {
                     f(page);
                 }
+            }
+            let shown = self.obj().visible_pages();
+            if self.shown.replace(shown.clone()) != shown
+                && let Some(f) = self.on_shown.borrow().as_ref()
+            {
+                f();
             }
         }
     }

@@ -748,8 +748,12 @@ impl App {
                 })
                 .collect();
             if rows.is_empty() {
-                let none = sidebar::outline_note("No Bookmarks", "This PDF has no outline.");
-                return sidebar.set_outline(Some(&sidebar::above(&none, &pdf.thumbnails())));
+                let thumbs = pdf.thumbnails();
+                if !sidebar.shows_below(&thumbs) {
+                    let none = sidebar::outline_note("No Bookmarks", "This PDF has no outline.");
+                    sidebar.set_outline(Some(&sidebar::above(&none, &thumbs)));
+                }
+                return;
             }
             let jump = glib::clone!(
                 #[weak]

@@ -7,7 +7,8 @@
 //! bullets are the browser's, as they are in draw.io. A label with no formula never comes here.
 //!
 //! Everything a page asks for goes into one document: one load, one snapshot, one crop per
-//! label. The canvas paints the label's source meanwhile.
+//! label, as many labels as one picture can hold, the rest waiting for the next. The canvas
+//! paints the label's source meanwhile.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -23,6 +24,13 @@ use webkit6::prelude::*;
 /// The page zoom the labels are rendered at: a formula stays sharp up to this canvas zoom and
 /// is scaled down, not up, below it.
 const RENDER_ZOOM: f64 = 3.0;
+
+/// The tallest picture a batch is taken as, in texture pixels: 300 small formulas in one
+/// document are taller than a texture may be, and every crop of that picture fails.
+// ponytail: GTK does not say how big a texture its renderer takes, so this is under every
+// one's: cairo's image surfaces stop at 32767, and GL 4 promises 16384. The real limit would
+// only take fewer loads.
+const MAX_PICTURE: f64 = 8192.0;
 
 /// How long after a batch fails to wait for WebKit to say its process died.
 const LOST_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -172,14 +180,19 @@ impl Typesetter {
         if labels.is_empty() {
             return;
         }
+        *self.batch.borrow_mut() = labels;
+        self.load();
+    }
+
+    /// Load the batch as one document.
+    fn load(&self) {
         let mut body = String::new();
-        for (i, label) in labels.iter().enumerate() {
+        for (i, label) in self.batch.borrow().iter().enumerate() {
             body.push_str(&format!(
                 "<div class=\"w\"><div class=\"l\" id=\"l{i}\">{}</div></div>",
                 label.html
             ));
         }
-        *self.batch.borrow_mut() = labels;
         let page = format!(
             "<!doctype html><html><head><meta charset=\"utf-8\"><style>\
              html, body {{ margin: 0; padding: 0; background: transparent; }}\
@@ -203,6 +216,19 @@ impl Typesetter {
             .evaluate_javascript_future(MEASURE, None, None)
             .await
             .map(|v| v.to_str().to_string());
+        // A document taller than one picture holds keeps the labels that fit, loaded again on
+        // their own; the others go back to wait for the next batch.
+        if let Ok(m) = &measured
+            && self.holds(&keys)
+        {
+            let limit = MAX_PICTURE / (RENDER_ZOOM * f64::from(self.view.scale_factor()));
+            let fit = fitting(&parse_boxes(m).1, limit);
+            if fit < keys.len() {
+                let rest = self.batch.borrow_mut().split_off(fit);
+                self.queued.borrow_mut().splice(0..0, rest);
+                return self.load();
+            }
+        }
         let shot = self
             .view
             .snapshot_future(
@@ -211,13 +237,7 @@ impl Typesetter {
             )
             .await;
         // The process died meanwhile and the batch went again: this one is not ours any more.
-        if !self
-            .batch
-            .borrow()
-            .iter()
-            .map(|l| l.key)
-            .eq(keys.iter().copied())
-        {
+        if !self.holds(&keys) {
             return;
         }
         let (measured, texture) = match (measured, shot) {
@@ -227,13 +247,7 @@ impl Typesetter {
                 // A process that died fails these first and says so a moment later: that batch
                 // is `lost`'s to send again, not this one's to give up on.
                 glib::timeout_future(LOST_GRACE).await;
-                if !self
-                    .batch
-                    .borrow()
-                    .iter()
-                    .map(|l| l.key)
-                    .eq(keys.iter().copied())
-                {
+                if !self.holds(&keys) {
                     return;
                 }
                 for key in &keys {
@@ -261,6 +275,15 @@ impl Typesetter {
         self.finish();
     }
 
+    /// Whether the batch in flight is still the one of `keys`.
+    fn holds(&self, keys: &[u64]) -> bool {
+        self.batch
+            .borrow()
+            .iter()
+            .map(|l| l.key)
+            .eq(keys.iter().copied())
+    }
+
     fn finish(&self) {
         self.batch.borrow_mut().clear();
         if let Some(f) = self.on_ready.borrow().as_ref() {
@@ -286,6 +309,16 @@ fn parse_boxes(measured: &str) -> (f64, Vec<(f64, f64, f64, f64)>) {
         })
         .collect();
     (width, boxes)
+}
+
+/// How many labels, from the first, one picture of the document holds: those ending within
+/// `limit` CSS pixels of its top, and the first whatever its size.
+fn fitting(boxes: &[(f64, f64, f64, f64)], limit: f64) -> usize {
+    boxes
+        .iter()
+        .take_while(|&&(_, y, _, h)| y + h <= limit)
+        .count()
+        .max(1)
 }
 
 /// A label as the HTML WebKit lays out: the label's font, colour and alignment on its box, the
@@ -436,5 +469,18 @@ mod tests {
         let (w, boxes) = parse_boxes("1200;0,0,100.5,20;0,44,50,10");
         assert_eq!(w, 1200.0);
         assert_eq!(boxes, [(0.0, 0.0, 100.5, 20.0), (0.0, 44.0, 50.0, 10.0)]);
+    }
+
+    #[test]
+    fn a_batch_keeps_the_labels_one_picture_holds() {
+        let boxes = [
+            (0.0, 0.0, 50.0, 20.0),
+            (0.0, 44.0, 50.0, 20.0),
+            (0.0, 88.0, 50.0, 20.0),
+        ];
+        assert_eq!(fitting(&boxes, 1000.0), 3);
+        assert_eq!(fitting(&boxes, 70.0), 2);
+        // A label taller than any picture goes on its own.
+        assert_eq!(fitting(&[(0.0, 0.0, 50.0, 5000.0)], 70.0), 1);
     }
 }

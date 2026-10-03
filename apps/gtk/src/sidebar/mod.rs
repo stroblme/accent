@@ -417,6 +417,16 @@ impl Sidebar {
         }
     }
 
+    /// Whether the pane shows `below` under a sentence ([`above`]), as it shows a PDF's
+    /// thumbnail strip under "No Bookmarks": a refill leaves that be, since taking the strip out
+    /// from under the pointer ends its hover.
+    pub fn shows_below(&self, below: &gtk::Widget) -> bool {
+        self.outline_list.borrow().is_none()
+            && below
+                .parent()
+                .is_some_and(|split| self.outline_bin.child() == Some(split))
+    }
+
     /// Show the outline of the document `key` as rows that jump, over `below` when there is one
     /// (a PDF's thumbnail strip). The list on screen is refilled when it is already that
     /// document's, so an edit, a save, a language server's answer or a page edit leaves it

@@ -183,7 +183,8 @@ pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
         };
         app.show_pane("outline");
         for _ in 0..20 {
-            println!("bench strip {}", pages_read(&pdf));
+            let buttons = pdf.strip_buttons(app.window.upcast_ref());
+            println!("bench strip {} {buttons}", pages_read(&pdf));
             glib::timeout_future(Duration::from_secs(2)).await;
         }
         bench_quit(&app);

@@ -711,14 +711,10 @@ impl PdfTab {
         self.view.mode() != pdfview::Mode::Select
     }
 
-    /// Give those tools the page under the reader and its neighbours.
-    ///
-    // ponytail: three pages, so a fourth that is partly on screen waits until it is current.
+    /// Give those tools every page at least partly on screen.
     fn ask_inks(&self) {
-        let page = self.view.current_page();
-        let last = self.view.page_count().saturating_sub(1);
-        for p in page.saturating_sub(1)..=(page + 1).min(last) {
-            self.ask(Request::Inks(p));
+        for page in self.view.visible_pages() {
+            self.ask(Request::Inks(page));
         }
     }
 
@@ -1219,10 +1215,16 @@ impl PdfTab {
                     tab.ask(Request::Links(page));
                 }
                 tab.thumbs.set_framed(page);
+                tab.emit(&tab.on_page);
+            }
+        ));
+        view.connect_shown(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || {
                 if tab.wants_inks() {
                     tab.ask_inks();
                 }
-                tab.emit(&tab.on_page);
             }
         ));
         view.connect_pressed(glib::clone!(
