@@ -840,20 +840,30 @@ impl Remote {
         self.control(ssh::cancel(&self.url, &self.ctl, f))
     }
 
+    /// The forwards the window started and has not stopped, which is what the Ports pane lists.
+    pub fn forwards(&self) -> Vec<Forward> {
+        self.locked(&self.forwards).clone()
+    }
+
     /// Put the forwards back on the master [`connect`](Self::connect) found or made. A master that
     /// survived the drop still holds them and answers OK to a forward it already has, so this is
-    /// the same call either way. One that will not come back is said, not fatal: the vault is up.
+    /// the same call either way. One that will not come back — its port taken meanwhile — is said
+    /// and dropped, not fatal and not tried again: the vault is up, and the Ports pane, which
+    /// lists [`forwards`](Self::forwards), shows what is.
     fn restore_forwards(&self) {
-        let forwards = self.locked(&self.forwards).clone();
+        let forwards = self.forwards();
         if forwards.is_empty() {
             return;
         }
         self.say("Restoring the forwards");
         for f in forwards {
             if let Err(e) = self.control(ssh::forward(&self.url, &self.ctl, f)) {
-                let _ = self
-                    .events
-                    .send(Event::Error(format!("Cannot restore a forward: {e}")));
+                self.locked(&self.forwards).retain(|kept| *kept != f);
+                // ssh's first line, "… Port forwarding failed": a toast is one line.
+                let why = e.lines().next().unwrap_or_default();
+                let _ = self.events.send(Event::Error(format!(
+                    "Cannot restore the forward {f}: {why}"
+                )));
             }
         }
     }

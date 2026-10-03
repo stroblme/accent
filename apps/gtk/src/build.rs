@@ -577,7 +577,7 @@ fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
 }
 
 /// Port forwarding is ssh's, over the master that is already open: nothing is spawned, and the
-/// connection keeps the list it puts back after a reconnect.
+/// connection keeps the list, which it puts back after a reconnect and the pane draws.
 fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     sidebar::PortsData {
         add_forward: Arc::new({
@@ -596,6 +596,10 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
                     tracing::warn!("cancelling the forward {f:?}: {e}");
                 }
             }
+        }),
+        forwards: Box::new({
+            let vault = vault.clone();
+            move || vault.remote().map(|r| r.forwards()).unwrap_or_default()
         }),
     }
 }

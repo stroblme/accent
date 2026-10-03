@@ -320,6 +320,17 @@ pub enum Direction {
     ToLocal,
 }
 
+impl Direction {
+    /// The arrow for it, pointing the way a connection travels: from the port that listens to the
+    /// one it reaches, with the local port on the left.
+    pub fn arrow(self) -> &'static str {
+        match self {
+            Direction::ToRemote => "→",
+            Direction::ToLocal => "←",
+        }
+    }
+}
+
 /// One port forward over the master: a port on this machine, a port on the host, and which of the
 /// two listens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +338,20 @@ pub struct Forward {
     pub local: u16,
     pub remote: u16,
     pub direction: Direction,
+}
+
+/// `8080 → 80`, the local port first either way round: the Ports pane's row, and a forward named
+/// in a message.
+impl std::fmt::Display for Forward {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} {}",
+            self.local,
+            self.direction.arrow(),
+            self.remote
+        )
+    }
 }
 
 /// Add a forward to the running master.
@@ -385,14 +410,16 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
 /// does not hold it yet. `server` is a path expression from [`server_path`].
 ///
 /// `-t` forces a pty, which a remote command does not get by default: `attach` relays one, and
-/// without it the host's end has no terminal to put in raw mode or to take a size from. No
-/// `BatchMode`: should the master be gone, a prompt in the tab is one the reader can answer.
+/// without it the host's end has no terminal to put in raw mode or to take a size from. `-e none`
+/// because the pty makes `~` ssh's escape character, and `~.` typed at the start of a line in the
+/// shell would end the attach instead of reaching the shell. No `BatchMode`: should the master be
+/// gone, a prompt in the tab is one the reader can answer.
 ///
 /// A path that is not there — a typo in the address — starts the shell at the login's home, which
 /// is the holder's own fallback, so a window opened at a mistyped path still gets one.
 pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
     let mut argv = base(url, ctl);
-    argv.push("-t".to_string());
+    argv.extend(["-t", "-e", "none"].map(String::from));
     argv.push(url.destination());
     argv.push(format!(
         "{server} attach --cwd {} {}",
@@ -977,6 +1004,8 @@ mod tests {
                 "-o",
                 "ControlPath=/run/user/1000/accent/0123456789abcdef",
                 "-t",
+                "-e",
+                "none",
                 "box",
                 &format!("{server} attach --cwd '/srv/vault' '{id}'"),
             ])
@@ -991,6 +1020,8 @@ mod tests {
                 "-p",
                 "2222",
                 "-t",
+                "-e",
+                "none",
                 "me@box",
                 &format!("{server} attach --cwd '/srv/my vault' '{id}'"),
             ])

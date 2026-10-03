@@ -137,6 +137,8 @@ struct VaultPanes {
     /// The Ports pane's page, hidden for the same reason the Git one is: a vault on this machine
     /// has no ssh connection to forward anything over.
     ports_page: adw::ViewStackPage,
+    /// Draws the Ports pane's rows again from the connection's list.
+    ports_refill: Rc<dyn Fn()>,
     select_tag: Rc<dyn Fn(&str)>,
 }
 
@@ -195,7 +197,7 @@ impl Sidebar {
             // Hidden until the pane says there is a repository, which is one refresh away.
             git_page.set_visible(false);
 
-            let ports = ports::pane(&Rc::new(data.ports));
+            let (ports, ports_refill) = ports::pane(&Rc::new(data.ports));
             stack.add_titled_with_icon(&ports, Some("ports"), "Ports", ports::ICON);
             let ports_page = stack.page(&ports);
             // Hidden until the window says its vault is on another machine.
@@ -221,7 +223,7 @@ impl Sidebar {
                 (references, references_stack, references_empty),
                 git_page,
                 git_divider,
-                ports_page,
+                (ports_page, ports_refill),
             )
         });
 
@@ -260,7 +262,7 @@ impl Sidebar {
             switcher: switcher.upcast(),
             stack,
             panes: panes.map(
-                |(search, tags, references, git_page, git_divider, ports_page)| {
+                |(search, tags, references, git_page, git_divider, (ports_page, ports_refill))| {
                     let (references, references_stack, references_empty) = references;
                     VaultPanes {
                         search_entry: search.entry,
@@ -290,6 +292,7 @@ impl Sidebar {
                         git_page,
                         git_divider,
                         ports_page,
+                        ports_refill,
                         select_tag: tags.select,
                     }
                 },
@@ -394,6 +397,14 @@ impl Sidebar {
     pub fn set_ports_visible(&self, on: bool) {
         if let Some(panes) = self.panes.as_ref() {
             panes.ports_page.set_visible(on);
+        }
+    }
+
+    /// Draw the Ports pane again from the connection's forwards: a reconnect drops one that would
+    /// not come back.
+    pub fn refresh_ports(&self) {
+        if let Some(panes) = self.panes.as_ref() {
+            (panes.ports_refill)();
         }
     }
 
