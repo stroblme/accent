@@ -88,7 +88,7 @@ pub enum FocusMode {
 
 /// The global config file.
 #[doc = concat!("\n```toml\n", example!(), "```")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Most recent first, and not capped: a vault leaves the list when it is removed from it, or,
@@ -151,7 +151,7 @@ pub struct Config {
 /// It is deliberately not a walk-level skip: [`crate::walk`]'s own skips keep whole dependency
 /// trees out of the index and out of the kernel's watch budget, which is a different question
 /// from "I would rather not see this folder in my results".
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchConfig {
     /// Vault-relative directory paths, applied to every vault; one that names nothing in this

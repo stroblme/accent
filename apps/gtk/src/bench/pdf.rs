@@ -76,7 +76,7 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         };
         let said = Cell::new(app.toasted.get());
-        let links = || links_read(&app, &pdf, &note.borrow(), &said);
+        let links = || links_read(&app, &note.borrow(), &said);
         println!("bench pages opened {} {}", pages_read(&pdf), links());
         pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 2 });
         written(&app).await;
@@ -556,7 +556,7 @@ async fn linked_note(app: &Rc<App>, pdf: &str) -> String {
 /// The pages the note's links name, in the order it holds them — on disk, and in its tab unless
 /// the tab holds the same — and what the toast said since the last time this was asked: how the
 /// notes followed the step before it.
-fn links_read(app: &Rc<App>, pdf: &pdftab::PdfTab, note: &str, said: &Cell<usize>) -> String {
+fn links_read(app: &Rc<App>, note: &str, said: &Cell<usize>) -> String {
     let pages = |text: &str| -> Vec<String> {
         text.match_indices("#page=")
             .map(|(at, found)| {
@@ -577,7 +577,7 @@ fn links_read(app: &Rc<App>, pdf: &pdftab::PdfTab, note: &str, said: &Cell<usize
     };
     let now = app.toasted.get();
     let toast = (now > said.replace(now))
-        .then(|| pdf.relinks.borrow().toast.as_ref().and_then(|t| t.title()))
+        .then(|| app.toasts.shown().into_iter().next())
         .flatten();
     format!("links={on_disk:?} tab={tab} said={toast:?}")
 }
@@ -680,16 +680,16 @@ fn rebuild(vault: &accent_api::Vault, key: &str) -> anyhow::Result<()> {
     rebuilt
 }
 
-/// Press the button on the last toast that had one, as a click on it does, if it says `label`.
+/// Press the button saying `label` on the newest toast that has one, as a click on it does.
 fn press_toast(app: &Rc<App>, label: &str) -> bool {
-    let toast = app.buttoned.borrow().clone();
-    match toast.filter(|t| t.button_label().as_deref() == Some(label)) {
-        Some(toast) => {
-            toast.emit_by_name::<()>("button-clicked", &[]);
-            true
-        }
-        None => false,
-    }
+    let button = find_widget(app.toasts.widget().upcast_ref(), &|w| {
+        w.downcast_ref::<gtk::Button>()
+            .is_some_and(|b| b.label().as_deref() == Some(label))
+    });
+    button
+        .and_downcast::<gtk::Button>()
+        .map(|b| b.emit_clicked())
+        .is_some()
 }
 
 /// What the vault's own copy of `key` holds, fetched past the cache the reader is drawing on.
@@ -908,7 +908,7 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
             pdf.page_count(),
             vault_pages(&app, &key),
             app.toasted.get(),
-            links_read(&app, &pdf, &note, &said)
+            links_read(&app, &note, &said)
         );
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         let argv = accent_api::ssh::exit(remote.url(), remote.control_path());
@@ -949,7 +949,7 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
             pdf.unsent(),
             vault_pages(&app, &key),
             app.toasted.get(),
-            links_read(&app, &pdf, &note, &said)
+            links_read(&app, &note, &said)
         );
         bench_quit(&app);
     });

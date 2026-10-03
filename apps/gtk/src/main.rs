@@ -64,6 +64,7 @@ mod switcher;
 mod synctex;
 mod terminal;
 mod theme;
+mod toasts;
 mod tree;
 mod typing;
 mod widgets;
@@ -106,6 +107,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
+use toasts::Toast;
 use wire::{choice_row, wire_pane, wire_tree, wire_window, written_at};
 use zoom::{picture_of, stepped_zoom, zoom_on_pinch, zoom_on_wheel};
 
@@ -249,15 +251,11 @@ struct App {
     /// The pane a note opens into and the one the find bar and the preview follow.
     active_pane: RefCell<Rc<Pane>>,
     title: adw::WindowTitle,
-    toasts: adw::ToastOverlay,
-    /// How many toasts this window has put up. For the drills: libadwaita will not say what the
-    /// overlay is showing, and "it says so once rather than once a save" is a count.
+    toasts: Rc<toasts::Toasts>,
+    /// How many toasts this window has put up. For the drills: "it says so once rather than once
+    /// a save" is a count.
     #[cfg(feature = "bench")]
     toasted: Cell<usize>,
-    /// The last toast that carried a button, for a drill to press: a toast is not a widget until
-    /// the overlay shows it, and it may be queued behind another.
-    #[cfg(feature = "bench")]
-    buttoned: RefCell<Option<adw::Toast>>,
     /// Raised across the window when a remote vault stops answering, with a way back. A banner
     /// rather than a toast because it is a state that persists and needs a decision, and one
     /// across the window rather than per tab because it is every tab that is affected.
@@ -298,6 +296,8 @@ struct App {
     /// than a server answers.
     references: RefCell<Option<glib::JoinHandle<()>>>,
     ops: OnceCell<Rc<fileops::Ops>>,
+    /// Built on idle once the window is up, so the first open of Preferences is quick too.
+    preferences: OnceCell<settings::Preferences>,
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
     preview: RefCell<Option<preview::Preview>>,
@@ -452,23 +452,18 @@ impl App {
     }
 
     fn toast(&self, text: &str) {
-        #[cfg(feature = "bench")]
-        self.toasted.set(self.toasted.get() + 1);
-        self.toasts.add_toast(adw::Toast::new(text));
+        self.add_toast(Toast::new(text));
     }
 
     /// A [`toast`](Self::toast) with a button on it, which runs `act` when pressed.
     fn toast_with(&self, text: &str, button: &str, act: impl Fn() + 'static) {
+        self.add_toast(Toast::new(text).button(button, act));
+    }
+
+    fn add_toast(&self, toast: Toast) {
         #[cfg(feature = "bench")]
         self.toasted.set(self.toasted.get() + 1);
-        let toast = adw::Toast::builder()
-            .title(text)
-            .button_label(button)
-            .build();
-        toast.connect_button_clicked(move |_| act());
-        #[cfg(feature = "bench")]
-        self.buttoned.replace(Some(toast.clone()));
-        self.toasts.add_toast(toast);
+        self.toasts.add(toast);
     }
 
     /// A failure, in the one shape every failure toast takes: "Cannot <what>: <why>". A reason
@@ -1507,19 +1502,24 @@ impl App {
 
     /// The config it shows is already the file's: a hand edit is taken in as it lands
     /// (`Shell::watch_config`), so nothing is read again here.
-    fn preferences(self: &Rc<Self>) {
-        // Every window, not just the one the dialog is over: the config is the process's.
-        let shell = self.shell.clone();
-        settings::present(
-            &self.window,
-            self.config.clone(),
-            self.vault().map(|v| v.root().to_path_buf()),
-            move |config: &Config| {
-                if let Some(shell) = shell.upgrade() {
-                    shell.apply_config(config);
-                }
-            },
-        );
+    fn preferences(&self) {
+        self.prepared_preferences().present(&self.window);
+    }
+
+    fn prepared_preferences(&self) -> &settings::Preferences {
+        self.preferences.get_or_init(|| {
+            // Every window, not just the one the dialog is over: the config is the process's.
+            let shell = self.shell.clone();
+            settings::Preferences::new(
+                self.config.clone(),
+                self.vault().map(|v| v.root().to_path_buf()),
+                move |config: &Config| {
+                    if let Some(shell) = shell.upgrade() {
+                        shell.apply_config(config);
+                    }
+                },
+            )
+        })
     }
 
     fn about(&self) {

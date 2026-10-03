@@ -20,7 +20,9 @@ const SETTLE: Duration = Duration::from_millis(1200);
 /// Then it presses the toast's Undo (`App::undo_replace`, which Xvfb cannot click): `undone` must
 /// read `page=results rows=1` with the marker back in the note. Last it replaces again, edits the
 /// note behind the pane's back and undoes once more: `undo_skipped` must keep the edit, since a
-/// note changed since the rewrite is never written over.
+/// note changed since the rewrite is never written over. Each line ends on the toasts standing,
+/// and `replaced_again` must hold one "Replaced" toast: a rewrite takes the one before it away,
+/// whose Undo would now undo the newer one.
 ///
 /// One note is all a drill can rewrite — two would raise the confirmation Xvfb cannot answer —
 /// and one note is also the case where the worker has indexed the rewrite before the requery
@@ -83,7 +85,11 @@ fn bench_replace_print(app: &Rc<App>, path: &std::path::Path, step: &str) {
     let (page, rows, count) = sidebar.search_state();
     let rows = rows.len();
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    println!("bench replace step={step} page={page} rows={rows} count={count:?} text={text:?}");
+    println!(
+        "bench replace step={step} page={page} rows={rows} count={count:?} text={text:?} \
+         toasts={:?}",
+        app.toasts.shown()
+    );
 }
 
 /// Take the drill's own note away again, whatever it managed to do with it.

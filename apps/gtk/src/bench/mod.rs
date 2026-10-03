@@ -30,6 +30,7 @@ mod style;
 mod suggest;
 mod synctex;
 mod tags;
+mod toasts;
 
 use answer::bench_answer;
 use attach::bench_attach;
@@ -85,7 +86,7 @@ use tags::bench_tags;
 /// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
 /// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` clicks outside each dialog through XTEST
-/// instead (`dismiss::bench_dismiss`).
+/// instead (`dismiss::bench_dismiss`), and `=prefs` times Preferences presenting (`bench_prefs`).
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
@@ -136,7 +137,8 @@ use tags::bench_tags;
 /// `=present:<note>,<pdf>,<image>,<side>` presents a note, a PDF, an image and a shell from one of
 /// two panes and prints what F5 shows, the find bar, a held `Ctrl+Tab`'s card, Escape over it, a
 /// toast against the status bar, and the layout leaving F5 puts back (see
-/// `present::bench_present`). `ACCENT_BENCH_PATHS=1`
+/// `present::bench_present`). `=toasts` raises four toasts and two under one key and prints the
+/// ones standing (see `toasts::bench_toasts`). `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
@@ -863,6 +865,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rels) = notes.strip_prefix("present:") {
                 return present::bench_present(&app, rels);
             }
+            if notes == "toasts" {
+                return toasts::bench_toasts(&app);
+            }
             return bench_chrome(&app, &notes);
         }
         if let Some(arg) = keys {
@@ -926,6 +931,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rels) = query.strip_prefix("dismiss:") {
             return dismiss::bench_dismiss(&app, rels);
         }
+        if query == "prefs" {
+            return bench_prefs(&app);
+        }
         let t0 = Instant::now();
         let _ = WidgetExt::activate_action(&app.window, "win.palette-files", None);
         println!("bench switcher_open_ms {:.1}", ms_since(t0));
@@ -952,6 +960,137 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             bench_switcher_rows(&app);
             bench_quit(&app)
         });
+    });
+}
+
+/// `ACCENT_BENCH_SWITCHER=prefs` presents Preferences three times and prints, for each, how long
+/// the action held the main loop (`open_ms`), how long until the window painted after it
+/// (`first_frame_ms`), and over the dialog's presenting animation the frames painted, the
+/// longest gap between two of them (`worst_frame_ms`), the time those frames spent styling and
+/// laying out (`layout_ms`, the main thread's own) and the median one spent painting
+/// (`paint_ms`, which under Xvfb's cairo renderer is the whole window in software every frame).
+/// Then it writes `config.toml` by hand with the dialog closed and again with it up, and prints
+/// what its Column Width row shows each time: the kept dialog has to show a config that moved
+/// while it was away. Last it answers Restore Defaults and prints whether the dialog is the same
+/// one and what the row shows.
+fn bench_prefs(app: &Rc<App>) {
+    /// libadwaita's floating dialog takes 300 ms to present; a little more catches its last frame.
+    const ANIMATION: Duration = Duration::from_millis(400);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        let Some(clock) = app.window.frame_clock() else {
+            return bench_quit(&app);
+        };
+        for round in 0..3 {
+            // Each phase's end, by its first letter: connected after GTK's own handlers, so an
+            // update's mark is where the frame's styling and layout start, a layout's where they
+            // end and its painting starts, and a paint's where that ends.
+            let marks = Rc::new(RefCell::new(Vec::new()));
+            let mark = |phase: char| {
+                let marks = marks.clone();
+                move |_: &gdk::FrameClock| marks.borrow_mut().push((phase, Instant::now()))
+            };
+            let handlers = [
+                clock.connect_update(mark('u')),
+                clock.connect_layout(mark('l')),
+                clock.connect_paint(mark('p')),
+            ];
+            let t0 = Instant::now();
+            let _ = WidgetExt::activate_action(&app.window, "win.preferences", None);
+            let open = ms_since(t0);
+            glib::timeout_future(ANIMATION).await;
+            for handler in handlers {
+                clock.disconnect(handler);
+            }
+            let ms = |a: Instant, b: Instant| (b - a).as_secs_f64() * 1000.0;
+            let marks = marks.take();
+            let between = |from: char, to: char| -> Vec<f64> {
+                marks
+                    .windows(2)
+                    .filter(|w| w[0].0 == from && w[1].0 == to)
+                    .map(|w| ms(w[0].1, w[1].1))
+                    .collect()
+            };
+            let paints: Vec<Instant> = marks.iter().filter(|m| m.0 == 'p').map(|m| m.1).collect();
+            let first = paints.first().map_or(f64::NAN, |&t| ms(t0, t));
+            let gap = paints
+                .windows(2)
+                .map(|w| ms(w[0], w[1]))
+                .fold(0.0, f64::max);
+            let mut painting = between('l', 'p');
+            painting.sort_by(f64::total_cmp);
+            println!(
+                "bench prefs round={round} open_ms={open:.1} first_frame_ms={first:.1} \
+                 frames={} worst_frame_ms={gap:.1} layout_ms={:.1} paint_ms={:.1}",
+                paints.len(),
+                between('u', 'l').iter().sum::<f64>(),
+                painting
+                    .get(painting.len() / 2)
+                    .copied()
+                    .unwrap_or(f64::NAN),
+            );
+            if let Some(dialog) = app.window.visible_dialog() {
+                dialog.force_close();
+            }
+            glib::timeout_future(Duration::from_millis(800)).await;
+        }
+        let column_width = |app: &Rc<App>| {
+            app.window
+                .visible_dialog()
+                .and_then(|d| {
+                    find_widget(d.upcast_ref(), &|w| {
+                        w.downcast_ref::<adw::SpinRow>()
+                            .is_some_and(|row| row.title() == "Column Width")
+                    })
+                })
+                .and_downcast::<adw::SpinRow>()
+                .map_or(0.0, |row| row.value())
+        };
+        for (case, width) in [("closed", 70), ("open", 80)] {
+            let mut edited = app.config.borrow().clone();
+            edited.column_width = width;
+            if let Err(e) = edited.write(&accent_core::config::config_path()) {
+                eprintln!("writing config.toml: {e:#}");
+            }
+            // The watcher's news, and its taking the file in.
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            if case == "closed" {
+                let _ = WidgetExt::activate_action(&app.window, "win.preferences", None);
+                glib::timeout_future(ANIMATION).await;
+            }
+            println!(
+                "bench prefs_edited {case} wrote={width} shows={}",
+                column_width(&app)
+            );
+        }
+        // Restore Defaults, answered: a page of defaults in the same dialog.
+        let before = app.window.visible_dialog();
+        let restore = before.as_ref().and_then(|d| {
+            find_widget(d.upcast_ref(), &|w| {
+                w.downcast_ref::<adw::ButtonRow>()
+                    .is_some_and(|row| row.title() == "Restore Defaults")
+            })
+        });
+        if let Some(row) = restore {
+            row.emit_by_name::<()>("activated", &[]);
+        }
+        glib::timeout_future(Duration::from_millis(500)).await;
+        if let Some(alert) = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>()
+        {
+            alert.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+            alert.close();
+        }
+        glib::timeout_future(ANIMATION).await;
+        println!(
+            "bench prefs_restored same_dialog={} shows={}",
+            app.window.visible_dialog() == before,
+            column_width(&app)
+        );
+        bench_quit(&app);
     });
 }
 

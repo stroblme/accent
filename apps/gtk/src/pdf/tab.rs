@@ -64,8 +64,6 @@ pub struct Relinks {
     /// The links each delete left naming the page it took out, by its step: what the Undo that
     /// puts the page back keeps where they are.
     pub left: HashMap<u32, Vec<KeptLink>>,
-    /// What the last rewrite said, replaced by the next one's rather than queued behind it.
-    pub toast: Option<adw::Toast>,
 }
 
 pub struct PdfTab {

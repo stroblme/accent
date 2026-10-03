@@ -1304,8 +1304,11 @@ impl App {
                             unsaved,
                             report.undoable,
                         );
-                        match report.undoable {
-                            true => app.toast_with(&message, "Undo", {
+                        // Under one key, so a newer rewrite takes away the Undo of the one
+                        // before it, which would now undo this one.
+                        let toast = Toast::new(&message).key("replace");
+                        app.add_toast(match report.undoable {
+                            true => toast.button("Undo", {
                                 let weak = Rc::downgrade(&app);
                                 move || {
                                     if let Some(app) = weak.upgrade() {
@@ -1313,8 +1316,8 @@ impl App {
                                     }
                                 }
                             }),
-                            false => app.toast(&message),
-                        }
+                            false => toast,
+                        });
                     }
                     // Including a worker that stopped: a Replace the user asked for and watched a
                     // progress state run through must never end in silence.

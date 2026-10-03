@@ -63,7 +63,7 @@ async fn bench_escape_case(app: &Rc<App>, tab: &Rc<Tab>, under: Under, popup: bo
     let find = app.pane().find.clone();
     find.close();
     tab.leave_compare();
-    // A toast takes Escape for itself (`AdwToastOverlay`), ahead of the window: none may stand.
+    // A toast takes Escape for itself (`toasts::Toasts`), ahead of the window: none may stand.
     app.toasts.dismiss_all();
     // The words the popup offers, then the line the caret ends on.
     tab.set_text("theorem theory thermal\nwritten on disk\n");

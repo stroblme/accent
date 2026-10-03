@@ -375,12 +375,12 @@ impl App {
                     }
                 };
                 provider.load_from_string(&format!(
-                    "toastoverlay.accent-lifted > toast {{ transform: translateY(-{by}px); }}"
+                    ".accent-lifted > .accent-toasts {{ transform: translateY(-{by}px); }}"
                 ));
                 *lift = Some((provider, by));
             });
         }
-        crate::widgets::set_class(&self.toasts, "accent-lifted", by.is_some());
+        crate::widgets::set_class(self.toasts.widget(), "accent-lifted", by.is_some());
     }
 
     /// Give the keyboard to what F5 shows, on F5 and on every tab a held `Ctrl+Tab` steps to, so

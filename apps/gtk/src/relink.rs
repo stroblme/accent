@@ -6,6 +6,7 @@
 
 use crate::doc::{self, Doc};
 use crate::pdftab::PdfTab;
+use crate::toasts::Toast;
 use crate::{App, pdfview};
 use accent_api::rpc::RpcError;
 use accent_api::{PageEdit, RepageReport};
@@ -110,15 +111,9 @@ impl App {
     }
 
     /// Say what a rewrite did, in place of what the last one for this document said: a burst of
-    /// Undos would otherwise queue a toast each, each out of date by the time it showed.
+    /// Undos would otherwise stack a toast each, all but the last out of date.
     fn relinked(&self, pdf: &PdfTab, message: &str) {
-        let toast = adw::Toast::new(message);
-        if let Some(old) = pdf.relinks.borrow_mut().toast.replace(toast.clone()) {
-            old.dismiss();
-        }
-        #[cfg(feature = "bench")]
-        self.toasted.set(self.toasted.get() + 1);
-        self.toasts.add_toast(toast);
+        self.add_toast(Toast::new(message).key(format!("relink {}", pdf.key())));
     }
 }
 
