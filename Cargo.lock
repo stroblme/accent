@@ -95,6 +95,7 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
+ "unicode-width",
 ]
 
 [[package]]

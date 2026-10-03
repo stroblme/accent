@@ -4,13 +4,12 @@
 //! A table is a header row and a delimiter row of dashes holding as many cells, then the body
 //! rows, every one a line holding a pipe. A row splits at each pipe not escaped with a backslash,
 //! inside code too, as GFM and the preview split it. A column is as wide as its widest cell, three
-//! at least, so the delimiter row has room for its colons.
-//!
-//! ponytail: widths are counted in characters, not display columns: a wide character pads one
-//! column short in a monospace font, and core has no width crate for it. A note's proportional
-//! font lines nothing up by spaces anyway; the point is the text read anywhere else.
+//! at least, so the delimiter row has room for its colons. Widths are display columns, a wide
+//! character (CJK, most emoji) taking two, so the table lines up in a monospace font; the caret's
+//! columns are characters, as the buffer counts them.
 
 use std::ops::Range;
+use unicode_width::UnicodeWidthStr;
 
 /// A key the table helper answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,42 +123,43 @@ pub fn table_key(lines: &[&str], at: usize, column: usize, key: TableKey) -> Opt
             content
                 .iter()
                 .filter_map(|row| row.get(k))
-                .map(|text| text.chars().count())
+                .map(|text| text.width())
                 .fold(3, usize::max)
         })
         .collect();
-    let row_line = |cells: &[String]| {
+    // A row laid out, and the character each of its cells' text starts at.
+    let lay = |cells: &[String]| {
         let mut line = format!("{indent}|");
+        let mut starts = Vec::new();
         for (k, (&width, &align)) in widths.iter().zip(&aligns).enumerate() {
             let text = cells.get(k).map_or("", String::as_str);
-            line += &format!(" {} |", pad(text, width, align));
+            let space = width - text.width();
+            let left = lead(space, align);
+            starts.push(line.chars().count() + 1 + left);
+            line += &format!(" {}{text}{} |", " ".repeat(left), " ".repeat(space - left));
         }
-        line
+        (line, starts)
     };
-    let mut text: Vec<String> = content.iter().map(|cells| row_line(cells)).collect();
     let rules: Vec<String> = widths
         .iter()
         .zip(&aligns)
         .map(|(&w, &a)| rule(w, a))
         .collect();
-    text.insert(1, format!("{indent}| {} |", rules.join(" | ")));
-    // Where cell `k` holding `len` characters starts its text in a row as laid out.
-    let start = |k: usize, len: usize| {
-        let before: usize = widths[..k].iter().map(|w| w + 3).sum();
-        indent.chars().count() + 2 + before + lead(widths[k] - len, aligns[k])
-    };
+    let mut laid: Vec<(String, Vec<usize>)> = content.iter().map(|cells| lay(cells)).collect();
+    laid.insert(1, lay(&rules));
     let line_of = |row: usize| if row == 0 { 0 } else { row + 1 };
     let length = |row: usize, k: usize| content[row].get(k).map_or(0, |text| text.chars().count());
     let caret = match target {
-        Target::Stay if at == head + 1 => (1, start(k, widths[k]) + offset.min(widths[k])),
-        Target::Stay => (line_of(row), start(k, length(row, k)) + offset),
-        Target::Cell(row, k) => (line_of(row), start(k, length(row, k)) + length(row, k)),
-        Target::Added => (text.len() - 1, start(0, 0)),
-        Target::Left => {
-            text.push(String::new());
-            (text.len() - 1, 0)
-        }
+        Target::Stay if at == head + 1 => (1, laid[1].1[k] + offset.min(widths[k])),
+        Target::Stay => (line_of(row), laid[line_of(row)].1[k] + offset),
+        Target::Cell(row, k) => (line_of(row), laid[line_of(row)].1[k] + length(row, k)),
+        Target::Added => (laid.len() - 1, laid[laid.len() - 1].1[0]),
+        Target::Left => (laid.len(), 0),
     };
+    let mut text: Vec<String> = laid.into_iter().map(|(line, _)| line).collect();
+    if matches!(target, Target::Left) {
+        text.push(String::new());
+    }
     Some(TableEdit {
         lines: head..end,
         text,
@@ -228,14 +228,7 @@ fn aligns(header: &[Cell], row: &[Cell]) -> Option<Vec<Align>> {
         .collect()
 }
 
-/// `text` padded with spaces to `width` characters, on the side its column's alignment says.
-fn pad(text: &str, width: usize, align: Align) -> String {
-    let space = width - text.chars().count();
-    let left = lead(space, align);
-    format!("{}{text}{}", " ".repeat(left), " ".repeat(space - left))
-}
-
-/// How much of a cell's `space` goes before its text.
+/// How much of a cell's `space`, the columns its text leaves, goes before the text.
 fn lead(space: usize, align: Align) -> usize {
     match align {
         Align::Right => space,
@@ -264,7 +257,12 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         let edit = table_key(&lines, at, column, key)?;
         let mut out = edit.text;
-        out[edit.caret.0].insert(edit.caret.1, '^');
+        let line = &mut out[edit.caret.0];
+        let byte = line
+            .char_indices()
+            .nth(edit.caret.1)
+            .map_or(line.len(), |(b, _)| b);
+        line.insert(byte, '^');
         Some(out.join("\n"))
     }
 
@@ -308,12 +306,18 @@ mod tests {
         );
     }
 
+    /// A wide character takes two columns, so the table lines up in a monospace font, and the
+    /// caret still lands by characters.
     #[test]
-    fn a_wide_character_counts_as_one() {
-        let table = "| 漢字漢字 | x |\n|---|---|";
+    fn a_wide_character_takes_two_columns() {
+        let table = "| 漢字 | x |\n|---|---|\n| a | 🙂 |";
         assert_eq!(
-            press(table, 0, 2, TableKey::Enter).unwrap(),
-            "| 漢字漢字 | x   |\n| ---- | --- |\n| ^     |     |"
+            press(table, 0, 2, TableKey::Tab).unwrap(),
+            "| 漢字 | x^   |\n| ---- | --- |\n| a    | 🙂  |"
+        );
+        assert_eq!(
+            press(table, 2, 6, TableKey::BackTab).unwrap(),
+            "| 漢字 | x   |\n| ---- | --- |\n| a^    | 🙂  |"
         );
     }
 

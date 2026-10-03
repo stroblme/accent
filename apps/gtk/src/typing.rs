@@ -99,6 +99,18 @@ pub fn continuation(line: &str) -> Option<Continue> {
     None
 }
 
+/// How Return carries on from `line` in front matter, which is YAML: a sequence item, `- ` and
+/// its indent (`tags:` written as a list), starts the next one, and an empty one ends the
+/// sequence as an empty item ends a list. Nothing else there carries on.
+pub fn sequence_item(line: &str) -> Option<Continue> {
+    let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+    let body = line[indent.len()..].strip_prefix("- ")?;
+    Some(match body.is_empty() {
+        true => Continue::Unlist,
+        false => Continue::Insert(format!("{indent}- ")),
+    })
+}
+
 /// The column a wrapped row of `line` starts at. Where `markers` says the line is a note's and it
 /// opens with a list, task or quote marker, that is behind the marker and the space after it, so
 /// the wrap lines up under the item's text. Otherwise an indented line hangs one `level` deeper
@@ -355,14 +367,19 @@ fn on_return(view: &sourceview5::View) -> glib::Propagation {
             return glib::Propagation::Stop;
         }
     }
-    if verbatim(&buffer, &start) {
+    let yaml = tagged(&buffer, &start, "frontmatter");
+    if verbatim(&buffer, &start) && !yaml {
         return glib::Propagation::Proceed;
     }
     if in_table(view, TableKey::Enter) {
         return glib::Propagation::Stop;
     }
 
-    match continuation(&line) {
+    let next = match yaml {
+        true => sequence_item(&line),
+        false => continuation(&line),
+    };
+    match next {
         Some(Continue::Insert(prefix)) => {
             let mut at = caret;
             buffer.begin_user_action();
@@ -517,12 +534,20 @@ fn char_at(iter: &gtk::TextIter) -> Option<char> {
     (!iter.is_end()).then(|| iter.char())
 }
 
-/// Whether `iter` is inside a code block or the frontmatter, where none of this applies.
+/// Whether `iter` is inside a code block or the frontmatter, where none of this applies but
+/// front matter's own lists ([`sequence_item`]).
 fn verbatim(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
     [crate::highlight::CODEBLOCK, "frontmatter"]
         .iter()
-        .filter_map(|name| buffer.tag_table().lookup(name))
-        .any(|tag| iter.has_tag(&tag))
+        .any(|name| tagged(buffer, iter, name))
+}
+
+/// Whether the styling pass has tagged `iter` with the tag called `name`.
+fn tagged(buffer: &gtk::TextBuffer, iter: &gtk::TextIter, name: &str) -> bool {
+    buffer
+        .tag_table()
+        .lookup(name)
+        .is_some_and(|tag| iter.has_tag(&tag))
 }
 
 #[cfg(test)]
@@ -543,6 +568,24 @@ mod tests {
         assert_eq!(inserts("+ item"), "+ ");
         assert_eq!(inserts("    - nested"), "    - ", "the indent comes along");
         assert_eq!(inserts("> quoted"), "> ");
+    }
+
+    /// Front matter is YAML: a `- ` item carries on at its indent and an empty one ends the
+    /// sequence, while what the body would continue, a quote or a task's brackets, does not.
+    #[test]
+    fn a_front_matter_sequence_carries_on() {
+        assert_eq!(
+            sequence_item("  - draft"),
+            Some(Continue::Insert("  - ".into()))
+        );
+        assert_eq!(
+            sequence_item("- [x] y"),
+            Some(Continue::Insert("- ".into()))
+        );
+        assert_eq!(sequence_item("  - "), Some(Continue::Unlist));
+        assert_eq!(sequence_item("tags: [a, b]"), None);
+        assert_eq!(sequence_item("> quoted"), None);
+        assert_eq!(sequence_item("1. first"), None);
     }
 
     #[test]

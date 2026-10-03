@@ -153,6 +153,8 @@ impl Vault {
         }
     }
 
+    /// Never waits, so the main loop can make it: a remote vault sends this and the two below on
+    /// to the host from a thread of its own, in the order they were made.
     pub fn set_config(&self, cfg: VaultConfig) {
         match &self.backend {
             Backend::Local(v) => v.set_config(cfg),

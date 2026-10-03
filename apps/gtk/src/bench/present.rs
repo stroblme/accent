@@ -145,11 +145,7 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
                 screen(&app)
             );
 
-            let toast = adw::Toast::builder()
-                .title("bench toast")
-                .timeout(0)
-                .build();
-            app.toasts.add_toast(toast.clone());
+            app.toasts.add(Toast::new("bench toast").lasting());
             glib::timeout_future(Duration::from_millis(600)).await;
             let (w, h) = (
                 f64::from(app.window.width()),
@@ -164,7 +160,7 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
             frames(&app, kind, "down").await;
             glib::timeout_future(Duration::from_millis(800)).await;
             println!("bench present {kind}_toast_away {}", toast_and_bar(&app));
-            toast.dismiss();
+            app.toasts.dismiss_all();
             glib::timeout_future(Duration::from_millis(500)).await;
             app.set_presenting(false);
             glib::timeout_future(Duration::from_millis(800)).await;
@@ -367,14 +363,14 @@ fn toast_and_bar(app: &Rc<App>) -> String {
     )
 }
 
-/// Where the toast up over the window ends, in the window.
+/// Where the toasts up over the window end, in the window: the bottom of their pile, the
+/// overlay's last child.
 fn toast_bottom(app: &Rc<App>) -> Option<f32> {
-    let child = app.toasts.child();
-    let mut toast = app.toasts.first_child();
-    while let Some(w) = toast.clone().filter(|w| Some(w) == child.as_ref()) {
-        toast = w.next_sibling();
-    }
-    let bounds = toast?.compute_bounds(&app.window)?;
+    let bounds = app
+        .toasts
+        .widget()
+        .last_child()?
+        .compute_bounds(&app.window)?;
     Some(bounds.y() + bounds.height())
 }
 

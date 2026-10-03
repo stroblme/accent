@@ -314,8 +314,7 @@ fn counts(path: &Path) -> (usize, usize, usize) {
     (pages, highlights, ink)
 }
 
-/// What the toast starting with `prefix` says, once one is up: a toast waits behind the one
-/// before it for as long as that one stays.
+/// What the toast starting with `prefix` says, once one is up.
 async fn toast(app: &Rc<App>, prefix: &str) -> Option<String> {
     for _ in 0..100 {
         let label = find_widget(app.window.upcast_ref(), &|w| {

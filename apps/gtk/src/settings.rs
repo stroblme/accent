@@ -35,17 +35,74 @@ const FOCUS_MODES: [(FocusMode, &str, &str); 3] = [
     ),
 ];
 
-/// `root` identifies which vault's per-vault settings are being edited, and is `None` in a window
-/// opened on a file rather than a folder, where that group has no vault to be about. `on_change`
-/// is called
-/// after every edit, with the config already saved to disk, so the caller can apply it live.
-pub fn present(
-    parent: &impl IsA<gtk::Widget>,
+/// A window's Preferences dialog, built once, ahead of its first open, and presented again after
+/// that. An open built its twenty-odd rows, then styled and laid them out, about 60 ms on the
+/// main thread before the dialog's animation could run, the stutter a reader saw; a dialog shown
+/// before costs about 30 (`ACCENT_BENCH_SWITCHER=prefs`), its first showing still styling every
+/// row once.
+pub struct Preferences {
+    dialog: adw::PreferencesDialog,
     config: Rc<RefCell<Config>>,
-    root: Option<PathBuf>,
-    on_change: impl Fn(&Config) + 'static,
-) {
-    page(parent.as_ref(), config, root, Rc::new(on_change));
+    /// The config the rows show, kept while the dialog is closed and `None` while it is up, its
+    /// rows then following whatever they change. Every row reads its value once, so a config that
+    /// moved in between — a hand edit, the palette — gets the dialog a new page before it shows.
+    shown: Rc<RefCell<Option<Config>>>,
+}
+
+impl Preferences {
+    /// `root` identifies which vault's per-vault settings are being edited, and is `None` in a
+    /// window opened on a file rather than a folder, where that group has no vault to be about.
+    /// `on_change` is called after every edit, with the config already saved to disk, so the
+    /// caller can apply it live.
+    pub fn new(
+        config: Rc<RefCell<Config>>,
+        root: Option<PathBuf>,
+        on_change: impl Fn(&Config) + 'static,
+    ) -> Preferences {
+        let on_change: Rc<dyn Fn(&Config)> = Rc::new(on_change);
+        let dialog = adw::PreferencesDialog::builder()
+            .title("Preferences")
+            .build();
+        fill(&dialog, &config, &root, &on_change);
+
+        // A config taken in from the file is a new page in the same dialog, for the reason a
+        // reset is: every row is built reading its new value, so no row's handler runs and
+        // nothing is written back. Weak: the action hangs off the dialog.
+        let action = gio::SimpleAction::new("reload", None);
+        action.connect_activate({
+            let (weak, config) = (dialog.downgrade(), config.clone());
+            move |_, _| {
+                if let Some(dialog) = weak.upgrade() {
+                    fill(&dialog, &config, &root, &on_change);
+                }
+            }
+        });
+        let actions = gio::SimpleActionGroup::new();
+        actions.add_action(&action);
+        dialog.insert_action_group("preferences", Some(&actions));
+
+        let shown = Rc::new(RefCell::new(Some(config.borrow().clone())));
+        dialog.connect_closed({
+            let (config, shown) = (config.clone(), shown.clone());
+            move |_| {
+                shown.replace(Some(config.borrow().clone()));
+            }
+        });
+        crate::dialogs::close_on_outside_press(dialog.upcast_ref());
+        Preferences {
+            dialog,
+            config,
+            shown,
+        }
+    }
+
+    pub fn present(&self, parent: &impl IsA<gtk::Widget>) {
+        let shown = self.shown.take();
+        if shown.is_some_and(|shown| shown != *self.config.borrow()) {
+            reload(self.dialog.upcast_ref());
+        }
+        self.dialog.present(Some(parent));
+    }
 }
 
 /// Write `config` to disk, and say so in the log when that fails: the change is already in force
@@ -62,53 +119,22 @@ pub fn save(config: &Config) {
     }
 }
 
-/// The action an open Preferences dialog answers by building its rows again ([`reload`]).
+/// The action a Preferences dialog answers by building its rows again ([`reload`]).
 const RELOAD: &str = "preferences.reload";
 
-/// Build an open Preferences dialog's rows again from the config: what a hand edit to
-/// `config.toml` does to one (`Shell::config_file_changed`). Only a Preferences dialog has the
-/// action, so any other dialog is left alone.
+/// Build a Preferences dialog's rows again from the config: what a hand edit to `config.toml`
+/// does to an open one (`Shell::config_file_changed`), and a config that moved does to a closed
+/// one as it is presented again. Only a Preferences dialog has the action, so any other dialog is
+/// left alone.
 pub fn reload(dialog: &adw::Dialog) {
     let _ = dialog.activate_action(RELOAD, None);
 }
 
-/// The dialog itself, split off so Restore Defaults can build it a second time. Every row reads
-/// its value once, at construction, so a reset that changes all of them is a new page rather than
-/// a handle kept on each row.
-fn page(
-    parent: &gtk::Widget,
-    config: Rc<RefCell<Config>>,
-    root: Option<PathBuf>,
-    on_change: Rc<dyn Fn(&Config)>,
-) {
-    let dialog = adw::PreferencesDialog::builder()
-        .title("Preferences")
-        .build();
-    fill(&dialog, parent, &config, &root, &on_change);
-
-    // A config taken in from the file is a new page in the same dialog, for the reason a reset
-    // is: every row is built reading its new value, so no row's handler runs and nothing is
-    // written back. Weak: the action hangs off the dialog.
-    let action = gio::SimpleAction::new("reload", None);
-    action.connect_activate({
-        let (weak, parent) = (dialog.downgrade(), parent.clone());
-        move |_, _| {
-            if let Some(dialog) = weak.upgrade() {
-                fill(&dialog, &parent, &config, &root, &on_change);
-            }
-        }
-    });
-    let actions = gio::SimpleActionGroup::new();
-    actions.add_action(&action);
-    dialog.insert_action_group("preferences", Some(&actions));
-    dialog.present(Some(parent));
-    crate::dialogs::close_on_outside_press(dialog.upcast_ref());
-}
-
-/// Put a page of rows reading `config` into `dialog`, in place of the one it has.
+/// Put a page of rows reading `config` into `dialog`, in place of the one it has. Every row reads
+/// its value once, at construction, so a reset or a config taken in that changes any of them is
+/// a new page rather than a handle kept on each row.
 fn fill(
     dialog: &adw::PreferencesDialog,
-    parent: &gtk::Widget,
     config: &Rc<RefCell<Config>>,
     root: &Option<PathBuf>,
     on_change: &Rc<dyn Fn(&Config)>,
@@ -134,7 +160,7 @@ fn fill(
     if let Some(root) = root {
         page.add(&vault_group(config, root, &save));
     }
-    page.add(&reset_group(dialog, parent, config, root, &save, on_change));
+    page.add(&reset_group(dialog, config, root, &save, on_change));
 
     if let Some(old) = dialog.visible_page() {
         dialog.remove(&old);
@@ -546,7 +572,6 @@ fn vault_group(
 /// what survives. DESIGN.md, States: an alert dialog is for a choice that can lose data.
 fn reset_group(
     dialog: &adw::PreferencesDialog,
-    parent: &gtk::Widget,
     config: &Rc<RefCell<Config>>,
     root: &Option<PathBuf>,
     save: &Rc<dyn Fn()>,
@@ -563,8 +588,9 @@ fn reset_group(
             on_change.clone(),
         );
         // Weak: this closure hangs off a row inside the dialog, and a strong handle back to it is
-        // the cycle that would keep every preferences dialog ever opened alive.
-        let (dialog, parent) = (dialog.downgrade(), parent.clone());
+        // the cycle that would keep the dialog alive past its window. Nothing here holds the
+        // window either: the window holds the dialog.
+        let dialog = dialog.downgrade();
         move |_| {
             let Some(dialog) = dialog.upgrade() else {
                 return;
@@ -575,7 +601,7 @@ fn reset_group(
                 save.clone(),
                 on_change.clone(),
             );
-            let (weak, parent) = (dialog.downgrade(), parent.clone());
+            let weak = dialog.downgrade();
             crate::dialogs::confirm(
                 &dialog,
                 "Restore Default Preferences?",
@@ -596,8 +622,7 @@ fn reset_group(
                         };
                     }
                     save();
-                    dialog.close();
-                    page(&parent, config.clone(), root.clone(), on_change.clone());
+                    fill(&dialog, &config, &root, &on_change);
                 },
             );
         }

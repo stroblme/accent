@@ -4,7 +4,7 @@
 //! `accent_core::pdf`). [`spawn`] is the whole interface: it opens the file, reports the page
 //! sizes and then answers [`Request`]s until the tab drops its sender.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
@@ -140,6 +140,10 @@ fn render_loop(
     // The pages whose text has already been read, for the highlights, the selections and the
     // exports that all want the same glyphs.
     let mut glyphs = Glyphs::new();
+    // The pages an Export Highlights wrote on, under their numbers today: the Undo or Redo of a
+    // delete swaps in the document from the other side of it, which the export may not have
+    // reached, so they are drawn again after every page edit walked.
+    let mut exported: HashSet<usize> = HashSet::new();
     // The tab has been told the file was written into under the document.
     let mut changed = false;
     // The channel closing is the tab going away.
@@ -374,7 +378,7 @@ fn render_loop(
                         // in, taken out or moved is a change to the file and nothing else would
                         // save it.
                         ink.dirty = true;
-                        repaged(&doc, &mut glyphs, view, edit, step);
+                        repaged(&doc, &mut glyphs, &mut exported, view, edit, step);
                     }
                     Err(e) => tracing::warn!("{edit:?}: {e:#}"),
                 },
@@ -387,7 +391,14 @@ fn render_loop(
                                 send(view, Reply::PageChanged(page, area))
                             }
                             pdf::Walked::Pages(edit, step) => {
-                                repaged(&doc, &mut glyphs, view, edit, step)
+                                repaged(&doc, &mut glyphs, &mut exported, view, edit, step);
+                                for &page in &exported {
+                                    let Ok(size) = doc.page_size(page) else {
+                                        continue;
+                                    };
+                                    let all = pdf::Rect::from_corners((0.0, 0.0), size);
+                                    send(view, Reply::PageChanged(page, all));
+                                }
                             }
                         }
                     }
@@ -455,6 +466,7 @@ fn render_loop(
                                 etag = Some(written);
                                 send(view, Reply::Saved(written));
                                 for (page, area) in pages {
+                                    exported.insert(page);
                                     send(view, Reply::PageChanged(page, area));
                                 }
                                 Ok(added)
@@ -495,8 +507,10 @@ fn render_loop(
                             // come from a counter that never goes back, so a request still naming
                             // a stroke of the old document cannot land on one of the new.
                             ink = Ink::default();
-                            // The text moved with the document, so what was read of it goes.
+                            // The text moved with the document, so what was read of it goes,
+                            // and with the history no delete swaps a document back in.
                             glyphs.clear();
+                            exported.clear();
                             send(view, Reply::Reloaded(sizes));
                         }
                         Err(why) => {
@@ -550,11 +564,13 @@ fn copy(doc: &PdfDoc, highlights: &[pdf::Highlight], path: &Path, dest: &Path) -
     Ok(())
 }
 
-/// The pages were edited, or an edit taken back: the glyphs read of each page follow it to its
-/// new number, and the tab hears the page sizes and where every page went.
+/// The pages were edited, or an edit taken back: the glyphs read of each page and the pages
+/// exported to follow it to their new numbers, and the tab hears the page sizes and where every
+/// page went.
 fn repaged(
     doc: &PdfDoc,
     glyphs: &mut Glyphs,
+    exported: &mut HashSet<usize>,
     view: &glib::SendWeakRef<PdfView>,
     edit: pdf::PageEdit,
     step: u32,
@@ -563,6 +579,7 @@ fn repaged(
         .into_iter()
         .filter_map(|(page, found)| Some((edit.map(page)?, found)))
         .collect();
+    *exported = exported.iter().filter_map(|&page| edit.map(page)).collect();
     let sizes = page_sizes(doc);
     send(view, Reply::Repaged { sizes, edit, step });
 }

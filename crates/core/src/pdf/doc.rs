@@ -31,16 +31,21 @@ impl Drop for PdfDoc {
 impl PdfDoc {
     pub fn open(path: impl AsRef<Path>) -> Result<PdfDoc> {
         let path = path.as_ref();
+        File::open(path)
+            .map_err(anyhow::Error::from)
+            .and_then(PdfDoc::from_file)
+            .with_context(|| format!("open pdf {}", path.display()))
+    }
+
+    /// A document read from a file already open, which pdfium reads as it needs it for as long as
+    /// the document lives.
+    pub(super) fn from_file(file: File) -> Result<PdfDoc> {
         let pdfium = pdfium()?;
-        let context = || format!("open pdf {}", path.display());
-        let file = File::open(path).with_context(context)?;
         // The same open file, not the path again: a rename in between would hand back another.
-        let kept = file.try_clone().with_context(context)?;
-        let read = Etag::from_meta(&kept.metadata().with_context(context)?);
+        let kept = file.try_clone()?;
+        let read = Etag::from_meta(&kept.metadata()?);
         let _guard = lock();
-        let doc = pdfium
-            .load_pdf_from_reader(file, None)
-            .with_context(context)?;
+        let doc = pdfium.load_pdf_from_reader(file, None)?;
         Ok(PdfDoc {
             doc: Some(doc),
             file: Some((kept, read)),

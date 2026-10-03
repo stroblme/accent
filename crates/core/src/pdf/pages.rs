@@ -1,13 +1,14 @@
 //! Which pages a document has and in what order: a blank page put in, a page taken out, a page
-//! moved somewhere else, and a page taken out put back.
+//! moved somewhere else, and the whole document kept for a page taken out to come back.
 
+use std::io::Write;
 use std::os::raw::{c_int, c_ulong};
 
 use anyhow::{Context, Result, anyhow};
 use pdfium_render::prelude::*;
 
 use super::doc::paper;
-use super::{PdfDoc, lock, pdfium};
+use super::{PdfDoc, lock};
 
 impl PdfDoc {
     /// A blank page at `at`, the size of the page before it (the first page's, at the front):
@@ -49,43 +50,22 @@ impl PdfDoc {
             .map_err(|e| anyhow!("delete page {page}: {e:?}"))
     }
 
-    /// Take a page out and hand it back as a PDF of its own — its content, the resources it uses
-    /// and its annotations, ink included — for [`PdfDoc::put_page`] to put back: pdfium cannot
-    /// hand back a page once it is gone.
+    /// The document as it now stands, as a second document of its own: what a page delete keeps
+    /// for its Undo to swap back in (`ledger`), since pdfium cannot hand back a page once it is
+    /// gone, and a copy of one would lose the links into it, out of it and the bookmarks naming it.
     ///
-    /// What points at the page, or from it to another, does not come back with it. pdfium's copy
-    /// drops every reference to a page outside it, so a link on the page to another loses its
-    /// target; and the bookmarks, links and named destinations elsewhere keep naming the page
-    /// deleted here, not the copy put back.
-    pub fn take_page(&mut self, page: usize) -> Result<Vec<u8>> {
-        let copy = {
-            let pdfium = pdfium()?;
-            let _guard = lock();
-            let mut copy = pdfium.create_new_pdf().context("create pdf")?;
-            copy.pages_mut()
-                .copy_page_from_document(self.doc(), page as PdfPageIndex, 0)
-                .map_err(|e| anyhow!("copy page {page}: {e:?}"))?;
-            copy.save_to_bytes().context("save the page")?
-        };
-        self.delete_page(page)?;
-        Ok(copy)
-    }
-
-    /// Put a page [`PdfDoc::take_page`] took out back in at `at`.
-    pub fn put_page(&mut self, at: usize, page: &[u8]) -> Result<()> {
-        let pdfium = pdfium()?;
-        let _guard = lock();
-        let count = self.doc().pages().len() as usize;
-        if at > count {
-            return Err(anyhow!("cannot put page {at} back into {count}"));
-        }
-        let source = pdfium
-            .load_pdf_from_byte_slice(page, None)
-            .context("open the page kept")?;
-        self.doc_mut()
-            .pages_mut()
-            .copy_page_from_document(&source, 0, at as PdfPageIndex)
-            .map_err(|e| anyhow!("put page {at} back: {e:?}"))
+    /// It is read from a file in the cache dir rather than held in memory, so a scanned PDF of a
+    /// hundred megabytes costs that much disk per delete in the history, not memory. The file has
+    /// no name: it goes with the last document reading it, a crash included.
+    pub(super) fn snapshot(&self) -> Result<PdfDoc> {
+        let bytes = self.save()?;
+        let dir = crate::config::xdg("XDG_CACHE_HOME", ".cache").join("accent");
+        let file = std::fs::create_dir_all(&dir).and_then(|()| {
+            let mut file = tempfile::tempfile_in(&dir)?;
+            file.write_all(&bytes)?;
+            Ok(file)
+        });
+        PdfDoc::from_file(file.with_context(|| format!("snapshot into {}", dir.display()))?)
     }
 
     /// Move the page at `from` so that it ends up at `to`.

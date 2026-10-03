@@ -76,7 +76,6 @@ pub fn build_window(
         false => format!("{vault_name} ({host})"),
     };
     let first = Pane::new(&tab_menu());
-    let toasts = adw::ToastOverlay::new();
     // Hidden until something goes wrong with a connection, which for a local vault is never.
     let connection = adw::Banner::builder().button_label("Reconnect").build();
     // Hidden until the first `Progress`, so a warm start that never reports one never shows it.
@@ -105,7 +104,7 @@ pub fn build_window(
         .shrink_end_child(false)
         .build();
 
-    toasts.set_child(Some(&paned));
+    let toasts = crate::toasts::Toasts::new(&paned);
 
     // Split headers, as GNOME Files and VS Code have them: the sidebar is a full-height column
     // with a header of its own, and the tab bar belongs to the editor column. The two header
@@ -217,7 +216,7 @@ pub fn build_window(
     if vault.as_ref().is_some_and(|v| v.is_remote()) {
         editor_column.append(connect.widget());
     }
-    editor_column.append(&toasts);
+    editor_column.append(toasts.widget());
 
     // Only the header is a top bar now: the tab bars belong to the panes, so they sit inside
     // `content` and presentation mode takes them away with it rather than unrevealing them.
@@ -275,8 +274,6 @@ pub fn build_window(
         toasts,
         #[cfg(feature = "bench")]
         toasted: Cell::new(0),
-        #[cfg(feature = "bench")]
-        buttoned: RefCell::new(None),
         connection,
         retry: Default::default(),
         connect,
@@ -294,6 +291,7 @@ pub fn build_window(
         excluded: RefCell::new(None),
         references: RefCell::new(None),
         ops: OnceCell::new(),
+        preferences: OnceCell::new(),
         preview: RefCell::new(None),
         inverted_images: Rc::default(),
         told_unheld: Cell::new(false),
@@ -375,6 +373,16 @@ pub fn build_window(
     window.connect_map(|_| tracing::debug!(t_ms = ms(), "window mapped"));
     window.present();
     tracing::debug!(t_ms = ms(), "window presented");
+
+    // Behind everything the window opens with, the session restore included: the dialog is
+    // waited for by nobody until it is asked for, and then it should not have to be built.
+    let weak = Rc::downgrade(&app);
+    glib::idle_add_local_full(glib::Priority::LOW, move || {
+        if let Some(app) = weak.upgrade() {
+            app.prepared_preferences();
+        }
+        glib::ControlFlow::Break
+    });
 
     glib::idle_add_local_once(glib::clone!(
         #[weak]
@@ -959,6 +967,10 @@ thread_local! {
 /// so nothing bands against it, on a class of ours rather than on `headerbar` globally; on the find
 /// bar it reaches the box Adwaita paints (`searchbar > revealer > box`), since the bar's own node
 /// is covered by it, and takes away the shade line Adwaita draws under that box, black in dark.
+/// `expander` and `dropdown arrow` are the glyphs libadwaita draws from `pan-*` names for a tree
+/// row's disclosure and a dropdown's arrow, drawn from the `go-*` names instead: themes redraw
+/// `pan-*` (WhiteSur's use a single-quoted `fill` GTK cannot recolour, and drew nothing), and the
+/// Git pane's own disclosures are `go-*` already (DESIGN.md, Iconography).
 /// `.accent-lone-header` drops the bottom padding of the sidebar header, the one header in the
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
 /// bottom and its bar area another 3, so with 6 above and none below both headers hold their
@@ -973,9 +985,10 @@ thread_local! {
 /// over the document. `.accent-idle-pane` is on every pane's tab bar but the active one's
 /// (`App::mark_active_pane`): its selected tab is outlined rather than filled, so two panes do not
 /// show two identical pills. Not under the pointer, where it takes Adwaita's hover fill like any
-/// other tab, and not on a bar of one tab, which Adwaita draws with no pill at all. A toast's
-/// transform eases over `widgets::FADE_MS` where animations are on, for the lift presentation
-/// mode gives the toasts over the status bar (`App::lift_toasts`).
+/// other tab, and not on a bar of one tab, which Adwaita draws with no pill at all. The toasts'
+/// pile eases its transform over `widgets::FADE_MS` where animations are on, for the lift
+/// presentation mode gives the toasts over the status bar (`App::lift_toasts`), and a toast in it
+/// trades Adwaita's margins for the pile's spacing, which clicks pass through to the document.
 ///
 /// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
 /// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
@@ -1047,7 +1060,7 @@ fn install_chrome_css() {
                 ".chrome-fade, paned > separator {{ transition: opacity {ms}ms ease; }} \
                  scrolledwindow > undershoot {{ transition: box-shadow {ms}ms ease, \
                    background-image {ms}ms ease; }} \
-                 toastoverlay > toast {{ transition: transform {lift}ms ease-out; }} ",
+                 .accent-toasts {{ transition: transform {lift}ms ease-out; }} ",
                 ms = fade::RAMP_MS,
                 lift = crate::widgets::FADE_MS
             ),
@@ -1093,6 +1106,7 @@ fn install_chrome_css() {
                color: var(--popover-fg-color); border-radius: 12px; \
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
              .accent-statusbar {{ padding: 6px 12px; }} \
+             .accent-toasts toast {{ margin: 0; }} \
              .accent-ring-tool, .accent-ring-hub {{ min-width: 0; min-height: 0; padding: 0; \
                box-shadow: 0 1px 4px var(--shade-color); }} \
              .accent-ring-tool:checked {{ background-color: var(--accent-bg-color); \
@@ -1118,7 +1132,11 @@ fn install_chrome_css() {
              GtkSourceAssistant.completion list row cell.icon {{ opacity: 0.7; }} \
              GtkSourceAssistant.completion list row cell.after {{ opacity: 0.6; \
                margin-left: 12px; }} \
-             textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }}",
+             textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }} \
+             expander {{ -gtk-icon-source: -gtk-icontheme(\"go-next-symbolic\"); }} \
+             expander:dir(rtl) {{ -gtk-icon-source: -gtk-icontheme(\"go-previous-symbolic\"); }} \
+             expander:checked {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }} \
+             dropdown arrow {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }}",
             away = fade::FLOOR,
         ));
         gtk::style_context_add_provider_for_display(
