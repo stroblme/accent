@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::json;
 
-use crate::link;
+use crate::link::{self, Failure};
 use crate::rpc::{Client, Hello, RpcError};
 use crate::ssh::{self, Forward, Url};
 use crate::{Event, VaultConfig};
@@ -48,26 +48,6 @@ pub enum State {
     Connecting,
     Connected,
     Disconnected(String),
-}
-
-/// Why an attempt to connect failed, which decides whether another attempt is worth making.
-enum Failure {
-    /// Anything on the way to the vault: ssh, the link, the upload, a server that went quiet.
-    Link(String),
-    /// The host's `serve` answered the `hello` and will not serve the vault.
-    Refused(String),
-}
-
-impl From<String> for Failure {
-    fn from(why: String) -> Failure {
-        Failure::Link(why)
-    }
-}
-
-impl From<&str> for Failure {
-    fn from(why: &str) -> Failure {
-        Failure::Link(why.to_string())
-    }
 }
 
 /// What [`Remote::push`] made of a cached copy that has been written to.

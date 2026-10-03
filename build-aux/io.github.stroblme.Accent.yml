@@ -51,6 +51,21 @@ modules:
         # The archive has no top-level directory: lib/ and LICENSE sit at its root.
         strip-components: 0
 
+  # The servers a remote vault uploads, one per machine a host may be, built by `make server`
+  # (which `make flatpak` runs first) outside the sandbox: the Rust extension has no musl targets,
+  # and bundled SQLite wants a C compiler for each, which cargo zigbuild brings there.
+  - name: accent-server
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 accent-cli-x86_64 accent-cli-aarch64 -t /app/lib/accent
+    sources:
+      - type: file
+        path: ../target/x86_64-unknown-linux-musl/release/accent-cli
+        dest-filename: accent-cli-x86_64
+      - type: file
+        path: ../target/aarch64-unknown-linux-musl/release/accent-cli
+        dest-filename: accent-cli-aarch64
+
   - name: accent
     buildsystem: simple
     build-commands:

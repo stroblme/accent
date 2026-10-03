@@ -53,10 +53,11 @@ HOST_FFI_LIB := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/debug/libac
 ANDROID_NDK_HOME ?= $(firstword $(wildcard $(HOME)/Android/Sdk/ndk/*))
 READELF ?= $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf
 
-# The remote server is this same CLI, built static so it starts on a host older than this one.
-# Its name on the remote is its own blake3, so a rebuild re-provisions exactly once.
-MUSL_TARGET := x86_64-unknown-linux-musl
-SERVER_BIN  := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/$(MUSL_TARGET)/$(PROFILE)/accent-cli
+# The remote server is this same CLI, built static so it starts on a host older than this one,
+# once per machine `uname -m` names, and a connection uploads the one its host runs. Its name on
+# the remote is the builds' blake3, so a rebuild re-provisions exactly once.
+SERVER_ARCHES := x86_64 aarch64
+SERVER_BIN     = $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/$(1)-unknown-linux-musl/$(PROFILE)/accent-cli
 
 # `cargo build` puts a release build under target/release and a dev build under target/debug.
 CARGO_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--release,)
@@ -125,8 +126,8 @@ requirements:
 	test -f $(PDFIUM_LIB) || echo "optional: libpdfium, for the PDF tab: run make pdfium"; \
 	command -v git >/dev/null || echo "optional: git, for the Git pane"; \
 	command -v ssh >/dev/null || echo "optional: ssh, for remote vaults"; \
-	{ command -v cargo-zigbuild && command -v zig || command -v musl-gcc; } >/dev/null || \
-		echo "optional: cargo-zigbuild and zig (or musl-gcc), for make server, which remote vaults need"; \
+	{ command -v cargo-zigbuild && command -v zig; } >/dev/null || \
+		echo "optional: cargo-zigbuild and zig, for make server, which remote vaults need"; \
 	command -v merl-rt >/dev/null || echo "optional: merl-rt, for ghost text"; \
 	if test $$missing = 0; then echo "All requirements met."; \
 	else echo "README.md, Requirements, lists the packages per distro."; exit 1; fi
@@ -307,26 +308,24 @@ drills: gtk-bench xvfb
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
 	grep '^bench ' "$$xdg/keys" | diff -u apps/gtk/src/bench/keys.expected -
 
-## server: build the static accent-cli that gets uploaded to a remote host
+## server: build the static accent-cli that gets uploaded to a remote host, for x86_64 and aarch64
 #
 # Static because the host may be older than this machine: a binary linked against Tumbleweed's
-# glibc will not start on a stable distro, and the whole point is that any x86_64 Linux works.
-# rusqlite is bundled C, so this needs a musl-capable C compiler, not only the Rust target.
-# `cargo zigbuild` brings its own and needs no root, which is why it is tried first.
+# glibc will not start on a stable distro, and the whole point is that any Linux host works.
+# rusqlite is bundled C, so this needs a C compiler for each musl target, not only the Rust
+# target: `cargo zigbuild` brings one for both and needs no root.
 server:
-	@rustup target list --installed | grep -qx '$(MUSL_TARGET)' \
-		|| rustup target add $(MUSL_TARGET)
-	@if command -v cargo-zigbuild >/dev/null && command -v zig >/dev/null; then \
-		$(CARGO) zigbuild -p accent-cli $(CARGO_PROFILE_FLAG) --target $(MUSL_TARGET); \
-	elif command -v musl-gcc >/dev/null || command -v x86_64-linux-musl-gcc >/dev/null; then \
-		$(CARGO) build -p accent-cli $(CARGO_PROFILE_FLAG) --target $(MUSL_TARGET); \
-	else \
-		echo "No musl C toolchain. Either (no root needed):"; \
+	@command -v cargo-zigbuild >/dev/null && command -v zig >/dev/null || { \
+		echo "make server needs cargo-zigbuild and zig (no root needed):"; \
 		echo "    uv tool install cargo-zigbuild && ln -s \$$HOME/.local/share/uv/tools/cargo-zigbuild/bin/python-zig \$$HOME/.local/bin/zig"; \
-		echo "or install your distro's musl package (openSUSE: musl-devel, Debian: musl-tools)."; \
-		exit 1; \
-	fi
-	@echo "Server binary: $(SERVER_BIN)"
+		exit 1; }
+	@for arch in $(SERVER_ARCHES); do \
+		rustup target list --installed | grep -qx "$$arch-unknown-linux-musl" \
+			|| rustup target add "$$arch-unknown-linux-musl" || exit 1; \
+		$(CARGO) zigbuild -p accent-cli $(CARGO_PROFILE_FLAG) --target "$$arch-unknown-linux-musl" \
+			|| exit 1; \
+		echo "Server binary: $(call SERVER_BIN,$$arch)"; \
+	done
 
 ## install: install into ~/.local (no sudo); override PREFIX for a system-wide install
 install: all
@@ -346,7 +345,10 @@ install: all
 	-@test -f $(PDFIUM_LIB) && install -Dm755 $(PDFIUM_LIB) $(DESTDIR)$(LIBDIR)/accent/libpdfium.so
 	@# Also best effort: `make server` needs a musl toolchain, and everything but opening a vault
 	@# on another machine works without it. Same `../lib/accent` the app looks in for libpdfium.
-	-@test -f $(SERVER_BIN) && install -Dm755 $(SERVER_BIN) $(DESTDIR)$(LIBDIR)/accent/accent-cli
+	-@for arch in $(SERVER_ARCHES); do \
+		test -f $(call SERVER_BIN,$$arch) && \
+			install -Dm755 $(call SERVER_BIN,$$arch) $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch; \
+	done; true
 	@# Best effort: without these the launcher and icon can take a re-login to appear.
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
 	-@gtk-update-icon-cache -qtf $(DESTDIR)$(DATADIR)/icons/hicolor 2>/dev/null
@@ -362,6 +364,7 @@ uninstall:
 	rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg
 	rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg
 	rm -f $(DESTDIR)$(LIBDIR)/accent/libpdfium.so
+	rm -f $(foreach arch,$(SERVER_ARCHES),$(DESTDIR)$(LIBDIR)/accent/accent-cli-$(arch))
 	-@rmdir $(DESTDIR)$(LIBDIR)/accent 2>/dev/null
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
 	@echo "Uninstalled from $(DESTDIR)$(PREFIX)"
@@ -382,7 +385,9 @@ cargo-sources:
 		Cargo.lock -o build-aux/cargo-sources.json
 
 ## flatpak: build and install the Flatpak (needs org.flatpak.Builder and the GNOME 50 SDK)
-flatpak:
+#
+# After `server`, whose binaries the manifest takes from target/ as they are.
+flatpak: server
 	flatpak run org.flatpak.Builder --user --install --force-clean \
 		build-aux/build build-aux/$(APP_ID).yml
 
