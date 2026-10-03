@@ -735,12 +735,19 @@ impl Notes {
                     .into_iter()
                     .map(|hit| {
                         // From this note's folder, which is where the index resolves it from.
-                        let link = markdown::percent_encode(&path::relative(dir, &hit));
+                        let path = path::relative(dir, &hit);
+                        let link = markdown::percent_encode(&path);
+                        // The popup narrows by what is typed after the `(`, the name as it reads
+                        // or as the link spells it, so the row answers to both.
+                        let filter = match path == link {
+                            true => link.clone(),
+                            false => format!("{path} {link}"),
+                        };
                         Completion {
                             label: basename(&hit).to_string(),
                             // What goes in is not what the row reads, so it is shown as well.
                             detail: Some(link.clone()),
-                            filter: Some(link.clone()),
+                            filter: Some(filter),
                             insert: link,
                             kind: Kind::File,
                             replace,
@@ -1414,6 +1421,44 @@ mod tests {
         for item in &items {
             let filter = item.filter.as_deref().unwrap_or(&item.label);
             assert!(kept(filter), "the popup would drop {filter:?}");
+        }
+    }
+
+    /// A link's destination is typed as the name reads or as the link spells it, encoded, and
+    /// the popup keeps the row it was offered either way.
+    #[test]
+    fn a_link_destination_row_survives_the_popup_typed_either_way() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir(vault.path().join("sub")).unwrap();
+        std::fs::write(vault.path().join("sub/Über Notiz.md"), "# Ü\n").unwrap();
+        std::fs::write(vault.path().join("a.md"), "[t](Übe\n[t](sub/%C3%9Cb\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
+        )
+        .unwrap();
+        for (line, character, typed) in [(0, 7, "Übe"), (1, 15, "sub/%C3%9Cb")] {
+            let items = notes
+                .completion("a.md", Pos { line, character })
+                .unwrap()
+                .items;
+            assert_eq!(items[0].insert, "sub/%C3%9Cber%20Notiz.md", "{typed}");
+            // GtkSourceView's `fuzzy_match`, which the popup runs over every row it is handed.
+            let filter = items[0].filter.as_deref().unwrap_or(&items[0].label);
+            let mut rest = filter.chars().flat_map(char::to_lowercase);
+            let kept = typed
+                .chars()
+                .flat_map(char::to_lowercase)
+                .all(|c| rest.any(|f| f == c));
+            assert!(kept, "the popup would drop {filter:?} for {typed:?}");
         }
     }
 
