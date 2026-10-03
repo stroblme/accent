@@ -32,10 +32,16 @@ impl App {
             return;
         }
         pdf.relinks.borrow_mut().queue.push_back((edit, step));
+        if !self.reconciled.get() {
+            let name = doc::file_name(&key);
+            let wait = format!("The links into {name} follow once the vault is indexed");
+            self.relinked(pdf, &wait);
+        }
         self.relink(pdf);
     }
 
-    /// The link to the host is back: the page edits made while it was down rewrite the notes now.
+    /// The link to the host is back, or a walk of the vault has finished: the page edits made
+    /// meanwhile rewrite the notes now.
     pub(crate) fn relink_all(self: &Rc<Self>) {
         for pdf in self.docs().iter().filter_map(Doc::pdf) {
             self.relink(pdf);
@@ -49,10 +55,17 @@ impl App {
     /// for [`relink_all`](Self::relink_all), and nothing is said: the banner says the link went.
     /// One the link dropped under may have been carried out, and is not asked again: twice would
     /// move the links twice.
+    ///
+    /// None goes out before a walk of the vault has finished, the first or one stopped from the
+    /// status bar: the index has not got every note linking in, and a note it missed would keep
+    /// its old numbers for the next edit to move from there. A rename is refused until then.
     fn relink(self: &Rc<Self>, pdf: &Rc<PdfTab>) {
         let (Some(vault), Some(ops)) = (self.vault().cloned(), self.ops().cloned()) else {
             return;
         };
+        if !self.reconciled.get() {
+            return;
+        }
         let (edit, step, keep) = {
             let mut relinks = pdf.relinks.borrow_mut();
             if relinks.running {
@@ -110,8 +123,8 @@ impl App {
         });
     }
 
-    /// Say what a rewrite did, in place of what the last one for this document said: a burst of
-    /// Undos would otherwise stack a toast each, all but the last out of date.
+    /// Say what a rewrite did or waits for, in place of what the last one for this document said:
+    /// a burst of Undos would otherwise stack a toast each, all but the last out of date.
     fn relinked(&self, pdf: &PdfTab, message: &str) {
         self.add_toast(Toast::new(message).key(format!("relink {}", pdf.key())));
     }

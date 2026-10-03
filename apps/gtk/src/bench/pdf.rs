@@ -58,8 +58,10 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
 /// each followed to the file. Then Undo walks all four back through the window's action, newest
 /// first, and Redo makes them again, the file read after each. A note linking into pages 1 to 3
 /// (a highlight, a jump, a markdown link, an HTML `href` and a reference definition) is written
-/// and opened in a tab first, and after every step its links' pages are printed as the file and
-/// the tab's buffer hold them, with what the toast said, if it said anything; it is renamed
+/// and opened in a tab first, without waiting for a vault still being indexed (`opened
+/// indexed=false`), whose rewrites wait for the walk; after every step its links' pages are
+/// printed as the file and the tab's buffer hold them, with what the toast said, if it said
+/// anything; it is renamed
 /// between the delete and its Undo, which finds the links the delete left by the new name. Then
 /// Delete Page and Add Page Before from the page's menu opened on the third page while the first
 /// is read, each undone, with the page being read and the pages after each. Then the items of
@@ -79,7 +81,12 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
         };
         let said = Cell::new(app.toasted.get());
         let links = || links_read(&app, &note.borrow(), &said);
-        println!("bench pages opened {} {}", pages_read(&pdf), links());
+        let indexed = app.reconciled.get();
+        println!(
+            "bench pages opened indexed={indexed} {} {}",
+            pages_read(&pdf),
+            links()
+        );
         pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 2 });
         written(&app).await;
         println!("bench pages moved {} {}", pages_read(&pdf), links());
@@ -105,7 +112,10 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
             let to = "Page links renamed.md".to_string();
             crate::fileops::move_all(&ops, vec![(note.borrow().clone(), to.clone())]);
             written(&app).await;
-            note.replace(to);
+            // Refused while the vault is still being indexed.
+            if app.vault().is_some_and(|v| v.exists(&to)) {
+                note.replace(to);
+            }
             println!("bench pages renamed {}", links());
         }
         let walks = [
@@ -549,7 +559,9 @@ async fn linked_note(app: &Rc<App>, pdf: &str) -> String {
         let linked = vault
             .backlinks(pdf)
             .is_ok_and(|links| links.iter().any(|b| b.src_rel_path == note));
-        if linked {
+        // A vault still being indexed has it only once the walk is done, which the page edits'
+        // rewrites wait for themselves.
+        if linked || !app.reconciled.get() {
             break;
         }
         glib::timeout_future(Duration::from_millis(100)).await;

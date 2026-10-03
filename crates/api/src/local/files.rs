@@ -421,12 +421,18 @@ impl Local {
     /// `page=N&selection=…` and a plain `page=N` jump alike. `keep` is what the delete an Undo
     /// takes back left behind (see [`markdown::repage_links`]). A note that cannot be read or
     /// written is reported, not fatal: the page edit has already happened.
+    ///
+    /// The index is asked once it has taken in every note written before the call, the ones the
+    /// caller has just flushed and any a walk held back: a note missing from it would keep its
+    /// old page numbers, and the next edit would move them from there. Whether the index has
+    /// every note is the caller's to wait for, as it is before a rename (`reconciled`).
     pub fn repage_links(
         &self,
         rel: &str,
         edit: PageEdit,
         keep: &[KeptLink],
     ) -> Result<RepageReport> {
+        self.settle_index();
         let notes: BTreeSet<String> = self
             .index()
             .backlinks(rel)?
