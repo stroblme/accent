@@ -18,7 +18,7 @@ use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk};
 
 use super::geometry::{self, DRAG_SLOP, End, Frame, GAP, HANDLE, Sheet, TOLERANCE, Zoom};
-use super::paint::{self, Cache};
+use super::paint::{self, Cache, Tint};
 use super::tools::Tool;
 use crate::theme;
 use drag::Drag;
@@ -121,6 +121,18 @@ impl DiagramView {
 
     pub fn sheet(&self) -> Option<Rc<Sheet>> {
         self.imp().sheet.borrow().clone()
+    }
+
+    /// Paint the page in `tint`'s colours from now on: its labels are laid out again, their run
+    /// colours being in their layouts, and a drag's preview is built again; the page itself, its
+    /// formulas and its pictures stay as they are.
+    pub fn set_tint(&self, tint: Tint) {
+        let imp = self.imp();
+        if imp.tint.replace(tint) != tint {
+            imp.cache.forget();
+            imp.preview.take();
+            self.queue_draw();
+        }
     }
 
     pub fn set_selection(&self, ids: &[CellId]) {
@@ -403,6 +415,8 @@ mod imp {
         /// Alt held in the drag under way: no snapping to the grid.
         pub free: Cell<bool>,
         pub cache: Cache,
+        /// The colours the page is painted in.
+        pub tint: Cell<Tint>,
         /// Where labels with formulas are typeset, for a diagram that has any.
         pub typesetter: RefCell<Option<Rc<super::super::math::Typesetter>>>,
         pub on_edit: RefCell<Option<OnEdit>>,
@@ -431,6 +445,7 @@ mod imp {
                 pointer: Cell::new(Point::default()),
                 free: Cell::new(false),
                 cache: Cache::default(),
+                tint: Cell::new(Tint::FILE),
                 typesetter: RefCell::new(None),
                 on_edit: RefCell::new(None),
                 on_zoom: RefCell::new(None),
@@ -652,7 +667,8 @@ mod imp {
             snapshot.translate(&graphene::Point::new(-sx as f32, -sy as f32));
 
             // The sheet, or with none the whole canvas in the page's colour, as draw.io's.
-            let paper = sheet.scene.background.unwrap_or(Color::WHITE);
+            let tint = self.tint.get();
+            let paper = tint.colour(sheet.scene.background.unwrap_or(Color::WHITE));
             match sheet.page_rect {
                 Some(r) => {
                     let page = paint::grect(&frame.rect(&r));
@@ -702,6 +718,7 @@ mod imp {
                         &frame,
                         cache,
                         typesetter.as_ref(),
+                        tint,
                     );
                 }
             }

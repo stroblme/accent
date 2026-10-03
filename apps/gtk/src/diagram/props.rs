@@ -195,6 +195,12 @@ pub(super) fn number(v: f64) -> String {
 }
 
 impl Props {
+    /// What the Fill row says, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn fill_value(&self) -> String {
+        self.fill.value()
+    }
+
     pub fn new() -> Rc<Props> {
         let page = adw::PreferencesPage::new();
         let group = |title: &str| {

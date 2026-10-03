@@ -976,6 +976,10 @@ impl App {
         for pdf in self.pdfs() {
             pdf.restyle();
         }
+        // A diagram is painted through the theme's colours, so this is a repaint.
+        for diagram in self.diagrams() {
+            diagram.restyle();
+        }
         // An image is recoloured again from the texture it was read to.
         for image in self.images() {
             self.show_image(&image, None);

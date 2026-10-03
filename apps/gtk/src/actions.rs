@@ -260,6 +260,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-delete-page", "Delete Diagram Page", &[]),
     ("win.diagram-to-front", "Bring to Front", &[]),
     ("win.diagram-to-back", "Send to Back", &[]),
+    ("win.diagram-invert", "Invert Diagram Colours", &[]),
     ("win.diagram-select", "Select and Move", &[]),
     ("win.diagram-rect", "Add Rectangle", &[]),
     ("win.diagram-ellipse", "Add Ellipse", &[]),
