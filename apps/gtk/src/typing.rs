@@ -1,17 +1,19 @@
-//! What the editor does with Return, Backspace and a bracket: continue a list, close a fence,
-//! pair a delimiter.
+//! What the editor does with Return, Tab, Backspace and a bracket: continue a list, close a
+//! fence, pair a delimiter, line up a table and walk its cells.
 //!
 //! The decisions are plain functions over the current line, so they are testable without a
 //! display; [`install`] is the only part that needs a widget. Nothing here parses the note:
 //! `markdown::analyze` works on the whole buffer and its spans are thrown away after the
 //! highlighting pass, so a per-keystroke lookup would mean re-parsing. A list marker is visible in
-//! the line itself, and "am I inside a code fence" is already on the buffer as a tag.
+//! the line itself, and "am I inside a code fence" is already on the buffer as a tag. A table is
+//! the lines holding a pipe around the caret's, laid out by `markdown::table_key`.
 //!
 //! Every edit runs inside one `begin_user_action`/`end_user_action`, so one Ctrl+Z undoes it.
 //! Which presses reach [`on_key`] at all is `editor::keys`'s decision: a completion popup and a
 //! column of carets both own Return, and neither wants a list marker inserted underneath them.
 
 use crate::editor::{caret, line_end, line_prefix};
+use accent_core::markdown::{TableKey, table_key};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sourceview5::prelude::*;
@@ -284,6 +286,7 @@ pub fn on_key(
         gdk::Key::Return | gdk::Key::KP_Enter => on_return(view),
         gdk::Key::BackSpace => on_backspace(view),
         gdk::Key::Tab | gdk::Key::KP_Tab => on_tab(view),
+        gdk::Key::ISO_Left_Tab if in_table(view, TableKey::BackTab) => glib::Propagation::Stop,
         _ => match key.to_unicode().filter(|c| !c.is_control()) {
             Some(ch) => on_char(view, ch),
             None => glib::Propagation::Proceed,
@@ -299,6 +302,9 @@ pub fn on_key(
 /// The whole line is read, not the part in front of the caret: the item is indented from anywhere
 /// on it. The indent goes in at the head of the line, so the caret keeps its place in the text.
 fn on_tab(view: &sourceview5::View) -> glib::Propagation {
+    if in_table(view, TableKey::Tab) {
+        return glib::Propagation::Stop;
+    }
     let buffer = view.buffer();
     if buffer.has_selection() {
         return glib::Propagation::Proceed;
@@ -351,6 +357,9 @@ fn on_return(view: &sourceview5::View) -> glib::Propagation {
     }
     if verbatim(&buffer, &start) {
         return glib::Propagation::Proceed;
+    }
+    if in_table(view, TableKey::Enter) {
+        return glib::Propagation::Stop;
     }
 
     match continuation(&line) {
@@ -450,6 +459,57 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
     }
     view.scroll_mark_onscreen(&buffer.get_insert());
     glib::Propagation::Stop
+}
+
+/// Tab, Shift+Tab or Return with the caret in a table and nothing selected: the table laid out
+/// again with its columns lined up, as one undo step with the row the key adds or takes away, and
+/// the caret where the key sends it (`markdown::table_key`). Says whether the caret was in one.
+/// A column of carets never gets here: it takes these keys first (`editor::keys`).
+fn in_table(view: &sourceview5::View, key: TableKey) -> bool {
+    let buffer = view.buffer();
+    let at = caret(&buffer);
+    let mut start = at;
+    start.set_line_offset(0);
+    if buffer.has_selection() || verbatim(&buffer, &start) {
+        return false;
+    }
+    let line_text = |line: i32| match buffer.iter_at_line(line) {
+        Some(start) => buffer
+            .text(&start, &line_end(&buffer, line), true)
+            .to_string(),
+        None => String::new(),
+    };
+    // The run of lines holding a pipe around the caret's: as far as any table here can reach.
+    let piped = |line: i32| line_text(line).contains('|');
+    let (mut first, mut last) = (at.line(), at.line());
+    while first > 0 && piped(first - 1) {
+        first -= 1;
+    }
+    while last + 1 < buffer.line_count() && piped(last + 1) {
+        last += 1;
+    }
+    let lines: Vec<String> = (first..=last).map(line_text).collect();
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let row = (at.line() - first) as usize;
+    let Some(edit) = table_key(&lines, row, at.line_offset() as usize, key) else {
+        return false;
+    };
+    let top = first + edit.lines.start as i32;
+    let text = edit.text.join("\n");
+    let mut from = buffer.iter_at_line(top).unwrap_or(start);
+    let mut to = line_end(&buffer, first + edit.lines.end as i32 - 1);
+    if buffer.text(&from, &to, true) != text {
+        buffer.begin_user_action();
+        buffer.delete(&mut from, &mut to);
+        buffer.insert(&mut from, &text);
+        buffer.end_user_action();
+    }
+    let (line, column) = edit.caret;
+    let mut landing = line_end(&buffer, top + line as i32);
+    landing.set_line_offset(column as i32);
+    buffer.place_cursor(&landing);
+    view.scroll_mark_onscreen(&buffer.get_insert());
+    true
 }
 
 /// The character the iter sits in front of, or `None` at the end of the buffer.

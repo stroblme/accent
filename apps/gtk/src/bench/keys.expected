@@ -101,3 +101,9 @@ bench fold_column_up [(0, 1), (1, 1)] shut=true
 bench fold_add_below [(1, 1), (2, 1)] shut=false
 bench fold_shut_over_column_0 [(0, 1), (1, 1), (1, 4)] shut=true
 bench fold_shut_over_column_3 [(1, 4), (1, 1), (0, 1)] shut=true
+bench table_tab "| a   |  bb |\n| :-- | --: |\n| ccc |   d |" (2, 11) Stop
+bench table_tab_adds_row "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n|     |     |" (3, 2) Stop
+bench table_back_tab "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n|     |     |" (2, 11) Stop
+bench table_enter_leaves "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n" (3, 0) Stop
+bench table_undo "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n|     |     |"
+bench table_not_a_table "a | b\nc | d" (0, 1) Proceed

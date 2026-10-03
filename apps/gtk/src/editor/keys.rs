@@ -146,7 +146,11 @@ fn beneath_popup(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib
         tab.end_snippet();
         return glib::Propagation::Stop;
     }
-    let stepping_a_template = walking && matches!(key, gdk::Key::Tab | gdk::Key::KP_Tab);
+    let stepping_a_template = walking
+        && matches!(
+            key,
+            gdk::Key::Tab | gdk::Key::KP_Tab | gdk::Key::ISO_Left_Tab
+        );
     if !stepping_a_template && let Some(answer) = ghost::on_key(tab, key, state) {
         return answer;
     }

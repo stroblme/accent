@@ -138,6 +138,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
             bench_box(&view).await;
             bench_grow(&view);
             bench_folds(&view).await;
+            bench_table(&view);
             window.close();
             bench_quit(&app);
         });
@@ -445,6 +446,39 @@ async fn bench_folds(view: &multicaret::View) {
         view.clear_carets();
     }
     crate::fold::unfold_all(&buffer);
+}
+
+/// A note's Tab, Shift+Tab and Return in a table, through `typing::on_key` as a press in a note
+/// reaches it: the table lined up, the caret walking its cells, a row added past the last and an
+/// empty last row ending it, each one undo step. Prints the text and the caret's line and column.
+fn bench_table(view: &multicaret::View) {
+    let buffer = view.buffer();
+    let none = gdk::ModifierType::empty();
+    let press = |step: &str, key| {
+        let answer = typing::on_key(view.upcast_ref(), key, none);
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        let at = editor::caret(&buffer);
+        println!(
+            "bench table_{step} {text:?} ({}, {}) {answer:?}",
+            at.line(),
+            at.line_offset()
+        );
+    };
+    view.clear_carets();
+    buffer.set_text("| a | bb |\n|:-|-:|\n| ccc | d |");
+    buffer.place_cursor(&at(&buffer, 2, 3));
+    press("tab", gdk::Key::Tab);
+    press("tab_adds_row", gdk::Key::Tab);
+    press("back_tab", gdk::Key::ISO_Left_Tab);
+    buffer.place_cursor(&at(&buffer, 3, 2));
+    press("enter_leaves", gdk::Key::Return);
+    buffer.undo();
+    let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+    println!("bench table_undo {text:?}");
+    // A row of pipes with no delimiter row under its header is no table.
+    buffer.set_text("a | b\nc | d");
+    buffer.place_cursor(&at(&buffer, 0, 1));
+    press("not_a_table", gdk::Key::Tab);
 }
 
 /// The iter at `column` of `line`, or the end of the buffer past its last line.
