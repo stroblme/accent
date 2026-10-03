@@ -23,7 +23,7 @@ use webkit6::prelude::*;
 
 /// The page zoom the labels are rendered at: a formula stays sharp up to this canvas zoom and
 /// is scaled down, not up, below it.
-const RENDER_ZOOM: f64 = 3.0;
+pub(super) const RENDER_ZOOM: f64 = 3.0;
 
 /// The tallest snapshot a batch is taken as, in texture pixels, which bounds what is held while
 /// it is cut up: 300 small formulas in one would make a picture of nearly 200 MB.

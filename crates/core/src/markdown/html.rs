@@ -289,6 +289,17 @@ impl<'a> Page<'a> {
                     if is_image(t) {
                         self.html(format!("<img src=\"accent://file/{}\">", percent_encode(t)));
                         skip = 1;
+                    } else if crate::path::is_diagram(t) {
+                        // A picture of the page the anchor names, which the app draws, inside
+                        // the link a click follows to that page.
+                        let page = anchor
+                            .map_or_else(String::new, |a| format!("?page={}", percent_encode(a)));
+                        self.html(format!(
+                            "<a href=\"{}\" class=\"embed\"><img src=\"accent://file/{}{page}\"></a>",
+                            open_href(t, anchor),
+                            percent_encode(t)
+                        ));
+                        skip = 1;
                     } else {
                         self.html(format!(
                             "<a href=\"{}\" class=\"embed\">",
@@ -422,6 +433,24 @@ mod tests {
         let h = bare("# Hi\n\n[x](y.md)\n");
         assert!(h.contains("<h1 id=\"hi\">Hi</h1>"), "{h}");
         assert!(h.contains("<a href=\"y.md\">x</a>"), "{h}");
+    }
+
+    /// A diagram shows as a picture of its page, inside the link that opens it there.
+    #[test]
+    fn html_shows_an_embedded_diagram_as_a_picture_of_its_page() {
+        let h = bare("![[Figures/flow.drawio#Page 2]]");
+        assert!(
+            h.contains(
+                "<a href=\"accent://open/Figures/flow.drawio#Page 2\" class=\"embed\">\
+                 <img src=\"accent://file/Figures/flow.drawio?page=Page%202\"></a>"
+            ),
+            "{h}"
+        );
+        let h = bare("![[flow.drawio]]");
+        assert!(
+            h.contains("<img src=\"accent://file/flow.drawio\"></a>"),
+            "{h}"
+        );
     }
 
     #[test]

@@ -6,11 +6,14 @@
 //! every change goes through, which is what makes each one an undo step, marks the tab dirty
 //! and schedules the autosave.
 
+pub mod embed;
+pub mod export;
 mod geometry;
 mod label;
 mod math;
 mod paint;
 mod props;
+mod render;
 mod tools;
 mod view;
 mod window;
@@ -277,17 +280,7 @@ impl DiagramTab {
     }
 
     pub fn page_names(&self) -> Vec<String> {
-        let editor = self.editor.borrow();
-        editor
-            .file()
-            .pages
-            .iter()
-            .enumerate()
-            .map(|(i, p)| match p.name() {
-                "" => format!("Page {}", i + 1),
-                name => name.to_string(),
-            })
-            .collect()
+        page_names(self.editor.borrow().file())
     }
 
     /// Show page `i`, as a jump the pane's history records.
@@ -1123,6 +1116,11 @@ impl DiagramTab {
         self.editor.borrow().file().clone()
     }
 
+    /// What typesets this diagram's formulas, `None` for a diagram without any.
+    pub fn typesetter(&self) -> Option<Rc<math::Typesetter>> {
+        self.view.typesetter()
+    }
+
     /// A write of the model landed: the tab is clean at `etag`.
     pub fn mark_clean(&self, etag: Etag) {
         self.save.etag.set(Some(etag));
@@ -1547,5 +1545,39 @@ fn shown(index: usize, pages: usize) -> accent_drawio::Context {
             unix_ms: now.timestamp_millis(),
             offset_minutes: now.offset().local_minus_utc() / 60,
         }),
+    }
+}
+
+/// The names of `file`'s pages as the Outline pane lists them: a page with none is "Page N".
+fn page_names(file: &File) -> Vec<String> {
+    file.pages
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match p.name() {
+            "" => format!("Page {}", i + 1),
+            name => name.to_string(),
+        })
+        .collect()
+}
+
+/// The page of `file` called `name`, as `![[x.drawio#name]]` and `[[x.drawio#name]]` name one.
+pub fn page_named(file: &File, name: &str) -> Option<usize> {
+    page_names(file).iter().position(|n| n == name.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_is_found_by_its_name_or_its_place() {
+        let file = File::from_bytes(
+            br#"<mxfile><diagram name="Page-1"><mxGraphModel><root/></mxGraphModel></diagram>
+            <diagram><mxGraphModel><root/></mxGraphModel></diagram></mxfile>"#,
+        )
+        .unwrap();
+        assert_eq!(page_named(&file, "Page-1"), Some(0));
+        assert_eq!(page_named(&file, "Page 2"), Some(1));
+        assert_eq!(page_named(&file, "Page-2"), None);
     }
 }

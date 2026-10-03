@@ -230,6 +230,16 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
     }
 }
 
+/// [`serve`] for an SVG's text rather than its file: a diagram embedded in a note, drawn for it
+/// (`diagram::embed`), goes through the filter as an SVG image does.
+pub fn serve_svg(text: &str, look: Look, inverted: bool) -> Served {
+    let svg = look
+        .palette(true, inverted)
+        .and_then(|page| filtered(text, page, look.fills(page)))
+        .unwrap_or_else(|| text.to_string());
+    Served::Bytes(glib::Bytes::from_owned(svg.into_bytes()), "image/svg+xml")
+}
+
 /// What the classifier said about `path`, while the file is as it was then: `None` where it has
 /// not been asked, which in Light is every image.
 pub fn verdict(path: &Path) -> Option<Verdict> {
@@ -381,22 +391,26 @@ fn verdicts() -> &'static Mutex<HashMap<PathBuf, (Stamp, Verdict)>> {
 }
 
 /// Which version of a file a verdict was taken on: its mtime and size.
-type Stamp = (SystemTime, u64);
+pub(crate) type Stamp = (SystemTime, u64);
 
-fn stamp(path: &Path) -> Option<Stamp> {
+pub(crate) fn stamp(path: &Path) -> Option<Stamp> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.modified().ok()?, meta.len()))
 }
 
 /// An SVG's text with the recolouring filter around its content, drawn over its own paper when
 /// `fill` asks for it ([`Look::fills`]).
-fn svg_filtered(path: &Path, (paper, ink): Page, fill: bool) -> Option<Vec<u8>> {
+fn svg_filtered(path: &Path, page: Page, fill: bool) -> Option<Vec<u8>> {
     let text = std::fs::read_to_string(path).ok()?;
+    filtered(&text, page, fill).map(String::into_bytes)
+}
+
+/// [`svg_filtered`] of an SVG's text.
+fn filtered(text: &str, (paper, ink): Page, fill: bool) -> Option<String> {
     match fill {
-        true => recolour::recolour_svg_on_paper(&text, paper, ink),
-        false => recolour::recolour_svg(&text, paper, ink),
+        true => recolour::recolour_svg_on_paper(text, paper, ink),
+        false => recolour::recolour_svg(text, paper, ink),
     }
-    .map(String::into_bytes)
 }
 
 /// Line art, always recoloured: the vector counterpart of a scan.

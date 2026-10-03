@@ -73,6 +73,7 @@ bench lines_comment_column_carets true
 bench lines_comment_column "    // a();\n    // b();\n    // c();" [(0, 1), (1, 1), (2, 1)]
 bench lines_uncomment_column_carets true
 bench lines_uncomment_column "    a();\n    b();\n    c();" [(0, 1), (1, 1), (2, 1)]
+bench lines_comment_mixed_column "    // // x();\n    b();\n    // x();" [(0, 11), (2, 8)]
 bench lines_shift_delete passed=true
 bench lines_shift_delete "ab\ncd\nef" [(0, 1), (1, 1), (2, 1)]
 bench lines_shift_delete_cut "" [(0, 0)]
@@ -107,3 +108,7 @@ bench table_back_tab "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n|     |     |
 bench table_enter_leaves "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n" (3, 0) Stop
 bench table_undo "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n|     |     |"
 bench table_not_a_table "a | b\nc | d" (0, 1) Proceed
+bench occur_next_by_hand [(2, 5), (6, 9)]
+bench occur_all_by_hand [(2, 5), (6, 9), (15, 18), (19, 22)]
+bench occur_next_word [(2, 5), (19, 22)]
+bench occur_all_word [(2, 5), (19, 22)]

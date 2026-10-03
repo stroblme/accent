@@ -8,6 +8,7 @@ mod answer;
 mod attach;
 mod chrome;
 mod compare;
+mod corpus;
 mod diagnostics;
 mod diagram;
 mod dismiss;
@@ -15,6 +16,7 @@ mod export;
 mod files;
 mod find;
 mod git;
+mod ignored;
 mod image;
 mod keys;
 mod loose;
@@ -86,7 +88,9 @@ use tags::bench_tags;
 /// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
 /// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` clicks outside each dialog through XTEST
-/// instead (`dismiss::bench_dismiss`), and `=prefs` times Preferences presenting (`bench_prefs`).
+/// instead (`dismiss::bench_dismiss`), `=prefs` times Preferences presenting (`bench_prefs`), and
+/// `=ignored:<rel>` follows a note in a gitignored folder into the window (`ignored::bench_ignored`),
+/// and `=early:<query>` is the list landing in a dialog already open (`corpus::bench_early`).
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
@@ -460,7 +464,8 @@ use tags::bench_tags;
 /// `/tmp`.
 ///
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram (a sample is written there if there is none) and
-/// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`.
+/// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`;
+/// `=export:<rel>:<dir>` exports it as PDF, PNG and SVG and prints it into `<dir>` under Dark.
 ///
 /// `ACCENT_BENCH_COLLAPSE=1` drags the sidebar to 400 px and takes the window to 360 px, below the
 /// width the sidebar collapses at, and back, printing the window's width, whether the sidebar
@@ -933,6 +938,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rels) = query.strip_prefix("dismiss:") {
             return dismiss::bench_dismiss(&app, rels);
         }
+        if let Some(rel) = query.strip_prefix("ignored:") {
+            return ignored::bench_ignored(&app, rel);
+        }
+        if let Some(query) = query.strip_prefix("early:") {
+            return corpus::bench_early(&app, query);
+        }
         if query == "prefs" {
             return bench_prefs(&app);
         }
@@ -1112,6 +1123,7 @@ fn bench_switcher_rows(app: &Rc<App>) {
         match &**boxed.borrow::<Rc<crate::palette::Item>>() {
             crate::palette::Item::File(rel) => println!("bench switcher_row file {rel}"),
             crate::palette::Item::Missing(rel) => println!("bench switcher_row missing {rel}"),
+            crate::palette::Item::Ignored(rel) => println!("bench switcher_row ignored {rel}"),
             crate::palette::Item::Alias { name, rel } => {
                 println!("bench switcher_row alias {name} {rel}")
             }

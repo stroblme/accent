@@ -78,11 +78,12 @@ impl App {
     /// The old tab goes after the new one is in place, so the pane never stands empty and closes
     /// itself out from under the note arriving in it.
     pub(crate) fn mark_opened(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
-        // A label a search hit waits to show, which a file that turned out to be text drops.
+        // A label or a page a diagram waits to show, which a file that turned out to be text
+        // drops.
         if let Some(doc) = self.doc_for_page(page) {
-            let at = self.revealing.borrow_mut().remove(&doc.key());
-            if let (Some(at), Doc::Diagram(tab)) = (at, &doc) {
-                reveal_label(tab, at);
+            let reveal = self.revealing.borrow_mut().remove(&doc.key());
+            if let (Some(reveal), Doc::Diagram(tab)) = (reveal, &doc) {
+                reveal(self, tab);
             }
         }
         if how == Opened::Pinned {
@@ -1221,9 +1222,11 @@ impl App {
                     Some(Doc::Diagram(_)) => self.open_label(rel, bytes.start),
                     Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes)),
                     None => {
-                        self.revealing
-                            .borrow_mut()
-                            .insert(rel.to_string(), bytes.start);
+                        let at = bytes.start;
+                        self.revealing.borrow_mut().insert(
+                            rel.to_string(),
+                            Box::new(move |_, tab| reveal_label(tab, at)),
+                        );
                         self.select_when_open(rel, sidebar::Target::Range(bytes));
                     }
                 }
@@ -1238,11 +1241,30 @@ impl App {
     /// once a worker has read it, so one not open yet shows the label when it arrives
     /// ([`mark_opened`](Self::mark_opened)).
     fn open_label(self: &Rc<Self>, rel: &str, at: usize) {
+        self.reveal_in_diagram(rel, Box::new(move |_, tab| reveal_label(tab, at)));
+    }
+
+    /// Open diagram `rel` on its page called `name`, as a link to it lands: as a jump, or with a
+    /// toast saying there is none.
+    fn open_diagram_page(self: &Rc<Self>, rel: &str, name: &str) {
+        let name = name.to_string();
+        let show = move |app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>| {
+            match crate::diagram::page_named(&tab.file(), &name) {
+                Some(i) => tab.goto_page(i),
+                None => app.toast(&format!("No page {name} in {}", doc::file_name(&tab.key()))),
+            }
+        };
+        self.reveal_in_diagram(rel, Box::new(show));
+    }
+
+    /// Show `reveal` in diagram `rel`, now if it is open, else once a worker has read it
+    /// ([`mark_opened`](Self::mark_opened)).
+    fn reveal_in_diagram(self: &Rc<Self>, rel: &str, reveal: Reveal) {
         if let Some(Doc::Diagram(tab)) = self.doc_for(rel) {
             self.reveal_page(&tab.page);
-            return reveal_label(&tab, at);
+            return reveal(self, &tab);
         }
-        self.revealing.borrow_mut().insert(rel.to_string(), at);
+        self.revealing.borrow_mut().insert(rel.to_string(), reveal);
         self.open_preview(rel);
     }
 
@@ -1403,7 +1425,8 @@ impl App {
         });
     }
 
-    /// Open `rel` and land where `anchor` says: a PDF's page and selection, or a note's heading.
+    /// Open `rel` and land where `anchor` says: a PDF's page and selection, a diagram's page, or
+    /// a note's heading.
     fn land_on(self: &Rc<Self>, rel: &str, anchor: &str) {
         match accent_core::markdown::pdf_anchor(anchor) {
             Some(at) => {
@@ -1411,6 +1434,7 @@ impl App {
                 self.show_pdf_anchor(rel, Some(at));
             }
             None if anchor.is_empty() => self.open_preview(rel),
+            None if doc::kind_of(rel) == Kind::Diagram => self.open_diagram_page(rel, anchor),
             None => {
                 let anchor = anchor.to_string();
                 self.with_tab(rel, Opened::Preview, "open", move |app, tab| {
@@ -1772,6 +1796,9 @@ impl App {
         }
     }
 }
+
+/// What a diagram is to show once it is open: see [`App::reveal_in_diagram`].
+pub type Reveal = Box<dyn FnOnce(&Rc<App>, &Rc<crate::diagram::DiagramTab>)>;
 
 /// Show the label of `tab` whose line in its labels' text holds byte `at`, if there still is one.
 fn reveal_label(tab: &Rc<crate::diagram::DiagramTab>, at: usize) {

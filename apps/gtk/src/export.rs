@@ -4,7 +4,7 @@
 //! shown ([`Preview::for_paper`]): white paper whatever the theme, its images as their files are,
 //! its diagrams drawn. Once the page is in, WebKit paginates it — for its own print dialog, or for
 //! GTK's Print to File printer, which writes the PDF — or it is read back as one self-contained
-//! HTML file. A PDF tab's print and export are `pdf::export`'s.
+//! HTML file. A PDF tab's print and export are `pdf::export`'s, a diagram's `diagram::export`'s.
 
 use super::*;
 use crate::look::{self, Look, Served};
@@ -17,6 +17,8 @@ use webkit6::prelude::*;
 pub enum Export {
     Pdf,
     Html,
+    Png,
+    Svg,
 }
 
 /// Waited on before the page is taken: the diagrams the mermaid bootstrap draws, then the fonts.
@@ -44,40 +46,54 @@ document.querySelectorAll('script, span[data-line]').forEach(function (e) { e.re
 return '<!DOCTYPE html>' + document.documentElement.outerHTML;
 "#;
 
-/// What `doc` can be printed and exported as, `None` where it cannot be: a note and a PDF are the
-/// two (DESIGN.md, Preview).
+/// What `doc` can be printed and exported as, `None` where it cannot be: a note, a PDF and a
+/// diagram are the three (DESIGN.md, Preview and Diagram).
 pub fn printable(doc: &Doc) -> Option<Kind> {
     match doc {
         Doc::Text(tab) if tab.flavour().is_note() => Some(Kind::Note),
         Doc::Pdf(_) => Some(Kind::Pdf),
+        Doc::Diagram(_) => Some(Kind::Diagram),
         _ => None,
     }
 }
 
 impl App {
     /// Print…: the tab right-clicked, else the one in front. A note goes through WebKit's own
-    /// print dialog, a PDF through its tab's; any other tab does nothing, as Save As does.
+    /// print dialog, a PDF and a diagram through their tabs'; any other tab does nothing, as
+    /// Save As does.
     pub(crate) fn print(self: &Rc<Self>) {
         match self.menu_doc() {
             Some(Doc::Text(tab)) if tab.flavour().is_note() => self.print_note(tab),
             Some(Doc::Pdf(pdf)) => pdf::export::print(self, &pdf),
+            Some(Doc::Diagram(tab)) => diagram::export::print(self, &tab),
             _ => {}
         }
     }
 
-    /// Export as PDF… and Export as HTML…: the destination asked for on this machine, starting in
-    /// the file's own folder on a local vault, then the note or the PDF written there. A PDF has
-    /// no HTML, and any other tab has neither.
+    /// Export as PDF…, HTML…, PNG… and SVG…: the destination asked for on this machine, starting
+    /// in the file's own folder on a local vault, then the note, the PDF or the diagram written
+    /// there. A note has no PNG or SVG, a PDF only its PDF, a diagram no HTML, and any other tab
+    /// none.
     pub(crate) fn export(self: &Rc<Self>, to: Export) {
         let Some(doc) = self.menu_doc() else { return };
         let key = doc.key();
         let stem = Path::new(doc::file_name(&key))
             .file_stem()
             .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-        let (title, name) = match (to, printable(&doc)) {
-            (Export::Pdf, Some(Kind::Note)) => ("Export as PDF", format!("{stem}.pdf")),
-            (Export::Html, Some(Kind::Note)) => ("Export as HTML", format!("{stem}.html")),
-            (Export::Pdf, Some(Kind::Pdf)) => ("Export as PDF", format!("{stem} (exported).pdf")),
+        let title = match to {
+            Export::Pdf => "Export as PDF",
+            Export::Html => "Export as HTML",
+            Export::Png => "Export as PNG",
+            Export::Svg => "Export as SVG",
+        };
+        let name = match (to, &doc) {
+            (Export::Pdf, Doc::Text(tab)) if tab.flavour().is_note() => format!("{stem}.pdf"),
+            (Export::Html, Doc::Text(tab)) if tab.flavour().is_note() => format!("{stem}.html"),
+            (Export::Pdf, Doc::Pdf(_)) => format!("{stem} (exported).pdf"),
+            (_, Doc::Diagram(tab)) => match diagram::export::offered_name(tab, to) {
+                Some(name) => name,
+                None => return,
+            },
             _ => return,
         };
         let dialog = gtk::FileDialog::builder()
@@ -102,6 +118,7 @@ impl App {
                 (Doc::Text(tab), Export::Pdf) => app.note_pdf_to(tab, dest),
                 (Doc::Text(tab), Export::Html) => app.note_html_to(tab, dest),
                 (Doc::Pdf(pdf), _) => pdf::export::export_to(&app, &pdf, dest),
+                (Doc::Diagram(tab), to) => diagram::export::export_to(&app, &tab, to, dest),
                 _ => {}
             }
         });
@@ -184,10 +201,12 @@ impl App {
                     .to_string();
                 let (resolve, css) = (app.asset_resolver(), preview::paper_css());
                 let note = tab.rel();
+                let drawn = drawn_diagrams(&html, &resolve, &note).await;
                 // Fetching an image is a round trip on a remote vault, and the page may hold many.
                 let write = move || {
-                    let body = inline_images(&html, |uri| {
-                        data_uri(&preview::asset(&*resolve, &note, uri)?)
+                    let body = inline_images(&html, |uri| match drawn.get(uri) {
+                        Some(diagram) => diagram.clone(),
+                        None => data_uri(&preview::asset(&*resolve, &note, uri)?),
                     });
                     accent_core::fs::write_bytes(
                         &dest,
@@ -257,14 +276,19 @@ async fn paper(app: &Rc<App>, tab: &Rc<Tab>) -> Result<Preview, String> {
 
 /// A print of `page` on the locale's paper, [`MARGIN_MM`] all round.
 fn operation(page: &Preview) -> webkit6::PrintOperation {
+    let op = webkit6::PrintOperation::new(page.view());
+    op.set_page_setup(&page_setup());
+    op
+}
+
+/// The locale's paper with [`MARGIN_MM`] all round, which a note and a diagram are printed on.
+pub(crate) fn page_setup() -> gtk::PageSetup {
     let setup = gtk::PageSetup::new();
     setup.set_top_margin(MARGIN_MM, gtk::Unit::Mm);
     setup.set_bottom_margin(MARGIN_MM, gtk::Unit::Mm);
     setup.set_left_margin(MARGIN_MM, gtk::Unit::Mm);
     setup.set_right_margin(MARGIN_MM, gtk::Unit::Mm);
-    let op = webkit6::PrintOperation::new(page.view());
-    op.set_page_setup(&setup);
-    op
+    setup
 }
 
 /// Start `op` with `start`, which says whether it did, and wait until it is over: whether it
@@ -333,7 +357,7 @@ fn file_printer() -> Option<String> {
 }
 
 /// What an export is called in its toasts: the name the chooser was given.
-fn dest_name(dest: &Path) -> String {
+pub(crate) fn dest_name(dest: &Path) -> String {
     dest.file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
@@ -354,6 +378,39 @@ fn data_uri(path: &Path) -> Option<String> {
         "data:{mime};base64,{}",
         glib::base64_encode(&bytes)
     ))
+}
+
+/// Every diagram `html` embeds drawn as the page shows it, as a `data:` URI by its address, or
+/// `None` where it cannot be: drawn here, on the main thread, the file fetched on a worker.
+async fn drawn_diagrams(
+    html: &str,
+    resolve: &Arc<preview::Resolve>,
+    note: &str,
+) -> HashMap<String, Option<String>> {
+    let mut drawn = HashMap::new();
+    // Each address as `inline_images` hands it over: as `outerHTML` escapes it, unescaped.
+    let sources = html
+        .split(" src=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .map(|uri| uri.replace("&amp;", "&"))
+        .filter(|uri| preview::is_diagram(uri));
+    for uri in sources {
+        let (resolve, note, at) = (resolve.clone(), note.to_string(), uri.clone());
+        let path = crate::work::off_thread("asset", move || preview::asset(&*resolve, &note, &at));
+        let svg = match path.await.flatten() {
+            Some(path) => diagram::embed::svg(&path, preview::diagram_page(&uri).as_deref()).await,
+            None => None,
+        };
+        let data = svg.map(|svg| {
+            format!(
+                "data:image/svg+xml;base64,{}",
+                glib::base64_encode(svg.as_bytes())
+            )
+        });
+        drawn.insert(uri, data);
+    }
+    drawn
 }
 
 /// Every `accent:` image source in `html` put inside it by `fetch`, as a `data:` URI; one it

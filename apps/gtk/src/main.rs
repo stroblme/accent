@@ -272,9 +272,9 @@ struct App {
     docs: RefCell<Vec<Doc>>,
     /// Work waiting for a tab that is still being opened, by key: see [`App::with_tab`].
     awaiting: RefCell<HashMap<String, Waiting>>,
-    /// The label each diagram still being opened is to show, by key, as a byte of its labels'
-    /// text: see [`App::open_label`].
-    revealing: RefCell<HashMap<String, usize>>,
+    /// What each diagram still being opened is to show once it is up, by key: the label a search
+    /// hit found ([`App::open_label`]) or the page a link names.
+    revealing: RefCell<HashMap<String, open::Reveal>>,
     /// The pane a restored tab goes into, by key, until it has one: see [`App::tabs_for`].
     placing: RefCell<HashMap<String, std::rc::Weak<Pane>>>,
     /// The tabs the files of the last launch naming several have landed in so far, each with its

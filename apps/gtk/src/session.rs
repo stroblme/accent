@@ -17,12 +17,13 @@ pub(crate) const SESSION: Duration = Duration::from_secs(1);
 #[derive(Default)]
 pub struct Corpus {
     /// Every file, then every note a link names that is not there yet: one list, so Go to File
-    /// ranks them together and a file that is there leads at the same score. `real` is where the
-    /// files end.
-    files: Rc<Vec<String>>,
-    real: usize,
-    /// `(alias, note)` for every frontmatter alias, which Go to File also finds a note by.
-    aliases: Rc<Vec<(String, String)>>,
+    /// ranks them together and a file that is there leads at the same score. The notes in a
+    /// folder git ignores, which the index never walks, are the last walk of those folders,
+    /// behind the files the index lists.
+    files: palette::Files,
+    /// The open palette's way to the files as they land, so a dialog opened before they did, or
+    /// before the fresh ones its own opening asked for, ranks them as soon as they are here.
+    open: Option<palette::Refill>,
     tags: Rc<Vec<String>>,
     /// The index's recently changed notes, up to [`RECENT_FILES`]: one refresh behind at worst,
     /// which a list of what changed lately can afford.
@@ -31,8 +32,13 @@ pub struct Corpus {
 
 impl App {
     /// Re-read what the palette lists, off the main loop. Cheap enough to do on every reconcile
-    /// and every time the dialog opens, which is what keeps the answer both instant and current.
-    pub fn refresh_corpus(self: &Rc<Self>) {
+    /// and every time the dialog opens, which is what keeps the answer both instant and current:
+    /// the dialog shows what is here at once, and the files that land while it is open are handed
+    /// to it.
+    ///
+    /// The notes in the gitignored folders are the vault's last walk of them, unless `relist`
+    /// walks them again: a walk of the whole vault, so only the dialog opening asks for one.
+    pub fn refresh_corpus(self: &Rc<Self>, relist: bool) {
         let Some(vault) = self.vault().cloned() else {
             return;
         };
@@ -50,6 +56,10 @@ impl App {
                 // Never widened: Go to File has no All toggle, and the tree is where an ignored
                 // file is reached, dimmed but listed.
                 let mut files = vault.file_paths(false).unwrap_or_default();
+                let ignored = palette::with_ignored(
+                    &mut files,
+                    vault.ignored_notes(relist).unwrap_or_default(),
+                );
                 let real = files.len();
                 // What this window opened and is gone since: deleted, or renamed where no event
                 // said so. A typed query ranks the history with the files, so a gone one would
@@ -67,7 +77,7 @@ impl App {
                 files.extend(vault.missing_notes().unwrap_or_default());
                 let aliases = vault.note_aliases().unwrap_or_default();
                 (
-                    (files, real, gone, aliases),
+                    (files, real, ignored, gone, aliases),
                     vault
                         .tags()
                         .unwrap_or_default()
@@ -78,26 +88,38 @@ impl App {
                 )
             })
             .await;
-            if let (Some(app), Some(((files, real, gone, aliases), tags, recent))) =
+            if let (Some(app), Some(((files, real, ignored, gone, aliases), tags, recent))) =
                 (weak.upgrade(), loaded)
             {
                 app.recent_files
                     .borrow_mut()
                     .retain(|rel| !gone.contains(rel));
-                *app.corpus.borrow_mut() = Corpus {
-                    files: Rc::new(files),
+                let files = palette::Files {
+                    paths: Rc::new(files),
                     real,
+                    ignored: Rc::new(ignored),
                     aliases: Rc::new(aliases),
-                    tags: Rc::new(tags),
-                    recent: Rc::new(recent),
                 };
+                // Taken out while the dialog ranks: nothing it runs may find the corpus borrowed.
+                let open = {
+                    let mut corpus = app.corpus.borrow_mut();
+                    corpus.files = files.clone();
+                    corpus.tags = Rc::new(tags);
+                    corpus.recent = Rc::new(recent);
+                    corpus.open.take()
+                };
+                if let Some(refill) = open {
+                    refill(files);
+                    app.corpus.borrow_mut().open.get_or_insert(refill);
+                }
             }
         });
     }
 
     pub fn palette(self: &Rc<Self>, initial: palette::Mode) {
-        // For the next time it opens; this one uses what is already there.
-        self.refresh_corpus();
+        // This one shows what is already here, and takes the fresh files when they land. Only Go
+        // to File walks the gitignored folders again for its notes.
+        self.refresh_corpus(initial == palette::Mode::Files);
         // Two answers to "recent": what this window opened, and what changed on disk. The first
         // is what the user means, so it leads and the index's mtime list fills the page below it.
         let mru = self.recent_files.borrow().clone();
@@ -124,8 +146,6 @@ impl App {
             mru,
             // Every file, not only the notes: a source file has to be reachable by name too.
             files: self.corpus.borrow().files.clone(),
-            real: self.corpus.borrow().real,
-            aliases: self.corpus.borrow().aliases.clone(),
             commands: ACTIONS
                 .iter()
                 .map(|(action, label, _)| palette::Item::Command {
@@ -171,7 +191,7 @@ impl App {
         drop(key);
         drop(config);
         drop(used);
-        palette::present(
+        let refill = palette::present(
             &self.window,
             initial,
             sources,
@@ -179,9 +199,9 @@ impl App {
                 #[weak(rename_to = app)]
                 self,
                 move |item: &palette::Item| match item {
-                    palette::Item::File(rel) | palette::Item::Alias { rel, .. } => {
-                        app.open_path(rel)
-                    }
+                    palette::Item::File(rel)
+                    | palette::Item::Ignored(rel)
+                    | palette::Item::Alias { rel, .. } => app.open_path(rel),
                     // Followed as the link would be: New File, unless the note has been written
                     // since the list was read.
                     palette::Item::Missing(rel) => app.open_target(rel),
@@ -207,6 +227,7 @@ impl App {
                 }
             ),
         );
+        self.corpus.borrow_mut().open = Some(refill);
     }
 
     /// Remember that this file was just looked at. Called from `sync_active`, so it covers

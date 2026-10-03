@@ -886,6 +886,9 @@ mod tests {
 
         let target: Option<String> = w.client.call("resolve_link", json!(["b"])).unwrap();
         assert_eq!(target.as_deref(), Some("b.md"));
+
+        let ignored: Vec<String> = w.client.call("ignored_notes", json!([true])).unwrap();
+        assert!(ignored.is_empty());
     }
 
     #[test]

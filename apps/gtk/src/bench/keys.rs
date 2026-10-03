@@ -139,6 +139,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
             bench_grow(&view);
             bench_folds(&view).await;
             bench_table(&view);
+            bench_whole_words(&view);
             window.close();
             bench_quit(&app);
         });
@@ -481,6 +482,34 @@ fn bench_table(view: &multicaret::View) {
     press("not_a_table", gdk::Key::Tab);
 }
 
+/// Add Caret at Next Occurrence and Select All Occurrences of a word the tab took from under the
+/// caret ([`multicaret::View::match_whole_words`]) match whole words, passing over the `foo` in
+/// `foo_bar` and `xfoo`; of a selection made by hand, any. Prints every selection as offsets.
+fn bench_whole_words(view: &multicaret::View) {
+    let buffer = view.buffer();
+    let show = |step: &str| {
+        let spans: Vec<(i32, i32)> = view
+            .selections()
+            .iter()
+            .map(|(start, end)| (start.offset(), end.offset()))
+            .collect();
+        println!("bench occur_{step} {spans:?}");
+    };
+    for (by, whole) in [("by_hand", false), ("word", true)] {
+        view.clear_carets();
+        buffer.set_text("a.foo foo_bar xfoo foo");
+        buffer.select_range(&at(&buffer, 0, 5), &at(&buffer, 0, 2));
+        if whole {
+            view.match_whole_words();
+        }
+        view.add_next_occurrence();
+        show(&format!("next_{by}"));
+        view.select_all_occurrences();
+        show(&format!("all_{by}"));
+    }
+    view.clear_carets();
+}
+
 /// The iter at `column` of `line`, or the end of the buffer past its last line.
 fn at(buffer: &gtk::TextBuffer, line: i32, column: i32) -> gtk::TextIter {
     let mut at = buffer.iter_at_line(line).unwrap_or(buffer.end_iter());
@@ -699,6 +728,14 @@ async fn bench_lines(view: &multicaret::View) {
         println!("bench lines_{step}_carets {}", view.has_carets());
         show(step);
     }
+    // Carets on a commented line and an uncommented one apart: decided once over both, so both
+    // are commented, as VS Code does, where each deciding alone swapped them.
+    view.clear_carets();
+    buffer.set_text("    // x();\n    b();\n    x();");
+    buffer.select_range(&at(&buffer, 0, 8), &at(&buffer, 0, 7));
+    view.add_next_occurrence();
+    editor::toggle_comment(view.upcast_ref());
+    show("comment_mixed_column");
 
     // Shift+Delete is GTK's Cut binding, so the column leaves the press to it rather than deleting
     // a character at every caret, and answers the signal it emits with its own whole-line cut.
@@ -1204,7 +1241,8 @@ fn bench_held() -> String {
 }
 
 /// Box selection through the real pointer: a plain drag, which stays GTK's own selection, a
-/// `Shift+Alt` drag, and a `Shift+Alt` press that does not move, which leaves one caret there.
+/// `Shift+Alt` drag, a `Shift+Alt` press that does not move, which leaves one caret there, and a
+/// `Shift+Alt` drag resting a second below the view, which scrolls on and grows the box with it.
 /// The file at `rel` is given a text of its own, and for each the drill prints
 /// `bench box_ready <steps>` for `build-aux/xtest.py :N "<steps>"` to run, in the window's
 /// coordinates, which under Xvfb are the screen's, then every caret and the primary selection. It
@@ -1268,6 +1306,33 @@ pub(super) fn bench_box_drag(app: &Rc<App>, rel: &str) {
                 .map(|(start, end)| (start.offset(), end.offset()));
             println!("bench box {step} {carets:?} selection={selection:?}");
         }
+        // Down to 40 px below the view and resting there: the box goes on growing as the view
+        // scrolls, where it used to stop at the line the last motion reached, a screenful down.
+        let lines: Vec<String> = (0..400).map(|i| format!("line {i}")).collect();
+        tab.set_text(&lines.join("\n"));
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let rect = tab.view.visible_rect();
+        let screen = tab.view.line_at_y(rect.y() + rect.height()).0.line();
+        let below = graphene::Point::new(20.0, (tab.view.height() + 40) as f32);
+        let below = tab.view.compute_point(&app.window, &below).unwrap_or(below);
+        let rest = format!(
+            "move {}; sleep 0.2; down; move {}; sleep 0.1; move {:.0} {:.0}; sleep 1; up",
+            aim(0, 2),
+            aim(2, 2),
+            below.x(),
+            below.y()
+        );
+        println!("bench box_ready {}", chord(rest));
+        glib::timeout_future(Duration::from_millis(3000)).await;
+        let last = tab
+            .ghost_view()
+            .and_then(|view| view.caret_positions().last().copied())
+            .map_or(0, |(line, _)| line);
+        println!(
+            "bench box rest screen={screen} last={last} scrolled_on={}",
+            last > screen + 10
+        );
         tab.set_text(&own);
         bench_quit(&app);
     });
