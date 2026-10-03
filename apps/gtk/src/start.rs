@@ -39,8 +39,11 @@ pub fn present(
     on_open: impl Fn(PathBuf) + 'static,
     on_forget: Forget,
 ) -> adw::ApplicationWindow {
-    // The start screen is a window like any other, so it follows the same theme preference.
+    // The start screen is a window like any other, so it follows the same theme preference, and
+    // it may be the first window, before any vault's has put the shipped icons (a remote row's
+    // server) in the theme.
     crate::theme::apply(config.borrow().theme);
+    crate::build::install_icons();
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Accent")
@@ -386,13 +389,13 @@ pub(crate) fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
 }
 
 /// The icon a recent row carries, if any. Only what is not a folder here is marked: most rows are
-/// folders on this machine, and an icon on every one of them would say nothing. Both names are in
-/// Adwaita 50.
+/// folders on this machine, and an icon on every one of them would say nothing. The terminal is
+/// Adwaita's; the server is shipped (`data/icons`), the theme's own not being a rack.
 pub(crate) fn row_icon(path: &Path) -> Option<&'static str> {
     if crate::terminal::session_name(path).is_some() {
         return Some("utilities-terminal-symbolic");
     }
-    ssh::is_remote_path(path).then_some("network-server-symbolic")
+    ssh::is_remote_path(path).then_some("remote-server-symbolic")
 }
 
 /// The folder a remote vault is, for the row's title. A path with no last component — the whole

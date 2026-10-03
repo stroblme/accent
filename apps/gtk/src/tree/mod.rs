@@ -1128,7 +1128,7 @@ pub fn build(
     if let Some(host) = &remote_host {
         body.add_named(
             &status_page(
-                "network-server-symbolic",
+                "remote-server-symbolic",
                 &format!("Waiting for {host}"),
                 "Files will appear here when the host responds.",
             ),

@@ -958,7 +958,7 @@ thread_local! {
 /// everything else takes opacity. `.accent-flat` puts the two columns on the note's own background
 /// so nothing bands against it, on a class of ours rather than on `headerbar` globally; on the find
 /// bar it reaches the box Adwaita paints (`searchbar > revealer > box`), since the bar's own node
-/// is covered by it.
+/// is covered by it, and takes away the shade line Adwaita draws under that box, black in dark.
 /// `.accent-lone-header` drops the bottom padding of the sidebar header, the one header in the
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
 /// bottom and its bar area another 3, so with 6 above and none below both headers hold their
@@ -1018,7 +1018,7 @@ thread_local! {
 /// A GResource rather than hicolor: the completion list and the file lists need their icons
 /// long before anyone runs `make install`, and the theme keeps answering for every Adwaita name
 /// as it did.
-fn install_icons() {
+pub(crate) fn install_icons() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         if let Err(e) = gio::resources_register_include!("accent.gresource") {
@@ -1084,6 +1084,7 @@ fn install_chrome_css() {
              .accent-flat, .accent-flat:backdrop, \
                .accent-flat > revealer > box, .accent-flat > revealer > box:backdrop {{ \
                background-color: var(--view-bg-color); }} \
+             .accent-flat > revealer > box {{ box-shadow: none; }} \
              tabbar.accent-idle-pane tabbox:not(.single-tab) tab:selected:not(:hover) {{ \
                background-color: transparent; \
                box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 25%, transparent); }} \
