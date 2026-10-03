@@ -304,9 +304,14 @@ smoke: gtk-bench vault xvfb
 # `ACCENT_BENCH_KEYS=1` is multi-caret's regression cover: the key semantics, the carets and the
 # selections, in a view of its own, so an empty scratch vault is all it needs. Written to a file
 # first, so a run that crashes or times out fails on its exit status as well.
+#
+# `ACCENT_BENCH_CLOSE=1` exits 1 when a closed window leaves its vault referenced, which on a
+# remote vault keeps its `serve` and forwards up. One note in the vault, so a tab is open too.
 drills: gtk-bench xvfb
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
 	grep '^bench ' "$$xdg/keys" | diff -u apps/gtk/src/bench/keys.expected -
+	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && \
+		ACCENT_BENCH_CLOSE=1 exec timeout 60 $(TARGET_DIR)/accent "$$0"' "$$xdg/vault"
 
 ## server: build the static accent-cli that gets uploaded to a remote host, for x86_64 and aarch64
 #
