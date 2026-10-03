@@ -110,6 +110,13 @@ impl App {
         // Pruned before the config is borrowed for the rest: dropping a gone folder writes it.
         let vaults = start::recent_vaults(&self.config);
         let used = self.recent_commands.borrow();
+        // What the SyncTeX pair cannot run for over a LaTeX build without a SyncTeX file.
+        let (source, show) = self.synctex_missing(self.active_doc().as_ref());
+        let why = |action: &str| match action {
+            "win.pdf-go-to-source" if source => Some(synctex::NO_SYNCTEX.to_string()),
+            "win.show-in-pdf" if show => Some(synctex::NO_SYNCTEX.to_string()),
+            _ => None,
+        };
         let config = self.config.borrow();
         let key = self.key.borrow();
         let sources = palette::Sources {
@@ -126,6 +133,7 @@ impl App {
                     label: label.to_string(),
                     accels: accels_for(&config, action),
                     recent: used.iter().position(|a| a == action),
+                    why: why(action),
                 })
                 .collect(),
             tags: self.corpus.borrow().tags.clone(),

@@ -11,6 +11,11 @@ use std::time::SystemTime;
 /// document's is megabytes.
 const KEEP: usize = 2;
 
+/// Why Go to Source or Show in PDF is greyed over a LaTeX build without a SyncTeX file, as the
+/// palette's row says it; a menu item, which carries no tooltip, ends in the shorter label below.
+pub(crate) const NO_SYNCTEX: &str = "This build has no SyncTeX data: build with -synctex=1";
+const NO_SYNCTEX_LABEL: &str = "(no SyncTeX data)";
+
 thread_local! {
     /// The SyncTeX files read, oldest first, each with the etag it was read at: a rebuild is
     /// read again, and nothing else is.
@@ -51,6 +56,14 @@ fn build_of(pdf: &Path) -> Option<PathBuf> {
     })
 }
 
+/// Whether the PDF at `pdf` is a LaTeX build with no SyncTeX file to go by: built without one,
+/// or built again since without one. Not one whose pages accent has moved, whose file is there
+/// but names pages no longer where they were.
+fn without_synctex(root: &Path, pdf: &Path) -> bool {
+    let moved = TRUSTED.with_borrow(|trusted| trusted.get(pdf).is_some_and(|trust| trust.moved));
+    !moved && build_of(pdf).is_none() && synctex::is_build(root, pdf)
+}
+
 /// The SyncTeX file at `path`, read on a worker unless the one kept is what is there now.
 async fn read(path: PathBuf) -> Result<Arc<Synctex>, String> {
     let etag = Etag::of(&path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
@@ -73,6 +86,19 @@ async fn read(path: PathBuf) -> Result<Arc<Synctex>, String> {
         }
     });
     Ok(synctex)
+}
+
+/// `action` (Go to Source or Show in PDF) as a menu offers it: hidden while it is disabled, or
+/// greyed and saying why where it is `missing` only a SyncTeX file.
+pub(crate) fn menu_item(action: &str, missing: bool) -> gio::MenuItem {
+    let label = actions::label_of(action);
+    if missing {
+        let label = format!("{label} {NO_SYNCTEX_LABEL}");
+        return gio::MenuItem::new(Some(&label), Some(action));
+    }
+    let item = gio::MenuItem::new(Some(label), Some(action));
+    item.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
+    item
 }
 
 /// Whether `key` names a LaTeX source, the one kind of file Show in PDF goes from.
@@ -184,8 +210,12 @@ impl App {
 
     /// Offer Go to Source over a PDF with a SyncTeX file beside it, and Show in PDF over a `.tex`
     /// with a build near it, both of a local vault. Disabled anywhere else, which takes each off
-    /// the menu that names it and greys it in the palette.
+    /// the menu that names it, unless only a SyncTeX file is missing ([`App::synctex_missing`]):
+    /// then the page's menu shows it greyed, saying why.
     pub(crate) fn sync_synctex(&self, doc: Option<Doc>) {
+        if let Some(pdf) = doc.as_ref().and_then(Doc::pdf) {
+            pdf.set_without_synctex(self.synctex_missing(doc.as_ref()).0);
+        }
         let source = doc
             .as_ref()
             .and_then(Doc::pdf)
@@ -246,13 +276,8 @@ impl App {
         if self.local_tex(&tab.rel()).is_none() {
             return;
         }
-        let item = gio::MenuItem::new(
-            Some(actions::label_of("win.show-in-pdf")),
-            Some("win.show-in-pdf"),
-        );
-        item.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
         let section = gio::Menu::new();
-        section.append_item(&item);
+        section.append_item(&menu_item("win.show-in-pdf", false));
         let menu = gio::Menu::new();
         menu.append_section(None, &section);
         if let Some(previous) = tab.view.extra_menu() {
@@ -268,9 +293,33 @@ impl App {
             self,
             #[weak]
             tab,
-            move |_, _, _, _| app.sync_synctex(Some(Doc::Text(tab)))
+            move |_, _, _, _| {
+                let doc = Doc::Text(tab);
+                app.sync_synctex(Some(doc.clone()));
+                let missing = app.synctex_missing(Some(&doc)).1;
+                section.remove_all();
+                section.append_item(&menu_item("win.show-in-pdf", missing));
+            }
         ));
         tab.view.add_controller(press);
+    }
+
+    /// Whether Go to Source, then Show in PDF, is missing nothing but a SyncTeX file over `doc`:
+    /// a local vault's PDF that is a LaTeX build ([`synctex::is_build`]), or a `.tex` whose
+    /// build's PDF is there ([`synctex::pdf_near`]), built without `-synctex=1`.
+    pub(crate) fn synctex_missing(&self, doc: Option<&Doc>) -> (bool, bool) {
+        let root = self.root();
+        let source = (doc.and_then(Doc::pdf))
+            .filter(|pdf| self.is_local_pdf(pdf))
+            .is_some_and(|pdf| without_synctex(&root, &pdf.path()));
+        let show = (doc.and_then(Doc::tab))
+            .and_then(|tab| self.local_tex(&tab.rel()))
+            .is_some_and(|tex| {
+                synctex::near(&root, &tex, build_of).is_empty()
+                    && synctex::pdf_near(&root, &tex)
+                        .is_some_and(|pdf| without_synctex(&root, &pdf))
+            });
+        (source, show)
     }
 
     /// accent wrote into a PDF itself, ink, highlights or pages: a trusted build stays trusted

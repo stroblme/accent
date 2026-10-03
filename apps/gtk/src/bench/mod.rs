@@ -281,7 +281,9 @@ use tags::bench_tags;
 /// goes to the source from points of a LaTeX build's first two pages through Go to Source, as
 /// the page's menu does, and back with Show in PDF from the line it landed on, printing each
 /// line and line of text, or the toast (`synctex::bench_synctex`); point it at a `-synctex=1`
-/// build of an article in a scratch vault.
+/// build of an article in a scratch vault. A build without a SyncTeX file prints the palette's
+/// rows for both commands and the `.tex` tab's menu each second for eight instead, for a
+/// secondary press through XTEST to turn its Show in PDF into "(no SyncTeX data)".
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand, and what the vault holds under its name. `=sketch:<rel_note>` fires
