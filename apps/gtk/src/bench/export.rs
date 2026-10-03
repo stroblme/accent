@@ -315,7 +315,7 @@ fn counts(path: &Path) -> (usize, usize, usize) {
 }
 
 /// What the toast starting with `prefix` says, once one is up.
-async fn toast(app: &Rc<App>, prefix: &str) -> Option<String> {
+pub(super) async fn toast(app: &Rc<App>, prefix: &str) -> Option<String> {
     for _ in 0..100 {
         let label = find_widget(app.window.upcast_ref(), &|w| {
             w.downcast_ref::<gtk::Label>()

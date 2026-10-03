@@ -297,6 +297,11 @@ impl DiagramView {
         *self.imp().typesetter.borrow_mut() = Some(typesetter);
     }
 
+    /// What typesets the page's formulas, which an export of the diagram asks too.
+    pub fn typesetter(&self) -> Option<Rc<super::math::Typesetter>> {
+        self.imp().typesetter.borrow().clone()
+    }
+
     /// Whether formulas are still being typeset: the drill waits for them.
     #[cfg(feature = "bench")]
     pub fn typesetting(&self) -> bool {

@@ -47,10 +47,14 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 /// frames of a move on the page of `rel` with the most cells: none moving, the shape with the
 /// most edges on it moving live, and everything on the page moving as a box;
 /// `=present:<rel>,<pdf>` is presentation over both (`present`); `=look:<rel>:<dir>` walks
-/// the sample through the themes (`look`).
+/// the sample through the themes (`look`); `=export:<rel>:<dir>` exports and prints it into
+/// `<dir>` (`export`).
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("preview:") {
         return preview(app, rel);
+    }
+    if let Some((rel, dir)) = arg.strip_prefix("export:").and_then(|a| a.split_once(':')) {
+        return export(app, rel, Path::new(dir));
     }
     if let Some((rel, dir)) = arg.strip_prefix("look:").and_then(|a| a.split_once(':')) {
         return look(app, rel, Path::new(dir));
@@ -148,6 +152,89 @@ fn picture(widget: &gtk::Widget) -> Option<gdk::Texture> {
     let renderer = widget.native()?.renderer()?;
     let viewport = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
     Some(renderer.render_texture(&node, Some(&viewport)))
+}
+
+/// Under Dark, Export as PDF…, PNG… and SVG… of the sample (written to `rel` when there is none)
+/// into `<dir>` under the names the chooser offers, as each does once the chooser has answered,
+/// and Print… sent to `<dir>/print.pdf` by the print system's Export: printed for each, its pages
+/// and their sizes, the PNG's commonest pixel (its paper: white, the file's, not the theme's) and
+/// whether the SVG draws.
+fn export(app: &Rc<App>, rel: &str, dir: &Path) {
+    use crate::diagram::export::{export_to, offered_name, operation};
+    use crate::export::Export;
+    let path = app.root().join(rel);
+    if !path.exists() {
+        std::fs::write(&path, SAMPLE).expect("write the sample diagram");
+    }
+    std::fs::create_dir_all(dir).expect("a directory for the exports");
+    let (app, rel, dir) = (app.clone(), rel.to_string(), dir.to_path_buf());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        crate::theme::apply(Theme::Dark);
+        app.restyle_all();
+        app.open_path(&rel);
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        let Some(tab) = app.active_diagram() else {
+            println!("bench diagram no_tab");
+            return bench_quit(&app);
+        };
+        for to in [Export::Pdf, Export::Png, Export::Svg] {
+            let Some(name) = offered_name(&tab, to) else {
+                continue;
+            };
+            let dest = dir.join(&name);
+            let _ = std::fs::remove_file(&dest);
+            let started = Instant::now();
+            export_to(&app, &tab, to, dest.clone());
+            let said = super::export::toast(&app, &format!("Exported {name}")).await;
+            println!(
+                "bench diagram export {name} ms={:.0} said={said:?} {}",
+                ms_since(started),
+                exported(&dest)
+            );
+        }
+        let print = dir.join("print.pdf");
+        let _ = std::fs::remove_file(&print);
+        let op = operation(&tab.file(), tab.typesetter().as_ref(), "print").await;
+        op.set_export_filename(&print);
+        // From an idle, as Print… runs it: the export runs a main loop of its own.
+        let ran = gio::GioFuture::new(&op, |op, _, done| {
+            let op = op.clone();
+            glib::idle_add_local_once(move || {
+                done.resolve(op.run(gtk::PrintOperationAction::Export, None::<&gtk::Window>))
+            });
+        })
+        .await;
+        println!("bench diagram print {ran:?} {}", exported(&print));
+        bench_quit(&app);
+    });
+}
+
+/// What an export wrote: a PDF's page sizes in points, a picture's size, and a PNG's commonest
+/// pixel.
+fn exported(path: &Path) -> String {
+    if path.extension().is_some_and(|e| e == "pdf") {
+        return match accent_core::pdf::PdfDoc::open(path).and_then(|d| d.page_sizes()) {
+            Ok(sizes) => format!("pages={} sizes={sizes:?}", sizes.len()),
+            Err(e) => format!("unreadable {e}"),
+        };
+    }
+    let Ok(texture) = gdk::Texture::from_filename(path) else {
+        return "unreadable".to_string();
+    };
+    let mut downloader = gdk::TextureDownloader::new(&texture);
+    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+    let (bytes, _) = downloader.download_bytes();
+    let mut counts: HashMap<&[u8], usize> = HashMap::new();
+    for pixel in bytes.chunks_exact(4) {
+        *counts.entry(pixel).or_default() += 1;
+    }
+    let paper = counts.into_iter().max_by_key(|(_, n)| *n).map(|(p, _)| p);
+    format!(
+        "size={}x{} paper={paper:?}",
+        texture.width(),
+        texture.height()
+    )
 }
 
 /// Walk the sample (written to `rel` when there is none) through Light, Dark and Solarized, each

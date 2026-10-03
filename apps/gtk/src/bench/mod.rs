@@ -462,7 +462,8 @@ use tags::bench_tags;
 /// `/tmp`.
 ///
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram (a sample is written there if there is none) and
-/// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`.
+/// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`;
+/// `=export:<rel>:<dir>` exports it as PDF, PNG and SVG and prints it into `<dir>` under Dark.
 ///
 /// `ACCENT_BENCH_COLLAPSE=1` drags the sidebar to 400 px and takes the window to 360 px, below the
 /// width the sidebar collapses at, and back, printing the window's width, whether the sidebar

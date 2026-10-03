@@ -24,6 +24,8 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
+# gtk's own cairo, with the surfaces a diagram is exported onto (`diagram::render`).
+cairo-rs = { version = "0.22", features = ["pdf", "svg", "png", "v1_16"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_7"] }
 sourceview5 = { version = "0.11", features = ["v5_18"] }
 webkit6 = "0.6"

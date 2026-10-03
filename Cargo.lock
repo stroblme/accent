@@ -10,6 +10,7 @@ dependencies = [
  "accent-core",
  "accent-drawio",
  "anyhow",
+ "cairo-rs",
  "chrono",
  "glib-build-tools",
  "gtk4",

@@ -22,6 +22,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.print", "Print…", &[]),
     ("win.export-pdf", "Export as PDF…", &[]),
     ("win.export-html", "Export as HTML…", &[]),
+    ("win.export-png", "Export as PNG…", &[]),
+    ("win.export-svg", "Export as SVG…", &[]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
     // Most-recently-used order, so one press is the note before this one. Both spellings of the
     // backwards chord, because X11 delivers Shift+Tab as `ISO_Left_Tab` and which of the two a
@@ -321,6 +323,8 @@ impl App {
             "print" => self.print(),
             "export-pdf" => self.export(Export::Pdf),
             "export-html" => self.export(Export::Html),
+            "export-png" => self.export(Export::Png),
+            "export-svg" => self.export(Export::Svg),
             "save-session" => self.save_shells(),
             "close-session" => self.close_session(),
             "reload-window" => self.reload(),
@@ -1066,7 +1070,7 @@ pub fn tab_menu() -> gio::Menu {
 /// comparison and a remote vault's file cannot. `pinned` says which
 /// of Pin Tab and Unpin Tab it offers, and `prints` what the tab can be printed and exported as
 /// (`export::printable`): a note Print…, Export as PDF… and Export as HTML…, a PDF the first two,
-/// anything else none, in a section of their own after Reveal, since they make something of the
+/// a diagram those two and Export as PNG… and SVG…, anything else none, in a section of their own after Reveal, since they make something of the
 /// file rather than name it.
 ///
 /// Filled in place rather than built afresh, because `AdwTabView` holds one model per pane and a
@@ -1119,6 +1123,12 @@ pub fn fill_tab_menu(
     let prints: &[&str] = match prints {
         Some(Kind::Note) => &["win.print", "win.export-pdf", "win.export-html"],
         Some(Kind::Pdf) => &["win.print", "win.export-pdf"],
+        Some(Kind::Diagram) => &[
+            "win.print",
+            "win.export-pdf",
+            "win.export-png",
+            "win.export-svg",
+        ],
         _ => &[],
     };
     if !prints.is_empty() {
@@ -1250,6 +1260,8 @@ mod tests {
             "win.print",
             "win.export-pdf",
             "win.export-html",
+            "win.export-png",
+            "win.export-svg",
         ] {
             assert!(
                 ACTIONS.iter().any(|(name, _, _)| *name == action),
@@ -1407,8 +1419,8 @@ mod tests {
             .collect()
     }
 
-    /// A note is printed and exported three ways and a PDF two, right after Reveal in Sidebar; a
-    /// shell, a comparison or any other tab is offered none.
+    /// A note is printed and exported three ways, a PDF two and a diagram four, right after Reveal
+    /// in Sidebar; a shell, a comparison or any other tab is offered none.
     #[test]
     fn the_tab_menu_prints_what_can_be_printed() {
         let after_reveal = |prints| {
@@ -1433,6 +1445,11 @@ mod tests {
             [print, pdf, html, rename, trash]
         );
         assert_eq!(after_reveal(Some(Kind::Pdf)), [print, pdf, rename, trash]);
+        let (png, svg) = ("win.export-png", "win.export-svg");
+        assert_eq!(
+            after_reveal(Some(Kind::Diagram)),
+            [print, pdf, png, svg, rename, trash]
+        );
         assert_eq!(after_reveal(None), [rename, trash]);
     }
 
