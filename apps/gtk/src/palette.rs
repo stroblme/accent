@@ -18,7 +18,7 @@ use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
 use gtk::glib;
 use gtk::{gdk, gio, pango};
-use std::cell::{OnceCell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
@@ -89,14 +89,7 @@ pub struct Sources {
     /// it holds nothing but the user's own moves, and a file in it the index does not list is
     /// ranked with the files ([`with_history`]).
     pub mru: Vec<String>,
-    /// Every file and every tag in the vault: the window's own lists, shared rather than copied.
-    /// The files are followed by the notes links name that are not there yet, from `real` on.
-    pub files: Rc<Vec<String>>,
-    pub real: usize,
-    /// Which of the files are notes in a folder git ignores ([`with_ignored`]).
-    pub ignored: Rc<HashSet<String>>,
-    /// `(alias, note)` for every frontmatter alias, ranked with the files by the alias.
-    pub aliases: Rc<Vec<(String, String)>>,
+    pub files: Files,
     pub commands: Vec<Item>,
     pub tags: Rc<Vec<String>>,
     /// The recent vaults this window can switch to, newest first, the one it is on left out.
@@ -114,6 +107,21 @@ pub struct Sources {
     /// shells end with it (`Shell::remove_recent`), and never if that question is declined.
     pub on_forget: Box<Forget>,
 }
+
+/// What a typed Go to File query ranks: every file, followed by the notes links name that are not
+/// there yet from `real` on; which of the files are notes in a folder git ignores
+/// ([`with_ignored`]); and `(alias, note)` for every front matter alias, ranked with the files by
+/// the alias. The window's own lists, shared rather than copied.
+#[derive(Clone, Default, PartialEq)]
+pub struct Files {
+    pub paths: Rc<Vec<String>>,
+    pub real: usize,
+    pub ignored: Rc<HashSet<String>>,
+    pub aliases: Rc<Vec<(String, String)>>,
+}
+
+/// Hand an open dialog the window's files as they are now. See [`present`].
+pub type Refill = Box<dyn Fn(Files)>;
 
 /// Remove the recent vault `key`, then run the callback once its row may go.
 pub type Forget = dyn Fn(&str, Box<dyn FnOnce()>);
@@ -260,6 +268,20 @@ pub fn with_ignored(files: &mut Vec<String>, ignored: Vec<String>) -> HashSet<St
     };
     files.extend(added.iter().cloned());
     added.into_iter().collect()
+}
+
+/// A file's row, which says so when the note is in a folder git ignores.
+fn file_item(ignored: &HashSet<String>, rel: &String) -> Rc<Item> {
+    Rc::new(match ignored.contains(rel) {
+        true => Item::Ignored(rel.clone()),
+        false => Item::File(rel.clone()),
+    })
+}
+
+/// What the row at `at` reads, which is what finds it again in a list ranked anew.
+fn text_at(selection: &gtk::SingleSelection, at: u32) -> Option<String> {
+    let boxed = selection.item(at).and_downcast::<glib::BoxedAnyObject>()?;
+    Some(boxed.borrow::<Rc<Item>>().text().to_string())
 }
 
 /// "<Control>p" -> "Ctrl+P", spelled the way this GTK build spells it.
@@ -554,19 +576,21 @@ fn capture_shortcut(
 
 /// Opens in `mode` with an empty entry: the mode is chrome (title and placeholder), never a
 /// character the user has to type around or delete.
+///
+/// What it returns hands the dialog the window's files again for as long as it is open: they can
+/// land after it opened — in a vault's first seconds, or fresh from the opening itself — and a
+/// typed query is then ranked again over them, the highlight staying on its row if that is still
+/// there. A list that has not changed changes nothing.
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     mode: Mode,
     sources: Sources,
     on_pick: impl Fn(&Item) + 'static,
-) {
+) -> Refill {
     let Sources {
         recent,
         mru,
         files,
-        real,
-        ignored,
-        aliases,
         commands,
         tags,
         vaults,
@@ -602,11 +626,12 @@ pub fn present(
             .collect(),
     );
     let clashes = Rc::new(RefCell::new(conflicts(&commands.borrow())));
+    let files = Rc::new(RefCell::new(files));
     // What a typed query ranks ([`with_history`], then the aliases), where its files and its paths
     // end, and where each file sits in the window's most-recent list. Built on the first keystroke
-    // and kept: each is a pass over every path in the vault, and the corpus does not change while
-    // the dialog is up.
-    let typed = Rc::new(OnceCell::new());
+    // and kept until the files are handed over again: each is a pass over every path in the vault.
+    type Typed = (Rc<Vec<String>>, usize, usize, Vec<Option<usize>>);
+    let typed: Rc<RefCell<Option<Typed>>> = Rc::default();
 
     let model = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(model.clone()));
@@ -672,13 +697,6 @@ pub fn present(
     let refresh = Rc::new({
         let (model, selection, stack) = (model.clone(), selection.clone(), stack.clone());
         let (recent, files, tags) = (recent.clone(), files.clone(), tags.clone());
-        // A file's row, which says so when the note is in a folder git ignores.
-        let file_item = move |rel: &String| {
-            Rc::new(match ignored.contains(rel) {
-                true => Item::Ignored(rel.clone()),
-                false => Item::File(rel.clone()),
-            })
-        };
         let (mru, typed) = (mru.clone(), typed.clone());
         let (vaults, vault_places) = (vaults.clone(), vault_places.clone());
         let (commands, command_text, command_recent) = (
@@ -695,30 +713,37 @@ pub fn present(
                     // No corpus and no matching until the user actually types: the dialog is up in the
                     // time one indexed query takes, not the 11 s a full vault walk took.
                     Mode::Files if empty_query => {
-                        recent.iter().take(MAX_RESULTS).map(&file_item).collect()
+                        let ignored = &files.borrow().ignored;
+                        recent
+                            .iter()
+                            .take(MAX_RESULTS)
+                            .map(|rel| file_item(ignored, rel))
+                            .collect()
                     }
                     Mode::Files => {
-                        let (files, real, named, used) = typed.get_or_init(|| {
-                            let (mut files, real) = with_history(&files, real, &mru);
+                        let files = files.borrow();
+                        let mut typed = typed.borrow_mut();
+                        let (paths, real, named, used) = &*typed.get_or_insert_with(|| {
+                            let (mut paths, real) = with_history(&files.paths, files.real, &mru);
                             // Behind the paths, so a file leads an alias at the same score.
-                            let named = files.len();
-                            if !aliases.is_empty() {
-                                let mut all = (*files).clone();
-                                all.extend(aliases.iter().map(|(name, _)| name.clone()));
-                                files = Rc::new(all);
+                            let named = paths.len();
+                            if !files.aliases.is_empty() {
+                                let mut all = (*paths).clone();
+                                all.extend(files.aliases.iter().map(|(name, _)| name.clone()));
+                                paths = Rc::new(all);
                             }
-                            let used = places(&files, &mru);
-                            (files, real, named, used)
+                            let used = places(&paths, &mru);
+                            (paths, real, named, used)
                         });
                         let (real, named) = (*real, *named);
-                        rank(files, used, query, Corpus::Paths)
+                        rank(paths, used, query, Corpus::Paths)
                             .into_iter()
                             .map(|i| match i {
-                                i if i < real => file_item(&files[i]),
-                                i if i < named => Rc::new(Item::Missing(files[i].clone())),
+                                i if i < real => file_item(&files.ignored, &paths[i]),
+                                i if i < named => Rc::new(Item::Missing(paths[i].clone())),
                                 i => Rc::new(Item::Alias {
-                                    name: files[i].clone(),
-                                    rel: aliases[i - named].1.clone(),
+                                    name: paths[i].clone(),
+                                    rel: files.aliases[i - named].1.clone(),
                                 }),
                             })
                             .collect()
@@ -925,6 +950,34 @@ pub fn present(
         let debounce = debounce.clone();
         move |_| debounce.cancel()
     });
+    let refill: Refill = Box::new({
+        let (files, typed, refresh) = (files.clone(), typed.clone(), Rc::downgrade(&refresh));
+        let (entry, selection) = (entry.downgrade(), selection.downgrade());
+        move |new: Files| {
+            if *files.borrow() == new {
+                return;
+            }
+            *files.borrow_mut() = new;
+            typed.borrow_mut().take();
+            let (Some(refresh), Some(entry), Some(selection)) =
+                (refresh.upgrade(), entry.upgrade(), selection.upgrade())
+            else {
+                return;
+            };
+            let raw = entry.text();
+            if parse_query(&raw, mode).0 != Mode::Files {
+                return;
+            }
+            let kept = text_at(&selection, selection.selected());
+            refresh(&raw);
+            if let Some(kept) = kept
+                && let Some(at) = (0..selection.n_items())
+                    .find(|&at| text_at(&selection, at).as_ref() == Some(&kept))
+            {
+                selection.set_selected(at);
+            }
+        }
+    });
 
     let on_pick = Rc::new(on_pick);
     let pick = {
@@ -1002,6 +1055,7 @@ pub fn present(
     dialog.present(Some(parent));
     crate::dialogs::close_on_outside_press(&dialog);
     entry.grab_focus();
+    refill
 }
 
 #[cfg(test)]

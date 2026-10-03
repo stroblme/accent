@@ -8,6 +8,7 @@ mod answer;
 mod attach;
 mod chrome;
 mod compare;
+mod corpus;
 mod diagnostics;
 mod diagram;
 mod dismiss;
@@ -88,7 +89,8 @@ use tags::bench_tags;
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
 /// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` clicks outside each dialog through XTEST
 /// instead (`dismiss::bench_dismiss`), `=prefs` times Preferences presenting (`bench_prefs`), and
-/// `=ignored:<rel>` follows a note in a gitignored folder into the window (`ignored::bench_ignored`).
+/// `=ignored:<rel>` follows a note in a gitignored folder into the window (`ignored::bench_ignored`),
+/// and `=early:<query>` is the list landing in a dialog already open (`corpus::bench_early`).
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
@@ -938,6 +940,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = query.strip_prefix("ignored:") {
             return ignored::bench_ignored(&app, rel);
+        }
+        if let Some(query) = query.strip_prefix("early:") {
+            return corpus::bench_early(&app, query);
         }
         if query == "prefs" {
             return bench_prefs(&app);
