@@ -23,8 +23,9 @@ const SHIFT: f64 = 5.0;
 pub struct Targets<'a> {
     /// The other shapes' boxes.
     pub shapes: &'a [Rect],
-    /// The page, whose middle lines guide too, ahead of any shape's (Graph.js 966-1022).
-    pub page: Rect,
+    /// The page, whose middle lines guide too, ahead of any shape's (Graph.js 966-1022); none
+    /// with its page view off, as in draw.io.
+    pub page: Option<Rect>,
 }
 
 /// `delta`, a move of `bounds`, snapped to the guides, and the lines that show them. Within the
@@ -120,8 +121,11 @@ fn align(
     let (right, centre) = (left + width, left + width / 2.0);
     let mut tolerance = tolerance;
     let mut hit = None;
-    let boxes =
-        std::iter::once((targets.page, true)).chain(targets.shapes.iter().map(|r| (*r, false)));
+    let boxes = targets
+        .page
+        .map(|p| (p, true))
+        .into_iter()
+        .chain(targets.shapes.iter().map(|r| (*r, false)));
     for (by, page) in boxes {
         let (s, l) = span(&by, horizontal);
         let mut guides = vec![(s + l / 2.0, true), (s, false), (s + l, false)];
@@ -527,7 +531,10 @@ mod tests {
         shapes: &[Rect],
         grid: Option<f64>,
     ) -> (Point, Vec<Line>) {
-        let targets = Targets { shapes, page: PAGE };
+        let targets = Targets {
+            shapes,
+            page: Some(PAGE),
+        };
         snap(&bounds, Point::new(delta.0, delta.1), &targets, grid, 1.0)
     }
 

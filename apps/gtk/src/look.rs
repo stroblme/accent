@@ -321,7 +321,7 @@ fn recoloured(
 }
 
 /// The classifier's verdict on `texture`. One too large to look at is not a document, unmeasured.
-fn measure(texture: &gdk::Texture) -> Verdict {
+pub(crate) fn measure(texture: &gdk::Texture) -> Verdict {
     match pixels(texture) {
         Some(p) => recolour::classify(&p.data, p.width, p.height),
         None => Verdict {

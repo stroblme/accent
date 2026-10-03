@@ -60,6 +60,9 @@ pub struct DiagramTab {
     ring_shown: Cell<bool>,
     /// Where the diagram was left while presentation shows it, `None` otherwise.
     presenting: Cell<Option<DiagramPlace>>,
+    /// Invert Diagram Colours: painted as the other half of the theme would, as an inverted PDF
+    /// is. This tab's alone, and kept nowhere.
+    inverted: Cell<bool>,
     editor: RefCell<Editor>,
     page_index: Cell<usize>,
     selection: RefCell<Vec<CellId>>,
@@ -144,6 +147,7 @@ pub fn open(
         font: RefCell::new(None),
         ring_shown: Cell::new(true),
         presenting: Cell::new(None),
+        inverted: Cell::new(false),
         editor: RefCell::new(Editor::new(file)),
         page_index: Cell::new(place.page.min(pages.saturating_sub(1))),
         selection: RefCell::new(Vec::new()),
@@ -169,6 +173,7 @@ pub fn open(
     }
     let zoom = place.zoom.map_or(Zoom::Fit, Zoom::Scale);
     tab.view.restore(zoom, (place.x, place.y));
+    tab.restyle();
     tab.refresh();
     tab.fill_props();
     tab.view.connect_edit(glib::clone!(
@@ -436,6 +441,20 @@ impl DiagramTab {
             }
             _ => {}
         }
+    }
+
+    /// Paint the page in the theme's colours, the other half's while inverted: the PDF's rule
+    /// (`PdfTab::restyle`). Only the canvas changes; the file, the model and the Properties pane
+    /// keep the file's colours, so the tab never becomes dirty.
+    pub fn restyle(&self) {
+        let dark = adw::StyleManager::default().is_dark() != self.inverted.get();
+        self.view
+            .set_tint(paint::Tint::onto(crate::theme::page_colours(dark)));
+    }
+
+    pub fn toggle_invert(&self) {
+        self.inverted.set(!self.inverted.get());
+        self.restyle();
     }
 
     pub fn selection(&self) -> Vec<CellId> {
@@ -995,6 +1014,12 @@ impl DiagramTab {
     #[cfg(feature = "bench")]
     pub fn scale(&self) -> f64 {
         self.view.scale()
+    }
+
+    /// What the Properties pane's Fill row says, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn props_fill(&self) -> String {
+        self.props.fill_value()
     }
 
     /// Whether the ring is on screen, which presentation keeps it from being.

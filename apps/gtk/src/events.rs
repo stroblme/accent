@@ -210,6 +210,8 @@ impl App {
                     false => {
                         self.statusbar.set_progress(None);
                         self.statusbar.set_indexing(statusbar::Indexing::Idle);
+                        // The page edits made while the index was partial follow now.
+                        self.relink_all();
                     }
                 }
                 // A host's walk reports while the link to it is still being made, when every

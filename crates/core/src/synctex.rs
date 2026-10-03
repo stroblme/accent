@@ -28,6 +28,10 @@ const RC_FILES: [&str; 2] = ["latexmkrc", ".latexmkrc"];
 /// What a SyncTeX file is called beside its PDF, compressed first.
 const EXTENSIONS: [&str; 2] = [".synctex.gz", ".synctex"];
 
+/// What tells a PDF is a LaTeX build where it has no SyncTeX file: its source, or what a run
+/// leaves beside it whatever its flags (`latexmk -pdf` without `-synctex=1`).
+const RUN_FILES: [&str; 4] = [".tex", ".aux", ".fls", ".fdb_latexmk"];
+
 /// The most SyncTeX files [`near`] offers: each may have to be read whole to know whether it
 /// lists a source.
 const NEAR: usize = 16;
@@ -526,6 +530,34 @@ pub fn near(root: &Path, tex: &Path, build: impl Fn(&Path) -> Option<PathBuf>) -
     found
 }
 
+/// Whether the PDF at `pdf` is a LaTeX build, SyncTeX file or not: a `.tex` of its name, or the
+/// files a run leaves ([`RUN_FILES`]), beside it or in the folders [`build_dirs`] names.
+pub fn is_build(root: &Path, pdf: &Path) -> bool {
+    let (Some(dir), Some(stem)) = (pdf.parent(), pdf.file_stem()) else {
+        return false;
+    };
+    build_dirs(root, dir).any(|(folder, below)| {
+        RUN_FILES
+            .iter()
+            .any(|ext| folder.join(below).join(named(stem, ext)).is_file())
+    })
+}
+
+/// The PDF a build of `tex` made, looked for where [`near`] looks for its SyncTeX file.
+pub fn pdf_near(root: &Path, tex: &Path) -> Option<PathBuf> {
+    let (dir, stem) = (tex.parent()?, tex.file_stem()?);
+    build_dirs(root, dir)
+        .map(|(folder, below)| folder.join(below).join(named(stem, ".pdf")))
+        .find(|pdf| pdf.is_file())
+}
+
+/// `stem` with `ext` after it, which `with_extension` would put in place of a dot in the stem.
+fn named(stem: &std::ffi::OsStr, ext: &str) -> std::ffi::OsString {
+    let mut name = stem.to_os_string();
+    name.push(ext);
+    name
+}
+
 /// Where a LaTeX build of a file in `dir` may have written what it makes, nearest first: each
 /// folder from `dir` up to `root`, and after each its `build/` and `out/` and the `$out_dir` and
 /// `$aux_dir` a latexmk rc file there names (`rc_dirs`) inside `root`, each with the part of
@@ -723,6 +755,34 @@ mod tests {
         write("thesis/chapters/fig.pdf");
         assert_eq!(beside(&fig_pdf), None);
         assert_eq!(near(root, &chapter, beside), [main]);
+    }
+
+    /// A PDF is a LaTeX build by its source or by what a run leaves beside it or in its build
+    /// folder, SyncTeX file or not; a `.tex` finds its build's PDF where it would find the build.
+    #[test]
+    fn a_build_is_known_by_its_source_and_its_run_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write = |rel: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+            path
+        };
+        // `latexmk -pdf main.tex` in place, a build into `build/` with only its `.fls` left,
+        // and a PDF nothing built.
+        let main = write("paper/main.tex");
+        let main_pdf = write("paper/main.pdf");
+        let report = write("report/report.tex");
+        let report_pdf = write("report/build/report.pdf");
+        write("report/build/report.fls");
+        let scan = write("scans/scan.pdf");
+        assert!(is_build(root, &main_pdf));
+        assert!(is_build(root, &report_pdf));
+        assert!(!is_build(root, &scan));
+        assert_eq!(pdf_near(root, &main), Some(main_pdf));
+        assert_eq!(pdf_near(root, &report), Some(report_pdf));
+        assert_eq!(pdf_near(root, &write("paper/notes.tex")), None);
     }
 
     /// A latexmk rc file's `$out_dir` and `$aux_dir` are read where each is a plain string, the

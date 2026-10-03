@@ -2,6 +2,7 @@
 //! and pictures of every page as the canvas paints them.
 
 use super::*;
+use accent_core::config::Theme;
 
 /// A two-page diagram with a shape, an ellipse, an edge between them, a formula, and a bracket
 /// and a text turned a quarter each way.
@@ -45,10 +46,14 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 /// on (`build-aux/xtest.py`), then prints what the model holds; `=preview:<rel>` times the
 /// frames of a move on the page of `rel` with the most cells: none moving, the shape with the
 /// most edges on it moving live, and everything on the page moving as a box;
-/// `=present:<rel>,<pdf>` is presentation over both (`present`).
+/// `=present:<rel>,<pdf>` is presentation over both (`present`); `=look:<rel>:<dir>` walks
+/// the sample through the themes (`look`).
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("preview:") {
         return preview(app, rel);
+    }
+    if let Some((rel, dir)) = arg.strip_prefix("look:").and_then(|a| a.split_once(':')) {
+        return look(app, rel, Path::new(dir));
     }
     if let Some((rel, pdf)) = arg.strip_prefix("present:").and_then(|a| a.split_once(',')) {
         return present(app, rel, pdf);
@@ -130,20 +135,128 @@ fn shoot_pages(tab: &Rc<crate::diagram::DiagramTab>, dir: &Path) {
 
 /// Paint `widget` as it is on screen into a PNG at `path`.
 fn shoot(widget: &gtk::Widget, path: &Path) -> bool {
+    picture(widget).is_some_and(|t| t.save_to_png(path).is_ok())
+}
+
+/// `widget` as it is on screen, painted by its window's renderer.
+fn picture(widget: &gtk::Widget) -> Option<gdk::Texture> {
     let (w, h) = (f64::from(widget.width()), f64::from(widget.height()));
     let paintable = gtk::WidgetPaintable::new(Some(widget));
     let snapshot = gtk::Snapshot::new();
     paintable.snapshot(&snapshot, w, h);
-    let (Some(node), Some(renderer)) = (
-        snapshot.to_node(),
-        widget.native().and_then(|n| n.renderer()),
-    ) else {
-        return false;
-    };
-    renderer
-        .render_texture(&node, None)
-        .save_to_png(path)
-        .is_ok()
+    let node = snapshot.to_node()?;
+    let renderer = widget.native()?.renderer()?;
+    let viewport = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+    Some(renderer.render_texture(&node, Some(&viewport)))
+}
+
+/// Walk the sample (written to `rel` when there is none) through Light, Dark and Solarized, each
+/// also inverted (Invert Diagram Colours), painting page 1 into `<dir>/look-<theme>[-inverted].png`
+/// and printing: the paper, a pixel of shape `a`'s fill and what the remap wants of `#dae8fc`, the
+/// pixel of formula `m` farthest from the paper, the Properties pane's Fill for `a`, whether the
+/// model and the file are as they were, and whether the tab is dirty. On a page with its page
+/// view off the paper is read at the canvas's corner.
+fn look(app: &Rc<App>, rel: &str, dir: &Path) {
+    let path = app.root().join(rel);
+    if !path.exists() {
+        std::fs::write(&path, SAMPLE).expect("write the sample diagram");
+    }
+    std::fs::create_dir_all(dir).expect("a directory for the pictures");
+    let (app, rel, dir) = (app.clone(), rel.to_string(), dir.to_path_buf());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        app.open_path(&rel);
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        let Some(tab) = app.active_diagram() else {
+            println!("bench diagram no_tab");
+            return bench_quit(&app);
+        };
+        let (text, disk) = (tab.text(), std::fs::read(tab.path()).ok());
+        let sheet = tab.file().pages[0].page_view();
+        for theme in [Theme::Light, Theme::Dark, Theme::Solarized] {
+            crate::theme::apply(theme);
+            app.restyle_all();
+            for inverted in [false, true] {
+                glib::timeout_future(Duration::from_millis(500)).await;
+                if inverted {
+                    let _ = WidgetExt::activate_action(&app.window, "win.diagram-invert", None);
+                }
+                tab.select(vec!["a".to_string()]);
+                let props_fill = tab.props_fill();
+                tab.select(Vec::new());
+                let started = Instant::now();
+                while tab.typesetting() && started.elapsed() < Duration::from_secs(10) {
+                    glib::timeout_future(Duration::from_millis(20)).await;
+                }
+                bench_pump();
+                let canvas = tab.key_target();
+                let Some(shot) = picture(&canvas) else {
+                    println!("bench diagram look no_picture");
+                    continue;
+                };
+                let name = format!(
+                    "look-{theme:?}{}.png",
+                    if inverted { "-inverted" } else { "" }
+                );
+                let _ = shot.save_to_png(dir.join(name));
+                let mut downloader = gdk::TextureDownloader::new(&shot);
+                downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+                let (bytes, stride) = downloader.download_bytes();
+                let at = |x: f64, y: f64| {
+                    let i = y as usize * stride + x as usize * 4;
+                    [bytes[i], bytes[i + 1], bytes[i + 2]]
+                };
+                let on_page = |x: f64, y: f64| {
+                    let r = tab.to_widget(&accent_drawio::Rect::new(x, y, 0.0, 0.0));
+                    at(r.x, r.y)
+                };
+                let paper = match sheet {
+                    true => on_page(790.0, 490.0),
+                    false => at(3.0, 3.0),
+                };
+                let fill_a = on_page(124.0, 115.0);
+                let dark = adw::StyleManager::default().is_dark() != inverted;
+                let want = match crate::theme::page_colours(dark) {
+                    Some((p, i)) => {
+                        let [r, g, b, _] =
+                            accent_core::recolour::recolour_pixel([0xda, 0xe8, 0xfc, 255], p, i);
+                        [r, g, b]
+                    }
+                    None => [0xda, 0xe8, 0xfc],
+                };
+                let luma = |c: [u8; 3]| c.iter().map(|v| i32::from(*v)).sum::<i32>();
+                let m = tab
+                    .frame_of("m")
+                    .map(|r| tab.to_widget(&r))
+                    .unwrap_or_default();
+                let mut glyph = paper;
+                for y in m.y.max(0.0) as usize..(m.y + m.h) as usize {
+                    for x in m.x.max(0.0) as usize..(m.x + m.w) as usize {
+                        let c = at(x as f64, y as f64);
+                        if (luma(c) - luma(paper)).abs() > (luma(glyph) - luma(paper)).abs() {
+                            glyph = c;
+                        }
+                    }
+                }
+                let unchanged = tab.text() == text && std::fs::read(tab.path()).ok() == disk;
+                let rgb = |c: [u8; 3]| format!("{},{},{}", c[0], c[1], c[2]);
+                println!(
+                    "bench diagram look theme={theme:?} inverted={inverted} dark={dark} \
+                     paper={} fill_a={} want={} glyph={} props_fill={props_fill} \
+                     text_unchanged={unchanged} dirty={}",
+                    rgb(paper),
+                    rgb(fill_a),
+                    rgb(want),
+                    rgb(glyph),
+                    tab.save.modified.get()
+                );
+                if inverted {
+                    let _ = WidgetExt::activate_action(&app.window, "win.diagram-invert", None);
+                }
+            }
+        }
+        bench_quit(&app);
+    });
 }
 
 fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {

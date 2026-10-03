@@ -181,6 +181,12 @@ impl Page {
         self.model_attr("guides") != Some("0")
     }
 
+    /// Whether the page is drawn as a sheet: on unless it says `page="0"`, draw.io's Page View
+    /// off (Editor.js 1457-1466).
+    pub fn page_view(&self) -> bool {
+        self.model_attr("page") != Some("0")
+    }
+
     pub fn cell(&self, id: &str) -> Option<&Cell> {
         self.cells.iter().find(|c| c.id == id)
     }

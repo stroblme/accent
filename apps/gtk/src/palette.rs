@@ -52,6 +52,9 @@ pub enum Item {
         accels: Vec<String>,
         /// Position in the window's recently-run list, if it is in it at all. Lower is newer.
         recent: Option<usize>,
+        /// Why it cannot run here, where the window has a reason to give: the row is greyed and
+        /// says it.
+        why: Option<String>,
     },
     /// A tag to filter by.
     Tag(String),
@@ -372,6 +375,7 @@ fn row_factory(
             while let Some(child) = slot.first_child() {
                 slot.remove(&child);
             }
+            row.set_sensitive(true);
             let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
             // A file has the Files tree's icon, so a row reads the same in both places; a recent
             // vault has the start screen's, where it has one.
@@ -410,10 +414,12 @@ fn row_factory(
                     action,
                     label,
                     accels,
+                    why,
                     ..
                 } => {
                     name.set_text(label);
-                    dir.set_text("");
+                    dir.set_text(why.as_deref().unwrap_or(""));
+                    row.set_sensitive(why.is_none());
                     slot.append(&accel_button(action, accels, &conflicts.borrow(), &rebind));
                 }
                 Item::Tag(tag) => {
@@ -782,8 +788,10 @@ pub fn present(
                 let action = action.to_string();
                 move |chosen| {
                     let accels = on_rebind(&action, chosen);
-                    let (label, recent) = match &*commands.borrow()[index] {
-                        Item::Command { label, recent, .. } => (label.clone(), *recent),
+                    let (label, recent, why) = match &*commands.borrow()[index] {
+                        Item::Command {
+                            label, recent, why, ..
+                        } => (label.clone(), *recent, why.clone()),
                         _ => return,
                     };
                     commands.borrow_mut()[index] = Rc::new(Item::Command {
@@ -791,6 +799,7 @@ pub fn present(
                         label,
                         accels,
                         recent,
+                        why,
                     });
                     *clashes.borrow_mut() = conflicts(&commands.borrow());
                     let selected = selection.selected();
@@ -1052,6 +1061,7 @@ mod tests {
             label: action.to_string(),
             accels: accels.iter().map(|a| a.to_string()).collect(),
             recent: None,
+            why: None,
         })
     }
 

@@ -1,14 +1,16 @@
 //! Painting a page's display list with GSK: outlines as `gsk::Path`s, labels through Pango,
-//! pictures as textures. Colours are the document's, painted as authored (DESIGN.md, Colour: a
-//! diagram's page is data, like a rendered PDF page); the frame puts page units on screen.
+//! pictures as textures. Colours are the document's, painted through a [`Tint`]: as the file
+//! writes them, or moved onto the theme's paper and ink as a PDF page is (DESIGN.md, Colour);
+//! the frame puts page units on screen.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 
+use accent_core::recolour;
 use accent_drawio::{
     Align, Color, Font, ImageSource, Marks, Paint, PathCmd, Point, Prim, Rect, Run, Stroke, VAlign,
 };
@@ -26,10 +28,10 @@ pub struct Cache {
     /// By prim index, with the scale it was laid out at.
     layouts: RefCell<HashMap<usize, (f64, pango::Layout)>>,
     /// By prim index, for the display list on screen.
-    textures: RefCell<HashMap<usize, Option<gdk::Texture>>>,
+    textures: RefCell<HashMap<usize, Option<Rc<Picture>>>>,
     /// By a hash of the data URI, across display lists, so an edit does not decode every
     /// picture on the page again.
-    decoded: RefCell<HashMap<u64, Option<gdk::Texture>>>,
+    decoded: RefCell<HashMap<u64, Option<Rc<Picture>>>>,
     /// By prim index: a label with a formula as the HTML the typesetter is given, and its key.
     math: RefCell<HashMap<usize, (u64, String)>>,
     /// By prim index: where each label on screen was painted, for finding a label by its text.
@@ -102,24 +104,47 @@ impl Cache {
         self.boxes.borrow_mut().insert(index, painted);
     }
 
-    fn texture(&self, index: usize, uri: &str) -> Option<gdk::Texture> {
+    fn picture(&self, index: usize, uri: &str) -> Option<Rc<Picture>> {
         if let Some(t) = self.textures.borrow().get(&index) {
             return t.clone();
         }
         let mut h = DefaultHasher::new();
         uri.hash(&mut h);
         let key = h.finish();
-        let texture = self
+        let picture = self
             .decoded
             .borrow_mut()
             .entry(key)
             .or_insert_with(|| {
-                let (_, bytes) = accent_drawio::decode_data_uri(uri)?;
-                gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()
+                let (mime, bytes) = accent_drawio::decode_data_uri(uri)?;
+                let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()?;
+                // As the image tab takes them: an SVG is line art, a GIF likely an animation.
+                let document = match mime.as_str() {
+                    "image/svg+xml" => OnceCell::from(true),
+                    "image/gif" => OnceCell::from(false),
+                    _ => OnceCell::new(),
+                };
+                Some(Rc::new(Picture { texture, document }))
             })
             .clone();
-        self.textures.borrow_mut().insert(index, texture.clone());
-        texture
+        self.textures.borrow_mut().insert(index, picture.clone());
+        picture
+    }
+}
+
+/// A cell's picture, decoded, and whether it reads as a document.
+pub struct Picture {
+    texture: gdk::Texture,
+    /// Set from the type for an SVG and a GIF; a raster's is measured the first time a theme
+    /// that remaps documents asks (`look::measure`, on the main thread).
+    document: OnceCell<bool>,
+}
+
+impl Picture {
+    fn document(&self) -> bool {
+        *self
+            .document
+            .get_or_init(|| crate::look::measure(&self.texture).document)
     }
 }
 
@@ -158,8 +183,78 @@ fn alike(a: &Prim, b: &Prim) -> bool {
     }
 }
 
+/// A colour as the file writes it, which the Properties pane shows; the canvas paints through
+/// [`Tint::rgba`].
 pub fn rgba(c: Color) -> gdk::RGBA {
     theme::rgba([c.r, c.g, c.b], f32::from(c.a) / 255.0)
+}
+
+/// How the canvas paints the file's colours: as they are, or moved onto a theme's paper and ink
+/// as a PDF page is (`accent_core::recolour`), white onto paper and black onto ink, every other
+/// colour keeping its chroma. Painting takes it as a parameter and never reads the theme, so a
+/// printout or an export can paint with [`Tint::FILE`].
+#[derive(Clone, Copy, PartialEq)]
+pub struct Tint(Option<theme::Page>);
+
+impl Tint {
+    /// The file's own colours.
+    pub const FILE: Tint = Tint(None);
+
+    /// Onto `page`'s paper and ink, or the file's colours for `None` (`theme::page_colours`).
+    pub fn onto(page: Option<theme::Page>) -> Tint {
+        Tint(page)
+    }
+
+    /// `c` as the canvas paints it, its alpha kept: a remap is affine, so a colour faded over
+    /// the paper lands where the remapped colour faded over the remapped paper does.
+    pub fn colour(self, c: Color) -> Color {
+        let Some((paper, ink)) = self.0 else {
+            return c;
+        };
+        let [r, g, b, a] = recolour::recolour_pixel([c.r, c.g, c.b, c.a], paper, ink);
+        Color { r, g, b, a }
+    }
+
+    pub fn rgba(self, c: Color) -> gdk::RGBA {
+        rgba(self.colour(c))
+    }
+
+    /// The tint for a picture: this one for a document, asked only when this one remaps, and the
+    /// file's colours for a photo, as an image tab shows one.
+    fn picture(self, document: impl FnOnce() -> bool) -> Tint {
+        match self.0 {
+            Some(_) if document() => self,
+            _ => Tint::FILE,
+        }
+    }
+
+    /// Paint under the remap as a colour matrix, for pixels painting does not choose one by one:
+    /// a picture, a typeset formula.
+    fn under(self, snapshot: &gtk::Snapshot, paint: impl FnOnce()) {
+        let Some((paper, ink)) = self.0 else {
+            return paint();
+        };
+        let (matrix, offset) = gsk_matrix(&recolour::colour_matrix(paper, ink));
+        snapshot.push_color_matrix(
+            &graphene::Matrix::from_float(matrix),
+            &graphene::Vec4::from_float(offset),
+        );
+        paint();
+        snapshot.pop();
+    }
+}
+
+/// `recolour::colour_matrix`'s rows of five as GSK's matrix and offset. GSK multiplies the
+/// unpremultiplied pixel as a row vector by the matrix, so its row `j` holds what channel `j`
+/// adds to each output.
+fn gsk_matrix(m: &[f32; 20]) -> ([f32; 16], [f32; 4]) {
+    let mut matrix = [0.0; 16];
+    for i in 0..4 {
+        for j in 0..4 {
+            matrix[j * 4 + i] = m[i * 5 + j];
+        }
+    }
+    (matrix, [m[4], m[9], m[14], m[19]])
 }
 
 fn gpoint(p: Point) -> graphene::Point {
@@ -172,6 +267,7 @@ pub fn grect(r: &Rect) -> graphene::Rect {
 
 /// Paint one prim, `index` being its place in the display list. A label with a formula goes to
 /// `typesetter` when there is one, and is painted as its source until it has been typeset.
+#[allow(clippy::too_many_arguments)]
 pub fn prim(
     snapshot: &gtk::Snapshot,
     widget: &gtk::Widget,
@@ -180,6 +276,7 @@ pub fn prim(
     frame: &Frame,
     cache: &Cache,
     typesetter: Option<&Rc<Typesetter>>,
+    tint: Tint,
 ) {
     match prim {
         Prim::Path {
@@ -197,6 +294,7 @@ pub fn prim(
             *opacity,
             *shadow,
             frame,
+            tint,
         ),
         Prim::Text {
             rect,
@@ -219,6 +317,11 @@ pub fn prim(
                 valign: *valign,
                 wrap: *wrap,
             };
+            let look = Look {
+                background: *background,
+                border: *border,
+                opacity: *opacity,
+            };
             let has_math = runs.iter().any(|r| matches!(r, Run::Math { .. }));
             if let Some(typesetter) = typesetter.filter(|_| has_math) {
                 let (key, html) = cache
@@ -232,12 +335,8 @@ pub fn prim(
                     .clone();
                 match typesetter.get(key) {
                     Some(Some(rendered)) => {
-                        let look = Look {
-                            background: *background,
-                            border: *border,
-                            opacity: *opacity,
-                        };
-                        let block = typeset(snapshot, &rendered, &placed, *rotation, frame, look);
+                        let block =
+                            typeset(snapshot, &rendered, &placed, *rotation, frame, look, tint);
                         return cache.painted(index, frame, block, *anchor, *rotation);
                     }
                     Some(None) => {}
@@ -250,21 +349,14 @@ pub fn prim(
                     Some((scale, layout)) if *scale == frame.scale => layout.clone(),
                     _ => {
                         let width = wrap.then_some(rect.w);
-                        let layout = lay_out(widget, runs, font, width, *align, frame.scale);
+                        let layout = lay_out(widget, runs, font, width, *align, frame.scale, tint);
                         layouts.insert(index, (frame.scale, layout.clone()));
                         layout
                     }
                 }
             };
             let block = label(
-                snapshot,
-                &layout,
-                &placed,
-                *rotation,
-                font.color,
-                *background,
-                *border,
-                *opacity,
+                snapshot, &layout, &placed, *rotation, font.color, look, tint,
             );
             cache.painted(index, frame, block, *anchor, *rotation);
         }
@@ -277,24 +369,27 @@ pub fn prim(
             ..
         } => {
             let r = frame.rect(rect);
-            let texture = match source {
-                ImageSource::DataUri(uri) => cache.texture(index, uri),
+            let picture = match source {
+                ImageSource::DataUri(uri) => cache.picture(index, uri),
                 // ponytail: a picture on the web is not fetched, so it paints as its box. A
                 // download into the ssh-style cache is the upgrade.
                 ImageSource::Url(_) => None,
             };
             rotated(snapshot, r.centre(), *rotation, || {
-                with_opacity(snapshot, *opacity, || match &texture {
-                    Some(t) => {
+                with_opacity(snapshot, *opacity, || match &picture {
+                    Some(p) => {
+                        let t = &p.texture;
                         let dest = match keep_aspect {
                             true => fitted(t.width() as f64, t.height() as f64, &r),
                             false => r,
                         };
-                        snapshot.append_scaled_texture(
-                            t,
-                            gsk::ScalingFilter::Linear,
-                            &grect(&dest),
-                        );
+                        tint.picture(|| p.document()).under(snapshot, || {
+                            snapshot.append_scaled_texture(
+                                t,
+                                gsk::ScalingFilter::Linear,
+                                &grect(&dest),
+                            )
+                        });
                     }
                     None => {
                         let edge = theme::at(widget.color(), theme::PAGE_EDGE_ALPHA * 3.0);
@@ -407,6 +502,7 @@ pub fn stroke_of(s: &Stroke, scale: f64) -> gsk::Stroke {
 }
 
 /// An outline: its shadow, its fill, its stroke, all under one opacity.
+#[allow(clippy::too_many_arguments)]
 pub fn outline(
     snapshot: &gtk::Snapshot,
     path: &gsk::Path,
@@ -415,11 +511,12 @@ pub fn outline(
     opacity: f64,
     shadow: bool,
     frame: &Frame,
+    tint: Tint,
 ) {
     with_opacity(snapshot, opacity, || {
         if shadow {
             let off = accent_drawio::scene::SHADOW_OFFSET;
-            let colour = rgba(accent_drawio::scene::SHADOW_COLOR);
+            let colour = tint.rgba(accent_drawio::scene::SHADOW_COLOR);
             snapshot.save();
             snapshot.translate(&graphene::Point::new(
                 (off.x * frame.scale) as f32,
@@ -435,7 +532,9 @@ pub fn outline(
             snapshot.restore();
         }
         match fill {
-            Some(Paint::Solid(c)) => snapshot.append_fill(path, gsk::FillRule::Winding, &rgba(*c)),
+            Some(Paint::Solid(c)) => {
+                snapshot.append_fill(path, gsk::FillRule::Winding, &tint.rgba(*c))
+            }
             Some(Paint::Linear {
                 from,
                 to,
@@ -449,8 +548,8 @@ pub fn outline(
                         &gpoint(frame.to_content(*start)),
                         &gpoint(frame.to_content(*end)),
                         &[
-                            gsk::ColorStop::new(0.0, rgba(*from)),
-                            gsk::ColorStop::new(1.0, rgba(*to)),
+                            gsk::ColorStop::new(0.0, tint.rgba(*from)),
+                            gsk::ColorStop::new(1.0, tint.rgba(*to)),
                         ],
                     );
                     snapshot.pop();
@@ -482,8 +581,8 @@ pub fn outline(
                             0.0,
                             1.0,
                             &[
-                                gsk::ColorStop::new(0.0, rgba(*from)),
-                                gsk::ColorStop::new(1.0, rgba(*to)),
+                                gsk::ColorStop::new(0.0, tint.rgba(*from)),
+                                gsk::ColorStop::new(1.0, tint.rgba(*to)),
                             ],
                         )
                     });
@@ -493,7 +592,7 @@ pub fn outline(
             None => {}
         }
         if let Some(s) = stroke {
-            snapshot.append_stroke(path, &stroke_of(s, frame.scale), &rgba(s.color));
+            snapshot.append_stroke(path, &stroke_of(s, frame.scale), &tint.rgba(s.color));
         }
     });
 }
@@ -539,6 +638,23 @@ struct Look {
     opacity: f64,
 }
 
+impl Look {
+    /// The box's background and border around `block` (content coordinates).
+    fn frame(&self, snapshot: &gtk::Snapshot, block: &Rect, tint: Tint) {
+        if let Some(bg) = self.background {
+            snapshot.append_color(&tint.rgba(bg), &grect(block));
+        }
+        if let Some(b) = self.border {
+            let c = tint.rgba(b);
+            snapshot.append_border(
+                &gsk::RoundedRect::from_rect(grect(block), 0.0),
+                &[1.0; 4],
+                &[c; 4],
+            );
+        }
+    }
+}
+
 /// A label WebKit typeset, painted where Pango would have put the same block, which is returned
 /// (content coordinates, unturned).
 fn typeset(
@@ -548,45 +664,22 @@ fn typeset(
     rotation: f64,
     frame: &Frame,
     look: Look,
+    tint: Tint,
 ) -> Rect {
     let (w, h) = (rendered.size.0 * frame.scale, rendered.size.1 * frame.scale);
     let (x, y) = text_origin(at, (w, h), 0.0);
     let dest = Rect::new(x, y, w, h);
     rotated(snapshot, at.anchor, rotation, || {
         with_opacity(snapshot, look.opacity, || {
-            if let Some(bg) = look.background {
-                snapshot.append_color(&rgba(bg), &grect(&dest));
-            }
-            if let Some(b) = look.border {
-                let c = rgba(b);
-                snapshot.append_border(
-                    &gsk::RoundedRect::from_rect(grect(&dest), 0.0),
-                    &[1.0; 4],
-                    &[c; 4],
-                );
-            }
-            let crop = rendered.crop;
-            if crop.width() <= 0.0 {
-                return;
-            }
-            // The whole picture, scaled so the crop lands on `dest`, clipped to it.
-            let k = w / f64::from(crop.width());
-            let (tw, th) = (
-                f64::from(rendered.texture.width()) * k,
-                f64::from(rendered.texture.height()) * k,
-            );
-            snapshot.push_clip(&grect(&dest));
-            snapshot.append_scaled_texture(
-                &rendered.texture,
-                gsk::ScalingFilter::Trilinear,
-                &graphene::Rect::new(
-                    (x - f64::from(crop.x()) * k) as f32,
-                    (y - f64::from(crop.y()) * k) as f32,
-                    tw as f32,
-                    th as f32,
-                ),
-            );
-            snapshot.pop();
+            look.frame(snapshot, &dest, tint);
+            // Typeset in the file's colours, so a theme switch typesets nothing again.
+            tint.under(snapshot, || {
+                snapshot.append_scaled_texture(
+                    &rendered.texture,
+                    gsk::ScalingFilter::Trilinear,
+                    &grect(&dest),
+                )
+            });
         })
     });
     dest
@@ -603,37 +696,25 @@ struct Placed {
 
 /// A laid-out label, painted; the block its text took is returned (content coordinates,
 /// unturned).
-#[allow(clippy::too_many_arguments)]
 fn label(
     snapshot: &gtk::Snapshot,
     layout: &pango::Layout,
     at: &Placed,
     rotation: f64,
     colour: Color,
-    background: Option<Color>,
-    border: Option<Color>,
-    opacity: f64,
+    look: Look,
+    tint: Tint,
 ) -> Rect {
     let (_, logical) = layout.pixel_extents();
     let (tw, th) = (f64::from(logical.width()), f64::from(logical.height()));
     let (x, y) = text_origin(at, (tw, th), f64::from(logical.x()));
     let block = Rect::new(x + f64::from(logical.x()), y, tw, th);
     rotated(snapshot, at.anchor, rotation, || {
-        with_opacity(snapshot, opacity, || {
-            if let Some(bg) = background {
-                snapshot.append_color(&rgba(bg), &grect(&block));
-            }
-            if let Some(b) = border {
-                let c = rgba(b);
-                snapshot.append_border(
-                    &gsk::RoundedRect::from_rect(grect(&block), 0.0),
-                    &[1.0; 4],
-                    &[c; 4],
-                );
-            }
+        with_opacity(snapshot, look.opacity, || {
+            look.frame(snapshot, &block, tint);
             snapshot.save();
             snapshot.translate(&graphene::Point::new(x as f32, y as f32));
-            snapshot.append_layout(layout, &rgba(colour));
+            snapshot.append_layout(layout, &tint.rgba(colour));
             snapshot.restore();
         })
     });
@@ -687,7 +768,8 @@ fn text_of(runs: &[Run]) -> (String, Vec<(Range<usize>, Marks, bool)>) {
     (text, spans)
 }
 
-/// A Pango layout of `runs` in `font`, at `scale`, wrapped to `width` page units when given.
+/// A Pango layout of `runs` in `font`, at `scale`, wrapped to `width` page units when given, its
+/// runs' own colours through `tint`.
 fn lay_out(
     widget: &gtk::Widget,
     runs: &[Run],
@@ -695,6 +777,7 @@ fn lay_out(
     width: Option<f64>,
     align: Align,
     scale: f64,
+    tint: Tint,
 ) -> pango::Layout {
     let (text, spans) = text_of(runs);
     let layout = widget.create_pango_layout(Some(&text));
@@ -748,7 +831,7 @@ fn lay_out(
                 range,
             );
         }
-        if let Some(c) = marks.color {
+        if let Some(c) = marks.color.map(|c| tint.colour(c)) {
             let wide = |v: u8| u16::from(v) * 257;
             put(
                 pango::AttrColor::new_foreground(wide(c.r), wide(c.g), wide(c.b)).into(),
@@ -815,6 +898,44 @@ mod tests {
         assert_eq!(text_origin(&at, (30.0, 10.0), 0.0), (35.0, 15.0));
         let wrapped = Placed { wrap: true, ..at };
         assert_eq!(text_origin(&wrapped, (30.0, 10.0), 0.0), (0.0, 15.0));
+    }
+
+    #[test]
+    fn a_tint_puts_white_on_paper_and_black_on_ink() {
+        let (paper, ink) = ([29, 29, 32], [235, 235, 235]);
+        let fill = Color {
+            r: 0xda,
+            g: 0xe8,
+            b: 0xfc,
+            a: 128,
+        };
+        assert_eq!(Tint::FILE.colour(fill), fill);
+        let dark = Tint::onto(Some((paper, ink)));
+        assert_eq!(dark.colour(Color::WHITE), Color::rgb(29, 29, 32));
+        assert_eq!(dark.colour(Color::BLACK), Color::rgb(235, 235, 235));
+        // Any other colour as a PDF page's pixel is moved, its alpha kept.
+        let [r, g, b, a] = recolour::recolour_pixel([0xda, 0xe8, 0xfc, 128], paper, ink);
+        assert_eq!(dark.colour(fill), Color { r, g, b, a });
+    }
+
+    #[test]
+    fn the_gsk_matrix_is_the_pixel_remap() {
+        let (paper, ink) = ([0xfd, 0xf6, 0xe3], [0x65, 0x7b, 0x83]);
+        let (m, offset) = gsk_matrix(&recolour::colour_matrix(paper, ink));
+        for r in (0..=255u8).step_by(51) {
+            for g in (0..=255u8).step_by(51) {
+                for b in (0..=255u8).step_by(51) {
+                    let c = [r, g, b, 255].map(|v| f32::from(v) / 255.0);
+                    let want = recolour::recolour_pixel([r, g, b, 255], paper, ink);
+                    // GSK takes the pixel as a row vector times the matrix, then the offset.
+                    for i in 0..4 {
+                        let out = (0..4).map(|j| m[j * 4 + i] * c[j]).sum::<f32>() + offset[i];
+                        let out = (out * 255.0).round().clamp(0.0, 255.0);
+                        assert!((out - f32::from(want[i])).abs() <= 1.0, "{r},{g},{b}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

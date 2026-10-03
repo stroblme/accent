@@ -274,6 +274,26 @@ impl PdfTab {
         self.thumbs.add_controller(target);
     }
 
+    /// Where the strip and its insert button are in `window`, and whether each button is out:
+    /// what `ACCENT_BENCH_PDF=strip:` prints for XTEST to aim at.
+    #[cfg(feature = "bench")]
+    pub fn strip_buttons(&self, window: &gtk::Widget) -> String {
+        let o = &self.organize;
+        let at = |w: &gtk::Widget| {
+            w.compute_bounds(window).map(|r| {
+                let (x, y) = (r.x().round(), r.y().round());
+                format!("{x},{y},{},{}", r.width().round(), r.height().round())
+            })
+        };
+        format!(
+            "strip={:?} insert={:?} out=trash:{},insert:{}",
+            at(o.pane.upcast_ref()),
+            at(o.insert.upcast_ref()),
+            o.trash.reveals_child(),
+            o.insert.reveals_child()
+        )
+    }
+
     /// Show the buttons over the page under the pointer, or put them away: with the pointer gone,
     /// while a page is being dragged, and the trash on a document of one page, which keeps it.
     pub(super) fn hover_thumbnail(&self) {

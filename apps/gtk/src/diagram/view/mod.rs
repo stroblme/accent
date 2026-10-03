@@ -18,7 +18,7 @@ use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk};
 
 use super::geometry::{self, DRAG_SLOP, End, Frame, GAP, HANDLE, Sheet, TOLERANCE, Zoom};
-use super::paint::{self, Cache};
+use super::paint::{self, Cache, Tint};
 use super::tools::Tool;
 use crate::theme;
 use drag::Drag;
@@ -121,6 +121,18 @@ impl DiagramView {
 
     pub fn sheet(&self) -> Option<Rc<Sheet>> {
         self.imp().sheet.borrow().clone()
+    }
+
+    /// Paint the page in `tint`'s colours from now on: its labels are laid out again, their run
+    /// colours being in their layouts, and a drag's preview is built again; the page itself, its
+    /// formulas and its pictures stay as they are.
+    pub fn set_tint(&self, tint: Tint) {
+        let imp = self.imp();
+        if imp.tint.replace(tint) != tint {
+            imp.cache.forget();
+            imp.preview.take();
+            self.queue_draw();
+        }
     }
 
     pub fn set_selection(&self, ids: &[CellId]) {
@@ -325,12 +337,7 @@ impl DiagramView {
 
     fn centre_page(&self) {
         let Some(sheet) = self.sheet() else { return };
-        let (pw, ph) = sheet.scene.page_size;
-        let c = self
-            .imp()
-            .frame
-            .get()
-            .to_content(Point::new(pw / 2.0, ph / 2.0));
+        let c = self.imp().frame.get().to_content(sheet.shown().centre());
         let (w, h) = (f64::from(self.width()), f64::from(self.height()));
         self.set_scroll((c.x - w / 2.0, c.y - h / 2.0));
     }
@@ -344,7 +351,10 @@ impl DiagramView {
             return;
         }
         let scale = match imp.zoom.get() {
-            Zoom::Fit => geometry::fit_scale(sheet.scene.page_size, (w, h)),
+            Zoom::Fit => {
+                let shown = sheet.shown();
+                geometry::fit_scale((shown.w, shown.h), (w, h))
+            }
             Zoom::Scale(s) => geometry::clamp_scale(s),
         };
         let (frame, size) = geometry::frame(sheet.extent, scale, (w, h));
@@ -405,6 +415,8 @@ mod imp {
         /// Alt held in the drag under way: no snapping to the grid.
         pub free: Cell<bool>,
         pub cache: Cache,
+        /// The colours the page is painted in.
+        pub tint: Cell<Tint>,
         /// Where labels with formulas are typeset, for a diagram that has any.
         pub typesetter: RefCell<Option<Rc<super::super::math::Typesetter>>>,
         pub on_edit: RefCell<Option<OnEdit>>,
@@ -433,6 +445,7 @@ mod imp {
                 pointer: Cell::new(Point::default()),
                 free: Cell::new(false),
                 cache: Cache::default(),
+                tint: Cell::new(Tint::FILE),
                 typesetter: RefCell::new(None),
                 on_edit: RefCell::new(None),
                 on_zoom: RefCell::new(None),
@@ -653,16 +666,25 @@ mod imp {
             snapshot.save();
             snapshot.translate(&graphene::Point::new(-sx as f32, -sy as f32));
 
-            let (pw, ph) = sheet.scene.page_size;
-            let page = paint::grect(&frame.rect(&Rect::new(0.0, 0.0, pw, ph)));
-            let paper = sheet.scene.background.unwrap_or(Color::WHITE);
-            snapshot.append_color(&paint::rgba(paper), &page);
-            let edge = theme::at(obj.color(), theme::PAGE_EDGE_ALPHA);
-            snapshot.append_border(
-                &gsk::RoundedRect::from_rect(page, 0.0),
-                &[1.0; 4],
-                &[edge; 4],
-            );
+            // The sheet, or with none the whole canvas in the page's colour, as draw.io's.
+            let tint = self.tint.get();
+            let paper = tint.colour(sheet.scene.background.unwrap_or(Color::WHITE));
+            match sheet.page_rect {
+                Some(r) => {
+                    let page = paint::grect(&frame.rect(&r));
+                    snapshot.append_color(&paint::rgba(paper), &page);
+                    let edge = theme::at(obj.color(), theme::PAGE_EDGE_ALPHA);
+                    snapshot.append_border(
+                        &gsk::RoundedRect::from_rect(page, 0.0),
+                        &[1.0; 4],
+                        &[edge; 4],
+                    );
+                }
+                None => {
+                    let canvas = graphene::Rect::new(sx as f32, sy as f32, w as f32, h as f32);
+                    snapshot.append_color(&paint::rgba(paper), &canvas);
+                }
+            }
 
             // Only what is on screen, a prim's box being known from when the page was shown.
             let near = frame.to_page(Point::new(sx, sy));
@@ -673,7 +695,7 @@ mod imp {
                 Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Draw { .. })
             );
             if let Some(step) = sheet.grid.filter(|_| placing && self.moved.get())
-                && let Some(area) = intersection(&visible, &Rect::new(0.0, 0.0, pw, ph))
+                && let Some(area) = intersection(&visible, &sheet.page_rect.unwrap_or(visible))
             {
                 paint::grid(snapshot, &frame, area, step, paper);
             }
@@ -696,6 +718,7 @@ mod imp {
                         &frame,
                         cache,
                         typesetter.as_ref(),
+                        tint,
                     );
                 }
             }

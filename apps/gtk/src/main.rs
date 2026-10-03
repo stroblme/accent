@@ -748,8 +748,12 @@ impl App {
                 })
                 .collect();
             if rows.is_empty() {
-                let none = sidebar::outline_note("No Bookmarks", "This PDF has no outline.");
-                return sidebar.set_outline(Some(&sidebar::above(&none, &pdf.thumbnails())));
+                let thumbs = pdf.thumbnails();
+                if !sidebar.shows_below(&thumbs) {
+                    let none = sidebar::outline_note("No Bookmarks", "This PDF has no outline.");
+                    sidebar.set_outline(Some(&sidebar::above(&none, &thumbs)));
+                }
+                return;
             }
             let jump = glib::clone!(
                 #[weak]
@@ -971,6 +975,10 @@ impl App {
         // of whatever is on screen.
         for pdf in self.pdfs() {
             pdf.restyle();
+        }
+        // A diagram is painted through the theme's colours, so this is a repaint.
+        for diagram in self.diagrams() {
+            diagram.restyle();
         }
         // An image is recoloured again from the texture it was read to.
         for image in self.images() {

@@ -293,10 +293,9 @@ impl DiagramView {
             let snapped = sheet.grid.map(|g| geometry::snap_move(origin, raw, g));
             return (snapped.unwrap_or(raw), Vec::new());
         }
-        let (w, h) = sheet.scene.page_size;
         let targets = guide::Targets {
             shapes: guides,
-            page: Rect::new(0.0, 0.0, w, h),
+            page: sheet.page_rect,
         };
         let px = 1.0 / self.scale();
         guide::snap(bounds, raw, &targets, sheet.grid, px)

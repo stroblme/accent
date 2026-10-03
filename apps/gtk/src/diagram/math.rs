@@ -6,8 +6,9 @@
 //! unseen, and painted as a picture of the whole label: its wrapping, its baselines and its
 //! bullets are the browser's, as they are in draw.io. A label with no formula never comes here.
 //!
-//! Everything a page asks for goes into one document: one load, one snapshot, one crop per
-//! label. The canvas paints the label's source meanwhile.
+//! Everything a page asks for goes into one document: one load, one snapshot cut into a picture
+//! per label, as many labels as one snapshot can hold, the rest waiting for the next. The canvas
+//! paints the label's source meanwhile.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -17,12 +18,16 @@ use std::rc::Rc;
 
 use accent_drawio::{Align, Color, Font, Marks, Run};
 use adw::prelude::*;
-use gtk::{gdk, glib, graphene};
+use gtk::{gdk, glib};
 use webkit6::prelude::*;
 
 /// The page zoom the labels are rendered at: a formula stays sharp up to this canvas zoom and
 /// is scaled down, not up, below it.
 const RENDER_ZOOM: f64 = 3.0;
+
+/// The tallest snapshot a batch is taken as, in texture pixels, which bounds what is held while
+/// it is cut up: 300 small formulas in one would make a picture of nearly 200 MB.
+const MAX_PICTURE: f64 = 8192.0;
 
 /// How long after a batch fails to wait for WebKit to say its process died.
 const LOST_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
@@ -33,11 +38,10 @@ pub struct Label {
     pub html: String,
 }
 
-/// A typeset label: where in `texture` it is, and its size in page units.
+/// A typeset label: its picture, and its size in page units.
 #[derive(Clone)]
 pub struct Rendered {
     pub texture: gdk::Texture,
-    pub crop: graphene::Rect,
     pub size: (f64, f64),
 }
 
@@ -172,14 +176,19 @@ impl Typesetter {
         if labels.is_empty() {
             return;
         }
+        *self.batch.borrow_mut() = labels;
+        self.load();
+    }
+
+    /// Load the batch as one document.
+    fn load(&self) {
         let mut body = String::new();
-        for (i, label) in labels.iter().enumerate() {
+        for (i, label) in self.batch.borrow().iter().enumerate() {
             body.push_str(&format!(
                 "<div class=\"w\"><div class=\"l\" id=\"l{i}\">{}</div></div>",
                 label.html
             ));
         }
-        *self.batch.borrow_mut() = labels;
         let page = format!(
             "<!doctype html><html><head><meta charset=\"utf-8\"><style>\
              html, body {{ margin: 0; padding: 0; background: transparent; }}\
@@ -203,6 +212,19 @@ impl Typesetter {
             .evaluate_javascript_future(MEASURE, None, None)
             .await
             .map(|v| v.to_str().to_string());
+        // A document taller than one picture holds keeps the labels that fit, loaded again on
+        // their own; the others go back to wait for the next batch.
+        if let Ok(m) = &measured
+            && self.holds(&keys)
+        {
+            let limit = MAX_PICTURE / (RENDER_ZOOM * f64::from(self.view.scale_factor()));
+            let fit = fitting(&parse_boxes(m).1, limit);
+            if fit < keys.len() {
+                let rest = self.batch.borrow_mut().split_off(fit);
+                self.queued.borrow_mut().splice(0..0, rest);
+                return self.load();
+            }
+        }
         let shot = self
             .view
             .snapshot_future(
@@ -211,13 +233,7 @@ impl Typesetter {
             )
             .await;
         // The process died meanwhile and the batch went again: this one is not ours any more.
-        if !self
-            .batch
-            .borrow()
-            .iter()
-            .map(|l| l.key)
-            .eq(keys.iter().copied())
-        {
+        if !self.holds(&keys) {
             return;
         }
         let (measured, texture) = match (measured, shot) {
@@ -227,13 +243,7 @@ impl Typesetter {
                 // A process that died fails these first and says so a moment later: that batch
                 // is `lost`'s to send again, not this one's to give up on.
                 glib::timeout_future(LOST_GRACE).await;
-                if !self
-                    .batch
-                    .borrow()
-                    .iter()
-                    .map(|l| l.key)
-                    .eq(keys.iter().copied())
-                {
+                if !self.holds(&keys) {
                     return;
                 }
                 for key in &keys {
@@ -244,21 +254,40 @@ impl Typesetter {
         };
         let (doc_width, boxes) = parse_boxes(&measured);
         let factor = f64::from(texture.width()) / doc_width.max(1.0);
+        // Each label cut out into a picture of its own and the snapshot let go: a crop of it
+        // would hold all of it, and the cairo renderer would read all of it for every label.
+        let size = (texture.width() as usize, texture.height() as usize);
+        let mut pixels = vec![0; size.0 * size.1 * 4];
+        texture.download(&mut pixels, size.0 * 4);
         for (i, key) in keys.iter().enumerate() {
-            let rendered = boxes.get(i).map(|&(x, y, w, h)| Rendered {
-                texture: texture.clone(),
-                crop: graphene::Rect::new(
-                    (x * factor) as f32,
-                    (y * factor) as f32,
-                    (w * factor) as f32,
-                    (h * factor) as f32,
-                ),
-                size: (w, h),
+            let rendered = boxes.get(i).and_then(|&(x, y, w, h)| {
+                let picked = (x * factor, y * factor, w * factor, h * factor);
+                let (bytes, pw, ph) = cut(&pixels, size, picked)?;
+                let picture = gdk::MemoryTexture::new(
+                    pw as i32,
+                    ph as i32,
+                    gdk::MemoryFormat::B8g8r8a8Premultiplied,
+                    &glib::Bytes::from_owned(bytes),
+                    pw * 4,
+                );
+                Some(Rendered {
+                    texture: picture.upcast(),
+                    size: (w, h),
+                })
             });
             self.done.borrow_mut().insert(*key, rendered);
         }
         self.lost.set(false);
         self.finish();
+    }
+
+    /// Whether the batch in flight is still the one of `keys`.
+    fn holds(&self, keys: &[u64]) -> bool {
+        self.batch
+            .borrow()
+            .iter()
+            .map(|l| l.key)
+            .eq(keys.iter().copied())
     }
 
     fn finish(&self) {
@@ -286,6 +315,37 @@ fn parse_boxes(measured: &str) -> (f64, Vec<(f64, f64, f64, f64)>) {
         })
         .collect();
     (width, boxes)
+}
+
+/// How many labels, from the first, one picture of the document holds: those ending within
+/// `limit` CSS pixels of its top, and the first whatever its size.
+fn fitting(boxes: &[(f64, f64, f64, f64)], limit: f64) -> usize {
+    boxes
+        .iter()
+        .take_while(|&&(_, y, _, h)| y + h <= limit)
+        .count()
+        .max(1)
+}
+
+/// The pixels of the box `(x, y, w, h)`, in pixels of a picture `size` big at four bytes a
+/// pixel (`texture.download`'s), with its width and height; `None` where it holds none.
+fn cut(
+    pixels: &[u8],
+    size: (usize, usize),
+    (x, y, w, h): (f64, f64, f64, f64),
+) -> Option<(Vec<u8>, usize, usize)> {
+    let at = |v: f64, max: usize| (v.round().max(0.0) as usize).min(max);
+    let (left, top) = (at(x, size.0), at(y, size.1));
+    let (right, bottom) = (at(x + w, size.0), at(y + h, size.1));
+    if right <= left || bottom <= top {
+        return None;
+    }
+    let stride = size.0 * 4;
+    let bytes = (top..bottom)
+        .flat_map(|row| &pixels[row * stride + left * 4..row * stride + right * 4])
+        .copied()
+        .collect();
+    Some((bytes, right - left, bottom - top))
 }
 
 /// A label as the HTML WebKit lays out: the label's font, colour and alignment on its box, the
@@ -436,5 +496,33 @@ mod tests {
         let (w, boxes) = parse_boxes("1200;0,0,100.5,20;0,44,50,10");
         assert_eq!(w, 1200.0);
         assert_eq!(boxes, [(0.0, 0.0, 100.5, 20.0), (0.0, 44.0, 50.0, 10.0)]);
+    }
+
+    #[test]
+    fn a_batch_keeps_the_labels_one_picture_holds() {
+        let boxes = [
+            (0.0, 0.0, 50.0, 20.0),
+            (0.0, 44.0, 50.0, 20.0),
+            (0.0, 88.0, 50.0, 20.0),
+        ];
+        assert_eq!(fitting(&boxes, 1000.0), 3);
+        assert_eq!(fitting(&boxes, 70.0), 2);
+        // A label taller than any picture goes on its own.
+        assert_eq!(fitting(&[(0.0, 0.0, 50.0, 5000.0)], 70.0), 1);
+    }
+
+    #[test]
+    fn a_label_is_cut_out_of_the_picture() {
+        // A 3 × 2 picture whose every pixel holds its index four times.
+        let pixels: Vec<u8> = (0..6u8).flat_map(|i| [i; 4]).collect();
+        let (bytes, w, h) = cut(&pixels, (3, 2), (0.6, 0.0, 2.0, 2.0)).unwrap();
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(bytes, [1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 5, 5, 5, 5]);
+        // Past the picture's edge it stops there, and a box with nothing in it is no picture.
+        assert_eq!(
+            cut(&pixels, (3, 2), (2.0, 1.0, 5.0, 5.0)).unwrap().0,
+            [5; 4]
+        );
+        assert!(cut(&pixels, (3, 2), (1.0, 1.0, 0.2, 1.0)).is_none());
     }
 }

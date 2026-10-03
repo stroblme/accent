@@ -196,11 +196,11 @@ pub struct RepageReport {
 }
 
 /// A link a page edit left where it was ([`accent_core::markdown::Repaged::left`]): its note,
-/// its markup, and which of that note's links into the PDF reading the same it is.
+/// its anchor (`page=N&…`), and which of that note's links into the PDF with that anchor it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeptLink {
     pub note: String,
-    pub link: String,
+    pub anchor: String,
     pub nth: usize,
 }
 

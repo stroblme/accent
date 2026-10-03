@@ -231,6 +231,7 @@ impl App {
             "diagram-delete-page" => tab.delete_page(),
             "diagram-to-front" => tab.reorder(accent_drawio::ZOrder::ToFront),
             "diagram-to-back" => tab.reorder(accent_drawio::ZOrder::ToBack),
+            "diagram-invert" => tab.toggle_invert(),
             "diagram-select" => self.diagram_tool(Tool::Select),
             "diagram-rect" => self.diagram_tool(Tool::Rect),
             "diagram-ellipse" => self.diagram_tool(Tool::Ellipse),

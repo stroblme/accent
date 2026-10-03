@@ -127,6 +127,9 @@ pub struct PdfTab {
     /// and the page commands, until the menu has gone. See [`PdfTab::source_point`] and
     /// [`PdfTab::command_page`].
     pub(super) pointed: Cell<Option<(usize, f32, f32)>>,
+    /// The window found this a LaTeX build with no SyncTeX file: the page's menu shows Go to
+    /// Source greyed, saying why, rather than not at all.
+    pub(super) without_synctex: Cell<bool>,
     /// The line of text Show in PDF asked for while the document was still opening.
     pub(super) spot: Cell<Option<(usize, pdf::Rect)>>,
     /// A save is already scheduled, so a burst of strokes costs one write.
@@ -277,6 +280,7 @@ pub fn open(
         notes: RefCell::new(Vec::new()),
         pending_show: Cell::new(None),
         pointed: Cell::new(None),
+        without_synctex: Cell::new(false),
         spot: Cell::new(None),
         save_pending: Cell::new(false),
         uploading: Cell::new(false),
@@ -711,14 +715,10 @@ impl PdfTab {
         self.view.mode() != pdfview::Mode::Select
     }
 
-    /// Give those tools the page under the reader and its neighbours.
-    ///
-    // ponytail: three pages, so a fourth that is partly on screen waits until it is current.
+    /// Give those tools every page at least partly on screen.
     fn ask_inks(&self) {
-        let page = self.view.current_page();
-        let last = self.view.page_count().saturating_sub(1);
-        for p in page.saturating_sub(1)..=(page + 1).min(last) {
-            self.ask(Request::Inks(p));
+        for page in self.view.visible_pages() {
+            self.ask(Request::Inks(page));
         }
     }
 
@@ -1219,10 +1219,16 @@ impl PdfTab {
                     tab.ask(Request::Links(page));
                 }
                 tab.thumbs.set_framed(page);
+                tab.emit(&tab.on_page);
+            }
+        ));
+        view.connect_shown(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || {
                 if tab.wants_inks() {
                     tab.ask_inks();
                 }
-                tab.emit(&tab.on_page);
             }
         ));
         view.connect_pressed(glib::clone!(
@@ -1364,11 +1370,8 @@ impl PdfTab {
         // Window actions, in sections, the way the terminal's menu is built: that is what puts
         // them in the palette and lets them be rebound, which a tab-local group could not.
         self.pointed.set(self.view.page_point(x, y));
-        let source = gio::MenuItem::new(
-            Some(crate::actions::label_of("win.pdf-go-to-source")),
-            Some("win.pdf-go-to-source"),
-        );
-        source.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
+        let missing = self.without_synctex.get();
+        let source = crate::synctex::menu_item("win.pdf-go-to-source", missing);
         let open = gio::Menu::new();
         open.append_item(&source);
         menu.append_section(None, &open);

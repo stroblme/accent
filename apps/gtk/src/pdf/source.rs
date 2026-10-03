@@ -23,6 +23,12 @@ impl PdfTab {
         })
     }
 
+    /// Whether the window found this a LaTeX build with no SyncTeX file, which the page's menu
+    /// then says rather than leaving Go to Source out.
+    pub fn set_without_synctex(&self, missing: bool) {
+        self.without_synctex.set(missing);
+    }
+
     /// Bring `rect` of `page` into view and mark it as a selection is drawn, until [`MARK`] has
     /// passed or a selection replaces it. A jump, so Back returns to where the reader was; a
     /// document still opening does it once its pages are known ([`PdfTab::show_pending_spot`]),

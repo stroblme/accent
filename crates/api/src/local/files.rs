@@ -194,7 +194,12 @@ impl Local {
     /// to anything that moves, and the moved notes whose markdown links are relative to them.
     /// The servers are asked here, before anything moves, because they may read the disk to
     /// answer: rust-analyzer asks it whether the path is a folder.
+    ///
+    /// The index is asked once it has taken in every note written before the call, the tabs the
+    /// window has just flushed among them: a link saved a moment ago would otherwise be missed
+    /// by the plan and left naming the old place.
     pub fn plan_moves(&self, moves: &[(String, String)]) -> Result<RenamePlan> {
+        self.settle_index();
         let files = self.moved_files(moves)?;
         let mut candidates = BTreeSet::new();
         {
@@ -421,12 +426,18 @@ impl Local {
     /// `page=N&selection=…` and a plain `page=N` jump alike. `keep` is what the delete an Undo
     /// takes back left behind (see [`markdown::repage_links`]). A note that cannot be read or
     /// written is reported, not fatal: the page edit has already happened.
+    ///
+    /// The index is asked once it has taken in every note written before the call, the ones the
+    /// caller has just flushed and any a walk held back: a note missing from it would keep its
+    /// old page numbers, and the next edit would move them from there. Whether the index has
+    /// every note is the caller's to wait for, as it is before a rename (`reconciled`).
     pub fn repage_links(
         &self,
         rel: &str,
         edit: PageEdit,
         keep: &[KeptLink],
     ) -> Result<RepageReport> {
+        self.settle_index();
         let notes: BTreeSet<String> = self
             .index()
             .backlinks(rel)?
@@ -438,16 +449,16 @@ impl Local {
             let kept: Vec<(String, usize)> = keep
                 .iter()
                 .filter(|k| k.note == note)
-                .map(|k| (k.link.clone(), k.nth))
+                .map(|k| (k.anchor.clone(), k.nth))
                 .collect();
             match self.repage_one(&note, rel, edit, &kept) {
                 Ok(done) => {
                     report.moved += done.moved;
                     report
                         .left
-                        .extend(done.left.into_iter().map(|(link, nth)| KeptLink {
+                        .extend(done.left.into_iter().map(|(anchor, nth)| KeptLink {
                             note: note.clone(),
-                            link,
+                            anchor,
                             nth,
                         }));
                     if done.text.is_some() {
@@ -896,7 +907,7 @@ mod tests {
             deleted.left,
             [crate::KeptLink {
                 note: "a.md".into(),
-                link: "[[paper.pdf#page=3&selection=0,0,0,4|Hi]]".into(),
+                anchor: "page=3&selection=0,0,0,4".into(),
                 nth: 0
             }]
         );
@@ -1164,6 +1175,16 @@ mod tests {
             .replace_all(r"hello (\w+)", opts, "bye $1", false, false)
             .unwrap();
         assert_eq!(f.read("a.md"), "bye world\n");
+    }
+
+    /// A link saved just before the rename is in the plan: the window flushes its tabs and asks
+    /// at once, before the worker has taken the save in.
+    #[test]
+    fn a_link_saved_just_before_a_rename_is_rewritten() {
+        let f = vault_of(&[("B.md", "the target\n"), ("a.md", "nothing yet\n")]);
+        f.vault.save("a.md", "see [[B]]\n", None).unwrap();
+        let plan = f.vault.plan_moves(&one("B.md", "C.md")).unwrap();
+        assert_eq!(plan.rewrites, ["a.md"]);
     }
 
     #[test]

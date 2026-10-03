@@ -18,7 +18,8 @@ const POINTS: [(usize, f32, f32); 6] = [
 /// [`POINTS`] go to the source as the page's menu does and print where the caret landed (or the
 /// toast), and from that line show it in the PDF again, printing the line of text marked and
 /// whether it holds the point. Point it at a LaTeX build made with `-synctex=1` in a scratch
-/// vault; a source `\input` from outside the vault prints its toast.
+/// vault; a source `\input` from outside the vault prints its toast. A build without a SyncTeX
+/// file prints what the palette and the `.tex` beside it say instead ([`without_synctex`]).
 pub(super) fn bench_synctex(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -30,6 +31,10 @@ pub(super) fn bench_synctex(app: &Rc<App>, rel: &str) {
         let items = menu.menu_model().map(|m| fileops::labels(&m));
         menu.popdown();
         println!("bench synctex pdf {} menu={items:?}", offered(&app));
+        if app.synctex_missing(app.active_doc().as_ref()).0 {
+            without_synctex(&app, &rel).await;
+            return bench_quit(&app);
+        }
         for (page, x, y) in POINTS {
             app.open_path(&rel);
             let Some(pdf) = until(|| app.active_pdf()).await else {
@@ -121,6 +126,61 @@ async fn accent_writes(app: &Rc<App>, rel: &str) {
     let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
     saved().await;
     offer("added_undone");
+}
+
+/// A LaTeX build without a SyncTeX file: the palette's rows for the two commands over the PDF and
+/// over the `.tex` of its name beside it, then that tab's menu each second for eight, for a
+/// secondary press on it through XTEST to change.
+async fn without_synctex(app: &Rc<App>, rel: &str) {
+    println!(
+        "bench synctex no_synctex pdf palette={:?}",
+        palette_rows(app).await
+    );
+    let tex = format!("{}.tex", rel.trim_end_matches(".pdf"));
+    app.open_path(&tex);
+    let Some(tab) = until(|| app.active().filter(|tab| tab.rel() == tex)).await else {
+        return println!("bench synctex no_tex {tex}");
+    };
+    println!(
+        "bench synctex no_synctex tex palette={:?}",
+        palette_rows(app).await
+    );
+    for _ in 0..8 {
+        let menu = tab.view.extra_menu().map(|m| fileops::labels(&m));
+        println!("bench synctex no_synctex tex menu={menu:?}");
+        glib::timeout_future(Duration::from_secs(1)).await;
+    }
+}
+
+/// What the command palette's rows for Go to Source and Show in PDF say under their names, and
+/// whether each takes a pick.
+async fn palette_rows(app: &Rc<App>) -> Vec<(String, String, bool)> {
+    let mut rows = Vec::new();
+    for label in ["Go to Source", "Show in PDF"] {
+        let _ = WidgetExt::activate_action(&app.window, "win.palette-commands", None);
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let Some(dialog) = app.window.visible_dialog() else {
+            continue;
+        };
+        let entry = find_widget(dialog.upcast_ref(), &|w| w.is::<gtk::SearchEntry>());
+        if let Some(entry) = entry.and_downcast::<gtk::SearchEntry>() {
+            entry.set_text(&format!(">{label}"));
+        }
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let named = |w: &gtk::Widget| {
+            w.downcast_ref::<gtk::Label>()
+                .is_some_and(|l| l.label() == label)
+        };
+        if let Some(name) = find_widget(dialog.upcast_ref(), &named) {
+            let under = name.next_sibling().and_downcast::<gtk::Label>();
+            let says = under.map(|l| l.label().to_string()).unwrap_or_default();
+            let picks = name.parent().is_some_and(|row| row.is_sensitive());
+            rows.push((label.to_string(), says, picks));
+        }
+        dialog.force_close();
+        glib::timeout_future(Duration::from_millis(200)).await;
+    }
+    rows
 }
 
 /// Whether the two commands are enabled as the window stands.
