@@ -934,8 +934,8 @@ impl Tab {
         };
         if self.buffer.has_selection() {
             view.add_next_occurrence();
-        } else {
-            self.select_word();
+        } else if self.select_word() {
+            view.match_whole_words();
         }
     }
 
@@ -945,7 +945,10 @@ impl Tab {
         let Some(view) = self.view.downcast_ref::<multicaret::View>() else {
             return;
         };
-        if self.buffer.has_selection() || self.select_word() {
+        if !self.buffer.has_selection() && self.select_word() {
+            view.match_whole_words();
+        }
+        if self.buffer.has_selection() {
             view.select_all_occurrences();
         }
     }

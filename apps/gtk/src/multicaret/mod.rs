@@ -274,12 +274,23 @@ fn tab_insert(column: usize, width: usize, spaces: bool) -> String {
 
 /// Every occurrence of `needle` in `text`, left to right, none overlapping the one before, as
 /// character ranges, which is what a buffer counts in. Literal and case-sensitive: VS Code's Add
-/// Selection to Next Find Match by default.
-fn occurrences<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = (i32, i32)> + 'a {
+/// Selection to Next Find Match by default. With `whole`, only one standing as a word of its own,
+/// with no letter, digit or underscore either side: what VS Code matches a word taken from under
+/// the caret as.
+fn occurrences<'a>(
+    text: &'a str,
+    needle: &'a str,
+    whole: bool,
+) -> impl Iterator<Item = (i32, i32)> + 'a {
     let len = needle.chars().count() as i32;
     let (mut byte, mut chars) = (0, 0);
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
     text.match_indices(needle)
         .filter(move |_| !needle.is_empty())
+        .filter(move |&(at, _)| {
+            let (before, after) = (&text[..at], &text[at + needle.len()..]);
+            !whole || !(word(before.chars().next_back()) || word(after.chars().next()))
+        })
         .map(move |(at, _)| {
             chars += text[byte..at].chars().count() as i32;
             byte = at;
@@ -290,14 +301,15 @@ fn occurrences<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = (i32,
 /// The next occurrence of `needle` in `text` that starts at or after `from`, or failing that the
 /// first from the top, as the search wraps at the end of the buffer. One that overlaps a range in
 /// `taken`, a selection some caret already holds, is passed over, so `None` means every
-/// occurrence is taken.
+/// occurrence is taken. `whole` as for [`occurrences`].
 fn next_occurrence(
     text: &str,
     needle: &str,
     from: i32,
     taken: &[(i32, i32)],
+    whole: bool,
 ) -> Option<(i32, i32)> {
-    let free: Vec<(i32, i32)> = occurrences(text, needle)
+    let free: Vec<(i32, i32)> = occurrences(text, needle, whole)
         .filter(|&(start, end)| !taken.iter().any(|&(s, e)| start < e && s < end))
         .collect();
     free.iter()
@@ -477,6 +489,10 @@ mod imp {
         /// The primary caret's goal column, the counterpart of [`Caret::goal`]. Dropped by any
         /// other movement, any edit and any caret move this widget did not make.
         pub goal: Cell<Option<i32>>,
+        /// Whether the primary selection is a word taken from under the caret
+        /// ([`super::View::match_whole_words`]), whose occurrences are whole words. Dropped with
+        /// the goal by any caret move this widget did not make.
+        pub whole_words: Cell<bool>,
         /// The frame time the blink phase last restarted at, so every caret fades together and a
         /// caret being typed at is solid.
         pub blinked_at: Cell<i64>,
@@ -538,6 +554,7 @@ mod imp {
                         }
                         if !obj.imp().busy.get() {
                             obj.imp().goal.set(None);
+                            obj.imp().whole_words.set(false);
                             obj.clear_carets();
                         }
                     }
@@ -906,7 +923,8 @@ impl View {
         // The primary is `spans[0]` and a new caret is pushed last, so the last is the newest.
         let from = spans.last().map_or(0, |span| span.end());
         let taken: Vec<(i32, i32)> = spans.iter().map(|s| (s.start(), s.end())).collect();
-        let Some((from, to)) = next_occurrence(&text, &needle, from, &taken) else {
+        let whole = self.imp().whole_words.get();
+        let Some((from, to)) = next_occurrence(&text, &needle, from, &taken, whole) else {
             return;
         };
         let at = |offset| buffer.iter_at_offset(offset);
@@ -915,6 +933,14 @@ impl View {
         if let Some(caret) = self.imp().carets.borrow().last() {
             self.scroll_mark_onscreen(&caret.mark);
         }
+    }
+
+    /// Have the occurrences of the primary selection matched as whole words from here until the
+    /// selection is moved by hand: it is the word under the caret, which the tab has just selected
+    /// for Add Caret at Next Occurrence or Select All Occurrences, and VS Code then passes over
+    /// `foo` inside `foo_bar`.
+    pub fn match_whole_words(&self) {
+        self.imp().whole_words.set(true);
     }
 
     /// Add a caret selecting every occurrence of the primary selection that no caret holds yet,
@@ -930,7 +956,7 @@ impl View {
         let text = buffer.text(&all_start, &all_end, true);
         let taken: Vec<(i32, i32)> = self.spans().iter().map(|s| (s.start(), s.end())).collect();
         let at = |offset| buffer.iter_at_offset(offset);
-        for (from, to) in occurrences(&text, &needle) {
+        for (from, to) in occurrences(&text, &needle, self.imp().whole_words.get()) {
             if !taken.iter().any(|&(s, e)| from < e && s < to) {
                 self.push_caret(&at(from), &at(to), None, None);
             }
@@ -1292,12 +1318,17 @@ impl View {
 /// drag never see the sequence and the press is not a Shift+click extending the selection; a press
 /// without the chord is let go at once. The box is measured from where the press was in the
 /// buffer, so a scroll during the drag leaves its first corner where it was.
+///
+/// Resting past the view's top or bottom edge, the box goes on growing that way: every
+/// [`SCAN`] the box is drawn again to the pointer, and `select_box` brings the line under it on
+/// screen, so the view scrolls on, the faster the further past the edge, as GTK's own drag does.
 fn box_drag(view: &View) {
+    use std::{cell::Cell, rc::Rc};
     let drag = gtk::GestureDrag::builder()
         .button(gdk::BUTTON_PRIMARY)
         .propagation_phase(gtk::PropagationPhase::Capture)
         .build();
-    let from = std::rc::Rc::new(std::cell::Cell::new((0, 0)));
+    let from = Rc::new(Cell::new((0, 0)));
     let pressed = from.clone();
     drag.connect_drag_begin(move |drag, x, y| {
         let chord = gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::ALT_MASK;
@@ -1312,16 +1343,57 @@ fn box_drag(view: &View) {
         pressed.set(at);
         view.select_box(at, at);
     });
+    // Where the pointer is in the view, and whether the view is scrolling on past an edge for it.
+    let pointer = Rc::new(Cell::new((0.0, 0.0)));
+    let scanning = Rc::new(Cell::new(false));
     drag.connect_drag_update(move |drag, dx, dy| {
         let (Some(view), Some((x, y))) = (drag.widget().and_downcast::<View>(), drag.start_point())
         else {
             return;
         };
-        let (x, y) = ((x + dx) as i32, (y + dy) as i32);
-        let to = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x, y);
-        view.select_box(from.get(), to);
+        pointer.set((x + dx, y + dy));
+        box_to(&view, from.get(), pointer.get());
+        if !past_edge(&view, y + dy) || scanning.replace(true) {
+            return;
+        }
+        let (drag, from, pointer, scanning) = (
+            drag.downgrade(),
+            from.clone(),
+            pointer.clone(),
+            scanning.clone(),
+        );
+        glib::timeout_add_local(SCAN, move || {
+            let view = drag
+                .upgrade()
+                .filter(|drag| drag.is_active())
+                .and_then(|drag| drag.widget().and_downcast::<View>());
+            match view.filter(|view| past_edge(view, pointer.get().1)) {
+                Some(view) => {
+                    box_to(&view, from.get(), pointer.get());
+                    glib::ControlFlow::Continue
+                }
+                None => {
+                    scanning.set(false);
+                    glib::ControlFlow::Break
+                }
+            }
+        });
     });
     view.add_controller(drag);
+}
+
+/// How often a box drag resting past the view's edge scrolls on: GTK's own drag-select scan.
+const SCAN: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The box from buffer point `from` to the pointer at `x`, `y` in the view.
+fn box_to(view: &View, from: (i32, i32), (x, y): (f64, f64)) {
+    let to = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+    view.select_box(from, to);
+}
+
+/// Whether `y` in the view is above or below it, where a box drag scrolls on.
+fn past_edge(view: &View, y: f64) -> bool {
+    y < 0.0 || y >= f64::from(view.height())
 }
 
 fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
@@ -1332,7 +1404,7 @@ fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
 mod tests {
     use super::{
         Edit, Motion, Span, blink_alpha, departure, edit_for, ends_column, merge, next_occurrence,
-        spaces_ahead, spaces_behind, spread, tab_insert, undo_or_redo, vertical_step,
+        occurrences, spaces_ahead, spaces_behind, spread, tab_insert, undo_or_redo, vertical_step,
         visual_column,
     };
     use gtk::gdk::{Key, ModifierType as Mod};
@@ -1507,23 +1579,48 @@ mod tests {
     fn the_next_occurrence_wraps_and_skips_what_is_taken() {
         let text = "foo bar Foo foo baz foo";
         assert_eq!(
-            next_occurrence(text, "foo", 3, &[(0, 3)]),
+            next_occurrence(text, "foo", 3, &[(0, 3)], false),
             Some((12, 15)),
             "not Foo"
         );
         assert_eq!(
-            next_occurrence(text, "foo", 15, &[(0, 3), (12, 15)]),
+            next_occurrence(text, "foo", 15, &[(0, 3), (12, 15)], false),
             Some((20, 23))
         );
         let all = [(0, 3), (12, 15), (20, 23)];
-        assert_eq!(next_occurrence(text, "foo", 23, &all), None, "all taken");
         assert_eq!(
-            next_occurrence(text, "foo", 23, &[(12, 15), (20, 23)]),
+            next_occurrence(text, "foo", 23, &all, false),
+            None,
+            "all taken"
+        );
+        assert_eq!(
+            next_occurrence(text, "foo", 23, &[(12, 15), (20, 23)], false),
             Some((0, 3)),
             "wraps to the top"
         );
-        assert_eq!(next_occurrence(text, "o.", 0, &[]), None, "not a pattern");
+        assert_eq!(
+            next_occurrence(text, "o.", 0, &[], false),
+            None,
+            "not a pattern"
+        );
         // Offsets are characters, as the buffer counts them.
-        assert_eq!(next_occurrence("äö foo", "foo", 0, &[]), Some((3, 6)));
+        assert_eq!(
+            next_occurrence("äö foo", "foo", 0, &[], false),
+            Some((3, 6))
+        );
+    }
+
+    /// A word taken from under the caret matches whole words only, an underscore being part of
+    /// one, as VS Code has it; a selection made by hand matches anywhere.
+    #[test]
+    fn a_word_from_under_the_caret_matches_whole_words_only() {
+        let text = "a.foo foo_bar xfoo foo";
+        let all = |whole| occurrences(text, "foo", whole).collect::<Vec<_>>();
+        assert_eq!(all(false), [(2, 5), (6, 9), (15, 18), (19, 22)]);
+        assert_eq!(all(true), [(2, 5), (19, 22)]);
+        assert_eq!(
+            next_occurrence(text, "foo", 5, &[(2, 5)], true),
+            Some((19, 22))
+        );
     }
 }

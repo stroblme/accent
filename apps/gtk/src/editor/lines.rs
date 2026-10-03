@@ -240,10 +240,13 @@ pub(crate) fn newline_below(view: &sourceview5::View) {
 
 /// `text` with the language's comment markers put on or taken off, or `None` where the language
 /// names none. GtkSourceView carries the markers in its metadata but does no toggling of its own,
-/// so the text goes out to [`crate::comment`] and comes back as one replacement.
-fn toggled(text: &str, language: &sourceview5::Language) -> Option<String> {
+/// so the text goes out to [`crate::comment`] and comes back as one replacement. Line comments go
+/// on where `on` says, a column having decided over all its lines, or where `text` is not all
+/// commented already.
+fn toggled(text: &str, language: &sourceview5::Language, on: Option<bool>) -> Option<String> {
     if let Some(marker) = language.metadata("line-comment-start") {
-        return Some(comment::toggle_lines(text, &marker));
+        let on = on.unwrap_or_else(|| !comment::commented(text, &marker));
+        return Some(comment::comment_lines(text, &marker, on));
     }
     let (open, close) = (
         language.metadata("block-comment-start")?,
@@ -254,14 +257,21 @@ fn toggled(text: &str, language: &sourceview5::Language) -> Option<String> {
 
 /// Comment or uncomment lines `first` to `last` whole — a marker goes in front of a line, never
 /// in front of a word — replacing only the characters that actually change, so a caret in those
-/// lines keeps its column instead of riding to the end of a wholesale replacement.
-fn toggle_run(buffer: &gtk::TextBuffer, first: i32, last: i32, language: &sourceview5::Language) {
+/// lines keeps its column instead of riding to the end of a wholesale replacement. `on` as for
+/// [`toggled`].
+fn toggle_run(
+    buffer: &gtk::TextBuffer,
+    first: i32,
+    last: i32,
+    language: &sourceview5::Language,
+    on: Option<bool>,
+) {
     let Some(start) = buffer.iter_at_line(first) else {
         return;
     };
     let end = line_end(buffer, last);
     let text = buffer.text(&start, &end, true);
-    let Some(toggled) = toggled(&text, language) else {
+    let Some(toggled) = toggled(&text, language, on) else {
         return;
     };
     if toggled != text {
@@ -313,7 +323,8 @@ fn splice(
 
 /// Comment or uncomment the lines the selection covers with the language's own markers, inside a
 /// single user action so one Ctrl+Z undoes the whole thing. At a column, every run of lines the
-/// carets cover ([`covered`]), each run deciding for itself, and the column stays up.
+/// carets cover ([`covered`]), the column staying up; whether line comments go on or come off is
+/// decided once over all of them, as VS Code does, so a column half commented is commented whole.
 pub(crate) fn toggle_comment(view: &sourceview5::View) {
     if !view.is_editable() {
         return;
@@ -326,15 +337,30 @@ pub(crate) fn toggle_comment(view: &sourceview5::View) {
         return;
     };
     if let Some(column) = column(view) {
-        return column.each_block(&covered(column), |buffer, first, last| {
-            toggle_run(buffer, first, last, &language);
+        let runs = covered(column);
+        let on = language.metadata("line-comment-start").map(|marker| {
+            let text: Vec<String> = runs
+                .iter()
+                .filter_map(|&(first, last)| {
+                    let start = buffer.iter_at_line(first)?;
+                    Some(
+                        buffer
+                            .text(&start, &line_end(&buffer, last), true)
+                            .to_string(),
+                    )
+                })
+                .collect();
+            !comment::commented(&text.join("\n"), &marker)
+        });
+        return column.each_block(&runs, |buffer, first, last| {
+            toggle_run(buffer, first, last, &language, on);
             None
         });
     }
     let had_selection = buffer.has_selection();
     let (first, last) = selected_lines(&buffer);
     buffer.begin_user_action();
-    toggle_run(&buffer, first, last, &language);
+    toggle_run(&buffer, first, last, &language, None);
     buffer.end_user_action();
     // The marker is not part of what was selected, so the lines are selected afresh rather than
     // left to the marks: toggling never adds or removes a line, so they are still these two.

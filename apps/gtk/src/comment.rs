@@ -3,46 +3,46 @@
 //! The markers come from the GtkSourceView language's metadata, so this module never needs to
 //! know which language it is looking at — and never needs to touch a buffer.
 
-/// Toggle a line comment over `text`, whose lines are the ones the user selected.
-///
-/// Removes the marker when every non-blank line already carries one, otherwise inserts it at the
-/// shallowest indentation in the selection so the block stays aligned. Blank lines are left
-/// alone, and the trailing newline structure of the input is preserved.
-pub fn toggle_lines(text: &str, marker: &str) -> String {
+/// Whether every non-blank line of `text` carries `marker` already, which is when a toggle takes
+/// it off: a selection only half commented is commented whole. Asked once over all the lines
+/// before any is changed, so a column of carets goes one way, as VS Code's does.
+pub fn commented(text: &str, marker: &str) -> bool {
+    text.split('\n')
+        .filter(|l| !l.trim().is_empty())
+        .all(|l| l.trim_start().starts_with(marker))
+}
+
+/// `text`, whose lines are the ones the user selected, with a line comment put on (`on`) or taken
+/// off. It goes on at the shallowest indentation in the selection so the block stays aligned, and
+/// comes off with one space after it. Blank lines are left alone, and the trailing newline
+/// structure of the input is preserved.
+pub fn comment_lines(text: &str, marker: &str, on: bool) -> String {
     // `split('\n')` and `join("\n")` round-trip exactly, trailing newline included.
     let lines: Vec<&str> = text.split('\n').collect();
-    let content: Vec<&str> = lines
+    let common = lines
         .iter()
-        .copied()
         .filter(|l| !l.trim().is_empty())
-        .collect();
-    if content.is_empty() {
+        .map(|l| indent(l))
+        .min();
+    let Some(common) = common else {
         return text.to_string();
-    }
-    let out: Vec<String> = if content.iter().all(|l| l.trim_start().starts_with(marker)) {
-        lines
-            .iter()
-            .map(|line| {
-                let (lead, rest) = line.split_at(indent(line));
-                match rest.strip_prefix(marker) {
-                    Some(rest) => format!("{lead}{}", rest.strip_prefix(' ').unwrap_or(rest)),
-                    None => line.to_string(),
-                }
-            })
-            .collect()
-    } else {
-        let common = content.iter().copied().map(indent).min().unwrap_or(0);
-        lines
-            .iter()
-            .map(|line| {
-                if line.trim().is_empty() {
-                    line.to_string()
-                } else {
-                    format!("{}{marker} {}", &line[..common], &line[common..])
-                }
-            })
-            .collect()
     };
+    let out: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                return line.to_string();
+            }
+            if on {
+                return format!("{}{marker} {}", &line[..common], &line[common..]);
+            }
+            let (lead, rest) = line.split_at(indent(line));
+            match rest.strip_prefix(marker) {
+                Some(rest) => format!("{lead}{}", rest.strip_prefix(' ').unwrap_or(rest)),
+                None => line.to_string(),
+            }
+        })
+        .collect();
     out.join("\n")
 }
 
@@ -78,21 +78,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toggle_adds_at_the_common_indent() {
+    fn a_comment_goes_on_at_the_common_indent() {
         let src = "    fn a() {\n\n        b();\n    }\n";
+        assert!(!commented(src, "//"));
         assert_eq!(
-            toggle_lines(src, "//"),
+            comment_lines(src, "//", true),
             "    // fn a() {\n\n    //     b();\n    // }\n"
         );
     }
 
     #[test]
-    fn toggle_removes_when_every_line_is_commented() {
+    fn a_comment_comes_off_when_every_line_is_commented() {
         // The second line has no space after its marker; only one space is ever removed.
         let src = "    // fn a() {\n\n    //b();\n";
-        assert_eq!(toggle_lines(src, "//"), "    fn a() {\n\n    b();\n");
-        // A half-commented selection comments the rest instead of uncommenting.
-        assert_eq!(toggle_lines("# a\nb\n", "#"), "# # a\n# b\n");
+        assert!(commented(src, "//"));
+        assert_eq!(
+            comment_lines(src, "//", false),
+            "    fn a() {\n\n    b();\n"
+        );
+        // A half-commented selection is not commented, so a toggle comments the rest too.
+        assert!(!commented("# a\nb\n", "#"));
+        assert_eq!(comment_lines("# a\nb\n", "#", true), "# # a\n# b\n");
+    }
+
+    /// Told the direction, as a column is once it has decided over all its lines: off leaves a
+    /// line without a marker as it is.
+    #[test]
+    fn a_direction_given_is_kept() {
+        assert_eq!(comment_lines("# a\nb", "#", false), "a\nb");
+        assert_eq!(comment_lines("# a", "#", true), "# # a");
     }
 
     #[test]
