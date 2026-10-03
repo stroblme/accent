@@ -31,8 +31,8 @@ use std::collections::HashSet;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use accent_api::ssh;
 use gtk::prelude::*;
@@ -126,8 +126,23 @@ impl Term {
         }
         match &self.shell {
             Shell::Local(_) => end(&self.key, &self.at().unwrap_or_default()),
-            Shell::Remote { kill, .. } => run_kill(kill.clone()),
+            Shell::Remote { kill, link, .. } => {
+                run_kill(kill.clone(), Some(ssh::control_path(link)))
+            }
         }
+    }
+
+    /// The address whose master a remote shell rides.
+    fn link(&self) -> Option<&ssh::Url> {
+        match &self.shell {
+            Shell::Local(_) => None,
+            Shell::Remote { link, .. } => Some(link),
+        }
+    }
+
+    /// Whether `other` rides the same master, so that a link that dropped took both.
+    pub fn shares_link(&self, other: &Term) -> bool {
+        self.link().is_some() && self.link() == other.link()
     }
 
     pub fn restyle(&self) {
@@ -296,7 +311,6 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
         lost: Cell::new(false),
         ended: Cell::new(false),
     });
-    reattach_on_key(&term);
     take_copies(&term);
     start(&term);
     term
@@ -313,6 +327,7 @@ fn start(term: &Rc<Term>) {
     term.view
         .feed(format!("Connecting to {}…", link.host).as_bytes());
     let (link, weak) = (link.clone(), Rc::downgrade(term));
+    let ctl = ssh::control_path(&link);
     let view = glib::SendWeakRef::from(term.view.downgrade());
     // Set once there is an outcome. A line the worker said just before it returned can reach the
     // main loop after that, and would be drawn over the shell's first prompt.
@@ -326,6 +341,9 @@ fn start(term: &Rc<Term>) {
         })
         .await;
         over.store(true, Ordering::Relaxed);
+        if ready.is_ok() {
+            end_orphans(&ctl);
+        }
         let Some(term) = weak.upgrade() else {
             return;
         };
@@ -411,11 +429,12 @@ fn progress(view: &glib::SendWeakRef<vte4::Terminal>, over: &Arc<AtomicBool>, li
     });
 }
 
-/// Bring a lost shell back on a key press: a window of shells has no banner to press Reconnect
-/// on, and the tab is where the reader is looking. Not on a modifier alone, so the Ctrl of a
-/// Ctrl+W that gives up on the tab does not dial out first — which may raise a passphrase dialog.
-/// Capture phase, so the key that asks is not also typed into the shell it brings back.
-fn reattach_on_key(term: &Rc<Term>) {
+/// Bring a lost shell back on a key press, through `reconnect`, which brings back the others the
+/// link took as well: a window of shells has no banner to press Reconnect on, and the tab is where
+/// the reader is looking. Not on a modifier alone, so the Ctrl of a Ctrl+W that gives up on the
+/// tab does not dial out first — which may raise a passphrase dialog. Capture phase, so the key
+/// that asks is not also typed into the shell it brings back.
+pub fn on_reconnect(term: &Rc<Term>, reconnect: impl Fn(&Rc<Term>) + 'static) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     // Weak: the view owns this controller, and the term owns the view.
@@ -427,7 +446,7 @@ fn reattach_on_key(term: &Rc<Term>) {
             .is_some_and(|key| key.is_modifier());
         match weak.upgrade().filter(|term| term.lost.get() && !modifier) {
             Some(term) => {
-                term.reopen();
+                reconnect(&term);
                 glib::Propagation::Stop
             }
             None => glib::Propagation::Proceed,
@@ -856,7 +875,7 @@ pub fn end(key: &str, at: &str) {
     if ssh::is_remote(at) {
         let url = ssh::parse(at);
         match url.and_then(|url| Shell::remote(url.clone(), accent_api::link::host(&url), key)) {
-            Ok(Shell::Remote { kill, .. }) => run_kill(kill),
+            Ok(Shell::Remote { kill, link, .. }) => run_kill(kill, Some(ssh::control_path(&link))),
             Ok(Shell::Local(_)) => {}
             Err(e) => tracing::warn!("cannot end the shell at {at}: {e}"),
         }
@@ -864,7 +883,7 @@ pub fn end(key: &str, at: &str) {
     }
     if let Some(cli) = cli() {
         let cli = cli.to_string_lossy().into_owned();
-        run_kill(vec![cli, "kill".to_string(), id(key).to_string()]);
+        run_kill(vec![cli, "kill".to_string(), id(key).to_string()], None);
     }
 }
 
@@ -938,7 +957,11 @@ fn same_state(pid: u64) -> bool {
 
 /// Run a kill's argument vector and wait for it on a thread of its own, so Close Tab never waits
 /// on the holder or on a host. An empty one is a shell nothing holds.
-fn run_kill(argv: Vec<String>) {
+///
+/// `over` is the master socket a remote shell's end goes through. One that finds the link down is
+/// kept, and run again once a connection to it is up ([`end_orphans`]): the shell would otherwise
+/// run on the host with no tab left to reach it.
+fn run_kill(argv: Vec<String>, over: Option<PathBuf>) {
     let Some((program, args)) = argv.split_first() else {
         return;
     };
@@ -946,11 +969,34 @@ fn run_kill(argv: Vec<String>) {
     command.args(args).stdin(std::process::Stdio::null());
     let _ = std::thread::Builder::new()
         .name("accent-kill".to_string())
-        .spawn(move || {
-            if let Err(e) = command.status() {
-                tracing::warn!("cannot end the shell: {e}");
+        .spawn(move || match (command.status(), over) {
+            // ssh's own failure rather than the command's: the host never heard.
+            (Ok(status), Some(ctl)) if status.code() == Some(255) => {
+                tracing::debug!("ending a shell once {} is back", ctl.display());
+                let mut orphaned = ORPHANED.lock().unwrap_or_else(|e| e.into_inner());
+                orphaned.push((ctl, argv));
             }
+            (Ok(_), _) => {}
+            (Err(e), _) => tracing::warn!("cannot end the shell: {e}"),
         });
+}
+
+/// The ends of remote shells that found the link down, by the master socket they go through.
+static ORPHANED: Mutex<Vec<(PathBuf, Vec<String>)>> = Mutex::new(Vec::new());
+
+/// End the shells closed while the link through `ctl` was down, now that it is up again.
+pub fn end_orphans(ctl: &Path) {
+    let ends: Vec<Vec<String>> = {
+        let mut orphaned = ORPHANED.lock().unwrap_or_else(|e| e.into_inner());
+        let (due, kept) = std::mem::take(&mut *orphaned)
+            .into_iter()
+            .partition(|(over, _)| over == ctl);
+        *orphaned = kept;
+        due.into_iter().map(|(_, argv)| argv).collect()
+    };
+    for argv in ends {
+        run_kill(argv, Some(ctl.to_path_buf()));
+    }
 }
 
 /// The directory an OSC 7 `file://host/path` URI names, if `host` is this machine. A shell that

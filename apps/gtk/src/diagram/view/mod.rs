@@ -17,7 +17,7 @@ use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk};
 
-use super::geometry::{self, DRAG_SLOP, End, Frame, HANDLE, Sheet, TOLERANCE, Zoom};
+use super::geometry::{self, DRAG_SLOP, End, Frame, GAP, HANDLE, Sheet, TOLERANCE, Zoom};
 use super::paint::{self, Cache};
 use super::tools::Tool;
 use crate::theme;
@@ -143,6 +143,13 @@ impl DiagramView {
         self.set_cursor_from_name(on.then_some("grab"));
     }
 
+    /// A page to read, not to edit, as a presented one is: a drag moves the page, and no click
+    /// selects, moves, draws or opens a label.
+    pub fn set_read_only(&self, on: bool) {
+        self.imp().read_only.set(on);
+        self.set_cursor_from_name(None);
+    }
+
     pub fn zoom(&self) -> Zoom {
         self.imp().zoom.get()
     }
@@ -199,6 +206,29 @@ impl DiagramView {
 
     pub fn set_scroll(&self, at: (f64, f64)) {
         self.imp().scroll.set_scroll(at);
+    }
+
+    /// Whether the drawing goes on below the view (`down`) or above it. The last [`GAP`] is the
+    /// margin round it, nothing to read: a stroke on the page's edge, which widens the drawing a
+    /// pixel past a fitted page, does not take a notch of its own.
+    pub fn has_room(&self, down: bool) -> bool {
+        let Some(v) = self.imp().scroll.v() else {
+            return false;
+        };
+        match down {
+            true => v.value() + v.page_size() < v.upper() - GAP,
+            false => v.value() > v.lower() + GAP,
+        }
+    }
+
+    /// Scroll to the top of the drawing, or to its bottom, at the zoom it is at.
+    pub fn land(&self, top: bool) {
+        if let Some(v) = self.imp().scroll.v() {
+            v.set_value(match top {
+                true => v.lower(),
+                false => v.upper() - v.page_size(),
+            });
+        }
     }
 
     /// Where the diagram is left: the zoom and scroll to come back to. Applied once the widget
@@ -365,6 +395,7 @@ mod imp {
         pub pending_scroll: Cell<Option<(f64, f64)>>,
         pub tool: Cell<Tool>,
         pub panning: Cell<bool>,
+        pub read_only: Cell<bool>,
         pub(super) drag: RefCell<Option<Drag>>,
         pub(super) preview: RefCell<Option<Preview>>,
         /// Whether the drag under way has gone past [`DRAG_SLOP`].
@@ -395,6 +426,7 @@ mod imp {
                 pending_scroll: Cell::new(None),
                 tool: Cell::new(Tool::Select),
                 panning: Cell::new(false),
+                read_only: Cell::new(false),
                 drag: RefCell::new(None),
                 preview: RefCell::new(None),
                 moved: Cell::new(false),
@@ -578,7 +610,7 @@ mod imp {
                 #[weak]
                 obj,
                 move |_, n, x, y| {
-                    if n != 2 {
+                    if n != 2 || obj.imp().read_only.get() {
                         return;
                     }
                     let Some(sheet) = obj.sheet() else { return };

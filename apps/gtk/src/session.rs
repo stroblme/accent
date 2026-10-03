@@ -676,12 +676,12 @@ impl App {
                 "Pick one in the sidebar, or press Ctrl+E to go to a file.".to_string(),
             ),
             1 => (
-                "network-server-symbolic",
+                "remote-server-symbolic",
                 format!("Waiting for {}", self.host()),
                 "1 tab will open when it answers.".to_string(),
             ),
             n => (
-                "network-server-symbolic",
+                "remote-server-symbolic",
                 format!("Waiting for {}", self.host()),
                 format!("{n} tabs will open when it answers."),
             ),

@@ -4,12 +4,15 @@
 //! `analyze` lives here with the types it fills; the helpers it calls sit by concern — `spans`
 //! reads delimiters back from the source, `links` classifies and rewrites targets, `frontmatter`
 //! scans tags and the YAML block, `html` renders the preview.
+//!
+//! `table` stands apart: it lays out a pipe table as the editor's Tab and Enter keep it.
 
 mod blocks;
 mod frontmatter;
 mod html;
 mod links;
 mod spans;
+mod table;
 
 pub use blocks::{BlockId, block_ids};
 pub use html::{math_errors, mathml, to_html};
@@ -17,6 +20,7 @@ pub use links::{
     Repaged, anchor_range, heading_for, is_image, is_url, link_key, path_keys, path_link_keys,
     pdf_anchor, percent_decode, percent_encode, repage_links, rewrite_moved, slugs, strip_ext,
 };
+pub use table::{TableEdit, TableKey, table_key};
 
 use frontmatter::{frontmatter, scan_tags};
 use links::pending;

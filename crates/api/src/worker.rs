@@ -757,9 +757,15 @@ fn watch(
     // A repository's own directory and the branch tips inside it. Two watches per repo is
     // what tells the git pane a commit happened in a terminal; `notify` refuses a path that
     // does not exist, so a repository removed under us costs a warning, not the watch set.
+    // And each remote's tracking refs, which are all a push moves: one made in a terminal, or
+    // one a host finished after the link to it dropped.
     for git_dir in git_dirs {
         dirs.push(git_dir.clone());
         dirs.push(git_dir.join("refs/heads"));
+        let remotes = std::fs::read_dir(git_dir.join("refs/remotes"))
+            .into_iter()
+            .flatten();
+        dirs.extend(remotes.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
     }
     // One level each, as every other directory here: never the tree under one.
     dirs.extend(unindexed.iter().map(|rel| root.join(rel)));
@@ -1409,6 +1415,20 @@ mod tests {
         assert!(
             f.wait(|e| matches!(e, Event::GitChanged)).is_some(),
             "a commit has to reach the pane"
+        );
+
+        // A push moves its remote-tracking ref and nothing else the watcher saw: one made in a
+        // shell, or one a host finished after the link dropped, has to reach the pane too.
+        git(&["commit", "-q", "--allow-empty", "-m", "two"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD~1"]);
+        // A rescan puts the remote, which did not exist before, in the watch set.
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+        let _ = crate::tests::wait_for(&f.events, |_| false, Duration::from_millis(1500));
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        assert!(
+            f.wait(|e| matches!(e, Event::GitChanged)).is_some(),
+            "a push has to reach the pane"
         );
     }
 

@@ -7,7 +7,7 @@ use gtk::prelude::*;
 use gtk::{gdk, glib};
 
 /// How many rows Page Up and Page Down move by. A completion list is at most
-/// [`COMPLETIONS`] long and shows five or six of them at a time, so a page is a screenful.
+/// [`COMPLETIONS`] long and shows five of them at a time, so a page is a screenful.
 const PAGE: usize = 5;
 /// How many folders a path entry offers at once before the list stops.
 const COMPLETIONS: usize = 12;
@@ -135,15 +135,21 @@ pub(crate) fn path_field(
 ) -> gtk::Widget {
     // A `GtkListBox` rather than a column of buttons: it paints the selected row itself, where a
     // button would want a stylesheet the app does not otherwise have, and it is one tab stop
-    // instead of twelve. The rows are the only record of what is on offer.
+    // instead of twelve. The rows are the only record of what is on offer. `.navigation-sidebar`
+    // is the palette's and the sidebar's row, an inset pill on the card rather than a plain
+    // list's band of the view's colour, 6 px in from the card's edges all round.
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
+        .margin_top(6)
+        .margin_bottom(4)
+        .css_classes(["navigation-sidebar"])
         .build();
-    // A deep vault is a list that scrolls rather than a dialog taller than the window.
+    // A deep vault is a list that scrolls rather than a dialog taller than the window: five rows,
+    // which is a page.
     let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .propagate_natural_height(true)
-        .max_content_height(160)
+        .max_content_height(200)
         .child(&list)
         .build();
     scroller.add_css_class("card");

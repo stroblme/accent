@@ -762,8 +762,13 @@ impl Tab {
     /// aborts ("Byte index … is off the end of the line"). So a comparison opens the folds and
     /// shuts them again when it goes (`editor/compare.rs`).
     fn shut(&self, f: Fold) {
-        if self.comparing.borrow().is_none() {
-            fold::fold(self.text_buffer(), f);
+        if self.comparing.borrow().is_some() {
+            return;
+        }
+        let hide = || fold::fold(self.text_buffer(), f);
+        match self.view.downcast_ref::<multicaret::View>() {
+            Some(view) => view.keeping_carets(hide),
+            None => hide(),
         }
     }
 
@@ -911,10 +916,13 @@ impl Tab {
     }
 
     /// VS Code's Add Cursor Above / Below. Multi-caret lives on the view subclass; the tab keeps
-    /// the plain `sourceview5::View` type so nothing else has to know about it.
+    /// the plain `sourceview5::View` type so nothing else has to know about it. A shut block the
+    /// view opened for the caret is followed up as a jump into one is.
     pub fn add_caret(&self, below: bool) {
-        if let Some(view) = self.view.downcast_ref::<multicaret::View>() {
-            view.add_caret(below);
+        if let Some(view) = self.view.downcast_ref::<multicaret::View>()
+            && let Some(opened) = view.add_caret(below)
+        {
+            self.revealed_at(opened);
         }
     }
 

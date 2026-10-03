@@ -136,6 +136,9 @@ pub(super) fn bench_keys(app: &Rc<App>) {
             bench_selections(&view).await;
             bench_lines(&view).await;
             bench_box(&view).await;
+            bench_grow(&view);
+            bench_folds(&view).await;
+            bench_table(&view);
             window.close();
             bench_quit(&app);
         });
@@ -321,6 +324,168 @@ async fn bench_box(view: &multicaret::View) {
     view.select_box(point(2, 1), point(2, 1));
     show("click");
     view.set_monospace(false);
+}
+
+/// Add Caret Below and Above with a word selected grow a box from it: the same columns on each
+/// line added, a line short of them an empty caret at its end and one ending inside them selected
+/// to its end; the other way takes back the line added last, and once only the word is left it
+/// grows that way. Prints every selection as its line and columns, top to bottom.
+fn bench_grow(view: &multicaret::View) {
+    let buffer = view.buffer();
+    let show = |step: &str| {
+        let spans: Vec<_> = view
+            .selections()
+            .iter()
+            .map(|(from, to)| {
+                format!(
+                    "{}:{}-{}",
+                    from.line(),
+                    from.line_offset(),
+                    to.line_offset()
+                )
+            })
+            .collect();
+        println!("bench grow_{step} {}", spans.join(" "));
+    };
+    view.clear_carets();
+    buffer.set_text("one two three\nalpha beta\nxy\ngamma de\nomega zeta");
+    buffer.select_range(&at(&buffer, 1, 10), &at(&buffer, 1, 6));
+    for _ in 0..3 {
+        view.add_caret(true);
+        show("down");
+    }
+    view.add_caret(false);
+    show("take_back");
+    for _ in 0..2 {
+        view.add_caret(false);
+    }
+    show("original");
+    view.add_caret(false);
+    show("up");
+    view.press(gdk::Key::X, gdk::ModifierType::SHIFT_MASK);
+    let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+    println!("bench grow_typed {text:?}");
+    view.clear_carets();
+}
+
+/// Up and Down over a shut fold, in code and in prose, at one caret and at a column, and Add Caret
+/// onto a line the fold hides. Prints every caret, the primary first, and whether the block is
+/// still shut.
+async fn bench_folds(view: &multicaret::View) {
+    let buffer = view.buffer();
+    if let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() {
+        crate::fold::install_tag(source);
+    }
+    let shut = |header: u32, last: u32| {
+        let fold = accent_api::Fold {
+            start_line: header,
+            end_line: last,
+        };
+        crate::fold::fold(&buffer, fold);
+    };
+    let show = |step: &str| {
+        println!(
+            "bench fold_{step} {:?} shut={}",
+            view.caret_positions(),
+            crate::fold::is_folded(&buffer, 1)
+        );
+    };
+    let text = "x0\nhead\n  a\n  b\ntail\nend";
+    view.clear_carets();
+
+    // One caret steps over the block, from its header to the line after it and back.
+    for (mode, logical) in [("code", true), ("prose", false)] {
+        view.set_logical_lines(logical);
+        buffer.set_text(text);
+        shut(1, 3);
+        buffer.place_cursor(&at(&buffer, 1, 0));
+        glib::timeout_future(Duration::from_millis(100)).await;
+        view.emit_move_cursor(gtk::MovementStep::DisplayLines, 1, false);
+        show(&format!("{mode}_down"));
+        view.emit_move_cursor(gtk::MovementStep::DisplayLines, -1, false);
+        show(&format!("{mode}_up"));
+        // A block reaching the end of the text: Down from its header has nowhere to go.
+        buffer.set_text("x0\nhead\n  a");
+        shut(1, 2);
+        buffer.place_cursor(&at(&buffer, 1, 2));
+        glib::timeout_future(Duration::from_millis(100)).await;
+        view.emit_move_cursor(gtk::MovementStep::DisplayLines, 1, false);
+        show(&format!("{mode}_down_at_end"));
+    }
+    view.set_logical_lines(true);
+
+    // A column steps over it too.
+    buffer.set_text(text);
+    buffer.place_cursor(&at(&buffer, 0, 1));
+    view.add_caret(true);
+    shut(1, 3);
+    view.press(gdk::Key::Down, gdk::ModifierType::empty());
+    show("column_down");
+    view.press(gdk::Key::Up, gdk::ModifierType::empty());
+    show("column_up");
+    view.clear_carets();
+
+    // Add Caret goes by the lines of the text, and opens the block it adds a caret in.
+    buffer.set_text(text);
+    shut(1, 3);
+    buffer.place_cursor(&at(&buffer, 1, 1));
+    view.add_caret(true);
+    show("add_below");
+    view.clear_carets();
+
+    // A block shut over a column brings the carets it hides out to its header's end, where they
+    // merge, the primary too, and the column stays up.
+    for (primary, below) in [(0, true), (3, false)] {
+        crate::fold::unfold_all(&buffer);
+        buffer.place_cursor(&at(&buffer, primary, 1));
+        for _ in 0..3 {
+            view.add_caret(below);
+        }
+        view.keeping_carets(|| shut(1, 3));
+        show(&format!("shut_over_column_{primary}"));
+        view.clear_carets();
+    }
+    crate::fold::unfold_all(&buffer);
+}
+
+/// A note's Tab, Shift+Tab and Return in a table, through `typing::on_key` as a press in a note
+/// reaches it: the table lined up, the caret walking its cells, a row added past the last and an
+/// empty last row ending it, each one undo step. Prints the text and the caret's line and column.
+fn bench_table(view: &multicaret::View) {
+    let buffer = view.buffer();
+    let none = gdk::ModifierType::empty();
+    let press = |step: &str, key| {
+        let answer = typing::on_key(view.upcast_ref(), key, none);
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        let at = editor::caret(&buffer);
+        println!(
+            "bench table_{step} {text:?} ({}, {}) {answer:?}",
+            at.line(),
+            at.line_offset()
+        );
+    };
+    view.clear_carets();
+    buffer.set_text("| a | bb |\n|:-|-:|\n| ccc | d |");
+    buffer.place_cursor(&at(&buffer, 2, 3));
+    press("tab", gdk::Key::Tab);
+    press("tab_adds_row", gdk::Key::Tab);
+    press("back_tab", gdk::Key::ISO_Left_Tab);
+    buffer.place_cursor(&at(&buffer, 3, 2));
+    press("enter_leaves", gdk::Key::Return);
+    buffer.undo();
+    let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+    println!("bench table_undo {text:?}");
+    // A row of pipes with no delimiter row under its header is no table.
+    buffer.set_text("a | b\nc | d");
+    buffer.place_cursor(&at(&buffer, 0, 1));
+    press("not_a_table", gdk::Key::Tab);
+}
+
+/// The iter at `column` of `line`, or the end of the buffer past its last line.
+fn at(buffer: &gtk::TextBuffer, line: i32, column: i32) -> gtk::TextIter {
+    let mut at = buffer.iter_at_line(line).unwrap_or(buffer.end_iter());
+    at.set_line_offset(column);
+    at
 }
 
 /// Three carets down column 1 of `text`, or as many as it has lines for, the primary on top.

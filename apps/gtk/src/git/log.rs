@@ -43,12 +43,51 @@ enum LogItem {
 impl Panel {
     pub(super) fn wire_log(self: &Rc<Self>, view: &gtk::ListView) {
         let bound = Rc::downgrade(self);
+        // Every row the list has made, for `retell` below.
+        let rows: Rc<RefCell<Vec<glib::WeakRef<gtk::ListItem>>>> = Rc::default();
         view.set_factory(Some(&crate::widgets::factory(
-            |_| row_stack(),
+            {
+                let rows = rows.clone();
+                move |item| {
+                    rows.borrow_mut().push(item.downgrade());
+                    row_stack()
+                }
+            },
             // The row is rebuilt from the item rather than from the stack handed over: a
             // recycled row draws what it is bound to, not what it held.
             move |_: &gtk::Stack, item| bind_log(item, &bound),
         )));
+
+        // A commit's age is written when its row is bound, and a list binds a row only when its
+        // item changes or it scrolls into view, so a history left on screen went on saying "just
+        // now". Every row is bound again twice a minute while the list is on screen, so no age is
+        // more than half of [`ago`]'s finest step behind, and at once when it comes back on
+        // screen. Weak on the view, so the timer ends with the pane.
+        let panel = Rc::downgrade(self);
+        let retell = Rc::new(move || {
+            let live: Vec<gtk::ListItem> = {
+                let mut rows = rows.borrow_mut();
+                rows.retain(|row| row.upgrade().is_some());
+                rows.iter().filter_map(|row| row.upgrade()).collect()
+            };
+            for item in live {
+                bind_log(&item, &panel);
+            }
+        });
+        let weak = view.downgrade();
+        glib::timeout_add_seconds_local(30, {
+            let retell = retell.clone();
+            move || match weak.upgrade() {
+                Some(view) => {
+                    if view.is_mapped() {
+                        retell();
+                    }
+                    glib::ControlFlow::Continue
+                }
+                None => glib::ControlFlow::Break,
+            }
+        });
+        view.connect_map(move |_| retell());
 
         // The same one-click rule as the changes list and the tree: a commit opens its file list,
         // a file in it opens its diff.

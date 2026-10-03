@@ -190,9 +190,9 @@ impl App {
     /// whatever mode the user will come back to; a tab with a buffer is shown rendered, the
     /// preview laid over the pane's tabs (`Pane::cover`), so the pane's find bar and its
     /// `Ctrl+Tab` card go on being its own over the rendered note. A tab that draws its own
-    /// document — a PDF, an image, a diff, a terminal — is the thing presented, as it is, a PDF
-    /// fitted to a whole page meanwhile. Laid out again whenever another tab comes to the front
-    /// while presenting (`App::sync_active`).
+    /// document — a PDF, a diagram, an image, a diff, a terminal — is the thing presented, as it
+    /// is, a PDF or a diagram fitted to a whole page meanwhile. Laid out again whenever another
+    /// tab comes to the front while presenting (`App::sync_active`).
     pub(crate) fn lay_out(self: &Rc<Self>) {
         let presenting = self.presenting.get().is_some();
         let active = self.pane();
@@ -228,8 +228,13 @@ impl App {
             }
             widget.set_visible(rendered || self.mode.get() == Mode::Split && !presenting);
         }
-        if let Some(pdf) = self.active_pdf().filter(|_| presenting) {
-            pdf.set_presenting(true);
+        if presenting {
+            if let Some(pdf) = self.active_pdf() {
+                pdf.set_presenting(true);
+            }
+            if let Some(diagram) = self.active_diagram() {
+                diagram.set_presenting(true, self.ring_at.get());
+            }
         }
     }
 
@@ -288,13 +293,25 @@ impl App {
                 // up, so the presentation never reflows under the pointer.
                 self.toolbar.set_extend_content_to_bottom_edge(true);
                 self.apply_layout();
+                // The drawing tools go with the chrome, and the tool in hand is put down.
+                self.sync_drawing();
+                self.sync_status();
                 self.focus_presented();
             }
             (false, Some(before)) => {
                 self.presenting.set(None);
-                // Each PDF gets the zoom it had back, those a held `Ctrl+Tab` presented too.
+                // Each PDF gets the zoom it had back, those a held `Ctrl+Tab` presented too, and
+                // each diagram its zoom and its ring.
                 for pdf in self.pdfs() {
                     pdf.set_presenting(false);
+                }
+                for diagram in self.diagrams() {
+                    diagram.set_presenting(false, self.ring_at.get());
+                }
+                // A PDF's ring comes back as it was too, but not the tool `sync_drawing` would
+                // pick up again: that stays down until it is picked up from the ring.
+                if let Some(pdf) = self.active_pdf() {
+                    pdf.set_drawing(self.drawing.get(), self.ring_at.get());
                 }
                 self.lift_toasts(None);
                 self.sidebar_column.set_visible(before.sidebar);

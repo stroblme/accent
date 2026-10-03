@@ -11,34 +11,24 @@ impl View {
         self.reset_im_context();
         let buffer = self.buffer();
         let insert = buffer.get_insert();
-        let mut at = buffer.iter_at_mark(&insert);
-        let column = at.line_offset();
-        // Visible lines, because `fold.rs` hides folded text and a hidden line is not one to
-        // stop on.
-        let mut off_end = false;
-        for _ in 0..count.abs() {
-            let stepped = match count > 0 {
-                true => at.forward_visible_line(),
-                false => at.backward_visible_line(),
-            };
-            if !stepped {
-                off_end = true;
-                break;
-            }
-        }
-        let (landing, goal) =
-            vertical_step(imp.goal.get(), column, line_length(&buffer, at.line()));
-        match off_end {
-            // Past the last line the caret parks at the end of the buffer, which is what GTK
-            // does and what keeps Down at the bottom doing something.
+        let from = buffer.iter_at_mark(&insert);
+        let (line, reached) = crate::fold::line_by(&from, count);
+        let (landing, goal) = vertical_step(
+            imp.goal.get(),
+            from.line_offset(),
+            line_length(&buffer, line),
+        );
+        let at = match reached {
             true => {
-                at = match count > 0 {
-                    true => buffer.end_iter(),
-                    false => buffer.start_iter(),
-                }
+                let mut at = buffer.iter_at_line(line).unwrap_or(from);
+                at.set_line_offset(landing);
+                at
             }
-            false => at.set_line_offset(landing),
-        }
+            // Past the last line shown the caret parks at its end, or at the start of the first,
+            // which is what GTK does and what keeps Down at the bottom doing something.
+            false if count > 0 => line_end(&buffer, line),
+            false => buffer.iter_at_line(line).unwrap_or(from),
+        };
         imp.goal.set(Some(goal));
 
         // Ours, not the user's: the `mark-set` hook would read it as a click and drop both the
@@ -183,9 +173,10 @@ impl View {
                                 Motion::PageUp => -page_lines,
                                 _ => page_lines,
                             };
-                            // A page stops at either end of the document, and a line step there
-                            // lands where the caret already is.
-                            let line = (at.line() + step).clamp(0, buffer.line_count() - 1);
+                            // A shut block is one line, as at a single caret, and a page stops at
+                            // either end of the document: a line step there lands where the
+                            // caret already is.
+                            let (line, _) = crate::fold::line_by(&at, step);
                             if let Some(mut moved) = buffer.iter_at_line(line) {
                                 let (column, kept) = vertical_step(
                                     *goal,
@@ -217,16 +208,20 @@ impl View {
         }
     }
 
-    /// How far Page Up and Page Down move a column: the lines of the document on screen. And
-    /// where the primary caret sits among them, 0 at the top and 1 at the bottom, so the view can
-    /// scroll by the same page and leave it there.
+    /// How far Page Up and Page Down move a column: the lines of the document on screen, a shut
+    /// block's header without the lines it hides. And where the primary caret sits among them, 0
+    /// at the top and 1 at the bottom, so the view can scroll by the same page and leave it there.
     fn page(&self) -> (i32, f64) {
         let rect = self.visible_rect();
-        let (top, _) = self.line_at_y(rect.y());
+        let (mut row, _) = self.line_at_y(rect.y());
         let (bottom, _) = self.line_at_y(rect.y() + rect.height());
         let y = self.iter_location(&caret(&self.buffer())).y() - rect.y();
         let align = f64::from(y) / f64::from(rect.height().max(1));
-        ((bottom.line() - top.line()).max(1), align.clamp(0.0, 1.0))
+        let mut lines = 0;
+        while row.forward_visible_line() && row.line() <= bottom.line() {
+            lines += 1;
+        }
+        (lines.max(1), align.clamp(0.0, 1.0))
     }
 
     /// Move one caret to `at`, its anchor with it unless `extend` holds the anchor where it is.

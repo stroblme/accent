@@ -516,15 +516,20 @@ impl Tab {
         let opened = fold::reveal(self.text_buffer(), start);
         self.buffer.select_range(start, end);
         if opened {
-            // The lines that came back out want their end-of-line messages back.
-            self.paint_diagnostics();
-            if let Some(compare) = self.comparison()
-                && !compare.open_hiding(start.offset())
-            {
-                compare.refresh();
-            }
+            self.revealed_at(start.offset());
         }
         opened
+    }
+
+    /// What `fold::reveal` opening the text at `offset` asks of the tab: the lines that came back
+    /// out want their end-of-line messages back, and a comparison's run opens on both sides.
+    pub(super) fn revealed_at(&self, offset: i32) {
+        self.paint_diagnostics();
+        if let Some(compare) = self.comparison()
+            && !compare.open_hiding(offset)
+        {
+            compare.refresh();
+        }
     }
 
     /// Scroll the caret to `align` down the view, once the view can say where the caret is.

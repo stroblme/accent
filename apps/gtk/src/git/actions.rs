@@ -97,7 +97,10 @@ impl Panel {
                     (panel.hooks.toast)(&message);
                 }
                 Some(Err(e)) => {
-                    let message = format!("{e:#}");
+                    let message = match lost(&e) {
+                        true => format!("{e:#}; {ON_THE_HOST}"),
+                        false => format!("{e:#}"),
+                    };
                     match on_err {
                         Fail::AskToForce(name) if git::unmerged(&message) => {
                             panel.confirm_delete(name)
@@ -275,7 +278,7 @@ impl Panel {
             Fail::Say,
             move |vault, _| {
                 let _fetched = fetch_lock.lock();
-                let mut left = Vec::new();
+                let (mut left, mut gone) = (Vec::new(), false);
                 for (repo, stopped) in &repos {
                     if let Some(why) = stopped {
                         left.push(format!("{} ({why})", repo.name));
@@ -285,19 +288,23 @@ impl Panel {
                     pushing.store(false, Ordering::Relaxed);
                     let synced = vault
                         .git_pull(repo)
-                        .map_err(|e| why_not(&format!("{e:#}"), "the pull"))
+                        .map_err(|e| (lost(&e), why_not(&format!("{e:#}"), "the pull")))
                         .and_then(|_| {
                             pushing.store(true, Ordering::Relaxed);
                             let pushed = vault.git_push(repo);
-                            pushed.map_err(|e| why_not(&format!("{e:#}"), "the push"))
+                            pushed.map_err(|e| (lost(&e), why_not(&format!("{e:#}"), "the push")))
                         });
-                    if let Err(why) = synced {
+                    if let Err((lost, why)) = synced {
+                        gone |= lost;
                         left.push(format!("{} ({why})", repo.name));
                     }
                 }
                 match (left.is_empty(), repos.len()) {
                     (true, 1) => Ok("Synced 1 repository".to_string()),
                     (true, n) => Ok(format!("Synced {n} repositories")),
+                    (false, _) if gone => {
+                        Err(anyhow::anyhow!("{}; {ON_THE_HOST}", left.join(", ")))
+                    }
                     (false, _) => Err(anyhow::anyhow!(left.join(", "))),
                 }
             },
@@ -906,6 +913,18 @@ fn why_not(message: &str, half: &str) -> String {
     }
 }
 
+/// What a failure adds where the link went while git was out on the host: the host goes on and
+/// finishes it within its own bounds (`serve` waits for it once its client has gone), so the
+/// link's own words would leave out that it may have worked after all.
+const ON_THE_HOST: &str =
+    "the host may still finish it, and the pane shows what it did once the link is back";
+
+/// Whether the link went while `e`'s call was out on the host, rather than before it got there.
+fn lost(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<accent_api::rpc::RpcError>()
+        .is_some_and(|e| e.code == accent_api::rpc::LOST)
+}
+
 fn files(n: usize) -> String {
     match n {
         1 => "1 file".to_string(),
@@ -995,6 +1014,22 @@ mod tests {
         assert_eq!(why_not(conflicts, "the pull"), "the pull stopped");
         let timeout = "the pull did not finish within 60 seconds";
         assert_eq!(why_not(timeout, "the pull"), timeout);
+    }
+
+    #[test]
+    fn only_a_link_lost_mid_call_may_still_finish_on_the_host() {
+        use accent_api::rpc::{DISCONNECTED, LOST, RpcError};
+        let failed = |code| {
+            anyhow::Error::new(RpcError {
+                code,
+                message: "the connection closed".to_string(),
+                data: None,
+            })
+        };
+        assert!(lost(&failed(LOST)));
+        // Never asked: the host has nothing to finish.
+        assert!(!lost(&failed(DISCONNECTED)));
+        assert!(!lost(&anyhow::anyhow!("rejected")));
     }
 
     #[test]

@@ -131,6 +131,42 @@ pub fn hiding(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> Vec<gtk::TextTa
     hiders(buffer).filter(|tag| iter.has_tag(tag)).collect()
 }
 
+/// The line `count` lines below `at`'s, above for a negative count, passing over the lines that
+/// hidden text covers: to Up and Down a shut block is its header line alone, and a caret never
+/// lands inside it. Where the text runs out first, the last line reached, and `false`.
+pub fn line_by(at: &gtk::TextIter, count: i32) -> (i32, bool) {
+    let mut line = *at;
+    for _ in 0..count.abs() {
+        let mut next = line;
+        let stepped = match count > 0 {
+            true => next.forward_visible_line(),
+            false => next.backward_visible_line(),
+        };
+        if !stepped {
+            return (line.line(), false);
+        }
+        line = next;
+    }
+    (line.line(), true)
+}
+
+/// Where a caret on a line that a fold or a comparison's collapsed run hides goes instead, or
+/// `None` where its line is shown: the end of the line above the run, a shut fold's header, or the
+/// start of the line below where the run begins the text. GTK's own moves end on such a line where
+/// nothing is shown past it: Down at the end of the text with a shut block there.
+pub fn shown(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> Option<gtk::TextIter> {
+    let start = line_start(buffer, at.line());
+    if hiding(buffer, &start).is_empty() {
+        return None;
+    }
+    let mut above = start;
+    if above.backward_visible_line() {
+        return Some(crate::editor::line_end(buffer, above.line()));
+    }
+    let mut below = start;
+    below.forward_visible_line().then_some(below)
+}
+
 /// Whether GTK 4.22 aborts when asked for the iter at buffer `y` of `view` (see
 /// [`whole_lines`]): the line it finds there holds hidden text and `y` is below that line's top,
 /// so `gtk_text_layout_get_iter_at_position` hands the line's whole byte count to a walk that

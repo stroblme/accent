@@ -99,7 +99,7 @@ impl DiagramView {
         let sheet = self.sheet()?;
         let frame = imp.frame.get();
         let p = self.page_at(x, y);
-        if imp.panning.get() {
+        if imp.panning.get() || imp.read_only.get() {
             return Some(Drag::Pan {
                 scroll: self.scroll(),
             });
@@ -532,7 +532,7 @@ impl DiagramView {
     /// The pointer over the canvas: say with the cursor what a press there would do.
     pub(super) fn hover(&self, x: f64, y: f64) {
         let imp = self.imp();
-        if imp.panning.get() || imp.drag.borrow().is_some() {
+        if imp.panning.get() || imp.read_only.get() || imp.drag.borrow().is_some() {
             return;
         }
         let Some(sheet) = self.sheet() else { return };

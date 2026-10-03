@@ -320,6 +320,17 @@ pub enum Direction {
     ToLocal,
 }
 
+impl Direction {
+    /// The arrow for it, pointing the way a connection travels: from the port that listens to the
+    /// one it reaches, with the local port on the left.
+    pub fn arrow(self) -> &'static str {
+        match self {
+            Direction::ToRemote => "→",
+            Direction::ToLocal => "←",
+        }
+    }
+}
+
 /// One port forward over the master: a port on this machine, a port on the host, and which of the
 /// two listens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,6 +338,20 @@ pub struct Forward {
     pub local: u16,
     pub remote: u16,
     pub direction: Direction,
+}
+
+/// `8080 → 80`, the local port first either way round: the Ports pane's row, and a forward named
+/// in a message.
+impl std::fmt::Display for Forward {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} {}",
+            self.local,
+            self.direction.arrow(),
+            self.remote
+        )
+    }
 }
 
 /// Add a forward to the running master.
@@ -385,14 +410,16 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
 /// does not hold it yet. `server` is a path expression from [`server_path`].
 ///
 /// `-t` forces a pty, which a remote command does not get by default: `attach` relays one, and
-/// without it the host's end has no terminal to put in raw mode or to take a size from. No
-/// `BatchMode`: should the master be gone, a prompt in the tab is one the reader can answer.
+/// without it the host's end has no terminal to put in raw mode or to take a size from. `-e none`
+/// because the pty makes `~` ssh's escape character, and `~.` typed at the start of a line in the
+/// shell would end the attach instead of reaching the shell. No `BatchMode`: should the master be
+/// gone, a prompt in the tab is one the reader can answer.
 ///
 /// A path that is not there — a typo in the address — starts the shell at the login's home, which
 /// is the holder's own fallback, so a window opened at a mistyped path still gets one.
 pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
     let mut argv = base(url, ctl);
-    argv.push("-t".to_string());
+    argv.extend(["-t", "-e", "none"].map(String::from));
     argv.push(url.destination());
     argv.push(format!(
         "{server} attach --cwd {} {}",
@@ -404,15 +431,16 @@ pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
 
 // ------------------------------------------------------- server provisioning
 
-/// Where the uploaded `accent-cli` lives on the remote, relative to the login's home.
-/// The one architecture Phase 5 provisions. A host of another shape needs its own build,
-/// which is a build-matrix question rather than a code one.
-pub const MUSL_TARGET: &str = "x86_64-unknown-linux-musl";
+/// The machines a server is built for, as `uname -m` names them on Linux: the musl target of
+/// each is `<arch>-unknown-linux-musl`, and a host of any other kind is refused rather than sent
+/// a binary it cannot run.
+pub const SERVER_ARCHES: [&str; 2] = ["x86_64", "aarch64"];
 
+/// Where the uploaded `accent-cli` lives on the remote, relative to the login's home.
 pub const SERVER_DIR: &str = ".local/share/accent/server";
 
-/// The binary is named after its own contents, so a mismatched build is a missing file rather than
-/// a protocol error at the first request.
+/// The binary is named after the build's contents, so a mismatched build is a missing file rather
+/// than a protocol error at the first request.
 pub fn server_name(hash: &str) -> String {
     format!("accent-cli-{hash}")
 }
@@ -434,18 +462,17 @@ pub fn hash_of(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex()[..16].to_string()
 }
 
-/// Test for the server, `size` bytes of it, so a second connection skips the upload. The size is
-/// counted too because a host may still hold a short file under the final name from before
-/// [`install_server_cmd`] counted its bytes; failing this, the next install replaces it.
+/// What a host is, `uname -sm` (`Linux x86_64`), and how many bytes of the server it holds, `0`
+/// for none, one line each: which build it takes, and whether it has it already, so a second
+/// connection skips the upload. The size is counted because a host may still hold a short file
+/// under the final name from before [`install_server_cmd`] counted its bytes; failing the count,
+/// the next install replaces it.
 ///
-/// The answer is `yes` or `no` on stdout rather than an exit status, so that a session which never
-/// ran the test — refused by the host, or cut off — is not taken for a server that is missing.
-pub fn have_server_cmd(hash: &str, size: usize) -> String {
+/// An answer on stdout rather than an exit status, so that a session which never ran the test —
+/// refused by the host, or cut off — is not taken for a server that is missing.
+pub fn have_server_cmd(hash: &str) -> String {
     let installed = server_path(hash);
-    format!(
-        "if test -x {installed} && [ \"$(wc -c < {installed})\" -eq {size} ]; \
-         then echo yes; else echo no; fi"
-    )
+    format!("uname -sm; if test -x {installed}; then wc -c < {installed}; else echo 0; fi")
 }
 
 /// Read the binary, `size` bytes of it, from stdin and install it.
@@ -520,40 +547,30 @@ pub fn clip_cmd(server: &str, id: &str) -> String {
 
 // --------------------------------------------------------------------- cache
 
-/// The musl-static `accent-cli` this machine uploads to a host.
+/// The musl-static `accent-cli` this machine uploads to an `arch` host ([`SERVER_ARCHES`]), if
+/// this build has one.
 ///
-/// Looked for in three places, in the order that lets a developer run from `target/` and a user
-/// run from an install without either having to configure anything: `$ACCENT_SERVER_BIN`, then
-/// beside the running binary under `../lib/accent`, then the workspace's own musl output. It is a
-/// separate build from the `accent-cli` on `$PATH`, which is linked against this machine's glibc
-/// and would not start on an older host.
-pub fn server_binary() -> Result<PathBuf, String> {
-    if let Some(from_env) = std::env::var_os("ACCENT_SERVER_BIN") {
-        let path = PathBuf::from(from_env);
-        return match path.is_file() {
-            true => Ok(path),
-            false => Err(format!(
-                "ACCENT_SERVER_BIN is not a file: {}",
-                path.display()
-            )),
-        };
-    }
-    let exe = std::env::current_exe().map_err(|e| format!("cannot find my own path: {e}"))?;
+/// Looked for beside the running binary under `../lib/accent`, then in the workspace's own musl
+/// output, the order that lets a user run from an install and a developer from `target/` without
+/// either having to configure anything. It is a separate build from the `accent-cli` on `$PATH`,
+/// which is linked against this machine's glibc and would not start on an older host.
+pub fn server_binary(arch: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
     // Up the ancestors rather than one fixed step: the installed layout puts us in `bin/` beside
     // `lib/accent`, a development build runs from `target/<profile>/`, and a test binary from
     // `target/debug/deps/`. Four levels reaches the cargo target directory from all three.
     for dir in exe.ancestors().skip(1).take(4) {
         for candidate in [
-            dir.join("lib/accent/accent-cli"),
-            dir.join("../lib/accent/accent-cli"),
-            dir.join(format!("{MUSL_TARGET}/release/accent-cli")),
+            dir.join(format!("lib/accent/accent-cli-{arch}")),
+            dir.join(format!("../lib/accent/accent-cli-{arch}")),
+            dir.join(format!("{arch}-unknown-linux-musl/release/accent-cli")),
         ] {
             if candidate.is_file() {
-                return Ok(candidate);
+                return Some(candidate);
             }
         }
     }
-    Err("no server binary to upload; run `make server` first".to_string())
+    None
 }
 
 /// Where files fetched from this remote are kept, under the same short name as the socket.
@@ -977,6 +994,8 @@ mod tests {
                 "-o",
                 "ControlPath=/run/user/1000/accent/0123456789abcdef",
                 "-t",
+                "-e",
+                "none",
                 "box",
                 &format!("{server} attach --cwd '/srv/vault' '{id}'"),
             ])
@@ -991,6 +1010,8 @@ mod tests {
                 "-p",
                 "2222",
                 "-t",
+                "-e",
+                "none",
                 "me@box",
                 &format!("{server} attach --cwd '/srv/my vault' '{id}'"),
             ])
@@ -1017,15 +1038,12 @@ mod tests {
             server_path(hash),
             "$HOME/.local/share/accent/server/accent-cli-0123456789abcdef"
         );
-        // A short leftover under the final name is found as missing, so it is uploaded again, and
-        // the answer is a word: a session that never ran the test prints neither.
+        // The host's kind and the server's size, which a short leftover under the final name
+        // fails, so it is uploaded again; a session that never ran the test prints neither.
         let installed = server_path(hash);
         assert_eq!(
-            have_server_cmd(hash, 8_300_000),
-            format!(
-                "if test -x {installed} && [ \"$(wc -c < {installed})\" -eq 8300000 ]; \
-                 then echo yes; else echo no; fi"
-            )
+            have_server_cmd(hash),
+            format!("uname -sm; if test -x {installed}; then wc -c < {installed}; else echo 0; fi")
         );
     }
 

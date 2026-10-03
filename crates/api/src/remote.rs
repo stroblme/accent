@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::json;
 
-use crate::link;
+use crate::link::{self, Failure};
 use crate::rpc::{Client, Hello, RpcError};
 use crate::ssh::{self, Forward, Url};
 use crate::{Event, VaultConfig};
@@ -48,26 +48,6 @@ pub enum State {
     Connecting,
     Connected,
     Disconnected(String),
-}
-
-/// Why an attempt to connect failed, which decides whether another attempt is worth making.
-enum Failure {
-    /// Anything on the way to the vault: ssh, the link, the upload, a server that went quiet.
-    Link(String),
-    /// The host's `serve` answered the `hello` and will not serve the vault.
-    Refused(String),
-}
-
-impl From<String> for Failure {
-    fn from(why: String) -> Failure {
-        Failure::Link(why)
-    }
-}
-
-impl From<&str> for Failure {
-    fn from(why: &str) -> Failure {
-        Failure::Link(why.to_string())
-    }
 }
 
 /// What [`Remote::push`] made of a cached copy that has been written to.
@@ -840,20 +820,30 @@ impl Remote {
         self.control(ssh::cancel(&self.url, &self.ctl, f))
     }
 
+    /// The forwards the window started and has not stopped, which is what the Ports pane lists.
+    pub fn forwards(&self) -> Vec<Forward> {
+        self.locked(&self.forwards).clone()
+    }
+
     /// Put the forwards back on the master [`connect`](Self::connect) found or made. A master that
     /// survived the drop still holds them and answers OK to a forward it already has, so this is
-    /// the same call either way. One that will not come back is said, not fatal: the vault is up.
+    /// the same call either way. One that will not come back — its port taken meanwhile — is said
+    /// and dropped, not fatal and not tried again: the vault is up, and the Ports pane, which
+    /// lists [`forwards`](Self::forwards), shows what is.
     fn restore_forwards(&self) {
-        let forwards = self.locked(&self.forwards).clone();
+        let forwards = self.forwards();
         if forwards.is_empty() {
             return;
         }
         self.say("Restoring the forwards");
         for f in forwards {
             if let Err(e) = self.control(ssh::forward(&self.url, &self.ctl, f)) {
-                let _ = self
-                    .events
-                    .send(Event::Error(format!("Cannot restore a forward: {e}")));
+                self.locked(&self.forwards).retain(|kept| *kept != f);
+                // ssh's first line, "… Port forwarding failed": a toast is one line.
+                let why = e.lines().next().unwrap_or_default();
+                let _ = self.events.send(Event::Error(format!(
+                    "Cannot restore the forward {f}: {why}"
+                )));
             }
         }
     }

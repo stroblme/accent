@@ -44,10 +44,14 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 /// sample's shapes are on the screen and stays up for ten seconds, for an XTEST pointer to work
 /// on (`build-aux/xtest.py`), then prints what the model holds; `=preview:<rel>` times the
 /// frames of a move on the page of `rel` with the most cells: none moving, the shape with the
-/// most edges on it moving live, and everything on the page moving as a box.
+/// most edges on it moving live, and everything on the page moving as a box;
+/// `=present:<rel>,<pdf>` is presentation over both (`present`).
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("preview:") {
         return preview(app, rel);
+    }
+    if let Some((rel, pdf)) = arg.strip_prefix("present:").and_then(|a| a.split_once(',')) {
+        return present(app, rel, pdf);
     }
     if let Some(rest) = arg.strip_prefix("hold:") {
         let (rel, tool) = rest.split_once(':').unwrap_or((rest, ""));
@@ -431,6 +435,115 @@ fn preview(app: &Rc<App>, rel: &str) {
         run("still", &[], false);
         run("live", std::slice::from_ref(&busiest), true);
         run("boxed", &top, true);
+        bench_quit(&app);
+    });
+}
+
+/// The PDF at `pdf` with the pen in hand, presented and left, printing its ring and tool each
+/// time as `bench diagram present pdf_<when>`; then the diagram at `rel` (the two-page sample when
+/// there is none), zoomed in with Add Rectangle in hand, presented and left by real keys, a drag
+/// and a double click over shape `a` while presented, which select and change nothing, and its
+/// pages turned by key and wheel in and out of presentation. `bench diagram xtest <steps>` asks
+/// for those (`build-aux/xtest.py :N "<steps>"`), and every change of what the diagram shows
+/// prints as `bench diagram present <state>`.
+fn present(app: &Rc<App>, rel: &str, pdf: &str) {
+    let path = app.root().join(rel);
+    if !path.exists() {
+        std::fs::write(&path, SAMPLE).expect("write the sample diagram");
+    }
+    let (app, rel, pdf) = (app.clone(), rel.to_string(), pdf.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        app.open_path(&pdf);
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        app.pdf_mode(pdfview::Mode::Pen);
+        let pdf_state = |app: &Rc<App>, when: &str| {
+            if let Some(pdf) = app.active_pdf() {
+                println!(
+                    "bench diagram present pdf_{when} presenting={} ring={} tool={:?}",
+                    app.presenting.get().is_some(),
+                    pdf.ring_visible(),
+                    pdf.mode_label()
+                );
+            }
+        };
+        pdf_state(&app, "before");
+        app.set_presenting(true);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        pdf_state(&app, "presented");
+        app.set_presenting(false);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        pdf_state(&app, "after");
+
+        app.open_path(&rel);
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        let Some(tab) = app.active_diagram() else {
+            println!("bench diagram no_tab");
+            return bench_quit(&app);
+        };
+        for _ in 0..10 {
+            tab.zoom_step(false);
+        }
+        let _ = WidgetExt::activate_action(&app.window, "win.diagram-rect", None);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        // A widget point on the screen, for XTEST: the window sits at 0,0 under Xvfb, its
+        // client-side shadow putting the widgets a margin in.
+        let canvas = tab.key_target();
+        let (sx, sy) = app.window.surface_transform();
+        let on_screen = |x: f64, y: f64| {
+            let p = graphene::Point::new(x as f32, y as f32);
+            let p = canvas.compute_point(&app.window, &p).unwrap_or(p);
+            (p.x() + sx as f32, p.y() + sy as f32)
+        };
+        let (mx, my) = on_screen(
+            f64::from(canvas.width()) / 2.0,
+            f64::from(canvas.height()) / 2.0,
+        );
+        println!("bench diagram xtest move {mx:.0} {my:.0}; focus; sleep 0.5; key F5");
+        let (mut last, mut asked) = (String::new(), false);
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(14) {
+            // Presented, the page is fitted to a larger canvas: `a` is aimed at from there.
+            if app.presenting.get().is_some() && !asked {
+                asked = true;
+                glib::timeout_future(Duration::from_millis(300)).await;
+                let a = tab
+                    .frame_of("a")
+                    .map(|r| tab.to_widget(&r))
+                    .unwrap_or_default();
+                let (ax, ay) = on_screen(a.x + a.w / 2.0, a.y + a.h / 2.0);
+                println!(
+                    "bench diagram xtest drag {ax:.0} {ay:.0} {:.0} {:.0}; move {ax:.0} {ay:.0}; \
+                     down; up; down; up; sleep 0.5; key Delete; key ctrl+z; key Down; sleep 0.3; \
+                     key space; sleep 0.3; key Left; sleep 0.3; key Right; sleep 0.3; \
+                     key shift+space; sleep 0.3; key Page_Down; sleep 0.3; key Page_Up; \
+                     sleep 0.3; scroll -1; sleep 0.3; scroll 1; sleep 0.3; key F5; sleep 0.5; \
+                     move {mx:.0} {my:.0}; scroll -12; sleep 0.5; scroll 24",
+                    ax + 150.0,
+                    ay + 80.0
+                );
+            }
+            let place = tab.place();
+            let state = format!(
+                "presenting={} page={} zoom={} y={:.0} ring={} tool={:?} selected={} \
+                 history={:?} editing={:?} a={:?}",
+                app.presenting.get().is_some(),
+                place.page + 1,
+                tab.zoom_label(),
+                place.y,
+                tab.ring_visible(),
+                tab.tool(),
+                tab.selection().len(),
+                tab.history(),
+                tab.editing_label(),
+                tab.frame_of("a").map(|r| (r.x, r.y))
+            );
+            if state != last {
+                println!("bench diagram present {state}");
+                last = state;
+            }
+            glib::timeout_future(Duration::from_millis(20)).await;
+        }
         bench_quit(&app);
     });
 }

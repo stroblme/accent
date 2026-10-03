@@ -360,6 +360,7 @@ impl App {
                 }
                 if let Some(sidebar) = self.sidebar.get() {
                     sidebar.mark_tags_dirty();
+                    sidebar.refresh_ports();
                 }
                 if let Some(git) = self.git.get() {
                     // Nothing was discovered while the link was down, so this starts at the top.
@@ -376,9 +377,13 @@ impl App {
                     }
                 }
                 self.relink_all();
-                // A remote shell the drop ended kept its tab, and starts again in it.
+                // A remote shell the drop ended kept its tab, and starts again in it; one whose tab
+                // was closed meanwhile is ended now.
                 for term in self.terminals() {
                     term.reopen();
+                }
+                if let Some(remote) = self.vault().and_then(|v| v.remote()) {
+                    terminal::end_orphans(remote.control_path());
                 }
             }
             Event::Disconnected(why) => {

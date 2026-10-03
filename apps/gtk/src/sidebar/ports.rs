@@ -6,7 +6,7 @@ use accent_api::ssh::{Direction, Forward};
 use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -15,9 +15,9 @@ use std::sync::Arc;
 /// shield — none of them a port.
 pub(super) const ICON: &str = "network-wired-symbolic";
 
-/// What the Ports pane asks of the ssh connection behind the vault. Both are called on a worker
-/// thread: ssh has to answer before either returns, and a host that is slow to would otherwise
-/// hold the window.
+/// What the Ports pane asks of the ssh connection behind the vault. The first two are called on a
+/// worker thread: ssh has to answer before either returns, and a host that is slow to would
+/// otherwise hold the window.
 #[allow(clippy::type_complexity)]
 pub struct Data {
     /// Start a forward, either way. Answers an error message when ssh refuses, which is what the
@@ -25,6 +25,8 @@ pub struct Data {
     pub add_forward: Arc<dyn Fn(Forward) -> Result<(), String> + Send + Sync>,
     /// Take a forward down. Nothing to answer: the row goes either way.
     pub remove_forward: Arc<dyn Fn(Forward) + Send + Sync>,
+    /// The forwards the connection keeps, which are the rows. Asks nothing of ssh.
+    pub forwards: Box<dyn Fn() -> Vec<Forward>>,
 }
 
 /// What the two port boxes say, as a forward, or `None` while they are not one yet. `u16` does the
@@ -38,14 +40,13 @@ fn ports(local: &str, remote: &str) -> Option<(u16, u16)> {
 /// Take one forward down: the forward, and the row it is drawn in.
 type DropForward = Rc<dyn Fn(Forward, &gtk::ListBoxRow)>;
 
-/// The forwards running over the window's ssh connection, and the row that starts another one.
+/// The forwards running over the window's ssh connection, and the row that starts another one;
+/// and what draws the rows again from the connection's list, for a reconnect that dropped one.
 ///
-/// The pane keeps the list itself. Nothing asks ssh what it has open, so what the user added is
-/// what is drawn; the connection puts them back after a reconnect (`Remote::connect`) and the pane
-/// is only the list.
-pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
-    let forwards: Rc<RefCell<Vec<Forward>>> = Rc::new(RefCell::new(Vec::new()));
-
+/// The connection keeps the list (`Remote::forwards`), and the pane only draws it. Nothing asks
+/// ssh what it has open, so what the user added is what is drawn; the connection puts them back
+/// after a reconnect (`Remote::connect`), and drops one that will not come back.
+pub(super) fn pane(data: &Rc<Data>) -> (gtk::Widget, Rc<dyn Fn()>) {
     // A `GtkListBox` rebuilt row by row rather than a list view and a factory: there are a handful
     // of forwards at most, so a model to recycle rows into would cost more than it saves.
     let list = gtk::ListBox::builder()
@@ -74,41 +75,50 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
     // widget inside the ones it names — a row's close button, the entries, Add — and a strong
     // handle would be a cycle keeping the pane, and the vault behind `data`, alive after the
     // window has closed.
-    let switch_body: Rc<dyn Fn()> = Rc::new({
-        let forwards = forwards.clone();
-        glib::clone!(
-            #[weak]
-            body,
-            move || {
-                body.set_visible_child_name(match forwards.borrow().is_empty() {
-                    true => "empty",
-                    false => "list",
-                });
-            }
-        )
-    });
+
+    // The list, or the empty page while it has no rows.
+    let show: Rc<dyn Fn()> = Rc::new(glib::clone!(
+        #[weak]
+        list,
+        #[weak]
+        body,
+        move || {
+            body.set_visible_child_name(match list.first_child() {
+                Some(_) => "list",
+                None => "empty",
+            });
+        }
+    ));
 
     let drop_forward: DropForward = Rc::new({
-        let (data, forwards, switch_body) = (data.clone(), forwards.clone(), switch_body.clone());
+        let (data, show) = (data.clone(), show.clone());
+        move |f, row: &gtk::ListBoxRow| {
+            // Greyed out while ssh answers, so the button cannot ask a second time.
+            row.set_sensitive(false);
+            let (remove, show, row) = (data.remove_forward.clone(), show.clone(), row.clone());
+            glib::spawn_future_local(async move {
+                // The row goes whatever ssh answers: a forward it would not cancel is one nothing
+                // here could cancel either, and a master that died took its forwards with it.
+                crate::work::off_thread("ssh", move || remove(f)).await;
+                if let Some(list) = row.parent().and_downcast::<gtk::ListBox>() {
+                    list.remove(&row);
+                }
+                show();
+            });
+        }
+    });
+
+    let refill: Rc<dyn Fn()> = Rc::new({
+        let (data, drop_forward, show) = (data.clone(), drop_forward.clone(), show.clone());
         glib::clone!(
             #[weak]
             list,
-            move |f, row: &gtk::ListBoxRow| {
-                // Greyed out while ssh answers, so the button cannot ask a second time.
-                row.set_sensitive(false);
-                let remove = data.remove_forward.clone();
-                let (forwards, list, switch_body) =
-                    (forwards.clone(), list.clone(), switch_body.clone());
-                let row = row.clone();
-                glib::spawn_future_local(async move {
-                    // The row goes whatever ssh answers: a forward it would not cancel is one
-                    // nothing here could cancel either, and a master that died took its forwards
-                    // with it.
-                    crate::work::off_thread("ssh", move || remove(f)).await;
-                    forwards.borrow_mut().retain(|kept| *kept != f);
-                    list.remove(&row);
-                    switch_body();
-                });
+            move || {
+                list.remove_all();
+                for f in (data.forwards)() {
+                    list.append(&forward_row(f, drop_forward.clone()));
+                }
+                show();
             }
         )
     });
@@ -139,12 +149,9 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
         .build();
 
     let submit: Rc<dyn Fn()> = Rc::new({
-        let (data, forwards) = (data.clone(), forwards.clone());
-        let (switch_body, drop_forward) = (switch_body.clone(), drop_forward.clone());
+        let (data, refill) = (data.clone(), refill.clone());
         let direction = direction.clone();
         glib::clone!(
-            #[weak]
-            list,
             #[weak]
             banner,
             #[weak]
@@ -160,28 +167,24 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
                     remote: to,
                     direction: direction.get(),
                 };
-                let (forwards, list, banner) = (forwards.clone(), list.clone(), banner.clone());
+                // ssh answers a forward it already has with OK and adds nothing, which would read
+                // as a forward started.
+                if (data.forwards)().contains(&f) {
+                    banner.set_title(&format!("{f} is already forwarded"));
+                    banner.set_revealed(true);
+                    return;
+                }
+                let (banner, refill) = (banner.clone(), refill.clone());
                 let (local, remote) = (local.clone(), remote.clone());
-                let (switch_body, drop_forward) = (switch_body.clone(), drop_forward.clone());
                 let add = data.add_forward.clone();
                 glib::spawn_future_local(async move {
                     let answered = crate::work::off_thread("ssh", move || add(f)).await;
                     match answered {
-                        // ssh answers a forward it already has with OK and adds nothing, so a
-                        // second row would be stale the moment either was stopped. Asked when the
-                        // answer lands, which also catches an Add pressed twice before the first
-                        // came back.
-                        Some(Ok(())) if forwards.borrow().contains(&f) => {
-                            banner.set_title(&format!("{} is already forwarded", row_label(f)));
-                            banner.set_revealed(true);
-                        }
                         Some(Ok(())) => {
                             banner.set_revealed(false);
-                            forwards.borrow_mut().push(f);
-                            list.append(&forward_row(f, drop_forward));
                             local.set_text("");
                             remote.set_text("");
-                            switch_body();
+                            refill();
                         }
                         Some(Err(message)) => {
                             banner.set_title(&message);
@@ -236,30 +239,16 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
     column.append(&banner);
     column.append(&body);
     column.append(&form);
-    column.upcast()
-}
-
-/// The arrow for a direction, pointing the way a connection travels: from the port that listens
-/// to the one it reaches. The local port is always the one on the left.
-fn arrow(direction: Direction) -> &'static str {
-    match direction {
-        Direction::ToRemote => "→",
-        Direction::ToLocal => "←",
-    }
+    (column.upcast(), refill)
 }
 
 /// Set the form's direction button to `direction`: its arrow, and the words for it.
 fn show_direction(flip: &gtk::Button, direction: Direction) {
-    flip.set_label(arrow(direction));
+    flip.set_label(direction.arrow());
     flip.set_tooltip_text(Some(match direction {
         Direction::ToRemote => "A port on this machine reaches the remote one",
         Direction::ToLocal => "A port on the remote machine reaches this one",
     }));
-}
-
-/// A forward as its row reads it: `8080 → 80`, the local port first either way round.
-fn row_label(f: Forward) -> String {
-    format!("{} {} {}", f.local, arrow(f.direction), f.remote)
 }
 
 /// A forward in words, naming both ends: the tooltip on its row.
@@ -279,7 +268,7 @@ fn describe(f: Forward) -> String {
 /// One live forward: its ports and direction, read-only, and the button that takes it down.
 fn forward_row(f: Forward, drop_forward: DropForward) -> gtk::ListBoxRow {
     let label = gtk::Label::builder()
-        .label(row_label(f))
+        .label(f.to_string())
         .tooltip_text(describe(f))
         .xalign(0.0)
         .hexpand(true)
@@ -344,8 +333,8 @@ mod tests {
             direction: Direction::ToLocal,
             ..out
         };
-        assert_eq!(row_label(out), "8080 → 80");
-        assert_eq!(row_label(back), "8080 ← 80");
+        assert_eq!(out.to_string(), "8080 → 80");
+        assert_eq!(back.to_string(), "8080 ← 80");
         assert_eq!(
             describe(out),
             "Port 8080 on this machine reaches port 80 on the remote one"

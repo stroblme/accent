@@ -1162,6 +1162,24 @@ impl App {
                 move |term| app.close_page(&term.page)
             ),
         );
+        // A key in one lost shell brings back every shell of this window the same link took: the
+        // reader asking in one is asking for them all. Not another window's, which is another
+        // place the reader may not be looking at.
+        terminal::on_reconnect(
+            &term,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |term: &Rc<terminal::Term>| {
+                    term.reopen();
+                    for other in app.terminals() {
+                        if other.shares_link(term) {
+                            other.reopen();
+                        }
+                    }
+                }
+            ),
+        );
         // A `cd` is where the session will put the shell back, so it is written down like a move
         // of the caret would be.
         term.view
