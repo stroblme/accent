@@ -438,16 +438,16 @@ impl Local {
             let kept: Vec<(String, usize)> = keep
                 .iter()
                 .filter(|k| k.note == note)
-                .map(|k| (k.link.clone(), k.nth))
+                .map(|k| (k.anchor.clone(), k.nth))
                 .collect();
             match self.repage_one(&note, rel, edit, &kept) {
                 Ok(done) => {
                     report.moved += done.moved;
                     report
                         .left
-                        .extend(done.left.into_iter().map(|(link, nth)| KeptLink {
+                        .extend(done.left.into_iter().map(|(anchor, nth)| KeptLink {
                             note: note.clone(),
-                            link,
+                            anchor,
                             nth,
                         }));
                     if done.text.is_some() {
@@ -896,7 +896,7 @@ mod tests {
             deleted.left,
             [crate::KeptLink {
                 note: "a.md".into(),
-                link: "[[paper.pdf#page=3&selection=0,0,0,4|Hi]]".into(),
+                anchor: "page=3&selection=0,0,0,4".into(),
                 nth: 0
             }]
         );

@@ -162,7 +162,7 @@ mod tests {
     fn the_toast_says_what_moved_and_what_was_left() {
         let left = |n| KeptLink {
             note: "a.md".into(),
-            link: "[[p.pdf#page=2]]".into(),
+            anchor: "page=2".into(),
             nth: n,
         };
         let report = |moved, notes: &[&str], left: Vec<KeptLink>| RepageReport {

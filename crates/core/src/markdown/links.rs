@@ -577,9 +577,9 @@ pub struct Repaged {
     pub text: Option<String>,
     /// How many links now name another page.
     pub moved: usize,
-    /// The links left naming the page a delete took out, each as its markup reads and which of
-    /// the note's links into the PDF that read the same it is: enough to find it again after
-    /// edits elsewhere in the note.
+    /// The links left naming the page a delete took out, each as its anchor reads (`page=N&…`)
+    /// and which of the note's links into the PDF whose anchor reads the same it is: enough to
+    /// find it again after edits elsewhere in the note, and to itself.
     pub left: Vec<(String, usize)>,
 }
 
@@ -605,8 +605,8 @@ pub fn repage_links(
     let into_pdf =
         |key: Option<String>| key.and_then(|k| targets.get(&k)).is_some_and(|f| f == pdf);
     let a = analyze(text);
-    // Every link into the PDF, as where its markup sits and where the digits of its page do. A
-    // scanned path's markup is the destination as written, anchor and all.
+    // Every link into the PDF with an anchor, as where its anchor sits and where the digits of
+    // its page do.
     let mut found: Vec<(Range<usize>, Option<Range<usize>>)> = Vec::new();
     for link in &a.links {
         let key = match link.kind {
@@ -614,32 +614,38 @@ pub fn repage_links(
             LinkKind::Markdown => link_key(&path::resolve(dir, &link.target)),
             LinkKind::External => continue,
         };
-        if into_pdf(Some(key)) {
-            found.push((link.range.clone(), page_number(text, link)));
+        if into_pdf(Some(key))
+            && let Some(at) = anchor_at(text, link)
+        {
+            let number =
+                page_digits(&text[at.clone()]).map(|r| at.start + r.start..at.start + r.end);
+            found.push((at, number));
         }
     }
     for at in scanned_paths(text, &a) {
-        let Some((written, anchor)) = text.get(at.clone()).map(split_anchor) else {
+        let Some((written, Some(anchor))) = text.get(at.clone()).map(split_anchor) else {
             continue;
         };
         if into_pdf(path_key(dir, &percent_decode(written))) {
             let start = at.start + written.len() + 1;
-            let number = anchor.and_then(page_digits);
-            found.push((at, number.map(|r| start + r.start..start + r.end)));
+            let number = page_digits(anchor).map(|r| start + r.start..start + r.end);
+            found.push((start..start + anchor.len(), number));
         }
     }
     let mut out = Repaged::default();
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
-    // How many links into the PDF have read the same so far: before this rewrite, which is how
-    // `keep` counted, and after it, which is how the next one will.
+    // How many anchors into the PDF have read the same so far: before this rewrite, which is how
+    // `keep` counted, and after it, which is how the next one will. The anchor alone, so a left
+    // link is found again however it is retyped; two that differ only in their path are told
+    // apart by their order.
     let (mut before, mut after) = (HashMap::new(), HashMap::new());
-    let nth = |seen: &mut HashMap<String, usize>, markup: &str| {
-        let n = seen.entry(markup.to_string()).or_insert(0);
+    let nth = |seen: &mut HashMap<String, usize>, anchor: &str| {
+        let n = seen.entry(anchor.to_string()).or_insert(0);
         *n += 1;
         *n - 1
     };
-    for (markup, number) in found {
-        let Some(written) = text.get(markup.clone()) else {
+    for (anchor, number) in found {
+        let Some(written) = text.get(anchor.clone()) else {
             continue;
         };
         let kept = keep.contains(&(written.to_string(), nth(&mut before, written)));
@@ -652,7 +658,7 @@ pub fn repage_links(
         match (number, page.map(|page| (page, edit.map(page)))) {
             (Some(at), Some((page, Some(to)))) if to != page => {
                 let with = (to + 1).to_string();
-                let start = markup.start;
+                let start = anchor.start;
                 now.replace_range(at.start - start..at.end - start, &with);
                 edits.push((at, with));
                 out.moved += 1;
@@ -675,11 +681,11 @@ pub fn repage_links(
     out
 }
 
-/// Where the digits of a link's `page=N` sit in `text`, found from the target as written, the
-/// `#` after it and the anchor the parser read. `None` for a link with no page, and for one whose
-/// bytes do not spell what the parser read (a percent-encoded anchor), which is left alone rather
-/// than guessed at.
-fn page_number(text: &str, link: &Link) -> Option<Range<usize>> {
+/// Where a link's anchor sits in `text`, found from the target as written, the `#` after it and
+/// the anchor the parser read. `None` for a link with no anchor, and for one whose bytes do not
+/// spell what the parser read (a percent-encoded anchor), which is left alone rather than guessed
+/// at.
+fn anchor_at(text: &str, link: &Link) -> Option<Range<usize>> {
     let target = match link.kind {
         LinkKind::Wiki | LinkKind::Embed => {
             let open = if link.kind == LinkKind::Embed { 3 } else { 2 };
@@ -696,7 +702,7 @@ fn page_number(text: &str, link: &Link) -> Option<Range<usize>> {
     {
         return None;
     }
-    page_digits(anchor).map(|r| start + r.start..start + r.end)
+    Some(start..start + anchor.len())
 }
 
 /// Where the digits of `page=N` sit in an anchor as written, `None` when it names no page.
@@ -1183,13 +1189,23 @@ mod tests {
             &[],
         );
         assert_eq!(deleted.moved, 1);
-        assert_eq!(
-            deleted.left,
-            [
-                ("[[p.pdf#page=2]]".to_string(), 0),
-                ("[[p.pdf#page=2|again]]".to_string(), 0)
-            ]
-        );
+        // The second `page=2` is the link that moved there.
+        let left = [("page=2".to_string(), 0), ("page=2".to_string(), 2)];
+        assert_eq!(deleted.left, left);
+    }
+
+    /// A link the delete left is kept by its anchor alone, so the Undo still keeps it once it has
+    /// been retyped, or its path rewritten by a move of its note.
+    #[test]
+    fn a_left_link_is_kept_by_its_anchor() {
+        let src = "[[p.pdf#page=2|old]] [[p.pdf#page=3]]";
+        let deleted = repaged(src, PageEdit::Delete(1), &[]);
+        let left = "[[p.pdf#page=2|old]] [[p.pdf#page=2]]";
+        assert_eq!(deleted.text.as_deref(), Some(left));
+        let retyped = "[[Papers/p.pdf#page=2|new]] [[p.pdf#page=2]]";
+        let undone = repaged(retyped, PageEdit::Insert(1), &deleted.left);
+        let want = "[[Papers/p.pdf#page=2|new]] [[p.pdf#page=3]]";
+        assert_eq!(undone.text.as_deref(), Some(want));
     }
 
     /// The two path forms the parser does not hand over follow a page edit as a link does: a
@@ -1214,7 +1230,7 @@ mod tests {
         );
         assert_eq!(got.moved, 2);
         let deleted = repaged(src, PageEdit::Delete(0), &[]);
-        assert_eq!(deleted.left, [("../Papers/p.pdf#page=1".to_string(), 0)]);
+        assert_eq!(deleted.left, [("page=1".to_string(), 0)]);
         let undone = repaged(
             deleted.text.as_deref().unwrap(),
             PageEdit::Insert(0),
