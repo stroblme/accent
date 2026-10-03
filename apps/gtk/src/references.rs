@@ -126,7 +126,13 @@ impl App {
             let found = vault.definition(&tab.rel(), pos).await;
             tracing::debug!("definition for {} at {pos:?}: {found:?}", tab.rel());
             let Some(app) = weak.upgrade() else { return };
-            match found.unwrap_or_default().as_slice() {
+            // A request that failed found nothing either, and saying so would hide why: a host
+            // that stopped answering, a server that crashed.
+            let found = match found {
+                Ok(found) => found,
+                Err(e) => return app.cannot("go to the definition", e),
+            };
+            match found.as_slice() {
                 [] => app.toast("No definition found"),
                 [one] => app.open_at(one),
                 // More than one place answers to the name — an overload, a trait method, a note

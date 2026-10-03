@@ -1070,10 +1070,15 @@ pub fn build(
     // file's row often is not there — or not there yet — at the moment the tab changed. Re-applied
     // whenever the model changes, but never while the pointer is in the list: the selection is
     // the hover highlight too, and a reindex must not pull it out from under the row being
-    // pointed at.
+    // pointed at. The controller weakly: its own handlers hold the model, through `show_start`,
+    // and a strong one here would be a ring keeping the model, and the vault its listings ask,
+    // alive after the window has closed.
     model.connect_items_changed({
-        let motion = motion.clone();
+        let motion = motion.downgrade();
         move |_, _, _, _| {
+            let Some(motion) = motion.upgrade() else {
+                return;
+            };
             if motion.contains_pointer() {
                 return;
             }
