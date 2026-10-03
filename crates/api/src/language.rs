@@ -28,6 +28,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::local::Ignored;
 use crate::remote::Remote;
 use crate::vault::{Backend, remote_err};
 use crate::{Event, FileEdits, Local, LspConfig, Vault, locked};
@@ -419,6 +420,8 @@ pub(crate) struct Languages {
     words: Arc<AtomicBool>,
     /// The folders a LaTeX document's `\input{` lists.
     listing: Arc<Listing>,
+    /// The files in the folders git ignores, which the notes provider and the vault both ask.
+    pub(crate) ignored: Arc<Ignored>,
 }
 
 /// The vault's listing of a folder, the file tree's own ([`crate::local::list_dir`]), for a
@@ -448,6 +451,7 @@ impl Languages {
             db: db.clone(),
             index: Mutex::new(None),
         });
+        let ignored = Arc::new(Ignored::new(root.clone()));
         Arc::new(Languages {
             root,
             db,
@@ -458,6 +462,7 @@ impl Languages {
             ghost_starts: Mutex::new(Some(Vec::new())),
             words: Arc::new(AtomicBool::new(true)),
             listing,
+            ignored,
         })
     }
 
@@ -694,8 +699,10 @@ impl Languages {
                     // One notes provider per vault, whatever the note: they share the index.
                     let key = ("accent".to_string(), me.root.clone());
                     let (root, db, events) = (me.root.clone(), me.db.clone(), me.events.clone());
-                    let start =
-                        async move { Ok(Arc::new(Notes::open_at(root, &db, events)?) as _) };
+                    let ignored = me.ignored.clone();
+                    let start = async move {
+                        Ok(Arc::new(Notes::open_at(root, &db, events, ignored)?) as _)
+                    };
                     (
                         Some(me.session(key.clone(), start).await?),
                         "markdown".to_string(),

@@ -453,6 +453,11 @@ methods! {
     any resolve_link(target: ref str) -> Option<String>;
     /// What Go to File and `[[` completion offer to write.
     any missing_notes() -> Vec<String>;
+    /// The notes in the folders git ignores, walked again when `fresh`: what Go to File lists
+    /// behind the indexed files. Walked where the files are.
+    any ignored_notes(fresh: val bool) -> Vec<String>;
+    /// The file a link target names in the folders git ignores, when the index has none.
+    any resolve_ignored(target: ref str) -> Option<String>;
     /// `(alias, note)` for every frontmatter alias: what Go to File also finds a note by.
     any note_aliases() -> Vec<(String, String)>;
     any conflicts() -> Vec<(String, String)>;
@@ -647,7 +652,8 @@ impl Vault {
     /// The index answers first. A file in a tree it does not hold — a gitignored `build/` it has
     /// not walked, a `node_modules` it never enters — is still there to open, so the file New
     /// File would write for the link ([`linked_path`]) is looked for on disk before it is offered:
-    /// one `stat`, and only for a link the index could not place.
+    /// one `stat`, and only for a link the index could not place. Last, a link by name alone
+    /// finds a file in a gitignored folder ([`resolve_ignored`](Self::resolve_ignored)).
     ///
     /// That `stat` is asked through [`stat`](Self::stat) rather than [`exists`](Self::exists),
     /// which cannot say why it answered `false`: on a remote vault that is not answering, a link
@@ -661,7 +667,10 @@ impl Vault {
             return Ok(Some(rel));
         }
         let rel = linked_path(target);
-        Ok(self.stat(&rel)?.map(|_| rel))
+        if self.stat(&rel)?.is_some() {
+            return Ok(Some(rel));
+        }
+        self.resolve_ignored(target)
     }
 
     /// The repositories the vault touches. A failure is the caller's to see: offline used to read
@@ -745,6 +754,63 @@ mod tests {
         // A folder is not a file to open, and nothing at all is what New File is offered for.
         assert_eq!(f.vault.follow("node_modules/pkg").unwrap(), None);
         assert_eq!(f.vault.follow("nowhere.pdf").unwrap(), None);
+    }
+
+    /// A note in a gitignored folder is out of the index, and still listed, completed, followed
+    /// by its name alone and no note to write; a dependency tree inside the folder stays out.
+    #[test]
+    fn a_note_in_a_gitignored_folder_is_listed_completed_and_followed() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write(".gitignore", "ignored/\n");
+        f.write("ignored/Deep Note.md", "# Deep\n");
+        f.write("ignored/out.log", "log\n");
+        f.write("ignored/node_modules/dep/README.md", "dep\n");
+        f.write("a.md", "[[Deep Note]] [[Nowhere]]\n");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        assert_eq!(f.vault.resolve_link("Deep Note").unwrap(), None);
+        assert_eq!(
+            f.vault.ignored_notes(true).unwrap(),
+            ["ignored/Deep Note.md"]
+        );
+        assert_eq!(
+            f.vault.follow("Deep Note").unwrap().as_deref(),
+            Some("ignored/Deep Note.md")
+        );
+        assert_eq!(f.vault.missing_notes().unwrap(), ["Nowhere.md"]);
+
+        let rt = accent_lsp::runtime();
+        rt.block_on(f.vault.open_document(
+            "a.md",
+            "markdown",
+            "[[Deep Note]] [[Nowhere]]\n[[Deep\n".to_string(),
+        ))
+        .unwrap();
+        let Some(Event::Diagnostics { items, .. }) =
+            f.wait(|e| matches!(e, Event::Diagnostics { .. }))
+        else {
+            panic!("opening a note has to say what is wrong with it");
+        };
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].message, "No note named Nowhere");
+
+        let at = Pos {
+            line: 1,
+            character: 6,
+        };
+        let items = rt
+            .block_on(f.vault.completion("a.md", at, None))
+            .unwrap()
+            .items;
+        let rows: Vec<(&str, Option<&str>)> = items
+            .iter()
+            .map(|i| (i.insert.as_str(), i.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [("[[Deep Note]]", Some("ignored/Deep Note.md, ignored"))]
+        );
     }
 
     /// Paste duplicates, so the copy has to take a folder as readily as a file — and the copy is

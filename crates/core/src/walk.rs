@@ -28,7 +28,7 @@
 
 use ignore::{IncrementalIgnore, WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -223,6 +223,11 @@ pub struct ScanOptions {
     /// for the index: this is the Search pane's All toggle reaching, for one query, the trees the
     /// index deliberately does not hold. [`ALWAYS_SKIP_DIRS`] is not opened by it.
     pub include_skipped: bool,
+    /// Walk into the directories git ignores in the vault tree rather than skipping them, each
+    /// still reported in [`ScanResult::skipped`] as [`SkipReason::GitIgnored`] so the caller can
+    /// tell their files from the rest. Every other skip holds, dependency trees included. Off by
+    /// default and never on for the index: [`ignored_files`] is what it is for.
+    pub enter_ignored_dirs: bool,
     /// 0 = one thread per core.
     pub threads: usize,
     pub max_depth: Option<usize>,
@@ -236,6 +241,7 @@ impl Default for ScanOptions {
             target_gitignore: true,
             skip_dependency_trees: true,
             include_skipped: false,
+            enter_ignored_dirs: false,
             threads: 0,
             max_depth: None,
         }
@@ -451,6 +457,47 @@ pub fn unindexed_children(
         ));
     }
     Ok(out)
+}
+
+/// Every file inside a directory git ignores, by vault-relative path, in path order: the folders
+/// the index never walks, listed whole for Go to File, `[[` completion and a link naming a file in
+/// one. A dependency tree stays out, inside an ignored folder too: it is somebody else's, as the
+/// file tree says ([`Unindexed::Dependency`]), and a `node_modules` is the 40 000 files a listing
+/// must not hold. So does a conflict copy, which is never opened as a file.
+///
+/// One walk of the whole vault, since nothing short of one says where the ignored folders are.
+pub fn ignored_files(root: &Path) -> Vec<String> {
+    let opts = ScanOptions {
+        enter_ignored_dirs: true,
+        ..ScanOptions::default()
+    };
+    let r = scan(root, &opts);
+    let dirs: HashSet<String> = r
+        .skipped
+        .iter()
+        .filter(|s| s.reason == SkipReason::GitIgnored)
+        .filter_map(|s| {
+            Some(
+                s.path
+                    .strip_prefix(root)
+                    .ok()?
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        })
+        .collect();
+    let inside = |rel: &str| {
+        rel.match_indices('/')
+            .any(|(i, _)| dirs.contains(&rel[..i]))
+    };
+    let mut out: Vec<String> = r
+        .files
+        .into_iter()
+        .filter(|f| !matches!(f.kind, FileKind::Dir | FileKind::Conflict) && inside(&f.rel_path))
+        .map(|f| f.rel_path)
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// Walk `root`, applying the symlink rules. Returns files, aliases and skip reports.
@@ -675,6 +722,7 @@ fn walk_pass(
         let follow_links = opts.follow_links;
         let skip_deps = opts.skip_dependency_trees && !opts.include_skipped;
         let include_skipped = opts.include_skipped;
+        let enter_ignored = opts.enter_ignored_dirs;
         // Per thread rather than shared: `IncrementalIgnore` caches what it reads behind `&mut`,
         // and a lock per directory would be paid on the one hot path the walk has. Rooted at the
         // vault whichever folder the pass starts at, so the rules above that folder hold too.
@@ -713,7 +761,8 @@ fn walk_pass(
                 Err(_) => return WalkState::Continue,
             };
             // A directory git ignores is not walked; the file tree opens it a level at a time
-            // (`unindexed_children`). Real directories only — a directory *symlink* is admitted
+            // (`unindexed_children`), and `ignored_files` walks it, told which it is. Real
+            // directories only — a directory *symlink* is admitted
             // below and then walked as its own pass, which honours the target's own ignore files
             // whole, so the tree behind it is pruned there instead.
             if let Some(ignores) = ignores.as_mut()
@@ -724,7 +773,9 @@ fn walk_pass(
                     path: path.to_path_buf(),
                     reason: SkipReason::GitIgnored,
                 }));
-                return WalkState::Skip;
+                if !enter_ignored {
+                    return WalkState::Skip;
+                }
             }
             let io_skip = |tx: &mpsc::Sender<Msg>| {
                 let _ = tx.send(Msg::Skip(Skipped {
@@ -1401,6 +1452,35 @@ mod tests {
         let kind = |rel: &str| rows.iter().find(|(r, ..)| r == rel).map(|(_, k, _)| *k);
         assert_eq!(kind("node_modules/README.md"), Some(FileKind::Markdown));
         assert_eq!(kind("node_modules/pkg"), Some(FileKind::Dir));
+    }
+
+    /// The files in a gitignored folder are listed, a dependency tree inside one is not, and
+    /// nothing the index walks is.
+    #[test]
+    fn ignored_files_lists_the_gitignored_folders_and_nothing_else() {
+        let vault = tempfile::tempdir().unwrap();
+        let write = |rel: &str| {
+            let path = vault.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x").unwrap();
+        };
+        fs::write(vault.path().join(".gitignore"), "ignored/\n*.log\n").unwrap();
+        for rel in [
+            "note.md",
+            "kept.log",
+            "node_modules/dep.md",
+            "ignored/Deep Note.md",
+            "ignored/sub/paper.pdf",
+            "ignored/node_modules/dep.md",
+            "ignored/env/pyvenv.cfg",
+            "ignored/env/lib.md",
+        ] {
+            write(rel);
+        }
+        assert_eq!(
+            ignored_files(vault.path()),
+            ["ignored/Deep Note.md", "ignored/sub/paper.pdf"]
+        );
     }
 
     /// The visitor sees what `scan` lists, symlinked target and all, and stops when it says so.

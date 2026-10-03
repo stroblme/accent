@@ -41,6 +41,9 @@ pub enum Item {
     File(String),
     /// A note a link names that is not there yet, by the path New File would create it at.
     Missing(String),
+    /// A note in a folder git ignores, which the index never walks: opened as a file is, and
+    /// marked, search not reaching it.
+    Ignored(String),
     /// A note found by one of its frontmatter aliases: the alias that matched, and the note.
     Alias { name: String, rel: String },
     /// A `GAction` on the window, with the label and accelerator to show.
@@ -67,7 +70,7 @@ impl Item {
     /// The text the palette matches against and shows first in the row.
     fn text(&self) -> &str {
         match self {
-            Item::File(rel) | Item::Missing(rel) => rel,
+            Item::File(rel) | Item::Missing(rel) | Item::Ignored(rel) => rel,
             Item::Alias { name, .. } => name,
             Item::Command { label, .. } => label,
             Item::Tag(tag) => tag,
@@ -90,6 +93,8 @@ pub struct Sources {
     /// The files are followed by the notes links name that are not there yet, from `real` on.
     pub files: Rc<Vec<String>>,
     pub real: usize,
+    /// Which of the files are notes in a folder git ignores ([`with_ignored`]).
+    pub ignored: Rc<HashSet<String>>,
     /// `(alias, note)` for every frontmatter alias, ranked with the files by the alias.
     pub aliases: Rc<Vec<(String, String)>>,
     pub commands: Vec<Item>,
@@ -243,6 +248,20 @@ fn with_history(
     (Rc::new(corpus), end)
 }
 
+/// The index's files followed by the notes in the folders git ignores that it does not hold, so an
+/// indexed file leads one of those at the same score; and which of `files` those notes now are.
+pub fn with_ignored(files: &mut Vec<String>, ignored: Vec<String>) -> HashSet<String> {
+    let added: Vec<String> = {
+        let held: HashSet<&str> = files.iter().map(String::as_str).collect();
+        ignored
+            .into_iter()
+            .filter(|rel| !held.contains(rel.as_str()))
+            .collect()
+    };
+    files.extend(added.iter().cloned());
+    added.into_iter().collect()
+}
+
 /// "<Control>p" -> "Ctrl+P", spelled the way this GTK build spells it.
 ///
 /// `gtk::ShortcutLabel` would do the same, but it is deprecated since GTK 4.18.
@@ -381,7 +400,7 @@ fn row_factory(
             // vault has the start screen's, where it has one.
             icon.set_visible(matches!(
                 &*entry,
-                Item::File(_) | Item::Missing(_) | Item::Alias { .. }
+                Item::File(_) | Item::Missing(_) | Item::Ignored(_) | Item::Alias { .. }
             ));
             match &*entry {
                 // A note row reads as basename first, directory after: a vault full of `index.md`
@@ -392,13 +411,17 @@ fn row_factory(
                     dir.set_text(parent_dir(rel));
                 }
                 // The same row, and at its end, where a command keeps its shortcut, what it is not.
-                Item::Missing(rel) => {
+                Item::Missing(rel) | Item::Ignored(rel) => {
                     icon.set_icon_name(Some(crate::doc::icon_for(rel)));
                     name.set_text(basename(rel));
                     dir.set_text(parent_dir(rel));
+                    let what = match &*entry {
+                        Item::Missing(_) => "Not created",
+                        _ => "Ignored",
+                    };
                     slot.append(
                         &gtk::Label::builder()
-                            .label("Not created")
+                            .label(what)
                             .css_classes(["dim-label"])
                             .build(),
                     );
@@ -542,6 +565,7 @@ pub fn present(
         mru,
         files,
         real,
+        ignored,
         aliases,
         commands,
         tags,
@@ -648,6 +672,13 @@ pub fn present(
     let refresh = Rc::new({
         let (model, selection, stack) = (model.clone(), selection.clone(), stack.clone());
         let (recent, files, tags) = (recent.clone(), files.clone(), tags.clone());
+        // A file's row, which says so when the note is in a folder git ignores.
+        let file_item = move |rel: &String| {
+            Rc::new(match ignored.contains(rel) {
+                true => Item::Ignored(rel.clone()),
+                false => Item::File(rel.clone()),
+            })
+        };
         let (mru, typed) = (mru.clone(), typed.clone());
         let (vaults, vault_places) = (vaults.clone(), vault_places.clone());
         let (commands, command_text, command_recent) = (
@@ -663,11 +694,9 @@ pub fn present(
                 match mode {
                     // No corpus and no matching until the user actually types: the dialog is up in the
                     // time one indexed query takes, not the 11 s a full vault walk took.
-                    Mode::Files if empty_query => recent
-                        .iter()
-                        .take(MAX_RESULTS)
-                        .map(|rel| Rc::new(Item::File(rel.clone())))
-                        .collect(),
+                    Mode::Files if empty_query => {
+                        recent.iter().take(MAX_RESULTS).map(&file_item).collect()
+                    }
                     Mode::Files => {
                         let (files, real, named, used) = typed.get_or_init(|| {
                             let (mut files, real) = with_history(&files, real, &mru);
@@ -685,7 +714,7 @@ pub fn present(
                         rank(files, used, query, Corpus::Paths)
                             .into_iter()
                             .map(|i| match i {
-                                i if i < real => Rc::new(Item::File(files[i].clone())),
+                                i if i < real => file_item(&files[i]),
                                 i if i < named => Rc::new(Item::Missing(files[i].clone())),
                                 i => Rc::new(Item::Alias {
                                     name: files[i].clone(),
@@ -1033,6 +1062,20 @@ mod tests {
             rank(&corpus, &[], "zzzz", Corpus::Paths),
             Vec::<usize>::new()
         );
+    }
+
+    /// A note in an ignored folder joins the files once, behind them, so the indexed one of two
+    /// paths that score alike leads whatever their order by name.
+    #[test]
+    fn an_ignored_note_ranks_behind_an_indexed_file() {
+        let mut files = vec!["y/Deep Note.md".to_string()];
+        let ignored = with_ignored(
+            &mut files,
+            vec!["x/Deep Note.md".to_string(), "y/Deep Note.md".to_string()],
+        );
+        assert_eq!(files, ["y/Deep Note.md", "x/Deep Note.md"]);
+        assert_eq!(ignored, HashSet::from(["x/Deep Note.md".to_string()]));
+        assert_eq!(rank(&files, &[], "Deep Note", Corpus::Paths), [0, 1]);
     }
 
     #[test]

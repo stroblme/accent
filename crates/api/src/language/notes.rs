@@ -8,7 +8,7 @@
 //! the index and the open documents.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,7 @@ use super::{
     Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, PdfPages, Pos,
     Range, Severity, Signature, Support, Symbol, byte_of, pos_of, range_of,
 };
+use crate::local::{Ignored, Listing};
 use crate::{Backlink, Event, Local, locked};
 
 /// Rows the popup offers before the user has to type more.
@@ -376,21 +377,27 @@ pub(crate) struct Notes {
     events: Sender<Event>,
     /// What a link completion ranks, kept between keystrokes. See [`Notes::corpus`].
     corpora: Mutex<Corpora>,
+    /// The files in the folders git ignores, which a link finds when the index does not.
+    ignored: Arc<Ignored>,
 }
 
-/// What one kind of link completion ranks: `paths`, whose first `named` are files and notes only
-/// linked to so far (`missing`), and after those one name per entry of `aliases`.
+/// What one kind of link completion ranks: `paths`, whose first `named` are files, the notes in
+/// the folders git ignores (at `ignored`) and notes only linked to so far (`missing`), and after
+/// those one name per entry of `aliases`.
 struct Corpus {
     paths: Vec<String>,
+    ignored: std::ops::Range<usize>,
     named: usize,
     missing: Vec<String>,
     aliases: Vec<(String, String)>,
 }
 
-/// The two corpora a link completion ranks, as the index held them at `version`.
+/// The two corpora a link completion ranks, as the index held them at `version` and the ignored
+/// folders as `listing` holds them.
 #[derive(Default)]
 struct Corpora {
     version: i64,
+    listing: Option<Arc<Listing>>,
     /// `[[`: the notes and PDFs, the notes only linked to and the aliases.
     wiki: Option<Arc<Corpus>>,
     /// `![[` and `](`: every file.
@@ -398,13 +405,32 @@ struct Corpora {
 }
 
 impl Notes {
-    pub(crate) fn open_at(root: PathBuf, db: &Path, events: Sender<Event>) -> Result<Notes> {
+    pub(crate) fn open_at(
+        root: PathBuf,
+        db: &Path,
+        events: Sender<Event>,
+        ignored: Arc<Ignored>,
+    ) -> Result<Notes> {
         Ok(Notes {
             root,
             index: Mutex::new(Index::open(db)?),
             docs: Mutex::new(HashMap::new()),
             events,
             corpora: Mutex::default(),
+            ignored,
+        })
+    }
+
+    /// The file a link target names: the index's answer, or else one in a folder git ignores,
+    /// which the index never walks but a link still reaches.
+    fn find(&self, index: &Index, target: &str) -> Result<Option<String>> {
+        Ok(match index.resolve_target(target)? {
+            Some(rel) => Some(rel),
+            None => self
+                .ignored
+                .listing(false)
+                .resolve(target)
+                .map(str::to_string),
         })
     }
 
@@ -417,10 +443,16 @@ impl Notes {
     /// a keystroke for `](` and `![[`, 30 ms for `[[`, where ranking them is a few.
     fn corpus(&self, index: &Index, wiki: bool) -> Result<Arc<Corpus>> {
         let version = index.data_version()?;
+        let listing = self.ignored.listing(false);
         let mut corpora = locked(&self.corpora);
-        if corpora.version != version {
+        let walked = corpora
+            .listing
+            .as_ref()
+            .is_some_and(|l| Arc::ptr_eq(l, &listing));
+        if corpora.version != version || !walked {
             *corpora = Corpora {
                 version,
+                listing: Some(listing.clone()),
                 ..Corpora::default()
             };
         }
@@ -431,7 +463,7 @@ impl Notes {
         if let Some(corpus) = slot {
             return Ok(corpus.clone());
         }
-        let (mut paths, missing, aliases) = match wiki {
+        let (mut paths, mut missing, aliases) = match wiki {
             true => (
                 index.note_and_pdf_paths()?,
                 index.missing_notes()?,
@@ -439,6 +471,20 @@ impl Notes {
             ),
             false => (index.file_paths(false)?, Vec::new(), Vec::new()),
         };
+        // `[[` names a note in an ignored folder too, behind the files the index holds, and a
+        // link to one is no note to write.
+        let start = paths.len();
+        if wiki {
+            let held: HashSet<&str> = paths.iter().map(String::as_str).collect();
+            let notes: Vec<String> = listing
+                .notes()
+                .filter(|rel| !held.contains(rel.as_str()))
+                .cloned()
+                .collect();
+            paths.extend(notes);
+            missing.retain(|rel| listing.resolve(rel).is_none());
+        }
+        let ignored = start..paths.len();
         // Behind the files, so one that is there leads a note only linked to at the same rank:
         // the ranking is stable.
         paths.extend(missing.iter().cloned());
@@ -447,6 +493,7 @@ impl Notes {
         paths.extend(aliases.iter().map(|(alias, _)| alias.clone()));
         let corpus = Arc::new(Corpus {
             paths,
+            ignored,
             named,
             missing,
             aliases,
@@ -487,7 +534,11 @@ impl Notes {
             .unzip();
         let mut items = Vec::new();
         if !links.is_empty() {
-            let resolved = locked(&self.index).resolve_targets(&targets)?;
+            let index = locked(&self.index);
+            let resolved = targets
+                .iter()
+                .map(|target| self.find(&index, target))
+                .collect::<Result<Vec<_>>>()?;
             items.extend(
                 links
                     .iter()
@@ -551,6 +602,7 @@ impl Notes {
                 let corpus = self.corpus(&index, trigger == Trigger::Wiki)?;
                 let Corpus {
                     paths,
+                    ignored,
                     named,
                     missing,
                     aliases,
@@ -596,13 +648,17 @@ impl Notes {
                     let (name, path) = link_names(&hit);
                     // The bare name only while it reaches this file: where a shorter path
                     // answers to it first, the link has to spell the path out.
-                    let bare = index.resolve_target(&name)?.as_ref() == Some(&hit);
+                    let bare = self.find(&index, &name)?.as_ref() == Some(&hit);
                     items.push(Completion {
                         insert: match bare {
                             true => format!("[[{name}]]"),
                             false => format!("[[{path}]]"),
                         },
-                        detail: (!bare).then(|| hit.clone()),
+                        // Said, as the tree dims it: search does not reach it.
+                        detail: match ignored.contains(&i) {
+                            true => Some(format!("{hit}, ignored")),
+                            false => (!bare).then(|| hit.clone()),
+                        },
                         // The popup narrows by what was typed since the `[[`, which a bare
                         // name never matches; the path lets a folder narrow it too. The path
                         // as the index holds it, extension and all, because that is what the
@@ -629,7 +685,7 @@ impl Notes {
                     _ => {
                         let target =
                             path::resolve(parent_dir(rel), &markdown::percent_decode(dest));
-                        match locked(&self.index).resolve_target(&target)? {
+                        match self.find(&locked(&self.index), &target)? {
                             Some(note) if note.ends_with(".md") => Some(self.text_of(&note)?),
                             _ => return Ok(Completions::default()),
                         }
@@ -733,7 +789,7 @@ impl Notes {
     ) -> Result<Completions> {
         let target = match note {
             "" => rel.to_string(),
-            _ => match locked(&self.index).resolve_target(note)? {
+            _ => match self.find(&locked(&self.index), note)? {
                 Some(target) => target,
                 None => return Ok(Completions::default()),
             },
@@ -789,7 +845,7 @@ impl Notes {
             if link.kind == LinkKind::External || link.target.is_empty() {
                 return Ok(None);
             }
-            let Some(target) = locked(&self.index).resolve_target(&target_of(rel, link))? else {
+            let Some(target) = self.find(&locked(&self.index), &target_of(rel, link))? else {
                 return Ok(None);
             };
             // A link to something that is not a note has nothing to preview but its place.
@@ -835,7 +891,7 @@ impl Notes {
             true => rel.to_string(),
             false => {
                 let asked = target_of(rel, link);
-                let resolved = locked(&self.index).resolve_target(&asked)?;
+                let resolved = self.find(&locked(&self.index), &asked)?;
                 match resolved.or_else(|| self.unwalked(&asked)) {
                     Some(target) => target,
                     // Nothing is there yet: the answer is the file New File would write for it.
@@ -1214,6 +1270,7 @@ mod tests {
             vault.path().to_path_buf(),
             &db,
             std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
         )
         .unwrap();
         let caret = Pos {
@@ -1257,6 +1314,7 @@ mod tests {
             vault.path().to_path_buf(),
             &db,
             std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
         )
         .unwrap();
         let at = |line, character| Pos { line, character };
@@ -1299,6 +1357,7 @@ mod tests {
             vault.path().to_path_buf(),
             &db,
             std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
         )
         .unwrap();
         let caret = Pos {
@@ -1336,6 +1395,7 @@ mod tests {
             vault.path().to_path_buf(),
             &db,
             std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
         )
         .unwrap();
         let caret = Pos {
@@ -1379,6 +1439,7 @@ mod tests {
             vault.path().to_path_buf(),
             &db,
             std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
         )
         .unwrap();
         let caret = Pos {
@@ -1424,6 +1485,7 @@ mod tests {
             vault.path().to_path_buf(),
             &db,
             std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
         )
         .unwrap();
         let items = notes

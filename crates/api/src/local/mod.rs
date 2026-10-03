@@ -21,8 +21,10 @@ use crate::worker::{self, Msg};
 use crate::{Event, VaultConfig, language, locked};
 
 mod files;
+mod ignored;
 mod index;
 
+pub(crate) use ignored::{Ignored, Listing};
 pub(crate) use index::list_dir;
 
 /// One open vault: the index, the watcher, and the worker thread that owns both writers.

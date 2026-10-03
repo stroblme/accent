@@ -263,8 +263,27 @@ impl Local {
     }
 
     /// The notes links name that are not there yet, by the path New File would create each at.
+    /// One a link finds in a folder git ignores is there, and is not one of them.
     pub fn missing_notes(&self) -> Result<Vec<String>> {
-        self.index().missing_notes()
+        let mut missing = self.index().missing_notes()?;
+        let ignored = self.lang.ignored.listing(false);
+        missing.retain(|rel| ignored.resolve(rel).is_none());
+        Ok(missing)
+    }
+
+    /// The notes in the folders git ignores, which the index never walks: what Go to File lists
+    /// behind the files the index holds. `fresh` walks the vault for them again, which Go to File
+    /// asks for as it opens; otherwise they are the last walk's, the first walk being the first
+    /// time anyone asks.
+    pub fn ignored_notes(&self, fresh: bool) -> Result<Vec<String>> {
+        Ok(self.lang.ignored.listing(fresh).notes().cloned().collect())
+    }
+
+    /// The file a link target names in the folders git ignores, by the rule the index resolves
+    /// links by: what following a link the index cannot place opens.
+    pub fn resolve_ignored(&self, target: &str) -> Result<Option<String>> {
+        let ignored = self.lang.ignored.listing(false);
+        Ok(ignored.resolve(target).map(str::to_string))
     }
 
     /// `(alias, note)` for every frontmatter alias in the vault.

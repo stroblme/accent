@@ -63,12 +63,6 @@ impl Index {
             .optional()?)
     }
 
-    /// [`resolve_target`](Self::resolve_target) for many targets at once, for the note whose
-    /// every wikilink has to be checked on each keystroke.
-    pub fn resolve_targets(&self, targets: &[String]) -> Result<Vec<Option<String>>> {
-        targets.iter().map(|t| self.resolve_target(t)).collect()
-    }
-
     /// Every link in the vault that points at a *page and selection* of this PDF.
     ///
     /// This is where a highlight lives: the note holds it, the index finds it, and the viewer
@@ -370,19 +364,5 @@ mod tests {
             ix.missing_notes().unwrap(),
             ["Rev 1.2 notes.md", "sub/Later.md"]
         );
-    }
-
-    #[test]
-    fn resolve_targets_answers_many_at_once() {
-        let (vault, db) = fixture();
-        let mut ix = open(&db);
-        ix.reconcile(vault.path(), |_| {}).unwrap();
-
-        let targets = ["beta".to_string(), "Nope".to_string(), "a.md".to_string()];
-        assert_eq!(
-            ix.resolve_targets(&targets).unwrap(),
-            [Some("sub/Beta.md".to_string()), None, Some("a.md".into())]
-        );
-        assert!(ix.resolve_targets(&[]).unwrap().is_empty());
     }
 }
