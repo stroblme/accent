@@ -158,7 +158,8 @@ fn picture(widget: &gtk::Widget) -> Option<gdk::Texture> {
 /// into `<dir>` under the names the chooser offers, as each does once the chooser has answered,
 /// and Print… sent to `<dir>/print.pdf` by the print system's Export: printed for each, its pages
 /// and their sizes, the PNG's commonest pixel (its paper: white, the file's, not the theme's) and
-/// whether the SVG draws.
+/// whether the SVG draws; then the SVG a note's `![[rel]]` and `![[rel#Two]]` show, and how long
+/// each took.
 fn export(app: &Rc<App>, rel: &str, dir: &Path) {
     use crate::diagram::export::{export_to, offered_name, operation};
     use crate::export::Export;
@@ -206,12 +207,30 @@ fn export(app: &Rc<App>, rel: &str, dir: &Path) {
         })
         .await;
         println!("bench diagram print {ran:?} {}", exported(&print));
+        // A note's embed: the first page, its formula typeset by the typesetter no tab holds.
+        for page in [None, Some("Two")] {
+            let started = Instant::now();
+            let svg = crate::diagram::embed::svg(&tab.path(), page).await;
+            println!(
+                "bench diagram embed page={page:?} ms={:.0} bytes={} pictures={}",
+                ms_since(started),
+                svg.as_ref().map_or(0, |s| s.len()),
+                svg.as_ref().map_or(0, |s| s.matches("<image").count())
+            );
+        }
+        // A click on one, which follows `rel#Two` as a link: onto that page, or a toast.
+        app.open_target(&format!("{rel}#Two"));
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        println!("bench diagram follow #Two page={}", tab.page_index());
+        app.open_target(&format!("{rel}#Nope"));
+        let said = super::export::toast(&app, "No page").await;
+        println!("bench diagram follow #Nope said={said:?}");
         bench_quit(&app);
     });
 }
 
-/// What an export wrote: a PDF's page sizes in points, a picture's size, and a PNG's commonest
-/// pixel.
+/// What an export wrote: a PDF's page sizes in points, a picture's size and its commonest pixel,
+/// and the pictures an SVG holds (the formula, typeset).
 fn exported(path: &Path) -> String {
     if path.extension().is_some_and(|e| e == "pdf") {
         return match accent_core::pdf::PdfDoc::open(path).and_then(|d| d.page_sizes()) {
@@ -230,8 +249,12 @@ fn exported(path: &Path) -> String {
         *counts.entry(pixel).or_default() += 1;
     }
     let paper = counts.into_iter().max_by_key(|(_, n)| *n).map(|(p, _)| p);
+    let pictures = match path.extension().is_some_and(|e| e == "svg") {
+        true => std::fs::read_to_string(path).map_or(0, |svg| svg.matches("<image").count()),
+        false => 0,
+    };
     format!(
-        "size={}x{} paper={paper:?}",
+        "size={}x{} paper={paper:?} pictures={pictures}",
         texture.width(),
         texture.height()
     )

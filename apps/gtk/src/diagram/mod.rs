@@ -6,6 +6,7 @@
 //! every change goes through, which is what makes each one an undo step, marks the tab dirty
 //! and schedules the autosave.
 
+pub mod embed;
 pub mod export;
 mod geometry;
 mod label;
@@ -1557,4 +1558,26 @@ fn page_names(file: &File) -> Vec<String> {
             name => name.to_string(),
         })
         .collect()
+}
+
+/// The page of `file` called `name`, as `![[x.drawio#name]]` and `[[x.drawio#name]]` name one.
+pub fn page_named(file: &File, name: &str) -> Option<usize> {
+    page_names(file).iter().position(|n| n == name.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_is_found_by_its_name_or_its_place() {
+        let file = File::from_bytes(
+            br#"<mxfile><diagram name="Page-1"><mxGraphModel><root/></mxGraphModel></diagram>
+            <diagram><mxGraphModel><root/></mxGraphModel></diagram></mxfile>"#,
+        )
+        .unwrap();
+        assert_eq!(page_named(&file, "Page-1"), Some(0));
+        assert_eq!(page_named(&file, "Page 2"), Some(1));
+        assert_eq!(page_named(&file, "Page-2"), None);
+    }
 }

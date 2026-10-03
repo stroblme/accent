@@ -367,15 +367,19 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
             preview_look(&app, &format!("{theme:?}")).await;
         }
         // The image menu's own route: the page's address, resolved to the vault key it names.
-        let keys: Vec<String> = page_images(&app)
+        let mut keys: Vec<String> = page_images(&app)
             .await
             .iter()
             .filter_map(|(src, ..)| {
-                let rel = src.strip_prefix("accent://file/")?;
+                // A diagram's address names its page after a `?`.
+                let rel = src.strip_prefix("accent://file/")?.split('?').next()?;
                 app.vault()?
                     .asset(&accent_core::markdown::percent_decode(rel))
             })
             .collect();
+        // Once each: a diagram embedded twice, at two pages, is one file.
+        keys.sort();
+        keys.dedup();
         for key in &keys {
             app.invert_image(key);
         }

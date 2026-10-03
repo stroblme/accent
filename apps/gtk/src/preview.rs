@@ -862,7 +862,8 @@ fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
 /// and finish it once the data is there. So the resolving goes to a `gio::spawn_blocking` worker,
 /// the same pairing the git pane uses, and only the finishing comes back to the main loop. The
 /// worker also decides how an image is shown in the look in force, which may mean recolouring it
-/// ([`look::serve`]).
+/// ([`look::serve`]). A diagram is drawn back on the main loop, where GTK and its typesetter
+/// live, as an SVG that then goes through the look as an SVG image does ([`look::serve_svg`]).
 fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     #[cfg(feature = "bench")]
     assets.requests.set(assets.requests.get() + 1);
@@ -870,6 +871,7 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     let Some(("file", rel)) = accent_uri(&uri) else {
         return deny(request, "not a vault file");
     };
+    let page = diagram_page(&uri);
     // The look and the inverted set live on this thread; the worker gets a copy of each.
     let (resolve, request) = (assets.resolve.clone(), request.clone());
     let look = match assets.paper {
@@ -882,21 +884,32 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     glib::spawn_future_local(async move {
         let answer = crate::work::off_thread("asset", move || {
             let (key, path) = resolve_asset(&*resolve, &note, &rel)?;
-            let served = look::serve(&path, look, inverted.contains(&key));
-            Some((key, path, served))
+            let inverted = inverted.contains(&key);
+            let served =
+                (!accent_core::path::is_diagram(&key)).then(|| look::serve(&path, look, inverted));
+            Some((key, path, served, inverted))
         });
         let answer = answer.await;
         if let Some(Some((key, ..))) = &answer {
             assets.served.borrow_mut().insert(key.clone());
         }
-        match answer {
-            Some(Some((_, path, Served::File))) => send(&request, &path),
-            Some(Some((_, _, Served::Bytes(bytes, mime)))) => {
+        let (path, served) = match answer {
+            Some(Some((_, path, Some(served), _))) => (path, served),
+            Some(Some((_, path, None, inverted))) => {
+                match crate::diagram::embed::svg(&path, page.as_deref()).await {
+                    Some(svg) => (path, look::serve_svg(&svg, look, inverted)),
+                    None => return deny(&request, "no such diagram page"),
+                }
+            }
+            Some(None) => return deny(&request, "outside the vault"),
+            None => return deny(&request, "the asset worker stopped"),
+        };
+        match served {
+            Served::File => send(&request, &path),
+            Served::Bytes(bytes, mime) => {
                 let stream = gio::MemoryInputStream::from_bytes(&bytes);
                 request.finish(&stream, bytes.len() as i64, Some(mime));
             }
-            Some(None) => deny(&request, "outside the vault"),
-            None => deny(&request, "the asset worker stopped"),
         }
     });
 }
@@ -973,6 +986,23 @@ pub(crate) fn asset(resolve: &Resolve, note: &str, uri: &str) -> Option<PathBuf>
         return None;
     };
     resolve_asset(resolve, note, &rel).map(|(_, path)| path)
+}
+
+/// The page an embedded diagram's address names (`![[x.drawio#Page]]` asks for
+/// `x.drawio?page=Page`), percent-decoded; `None` for its first page or any other address.
+pub(crate) fn diagram_page(uri: &str) -> Option<String> {
+    let query = uri.split_once('?')?.1;
+    let query = query.split_once('#').map_or(query, |(q, _)| q);
+    query
+        .split('&')
+        .find_map(|p| p.strip_prefix("page="))
+        .map(percent_decode)
+}
+
+/// Whether an `accent://file/` address names a diagram, which an export draws rather than
+/// copies.
+pub(crate) fn is_diagram(uri: &str) -> bool {
+    matches!(accent_uri(uri), Some(("file", rel)) if accent_core::path::is_diagram(&rel))
 }
 
 /// Split `accent://<host>/<path>` into host and percent-decoded path, dropping `?query` and
@@ -1336,6 +1366,15 @@ mod tests {
 
     /// A click hands the system what Go to Definition would, and nothing the page could run or
     /// read the disk with; without a click nothing leaves at all.
+    #[test]
+    fn an_embedded_diagram_names_its_page() {
+        let uri = "accent://file/Figures/flow.drawio?page=Page%202";
+        assert!(is_diagram(uri));
+        assert_eq!(diagram_page(uri).as_deref(), Some("Page 2"));
+        assert_eq!(diagram_page("accent://file/flow.drawio"), None);
+        assert!(!is_diagram("accent://file/flow.png"));
+    }
+
     #[test]
     fn a_click_launches_what_the_editor_would_and_nothing_else() {
         for url in ["https://e.org", "mailto:a@b.c", "tel:+123", "sms:+123"] {
