@@ -37,13 +37,32 @@ impl Etag {
     }
 }
 
+/// What a file holds, as a digest of its bytes: the etag says a file was written, this says
+/// whether what it holds changed. Syncthing setting a file's mtime, or the same bytes written
+/// again, moves the etag alone.
+pub type Digest = blake3::Hash;
+
+pub fn digest(bytes: &str) -> Digest {
+    blake3::hash(bytes.as_bytes())
+}
+
+/// The file at `path`, opened, and its etag, taken from the handle before anything is read: a
+/// writer renaming a file into place leaves the bytes and the etag both of the file opened, and
+/// one writing in place moves the mtime past the etag, so a writer that raced the read costs a
+/// refused save rather than a silent overwrite. A stat of the path after the read paired the
+/// bytes of the file opened with the etag of the one renamed over it.
+fn open_stamped(path: &Path) -> io::Result<(std::fs::File, std::fs::Metadata)> {
+    let file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    Ok((file, meta))
+}
+
 /// Read a note and the etag to hand back to [`write_note`].
-///
-/// The stat happens *after* the read: if a writer raced us we may pair new bytes with an older
-/// etag, and the next save then reports [`SaveError::ChangedOnDisk`] instead of overwriting.
 pub fn read_note(path: &Path) -> io::Result<(String, Etag)> {
-    let text = std::fs::read_to_string(path)?;
-    Ok((text, Etag::of(path)?))
+    let (mut file, meta) = open_stamped(path)?;
+    let mut text = String::new();
+    io::Read::read_to_string(&mut file, &mut text)?;
+    Ok((text, Etag::from_meta(&meta)))
 }
 
 /// Biggest file we will pull into memory as text; anything larger stays closed.
@@ -69,16 +88,16 @@ pub struct Text {
     pub lossy: bool,
 }
 
-/// Read any file as text, saying so when it is binary or too big to hold.
-///
-/// As in [`read_note`], the stat happens *after* the read, so a writer that raced us costs a
-/// refused save rather than a silent overwrite.
+/// Read any file as text, saying so when it is binary or too big to hold. The etag is taken as
+/// [`read_note`] takes it.
 pub fn read_text(path: &Path) -> io::Result<Read> {
-    let size = std::fs::metadata(path)?.size();
+    let (mut file, meta) = open_stamped(path)?;
+    let size = meta.size();
     if size > MAX_TEXT {
         return Ok(Read::TooLarge { size });
     }
-    let bytes = std::fs::read(path)?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    io::Read::read_to_end(&mut file, &mut bytes)?;
     // A NUL byte is the same "this is not text" test `grep` and `git` use.
     if bytes.contains(&0) {
         return Ok(Read::Binary {
@@ -97,10 +116,21 @@ pub fn read_text(path: &Path) -> io::Result<Read> {
     };
     Ok(Read::Text(Text {
         text,
-        etag: Etag::of(path)?,
+        etag: Etag::from_meta(&meta),
         crlf,
         lossy,
     }))
+}
+
+impl Text {
+    /// The [`digest`] of the file as an editor writes it back, CRLF put back on every line: the
+    /// bytes read, but for a file of mixed line endings, and what a write of this text leaves.
+    pub fn digest(&self) -> Digest {
+        match self.crlf {
+            true => digest(&for_disk(&self.text, true, false)),
+            false => digest(&self.text),
+        }
+    }
 }
 
 /// The inverse of [`read_text`]: put an editor buffer back into the shape the file had.
@@ -332,6 +362,19 @@ mod tests {
                 assert!(t.text.ends_with('a'));
             }
             other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_read_digests_the_bytes_a_write_of_it_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("Note.md");
+        for bytes in ["a\nb\n", "a\r\nb\r\n"] {
+            std::fs::write(&note, bytes).unwrap();
+            let Read::Text(text) = read_text(&note).unwrap() else {
+                panic!("expected Text");
+            };
+            assert_eq!(text.digest(), digest(bytes));
         }
     }
 

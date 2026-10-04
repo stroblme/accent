@@ -29,6 +29,8 @@ cairo-rs = { version = "0.22", features = ["pdf", "svg", "png", "v1_16"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_7"] }
 sourceview5 = { version = "0.11", features = ["v5_18"] }
 webkit6 = "0.6"
+# WebKit's own HTTP library, for the pictures a diagram links from the web (`diagram::web`).
+soup3 = "0.9"
 # v0_76 for the context menu model and `check_match_at`; v0_78 deprecates `current_directory_uri`
 # and would fail the clippy gate, so the one 0.78 call, `vte_install_termprop` (a shell's OSC 52
 # copy, `terminal::install_termprops`), comes from the sys crate. The build floor is libvte 0.78.

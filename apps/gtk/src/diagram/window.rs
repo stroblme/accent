@@ -1,7 +1,7 @@
 //! The window's side of a diagram tab: opening one, saving it through the same etag gate a
 //! note's save goes through, what the watcher says about its file, and the diagram commands.
 
-use accent_core::fs::{Etag, SaveError};
+use accent_core::fs::{Digest, Etag, SaveError};
 use accent_drawio::File;
 
 use super::{DiagramTab, Tool};
@@ -13,7 +13,7 @@ const MAX_IMAGE: usize = 2 * 1024 * 1024;
 
 /// What reading a diagram off the disk came to.
 enum Parsed {
-    Diagram(File, Etag),
+    Diagram(File, Etag, Digest),
     /// Not something to draw on, and why: a status page's title and sentence.
     Refused(&'static str, String),
     Failed(std::io::Error),
@@ -40,7 +40,7 @@ fn parse(read: std::io::Result<accent_core::fs::Read>) -> Parsed {
 
 fn parse_text(text: accent_core::fs::Text) -> Parsed {
     match File::from_bytes(text.text.as_bytes()) {
-        Ok(file) => Parsed::Diagram(file, text.etag),
+        Ok(file) => Parsed::Diagram(file, text.etag, text.digest()),
         Err(e) => Parsed::Refused("Not a Diagram", format!("It could not be read: {e}.")),
     }
 }
@@ -93,8 +93,8 @@ impl App {
     }
 
     fn adopt_diagram(self: &Rc<Self>, key: &str, path: &Path, parsed: Parsed, how: Opened) {
-        let (file, etag) = match parsed {
-            Parsed::Diagram(file, etag) => (file, etag),
+        let (file, etag, digest) = match parsed {
+            Parsed::Diagram(file, etag, digest) => (file, etag, digest),
             Parsed::Refused(title, body) => return self.open_status(key, title, &body, how),
             Parsed::Failed(e) => return self.cannot_open(key, e),
         };
@@ -108,10 +108,11 @@ impl App {
             doc::file_name(key),
             &fileops::display_path(&self.root(), key),
             &self.tabs_for(key),
-            (file, etag),
+            (file, etag, digest),
             place,
         );
         self.wire_diagram(&tab);
+        tab.allow_web(self.web_images.borrow().contains(key));
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.
         if doc::is_loose_key(key) {
             tab.watch_file(glib::clone!(
@@ -174,6 +175,13 @@ impl App {
         tab.connect_autosave(on(|app, tab| app.save_diagram(tab, false)));
         tab.connect_image(on(|app, tab| app.pick_image(tab)));
         tab.connect_banner(on(|app, tab| app.resolve_diagram(tab)));
+        // Load: remembered for the file, and the note in the preview drawn again with them.
+        tab.connect_web(on(|app, tab| {
+            app.web_images.borrow_mut().insert(tab.key());
+            app.save_session_soon();
+            tab.allow_web(true);
+            app.reshow_preview_image(&tab.key());
+        }));
         let weak = Rc::downgrade(self);
         tab.connect_toast(move |text| {
             if let Some(app) = weak.upgrade() {
@@ -384,8 +392,9 @@ impl App {
         expected: Option<Etag>,
     ) -> Result<(), SaveError> {
         self.land_diagram(tab, false);
-        let etag = self.writer(tab)(&tab.text(), expected)?;
+        let (etag, digest) = self.writer(tab)(&tab.text(), expected)?;
         tab.mark_clean(etag);
+        tab.save.digest.set(Some(digest));
         tab.clear_changed();
         self.sync_status();
         Ok(())
@@ -429,8 +438,8 @@ impl App {
                 return;
             };
             match parsed {
-                Some(Parsed::Diagram(file, etag)) => {
-                    tab.reload(file, etag);
+                Some(Parsed::Diagram(file, etag, digest)) => {
+                    tab.reload(file, etag, digest);
                     app.sync_status();
                 }
                 Some(Parsed::Refused(_, why)) => app.cannot("reload", why),

@@ -3,7 +3,7 @@
 //! writes them, or moved onto the theme's paper and ink as a PDF page is (DESIGN.md, Colour);
 //! the frame puts page units on screen.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -37,6 +37,9 @@ pub struct Cache {
     math: RefCell<HashMap<usize, (u64, String)>>,
     /// By prim index: where each label on screen was painted, for finding a label by its text.
     boxes: RefCell<HashMap<usize, Painted>>,
+    /// Whether pictures on the web are drawn, from the download cache (`super::web`): the
+    /// reader said Load for this diagram.
+    web: Cell<bool>,
 }
 
 /// Where a label was painted, in page units: the block its text took, turned `rotation`
@@ -70,7 +73,13 @@ impl Cache {
             decoded: self.decoded.clone(),
             math: kept(&self.math, keep),
             boxes: RefCell::default(),
+            web: self.web.clone(),
         }
+    }
+
+    /// Draw pictures on the web from the download cache, or as their boxes.
+    pub fn set_web(&self, on: bool) {
+        self.web.set(on);
     }
 
     /// The topmost unlocked label whose painted text is under page point `p`. The display list
@@ -109,28 +118,55 @@ impl Cache {
         if let Some(t) = self.textures.borrow().get(&index) {
             return t.clone();
         }
-        let mut h = DefaultHasher::new();
-        uri.hash(&mut h);
-        let key = h.finish();
         let picture = self
             .decoded
             .borrow_mut()
-            .entry(key)
+            .entry(hash(uri))
             .or_insert_with(|| {
                 let (mime, bytes) = accent_drawio::decode_data_uri(uri)?;
-                let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()?;
-                // As the image tab takes them: an SVG is line art, a GIF likely an animation.
-                let document = match mime.as_str() {
-                    "image/svg+xml" => OnceCell::from(true),
-                    "image/gif" => OnceCell::from(false),
-                    _ => OnceCell::new(),
-                };
-                Some(Rc::new(Picture { texture, document }))
+                decode(bytes, &mime)
             })
             .clone();
         self.textures.borrow_mut().insert(index, picture.clone());
         picture
     }
+
+    /// The picture at `url` on the web, as downloaded: none until it is, and a failed decode
+    /// is not kept, so a download landing later is drawn.
+    fn web_picture(&self, index: usize, url: &str) -> Option<Rc<Picture>> {
+        if let Some(t) = self.textures.borrow().get(&index) {
+            return t.clone();
+        }
+        let key = hash(url);
+        let known = self.decoded.borrow().get(&key).cloned().flatten();
+        let picture = known.or_else(|| {
+            let bytes = super::web::cached(url)?;
+            let mime = gtk::gio::content_type_guess(None::<&str>, Some(bytes.as_slice())).0;
+            let picture = decode(bytes, &mime)?;
+            self.decoded.borrow_mut().insert(key, Some(picture.clone()));
+            Some(picture)
+        });
+        self.textures.borrow_mut().insert(index, picture.clone());
+        picture
+    }
+}
+
+fn hash(s: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// A picture's bytes, of type `mime`, decoded.
+fn decode(bytes: Vec<u8>, mime: &str) -> Option<Rc<Picture>> {
+    let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()?;
+    // As the image tab takes them: an SVG is line art, a GIF likely an animation.
+    let document = match mime {
+        "image/svg+xml" => OnceCell::from(true),
+        "image/gif" => OnceCell::from(false),
+        _ => OnceCell::new(),
+    };
+    Some(Rc::new(Picture { texture, document }))
 }
 
 /// A cell's picture, decoded, and whether it reads as a document.
@@ -374,8 +410,7 @@ pub fn prim(
             let r = frame.rect(rect);
             let picture = match source {
                 ImageSource::DataUri(uri) => cache.picture(index, uri),
-                // ponytail: a picture on the web is not fetched, so it paints as its box. A
-                // download into the ssh-style cache is the upgrade.
+                ImageSource::Url(url) if cache.web.get() => cache.web_picture(index, url),
                 ImageSource::Url(_) => None,
             };
             placed(snapshot, r.centre(), *rotation, (*flip_h, *flip_v), || {

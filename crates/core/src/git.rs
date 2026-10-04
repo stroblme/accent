@@ -31,6 +31,40 @@ pub struct Repo {
     pub name: String,
 }
 
+/// One comparison of a file with git: what the Git pane opens for a row, and what a session
+/// keeps of it to open it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Comparison {
+    pub repo: Repo,
+    /// Repository-relative, which is what git is asked with.
+    pub rel: String,
+    /// Vault key, which is what the working tree is read by and the tab is keyed by.
+    pub key: String,
+    pub sides: Sides,
+}
+
+/// Which two things a comparison compares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Sides {
+    /// HEAD against the index: what this commit would add. `orig` is the path a staged rename
+    /// or copy came from, which is the one HEAD has.
+    Staged { orig: Option<String> },
+    /// The index against the file on disk: what is not staged yet.
+    Worktree,
+    /// The index against nothing: a file deleted from the working tree, which has no tab to
+    /// compare inside, so this is a tab of its own the way a staged change is.
+    Deleted,
+    /// One commit against its first parent, which is what a file under an expanded history row
+    /// shows. `parent` is `None` on a root commit, whose left side is simply empty. `orig` is the
+    /// path a rename or copy came from, which is the one the parent has.
+    Commit {
+        oid: String,
+        parent: Option<String>,
+        orig: Option<String>,
+    },
+}
+
 /// Where HEAD is and how far it has drifted from its upstream.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Branch {

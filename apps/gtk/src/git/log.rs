@@ -1,7 +1,7 @@
 //! The history: the commit rows, the graph beside them, and what a commit expands into.
 
-use super::compare::Sides;
 use super::*;
+use accent_api::git::Sides;
 
 /// The width of one graph lane, in px.
 const LANE: i32 = 12;

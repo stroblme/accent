@@ -19,6 +19,7 @@ dependencies = [
  "pulldown-cmark",
  "serde_json",
  "similar",
+ "soup3",
  "sourceview5",
  "tracing",
  "tracing-subscriber",

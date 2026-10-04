@@ -201,7 +201,8 @@ impl App {
                     .to_string();
                 let (resolve, css) = (app.asset_resolver(), preview::paper_css());
                 let note = tab.rel();
-                let drawn = drawn_diagrams(&html, &resolve, &note).await;
+                let web = app.web_images.borrow().clone();
+                let drawn = drawn_diagrams(&html, &resolve, &note, &web).await;
                 // Fetching an image is a round trip on a remote vault, and the page may hold many.
                 let write = move || {
                     let body = inline_images(&html, |uri| match drawn.get(uri) {
@@ -247,7 +248,7 @@ impl App {
 
 /// What `tab` holds on paper, ready to be taken: loaded, its diagrams drawn, its fonts in.
 async fn paper(app: &Rc<App>, tab: &Rc<Tab>) -> Result<Preview, String> {
-    let page = Preview::for_paper(app.asset_resolver());
+    let page = Preview::for_paper(app.asset_resolver(), app.web_images.clone());
     let view = page.view().clone();
     // Connected when first polled, below, in this turn of the main loop: before the load the
     // render starts can have finished.
@@ -386,6 +387,7 @@ async fn drawn_diagrams(
     html: &str,
     resolve: &Arc<preview::Resolve>,
     note: &str,
+    web: &HashSet<String>,
 ) -> HashMap<String, Option<String>> {
     let mut drawn = HashMap::new();
     // Each address as `inline_images` hands it over: as `outerHTML` escapes it, unescaped.
@@ -397,9 +399,13 @@ async fn drawn_diagrams(
         .filter(|uri| preview::is_diagram(uri));
     for uri in sources {
         let (resolve, note, at) = (resolve.clone(), note.to_string(), uri.clone());
-        let path = crate::work::off_thread("asset", move || preview::asset(&*resolve, &note, &at));
-        let svg = match path.await.flatten() {
-            Some(path) => diagram::embed::svg(&path, preview::diagram_page(&uri).as_deref()).await,
+        let found =
+            crate::work::off_thread("asset", move || preview::asset_of(&*resolve, &note, &at));
+        let svg = match found.await.flatten() {
+            Some((key, path)) => {
+                let page = preview::diagram_page(&uri);
+                diagram::embed::svg(&path, page.as_deref(), web.contains(&key)).await
+            }
             None => None,
         };
         let data = svg.map(|svg| {

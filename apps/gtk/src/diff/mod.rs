@@ -237,6 +237,24 @@ fn first_change(lines: &[DiffLine], rows: &[Row], starts: &[i32], side: Side) ->
     Some(next.map_or(*starts.last()?, |n| starts[n - 1]))
 }
 
+/// The lines a selection of exactly `hunk` covers: `side`'s lines in it, or the other side's where
+/// it only takes lines out of `side`'s. A selection reads whole rows ([`diff::apply_lines`]), so
+/// either covers the hunk whole.
+fn hunk_lines(
+    lines: &[DiffLine],
+    rows: &[Row],
+    hunk: &Range<usize>,
+    side: Side,
+) -> Option<(Side, RangeInclusive<usize>)> {
+    [side, side.other()].into_iter().find_map(|side| {
+        let mut numbers = rows[hunk.clone()]
+            .iter()
+            .filter_map(|r| side.number(&lines[side.of(r)?]));
+        let first = numbers.next()?;
+        Some((side, first..=numbers.next_back().unwrap_or(first)))
+    })
+}
+
 /// Where the overlaid buttons sit, in rows.
 #[derive(Clone, Copy)]
 enum Anchor {
@@ -246,8 +264,12 @@ enum Anchor {
     Gap(usize),
 }
 
-/// What an entry [`Compare::offer`] puts on the panes' menus does with a selection.
-pub type OnLines = Box<dyn Fn(Side, RangeInclusive<usize>, &str, &str)>;
+/// What an entry [`Compare::offer`] puts on the panes' menus does with a selection, and what a
+/// button [`Compare::offer_hunks`] puts on each hunk does with that hunk's lines.
+pub type OnLines = Rc<dyn Fn(Side, RangeInclusive<usize>, &str, &str)>;
+
+/// What a button on a hunk does, handed the hunk's rows.
+type OnHunk = Rc<dyn Fn(&Compare, Range<usize>)>;
 
 /// Where the view is kept until the rows are laid: see [`Compare::keep`].
 #[derive(Clone, Copy)]
@@ -347,7 +369,9 @@ pub struct Compare {
     /// Which side is the user's own editor, if either. Its text is read, never set, and the hunk
     /// buttons write into it.
     editable: Option<Side>,
-    hunk_buttons: bool,
+    /// The buttons each hunk carries on the pane beside the editor: a label, a tooltip, and what
+    /// the button does.
+    hunk_buttons: RefCell<Vec<(&'static str, &'static str, OnHunk)>>,
     paned: gtk::Paned,
     lines: RefCell<Vec<DiffLine>>,
     rows: RefCell<Vec<Row>>,
@@ -407,6 +431,15 @@ impl Compare {
     /// `editable` names the pane whose buffer is the user's; `hunk_buttons` puts Take / Keep Both
     /// on the other pane, which only means something when there is an editable side.
     pub fn new(old: Pane, new: Pane, editable: Option<Side>, hunk_buttons: bool) -> Rc<Self> {
+        let take =
+            |keep_own| -> OnHunk { Rc::new(move |c: &Compare, hunk| c.take(hunk, keep_own)) };
+        let takes = match hunk_buttons && editable.is_some() {
+            true => vec![
+                ("Take", "Replace this hunk in Mine with Theirs", take(false)),
+                ("Both", "Keep both versions of this hunk", take(true)),
+            ],
+            false => Vec::new(),
+        };
         for pane in [&old, &new] {
             install_tags(&pane.buffer);
         }
@@ -455,7 +488,7 @@ impl Compare {
             weak: weak.clone(),
             panes: [old, new],
             editable,
-            hunk_buttons: hunk_buttons && editable.is_some(),
+            hunk_buttons: RefCell::new(takes),
             paned,
             lines: RefCell::new(Vec::new()),
             rows: RefCell::new(Vec::new()),
@@ -689,10 +722,6 @@ impl Compare {
         if !self.offered.borrow().is_empty() {
             return;
         }
-        let entries: Vec<(&str, &str, Rc<OnLines>)> = entries
-            .into_iter()
-            .map(|(name, label, act)| (name, label, Rc::new(act)))
-            .collect();
         for side in [Side::Old, Side::New] {
             let pane = self.pane(side);
             let (group, section) = (gio::SimpleActionGroup::new(), gio::Menu::new());
@@ -736,6 +765,31 @@ impl Compare {
             }
             pane.view.set_extra_menu(Some(&menu));
             self.offered.borrow_mut().push((menu, previous));
+        }
+    }
+
+    /// Put `buttons` on each hunk, on the pane beside the editor: each a label, its tooltip, and
+    /// what it does, which is handed the hunk's lines as [`Compare::offer`]'s entries are handed a
+    /// selection's. Asked once, before a hunk has had buttons: a hunk's are made with its first.
+    pub fn offer_hunks(&self, buttons: Vec<(&'static str, &'static str, OnLines)>) {
+        *self.hunk_buttons.borrow_mut() = buttons
+            .into_iter()
+            .map(|(label, tip, act)| {
+                let on: OnHunk = Rc::new(move |c: &Compare, hunk| c.act_on_hunk(&hunk, &act));
+                (label, tip, on)
+            })
+            .collect();
+        self.refresh();
+    }
+
+    /// Run `act` over the lines of `hunk`, as over a selection of exactly them.
+    fn act_on_hunk(&self, hunk: &Range<usize>, act: &OnLines) {
+        let Some(mine) = self.editable else {
+            return;
+        };
+        let picked = hunk_lines(&self.lines.borrow(), &self.rows.borrow(), hunk, mine);
+        if let Some((side, lines)) = picked {
+            act(side, lines, &self.text(Side::Old), &self.text(Side::New));
         }
     }
 
@@ -850,7 +904,7 @@ impl Compare {
             pane.pool.unclaim();
         }
         let mut overlays = Vec::new();
-        if self.hunk_buttons
+        if !self.hunk_buttons.borrow().is_empty()
             && let Some(mine) = self.editable
         {
             let (theirs, pane) = (mine.other(), self.pane(mine.other()));
@@ -1679,5 +1733,28 @@ mod tests {
         assert_eq!(at("a\nb\nc\n", "a\nc\n"), Some(2), "b is gone, so c");
         assert_eq!(at("a\nb\n", "a\n"), Some(2), "gone at the end, so the end");
         assert_eq!(at("a\n", "a\n"), None);
+    }
+
+    #[test]
+    fn a_hunk_is_its_lines_on_the_editors_side_or_the_ones_it_took_out() {
+        let staged = |old: &str, new: &str| {
+            let lines = diff::lines(old, new);
+            let rows = diff::align(&lines);
+            let hunk = diff::hunks(&lines, &rows).remove(0);
+            let (side, picked) = hunk_lines(&lines, &rows, &hunk, Side::New).unwrap();
+            (
+                side,
+                picked.clone(),
+                diff::apply_lines(old, new, side, picked),
+            )
+        };
+        let (old, new) = ("a\nb\nc\n", "a\nB\nadded\nc\n");
+        assert_eq!(staged(old, new), (Side::New, 2..=3, new.to_string()));
+        let (old, new) = ("a\nb\nc\nd\n", "a\nd\n");
+        assert_eq!(
+            staged(old, new),
+            (Side::Old, 2..=3, new.to_string()),
+            "nothing of the hunk is left on the editor's side"
+        );
     }
 }

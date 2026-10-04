@@ -135,6 +135,15 @@ impl DiagramView {
         }
     }
 
+    /// Draw the pictures the page links from the web, as downloaded, or as their boxes.
+    pub fn set_web(&self, on: bool) {
+        let imp = self.imp();
+        imp.cache.set_web(on);
+        imp.cache.forget();
+        imp.preview.take();
+        self.queue_draw();
+    }
+
     pub fn set_selection(&self, ids: &[CellId]) {
         *self.imp().selection.borrow_mut() = ids.to_vec();
         self.queue_draw();

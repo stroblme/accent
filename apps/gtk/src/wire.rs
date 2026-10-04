@@ -772,11 +772,12 @@ fn ends_presenting(app: &App, event: &gdk::Event) -> bool {
         .any(|trigger| trigger.trigger(event, false) == gdk::KeyMatch::Exact)
 }
 
-/// An Escape nothing closer to the focus wanted: the active pane's find bar goes first, then the
-/// comparison its tab is hosting, one per press, as the Stop Comparing button would. A diff tab of
-/// its own has no such button and is left alone. Says whether there was anything to put away.
+/// An Escape nothing closer to the focus wanted: the find bar of the pane the reader is in goes
+/// first, then the comparison its tab is hosting, one per press, as the Stop Comparing button
+/// would. A diff tab of its own has no such button and is left alone. Says whether there was
+/// anything to put away.
 pub fn dismiss(app: &App) -> bool {
-    let pane = app.pane();
+    let pane = app.reader_pane();
     if pane.find.is_open() {
         pane.find.close();
         return true;

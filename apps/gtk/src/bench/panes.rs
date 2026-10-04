@@ -376,10 +376,6 @@ fn bench_layout_print(app: &Rc<App>) {
         "bench layout_active {}",
         app.active_key().unwrap_or_default()
     );
-    println!(
-        "bench layout_stored_active {}",
-        app.restorable_active().unwrap_or_default()
-    );
     // Back/forward per pane, in the order the panes were made: a restore must write none of its
     // own landings or re-selections into them.
     let history: Vec<String> = app
@@ -397,7 +393,7 @@ fn bench_layout_print(app: &Rc<App>) {
 
 /// `(h 0.300 [a.md b.md *a.md] (v 0.600 [c.md *c.md] [d.md *d.md]))`: each split's axis and
 /// share, and each pane's tabs with the one in front.
-fn bench_layout_line(layout: &Layout) -> String {
+pub(super) fn bench_layout_line(layout: &Layout) -> String {
     match layout {
         Layout::Pane { tabs, selected } => {
             format!(

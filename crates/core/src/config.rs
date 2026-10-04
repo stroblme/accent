@@ -7,6 +7,7 @@
 //! The config file lives at `~/.config/accent/config.toml`; [`Config`] documents it with a
 //! worked example.
 
+use crate::git::Comparison;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -369,6 +370,13 @@ pub struct Session {
     /// The keys of the pinned tabs. Which pane each is in, and where, is the layout's: a pinned
     /// tab is always ahead of the others in its pane's `tabs`.
     pub pinned: Vec<String>,
+    /// The diagrams whose pictures on the web may be downloaded, by vault-relative path: the
+    /// reader said Load on the diagram's banner. Kept here, never in the diagram.
+    pub web_images: Vec<String>,
+    /// The comparisons with git the tabs showed, by tab key: a note compared with the index in
+    /// its own tab under the note's, and a staged change or a commit's file, a tab of its own,
+    /// under that tab's. A comparison with anything else is not kept.
+    pub compared: BTreeMap<String, Comparison>,
 }
 
 impl Default for Session {
@@ -387,6 +395,8 @@ impl Default for Session {
             diagram: BTreeMap::new(),
             terminals: BTreeMap::new(),
             pinned: Vec::new(),
+            web_images: Vec::new(),
+            compared: BTreeMap::new(),
         }
     }
 }
@@ -1284,6 +1294,24 @@ daily_dir = "Daily"
                 },
             )]),
             pinned: vec!["b.md".to_string()],
+            web_images: vec!["Figures/flow.drawio".to_string()],
+            compared: BTreeMap::from([(
+                "diff:commit:abc1234:a.md".to_string(),
+                Comparison {
+                    repo: crate::git::Repo {
+                        root: PathBuf::from("/vault"),
+                        git_dir: PathBuf::from("/vault/.git"),
+                        name: "vault".to_string(),
+                    },
+                    rel: "a.md".to_string(),
+                    key: "a.md".to_string(),
+                    sides: crate::git::Sides::Commit {
+                        oid: "abc1234".to_string(),
+                        parent: None,
+                        orig: Some("old.md".to_string()),
+                    },
+                },
+            )]),
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -1306,6 +1334,8 @@ daily_dir = "Daily"
             assert_eq!(back.recent_commands, s.recent_commands);
             assert_eq!(back.terminals, s.terminals);
             assert_eq!(back.pinned, s.pinned);
+            assert_eq!(back.web_images, s.web_images);
+            assert_eq!(back.compared, s.compared);
 
             // A terminal session's key is no path: it hashes as given, as an `ssh://` one does.
             let named = Path::new("terminal://dev");

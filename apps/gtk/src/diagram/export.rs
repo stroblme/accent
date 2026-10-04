@@ -37,6 +37,7 @@ pub fn offered_name(tab: &DiagramTab, to: Export) -> Option<String> {
 pub fn export_to(app: &Rc<App>, tab: &Rc<DiagramTab>, to: Export, dest: PathBuf) {
     let name = crate::export::dest_name(&dest);
     let (file, page, typesetter) = (tab.file(), tab.page_index(), tab.typesetter());
+    let web = tab.web_allowed();
     let done = format!("Exported {name}");
     app.busy_with(
         format!("Exporting {name}…"),
@@ -44,9 +45,9 @@ pub fn export_to(app: &Rc<App>, tab: &Rc<DiagramTab>, to: Export, dest: PathBuf)
         async move {
             let typesetter = typesetter.as_ref();
             let bytes = match to {
-                Export::Pdf => render::pdf(&file, typesetter).await,
-                Export::Png => render::png(&file, page, typesetter).await,
-                Export::Svg => render::svg(&file, page, Area::Drawing, typesetter).await,
+                Export::Pdf => render::pdf(&file, typesetter, web).await,
+                Export::Png => render::png(&file, page, typesetter, web).await,
+                Export::Svg => render::svg(&file, page, Area::Drawing, typesetter, web).await,
                 Export::Html => return Ok(None),
             }?;
             let write = move || accent_core::fs::write_bytes(&dest, &bytes, None);
@@ -63,11 +64,12 @@ pub fn export_to(app: &Rc<App>, tab: &Rc<DiagramTab>, to: Export, dest: PathBuf)
 pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
     let name = crate::doc::file_name(&tab.key()).to_string();
     let (file, typesetter, window) = (tab.file(), tab.typesetter(), app.window.clone());
+    let web = tab.web_allowed();
     app.busy_with(
         format!("Printing {name}…"),
         format!("print {name}"),
         async move {
-            let op = operation(&file, typesetter.as_ref(), &name).await;
+            let op = operation(&file, typesetter.as_ref(), web, &name).await;
             // From an idle, as a note's print: the dialog runs a main loop of its own, and glib
             // aborts on a future polled inside another's poll.
             let ran = gio::GioFuture::new(&op, move |op, _, done| {
@@ -87,11 +89,12 @@ pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
 pub async fn operation(
     file: &File,
     typesetter: Option<&Rc<Typesetter>>,
+    web: bool,
     name: &str,
 ) -> gtk::PrintOperation {
     let mut pages: Vec<Drawn> = Vec::new();
     for i in 0..file.pages.len() {
-        pages.extend(render::draw(file, i, Area::Sheet, typesetter).await);
+        pages.extend(render::draw(file, i, Area::Sheet, typesetter, web).await);
     }
     let pages = Rc::new(pages);
     let op = gtk::PrintOperation::new();

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::editor::Saves;
+use accent_core::fs::Digest;
 
 impl App {
     pub fn save_active(self: &Rc<Self>) {
@@ -157,13 +158,20 @@ impl App {
             .recv()
             .unwrap_or_else(|_| Err(std::io::Error::other("the save worker panicked").into()));
         log_write(&tab.key(), flight.expected, &written);
+        let digest = written.as_ref().ok().map(|(_, digest)| *digest);
         let landed = editor::landing(
             flight.started,
             save.edits.get(),
             flight.held,
             save.etag.get(),
-            written,
+            written.map(|(etag, _)| etag),
         );
+        if matches!(
+            landed,
+            editor::Landing::Clean(_) | editor::Landing::Behind(_)
+        ) {
+            save.digest.set(digest);
+        }
         let landed_ok = !matches!(landed, editor::Landing::Failed(_));
         apply(self, tab, landed, flight.explicit);
         if save.recheck.take() {
@@ -210,9 +218,14 @@ impl App {
         }
     }
 
-    /// The write itself, as something a worker can run. What the file should hold, not what the
-    /// buffer holds, is the caller's: a code file loses its trailing whitespace and a DOS file
-    /// gets its CRLFs back in [`Tab::for_disk`].
+    /// The write itself, as something a worker can run, answering the etag it left and the
+    /// digest of what it wrote. What the file should hold, not what the buffer holds, is the
+    /// caller's: a code file loses its trailing whitespace and a DOS file gets its CRLFs back in
+    /// [`Tab::for_disk`].
+    ///
+    /// A file the etag gate refuses is read: one still holding what the tab last read or wrote
+    /// has not changed, its etag having moved alone (Syncthing setting its mtime, the same bytes
+    /// written again), and is written over at its new etag.
     ///
     /// A loose tab is not in any vault, so it writes through core directly. Same atomic save,
     /// same etag gate; what it misses is the watcher being told the write was ours, which the
@@ -220,12 +233,22 @@ impl App {
     pub(crate) fn writer<T: Saves>(
         &self,
         tab: &Rc<T>,
-    ) -> impl FnOnce(&str, Option<Etag>) -> Result<Etag, SaveError> + Send + 'static {
+    ) -> impl FnOnce(&str, Option<Etag>) -> Result<(Etag, Digest), SaveError> + Send + 'static {
         let (rel, path) = (tab.key(), tab.path());
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
-        move |text, expected| match vault {
-            Some(vault) => vault.save(&rel, text, expected),
-            None => accent_core::fs::write_note(&path, text, expected),
+        let base = tab.save_state().digest.get();
+        move |text, expected| {
+            let write = |expected| match &vault {
+                Some(vault) => vault.save(&rel, text, expected),
+                None => accent_core::fs::write_note(&path, text, expected),
+            };
+            let mut written = write(expected);
+            if let Err(SaveError::ChangedOnDisk { .. }) = written
+                && let Some(etag) = unchanged(vault.as_deref(), &rel, &path, base)
+            {
+                written = write(Some(etag));
+            }
+            written.map(|etag| (etag, accent_core::fs::digest(text)))
         }
     }
 
@@ -259,7 +282,9 @@ impl App {
         self.land_save(tab, false);
         let written = self.writer(tab)(&tab.for_disk(), expected);
         log_write(&tab.rel(), expected, &written);
-        self.wrote(tab, written?, true);
+        let (etag, digest) = written?;
+        tab.save.digest.set(Some(digest));
+        self.wrote(tab, etag, true);
         Ok(())
     }
 
@@ -353,33 +378,51 @@ impl App {
     /// user's own edits. Nothing is lost by waiting — a real change fires the watcher again, and
     /// the etag gate refuses any save that would clobber one in the meantime.
     ///
-    /// The stat runs on a worker, being a round trip on a remote vault.
+    /// A file at another etag that still holds what the tab last read or wrote has not changed:
+    /// Syncthing sets a file's mtime, and writes the same bytes again, and the banner went up over
+    /// a note just opened and typed into. The tab takes its new etag.
+    ///
+    /// The stat, and the read after one that differs, run on a worker, being round trips on a
+    /// remote vault.
     pub(crate) fn check_disk<T: Saves>(self: &Rc<Self>, tab: &Rc<T>, moved: fn(&Rc<Self>, &Rc<T>)) {
         let (rel, path) = (tab.key(), tab.path());
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
+        let (ours, base) = (tab.save_state().etag.get(), tab.save_state().digest.get());
         let (app, watched) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
-            let looked = crate::work::off_thread("stat", move || match vault {
-                Some(vault) => vault.stat(&rel),
-                None => match Etag::of(&path) {
-                    Ok(etag) => Ok(Some(etag)),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                    Err(e) => Err(e),
-                },
+            let looked = crate::work::off_thread("stat", move || {
+                let disk = match &vault {
+                    Some(vault) => vault.stat(&rel)?,
+                    None => match Etag::of(&path) {
+                        Ok(etag) => Some(etag),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => return Err(e),
+                    },
+                };
+                Ok(match disk {
+                    Some(_) if disk != ours => {
+                        let same = unchanged(vault.as_deref(), &rel, &path, base);
+                        (disk, same)
+                    }
+                    _ => (disk, None),
+                })
             })
             .await
             .unwrap_or_else(|| Err(std::io::Error::other("the stat worker stopped")));
             if let (Some(app), Some(tab)) = (app.upgrade(), watched.upgrade()) {
-                app.compare_disk(&tab, looked, moved);
+                app.compare_disk(&tab, ours, looked, moved);
             }
         });
     }
 
-    /// What [`check_disk`](Self::check_disk) does once the stat is in.
+    /// What [`check_disk`](Self::check_disk) does once the stat is in: `ours` is the etag it
+    /// looked against, and `looked` what is on disk and, where that is another etag over the
+    /// same bytes, the etag they were read at.
     fn compare_disk<T: Saves>(
         self: &Rc<Self>,
         tab: &Rc<T>,
-        looked: std::io::Result<Option<Etag>>,
+        ours: Option<Etag>,
+        looked: std::io::Result<(Option<Etag>, Option<Etag>)>,
         moved: fn(&Rc<Self>, &Rc<T>),
     ) {
         let save = tab.save_state();
@@ -389,25 +432,31 @@ impl App {
             save.recheck.set(true);
             return;
         }
-        let disk = match looked {
-            Ok(disk) => disk,
+        // A save or a reload landed meanwhile: the look was against what the tab held before.
+        if save.etag.get() != ours {
+            return self.check_disk(tab, moved);
+        }
+        let (disk, same) = match looked {
+            Ok(looked) => looked,
             Err(e) => {
                 return tracing::debug!(
                     target: SAVES, rel = %tab.key(), error = %e, "watcher: could not stat"
                 );
             }
         };
-        let ours = save.etag.get();
         tracing::debug!(
             target: SAVES,
             rel = %tab.key(),
             ?ours,
             ?disk,
+            ?same,
             modified = save.modified.get(),
             "watcher"
         );
-        if ours != disk {
-            moved(self, tab);
+        match same {
+            Some(etag) => save.etag.set(Some(etag)),
+            None if ours != disk => moved(self, tab),
+            None => {}
         }
     }
 
@@ -1023,13 +1072,13 @@ impl App {
     /// The tab once Save As has written `to`: reopened there when the extension changes what the
     /// file opens as, and otherwise pointed at it — clean, unless it was typed into while the
     /// write was out, which the next autosave then writes to the new file. `wrote` is a text
-    /// write's etag, and whether the note's paths were rewritten on the way, which the tab then
-    /// reloads as a rename's notes are.
+    /// write's etag and digest, and whether the note's paths were rewritten on the way, which the
+    /// tab then reloads as a rename's notes are.
     fn follow_save_as(
         self: &Rc<Self>,
         doc: Doc,
         to: &str,
-        wrote: Option<(Etag, bool)>,
+        wrote: Option<(Etag, Digest, bool)>,
         edits: u64,
     ) {
         if doc::opens_differently(&doc.key(), to) {
@@ -1039,10 +1088,11 @@ impl App {
         }
         doc.retarget(&self.root(), to);
         match (&doc, wrote) {
-            (Doc::Text(tab), Some((etag, relinked))) => {
+            (Doc::Text(tab), Some((etag, digest, relinked))) => {
                 // What the old file's banner said is not about the new one.
                 tab.save.disk_changed.set(false);
                 tab.clear_disk_alert();
+                tab.save.digest.set(Some(digest));
                 self.wrote(tab, etag, tab.save.edits.get() == edits);
                 self.fetch_head(tab);
                 // A buffer typed into meanwhile keeps its edits and gets the banner instead.
@@ -1050,8 +1100,9 @@ impl App {
                     self.refresh_tab(tab);
                 }
             }
-            (Doc::Diagram(diagram), Some((etag, _))) => {
+            (Doc::Diagram(diagram), Some((etag, digest, _))) => {
                 diagram.clear_changed();
+                diagram.save.digest.set(Some(digest));
                 match diagram.save.edits.get() == edits {
                     true => diagram.mark_clean(etag),
                     false => diagram.save.etag.set(Some(etag)),
@@ -1086,10 +1137,10 @@ enum Contents {
     Copy,
 }
 
-/// A text tab's `text` at `to`, and whether it was rewritten: a note's relative paths pointed back
-/// at what they named from `from`'s folder, where the index is, the host on a remote vault. A
-/// free path is claimed first, as New File claims one, which also gives the file a new file's
-/// mode rather than the write's private one.
+/// A text tab's `text` at `to`, the digest of what was written, and whether it was rewritten: a
+/// note's relative paths pointed back at what they named from `from`'s folder, where the index
+/// is, the host on a remote vault. A free path is claimed first, as New File claims one, which
+/// also gives the file a new file's mode rather than the write's private one.
 fn write_text(
     vault: &Vault,
     from: &str,
@@ -1097,7 +1148,7 @@ fn write_text(
     text: String,
     note: bool,
     free: bool,
-) -> Result<(Etag, bool), String> {
+) -> Result<(Etag, Digest, bool), String> {
     let relinked = match note {
         true => vault
             .relink_copy(from, to, &text)
@@ -1107,10 +1158,9 @@ fn write_text(
     if free {
         vault.create_note(to, None).map_err(|e| format!("{e:#}"))?;
     }
-    let etag = vault
-        .save(to, relinked.as_deref().unwrap_or(&text), None)
-        .map_err(|e| e.to_string())?;
-    Ok((etag, relinked.is_some()))
+    let written = relinked.as_deref().unwrap_or(&text);
+    let etag = vault.save(to, written, None).map_err(|e| e.to_string())?;
+    Ok((etag, accent_core::fs::digest(written), relinked.is_some()))
 }
 
 /// A PDF's bytes at `to`. The vault copies the file where it is, except on a remote vault: there
@@ -1128,10 +1178,24 @@ fn copy_pdf(vault: &Vault, from: &str, local: &Path, to: &str) -> std::io::Resul
     }
 }
 
+/// The etag of the file at `rel` (at `path` outside a vault) if it still holds what `base`
+/// digests, its etag having moved alone; `None` if it holds anything else or cannot be read.
+fn unchanged(vault: Option<&Vault>, rel: &str, path: &Path, base: Option<Digest>) -> Option<Etag> {
+    let base = base?;
+    let read = match vault {
+        Some(vault) => vault.read_text(rel),
+        None => accent_core::fs::read_text(path),
+    };
+    match read {
+        Ok(accent_core::fs::Read::Text(text)) if text.digest() == base => Some(text.etag),
+        _ => None,
+    }
+}
+
 /// One write's outcome, on the `SAVES` target the save path has always logged to.
-fn log_write(rel: &str, expected: Option<Etag>, written: &Result<Etag, SaveError>) {
+fn log_write(rel: &str, expected: Option<Etag>, written: &Result<(Etag, Digest), SaveError>) {
     match written {
-        Ok(etag) => tracing::debug!(target: SAVES, rel = %rel, ?expected, ?etag, "wrote"),
+        Ok((etag, _)) => tracing::debug!(target: SAVES, rel = %rel, ?expected, ?etag, "wrote"),
         Err(e) => tracing::debug!(target: SAVES, rel = %rel, ?expected, error = %e, "refused"),
     }
 }

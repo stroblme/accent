@@ -1,5 +1,6 @@
 //! Drills over the comparisons the Git pane's rows open: the working tree, the index, a commit.
 
+use super::disk::{centre, overlaid};
 use super::*;
 
 /// A file opened the way the Git pane opens one: its Changes row activated, with no tab holding
@@ -249,8 +250,13 @@ fn bench_compare_binary(app: &Rc<App>, then: impl FnOnce() + 'static) {
 /// and unstaged. It prints the entries each pane's menu offers and what the index holds after
 /// each step. Then the added line is selected in the editor and reverted, which takes it out of
 /// the buffer, the index untouched, and an undo puts it back (`reverted gone=true … undone=true`).
-/// Last it leaves line 3 selected in the working-tree comparison for eight seconds, for
-/// `build-aux/xtest.py` to open the menu on with a secondary click (`hold` says when).
+/// Then it leaves line 3 selected in the working-tree comparison for eight seconds, for
+/// `build-aux/xtest.py` to open the menu on with a secondary click (`hold` says when). Last the
+/// same from the buttons on each hunk of the Index pane: Revert on the second takes line 9b out
+/// of the buffer and an undo puts it back (`hunk_reverted gone=true`, `hunk_undone=true`), Stage
+/// on the first stages line 3 alone, and `aim <x> <y>` is the middle of the Stage left on line
+/// 9b's hunk, for `build-aux/xtest.py :N "move <x> <y>; focus; down; up"` within ten seconds
+/// (`clicked index=…` holding line 9b).
 pub(in crate::bench) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -362,6 +368,69 @@ pub(in crate::bench) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
         select_line(&tab.buffer, 2);
         println!("bench compare_lines hold");
         wait(8000).await;
+
+        // The same two from the buttons on each hunk, on the Index pane beside the editor.
+        let Some(index_view) = pane_view(compare.widget(), false) else {
+            return bench_quit(&app);
+        };
+        let pressed = |label: &str, hunk: usize| {
+            let buttons = overlaid(&index_view, label);
+            let tip = buttons.get(hunk).and_then(|(_, b)| b.tooltip_text());
+            if let Some((_, button)) = buttons.get(hunk) {
+                button.emit_clicked();
+            }
+            (buttons.len(), tip)
+        };
+        println!(
+            "bench compare_lines hunk_reverted buttons={:?} gone={} index={:?} {}",
+            pressed("Revert", 1),
+            !has_9b(&tab),
+            git(&["show", &index]),
+            bench_compare_line(&compare)
+        );
+        tab.buffer.undo();
+        wait(300).await;
+        println!("bench compare_lines hunk_undone={}", has_9b(&tab));
+        let buttons = pressed("Stage", 0);
+        wait(1500).await;
+        println!(
+            "bench compare_lines hunk_staged buttons={buttons:?} index={:?} {}",
+            git(&["show", &index]),
+            bench_compare_line(&compare)
+        );
+
+        // And the Stage left, on the hunk adding line 9b, pressed through the real pointer.
+        let staged = git(&["show", &index]);
+        if let Some((top, button)) = overlaid(&index_view, "Stage").first().cloned() {
+            centre(&compare, &index_view, top).await;
+            let middle = gtk::graphene::Point::new(
+                button.width() as f32 / 2.0,
+                button.height() as f32 / 2.0,
+            );
+            let (sx, sy) = app.window.surface_transform();
+            if let Some(p) = button
+                .root()
+                .and_then(|root| button.compute_point(&root, &middle))
+            {
+                println!(
+                    "bench compare_lines aim {:.0} {:.0}",
+                    f64::from(p.x()) + sx,
+                    f64::from(p.y()) + sy
+                );
+            }
+            for _ in 0..100 {
+                wait(100).await;
+                if git(&["show", &index]) != staged {
+                    break;
+                }
+            }
+            wait(1500).await;
+        }
+        println!(
+            "bench compare_lines clicked index={:?} {}",
+            git(&["show", &index]),
+            bench_compare_line(&compare)
+        );
         bench_quit(&app);
     });
 }
@@ -1186,6 +1255,128 @@ pub(in crate::bench) fn bench_compare_stale(app: &Rc<App>, rel: &str) {
         println!("bench compare_stale row={:?}", panel.activate_change(&rel));
         wait(1500).await;
         report("clicked");
+        bench_quit(&app);
+    });
+}
+
+/// Comparisons with git across a restart, in two launches on one scratch home. `save:<rel>,<other>`
+/// makes a repository in the vault root, commits `<rel>` as twelve lines and again with line 1
+/// changed, stages line 3 changed and writes line 9b under line 9 on top. Then the left pane
+/// holds the note compared with the index (in front) and its staged comparison, the right pane
+/// `<other>` and the last commit's comparison (in front), and the left pane is the active one;
+/// it prints the layout the session writes and the comparisons it keeps, and saves it.
+/// `back:<rel>,<other>` prints what the restore put back: the layout, the active tab, whether the
+/// note is compared again and what its comparison holds, and the tabs of two blobs that came
+/// back, and the toasts standing. Committing the note between the two leaves the note and the
+/// staged change nothing to show: they come back as the plain note and not at all, saying
+/// nothing. Before 2026-10-04 the note came back plain, the two blob tabs did not come back, and
+/// the right pane showed whichever of its tabs landed first.
+pub(in crate::bench) fn bench_compare_session(app: &Rc<App>, arg: &str) {
+    let (save, rels) = match arg.split_once(':') {
+        Some(("save", rels)) => (true, rels),
+        Some(("back", rels)) => (false, rels),
+        _ => return bench_quit(app),
+    };
+    let Some((rel, other)) = rels.split_once(',') else {
+        return bench_quit(app);
+    };
+    let (app, rel, other) = (app.clone(), rel.to_string(), other.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        let print = |what: &str| {
+            let session = app.current_session();
+            println!(
+                "bench compare_session {what} layout={} active={:?} compared={:?}",
+                session.layout.as_ref().map_or_else(
+                    || "none".to_string(),
+                    super::super::panes::bench_layout_line
+                ),
+                session.active,
+                session.compared.keys().collect::<Vec<_>>()
+            );
+        };
+        if !save {
+            for _ in 0..100 {
+                wait(100).await;
+                if app.restored.get() && app.awaiting.borrow().is_empty() {
+                    break;
+                }
+            }
+            wait(1500).await;
+            print("back");
+            let tab = app.open_tabs().into_iter().find(|tab| tab.rel() == rel);
+            println!(
+                "bench compare_session back comparing={:?} diffs={:?} toasts={:?}",
+                tab.and_then(|tab| tab.comparison())
+                    .map(|compare| bench_compare_line(&compare)),
+                app.docs
+                    .borrow()
+                    .iter()
+                    .filter_map(|doc| Some(doc.diff()?.key()))
+                    .collect::<Vec<_>>(),
+                app.toasts.shown()
+            );
+            return bench_quit(&app);
+        }
+        let root = app.root();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=bench",
+                    "-c",
+                    "user.email=bench@accent.invalid",
+                ])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .unwrap_or_default()
+        };
+        let path = root.join(&rel);
+        let base: String = (1..=12).map(|i| format!("line {i}\n")).collect();
+        let _ = std::fs::write(&path, &base);
+        git(&["init", "-q"]);
+        git(&["add", "--", &rel]);
+        git(&["commit", "-qm", "base"]);
+        let second = base.replace("line 1\n", "line one\n");
+        let _ = std::fs::write(&path, &second);
+        git(&["commit", "-qam", "second"]);
+        let _ = std::fs::write(&path, second.replace("line 3\n", "line three\n"));
+        git(&["add", "--", &rel]);
+        let work = second
+            .replace("line 3\n", "line three\n")
+            .replace("line 9\n", "line 9\nline 9b\n");
+        let _ = std::fs::write(&path, &work);
+        // The watcher's debounce and a repository discovery that runs git per directory.
+        wait(4000).await;
+        let Some(panel) = app.git.get().filter(|git| git.has_repos()).cloned() else {
+            println!("bench compare_session no_repo");
+            return bench_quit(&app);
+        };
+        app.open_path(&rel);
+        app.open_path(&other);
+        wait(800).await;
+        let (Some(tab), Some(note)) = (app.doc_for(&rel), app.doc_for(&other)) else {
+            println!("bench compare_session no_tabs");
+            return bench_quit(&app);
+        };
+        panel.compare_worktree(&rel);
+        wait(800).await;
+        panel.compare_staged(&rel);
+        wait(800).await;
+        if let Some(staged) = app.doc_for(&format!("diff:index:{rel}")) {
+            app.pane().keep(staged.page());
+        }
+        app.split_page(&app.pane(), Side::Right, note.page());
+        let oid = git(&["rev-parse", "--short=7", "HEAD"]);
+        panel.compare_commit(&rel, &oid, &git(&["rev-parse", "--short=7", "HEAD~1"]));
+        wait(800).await;
+        app.reveal_page(tab.page());
+        wait(300).await;
+        print("saved");
+        app.save_session();
         bench_quit(&app);
     });
 }

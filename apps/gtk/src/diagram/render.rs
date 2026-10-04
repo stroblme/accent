@@ -68,18 +68,21 @@ impl Drawn {
     }
 }
 
-/// Page `i` of `file`, its formulas typeset by `typesetter` first. `None` for no such page.
+/// Page `i` of `file`, its formulas typeset by `typesetter` first, its pictures on the web drawn
+/// as downloaded where `web` (the reader said Load for it). `None` for no such page.
 pub async fn draw(
     file: &File,
     i: usize,
     area: Area,
     typesetter: Option<&Rc<Typesetter>>,
+    web: bool,
 ) -> Option<Drawn> {
     let page = file.pages.get(i)?;
     let scene = accent_drawio::scene_with(page, &super::shown(i, file.pages.len()));
     // Pango lays labels out through a widget; their sizes are absolute, so any one does.
     let widget = gtk::DrawingArea::new();
     let cache = Cache::default();
+    cache.set_web(web);
     let frame = Frame {
         scale: DETAIL,
         ..Frame::default()
@@ -133,10 +136,14 @@ pub async fn draw(
 }
 
 /// Every page of `file` as a PDF, a PDF page the size of each sheet.
-pub async fn pdf(file: &File, typesetter: Option<&Rc<Typesetter>>) -> Result<Vec<u8>, String> {
+pub async fn pdf(
+    file: &File,
+    typesetter: Option<&Rc<Typesetter>>,
+    web: bool,
+) -> Result<Vec<u8>, String> {
     let surface = cairo::PdfSurface::for_stream(1.0, 1.0, Vec::<u8>::new()).map_err(say)?;
     for i in 0..file.pages.len() {
-        let Some(drawn) = draw(file, i, Area::Sheet, typesetter).await else {
+        let Some(drawn) = draw(file, i, Area::Sheet, typesetter, web).await else {
             continue;
         };
         let (w, h) = (drawn.area.w * PDF_POINT, drawn.area.h * PDF_POINT);
@@ -154,8 +161,9 @@ pub async fn svg(
     i: usize,
     area: Area,
     typesetter: Option<&Rc<Typesetter>>,
+    web: bool,
 ) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, area, typesetter)
+    let drawn = draw(file, i, area, typesetter, web)
         .await
         .ok_or("there is no such page")?;
     let mut surface =
@@ -172,8 +180,9 @@ pub async fn png(
     file: &File,
     i: usize,
     typesetter: Option<&Rc<Typesetter>>,
+    web: bool,
 ) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, Area::Drawing, typesetter)
+    let drawn = draw(file, i, Area::Drawing, typesetter, web)
         .await
         .ok_or("there is no such page")?;
     let (w, h) = (drawn.area.w * PNG_SCALE, drawn.area.h * PNG_SCALE);

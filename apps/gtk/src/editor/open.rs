@@ -263,7 +263,7 @@ pub fn open(
         lossy: Cell::new(text.lossy),
         page,
         banner: banner.clone(),
-        save: SaveState::at(text.etag),
+        save: SaveState::at(text.etag, text.digest()),
         alerts: RefCell::new(Vec::new()),
         find: RefCell::default(),
         find_tag,

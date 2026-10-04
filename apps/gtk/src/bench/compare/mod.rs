@@ -16,16 +16,13 @@ pub(super) use disk::{
 };
 pub(super) use git::{
     bench_compare_clicks, bench_compare_lines, bench_compare_pads, bench_compare_pick,
-    bench_compare_row, bench_compare_stale, bench_compare_typing,
+    bench_compare_row, bench_compare_session, bench_compare_stale, bench_compare_typing,
 };
 
-/// What the toast over the window reads, whatever it says: [`bench_said`] looks for a failure.
+/// What the newest toast over the window reads, whatever it says: [`bench_said`] looks for a
+/// failure.
 pub(super) fn bench_toast(app: &Rc<App>) -> Option<String> {
-    let toast = find_widget(app.window.upcast_ref(), &|w| {
-        w.type_().name() == "AdwToastWidget"
-    })?;
-    let label = find_widget(&toast, &|w| w.is::<gtk::Label>())?;
-    Some(label.downcast::<gtk::Label>().ok()?.label().to_string())
+    app.toasts.shown().into_iter().next()
 }
 
 /// Type one character into the comparing editor's side — `line`, or the first change where it is

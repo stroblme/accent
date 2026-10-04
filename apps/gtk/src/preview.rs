@@ -305,6 +305,10 @@ fn matches_label(at: u32, total: u32) -> String {
 /// remote one — so a call can block on the network.
 pub type Resolve = dyn Fn(&str) -> Option<(String, PathBuf)> + Send + Sync;
 
+/// Keys the window keeps and its preview reads as it serves: the images inverted, the diagrams
+/// whose pictures on the web are drawn.
+type Keys = Rc<RefCell<HashSet<String>>>;
+
 /// What the `accent:` scheme serves from.
 struct Assets {
     resolve: Arc<Resolve>,
@@ -322,6 +326,8 @@ struct Assets {
     /// The key of the note on the page: a loose one's images are read beside it
     /// ([`resolve_asset`]).
     note: RefCell<String>,
+    /// The diagrams whose pictures on the web an embed draws, by key: the window's own set.
+    web: Keys,
 }
 
 /// Where the find readout goes; see [`Preview::connect_found`].
@@ -335,7 +341,8 @@ pub struct Preview {
 impl Preview {
     /// `resolve` turns a vault-relative asset path into a file on this machine; [`resolve_asset`]
     /// says which half of the containment guarantee is whose. `inverted` holds the images the
-    /// reader inverted, which are served the other way round from what the theme asks. `on_open`
+    /// reader inverted, which are served the other way round from what the theme asks; `web` the
+    /// diagrams whose pictures on the web an embed of them draws. `on_open`
     /// fires when the reader clicks a link into the vault, with a wikilink's target as written or
     /// a markdown link's vault path, and the `#anchor` if there is one; `on_invert` when the
     /// reader asks the image menu to invert an image, with its key.
@@ -345,23 +352,25 @@ impl Preview {
     /// upgrade path if tab memory ever shows up in a measurement.
     pub fn new(
         resolve: impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync + 'static,
-        inverted: Rc<RefCell<HashSet<String>>>,
+        inverted: Keys,
+        web: Keys,
         on_open: impl Fn(&str) + 'static,
         on_invert: impl Fn(&str) + 'static,
     ) -> Preview {
-        Self::build(Arc::new(resolve), inverted, on_open, on_invert, false)
+        Self::build(Arc::new(resolve), inverted, web, on_open, on_invert, false)
     }
 
     /// A page to print or export a note from, never shown: the note on the light theme's white
     /// paper whatever the window's theme, its images as their files are, its diagrams in mermaid's
     /// `neutral` theme, and nothing in it followed anywhere.
-    pub fn for_paper(resolve: Arc<Resolve>) -> Preview {
-        Self::build(resolve, Rc::default(), |_| {}, |_| {}, true)
+    pub fn for_paper(resolve: Arc<Resolve>, web: Keys) -> Preview {
+        Self::build(resolve, Rc::default(), web, |_| {}, |_| {}, true)
     }
 
     fn build(
         resolve: Arc<Resolve>,
-        inverted: Rc<RefCell<HashSet<String>>>,
+        inverted: Keys,
+        web: Keys,
         on_open: impl Fn(&str) + 'static,
         on_invert: impl Fn(&str) + 'static,
         paper: bool,
@@ -378,6 +387,7 @@ impl Preview {
             served: RefCell::default(),
             paper,
             note: RefCell::default(),
+            web,
         });
 
         let context = webkit6::WebContext::new();
@@ -895,8 +905,9 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
         }
         let (path, served) = match answer {
             Some(Some((_, path, Some(served), _))) => (path, served),
-            Some(Some((_, path, None, inverted))) => {
-                match crate::diagram::embed::svg(&path, page.as_deref()).await {
+            Some(Some((key, path, None, inverted))) => {
+                let web = assets.web.borrow().contains(&key);
+                match crate::diagram::embed::svg(&path, page.as_deref(), web).await {
                     Some(svg) => (path, look::serve_svg(&svg, look, inverted)),
                     None => return deny(&request, "no such diagram page"),
                 }
@@ -982,10 +993,15 @@ fn beside(dir: &Path, rel: &str) -> Option<(String, PathBuf)> {
 /// The file on this machine an `accent://file/` address on `note`'s page names, held to the vault
 /// as every request the page makes is.
 pub(crate) fn asset(resolve: &Resolve, note: &str, uri: &str) -> Option<PathBuf> {
+    asset_of(resolve, note, uri).map(|(_, path)| path)
+}
+
+/// [`asset`] with its key.
+pub(crate) fn asset_of(resolve: &Resolve, note: &str, uri: &str) -> Option<(String, PathBuf)> {
     let Some(("file", rel)) = accent_uri(uri) else {
         return None;
     };
-    resolve_asset(resolve, note, &rel).map(|(_, path)| path)
+    resolve_asset(resolve, note, &rel)
 }
 
 /// The page an embedded diagram's address names (`![[x.drawio#Page]]` asks for
