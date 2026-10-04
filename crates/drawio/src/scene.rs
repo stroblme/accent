@@ -545,12 +545,12 @@ impl<'a> Builder<'a> {
                 opacity,
                 shadow,
             });
-            for (path, fill) in heads.into_iter().flatten() {
+            for head in heads.into_iter().flatten().flatten() {
                 self.prims.push(Prim::Path {
                     cell: cell.id.clone(),
                     locked,
-                    path,
-                    fill,
+                    path: head.path,
+                    fill: head.fill.map(Paint::Solid),
                     stroke: Some(Stroke {
                         dash: None,
                         ..line.clone()
@@ -564,14 +564,14 @@ impl<'a> Builder<'a> {
         self.label(cell, &style, LabelAt::Edge(&routed, &g), 0.0, locked);
     }
 
-    /// The arrow head at one end of `points`, which it shortens; its outline and fill.
+    /// The arrow head at one end of `points`, which it shortens: its outlines, each with its fill.
     fn head(
         &self,
         style: &Resolved,
         points: &mut [Point],
         end: bool,
         line: &Stroke,
-    ) -> Option<(Vec<PathCmd>, Option<Paint>)> {
+    ) -> Option<Vec<marker::Marker>> {
         let (kind, size, fill, colour) = match end {
             true => ("endArrow", "endSize", "endFill", "endFillColor"),
             false => ("startArrow", "startSize", "startFill", "startFillColor"),
@@ -591,18 +591,16 @@ impl<'a> Builder<'a> {
             return None;
         }
         let unit = Point::new(dx / length, dy / length);
-        let marker = marker::marker(
+        let fill = style.flag(fill, true);
+        marker::marker(
             kind,
             &mut points[tip],
             unit,
             style.num(size, marker::DEFAULT_MARKERSIZE),
             line.width,
-            style.flag(fill, true),
-        )?;
-        let fill = marker
-            .filled
-            .then(|| Paint::Solid(style.color(colour).unwrap_or(line.color)));
-        Some((marker.path, fill))
+            !end,
+            fill.then(|| style.color(colour).unwrap_or(line.color)),
+        )
     }
 
     /// The vertex an edge end is attached to, as routing needs it.

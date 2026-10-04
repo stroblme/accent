@@ -33,6 +33,11 @@ pub struct Terminal {
     pub port_constraint: Option<u32>,
     /// The rotation a side constraint turns with, `portConstraintRotation=1`'s, else 0.
     pub port_rotation: f64,
+    /// `legacyAnchorPoints=0`, which draw.io writes on a shape it flips: connection points are
+    /// mirrored and turned as the shape is drawn rather than in its legacy order.
+    pub anchors_as_drawn: bool,
+    /// `anchorPointDirection=0`: connection points do not turn with the `direction`.
+    pub anchors_unturned: bool,
 }
 
 impl Terminal {
@@ -58,6 +63,8 @@ impl Terminal {
                 true => rotation,
                 false => 0.0,
             },
+            anchors_as_drawn: !style.flag("legacyAnchorPoints", true),
+            anchors_unturned: !style.flag("anchorPointDirection", true),
         })
     }
 
@@ -133,8 +140,6 @@ pub fn route(input: &EdgeInput) -> Vec<Point> {
         return Vec::new();
     }
     update_floating_terminal_points(input, &mut pts);
-    // ponytail: `bezier=1` reads these points as curve control points, which is up to drawing
-    // (mxPolyline), not routing.
     match pts.into_iter().collect::<Option<Vec<Point>>>() {
         Some(pts) => get_waypoints(&pts),
         None => Vec::new(),
@@ -235,39 +240,50 @@ fn connection_constraint(style: &Resolved, source: bool) -> Option<Constraint> {
 }
 
 /// Where a constraint pins an end: its point in the terminal's perimeter bounds as the shape
-/// faces east, turned with its direction and moved onto the outline if the constraint says so,
-/// or else mirrored with its flips; then turned with the terminal. This is draw.io's default
-/// order (`legacyAnchorPoints`), which differs from how the shape itself is drawn.
-// Graph.getLegacyConnectionPoint, Graph.js 22831-22954
-// ponytail: `legacyAnchorPoints=0` (mxGraph.getConnectionPoint) and `anchorPointDirection=0` are
-// not read; the point is placed the default way.
+/// faces east, then turned with the shape's direction and moved onto the outline if the
+/// constraint says so, or else mirrored with its flips; then turned with the terminal. This is
+/// draw.io's default order, which differs from how the shape itself is drawn; with
+/// `legacyAnchorPoints=0` the point is mirrored, turned with the direction and then moved onto
+/// the outline, as the shape is drawn. `anchorPointDirection=0` leaves the direction out.
+// Graph.getLegacyConnectionPoint, Graph.js 27776-27900, and mxGraph.getConnectionPoint,
+// mxGraph.js 7334-7449
 fn connection_point(t: &Terminal, c: &Constraint) -> Point {
     let mut bounds = perimeter_bounds(t, 0.0);
     let centre = bounds.centre();
     let o = &t.outline;
-    let quarter = o.direction.degrees();
-    if o.direction.vertical() {
+    let quarter = match t.anchors_unturned {
+        true => 0.0,
+        false => o.direction.degrees(),
+    };
+    // The legacy order measures the point on the box as it faces only while it turns with it.
+    if o.direction.vertical() && (t.anchors_as_drawn || !t.anchors_unturned) {
         bounds = shapes::rotate90(bounds);
     }
     let mut p = Point::new(
         bounds.x + c.point.x * bounds.w + c.dx,
         bounds.y + c.point.y * bounds.h + c.dy,
     );
+    let (flip_h, flip_v) = match o.direction.vertical() {
+        true => (o.flip_v, o.flip_h),
+        false => (o.flip_h, o.flip_v),
+    };
+    let mirror = |p: Point| {
+        Point::new(
+            if flip_h { 2.0 * centre.x - p.x } else { p.x },
+            if flip_v { 2.0 * centre.y - p.y } else { p.y },
+        )
+    };
     let mut turn = t.rotation;
-    if c.perimeter {
+    if t.anchors_as_drawn {
+        p = geom::rotate(mirror(p), centre, quarter);
+        if c.perimeter {
+            p = perimeter_point(t, p, false, 0.0);
+        }
+    } else if c.perimeter {
         p = perimeter_point(t, geom::rotate(p, centre, quarter), false, 0.0);
     } else {
         turn += quarter;
-        let (flip_h, flip_v) = match o.direction.vertical() {
-            true => (o.flip_v, o.flip_h),
-            false => (o.flip_h, o.flip_v),
-        };
-        if flip_h {
-            p.x = 2.0 * centre.x - p.x;
-        }
-        if flip_v {
-            p.y = 2.0 * centre.y - p.y;
-        }
+        p = mirror(p);
     }
     geom::rotate(p, centre, turn)
 }
@@ -1678,6 +1694,31 @@ mod tests {
         let mirrored = shape("shape=umlActor;flipH=1;");
         assert_points(&[anchor(&mirrored, 0.25, 0.1).0], &[(60.0, 4.0)]);
         assert_eq!(anchors(&shape("shape=note;"), "a").len(), 11);
+    }
+
+    #[test]
+    fn a_flipped_shapes_anchors_follow_it_once_legacy_anchors_are_off() {
+        // `a` in `style` pinned at (1, 0.25) of the box it is drawn in.
+        let pin = |style: &str, perimeter: bool| {
+            let page = shape(style);
+            let t = Terminal::of(&page, page.cell("a").unwrap()).unwrap();
+            let c = Constraint {
+                point: Point::new(1.0, 0.25),
+                dx: 0.0,
+                dy: 0.0,
+                perimeter,
+            };
+            connection_point(&t, &c)
+        };
+        // A triangle facing south, its tip at (40, 40), and flipped: the legacy order leaves
+        // the flip out of a point on the outline, the drawn one mirrors it with the shape.
+        let style = "triangle;direction=south;flipH=1;";
+        assert_points(&[pin(style, true)], &[(50.0, 30.0)]);
+        let drawn = format!("{style}legacyAnchorPoints=0;");
+        assert_points(&[pin(&drawn, true)], &[(30.0, 30.0)]);
+        // Unturned, a fixed point is measured on the box as it stands.
+        let unturned = "triangle;direction=south;anchorPointDirection=0;";
+        assert_points(&[pin(unturned, false)], &[(80.0, 10.0)]);
     }
 
     #[test]

@@ -12,14 +12,16 @@ use crate::style::Resolved;
 const DEFAULT_STARTSIZE: f64 = 40.0;
 
 /// An edge's line through `points` (ends already shortened for markers): straight segments,
-/// rounded corners (`rounded=1`) or a smooth curve (`curved=1`).
+/// rounded corners (`rounded=1`), a smooth curve (`curved=1`) or cubics with the points between
+/// the ends as their control points (`bezier=1`, before `curved`).
 ///
 /// `mxPolyline.paintEdgeShape` and `paintLine` (mxPolyline.js 73-105).
-// ponytail: `bezier=1` (`paintBezierLine`, which takes precedence over `curved`) is not read;
-// such an edge is drawn curved or straight.
 pub fn edge_line(points: &[Point], style: &Resolved) -> Vec<PathCmd> {
     if points.len() < 2 {
         return Vec::new();
+    }
+    if style.flag("bezier", false) {
+        return bezier_line(points);
     }
     if style.flag("curved", false) {
         return curved_line(points);
@@ -41,6 +43,26 @@ fn curved_line(pts: &[Point]) -> Vec<PathCmd> {
         ));
     }
     path.push(PathCmd::QuadTo(pts[n - 2], pts[n - 1]));
+    path
+}
+
+/// Cubics through `pts` read as an end, two control points and the next end, and so on, three
+/// points a curve; any other count of three or more is a curved line, two a straight one
+/// (`mxPolyline.paintBezierLine`). Needs two points.
+fn bezier_line(pts: &[Point]) -> Vec<PathCmd> {
+    let n = pts.len();
+    if n > 2 && !(n - 1).is_multiple_of(3) {
+        return curved_line(pts);
+    }
+    let mut path = vec![PathCmd::MoveTo(pts[0])];
+    if n == 2 {
+        path.push(PathCmd::LineTo(pts[1]));
+    }
+    path.extend(
+        pts[1..]
+            .chunks_exact(3)
+            .map(|c| PathCmd::CurveTo(c[0], c[1], c[2])),
+    );
     path
 }
 
@@ -517,6 +539,26 @@ mod tests {
                 PathCmd::QuadTo(pts[2], pts[3]),
             ]
         );
+    }
+
+    #[test]
+    fn a_bezier_line_reads_its_points_as_control_points() {
+        let p = Point::new;
+        let pts = [p(0.0, 0.0), p(0.0, 10.0), p(20.0, 10.0), p(20.0, 0.0)];
+        let bezier = style("bezier=1;curved=1;", true);
+        assert_eq!(
+            edge_line(&pts, &bezier),
+            vec![
+                PathCmd::MoveTo(pts[0]),
+                PathCmd::CurveTo(pts[1], pts[2], pts[3])
+            ]
+        );
+        // Three points are no cubic: curved, as `curved=1` draws them.
+        assert_eq!(
+            edge_line(&pts[..3], &bezier),
+            edge_line(&pts[..3], &style("curved=1;", true))
+        );
+        assert_eq!(edge_line(&pts[..2], &bezier)[1], PathCmd::LineTo(pts[1]));
     }
 
     /// The points a path's lines and moves end on, curves left out.

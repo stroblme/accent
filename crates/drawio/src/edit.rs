@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::Error;
-use crate::geom::{Point, Rect};
+use crate::geom::{Point, Rect, relative_ccw};
 use crate::model::{Cell, CellId, File, Geometry, Page, guid, set_attr};
 use crate::route::Constraint;
 use crate::scene::Scene;
@@ -1086,26 +1086,6 @@ fn relative_point(points: &[Point], p: Point) -> (f64, f64) {
         false => 0.0,
     };
     (along, across)
-}
-
-/// Which side of the line from `a` to `b` point `p` is on (`mxUtils.relativeCcw`).
-fn relative_ccw(a: Point, b: Point, p: Point) -> i32 {
-    let (x2, y2) = (b.x - a.x, b.y - a.y);
-    let (mut px, mut py) = (p.x - a.x, p.y - a.y);
-    let mut ccw = px * y2 - py * x2;
-    if ccw == 0.0 {
-        ccw = px * x2 + py * y2;
-        if ccw > 0.0 {
-            px -= x2;
-            py -= y2;
-            ccw = (px * x2 + py * y2).max(0.0);
-        }
-    }
-    match ccw {
-        c if c < 0.0 => -1,
-        c if c > 0.0 => 1,
-        _ => 0,
-    }
 }
 
 /// Give edge `id` the waypoints `points`, absolute, none for an empty list
