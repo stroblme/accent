@@ -363,6 +363,13 @@ impl DiagramTab {
         self.tool.get()
     }
 
+    /// Whether the page shown has a layer new cells can go into: one neither locked nor hidden.
+    pub fn can_insert(&self) -> bool {
+        let editor = self.editor.borrow();
+        let page = editor.page(self.page_index.get());
+        page.is_ok_and(|p| p.default_parent().is_some())
+    }
+
     pub fn set_tool(&self, tool: Tool) {
         self.tool.set(tool);
         self.view.set_tool(tool);

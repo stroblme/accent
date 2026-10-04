@@ -751,6 +751,7 @@ impl App {
             Some(d) => d.ring_shown(),
             None => self.drawing.get(),
         });
+        self.sync_diagram_tools();
         self.sync_history();
     }
 
