@@ -290,9 +290,11 @@ impl DiagramView {
     pub fn set_typesetter(&self, typesetter: Rc<super::math::Typesetter>) {
         let weak = self.downgrade();
         typesetter.connect_ready(move || {
-            if let Some(view) = weak.upgrade() {
+            let view = weak.upgrade();
+            if let Some(view) = &view {
                 view.queue_draw();
             }
+            view.is_some()
         });
         *self.imp().typesetter.borrow_mut() = Some(typesetter);
     }

@@ -9,6 +9,10 @@
 //! Everything a page asks for goes into one document: one load, one snapshot cut into a picture
 //! per label, as many labels as one snapshot can hold, the rest waiting for the next. The canvas
 //! paints the label's source meanwhile.
+//!
+//! One typesetter serves the whole app ([`shared`]): every diagram tab and every note's embed of
+//! a diagram, a WebKit view being a web process of its own. Its view is held by no window, which
+//! WebKit lays out and snapshots all the same.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -55,12 +59,27 @@ pub struct Typesetter {
     /// [`Typesetter::lost`].
     lost: Cell<bool>,
     scheduled: Cell<bool>,
-    on_ready: RefCell<Option<Box<dyn Fn()>>>,
+    /// Who paints again when labels come in; one that answers `false` is gone and dropped.
+    on_ready: RefCell<Vec<Box<dyn Fn() -> bool>>>,
+}
+
+thread_local! {
+    static SHARED: std::cell::OnceCell<Rc<Typesetter>> = const { std::cell::OnceCell::new() };
+}
+
+/// The app's one typesetter, made the first time a diagram with formulas asks.
+// ponytail: what it has typeset is kept for the app's life, every diagram's formulas together;
+// dropping the pictures no view has painted for a while is the upgrade if that ever weighs.
+pub fn shared() -> Rc<Typesetter> {
+    SHARED.with(|t| {
+        t.get_or_init(|| Typesetter::new(&gtk::Overlay::new()))
+            .clone()
+    })
 }
 
 impl Typesetter {
     /// A typesetter whose view lives, unseen and untouchable, in `host`.
-    pub fn new(host: &gtk::Overlay) -> Rc<Typesetter> {
+    fn new(host: &gtk::Overlay) -> Rc<Typesetter> {
         let settings = webkit6::Settings::new();
         settings.set_enable_javascript_markup(false);
         settings.set_enable_media(false);
@@ -89,7 +108,7 @@ impl Typesetter {
             batch: RefCell::new(Vec::new()),
             lost: Cell::new(false),
             scheduled: Cell::new(false),
-            on_ready: RefCell::new(None),
+            on_ready: RefCell::new(Vec::new()),
         });
         let weak = Rc::downgrade(&typesetter);
         typesetter.view.connect_load_changed(move |_, event| {
@@ -136,8 +155,9 @@ impl Typesetter {
         !self.batch.borrow().is_empty() || !self.queued.borrow().is_empty()
     }
 
-    pub fn connect_ready(&self, f: impl Fn() + 'static) {
-        *self.on_ready.borrow_mut() = Some(Box::new(f));
+    /// Call `f` whenever labels come in, until it answers `false`.
+    pub fn connect_ready(&self, f: impl Fn() -> bool + 'static) {
+        self.on_ready.borrow_mut().push(Box::new(f));
     }
 
     /// The label typeset under `key`: `Some(None)` for one WebKit could not render, `None` for
@@ -292,9 +312,7 @@ impl Typesetter {
 
     fn finish(&self) {
         self.batch.borrow_mut().clear();
-        if let Some(f) = self.on_ready.borrow().as_ref() {
-            f();
-        }
+        self.on_ready.borrow_mut().retain(|f| f());
         self.run();
     }
 }
