@@ -9,6 +9,26 @@ impl App {
         self.active_pane.borrow().clone()
     }
 
+    /// The pane the reader is in: the one holding the keyboard, else the active one. Not the
+    /// active one first: a tab picked in another pane's bar, or brought to its front behind the
+    /// reader's back (a sync deleting the note in front), makes that pane the active one and
+    /// leaves the keyboard where it was, and a click into the note being typed in moves no focus
+    /// to say otherwise. What the keyboard asks of a pane goes here: focus mode, the find bar.
+    pub fn reader_pane(&self) -> Rc<Pane> {
+        let focus = self.focused();
+        let holding = self
+            .panes
+            .borrow()
+            .iter()
+            .find(|pane| {
+                focus
+                    .as_ref()
+                    .is_some_and(|focus| focus.is_ancestor(pane.widget()))
+            })
+            .cloned();
+        holding.unwrap_or_else(|| self.pane())
+    }
+
     /// The active pane's tab view. Every `self.tabs` of the single-pane window went through here.
     pub fn tabs(&self) -> adw::TabView {
         self.pane().tabs.clone()

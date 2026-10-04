@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use accent_core::config::{DiagramConfig, DiagramPlace};
-use accent_core::fs::Etag;
+use accent_core::fs::{Digest, Etag};
 use accent_drawio::{CellId, Editor, File, Point};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -108,15 +108,15 @@ pub struct DiagramTab {
     on_toast: TextHook,
 }
 
-/// A new tab of `tabs` showing `file` as it was read, at its etag, where the session last left
-/// it.
+/// A new tab of `tabs` showing `file` as it was read, at its etag and digest, where the session
+/// last left it.
 pub fn open(
     key: &str,
     path: &Path,
     title: &str,
     tooltip: &str,
     tabs: &adw::TabView,
-    (file, etag): (File, Etag),
+    (file, etag, digest): (File, Etag, Digest),
     place: DiagramPlace,
 ) -> Rc<DiagramTab> {
     let view = DiagramView::new();
@@ -177,7 +177,7 @@ pub fn open(
         tool: Cell::new(Tool::Select),
         options: Cell::new(DiagramConfig::default()),
         pasted: RefCell::new((None, 0)),
-        save: SaveState::at(etag),
+        save: SaveState::at(etag, digest),
         save_pending: Cell::new(false),
         monitor: RefCell::new(None),
         on_zoom: RefCell::new(None),
@@ -1408,11 +1408,12 @@ impl DiagramTab {
 
     /// The file changed on disk and the tab holds no edits: read it again, staying on the same
     /// page and keeping whatever of the selection is still there.
-    pub fn reload(self: &Rc<Self>, file: File, etag: Etag) {
+    pub fn reload(self: &Rc<Self>, file: File, etag: Etag, digest: Digest) {
         let last = file.pages.len().saturating_sub(1);
         *self.editor.borrow_mut() = Editor::new(file);
         self.page_index.set(self.page_index.get().min(last));
         self.save.etag.set(Some(etag));
+        self.save.digest.set(Some(digest));
         self.save.modified.set(false);
         self.save.disk_changed.set(false);
         self.banner.set_revealed(false);

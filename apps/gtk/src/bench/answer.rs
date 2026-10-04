@@ -144,6 +144,102 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// `ACCENT_BENCH_ANSWER=same:<rel>` opens `<rel>` afresh for each way its stamp can move while
+/// its bytes stay the ones the tab read — `touch`, a copy renamed over it, the same bytes written
+/// in place, a touch the watcher reports before the typing, a touch under a Ctrl+S that goes
+/// before the watcher has spoken — and for one real change, makes it behind the tab's back as
+/// soon as the tab is up and types a line at once, as a reader typing into a note just opened.
+/// `racing` changes the file, has the tab reload it as the watcher would and types before the
+/// read is in. After the autosave it prints whether the tab was dirty on opening, the banner
+/// standing, whether a dialog is up, whether the tab came clean, the file's last line and whether
+/// the line typed is still in the buffer: only `changed` and `racing` may raise the banner, and
+/// no line typed is lost. It writes into the vault, so point it at a scratch one.
+pub(super) fn bench_answer_same(app: &Rc<App>, rel: &str) {
+    scratch_only(app, "ACCENT_BENCH_ANSWER");
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        for _ in 0..600 {
+            if app.reconciled.get() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        let Some(vault) = app.vault().cloned() else {
+            return bench_quit(&app);
+        };
+        for case in [
+            "none", "touch", "copy", "inplace", "late", "save", "changed", "racing",
+        ] {
+            app.open_path(&rel);
+            let mut tab = None;
+            for _ in 0..100 {
+                tab = app.open_tabs().into_iter().find(|t| t.rel() == rel);
+                if tab.is_some() {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(20)).await;
+            }
+            let Some(tab) = tab else {
+                println!("bench answer same {case} no_tab");
+                return bench_quit(&app);
+            };
+            let script = match case {
+                "none" => None,
+                "touch" | "late" | "save" => Some("touch {}"),
+                "copy" => Some("cp {} {}.same && mv {}.same {}"),
+                "inplace" => Some("cp {} {}.same && cat {}.same > {} && rm {}.same"),
+                _ => Some("printf 'changed theirs\\n' >> {}"),
+            };
+            if let Some(script) = script {
+                crate::work::off_thread("bench", {
+                    let (vault, rel) = (vault.clone(), rel.clone());
+                    move || behind(&vault, &rel, script)
+                })
+                .await;
+            }
+            // The watcher's news lands while the tab is still clean.
+            if case == "late" {
+                glib::timeout_future(Duration::from_millis(1500)).await;
+            }
+            let opened_dirty = tab.save.modified.get();
+            // The read a watcher's news starts, still out when the key lands.
+            if case == "racing" {
+                app.refresh_tab(&tab);
+            }
+            let typed = format!("{case} mine\n");
+            tab.buffer.insert(&mut tab.buffer.end_iter(), &typed);
+            if case == "save" {
+                app.save_tab(&tab, true);
+            }
+            glib::timeout_future(Duration::from_millis(2500)).await;
+            let dialog = app.window.visible_dialog();
+            let read = crate::work::off_thread("bench", {
+                let (vault, rel) = (vault.clone(), rel.clone());
+                move || vault.read(&rel).map(|(text, _)| text)
+            })
+            .await
+            .and_then(Result::ok)
+            .unwrap_or_default();
+            println!(
+                "bench answer same {case} opened_dirty={opened_dirty} alert={:?} dialog={} \
+                 modified={} file_last={:?} kept={}",
+                tab.alert(),
+                dialog.is_some(),
+                tab.save.modified.get(),
+                read.lines().last().unwrap_or_default(),
+                tab.text().contains(&typed),
+            );
+            if let Some(dialog) = dialog {
+                dialog.close();
+            }
+            tab.discard();
+            app.close_page(&tab.page);
+            glib::timeout_future(Duration::from_millis(300)).await;
+        }
+        bench_quit(&app);
+    });
+}
+
 /// Run `script`, its `{}` the file's quoted path, where the vault's files are: on the host over
 /// the vault's master, or here.
 fn behind(vault: &Vault, rel: &str, script: &str) -> bool {

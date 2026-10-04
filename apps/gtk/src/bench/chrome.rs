@@ -26,6 +26,9 @@ pub(super) fn bench_chrome(app: &Rc<App>, notes: &str) {
         // The split hands the keyboard to the note it moved, from an idle; this takes it back
         // once that has run, since nothing headless can click into the left note.
         glib::timeout_future(Duration::from_millis(200)).await;
+        if let Some(tab) = app.tab_of(&left) {
+            tab.view.grab_focus();
+        }
         app.set_active_pane(&left);
         bench_chrome_levels(&app);
         bench_chrome_veil(&app).await;
@@ -276,4 +279,107 @@ async fn bench_chrome_key(app: &Rc<App>, target: &gtk::Widget, case: &str, chord
         app.chrome_hidden.get(),
         app.header.has_css_class("chrome-hidden")
     );
+}
+
+/// Focus mode and the find bar over two panes, at High, through real input
+/// (`build-aux/xtest.py`, spawned per step): `<relA>` on the left, `<relB>` on the right with
+/// `<relC>` behind it. A find bar opened on the left and a query typed into it, a letter typed on
+/// the right, one on the left; then two ways the right pane becomes the active one with the
+/// keyboard left behind on the left: `<relB>`'s tab picked in the right pane's bar, and, after a
+/// click on each side, `<relB>`'s file deleted, which closes its tab and brings `<relC>` to the
+/// front behind the reader's back. After each, a click into the left note, a letter typed and
+/// `Ctrl+F`. It prints which pane is active, which has the keyboard, which recede, whether the
+/// left note's text fades and which find bar is open: the pane typed in is the one that stays,
+/// and `Ctrl+F` opens its bar. It types into the notes and deletes `<relB>`, so point it at a
+/// scratch vault.
+pub(super) fn bench_chrome_find(app: &Rc<App>, rels: &str) {
+    scratch_only(app, "ACCENT_BENCH_CHROME=find:");
+    let [a, b, c] = rels.split(',').collect::<Vec<_>>()[..] else {
+        return bench_quit(app);
+    };
+    let (app, a, b, c) = (app.clone(), a.to_string(), b.to_string(), c.to_string());
+    glib::spawn_future_local(async move {
+        for (rel, split) in [(&a, false), (&b, true), (&c, false)] {
+            app.open_path(rel);
+            glib::timeout_future(Duration::from_millis(400)).await;
+            if split {
+                let _ = WidgetExt::activate_action(&app.window, "win.split-right", None);
+                glib::timeout_future(Duration::from_millis(400)).await;
+            }
+        }
+        let (Some(tab_a), Some(tab_b)) = (app.tab_for(&a), app.tab_for(&b)) else {
+            println!("bench chrome_find no_tabs");
+            return bench_quit(&app);
+        };
+        let (Some(left), Some(right)) = (app.pane_of(&tab_a.page), app.pane_of(&tab_b.page)) else {
+            return bench_quit(&app);
+        };
+        app.config.borrow_mut().focus_mode = FocusMode::High;
+        let middle = |w: &gtk::Widget| {
+            let p = graphene::Point::new(w.width() as f32 / 2.0, w.height() as f32 / 2.0);
+            let p = w.compute_point(&app.window, &p).unwrap_or(p);
+            format!("{:.0} {:.0}", p.x(), p.y())
+        };
+        let state = |step: &str| {
+            let side = |pane: &Rc<Pane>| match Rc::ptr_eq(pane, &left) {
+                true => "left",
+                false => "right",
+            };
+            let focus = gtk::prelude::GtkWindowExt::focus(&app.window);
+            let keyboard = [&left, &right]
+                .into_iter()
+                .find(|pane| focus.as_ref().is_some_and(|f| f.is_ancestor(pane.widget())))
+                .map_or("none", side);
+            println!(
+                "bench chrome_find {step} active={} keyboard={keyboard} away_left={} \
+                 away_right={} fade_left={} find_left={} find_right={}",
+                side(&app.pane()),
+                left.widget().has_css_class("chrome-away"),
+                right.widget().has_css_class("chrome-away"),
+                tab_a.ghost_view().is_some_and(|v| v.fading()),
+                left.find.is_open(),
+                right.find.is_open(),
+            );
+        };
+        let (va, vb) = (
+            middle(tab_a.view.upcast_ref()),
+            middle(tab_b.view.upcast_ref()),
+        );
+        let name = crate::doc::file_name(&b).to_string();
+        let tab_label = find_widget(right.bar.upcast_ref(), &|w| {
+            w.downcast_ref::<gtk::Label>()
+                .is_some_and(|l| l.label() == name)
+        })
+        .map(|label| middle(&label))
+        .unwrap_or_default();
+        // A pointer that moves brings the chrome back, so each letter typed fades it afresh.
+        let type_left = format!("move 5 5; move {va}; down; up; type z");
+        for (step, steps) in [
+            (
+                "find_left",
+                format!("move {va}; focus; down; up; key ctrl+f; type the"),
+            ),
+            ("type_right", format!("move {vb}; down; up; type x")),
+            ("type_left", format!("move {va}; down; up; type y")),
+            ("pick_right_tab", format!("move {tab_label}; down; up")),
+            ("type_left_after_pick", type_left.clone()),
+            ("find_after_pick", "key Escape; key ctrl+f".into()),
+            (
+                "back_left",
+                format!("key Escape; move {vb}; down; up; move {va}; down; up"),
+            ),
+        ] {
+            super::git::xtest(&steps).await;
+            state(step);
+        }
+        // Deleted behind the reader's back, as a sync or a checkout does.
+        let _ = std::fs::remove_file(app.root().join(&b));
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        state("closed_behind");
+        super::git::xtest(&type_left).await;
+        state("type_left_after_close");
+        super::git::xtest("key ctrl+f").await;
+        state("find_after_close");
+        bench_quit(&app);
+    });
 }

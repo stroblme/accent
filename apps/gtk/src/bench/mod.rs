@@ -35,9 +35,9 @@ mod synctex;
 mod tags;
 mod toasts;
 
-use answer::bench_answer;
+use answer::{bench_answer, bench_answer_same};
 use attach::bench_attach;
-use chrome::{bench_chrome, bench_chrome_keys};
+use chrome::{bench_chrome, bench_chrome_find, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_clicks, bench_compare_conflict, bench_compare_diag,
     bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_left,
@@ -144,7 +144,10 @@ use tags::bench_tags;
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
 /// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
 /// for XTEST presses of the keys that step through a note, the preview and a PDF, and prints
-/// whether each one faded the chrome (see `chrome::bench_chrome_keys`).
+/// whether each one faded the chrome (see `chrome::bench_chrome_keys`). `=find:<a>,<b>,<c>`
+/// makes the right of two panes the active one with the keyboard on the left, by a tab picked in
+/// its bar and by `<b>` deleted on disk, types on the left through XTEST and prints which pane
+/// recedes at High and whose find bar `Ctrl+F` opens (see `chrome::bench_chrome_find`).
 /// `=present:<note>,<pdf>,<image>,<side>` presents a note, a PDF, an image and a shell from one of
 /// two panes and prints what F5 shows, the find bar, a held `Ctrl+Tab`'s card, Escape over it, a
 /// toast against the status bar, and the layout leaving F5 puts back (see
@@ -400,7 +403,8 @@ use tags::bench_tags;
 /// note and prints the text and the files they left (`attach::bench_attach`).
 /// `ACCENT_BENCH_ANSWER=<rel_note>` answers Overwrite, Keep Mine and a deleted file's Save over a
 /// note it changes behind the tab's back, and prints how long each held the main loop
-/// (`answer::bench_answer`).
+/// (`answer::bench_answer`). `=same:<rel_note>` moves the file's etag alone and types at once,
+/// and prints whether the banner went up (`answer::bench_answer_same`).
 /// `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>` exports a PDF that a note highlights into `$TMPDIR` and
 /// copies it for printing, and prints what each copy holds against the source
 /// (`export::bench_export_pdf`); `=note:<rel_note>` exports a note as PDF and as HTML into
@@ -747,6 +751,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(arg) = attach {
             return bench_attach(&app, &arg);
         }
+        if let Some(rel) = answer.as_deref().and_then(|a| a.strip_prefix("same:")) {
+            return bench_answer_same(&app, rel);
+        }
         if let Some(rel) = answer {
             return bench_answer(&app, &rel);
         }
@@ -883,6 +890,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(notes) = chrome {
             if let Some(rels) = notes.strip_prefix("keys:") {
                 return bench_chrome_keys(&app, rels);
+            }
+            if let Some(rels) = notes.strip_prefix("find:") {
+                return bench_chrome_find(&app, rels);
             }
             if let Some(rels) = notes.strip_prefix("present:") {
                 return present::bench_present(&app, rels);

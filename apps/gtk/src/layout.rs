@@ -648,7 +648,7 @@ impl App {
     }
 
     /// `Root` and `GtkWindow` both spell this `focus`, so the window's one is named here once.
-    fn focused(&self) -> Option<gtk::Widget> {
+    pub(crate) fn focused(&self) -> Option<gtk::Widget> {
         gtk::prelude::GtkWindowExt::focus(&self.window)
     }
 
@@ -670,13 +670,13 @@ impl App {
         // The lines between the panes and along their edges too, which would otherwise frame the
         // panes that are receding (`.dividers-hidden` in `install_chrome_css`).
         self.window.add_css_class("dividers-hidden");
-        let active = self.pane();
+        let writing = self.reader_pane();
         for pane in self.panes.borrow().iter() {
-            if !Rc::ptr_eq(pane, &active) {
+            if !Rc::ptr_eq(pane, &writing) {
                 pane.widget().add_css_class("chrome-away");
             }
         }
-        if let Some(tab) = self.active() {
+        if let Some(tab) = self.tab_of(&writing) {
             tab.set_fade(true);
         }
     }
@@ -724,7 +724,10 @@ impl App {
         let in_popover = self
             .focused()
             .is_some_and(|w| w.ancestor(gtk::Popover::static_type()).is_some());
-        in_popover || self.active().is_some_and(|tab| tab.banner.is_revealed())
+        in_popover
+            || self
+                .tab_of(&self.reader_pane())
+                .is_some_and(|tab| tab.banner.is_revealed())
     }
 }
 

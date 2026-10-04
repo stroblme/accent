@@ -848,7 +848,7 @@ fn moved(row: &(f32, String), now: &[(f32, String)]) -> String {
 }
 
 /// Run `build-aux/xtest.py` on this display, then wait out the buttons' 250 ms slide.
-async fn xtest(steps: &str) {
+pub(super) async fn xtest(steps: &str) {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/xtest.py");
     let display = std::env::var("DISPLAY").unwrap_or_default();
     let argv = ["python3", script, &display, steps].map(std::ffi::OsStr::new);

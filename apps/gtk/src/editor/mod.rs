@@ -11,7 +11,7 @@
 
 use crate::{diagnostics, diff, fold, highlight, lang, multicaret, wrap};
 use accent_api::{Diagnostic, Fold, Vault};
-use accent_core::fs::{self, Etag, SaveError};
+use accent_core::fs::{self, Digest, Etag, SaveError};
 use accent_core::markdown::Link;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -135,7 +135,8 @@ pub struct Flight {
     pub held: Option<Etag>,
     /// A Ctrl+S, which says "Saved" when it lands.
     pub explicit: bool,
-    pub answer: std::sync::mpsc::Receiver<Result<Etag, SaveError>>,
+    /// The etag the write left, and the digest of what it wrote.
+    pub answer: std::sync::mpsc::Receiver<Result<(Etag, Digest), SaveError>>,
 }
 
 /// What a save that has just landed means for its tab.
@@ -177,6 +178,9 @@ pub fn landing(
 #[derive(Default)]
 pub struct SaveState {
     pub etag: Cell<Option<Etag>>,
+    /// What the file held at `etag`, the bytes the tab last read or wrote: a file whose etag
+    /// moved while it still holds them has not changed.
+    pub digest: Cell<Option<Digest>>,
     pub modified: Cell<bool>,
     /// Someone else changed the file under a dirty tab. Autosave stops until the user has
     /// answered the banner, so a conflict is never resolved behind their back.
@@ -195,10 +199,11 @@ pub struct SaveState {
 }
 
 impl SaveState {
-    /// A file as it was just read, at `etag`.
-    pub fn at(etag: Etag) -> SaveState {
+    /// A file as it was just read, at `etag`, holding what `digest` digests.
+    pub fn at(etag: Etag, digest: Digest) -> SaveState {
         SaveState {
             etag: Cell::new(Some(etag)),
+            digest: Cell::new(Some(digest)),
             ..SaveState::default()
         }
     }
@@ -616,6 +621,13 @@ impl Tab {
                 Some(Err(e)) => return done(&tab, Err(e)),
                 None => return done(&tab, Err(std::io::Error::other("the reader stopped"))),
             };
+            // Typed into while the file was read: the buffer holds the only copy of that, so it
+            // asks as a dirty tab does (`App::refresh_tab`) rather than being replaced.
+            if tab.save.modified.get() {
+                tab.save.disk_changed.set(true);
+                tab.show_alert(Alert::Compare);
+                return done(&tab, Ok(()));
+            }
             tab.adopt_reload(text, anchor);
             done(&tab, Ok(()));
         });
@@ -626,6 +638,7 @@ impl Tab {
         self.crlf.set(text.crlf);
         self.lossy.set(text.lossy);
         let etag = text.etag;
+        self.save.digest.set(Some(text.digest()));
         self.set_text(&text.text);
         let iter = self
             .buffer
