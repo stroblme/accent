@@ -511,7 +511,13 @@ mod imp {
         /// The tag the find bar paints its matches in this view's buffer with, which the fade
         /// leaves unveiled.
         pub find_tag: RefCell<Option<gtk::TextTag>>,
+        /// Where the fade is measured from instead of this view's carets
+        /// ([`super::View::fade_from`]).
+        pub fade_follows: RefCell<Option<Follows>>,
     }
+
+    /// The lines a view's fade is measured from when not its own carets', 0-based.
+    pub type Follows = Box<dyn Fn() -> Option<std::ops::RangeInclusive<i32>>>;
 
     #[glib::object_subclass]
     impl ObjectSubclass for View {
@@ -825,6 +831,22 @@ impl View {
             glib::ControlFlow::Break
         });
         *imp.fade_tick.borrow_mut() = Some(id);
+    }
+
+    /// Measure the line fade from the lines `follows` names rather than from this view's carets:
+    /// a comparison column beside the editor, whose own caret nobody moves.
+    pub fn fade_from(&self, follows: impl Fn() -> Option<std::ops::RangeInclusive<i32>> + 'static) {
+        self.imp().fade_follows.replace(Some(Box::new(follows)));
+    }
+
+    /// The lines [`View::fade_from`] names, if it was asked to.
+    pub(crate) fn fade_followed(&self) -> Option<std::ops::RangeInclusive<i32>> {
+        self.imp().fade_follows.borrow().as_ref()?()
+    }
+
+    /// Whether the line fade shows at all, so that whatever moves what it follows can redraw.
+    pub fn fade_shown(&self) -> bool {
+        self.imp().fade.get() > 0.0
     }
 
     /// Whether the line fade is on, for the headless check that cannot see it.

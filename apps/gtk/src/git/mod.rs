@@ -28,6 +28,7 @@ use crate::diff::{Compare, Side};
 use crate::difftab::DiffTab;
 
 use crate::highlight;
+use crate::widgets::{icon_button, reveal_on_hover};
 
 mod actions;
 mod branch;
@@ -1110,14 +1111,12 @@ fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
 /// keeps them. A list makes rows for its first 200 items whether anyone points at them or not, and
 /// picking another repository has GTK take every one of them apart again, so only the rows someone
 /// has been on pay for their buttons. The keyboard landing on a row reveals them
-/// ([`changes::reveal_on_hover`]), so they are there before Tab moves on to them.
+/// ([`reveal_on_hover`]), so they are there before Tab moves on to them.
 fn revealed_actions(
     item: &gtk::ListItem,
     build: impl Fn(&gtk::ListItem) -> gtk::Box + 'static,
 ) -> gtk::Revealer {
-    let revealer = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideLeft)
-        .build();
+    let revealer = crate::widgets::hover_revealer();
     revealer.connect_reveal_child_notify(glib::clone!(
         #[weak]
         item,
@@ -1128,18 +1127,6 @@ fn revealed_actions(
         }
     ));
     revealer
-}
-
-fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
-    let button = gtk::Button::builder()
-        .icon_name(icon)
-        .tooltip_text(tooltip)
-        .valign(gtk::Align::Center)
-        .build();
-    button.add_css_class("flat");
-    // The tooltip's words are its name for a screen reader too, an icon having none of its own.
-    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
-    button
 }
 
 fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
@@ -1200,41 +1187,62 @@ fn peek<T: 'static, R>(object: Option<glib::Object>, read: impl FnOnce(&T) -> R)
 #[derive(Default)]
 struct Fill(Rc<RefCell<Option<glib::SourceId>>>);
 
+/// A run of a store's rows to replace: where it starts and how many rows it replaces, both as the
+/// store holds them before any run is spliced, and what replaces them.
+type Run = (u32, u32, Vec<glib::BoxedAnyObject>);
+
 impl Fill {
-    /// Replace `removed` rows at `at` in `store` with `items`, each chunk going in before the rows
-    /// that followed the replaced ones — the end of the store where nothing did, however many rows
-    /// went in above meanwhile (a commit expanded). A chunk due while `hold` says so is not
-    /// spliced, and the rest is left to whoever lets go; `done` runs once every item is in.
+    /// Replace each of `runs` — sorted, apart — in `store`: its first chunk at once, from the
+    /// bottom up so that the positions above a splice still hold, and the rest a chunk per turn,
+    /// the lowest run first. Each chunk goes in before the rows that will follow its run once every
+    /// run is in, the end of the store where nothing does, however many rows went in above
+    /// meanwhile (a commit expanded). A chunk due while `hold` says so is not spliced, and the rest
+    /// is left to whoever lets go; `done` runs once every item is in.
+    ///
+    /// Runs rather than one span from the first change to the last: GTK keeps its focus, and the
+    /// row its scroll is anchored to, inside a span that replaces them, no further in than the
+    /// first chunk reaches. A Stage spliced from the Staged section down to the row clicked half
+    /// a list below, and the list scrolled up to the section.
     fn splice(
         &self,
         store: &gio::ListStore,
-        at: u32,
-        removed: u32,
-        items: Vec<glib::BoxedAnyObject>,
+        runs: Vec<Run>,
         hold: impl Fn() -> bool + 'static,
         done: impl FnOnce() + 'static,
     ) {
         self.cancel();
-        let tail = store.n_items() - at - removed;
-        let mut items = items.into_iter();
-        let first: Vec<_> = items.by_ref().take(FILL_CHUNK).collect();
-        store.splice(at, removed, &first);
-        let mut rest = items.peekable();
-        if rest.peek().is_none() {
+        let n = i64::from(store.n_items());
+        // How many rows the runs below the one being spliced add.
+        let mut grown = 0;
+        let mut pending = Vec::new();
+        for (at, removed, mut items) in runs.into_iter().rev() {
+            let tail = n - i64::from(at + removed) + grown;
+            grown += items.len() as i64 - i64::from(removed);
+            let rest = items.split_off(items.len().min(FILL_CHUNK));
+            store.splice(at, removed, &items);
+            if !rest.is_empty() {
+                pending.push((tail as u32, rest.into_iter()));
+            }
+        }
+        if pending.is_empty() {
             return done();
         }
-        let (store, pending, mut done) = (store.downgrade(), self.0.clone(), Some(done));
+        let (store, slot, mut done) = (store.downgrade(), self.0.clone(), Some(done));
         let id = glib::idle_add_local(move || {
             let Some(store) = store.upgrade().filter(|_| !hold()) else {
-                pending.take();
+                slot.take();
                 return glib::ControlFlow::Break;
             };
+            let (tail, rest) = &mut pending[0];
             let chunk: Vec<_> = rest.by_ref().take(FILL_CHUNK).collect();
-            store.splice(store.n_items() - tail, 0, &chunk);
-            if rest.peek().is_some() {
+            store.splice(store.n_items() - *tail, 0, &chunk);
+            if rest.len() == 0 {
+                pending.remove(0);
+            }
+            if !pending.is_empty() {
                 return glib::ControlFlow::Continue;
             }
-            pending.take();
+            slot.take();
             if let Some(done) = done.take() {
                 done();
             }
@@ -1247,6 +1255,26 @@ impl Fill {
     fn cancel(&self) -> bool {
         self.0.take().map(glib::SourceId::remove).is_some()
     }
+}
+
+/// The runs of `rows` that differ from what `store` holds, as [`Fill::splice`] takes them. The rows
+/// the two share are left out (Myers' diff, `git diff`'s), so their widgets stay where they are.
+fn changed_runs<T: Clone + Eq + std::hash::Hash + 'static>(
+    store: &gio::ListStore,
+    rows: &[T],
+) -> Vec<Run> {
+    let held: Vec<T> = (0..store.n_items())
+        .filter_map(|i| boxed(store.item(i)))
+        .collect();
+    similar::capture_diff_slices(similar::Algorithm::Myers, &held, rows)
+        .iter()
+        .map(similar::DiffOp::as_tag_tuple)
+        .filter(|(tag, ..)| *tag != similar::DiffTag::Equal)
+        .map(|(_, old, new)| {
+            let items = rows[new].iter().cloned().map(glib::BoxedAnyObject::new);
+            (old.start as u32, old.len() as u32, items.collect())
+        })
+        .collect()
 }
 
 /// A row of the changes list or the history: a stack of the layouts the items bound to it have
@@ -1391,6 +1419,31 @@ fn merge_statuses(
 mod tests {
     use super::*;
 
+    #[test]
+    fn changed_runs_leave_the_rows_a_change_does_not_touch_alone() {
+        let runs = |held: &[&'static str], rows: &[&'static str]| {
+            let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+            for row in held {
+                store.append(&glib::BoxedAnyObject::new(*row));
+            }
+            changed_runs(&store, rows)
+                .into_iter()
+                .map(|(at, removed, items)| {
+                    let items: Vec<&str> = items.iter().map(|i| *i.borrow::<&str>()).collect();
+                    (at, removed, items)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(runs(&["a", "b"], &["a", "b"]), [], "nothing");
+        // Staging `b` opens a Staged section above and takes `b` out of Changes: the rows between
+        // the two keep their widgets, as do the rows after.
+        assert_eq!(
+            runs(&["C", "a", "b", "c"], &["S", "B", "C", "a", "c"]),
+            [(0, 0, vec!["S", "B"]), (2, 1, vec![])]
+        );
+        assert_eq!(runs(&["a", "c"], &["a", "b", "c"]), [(1, 0, vec!["b"])]);
+    }
+
     fn repo(root: &str) -> Repo {
         Repo {
             root: PathBuf::from(root),
@@ -1405,6 +1458,7 @@ mod tests {
             parents: Vec::new(),
             refs: Vec::new(),
             author: String::new(),
+            email: String::new(),
             time: 0,
             summary: String::new(),
             body: String::new(),

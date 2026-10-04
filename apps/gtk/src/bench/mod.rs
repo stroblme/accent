@@ -55,8 +55,8 @@ use files::{
 use find::bench_find;
 use git::{
     bench_git, bench_git_branch, bench_git_close, bench_git_focus, bench_git_init,
-    bench_git_markers, bench_git_press, bench_git_rebase, bench_git_switch, bench_git_sync_all,
-    bench_git_sync_over_fetch,
+    bench_git_markers, bench_git_press, bench_git_rebase, bench_git_scroll, bench_git_switch,
+    bench_git_sync_all, bench_git_sync_over_fetch,
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
 use keys::{
@@ -103,7 +103,10 @@ use tags::bench_tags;
 /// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did,
 /// and `=sync` asks for a Sync during the fetch on opening and prints whether it waited for it.
 /// `=focus` clicks rows and walks the keyboard over them through XTEST, and prints whether each
-/// row's buttons are out. `=switch` picks the second repository and clicks the history's first row
+/// row's buttons are out. `=scroll` clicks Stage half way down the scrolled changes list, then
+/// commits with the history scrolled, and prints whether the rows on screen stayed put (see
+/// `git::bench_git_scroll`).
+/// `=switch` picks the second repository and clicks the history's first row
 /// at once, and prints what that asked for, then what each pick draws at once, every repository
 /// twice over (see `git::bench_git_switch`). `=markers:<rel>` resolves the conflict blocks a merge
 /// left in a note through their buttons and the palette (see `git::bench_git_markers`). `=branch`
@@ -160,9 +163,10 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
-/// what the panes hold and whether their rows line up. `=pads:<rel_path>` instead stages a note of
-/// long paragraphs in a repository it makes itself and types at the start of the two lines whose
-/// padding tag does not begin at the newline before them, and `=lines:<rel_path>` stages and
+/// what the panes hold and whether their rows line up, and what focus mode's line fade follows in
+/// the other column. `=pads:<rel_path>` instead stages a note of long paragraphs in a repository
+/// it makes itself and types at the start of the two lines whose padding tag does not begin at
+/// the newline before them, and `=lines:<rel_path>` stages and
 /// unstages one line of a note it commits in a repository of its own. `=row:<repo_rel>` activates
 /// that file's Changes row, as a click on it does, and prints what the comparison it opened holds;
 /// `=row:stale:<repo_rel>` stages the file behind the pane's back first, so the row it activates
@@ -906,6 +910,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 (None, "sync") => bench_git_sync_over_fetch(&app),
                 (None, "rebase") => bench_git_rebase(&app),
                 (None, "focus") => bench_git_focus(&app),
+                (None, "scroll") => bench_git_scroll(&app),
                 (None, "switch") => bench_git_switch(&app),
                 (None, "branch") => bench_git_branch(&app),
                 (None, "syncall") => bench_git_sync_all(&app),

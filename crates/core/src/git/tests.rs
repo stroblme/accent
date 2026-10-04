@@ -411,6 +411,7 @@ fn parse_log_and_lanes_on_a_linear_history() {
     let summaries: Vec<&str> = commits.iter().map(|c| c.summary.as_str()).collect();
     assert_eq!(summaries, ["three", "two", "one"]);
     assert_eq!(commits[0].author, "Accent Test");
+    assert_eq!(commits[0].email, "test@accent.invalid");
     assert!(commits[0].time > 0);
     assert_eq!(
         commits[0].refs,
@@ -499,6 +500,7 @@ fn node(id: &str, parents: &[&str], refs: &[&str]) -> Commit {
             })
             .collect(),
         author: String::new(),
+        email: String::new(),
         time: 0,
         summary: String::new(),
         body: String::new(),

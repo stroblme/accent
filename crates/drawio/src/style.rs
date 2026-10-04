@@ -53,6 +53,11 @@ impl Style {
         self.items.is_empty() && !self.leading_semicolon
     }
 
+    /// Whether the style carries the named style `name` (`text`, `ellipse`) as a bare token.
+    pub fn names(&self, name: &str) -> bool {
+        self.items.iter().any(|(k, v)| k == name && v.is_none())
+    }
+
     /// The style as drawn: draw.io's defaults for a vertex or an edge, then each named style and
     /// pair in order (`mxStylesheet.getCellStyle`). A pair set to `none` removes the key, which
     /// is how `fillColor=none` comes to mean "no fill".
@@ -100,6 +105,94 @@ impl fmt::Display for Style {
         Ok(())
     }
 }
+
+/// The keys a pasted style carries over, draw.io's `Graph.cellStyles`: how a cell looks, never
+/// what shape it is.
+// Graph.js 1676-1717
+pub(crate) const LOOK: &[&str] = &[
+    "rounded",
+    "shadow",
+    "glass",
+    "dashed",
+    "dashPattern",
+    "comic",
+    "sketch",
+    "fillWeight",
+    "hachureGap",
+    "hachureAngle",
+    "jiggle",
+    "disableMultiStroke",
+    "disableMultiStrokeFill",
+    "fillStyle",
+    "curveFitting",
+    "simplification",
+    "sketchStyle",
+    "pointerEvents",
+    "opacity",
+    "strokeColor",
+    "strokeWidth",
+    "align",
+    "verticalAlign",
+    "spacingLeft",
+    "spacingRight",
+    "spacingTop",
+    "spacingBottom",
+    "spacing",
+    "arcSize",
+    "absoluteArcSize",
+    "comicStyle",
+    "swimlaneFillColor",
+    "shadowOffsetX",
+    "shadowOffsetY",
+    "shadowBlur",
+    "shadowColor",
+    "shadowOpacity",
+    "fillColor",
+    "gradientColor",
+    "gradientDirection",
+];
+
+/// What a text cell takes of a pasted style (`Graph.textStyles`); every other cell takes these
+/// too.
+pub(crate) const TEXT_LOOK: &[&str] = &[
+    "fontFamily",
+    "fontSource",
+    "fontSize",
+    "fontColor",
+    "fontStyle",
+    "textOpacity",
+    "labelBorderColor",
+    "labelBackgroundColor",
+    "autosize",
+    "resizable",
+    "horizontal",
+    "textDirection",
+    "autosizeText",
+];
+
+/// What only an edge takes of a pasted style (`Graph.edgeStyles`), less `edgeStyle`, which
+/// draw.io's Paste Style leaves alone (`pasteEdgeStyle`).
+pub(crate) const EDGE_LOOK: &[&str] = &[
+    "elbow",
+    "jumpStyle",
+    "jumpSize",
+    "startArrow",
+    "startFill",
+    "startSize",
+    "endArrow",
+    "endFill",
+    "endSize",
+    "flowAnimation",
+    "flowAnimationDirection",
+    "flowAnimationTimingFunction",
+    "flowAnimationDuration",
+    "sourcePerimeterSpacing",
+    "targetPerimeterSpacing",
+    "curved",
+    "linecap",
+    "linejoin",
+    "libavoidRouting",
+];
 
 /// `defaultVertex` in draw.io's `styles/default.xml`.
 const DEFAULT_VERTEX: &[(&str, &str)] = &[

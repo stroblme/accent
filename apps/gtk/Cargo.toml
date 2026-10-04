@@ -41,6 +41,8 @@ chrono.workspace = true
 serde_json.workspace = true
 # Hover documentation arrives as markdown and Pango wants markup; only the pull parser is needed.
 pulldown-cmark.workspace = true
+# The Git pane's lists splice only the rows a refresh changed (`git::changed_runs`); core's too.
+similar = { version = "3", default-features = false }
 
 [build-dependencies]
 # Compiles the completion-kind icons into the binary's GResource.

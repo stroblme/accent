@@ -639,6 +639,141 @@ pub(super) fn bench_git_focus(app: &Rc<App>) {
     });
 }
 
+/// Whether a refresh leaves the Git pane's two lists where they were: a real click, through
+/// XTEST, on a Stage button half way down the scrolled changes list, then a commit of it while the
+/// history is scrolled half way down. Prints how far the row above the one staged moved on screen
+/// and which row has the keyboard afterwards, then how far the commit row half way down the
+/// history moved. Point it at a repository with nothing staged and enough changes and history to
+/// scroll; it commits there. `moved=0` both times, and the keyboard on the row now in the staged
+/// one's place.
+pub(super) fn bench_git_scroll(app: &Rc<App>) {
+    app.show_pane("git");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let Some(git) = app.git.get() else {
+            return bench_quit(&app);
+        };
+        app.show_pane("git");
+        git.set_tree(true);
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        let lists = [git.divider().start_child(), git.divider().end_child()].map(|list| {
+            let scroller = list
+                .as_ref()
+                .and_then(|w| find_widget(w, &|w| w.is::<gtk::ScrolledWindow>()))
+                .and_downcast::<gtk::ScrolledWindow>();
+            list.zip(scroller)
+        });
+        let [Some((changes, scroller)), Some(history)] = lists else {
+            println!("bench git_scroll none");
+            return bench_quit(&app);
+        };
+        let shown = scrolled_rows(&changes, &scroller, "entry").await;
+        let middle = scroller.height() as f32 / 2.0;
+        let Some(i) = shown
+            .iter()
+            .position(|(y, _)| *y > middle)
+            .filter(|&i| i > 0)
+        else {
+            println!("bench git_scroll no_row");
+            return bench_quit(&app);
+        };
+        let (above, path) = (shown[i - 1].clone(), shown[i].1.clone());
+        let row = change_row(&changes, &path);
+        let (dx, dy) = app.window.surface_transform();
+        let screen = |w: &gtk::Widget, x: f32| {
+            let at = graphene::Point::new(x, w.height() as f32 / 2.0);
+            w.compute_point(&app.window, &at)
+                .map(|p| format!("{} {}", p.x() as f64 + dx, p.y() as f64 + dy))
+                .unwrap_or_default()
+        };
+        // The pointer on the row first, which brings its buttons out where they are pressed.
+        if let Some(row) = &row {
+            xtest(&format!("move {}; focus", screen(row, 20.0))).await;
+        }
+        let Some(button) = row.and_then(|row| row_button(&row, "Stage")) else {
+            println!("bench git_scroll no_button");
+            return bench_quit(&app);
+        };
+        xtest(&format!(
+            "move {}; down; up",
+            screen(button.upcast_ref(), 8.0)
+        ))
+        .await;
+        glib::timeout_future(Duration::from_millis(2000)).await;
+        let focus = gtk::prelude::GtkWindowExt::focus(&app.window)
+            .and_then(|f| f.first_child())
+            .and_then(|row| row.tooltip_text())
+            .unwrap_or_default();
+        println!(
+            "bench git_scroll staged={path} moved={} focus={focus}",
+            moved(&above, &rows_on_screen(&changes, &scroller, "entry"))
+        );
+
+        let (history, scroller) = history;
+        let shown = scrolled_rows(&history, &scroller, "commit").await;
+        let Some(row) = shown.get(shown.len() / 2).cloned() else {
+            println!("bench git_scroll_history no_row");
+            return bench_quit(&app);
+        };
+        let committed = std::process::Command::new("git")
+            .args(["commit", "-qm", "bench git_scroll"])
+            .current_dir(app.root())
+            .status()
+            .is_ok_and(|s| s.success());
+        glib::timeout_future(Duration::from_millis(3000)).await;
+        println!(
+            "bench git_scroll_history committed={committed} moved={}",
+            moved(&row, &rows_on_screen(&history, &scroller, "commit"))
+        );
+        bench_quit(&app);
+    });
+}
+
+/// Scroll `list` half way down, and the rows of `kind` it then shows ([`rows_on_screen`]).
+async fn scrolled_rows(
+    list: &gtk::Widget,
+    scroller: &gtk::ScrolledWindow,
+    kind: &str,
+) -> Vec<(f32, String)> {
+    let adj = scroller.vadjustment();
+    adj.set_value((adj.upper() - adj.page_size()) / 2.0);
+    glib::timeout_future(Duration::from_millis(500)).await;
+    rows_on_screen(list, scroller, kind)
+}
+
+/// The rows of `list` showing their `kind` layout, top to bottom: where each is in `scroller` and
+/// its tooltip, which names it.
+fn rows_on_screen(
+    list: &gtk::Widget,
+    scroller: &gtk::ScrolledWindow,
+    kind: &str,
+) -> Vec<(f32, String)> {
+    let mut rows = Vec::new();
+    let mut todo = vec![list.clone()];
+    while let Some(w) = todo.pop() {
+        let row = w.is_mapped()
+            && w.downcast_ref::<gtk::Stack>()
+                .is_some_and(|s| s.visible_child_name().as_deref() == Some(kind));
+        match (
+            row,
+            w.compute_point(scroller, &graphene::Point::new(0.0, 0.0)),
+        ) {
+            (true, Some(y)) => rows.push((y.y(), w.tooltip_text().unwrap_or_default().into())),
+            _ => todo.extend(std::iter::successors(w.first_child(), |c| c.next_sibling())),
+        }
+    }
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    rows
+}
+
+/// How far `row` moved on screen to where it is in `now`, or `gone` where it is not on it.
+fn moved(row: &(f32, String), now: &[(f32, String)]) -> String {
+    now.iter()
+        .find(|(_, name)| *name == row.1)
+        .map_or("gone".to_string(), |(y, _)| (y - row.0).to_string())
+}
+
 /// Run `build-aux/xtest.py` on this display, then wait out the buttons' 250 ms slide.
 async fn xtest(steps: &str) {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/xtest.py");

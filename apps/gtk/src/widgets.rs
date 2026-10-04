@@ -180,6 +180,105 @@ pub(crate) fn claim_press(button: &gtk::Button) {
     button.set_focus_on_click(false);
 }
 
+/// The class on a revealer of a row's hover buttons ([`hover_revealer`]): the only revealers
+/// [`reveal_on_hover`] opens and shuts, so it never touches one a row holds for its own ends (an
+/// `AdwEntryRow`'s apply button sits in one).
+const HOVER_ACTIONS: &str = "accent-hover-actions";
+
+/// The marker class on a row whose buttons already follow its hover ([`reveal_on_hover`]).
+const WATCHED: &str = "accent-hover-row";
+
+/// A revealer for a row's hover buttons, which slide in from the side ([`reveal_on_hover`]).
+pub(crate) fn hover_revealer() -> gtk::Revealer {
+    let revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideLeft)
+        .build();
+    revealer.add_css_class(HOVER_ACTIONS);
+    revealer
+}
+
+/// Show a row's buttons while the pointer or the keyboard is on it, and give them no width at all
+/// the rest of the time, so the name beside them reads out to the whole width of the pane and is
+/// cut short only where there is really something to give way to. A `GtkRevealer` does both: shut,
+/// it measures nothing, and it slides them in and out at full opacity, the same way whether the
+/// pointer or the focus is what let them go. The Git pane's rows and the diagram Properties
+/// pane's rows share it, each holding its buttons in a [`hover_revealer`].
+///
+/// Watched on the row itself: that is the widget GTK marks with PRELIGHT while the pointer is
+/// anywhere on it and with FOCUS_WITHIN while one of its buttons has the keyboard — and in a list
+/// it is the one the keyboard lands on first, so Tab reveals the buttons it would otherwise never
+/// be able to reach.
+///
+/// A click gives the row the focus as well, taking it back even from a button pressed inside it,
+/// and that focus is the pointer's: it keeps the buttons no longer than the pointer stays, or a
+/// commit clicked open would keep them out until the focus went somewhere else. So a press marks
+/// the row until both the pointer and the focus have left it. GTK's FOCUS_VISIBLE cannot tell the
+/// two apart: it outlasts a key by three seconds whatever is clicked meanwhile, and then drops
+/// what the keyboard reached.
+pub(crate) fn reveal_on_hover(row: &impl IsA<gtk::Widget>) {
+    let row = row.upcast_ref::<gtk::Widget>();
+    // Once per row widget, which in a list is recycled and bound again and again. The class is
+    // the marker, there being nowhere else to keep one bit on a widget GTK made for itself.
+    if row.has_css_class(WATCHED) {
+        return;
+    }
+    row.add_css_class(WATCHED);
+    let clicked = Rc::new(Cell::new(false));
+    let press = gtk::GestureClick::new();
+    // Ahead of the row's own gesture and of any button's, which are what move the focus.
+    press.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let mark = clicked.clone();
+    press.connect_pressed(move |_, _, _, _| mark.set(true));
+    row.add_controller(press);
+    row.connect_state_flags_changed(move |row, _| {
+        let flags = row.state_flags();
+        let hovered = flags.contains(gtk::StateFlags::PRELIGHT);
+        let focused = flags.contains(gtk::StateFlags::FOCUS_WITHIN);
+        // Not on the focus leaving alone: moving it between the row and a button inside takes it
+        // off the row and puts it back, which a press does with the pointer still on the row.
+        if !hovered && !focused {
+            clicked.set(false);
+        }
+        let on = hovered || (focused && !clicked.get());
+        for revealer in revealers(row) {
+            revealer.set_reveal_child(on);
+        }
+    });
+}
+
+/// Every [`hover_revealer`] under `row` — in a list row, one per layout its stack can show.
+fn revealers(row: &gtk::Widget) -> Vec<gtk::Revealer> {
+    let mut found = Vec::new();
+    let mut todo = vec![row.clone()];
+    while let Some(widget) = todo.pop() {
+        if widget.has_css_class(HOVER_ACTIONS)
+            && let Ok(revealer) = widget.clone().downcast::<gtk::Revealer>()
+        {
+            found.push(revealer);
+            continue;
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    found
+}
+
+/// A flat icon button, centred in its row, named by its tooltip.
+pub(crate) fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .icon_name(icon)
+        .tooltip_text(tooltip)
+        .valign(gtk::Align::Center)
+        .build();
+    button.add_css_class("flat");
+    // The tooltip's words are its name for a screen reader too, an icon having none of its own.
+    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
+    button
+}
+
 /// How long a switch crossfades and a page fades in (DESIGN.md, Motion).
 pub(crate) const FADE_MS: u32 = 150;
 

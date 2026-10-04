@@ -2,16 +2,18 @@
 //!
 //! Every row writes one change through the tab, which is one undo step; spin rows wait for a
 //! burst of steps to settle first. Filling the rows from the model sets `filling`, so the
-//! notifications that causes are not taken for edits.
+//! notifications that causes are not taken for edits. The Position, Size and Style groups slide
+//! out Copy and Paste buttons while the pointer or the keyboard is on them, as a Git pane row
+//! does its own (`widgets::reveal_on_hover`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use accent_drawio::{Color, Resolved};
+use accent_drawio::{Color, Rect, Resolved};
 use adw::prelude::*;
 
-use crate::widgets::Debounce;
+use crate::widgets::{Debounce, hover_revealer, icon_button, reveal_on_hover};
 
 /// What the pane shows.
 pub enum Target {
@@ -24,6 +26,9 @@ pub enum Target {
         edges: bool,
         /// Some cell takes a fill: a shape, or a flex arrow ([`accent_drawio::Cell::takes_fill`]).
         fills: bool,
+        /// The one shape selected: its place and size in its parent, as the file has them, and
+        /// whether it is pinned where it is (locked, or on a locked layer).
+        geometry: Option<(Rect, bool)>,
     },
     Page {
         name: String,
@@ -40,6 +45,33 @@ pub enum Change {
     Raw(String),
     PageAttr(&'static str, Option<String>),
     PageName(String),
+    /// The one selected shape's place and size in its parent.
+    Geometry(Rect),
+    /// A group's Copy button: what it shows, onto the clipboard.
+    Copy(Clip),
+    /// A group's Paste button: what the clipboard holds, onto the selection.
+    Paste(Clip),
+    /// A row of the Layers group.
+    Layer(super::layers::LayerChange),
+}
+
+/// What a Copy or Paste button carries: `x, y`, `w, h`, or the style string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clip {
+    Position,
+    Size,
+    Style,
+}
+
+impl Clip {
+    /// What it carries, as a toast says it.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Clip::Position => "position",
+            Clip::Size => "size",
+            Clip::Style => "style",
+        }
+    }
 }
 
 /// Arrow heads a menu offers, by style value and label.
@@ -132,6 +164,16 @@ pub struct Props {
     root: gtk::ScrolledWindow,
     filling: Rc<Cell<bool>>,
     on_change: OnChange,
+    position: adw::PreferencesGroup,
+    size: adw::PreferencesGroup,
+    x: adw::SpinRow,
+    y: adw::SpinRow,
+    width: adw::SpinRow,
+    height: adw::SpinRow,
+    /// Each group's Copy and Paste buttons, by what they carry.
+    clips: Vec<(Clip, gtk::Button, gtk::Button)>,
+    /// The page's layers, shown whatever is selected.
+    layers: super::layers::Layers,
     shape: adw::PreferencesGroup,
     text: adw::PreferencesGroup,
     line: adw::PreferencesGroup,
@@ -180,6 +222,32 @@ fn spin(title: &str, range: (f64, f64, f64)) -> adw::SpinRow {
     row
 }
 
+/// A row of the geometry: whole units a step, fractions kept, shown as the file writes them.
+fn coordinate(title: &str, low: f64) -> adw::SpinRow {
+    let row = spin(title, (low, 1e6, 1.0));
+    row.set_digits(2);
+    row.connect_output(|row| {
+        row.set_text(&number((row.value() * 100.0).round() / 100.0));
+        true
+    });
+    row
+}
+
+/// Copy and Paste buttons for a group's header, sliding out while the pointer or the keyboard
+/// is on the group, `what` naming what they carry.
+fn clip_buttons(group: &adw::PreferencesGroup, what: &str) -> (gtk::Button, gtk::Button) {
+    let copy = icon_button("edit-copy-symbolic", &format!("Copy {what}"));
+    let paste = icon_button("edit-paste-symbolic", &format!("Paste {what}"));
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    buttons.append(&copy);
+    buttons.append(&paste);
+    let revealer = hover_revealer();
+    revealer.set_child(Some(&buttons));
+    group.set_header_suffix(Some(&revealer));
+    reveal_on_hover(group);
+    (copy, paste)
+}
+
 /// The `rotation` a turn of `degrees` writes: none for no turn, as a shape draw.io never turned
 /// has none.
 pub(super) fn rotation(degrees: f64) -> Option<String> {
@@ -208,6 +276,13 @@ impl Props {
             page.add(&g);
             g
         };
+        let (position, size) = (group("Position"), group("Size"));
+        let (x, y) = (coordinate("X", -1e6), coordinate("Y", -1e6));
+        let (width, height) = (coordinate("Width", 0.0), coordinate("Height", 0.0));
+        position.add(&x);
+        position.add(&y);
+        size.add(&width);
+        size.add(&height);
         let (shape, text, line, raw_group, page_group) = (
             group("Shape"),
             group("Text"),
@@ -278,6 +353,16 @@ impl Props {
             .build();
         raw.add_css_class("monospace");
         raw_group.add(&raw);
+        let clips = [
+            (Clip::Position, &position, "Position"),
+            (Clip::Size, &size, "Size"),
+            (Clip::Style, &raw_group, "Style"),
+        ]
+        .map(|(clip, group, what)| {
+            let (copy, paste) = clip_buttons(group, what);
+            (clip, copy, paste)
+        })
+        .to_vec();
 
         let page_name = adw::EntryRow::builder()
             .title("Name")
@@ -290,6 +375,14 @@ impl Props {
         page_group.add(&background.row);
         page_group.add(&page_width);
         page_group.add(&page_height);
+        let on_change: OnChange = Rc::new(RefCell::new(None));
+        let on = on_change.clone();
+        let layers = super::layers::Layers::new(move |change| {
+            if let Some(f) = on.borrow().as_ref() {
+                f(Change::Layer(change));
+            }
+        });
+        page.add(&layers.group);
 
         let root = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -299,7 +392,15 @@ impl Props {
         let props = Rc::new(Props {
             root,
             filling: Rc::new(Cell::new(false)),
-            on_change: Rc::new(RefCell::new(None)),
+            on_change,
+            position,
+            size,
+            x,
+            y,
+            width,
+            height,
+            clips,
+            layers,
             shape,
             text,
             line,
@@ -433,6 +534,31 @@ impl Props {
             });
         }
 
+        // The four read together when the burst settles, so a second row changed meanwhile
+        // does not take back the first one's change.
+        for row in [&self.x, &self.y, &self.width, &self.height] {
+            let (me, send) = (Rc::downgrade(self), send.clone());
+            row.connect_value_notify(move |_| {
+                let Some(me) = me.upgrade() else { return };
+                if me.filling.get() {
+                    return;
+                }
+                let (weak, send) = (Rc::downgrade(&me), send.clone());
+                me.debounce.call(move || {
+                    if let Some(me) = weak.upgrade() {
+                        let (x, y) = (me.x.value(), me.y.value());
+                        let (w, h) = (me.width.value(), me.height.value());
+                        send(Change::Geometry(Rect::new(x, y, w, h)));
+                    }
+                });
+            });
+        }
+        for (clip, copy, paste) in &self.clips {
+            let (clip, send_copy, send_paste) = (*clip, send.clone(), send.clone());
+            copy.connect_clicked(move |_| send_copy(Change::Copy(clip)));
+            paste.connect_clicked(move |_| send_paste(Change::Paste(clip)));
+        }
+
         for (button, bit) in [(&self.bold, 1), (&self.italic, 2), (&self.underline, 4)] {
             let (me, set) = (Rc::downgrade(self), style("fontStyle"));
             button.connect_toggled(move |button| {
@@ -503,7 +629,23 @@ impl Props {
                 vertices,
                 edges,
                 fills,
+                geometry,
             } => {
+                self.position.set_visible(geometry.is_some());
+                self.size.set_visible(geometry.is_some());
+                if let Some((r, pinned)) = geometry {
+                    let rows = [&self.x, &self.y, &self.width, &self.height];
+                    for (row, v) in rows.into_iter().zip([r.x, r.y, r.w, r.h]) {
+                        row.set_value(v);
+                        row.set_sensitive(!pinned);
+                    }
+                }
+                for (clip, copy, paste) in &self.clips {
+                    match clip {
+                        Clip::Style => copy.set_sensitive(*count == 1),
+                        _ => paste.set_sensitive(!geometry.is_some_and(|(_, pinned)| pinned)),
+                    }
+                }
                 // Every shape takes a fill; flex arrows alone show only the rows it takes.
                 self.shape.set_visible(*fills);
                 let outline: [&gtk::Widget; 7] = [
@@ -569,6 +711,8 @@ impl Props {
                 size,
                 background,
             } => {
+                self.position.set_visible(false);
+                self.size.set_visible(false);
                 self.shape.set_visible(false);
                 self.line.set_visible(false);
                 self.page_name.set_text(name);
@@ -579,6 +723,17 @@ impl Props {
         }
         self.sync_gradient();
         self.filling.set(false);
+    }
+
+    /// Show the page's layers, the topmost first, `current` marked.
+    pub fn fill_layers(&self, layers: &[super::layers::Layer], current: Option<&str>) {
+        self.layers.fill(layers, current);
+    }
+
+    /// The Layers group, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn layers(&self) -> &super::layers::Layers {
+        &self.layers
     }
 
     /// A gradient runs from the fill, so it is greyed without one, and its direction shows only

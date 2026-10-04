@@ -1115,6 +1115,7 @@ fn install_chrome_css() {
              .accent-ring-dim:not(:hover):not(:focus-visible) {{ opacity: var(--dim-opacity); }} \
              .accent-label-editor {{ box-shadow: 0 0 0 1px var(--accent-bg-color), \
                0 1px 4px var(--shade-color); }} \
+             .accent-current-layer {{ box-shadow: inset 3px 0 var(--accent-bg-color); }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \

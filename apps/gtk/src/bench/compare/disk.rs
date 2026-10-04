@@ -3,6 +3,36 @@
 
 use super::*;
 
+/// Focus mode's line fade as High brings it in, on the editor's tab: whether the other column
+/// fades too, and the lines there it is measured from, with the caret on the rewritten line 3 and
+/// on the line added at the end, which faces the blank under the disk copy's last line. Then
+/// whether it goes with the editor's.
+fn bench_compare_fade(tab: &Rc<Tab>, compare: &diff::Compare) {
+    let theirs = [false, true]
+        .into_iter()
+        .filter_map(|end| pane_view(compare.widget(), end))
+        .find(|view| view.upcast_ref::<gtk::Widget>() != tab.view.upcast_ref::<gtk::Widget>())
+        .and_downcast::<crate::multicaret::View>();
+    let Some(theirs) = theirs else {
+        return println!("bench compare_fade none");
+    };
+    let was = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).offset();
+    tab.set_fade(true);
+    for line in [2, 50] {
+        if let Some(at) = tab.buffer.iter_at_line(line) {
+            tab.buffer.place_cursor(&at);
+        }
+        println!(
+            "bench compare_fade caret={line} fading={} theirs={:?}",
+            theirs.fading(),
+            crate::fade::span(&theirs)
+        );
+    }
+    tab.set_fade(false);
+    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(was));
+    println!("bench compare_fade off fading={}", theirs.fading());
+}
+
 /// The note is given fifty lines, written out, then edited in two places: a rewrite near the
 /// top and a line added at the end. The comparison with the disk copy is then read back — rows,
 /// hunks, hidden runs, buttons, how many rows GTK lays out at a height other than the one the
@@ -58,6 +88,7 @@ pub(in crate::bench) fn bench_compare(app: &Rc<App>, rel: &str) {
                 bench_compare_line(&compare),
                 bench_banner_button(&tab)
             );
+            bench_compare_fade(&tab, &compare);
             // Go to Line's preview into the run the comparison collapsed. It moves no caret, so
             // the comparison has to be laid again for the other side to open with it: a run still
             // counted hidden here is one opened on the editor's side alone.

@@ -105,8 +105,12 @@ fn found(view: &multicaret::View, mut at: gtk::TextIter, bottom: i32) -> Vec<Ran
 }
 
 /// The lines the carets and their selections cover, first to last: every caret *and* every
-/// anchor, so a selection made upwards at a column does not run into veiled lines.
+/// anchor, so a selection made upwards at a column does not run into veiled lines. Or what the
+/// view was told to follow instead (`multicaret::View::fade_from`).
 pub(crate) fn span(view: &multicaret::View) -> RangeInclusive<i32> {
+    if let Some(span) = view.fade_followed() {
+        return span;
+    }
     let selections = view.selections();
     let lines = || {
         selections

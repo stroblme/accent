@@ -10,6 +10,7 @@ pub mod embed;
 pub mod export;
 mod geometry;
 mod label;
+mod layers;
 mod math;
 mod paint;
 mod props;
@@ -37,6 +38,7 @@ use view::{DiagramView, Edit};
 const AUTOSAVE: std::time::Duration = std::time::Duration::from_secs(1);
 
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<DiagramTab>)>>>;
+type TextHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
 
 pub struct DiagramTab {
     key: RefCell<String>,
@@ -93,6 +95,9 @@ pub struct DiagramTab {
     on_image: Hook,
     on_banner: Hook,
     on_options: Hook,
+    /// Something to tell the reader in a toast: what was copied, or that there was nothing to
+    /// paste.
+    on_toast: TextHook,
 }
 
 /// A new tab of `tabs` showing `file` as it was read, at its etag, where the session last left
@@ -170,6 +175,7 @@ pub fn open(
         on_image: RefCell::new(None),
         on_banner: RefCell::new(None),
         on_options: RefCell::new(None),
+        on_toast: RefCell::new(None),
     });
     if has_math {
         tab.view.set_typesetter(math::Typesetter::new(&tab.overlay));
@@ -341,6 +347,8 @@ impl DiagramTab {
         self.finish_label();
         self.page_index.set(i);
         self.selection.borrow_mut().clear();
+        // A layer picked on one page is not one of another's.
+        self.editor.borrow_mut().set_current_layer(None);
         self.refresh();
         self.fill_props();
         match land {
@@ -470,17 +478,37 @@ impl DiagramTab {
         self.props.widget().clone()
     }
 
-    /// Put the selection's look, or the page's, into the Properties pane.
+    /// Put the selection's look, or the page's, into the Properties pane, and the page's layers.
     fn fill_props(&self) {
-        let target = {
+        let (target, layers, current) = {
             let editor = self.editor.borrow();
             let Ok(page) = editor.page(self.page_index.get()) else {
                 return;
             };
+            let layers: Vec<layers::Layer> = page
+                .layers()
+                .iter()
+                .rev()
+                .map(|l| layers::Layer {
+                    id: l.id.clone(),
+                    name: l.label().to_string(),
+                    visible: l.is_visible(),
+                    locked: l.is_locked(),
+                })
+                .collect();
+            let current = editor
+                .current_layer(self.page_index.get())
+                .map(str::to_string);
             let selection = self.selection.borrow();
             let cells: Vec<&accent_drawio::Cell> =
                 selection.iter().filter_map(|id| page.cell(id)).collect();
-            match cells.first() {
+            let pinned = |id: &str| self.view.sheet().is_some_and(|s| s.is_pinned(id));
+            let geometry = match cells.as_slice() {
+                [cell] if cell.vertex => cell.geometry.as_ref().filter(|g| !g.relative),
+                _ => None,
+            };
+            let geometry = geometry.map(|g| (g.rect(), pinned(&cells[0].id)));
+            let target = match cells.first() {
                 Some(first) => props::Target::Cells {
                     style: first.style.resolve(first.edge),
                     raw: first.style.to_string(),
@@ -488,15 +516,18 @@ impl DiagramTab {
                     vertices: cells.iter().any(|c| c.vertex),
                     edges: cells.iter().any(|c| c.edge),
                     fills: cells.iter().any(|c| c.takes_fill()),
+                    geometry,
                 },
                 None => props::Target::Page {
                     name: page.name().to_string(),
                     size: page.size(),
                     background: page.background(),
                 },
-            }
+            };
+            (target, layers, current)
         };
         self.props.fill(&target);
+        self.props.fill_layers(&layers, current.as_deref());
     }
 
     /// A row of the Properties pane changed.
@@ -519,8 +550,123 @@ impl DiagramTab {
             props::Change::PageName(name) if !name.trim().is_empty() => {
                 self.rename_page(name.trim());
             }
+            props::Change::Geometry(rect) => {
+                if let [id] = ids.as_slice() {
+                    self.set_geometry(id, rect);
+                }
+            }
+            props::Change::Copy(clip) => self.copy_property(clip),
+            props::Change::Paste(clip) => self.paste_property(clip),
+            props::Change::Layer(change) => self.apply_layer(change),
             _ => {}
         }
+    }
+
+    /// A row of the Layers group changed.
+    fn apply_layer(self: &Rc<Self>, change: layers::LayerChange) {
+        use layers::LayerChange as L;
+        let pick = |id: Option<CellId>| {
+            self.editor.borrow_mut().set_current_layer(id);
+            self.fill_props();
+        };
+        match change {
+            L::Add => {
+                let mut added = None;
+                self.edit(|e, page| {
+                    added = Some(e.add_layer(page, "Untitled Layer")?);
+                    Ok(())
+                });
+                // As draw.io's Add Layer does, the new layer is the one drawn into.
+                if added.is_some() {
+                    pick(added);
+                }
+            }
+            L::Pick(id) => pick(Some(id)),
+            L::Rename(id, name) => self.edit(|e, page| e.rename_layer(page, &id, name.trim())),
+            L::Show(id, on) => self.edit(|e, page| e.set_visible(page, &id, on)),
+            L::Lock(id, on) => self.edit(|e, page| {
+                let ids = std::slice::from_ref(&id);
+                e.set_style(page, ids, "locked", on.then_some("1"))
+            }),
+            L::Raise(id, up) => {
+                let z = match up {
+                    true => accent_drawio::ZOrder::Forward,
+                    false => accent_drawio::ZOrder::Backward,
+                };
+                self.edit(|e, page| e.reorder(page, std::slice::from_ref(&id), z));
+            }
+            L::Delete(id) => self.edit(|e, page| e.delete_layer(page, &id)),
+        }
+    }
+
+    /// Give shape `id` the place and size `rect` in its parent, as the file has them.
+    fn set_geometry(self: &Rc<Self>, id: &str, rect: accent_drawio::Rect) {
+        self.edit(|e, page| {
+            let o = e.page(page)?.origin_of(id);
+            e.resize(page, id, rect.translate(o.x, o.y))
+        });
+    }
+
+    /// The one selected cell's position (`x, y`), size (`w, h`) or style string onto the
+    /// clipboard, as plain text.
+    fn copy_property(self: &Rc<Self>, clip: props::Clip) {
+        let text = {
+            let editor = self.editor.borrow();
+            let selection = self.selection.borrow();
+            let [id] = selection.as_slice() else { return };
+            let Some(cell) = editor
+                .page(self.page_index.get())
+                .ok()
+                .and_then(|p| p.cell(id))
+            else {
+                return;
+            };
+            let g = cell.geometry.as_ref().map(|g| g.rect()).unwrap_or_default();
+            let pair = |a, b| format!("{}, {}", props::number(a), props::number(b));
+            match clip {
+                props::Clip::Position => pair(g.x, g.y),
+                props::Clip::Size => pair(g.w, g.h),
+                props::Clip::Style => cell.style.to_string(),
+            }
+        };
+        self.view.clipboard().set_text(&text);
+        // A style string can run to a line of its own; a pair is short enough to read back.
+        match clip {
+            props::Clip::Style => self.toast("Copied style"),
+            _ => self.toast(&format!("Copied {} {text}", clip.noun())),
+        }
+    }
+
+    /// The clipboard's text onto the selection: a position or a size onto the one shape, a
+    /// style's look onto every cell selected, as one step (`Editor::paste_style`).
+    fn paste_property(self: &Rc<Self>, clip: props::Clip) {
+        let clipboard = self.view.clipboard();
+        let tab = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let text = clipboard.read_text_future().await.ok().flatten();
+            let Some(tab) = tab.upgrade() else { return };
+            let text = text.as_deref().map(str::trim).unwrap_or_default();
+            let ids = tab.selection();
+            let geometry = || {
+                let editor = tab.editor.borrow();
+                let page = editor.page(tab.page_index.get()).ok()?;
+                let [id] = ids.as_slice() else { return None };
+                Some(page.cell(id)?.geometry.as_ref()?.rect())
+            };
+            match (clip, pair(text), geometry()) {
+                (props::Clip::Position, Some((x, y)), Some(g)) => {
+                    tab.set_geometry(&ids[0], accent_drawio::Rect::new(x, y, g.w, g.h))
+                }
+                (props::Clip::Size, Some((w, h)), Some(g)) if w >= 0.0 && h >= 0.0 => {
+                    tab.set_geometry(&ids[0], accent_drawio::Rect::new(g.x, g.y, w, h))
+                }
+                (props::Clip::Style, ..) if text.contains('=') && !text.contains('\n') => {
+                    let style = accent_drawio::Style::parse(text);
+                    tab.edit(|e, page| e.paste_style(page, &ids, &style));
+                }
+                (clip, ..) => tab.toast(&format!("No {} on the clipboard", clip.noun())),
+            }
+        });
     }
 
     pub fn select_all(self: &Rc<Self>) {
@@ -596,10 +742,22 @@ impl DiagramTab {
             }
         };
         // Let go of the selection before the canvas hears of it: showing a page can scroll it,
-        // a scroll finishes an open label, and that is an edit that comes back here.
+        // a scroll finishes an open label, and that is an edit that comes back here. What is
+        // hidden or locked now goes too, a layer hidden or locked under it, as nothing hidden or
+        // locked is picked.
         let selection = {
+            let locked: std::collections::HashSet<&str> = sheet
+                .scene
+                .prims
+                .iter()
+                .filter(|p| p.locked())
+                .map(|p| p.cell())
+                .collect();
             let mut selection = self.selection.borrow_mut();
-            selection.retain(|id| sheet.frame_of(id).is_some());
+            selection.retain(|id| {
+                let there = sheet.frame_of(id).is_some() && sheet.page.is_shown(id);
+                there && !locked.contains(id.as_str())
+            });
             selection.clone()
         };
         self.view.set_selection(&selection);
@@ -838,13 +996,21 @@ impl DiagramTab {
         let Some(sheet) = self.view.sheet() else {
             return;
         };
-        let markdown = {
+        let (markdown, inside) = {
             let editor = self.editor.borrow();
             let Ok(page) = editor.page(self.page_index.get()) else {
                 return;
             };
             let Some(cell) = page.cell(&id) else { return };
-            accent_drawio::label::to_markdown(cell.label(), cell.is_html())
+            // A label inside its shape, rather than beside it or on an edge.
+            let style = cell.style.resolve(cell.edge);
+            let at = |key, middle| style.get(key).is_none_or(|v| v == middle);
+            (
+                accent_drawio::label::to_markdown(cell.label(), cell.is_html()),
+                cell.vertex
+                    && at("labelPosition", "center")
+                    && at("verticalLabelPosition", "middle"),
+            )
         };
         // Where the label is drawn, or where it will be for a cell that has none yet: halfway
         // along an edge, over the whole of a shape.
@@ -854,8 +1020,12 @@ impl DiagramTab {
             .iter()
             .find_map(|p| match p {
                 accent_drawio::Prim::Text {
-                    cell, rect, font, ..
-                } if *cell == id => Some((*rect, font.size)),
+                    cell,
+                    rect,
+                    font,
+                    valign,
+                    ..
+                } if *cell == id => Some((label::label_box(*rect, *valign, inside), font.size)),
                 _ => None,
             })
             .or_else(|| {
@@ -979,13 +1149,13 @@ impl DiagramTab {
         self.label.borrow().as_ref().map(|e| e.cell.clone())
     }
 
-    /// Where the label editor sits on the canvas, how big its text is there and whether it holds
-    /// the keyboard, for the drills that move the page under it.
+    /// Where the label editor sits on the canvas, how tall its text is laid out, how big that
+    /// text is and whether it holds the keyboard, for the drills that move the page under it.
     #[cfg(feature = "bench")]
-    pub fn label_at(&self) -> Option<(f64, f64, f64, bool)> {
+    pub fn label_at(&self) -> Option<(accent_drawio::Rect, f64, f64, bool)> {
         let editor = self.label.borrow().clone()?;
-        let (x, y, px) = editor.at();
-        Some((x, y, px, editor.has_focus()))
+        let (at, content, px) = editor.at();
+        Some((at, content, px, editor.has_focus()))
     }
 
     /// `Ctrl+Return` in the label editor, which the window's accelerator took first: finish the
@@ -1007,6 +1177,25 @@ impl DiagramTab {
     #[cfg(feature = "bench")]
     pub fn scale(&self) -> f64 {
         self.view.scale()
+    }
+
+    /// The Layers group's rows as a drill reads them, the topmost first.
+    #[cfg(feature = "bench")]
+    pub fn layer_rows(&self) -> Vec<String> {
+        self.props.layers().describe()
+    }
+
+    /// The Layers group's row of layer `id`.
+    #[cfg(feature = "bench")]
+    pub fn layer_row(&self, id: &str) -> Option<adw::EntryRow> {
+        self.props.layers().row_of(id)
+    }
+
+    /// What a click on the middle of cell `id` picks.
+    #[cfg(feature = "bench")]
+    pub fn pick(&self, id: &str) -> Option<CellId> {
+        let r = self.view.to_widget(&self.frame_of(id)?);
+        self.view.cell_at(r.x + r.w / 2.0, r.y + r.h / 2.0)
     }
 
     /// What the Properties pane's Fill row says, for a drill.
@@ -1449,6 +1638,18 @@ impl DiagramTab {
         *self.on_options.borrow_mut() = Some(Rc::new(f));
     }
 
+    /// What to tell the reader in a toast.
+    pub fn connect_toast(&self, f: impl Fn(&str) + 'static) {
+        *self.on_toast.borrow_mut() = Some(Rc::new(f));
+    }
+
+    fn toast(&self, text: &str) {
+        let f = self.on_toast.borrow().clone();
+        if let Some(f) = f {
+            f(text);
+        }
+    }
+
     /// The changed-on-disk banner's button.
     pub fn connect_banner(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
         *self.on_banner.borrow_mut() = Some(Rc::new(f));
@@ -1548,6 +1749,17 @@ fn shown(index: usize, pages: usize) -> accent_drawio::Context {
     }
 }
 
+/// Two numbers as Copy Position and Copy Size write them, `x, y`, or with spaces alone between
+/// them.
+fn pair(text: &str) -> Option<(f64, f64)> {
+    let mut numbers = text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<f64>().ok().filter(|n| n.is_finite()));
+    let (a, b) = (numbers.next()??, numbers.next()??);
+    numbers.next().is_none().then_some((a, b))
+}
+
 /// The names of `file`'s pages as the Outline pane lists them: a page with none is "Page N".
 fn page_names(file: &File) -> Vec<String> {
     file.pages
@@ -1579,5 +1791,13 @@ mod tests {
         assert_eq!(page_named(&file, "Page-1"), Some(0));
         assert_eq!(page_named(&file, "Page 2"), Some(1));
         assert_eq!(page_named(&file, "Page-2"), None);
+    }
+
+    #[test]
+    fn a_copied_position_reads_back() {
+        assert_eq!(pair("100, 20.5"), Some((100.0, 20.5)));
+        assert_eq!(pair(" -3 4 "), Some((-3.0, 4.0)));
+        assert_eq!(pair("1, 2, 3"), None);
+        assert_eq!(pair("rounded=1;"), None);
     }
 }
