@@ -20,6 +20,12 @@ pub struct Outline {
     pub size: Option<f64>,
     /// `fixedSize=1`: `size` is in page units rather than a share of the width.
     pub fixed_size: bool,
+    /// `strokeWidth`, which a lifeline's and a backbone's line is met beside.
+    pub stroke_width: f64,
+    /// A backbone's `backboneSize`, its line's own width.
+    pub backbone_size: Option<f64>,
+    /// A lifeline's `lifelineMirror=1`: a foot box as deep as its head ends it.
+    pub lifeline_mirror: bool,
 }
 
 /// The perimeters mxGraph and draw.io register.
@@ -34,9 +40,17 @@ pub enum PerimeterKind {
     Trapezoid,
     Step,
     Hexagon,
+    /// mxGraph's own hexagon, a quarter of its width (or height) to each point.
+    MxHexagon,
     Callout,
     /// The centre itself, where a waypoint's edges meet.
     Center,
+    /// A UML lifeline's dashed line below its head.
+    Lifeline,
+    /// The rectangle, always met straight across.
+    Orthogonal,
+    /// A bus line through the middle, met straight across it.
+    Backbone,
 }
 
 impl Outline {
@@ -48,6 +62,9 @@ impl Outline {
             flip_v: style.flag("flipV", false),
             size: style.get("size").and_then(parse_num),
             fixed_size: style.flag("fixedSize", false),
+            stroke_width: style.num("strokeWidth", 1.0),
+            backbone_size: style.get("backboneSize").and_then(parse_num),
+            lifeline_mirror: style.flag("lifelineMirror", false),
         }
     }
 
@@ -79,7 +96,17 @@ impl Outline {
             PerimeterKind::Trapezoid => trapezoid(bounds, d, size(20.0, 0.2), next, orthogonal),
             PerimeterKind::Step => step(bounds, d, size(20.0, 0.2), next, orthogonal),
             PerimeterKind::Hexagon => hexagon(bounds, d, size(20.0, 0.25), next, orthogonal),
+            PerimeterKind::MxHexagon => {
+                // From a corner's quarter outside it, the line aims at the centre.
+                let x_in = next.x >= bounds.x && next.x <= bounds.right();
+                let y_in = next.y >= bounds.y && next.y <= bounds.bottom();
+                let orthogonal = orthogonal && (x_in || y_in);
+                hexagon(bounds, d, (0.25, false), next, orthogonal)
+            }
             PerimeterKind::Center => Some(c),
+            PerimeterKind::Lifeline => Some(self.lifeline(bounds, next)),
+            PerimeterKind::Orthogonal => Some(rectangle(bounds, next, true)),
+            PerimeterKind::Backbone => Some(self.backbone(bounds, next)),
             PerimeterKind::Callout => {
                 let tail = self.size.unwrap_or(30.0).min(bounds.h).max(0.0);
                 let m = Margins {
@@ -92,15 +119,57 @@ impl Outline {
         };
         met.map(mirror).unwrap_or(c)
     }
+
+    /// Beside a lifeline's line, on the side of `next`, at its height between the head (`size`,
+    /// 40 by default) and the foot (Shapes.js `LifelinePerimeter`).
+    fn lifeline(&self, b: Rect, next: Point) -> Point {
+        let size = self.size.unwrap_or(40.0);
+        let max = if self.lifeline_mirror {
+            b.bottom() - size
+        } else {
+            b.bottom()
+        };
+        let c = b.centre();
+        let side = beside(self.stroke_width / 2.0 - 1.0, next.x < c.x);
+        Point::new(c.x + side, next.y.max(b.y + size).min(max))
+    }
+
+    /// Beside a backbone's line through the middle, across it from `next`, level with `next`
+    /// within its length; a north or south one stands upright (Shapes.js `BackbonePerimeter`).
+    fn backbone(&self, b: Rect, next: Point) -> Point {
+        let mut sw = self.stroke_width / 2.0 - 1.0;
+        if let Some(size) = self.backbone_size {
+            sw += size / 2.0 - 1.0;
+        }
+        let c = b.centre();
+        match self.direction.vertical() {
+            true => Point::new(
+                c.x + beside(sw, next.x < c.x),
+                next.y.max(b.y).min(b.bottom()),
+            ),
+            false => Point::new(
+                next.x.max(b.x).min(b.right()),
+                c.y + beside(sw, next.y < c.y),
+            ),
+        }
+    }
+}
+
+/// How far off a line of half-width `sw + 1` an end meets it: `sw` on the far side, a unit
+/// further on the near side (`before`).
+fn beside(sw: f64, before: bool) -> f64 {
+    if before { -(sw + 1.0) } else { sw }
 }
 
 impl PerimeterKind {
-    /// The perimeter registered under `name` (mxStyleRegistry.js 70-74, Shapes.js 3395-3673),
-    /// the rectangle's for any other.
-    // ponytail: mxGraph's own `hexagonPerimeter` and draw.io's lifeline, orthogonal and backbone
-    // perimeters are met as the rectangle is.
+    /// The perimeter registered under `name` (mxStyleRegistry.js 70-74, Shapes.js 3395-3673,
+    /// 3787-3825, 4054-4089), the rectangle's for any other.
     pub fn named(name: Option<&str>) -> PerimeterKind {
         match name {
+            Some("hexagonPerimeter") => PerimeterKind::MxHexagon,
+            Some("lifelinePerimeter") => PerimeterKind::Lifeline,
+            Some("orthogonalPerimeter") => PerimeterKind::Orthogonal,
+            Some("backbonePerimeter") => PerimeterKind::Backbone,
             Some("ellipsePerimeter") => PerimeterKind::Ellipse,
             Some("rhombusPerimeter") => PerimeterKind::Rhombus,
             Some("trianglePerimeter") => PerimeterKind::Triangle,
@@ -689,5 +758,47 @@ mod tests {
         // A callout is met on its box, above the tail.
         let p = outline(PerimeterKind::Callout).point(r, Point::new(50.0, 200.0), false);
         assert!(near(p, Point::new(50.0, 20.0)), "{p:?}");
+        // mxGraph's hexagon, its points a quarter in: from beyond a corner, even orthogonally,
+        // on the line to the centre, here crossing the side from (0, 25) to (25, 0).
+        let hex = outline(PerimeterKind::MxHexagon);
+        let p = hex.point(r, Point::new(-100.0, -100.0), true);
+        assert!(near(p, Point::new(250.0 / 11.0, 25.0 / 11.0)), "{p:?}");
+        let p = hex.point(r, Point::new(10.0, -100.0), true);
+        assert!(near(p, Point::new(10.0, 15.0)), "straight down: {p:?}");
+    }
+
+    #[test]
+    fn a_lifeline_and_a_backbone_are_met_beside_their_line() {
+        let tall = Rect::new(0.0, 0.0, 100.0, 200.0);
+        let life = Outline {
+            kind: PerimeterKind::Lifeline,
+            stroke_width: 3.0,
+            ..Outline::default()
+        };
+        // A unit and a half off the middle on the left, half a unit on the right; never in
+        // the head, 40 deep by default.
+        let p = life.point(tall, Point::new(-50.0, 10.0), false);
+        assert!(near(p, Point::new(48.5, 40.0)), "{p:?}");
+        let p = life.point(tall, Point::new(300.0, 300.0), false);
+        assert!(near(p, Point::new(50.5, 200.0)), "{p:?}");
+        let mirrored = Outline {
+            lifeline_mirror: true,
+            ..life
+        };
+        let p = mirrored.point(tall, Point::new(300.0, 300.0), false);
+        assert!(near(p, Point::new(50.5, 160.0)), "above the foot: {p:?}");
+        let bus = Outline {
+            kind: PerimeterKind::Backbone,
+            stroke_width: 4.0,
+            ..Outline::default()
+        };
+        let flat = Rect::new(0.0, 0.0, 200.0, 10.0);
+        let p = bus.point(flat, Point::new(50.0, -100.0), false);
+        assert!(near(p, Point::new(50.0, 3.0)), "{p:?}");
+        let p = bus.point(flat, Point::new(300.0, 100.0), false);
+        assert!(near(p, Point::new(200.0, 6.0)), "{p:?}");
+        let ortho = outline(PerimeterKind::Orthogonal);
+        let p = ortho.point(flat, Point::new(30.0, 100.0), false);
+        assert!(near(p, Point::new(30.0, 10.0)), "straight across: {p:?}");
     }
 }

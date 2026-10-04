@@ -249,6 +249,8 @@ fn export(app: &Rc<App>, rel: &str, dir: &Path) {
                 svg.as_ref().map_or(0, |s| s.matches("<image").count())
             );
         }
+        // The tab's formulas and the embed's typeset by one view, which is one web process.
+        println!("bench diagram web_processes={}", web_processes());
         // A click on one, which follows `rel#Two` as a link: onto that page, or a toast.
         app.open_target(&format!("{rel}#Two"));
         glib::timeout_future(Duration::from_millis(1000)).await;
@@ -258,6 +260,42 @@ fn export(app: &Rc<App>, rel: &str, dir: &Path) {
         println!("bench diagram follow #Nope said={said:?}");
         bench_quit(&app);
     });
+}
+
+/// How many WebKit web processes this one has started, a sandbox between or not: read off
+/// `/proc`, signalling nothing.
+fn web_processes() -> usize {
+    let mut procs: HashMap<u32, (u32, String)> = HashMap::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse().ok()) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        // `pid (comm) state ppid …`, the name in brackets that may hold spaces.
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+            continue;
+        };
+        let ppid = stat[close + 1..].split_whitespace().nth(1);
+        if let Some(ppid) = ppid.and_then(|p| p.parse().ok()) {
+            procs.insert(pid, (ppid, stat[open + 1..close].to_string()));
+        }
+    }
+    let me = std::process::id();
+    let ours = |mut pid: u32| {
+        while let Some(&(parent, _)) = procs.get(&pid) {
+            if parent == me {
+                return true;
+            }
+            pid = parent;
+        }
+        false
+    };
+    procs
+        .iter()
+        .filter(|(pid, (_, name))| name.starts_with("WebKitWebProces") && ours(**pid))
+        .count()
 }
 
 /// What an export wrote: a PDF's page sizes in points, a picture's size and its commonest pixel,

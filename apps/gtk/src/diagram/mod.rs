@@ -178,7 +178,7 @@ pub fn open(
         on_toast: RefCell::new(None),
     });
     if has_math {
-        tab.view.set_typesetter(math::Typesetter::new(&tab.overlay));
+        tab.view.set_typesetter(math::shared());
     }
     let zoom = place.zoom.map_or(Zoom::Fit, Zoom::Scale);
     tab.view.restore(zoom, (place.x, place.y));

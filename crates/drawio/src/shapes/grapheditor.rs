@@ -6,8 +6,8 @@ use super::{
     Direction, Fill, LINE_ARCSIZE, Margins, Part, Pen, RECTANGLE_ROUNDING_FACTOR, add_points,
     polygon, polyline, quarter, rect,
 };
-use crate::geom::{PathCmd, Point, Rect};
-use crate::scene::Cap;
+use crate::geom::{PathCmd, Point, Rect, relative_ccw};
+use crate::scene::{Cap, Join};
 use crate::style::Resolved;
 
 /// `mxConstants.ARROW_SIZE`: a flex arrow's head is `ARROW_SIZE / 5 · 3` long by default.
@@ -17,15 +17,14 @@ const ARROW_SIZE: f64 = 30.0;
 ///
 /// `mxArrowConnector.paintEdgeShape` (mxArrowConnector.js 124-417) with `FlexArrowShape`'s
 /// widths (Shapes.js 3990-4018): the band's outbound side is walked first, then its inbound side
-/// back, each waypoint's corner on the mitre of the two segments.
-// ponytail: `rounded=1` joins (quads at each bend) and `curved=1` (a fine polyline from
-// `getCurvePoints`, trimmed for the heads) are drawn straight and mitred. The JS also lowers
-// the miter limit to 1.42 on bent arrows and restrokes the heads at 4; `Part` has no miter
-// limit, so the scene's own applies.
+/// back, each waypoint's corner on the mitre of the two segments, or with `rounded=1` bent round
+/// it by a quad on the outer side. `curved=1` walks a fine polyline along the curved line
+/// instead, cut where the heads begin. A bent band is mitred at most 1.42 times its stroke and
+/// its heads stroked again at 4, as the JS does.
 pub fn flex_arrow(points: &[Point], style: &Resolved, stroke_width: f64) -> Vec<Part> {
-    let (Some(&p0), Some(&p1), Some(&pe)) = (points.first(), points.get(1), points.last()) else {
+    if points.len() < 2 {
         return Vec::new();
-    };
+    }
     let edge_width = style.num("width", 10.0) + (stroke_width - 1.0).max(0.0);
     let start_width = edge_width + style.num("startWidth", 20.0) + stroke_width;
     let end_width = edge_width + style.num("endWidth", 20.0) + stroke_width;
@@ -37,16 +36,32 @@ pub fn flex_arrow(points: &[Point], style: &Resolved, stroke_width: f64) -> Vec<
     let start_size = style.num("startSize", ARROW_SIZE / 5.0) * 3.0 + stroke_width;
     let end_size = style.num("endSize", ARROW_SIZE / 5.0) * 3.0 + stroke_width;
 
+    let curved = style.flag("curved", false) && points.len() > 2;
+    // Rounded joins would overshoot the fine polyline's short segments.
+    let rounded = !curved && style.flag("rounded", false);
+    let mut pts = points.to_vec();
+    if curved {
+        pts = curve_points(&pts);
+        if marker_start {
+            pts = trim_curve(&pts, spacing + start_size, true);
+        }
+        if marker_end {
+            pts = trim_curve(&pts, spacing + end_size, false);
+        }
+    }
+    let (p0, p1, pe) = (pts[0], pts[1], pts[pts.len() - 1]);
+
     let (dx, dy) = (p1.x - p0.x, p1.y - p0.y);
     let dist = dx.hypot(dy);
     if dist == 0.0 {
         return Vec::new();
     }
     let (mut nx, mut ny) = (dx / dist, dy / dist);
+    let (start_nx, start_ny) = (nx, ny);
     let (mut nx1, mut ny1) = (nx, ny);
     let (orthx, orthy) = (edge_width * ny, -edge_width * nx);
     let mut path = Vec::new();
-    // The inbound side's corners, drawn in reverse once the far end is reached.
+    // The inbound side, drawn in reverse once the far end is reached.
     let mut inbound = Vec::new();
 
     if marker_start {
@@ -66,7 +81,9 @@ pub fn flex_arrow(points: &[Point], style: &Resolved, stroke_width: f64) -> Vec<
         path.push(PathCmd::LineTo(out_start));
     }
 
-    for w in points.windows(3) {
+    for w in pts.windows(3) {
+        // Which way the line bends here.
+        let pos = relative_ccw(w[0], w[1], w[2]);
         let (dx1, dy1) = (w[2].x - w[1].x, w[2].y - w[1].y);
         let dist1 = dx1.hypot(dy1);
         if dist1 == 0.0 {
@@ -74,19 +91,47 @@ pub fn flex_arrow(points: &[Point], style: &Resolved, stroke_width: f64) -> Vec<
         }
         (nx1, ny1) = (dx1 / dist1, dy1 / dist1);
         // The cosine of half the bend: how much further out than half the width the mitre lies.
-        let angle_factor = ((nx * nx1 + ny * ny1 + 1.0) / 2.0).sqrt().max(0.06);
+        let tmp = ((nx * nx1 + ny * ny1 + 1.0) / 2.0).sqrt().max(0.04);
         let (nx2, ny2) = (nx + nx1, ny + ny1);
         let dist2 = nx2.hypot(ny2);
         if dist2 == 0.0 {
             continue;
         }
         let (nx2, ny2) = (nx2 / dist2, ny2 / dist2);
+        // Wider strokes need a wider minimum bend.
+        let width_factor = tmp.max((stroke_width / 200.0 + 0.04).min(0.35));
+        let angle_factor = match pos != 0 && rounded {
+            true => width_factor.max(0.1),
+            false => tmp.max(0.06),
+        };
         let d = edge_width / 2.0 / angle_factor;
-        path.push(PathCmd::LineTo(Point::new(
-            w[1].x + ny2 * d,
-            w[1].y - nx2 * d,
-        )));
-        inbound.push(Point::new(w[1].x - ny2 * d, w[1].y + nx2 * d));
+        let out = Point::new(w[1].x + ny2 * d, w[1].y - nx2 * d);
+        let inn = Point::new(w[1].x - ny2 * d, w[1].y + nx2 * d);
+        // Where the band's sides along either segment meet the bend's inner corner `from`,
+        // offset across by the width.
+        let side = |from: Point, (sx, sy): (f64, f64), sign: f64| {
+            Point::new(
+                from.x + sign * sy * edge_width,
+                from.y - sign * sx * edge_width,
+            )
+        };
+        match (rounded, pos) {
+            (true, -1) => {
+                path.push(PathCmd::LineTo(side(inn, (nx, ny), 1.0)));
+                path.push(PathCmd::QuadTo(out, side(inn, (nx1, ny1), 1.0)));
+                inbound.push(PathCmd::LineTo(inn));
+            }
+            (true, 1) => {
+                path.push(PathCmd::LineTo(out));
+                // Pushed in the order they are walked back.
+                inbound.push(PathCmd::QuadTo(inn, side(out, (nx, ny), -1.0)));
+                inbound.push(PathCmd::LineTo(side(out, (nx1, ny1), -1.0)));
+            }
+            _ => {
+                path.push(PathCmd::LineTo(out));
+                inbound.push(PathCmd::LineTo(inn));
+            }
+        }
         (nx, ny) = (nx1, ny1);
     }
 
@@ -104,9 +149,116 @@ pub fn flex_arrow(points: &[Point], style: &Resolved, stroke_width: f64) -> Vec<
             pe.y - spacing * ny1 - orthy / 2.0,
         )));
     }
-    path.extend(inbound.into_iter().rev().map(PathCmd::LineTo));
+    path.extend(inbound.into_iter().rev());
     path.push(PathCmd::Close);
-    vec![Part::body(path)]
+
+    let bent = pts.len() > 2;
+    let join = match (rounded, bent) {
+        (true, _) => Join::Round,
+        (false, true) => Join::Miter(1.42),
+        (false, false) => Join::default(),
+    };
+    let mut parts = vec![Part::body(path).with(Pen {
+        join,
+        ..Pen::default()
+    })];
+    if bent {
+        // The heads again, the low mitre limit lifted from their points.
+        let pen = Pen {
+            join: Join::Miter(4.0),
+            ..Pen::default()
+        };
+        let mut restroke = |head: [Point; 5]| {
+            parts.push(Part::line(polyline(&head)).with(pen));
+        };
+        if marker_start {
+            let n = (start_nx, start_ny);
+            restroke(arrow_head(
+                p0,
+                n,
+                spacing,
+                start_size,
+                edge_width,
+                start_width,
+            ));
+        }
+        if marker_end {
+            restroke(arrow_head(
+                pe,
+                (-nx, -ny),
+                spacing,
+                end_size,
+                edge_width,
+                end_width,
+            ));
+        }
+    }
+    parts
+}
+
+/// A fine polyline along the curved line through `pts` (`mxPolyline.paintCurvedLine`'s quads),
+/// each quad in 4 to 64 steps of about 8 units (`mxArrowConnector.getCurvePoints`).
+fn curve_points(pts: &[Point]) -> Vec<Point> {
+    let n = pts.len();
+    let mut result = vec![pts[0]];
+    let mut p0 = pts[0];
+    for i in 1..n - 1 {
+        let pc = pts[i];
+        let pe = match i < n - 2 {
+            true => Point::new(
+                (pts[i].x + pts[i + 1].x) / 2.0,
+                (pts[i].y + pts[i + 1].y) / 2.0,
+            ),
+            false => pts[i + 1],
+        };
+        let len = p0.distance(pc) + pc.distance(pe);
+        let steps = (len / 8.0).ceil().clamp(4.0, 64.0) as usize;
+        for j in 1..=steps {
+            let u = j as f64 / steps as f64;
+            let iu = 1.0 - u;
+            result.push(Point::new(
+                iu * iu * p0.x + 2.0 * iu * u * pc.x + u * u * pe.x,
+                iu * iu * p0.y + 2.0 * iu * u * pc.y + u * u * pe.y,
+            ));
+        }
+        p0 = pe;
+    }
+    result
+}
+
+/// `pts` with the part within `dist` of the first (`source`) or last end replaced by the chord
+/// from the end to where the curve leaves that circle, which the head is drawn along
+/// (`mxArrowConnector.trimCurveForMarker`). As it was if the curve is shorter.
+fn trim_curve(pts: &[Point], dist: f64, source: bool) -> Vec<Point> {
+    let n = pts.len();
+    let pc = if source { pts[0] } else { pts[n - 1] };
+    // Between the outer point `p0` and the inner `p1`, `dist` from the end.
+    let cut = |p0: Point, p1: Point| {
+        let (dx, dy) = (p1.x - p0.x, p1.y - p0.y);
+        let (fx, fy) = (p0.x - pc.x, p0.y - pc.y);
+        let a = dx * dx + dy * dy;
+        let b = 2.0 * (fx * dx + fy * dy);
+        let c = fx * fx + fy * fy - dist * dist;
+        let disc = b * b - 4.0 * a * c;
+        if a == 0.0 || disc < 0.0 {
+            return p0;
+        }
+        let t = ((-b - disc.sqrt()) / (2.0 * a)).clamp(0.0, 1.0);
+        Point::new(p0.x + t * dx, p0.y + t * dy)
+    };
+    let beyond = |p: Point| p.distance(pc) >= dist;
+    if source {
+        if let Some(i) = (1..n - 1).find(|&i| beyond(pts[i])) {
+            let mut result = vec![pc, cut(pts[i], pts[i - 1])];
+            result.extend_from_slice(&pts[i..]);
+            return result;
+        }
+    } else if let Some(i) = (1..n - 1).rev().find(|&i| beyond(pts[i])) {
+        let mut result = pts[..=i].to_vec();
+        result.extend([cut(pts[i], pts[i + 1]), pc]);
+        return result;
+    }
+    pts.to_vec()
 }
 
 /// A flex arrow's head at `pt`, `n` pointing from `pt` into the band
@@ -919,7 +1071,12 @@ mod tests {
             Point::new(100.0, 0.0),
             Point::new(100.0, 100.0),
         ];
-        let path = &flex_arrow(&bent, &style("shape=flexArrow;endArrow=none;", true), 1.0)[0].path;
+        let sharp = flex_arrow(
+            &bent,
+            &style("shape=flexArrow;endArrow=none;rounded=0;", true),
+            1.0,
+        );
+        let path = &sharp[0].path;
         let on_path = |q: Point| {
             path.iter()
                 .any(|c| matches!(c, PathCmd::LineTo(p) if near(*p, q)))
@@ -928,6 +1085,43 @@ mod tests {
             on_path(Point::new(95.0, 5.0)) && on_path(Point::new(105.0, -5.0)),
             "both sides meet on the mitre: {path:?}"
         );
+        assert_eq!(
+            sharp[0].pen.join,
+            Join::Miter(1.42),
+            "bent, it is mitred close"
+        );
+        // Rounded, an edge's default, the outer side bends round the corner by a quad, from
+        // the inner corner's offsets along either segment.
+        let round = flex_arrow(&bent, &style("shape=flexArrow;endArrow=none;", true), 1.0);
+        let bend = round[0].path.iter().any(|c| {
+            matches!(c, PathCmd::QuadTo(c, p)
+                if near(*c, Point::new(105.0, -5.0)) && near(*p, Point::new(105.0, 5.0)))
+        });
+        assert!(bend, "{:?}", round[0].path);
+        assert_eq!(round[0].pen.join, Join::Round);
+        // With its head, bent, the head is stroked again at the usual mitre.
+        let headed = flex_arrow(&bent, &style("shape=flexArrow;", true), 1.0);
+        assert_eq!(headed.len(), 2);
+        assert!(headed[1].fill == Fill::None && headed[1].pen.join == Join::Miter(4.0));
+    }
+
+    #[test]
+    fn a_curved_flex_arrow_is_cut_where_its_heads_begin() {
+        let p = Point::new;
+        let line = [p(0.0, 0.0), p(10.0, 0.0), p(20.0, 0.0), p(30.0, 0.0)];
+        // The last point at least 15 from the end stays; the curve goes on to 15 from it.
+        assert_eq!(
+            trim_curve(&line, 15.0, false),
+            [p(0.0, 0.0), p(10.0, 0.0), p(15.0, 0.0), p(30.0, 0.0)]
+        );
+        assert_eq!(
+            trim_curve(&line, 15.0, true),
+            [p(0.0, 0.0), p(15.0, 0.0), p(20.0, 0.0), p(30.0, 0.0)]
+        );
+        // Each quad of the curved line in steps of about 8, at least 4.
+        let curve = curve_points(&[p(0.0, 0.0), p(40.0, 0.0), p(40.0, 40.0)]);
+        assert_eq!(curve.len(), 1 + 10);
+        assert_eq!(curve.last(), Some(&p(40.0, 40.0)));
     }
 
     fn corners(path: &[PathCmd]) -> Vec<Point> {

@@ -139,6 +139,26 @@ pub fn bounds_of(points: impl IntoIterator<Item = Point>) -> Option<Rect> {
     Some(Rect::from_corners(lo, hi))
 }
 
+/// Which side of the line from `a` to `b` point `p` is on (`mxUtils.relativeCcw`).
+pub(crate) fn relative_ccw(a: Point, b: Point, p: Point) -> i32 {
+    let (x2, y2) = (b.x - a.x, b.y - a.y);
+    let (mut px, mut py) = (p.x - a.x, p.y - a.y);
+    let mut ccw = px * y2 - py * x2;
+    if ccw == 0.0 {
+        ccw = px * x2 + py * y2;
+        if ccw > 0.0 {
+            px -= x2;
+            py -= y2;
+            ccw = (px * x2 + py * y2).max(0.0);
+        }
+    }
+    match ccw {
+        c if c < 0.0 => -1,
+        c if c > 0.0 => 1,
+        _ => 0,
+    }
+}
+
 /// How far `p` is from the segment `a`–`b`.
 pub fn distance_to_segment(p: Point, a: Point, b: Point) -> f64 {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
