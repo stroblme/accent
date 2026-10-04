@@ -730,6 +730,79 @@ pub(super) fn bench_git_scroll(app: &Rc<App>) {
     });
 }
 
+/// Where the keyboard goes when a Commit leaves nothing to commit and its button goes with the
+/// box: a message typed into the box and Commit clicked through XTEST. Point it at a repository
+/// with one change and nothing else, and a history long enough to scroll; it commits there.
+/// Prints whether the box is still shown, and whether the keyboard is on the row of the commit
+/// HEAD is now on (`on_head=true`), which the history scrolled to (`shown=true`).
+pub(super) fn bench_git_commit_focus(app: &Rc<App>) {
+    app.show_pane("git");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let Some(git) = app.git.get() else {
+            return bench_quit(&app);
+        };
+        app.show_pane("git");
+        let history = git.divider().end_child();
+        let scroller = history
+            .as_ref()
+            .and_then(|w| find_widget(w, &|w| w.is::<gtk::ScrolledWindow>()))
+            .and_downcast::<gtk::ScrolledWindow>();
+        let pane = git.divider().clone().upcast::<gtk::Widget>();
+        let pane = pane.parent().unwrap_or(pane);
+        let message = find_widget(&pane, &|w| {
+            w.is::<gtk::TextView>() && w.has_css_class("card")
+        });
+        let button = find_widget(&pane, &|w| {
+            w.downcast_ref::<gtk::Button>()
+                .is_some_and(|b| b.label().as_deref() == Some("Commit"))
+        });
+        let (Some(history), Some(scroller), Some(message), Some(button)) = (
+            history,
+            scroller,
+            message.and_downcast::<gtk::TextView>(),
+            button,
+        ) else {
+            println!("bench git_commit_focus none");
+            return bench_quit(&app);
+        };
+        scrolled_rows(&history, &scroller, "commit").await;
+        message.buffer().set_text("bench git_commit_focus");
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let (dx, dy) = app.window.surface_transform();
+        let at = button
+            .compute_point(&app.window, &graphene::Point::new(10.0, 10.0))
+            .map(|p| format!("{} {}", p.x() as f64 + dx, p.y() as f64 + dy))
+            .unwrap_or_default();
+        xtest(&format!("move {at}; focus; down; up")).await;
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "--short=7", "HEAD"])
+            .current_dir(app.root())
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default();
+        let row = gtk::prelude::GtkWindowExt::focus(&app.window)
+            .filter(|f| f.is_ancestor(&history))
+            .and_then(|f| f.first_child());
+        let tip = row
+            .as_ref()
+            .and_then(|r| r.tooltip_text())
+            .unwrap_or_default();
+        let shown = row.is_some_and(|r| {
+            r.compute_point(&scroller, &graphene::Point::new(0.0, 0.0))
+                .is_some_and(|p| p.y() >= 0.0 && p.y() < scroller.height() as f32)
+        });
+        println!(
+            "bench git_commit_focus box={} on_head={} shown={shown}",
+            button.is_visible(),
+            !head.is_empty() && tip.contains(&head)
+        );
+        bench_quit(&app);
+    });
+}
+
 /// Scroll `list` half way down, and the rows of `kind` it then shows ([`rows_on_screen`]).
 async fn scrolled_rows(
     list: &gtk::Widget,

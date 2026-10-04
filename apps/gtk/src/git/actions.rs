@@ -202,7 +202,10 @@ impl Panel {
                     .git_commit(repo, &message, all)
                     .map(|id| format!("Committed {id}"))
             },
-            |panel| panel.message.buffer().set_text(""),
+            |panel| {
+                panel.to_head.set(panel.commit.has_focus());
+                panel.message.buffer().set_text("");
+            },
         );
     }
 

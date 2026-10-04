@@ -299,6 +299,17 @@ impl Bar {
     pub fn zoom(&self) -> &gtk::Widget {
         self.zoom.upcast_ref()
     }
+
+    /// Whether a menu hung off one of the bar's controls is up.
+    pub fn menu_open(&self) -> bool {
+        holds_popover(&self.row)
+    }
+}
+
+/// Whether a popover parented anywhere under `widget` is showing.
+fn holds_popover(widget: &impl IsA<gtk::Widget>) -> bool {
+    std::iter::successors(widget.first_child(), |w| w.next_sibling())
+        .any(|w| (w.is::<gtk::Popover>() && w.is_visible()) || holds_popover(&w))
 }
 
 /// A readout that is also a control: flat and label-only, so it reads as the rest of the bar

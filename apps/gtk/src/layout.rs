@@ -332,24 +332,37 @@ impl App {
     /// While presenting, the status bar shows for as long as the pointer is over the strip at the
     /// bottom of the editor column where it sits, and goes again when it leaves. `at` is the
     /// pointer in the window's coordinates, `None` once it has left the window.
+    ///
+    /// A menu opened from the bar keeps it, wherever the pointer goes to pick from it: the menu
+    /// is the bar's, and goes with it. Opening one takes the pointer, which the window hears as
+    /// the pointer leaving it.
     pub fn hover_status(&self, at: Option<(f64, f64)>) {
         if self.presenting.get().is_none() {
             return;
         }
         let bar = self.statusbar.widget();
         let (_, height, _, _) = bar.measure(gtk::Orientation::Vertical, self.toolbar.width());
-        let over = at
-            .and_then(|(x, y)| {
-                let point = graphene::Point::new(x as f32, y as f32);
-                self.window.compute_point(&self.toolbar, &point)
-            })
-            .is_some_and(|p| {
-                let (x, y) = (f64::from(p.x()), f64::from(p.y()));
-                self.toolbar.contains(x, y) && y >= f64::from(self.toolbar.height() - height)
-            });
+        let over = self.statusbar.menu_open()
+            || at
+                .and_then(|(x, y)| {
+                    let point = graphene::Point::new(x as f32, y as f32);
+                    self.window.compute_point(&self.toolbar, &point)
+                })
+                .is_some_and(|p| {
+                    let (x, y) = (f64::from(p.x()), f64::from(p.y()));
+                    self.toolbar.contains(x, y) && y >= f64::from(self.toolbar.height() - height)
+                });
         self.toolbar.set_reveal_bottom_bars(over);
         // The toasts are part of the document the bar comes up over, so they go up with it.
         self.lift_toasts(over.then_some(height));
+    }
+
+    /// The pointer in the window's coordinates, `None` while it is off the window.
+    pub fn pointer(&self) -> Option<(f64, f64)> {
+        let pointer = WidgetExt::display(&self.window).default_seat()?.pointer()?;
+        let (x, y, _) = self.window.surface()?.device_position(&pointer)?;
+        let (dx, dy) = self.window.surface_transform();
+        Some((x - dx, y - dy))
     }
 
     /// Lift the toasts by `by` pixels, the status bar's height while it shows over a presented

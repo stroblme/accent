@@ -577,6 +577,10 @@ impl Shell {
             },
             on_forget,
         );
+        #[cfg(feature = "bench")]
+        if std::env::var("ACCENT_BENCH_START").is_ok() {
+            crate::bench::bench_start(&window);
+        }
         self.start.set(Some(&window));
     }
 

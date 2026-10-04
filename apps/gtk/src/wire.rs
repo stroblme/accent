@@ -393,8 +393,7 @@ pub fn wire_window(app: &Rc<App>) {
                 for action in pdftab::PAGE_ACTIONS {
                     menu.append(Some(label_of(action)), Some(action));
                 }
-                crate::widgets::popup_menu(button, &menu, None)
-                    .set_position(gtk::PositionType::Top);
+                bar_menu(&app, button, &menu);
                 return;
             }
             let Some(tab) = app.active() else {
@@ -427,8 +426,7 @@ pub fn wire_window(app: &Rc<App>) {
             for action in ["win.pdf-fit-width", "win.pdf-fit-page"] {
                 menu.append(Some(label_of(action)), Some(action));
             }
-            crate::widgets::popup_menu(app.statusbar.zoom(), &menu, None)
-                .set_position(gtk::PositionType::Top);
+            bar_menu(&app, app.statusbar.zoom(), &menu);
         }
     ));
     app.statusbar.zoom().add_controller(fit);
@@ -790,6 +788,19 @@ pub fn dismiss(app: &App) -> bool {
         }
         None => false,
     }
+}
+
+/// A menu off one of the status bar's controls, opening upwards, the bar being the window's
+/// bottom edge. Over a presented document the bar stays up under it, and once it closes the
+/// pointer says again whether the bar stays (`App::hover_status`).
+fn bar_menu(app: &Rc<App>, host: &impl IsA<gtk::Widget>, menu: &gio::Menu) {
+    let popover = crate::widgets::popup_menu(host, menu, None);
+    popover.set_position(gtk::PositionType::Top);
+    popover.connect_closed(glib::clone!(
+        #[weak]
+        app,
+        move |_| app.hover_status(app.pointer())
+    ));
 }
 
 /// Right-click and Menu open the file-operations menu; Delete trashes. A key controller on the

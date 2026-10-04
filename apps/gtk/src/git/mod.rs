@@ -223,8 +223,8 @@ pub struct Panel {
     divider: gtk::Paned,
     changes: gio::ListStore,
     log: gio::ListStore,
-    /// The history list, so the bench can activate a row without a pointer.
-    #[cfg(feature = "bench")]
+    /// The history list, which Commit hands the keyboard to ([`Panel::focus_head`]), and whose
+    /// rows the bench activates without a pointer.
     log_view: gtk::ListView,
     /// Whether git has history the store does not hold, which is what puts the Load More row at
     /// the end of the log. Also the re-entrancy guard: it is cleared while a page is in flight.
@@ -299,6 +299,9 @@ pub struct Panel {
     /// A press is down over the changes list, so its rows are held where they are until the
     /// release (see [`Panel::rebuild_changes`]).
     pressed: Rc<Cell<bool>>,
+    /// A commit went in from the Commit button while it held the keyboard, which goes to the
+    /// commit once the history holds it ([`Panel::focus_head`]).
+    to_head: Cell<bool>,
     /// The two lists' fills under way, if any.
     changes_fill: Fill,
     log_fill: Fill,
@@ -413,6 +416,7 @@ impl Panel {
             tree: Cell::new(hooks.tree),
             collapsed: RefCell::new(HashSet::new()),
             pressed: Rc::default(),
+            to_head: Cell::new(false),
             changes_fill: Fill::default(),
             log_fill: Fill::default(),
             hooks,
@@ -435,7 +439,6 @@ impl Panel {
             divider,
             changes,
             log,
-            #[cfg(feature = "bench")]
             log_view: log_view.clone(),
             has_more: Cell::new(false),
             state: RefCell::new(State::default()),

@@ -222,6 +222,34 @@ impl Panel {
         });
     }
 
+    /// Put the keyboard on the history's row of the commit HEAD is on, or on its top row where
+    /// that is not listed, scrolled to: where a commit made from the Commit button leaves it. The
+    /// button goes insensitive with the message it took, and hidden where nothing is left to
+    /// commit, and the window would be left with nothing focused. From an idle, once the rows the
+    /// refresh landing now spliced in have widgets.
+    pub(super) fn focus_head(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            let Some(panel) = weak.upgrade() else {
+                return;
+            };
+            let head = {
+                let state = panel.state.borrow();
+                let status = state.statuses.get(state.selected);
+                status.and_then(|s| s.branch.oid.clone())
+            };
+            let at = head.and_then(|oid| panel.row_of_commit(&oid)).unwrap_or(0);
+            // `FOCUS` moves the list's own focus to the row, which the keyboard follows only
+            // into a list that has it already.
+            if at < panel.log.n_items() {
+                panel
+                    .log_view
+                    .scroll_to(at, gtk::ListScrollFlags::FOCUS, None);
+                panel.log_view.grab_focus();
+            }
+        });
+    }
+
     /// Where a commit sits in the log store, or `None` if it has since been spliced away.
     fn row_of_commit(&self, oid: &str) -> Option<u32> {
         (0..self.log.n_items()).find(|i| {
