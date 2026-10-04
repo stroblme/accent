@@ -496,6 +496,8 @@ impl<'a> Builder<'a> {
             style: &style,
             source: self.terminal(cell.source.as_deref()),
             target: self.terminal(cell.target.as_deref()),
+            source_port: self.terminal(style.get("sourcePort")),
+            target_port: self.terminal(style.get("targetPort")),
             source_point: g.source_point.map(at),
             target_point: g.target_point.map(at),
             waypoints: &waypoints,

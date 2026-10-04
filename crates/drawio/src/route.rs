@@ -25,21 +25,69 @@ pub struct Terminal {
     pub outline: Outline,
     /// The terminal's own `perimeterSpacing`.
     pub perimeter_spacing: f64,
+    /// `routingCenterX`/`routingCenterY`: how far off the centre the edge styles route from, in
+    /// shares of the width and height.
+    pub routing: Point,
+    /// The sides its `portConstraint` lets an edge leave by, as [`directions`] reads them; `None`
+    /// leaves it to the edge.
+    pub port_constraint: Option<u32>,
+    /// The rotation a side constraint turns with, `portConstraintRotation=1`'s, else 0.
+    pub port_rotation: f64,
 }
 
 impl Terminal {
-    /// Vertex `cell` of `page` as an edge end; `None` for an edge, a layer or a cell placed
-    /// relative to its parent.
+    /// Vertex `cell` of `page` as an edge end, a port on another vertex included; `None` for an
+    /// edge, a layer or a cell placed on an edge.
     pub(crate) fn of(page: &Page, cell: &Cell) -> Option<Terminal> {
-        let bounds = page.absolute_rect(&cell.id)?;
+        let bounds = page
+            .absolute_rect(&cell.id)
+            .or_else(|| port_rect(page, cell))?;
         let style = cell.style.resolve(false);
+        let rotation = style.num("rotation", 0.0);
         Some(Terminal {
             bounds,
-            rotation: style.num("rotation", 0.0),
+            rotation,
             outline: Outline::of(&style),
             perimeter_spacing: style.num("perimeterSpacing", 0.0),
+            routing: Point::new(
+                style.num("routingCenterX", 0.0),
+                style.num("routingCenterY", 0.0),
+            ),
+            port_constraint: style.get("portConstraint").map(directions),
+            port_rotation: match style.flag("portConstraintRotation", false) {
+                true => rotation,
+                false => 0.0,
+            },
         })
     }
+
+    /// Where the edge styles route from in `bounds`, the terminal's own or a rounded copy: the
+    /// centre moved by its `routing` shares.
+    // mxGraphView.getRoutingCenterX/Y, mxGraphView.js 1984-2001
+    fn routing_centre(&self, bounds: Rect) -> Point {
+        let c = bounds.centre();
+        Point::new(
+            c.x + self.routing.x * bounds.w,
+            c.y + self.routing.y * bounds.h,
+        )
+    }
+}
+
+/// A vertex placed relative to the vertex it sits on, as a port is: a share of its parent's size
+/// in, then its offset (`mxGraphView.updateVertexState`).
+fn port_rect(page: &Page, cell: &Cell) -> Option<Rect> {
+    let g = cell
+        .geometry
+        .as_ref()
+        .filter(|g| cell.vertex && g.relative)?;
+    let parent = page.absolute_rect(cell.parent.as_deref()?)?;
+    let o = g.offset.unwrap_or_default();
+    Some(Rect::new(
+        parent.x + g.x * parent.w + o.x,
+        parent.y + g.y * parent.h + o.y,
+        g.width,
+        g.height,
+    ))
 }
 
 /// Everything routing one edge needs, in absolute page coordinates.
@@ -49,6 +97,10 @@ pub struct EdgeInput<'a> {
     pub style: &'a Resolved,
     pub source: Option<Terminal>,
     pub target: Option<Terminal>,
+    /// The cells `sourcePort` and `targetPort` name, which the edge style and the floating ends
+    /// route from in their terminals' place (`mxGraphView.getTerminalPort`).
+    pub source_port: Option<Terminal>,
+    pub target_port: Option<Terminal>,
     /// Where a dangling end is (the geometry's `sourcePoint`/`targetPoint`).
     pub source_point: Option<Point>,
     pub target_point: Option<Point>,
@@ -342,11 +394,10 @@ fn is_orthogonal(style: &Resolved) -> bool {
 // mxGraphView.updatePoints, mxGraphView.js 1414-1467
 fn update_points(input: &EdgeInput, state: &State) -> Vec<Option<Point>> {
     let mut pts = vec![state.p0];
-    // ponytail: `sourcePort`/`targetPort` (getTerminalPort) are not followed, and fixed-aspect
-    // stencil bounds (updateBoundsFromStencil) are not routed around.
+    // ponytail: fixed-aspect stencil bounds (updateBoundsFromStencil) are not routed around.
     let (src, trg, points) = (
-        input.source.as_ref(),
-        input.target.as_ref(),
+        input.source_port.as_ref().or(input.source.as_ref()),
+        input.target_port.as_ref().or(input.target.as_ref()),
         input.waypoints,
     );
     match get_edge_style(input) {
@@ -371,19 +422,21 @@ fn update_floating_terminal_points(input: &EdgeInput, pts: &mut [Option<Point>])
     if pts[last].is_none()
         && let Some(target) = &input.target
     {
-        let p = floating_terminal_point(input, target, input.source.as_ref(), false, pts);
+        let start = input.target_port.as_ref().unwrap_or(target);
+        let p = floating_terminal_point(input, start, input.source.as_ref(), false, pts);
         pts[last] = Some(p);
     }
     if pts[0].is_none()
         && let Some(source) = &input.source
     {
-        let p = floating_terminal_point(input, source, input.target.as_ref(), true, pts);
+        let start = input.source_port.as_ref().unwrap_or(source);
+        let p = floating_terminal_point(input, start, input.target.as_ref(), true, pts);
         pts[0] = Some(p);
     }
 }
 
-/// A floating end: on the outline of `start` facing the next point, the edge's perimeter spacing
-/// kept free. A turned terminal is met on its turned outline.
+/// A floating end: on the outline of `start`, the terminal or its port, facing the next point,
+/// the edge's perimeter spacing kept free. A turned terminal is met on its turned outline.
 // mxGraphView.getFloatingTerminalPoint, mxGraphView.js 1608-1638
 fn floating_terminal_point(
     input: &EdgeInput,
@@ -463,9 +516,6 @@ fn round_rect(r: Rect) -> Rect {
     )
 }
 
-// ponytail: the edge styles route from their terminals' centres; `routingCenterX`/`routingCenterY`
-// (mxGraphView.getRoutingCenterX/Y, mxGraphView.js 1760-1779) do not move them.
-
 /// A self-loop: out of the source and back in, `segment` (by default the grid size) away from
 /// it on the side `direction` names (the right for the default `west`), or through the first
 /// waypoint.
@@ -482,20 +532,21 @@ fn loop_style(
     }
     let Some(source) = source else { return };
     let s = source.bounds;
+    let centre = source.routing_centre(s);
     let pt = points.first().copied().filter(|p| !s.contains(*p));
     let seg = state.style.num("segment", state.grid_size);
     let dir = state.style.get("direction").unwrap_or("west");
     let (mut x, mut dx, mut y, mut dy) = (0.0, 0.0, 0.0, 0.0);
     if dir == "north" || dir == "south" {
-        x = s.centre().x;
+        x = centre.x;
         dx = seg;
     } else {
-        y = s.centre().y;
+        y = centre.y;
         dy = seg;
     }
     match pt {
         Some(p) if p.x >= s.x && p.x <= s.right() => {
-            x = s.centre().x;
+            x = centre.x;
             dx = (x - p.x).abs().max(dy);
             y = p.y;
             dy = 0.0;
@@ -546,16 +597,18 @@ fn elbow_connector(
     elbow_segment(state, source, target, points, result, vertical);
 }
 
-/// The boxes the elbow styles route between: a fixed end is a point.
+/// The boxes the elbow styles route between, each with the point it is routed from: a fixed
+/// end is a point.
 fn elbow_ends(
     state: &State,
     source: Option<&Terminal>,
     target: Option<&Terminal>,
-) -> Option<(Rect, Rect)> {
-    let at = |p: Point| Rect::new(p.x, p.y, 0.0, 0.0);
-    let s = state.p0.map(at).or(source.map(|t| t.bounds))?;
-    let t = state.pe.map(at).or(target.map(|t| t.bounds))?;
-    Some((s, t))
+) -> Option<((Rect, Point), (Rect, Point))> {
+    let end = |fixed: Option<Point>, t: Option<&Terminal>| match fixed {
+        Some(p) => Some((Rect::new(p.x, p.y, 0.0, 0.0), p)),
+        None => t.map(|t| (t.bounds, t.routing_centre(t.bounds))),
+    };
+    Some((end(state.p0, source)?, end(state.pe, target)?))
 }
 
 /// SideToSide: a vertical segment halfway between the terminals or at the waypoint's x, met
@@ -580,22 +633,23 @@ fn elbow_segment(
         }
     };
     let pt = points.first().copied().map(swap);
-    let Some((s, t)) = elbow_ends(state, source, target) else {
+    let Some(((s, sc), (t, tc))) = elbow_ends(state, source, target) else {
         return;
     };
     let (s, t) = (swap_rect(s), swap_rect(t));
+    let (sc, tc) = (swap(sc), swap(tc));
     let l = s.x.max(t.x);
     let r = s.right().min(t.right());
     let x = match pt {
         Some(p) => p.x,
         None => js_round(r + (l - r) / 2.0),
     };
-    let meet = |b: Rect| match pt {
+    let meet = |b: Rect, centre: Point| match pt {
         Some(p) if p.y >= b.y && p.y <= b.bottom() => p.y,
-        _ => b.centre().y,
+        _ => centre.y,
     };
     let outside = |y: f64| !t.contains(Point::new(x, y)) && !s.contains(Point::new(x, y));
-    for y in [meet(s), meet(t)] {
+    for y in [meet(s, sc), meet(t, tc)] {
         if outside(y) {
             result.push(Some(swap(Point::new(x, y))));
         }
@@ -630,11 +684,12 @@ fn segment_connector(
     let end = state.pe.map(round_point);
     let source = source_scaled.map(|t| round_rect(t.bounds));
     let target = target_scaled.map(|t| round_rect(t.bounds));
+    let routing = |t: Option<&Terminal>, b: Option<Rect>| Some(t?.routing_centre(b?));
     let mut temp_points: Vec<Point> = Vec::new();
     // Whether the first segment outgoing from the source end is horizontal
     let mut horizontal = true;
     // Adds the first point
-    let Some(mut pt) = start.or(source.map(|s| s.centre())) else {
+    let Some(mut pt) = start.or(routing(source_scaled, source)) else {
         return;
     };
     // Without hints the last point lines up with the first along a horizontal.
@@ -736,7 +791,7 @@ fn segment_connector(
     }
 
     // Adds the last point
-    if let Some(pt) = end.or(target.map(|t| t.centre())) {
+    if let Some(pt) = end.or(routing(target_scaled, target)) {
         let enters_target = if horizontal {
             end.is_some_and(|e| e.y != hint.y)
                 || (end.is_none() && target.is_some_and(|t| hint.y < t.y || hint.y > t.bottom()))
@@ -888,6 +943,45 @@ fn get_jetty_size(style: &Resolved, source: bool) -> f64 {
     }
 }
 
+/// The sides named in a port constraint (`north`, `west`, `south`, `east`, as many as it holds).
+fn directions(value: &str) -> u32 {
+    [
+        ("north", NORTH),
+        ("west", WEST),
+        ("south", SOUTH),
+        ("east", EAST),
+    ]
+    .into_iter()
+    .filter(|(name, _)| value.contains(name))
+    .fold(0, |mask, (_, side)| mask | side)
+}
+
+/// The sides an end may leave terminal `t` by: its `portConstraint`, else the edge's
+/// `sourcePortConstraint` or `targetPortConstraint`, turned a quarter at a time with a terminal
+/// that has `portConstraintRotation=1`; every side without either.
+// mxUtils.getPortConstraints, mxUtils.js 3009-3127
+fn port_constraints(t: &Terminal, style: &Resolved, source: bool) -> u32 {
+    let key = match source {
+        true => "sourcePortConstraint",
+        false => "targetPortConstraint",
+    };
+    let Some(mask) = t.port_constraint.or_else(|| style.get(key).map(directions)) else {
+        return ALL;
+    };
+    let r = t.port_rotation;
+    let quad = match () {
+        _ if r >= 135.0 || r <= -135.0 => 2,
+        _ if r > 45.0 => 1,
+        _ if r < -45.0 => 3,
+        _ => 0,
+    };
+    // Clockwise, each side moves `quad` places on.
+    let clockwise = [NORTH, EAST, SOUTH, WEST];
+    (0..4)
+        .filter(|&i| mask & clockwise[i] != 0)
+        .fold(0, |turned, i| turned | clockwise[(i + quad) % 4])
+}
+
 /// `mxUtils.reversePortConstraints`: west and east swapped, north and south swapped.
 fn reverse_port_constraints(constraint: u32) -> u32 {
     ((constraint & WEST) << 3)
@@ -940,9 +1034,10 @@ fn orth_connector(
         return;
     }
 
-    // ponytail: `portConstraint`, `sourcePortConstraint`/`targetPortConstraint` and
-    // `portConstraintRotation` are not read: every side of both ends is allowed.
-    let port_constraint = [ALL, ALL];
+    let port_constraint = [
+        source_scaled.map_or(ALL, |t| port_constraints(t, state.style, true)),
+        target_scaled.map_or(ALL, |t| port_constraints(t, state.style, false)),
+    ];
     if let Some(t) = source_scaled
         && t.rotation != 0.0
     {
@@ -1248,6 +1343,8 @@ mod tests {
             style,
             source: Some(source),
             target: Some(target),
+            source_port: None,
+            target_port: None,
             source_point: None,
             target_point: None,
             waypoints: &[],
@@ -1366,6 +1463,64 @@ mod tests {
             &pts,
             &[(60.0, 40.0), (60.0, 80.0), (240.0, 80.0), (240.0, 100.0)],
         );
+    }
+
+    #[test]
+    fn a_port_constraint_picks_the_side_an_end_leaves_by() {
+        let style = orthogonal();
+        let north = Terminal {
+            port_constraint: Some(NORTH),
+            ..rect(0.0, 0.0)
+        };
+        let pts = route(&input(&style, north, rect(200.0, 100.0)));
+        // Up out of the top, its jetty (`auto`, 20 without a start arrow) above it.
+        assert_points(&pts[..2], &[(40.0, 0.0), (40.0, -20.0)]);
+        // Turned with a shape that is turned a quarter, north is east.
+        let turned = Terminal {
+            port_rotation: 90.0,
+            ..north
+        };
+        assert_eq!(port_constraints(&turned, &style, true), EAST);
+        // The edge's own constraint for the end, where the terminal has none.
+        let style = Style::parse("sourcePortConstraint=south;").resolve(true);
+        assert_eq!(port_constraints(&rect(0.0, 0.0), &style, true), SOUTH);
+    }
+
+    #[test]
+    fn the_elbow_styles_route_from_the_routing_centre() {
+        let style = Style::parse("edgeStyle=sideToSideEdgeStyle;").resolve(true);
+        let high = Terminal {
+            routing: Point::new(0.0, -0.5),
+            ..rect(0.0, 0.0)
+        };
+        let pts = route(&input(&style, high, rect(200.0, 100.0)));
+        assert_points(
+            &pts,
+            &[(80.0, 0.0), (140.0, 0.0), (140.0, 120.0), (200.0, 120.0)],
+        );
+    }
+
+    #[test]
+    fn an_edge_to_a_port_leaves_from_the_port() {
+        let mut page = shape("");
+        let mut port = Cell::new_vertex("p", "a", Rect::new(1.0, 0.5, 20.0, 20.0), "", "");
+        let g = port.geometry.as_mut().unwrap();
+        g.relative = true;
+        g.offset = Some(Point::new(-10.0, -10.0));
+        page.cells.push(port);
+        let r = Rect::new(200.0, 0.0, 80.0, 40.0);
+        page.cells.push(Cell::new_vertex("b", "1", r, "", ""));
+        let ends = |id| (Some(id), Point::default());
+        page.cells.push(Cell::new_edge(
+            "e",
+            "1",
+            ends("a"),
+            ends("b"),
+            "sourcePort=p;",
+        ));
+        let scene = crate::scene(&page);
+        // Out of the port's right side, centred on the right of `a`.
+        assert_points(&scene.route("e").unwrap()[..1], &[(90.0, 20.0)]);
     }
 
     #[test]
