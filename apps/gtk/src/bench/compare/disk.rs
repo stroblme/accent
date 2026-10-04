@@ -157,6 +157,7 @@ pub(in crate::bench) fn bench_compare(app: &Rc<App>, rel: &str) {
                     "bench",
                     ("old", &body),
                     ("new", &new),
+                    false,
                 );
                 app.set_zoom(1.5);
                 glib::timeout_add_local_once(Duration::from_millis(500), move || {
@@ -650,6 +651,7 @@ pub(in crate::bench) fn bench_compare_gap(app: &Rc<App>, rel: &str) {
             "gap",
             ("old", &disk),
             ("new", &edited),
+            false,
         );
         wait(1200).await;
         let compare = diff.comparison();
@@ -763,6 +765,7 @@ pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
             "unfold",
             ("old", &disk),
             ("new", &edited),
+            false,
         );
         let compare = diff.comparison();
         // Until it has gone to its first change: a press before that is kept from moving the

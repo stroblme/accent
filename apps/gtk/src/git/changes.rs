@@ -1,7 +1,7 @@
 //! The changed-files list: the rows one `git status` becomes, and the widgets they are drawn in.
 
-use super::compare::Sides;
 use super::*;
+use accent_api::git::Sides;
 use std::collections::BTreeMap;
 
 /// How far one level of the changes tree is indented, in px. `GtkTreeExpander`'s own step, so a

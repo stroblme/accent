@@ -2,6 +2,7 @@
 //! and restores between runs.
 
 use super::*;
+use accent_api::git::Sides;
 
 /// What the palette lists before the user types anything.
 const RECENT_FILES: usize = 50;
@@ -271,14 +272,8 @@ impl App {
         let stored = self.stored_session();
         let (sidebar, width) = self.sidebar_saved();
         let session = Session {
-            open: self
-                .docs
-                .borrow()
-                .iter()
-                .filter(|d| d.persists())
-                .map(|d| d.key())
-                .collect(),
-            active: self.restorable_active(),
+            open: self.docs.borrow().iter().map(|d| d.key()).collect(),
+            active: self.active_key(),
             layout: self.layout(),
             // Neither presentation nor a narrow window is session state, so a sidebar either one
             // hid is saved as it was.
@@ -315,7 +310,6 @@ impl App {
                 .borrow()
                 .iter()
                 .filter_map(|page| self.doc_for_page(page))
-                .filter(Doc::persists)
                 .map(|d| d.key())
                 .collect(),
             web_images: {
@@ -323,6 +317,11 @@ impl App {
                 keys.sort();
                 keys
             },
+            compared: self
+                .git
+                .get()
+                .map(|git| git.kept().into_iter().collect())
+                .unwrap_or_default(),
         };
         match self.restored.get() {
             true => session,
@@ -557,21 +556,6 @@ impl App {
         }
     }
 
-    /// The tab a restore comes back on. The one in front, unless that is a comparison: it is not
-    /// restored, and a pane naming none would leave the restore making whichever pane landed last
-    /// the active one. The pane the reader was in names its most recently used tab that *is*
-    /// restored instead, so the window comes back in that pane.
-    pub(crate) fn restorable_active(&self) -> Option<String> {
-        if let Some(doc) = self.active_doc().filter(|d| d.persists()) {
-            return Some(doc.key());
-        }
-        self.pane().recent().iter().find_map(|page| {
-            self.doc_for_page(page)
-                .filter(|doc| doc.persists())
-                .map(|doc| doc.key())
-        })
-    }
-
     /// The panes as the session records them, read off the widget tree, which is the layout.
     /// While presentation mode hides every pane but one, or a split has no size yet, there is no
     /// ratio to read and the stored layout stands.
@@ -589,8 +573,7 @@ impl App {
     }
 
     /// The layout under `widget`: a pane's column, or a `GtkPaned` between two such trees. A pane
-    /// with nothing to put back — comparisons are not — is left out, and the other side of its
-    /// split takes the split's place.
+    /// with no tab is left out, and the other side of its split takes the split's place.
     fn layout_of(&self, widget: &gtk::Widget) -> Result<Option<Layout>, Unsized> {
         if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
             let (Some(start), Some(end)) = (paned.start_child(), paned.end_child()) else {
@@ -622,11 +605,7 @@ impl App {
         else {
             return Ok(None);
         };
-        let key = |page: &adw::TabPage| {
-            self.doc_for_page(page)
-                .filter(|d| d.persists())
-                .map(|d| d.key())
-        };
+        let key = |page: &adw::TabPage| self.doc_for_page(page).map(|d| d.key());
         let tabs: Vec<String> = pane.pages().iter().filter_map(key).collect();
         let selected = pane.tabs.selected_page().as_ref().and_then(key);
         Ok((!tabs.is_empty()).then_some(Layout::Pane { tabs, selected }))
@@ -772,11 +751,37 @@ impl App {
                 restore: restore.clone(),
                 landed: Cell::new(false),
             };
+            let compared = session.compared.get(key).cloned();
+            // A comparison with git in a tab of its own is read from git again. It waits as a
+            // read does, so its pane is kept for it, and taking it out of `awaiting` once it is
+            // open or given up drops `asked`, which puts the panes back.
+            if let Some(what) = compared
+                .clone()
+                .filter(|what| what.sides != Sides::Worktree)
+            {
+                if let Some(git) = self.git.get() {
+                    let waiting = Waiting {
+                        what: None,
+                        run: Box::new(|_, _| {}),
+                    };
+                    self.awaiting.borrow_mut().insert(key.clone(), waiting);
+                    let key = key.clone();
+                    git.restore(what, move || {
+                        if let Some(app) = asked.app.upgrade() {
+                            app.awaiting.borrow_mut().remove(&key);
+                        }
+                    });
+                }
+                continue;
+            }
             // At once rather than from `Asked`'s idle, so nothing a landing moves is painted before
-            // it is put back.
+            // it is put back. A note compared with the index comes back compared.
             self.with_tab(key, Opened::Restored, "restore", move |app, _| {
                 asked.landed.set(true);
-                app.put_back(&asked.restore)
+                app.put_back(&asked.restore);
+                if let (Some(what), Some(git)) = (compared, app.git.get()) {
+                    git.restore(what, || {});
+                }
             });
         }
         // What is still on its way keeps its place; the rest has landed, or failed to open.
@@ -1086,6 +1091,7 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
     stored.pdf.extend(now.pdf);
     stored.diagram.extend(now.diagram);
     stored.terminals.extend(now.terminals);
+    stored.compared.extend(now.compared);
     for key in now.web_images {
         if !stored.web_images.contains(&key) {
             stored.web_images.push(key);

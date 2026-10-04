@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::diff::OnLines;
+use accent_api::git::{Comparison, Sides};
 use accent_core::diff;
 
 impl Panel {
@@ -17,7 +18,7 @@ impl Panel {
                 None => return,
             }
         };
-        let what = What {
+        let what = Comparison {
             repo,
             rel: rel.to_string(),
             key: key.to_string(),
@@ -30,31 +31,73 @@ impl Panel {
         glib::spawn_future_local(async move {
             let read = {
                 let what = what.clone();
-                crate::work::off_thread("git", move || what.read(&vault)).await
+                crate::work::off_thread("git", move || read(&what, &vault)).await
             };
             if panel.asked.get() != asked {
                 return;
             }
             match read {
-                Some(Ok(read)) => panel.show(what, read),
+                Some(Ok(read)) => panel.show(what, read, false),
                 Some(Err(why)) => (panel.hooks.toast)(&why),
                 None => {}
             }
         });
     }
 
-    /// Put a freshly read comparison on screen, and remember it for the refreshes to come.
-    fn show(self: &Rc<Self>, what: What, read: (Blob, Blob)) {
+    /// Open `what` again as a session restore puts it back: into the pane the restore keeps for
+    /// its tab, in front of nothing, and saying nothing where there is nothing left to show. `done`
+    /// runs once it is open or given up.
+    pub fn restore(self: &Rc<Self>, what: Comparison, done: impl FnOnce() + 'static) {
+        let (panel, vault) = (self.clone(), self.hooks.vault.clone());
+        glib::spawn_future_local(async move {
+            let read = {
+                let what = what.clone();
+                crate::work::off_thread("git", move || read(&what, &vault)).await
+            };
+            match read {
+                Some(Ok(read)) => panel.show(what, read, true),
+                Some(Err(why)) => tracing::debug!("{why}"),
+                None => {}
+            }
+            done();
+        });
+    }
+
+    /// The comparisons open, each under the key of the tab showing it: what a session keeps.
+    pub fn kept(&self) -> Vec<(String, Comparison)> {
+        let watches = self.watches.borrow();
+        let tab = |w: &Watch| match &w.target {
+            Target::Tab(compare) => compare.upgrade().map(|_| w.what.key.clone()),
+            Target::Diff(tab) => tab.upgrade().map(|tab| tab.key()),
+        };
+        watches
+            .iter()
+            .filter_map(|w| Some((tab(w)?, w.what.clone())))
+            .collect()
+    }
+
+    /// Put a freshly read comparison on screen, and remember it for the refreshes to come and
+    /// for the session. A `restored` one says nothing where it shows nothing: the reader did not
+    /// ask for it in this sitting.
+    fn show(self: &Rc<Self>, what: Comparison, read: (Blob, Blob), restored: bool) {
         let name = split_name(&what.rel).1.to_string();
+        let say = {
+            let panel = Rc::downgrade(self);
+            move |text: &str| {
+                if let Some(panel) = panel.upgrade().filter(|_| !restored) {
+                    (panel.hooks.toast)(text);
+                }
+            }
+        };
         // The same test the tab opener uses, and the same answer: a diff of two binaries is
         // noise, so the pane says why instead of showing it.
         let (Blob::Text(left), Blob::Text(right)) = read else {
-            return (self.hooks.toast)(&format!("{name} is binary"));
+            return say(&format!("{name} is binary"));
         };
-        let left_name = split_name(what.left_rel()).1;
-        let left_title = format!("{left_name} ({})", what.sides.left_title());
-        let right_title = format!("{name} ({})", what.sides.right_title());
-        let nothing = what.sides.nothing_to_show();
+        let left_name = split_name(left_rel(&what)).1;
+        let left_title = format!("{left_name} ({})", left_title(&what.sides));
+        let right_title = format!("{name} ({})", right_title(&what.sides));
+        let nothing = nothing_to_show(&what.sides);
         let endings = line_endings_only(&left, &right);
         let unchanged = left == right;
         match what.sides.clone() {
@@ -79,14 +122,14 @@ impl Panel {
                         // and the comparison is laid again over what it reads.
                         if compare.counts().1 == 0 {
                             if endings {
-                                (panel.hooks.toast)(&format!(
-                                    "{name} differs only in line endings"
-                                ));
+                                say(&format!("{name} differs only in line endings"));
                                 return false;
                             }
                             if unchanged {
-                                (panel.hooks.toast)(&format!("{name} {nothing}"));
-                                panel.schedule_refresh(Depth::Everything);
+                                say(&format!("{name} {nothing}"));
+                                if !restored {
+                                    panel.schedule_refresh(Depth::Everything);
+                                }
                                 return false;
                             }
                         }
@@ -95,7 +138,7 @@ impl Panel {
                     panel.watch(what, Target::Tab(compare));
                     true
                 };
-                (self.hooks.compare_file)(&key, &left_title, &left, Box::new(register));
+                (self.hooks.compare_file)(&key, &left_title, &left, restored, Box::new(register));
             }
             Sides::Staged { .. } | Sides::Deleted | Sides::Commit { .. } => {
                 // The same test, made where this side can make it: before the tab is opened
@@ -103,22 +146,25 @@ impl Panel {
                 // and a file listed under a commit that did not change it both read the same
                 // text twice, and a tab of two identical columns is not an answer.
                 if left == right {
-                    (self.hooks.toast)(&format!("{name} {nothing}"));
-                    return self.schedule_refresh(Depth::Everything);
+                    say(&format!("{name} {nothing}"));
+                    if !restored {
+                        self.schedule_refresh(Depth::Everything);
+                    }
+                    return;
                 }
                 if endings {
-                    return (self.hooks.toast)(&format!("{name} differs only in line endings"));
+                    return say(&format!("{name} differs only in line endings"));
                 }
-                let key = format!("diff:{}:{}", what.sides.tag(), what.key);
+                let key = format!("diff:{}:{}", tag(&what.sides), what.key);
                 let tab = (self.hooks.open_diff)(
                     &key,
                     &name,
                     &right_title,
                     (&left_title, &left),
                     (&right_title, &right),
+                    restored,
                 );
-                // A commit never changes; the index does.
-                if let (Some(tab), Sides::Staged { .. } | Sides::Deleted) = (tab, &what.sides) {
+                if let Some(tab) = tab {
                     self.offer_lines(tab.comparison(), &what);
                     self.watch(what, Target::Diff(Rc::downgrade(&tab)));
                 }
@@ -127,17 +173,18 @@ impl Panel {
     }
 
     /// Stage Selected Lines and Revert Selected Lines on a comparison of the working tree with
-    /// the index, Unstage Selected Lines on one of the index with HEAD, and nothing on the rest.
-    /// What is staged or unstaged is the index's text with the selected changes made or undone,
-    /// worked out from the two texts on screen, which are what the selection was made in.
-    fn offer_lines(self: &Rc<Self>, compare: &Rc<Compare>, what: &What) {
+    /// the index, with Stage and Revert on each of its hunks, Unstage Selected Lines on one of the
+    /// index with HEAD, and nothing on the rest. What is staged or unstaged is the index's text
+    /// with the selected changes made or undone, worked out from the two texts on screen, which
+    /// are what the selection was made in.
+    fn offer_lines(self: &Rc<Self>, compare: &Rc<Compare>, what: &Comparison) {
         let (name, label, unstage) = match what.sides {
             Sides::Worktree => ("stage", "Stage Selected Lines", false),
             Sides::Staged { .. } => ("unstage", "Unstage Selected Lines", true),
             Sides::Deleted | Sides::Commit { .. } => return,
         };
         let (panel, repo, rel) = (Rc::downgrade(self), what.repo.clone(), what.rel.clone());
-        let stage: OnLines = Box::new(move |side, lines, old, new| {
+        let stage: OnLines = Rc::new(move |side, lines, old, new| {
             let Some(panel) = panel.upgrade() else {
                 return;
             };
@@ -151,14 +198,14 @@ impl Panel {
             }
             panel.stage_text(repo.clone(), rel.clone(), text, unstage);
         });
-        let mut entries = vec![(name, label, stage)];
+        let mut entries = vec![(name, label, stage.clone())];
         // The working tree is the file's own tab, so its side of the comparison is the editor:
         // the selected lines go back to the index's there, as an edit Ctrl+Z takes back, and are
         // saved as any edit is.
         if !unstage {
-            let (panel, compare) = (Rc::downgrade(self), Rc::downgrade(compare));
-            let revert: OnLines = Box::new(move |side, lines, old, new| {
-                let (Some(panel), Some(compare)) = (panel.upgrade(), compare.upgrade()) else {
+            let (panel, weak) = (Rc::downgrade(self), Rc::downgrade(compare));
+            let revert: OnLines = Rc::new(move |side, lines, old, new| {
+                let (Some(panel), Some(compare)) = (panel.upgrade(), weak.upgrade()) else {
                     return;
                 };
                 let text = diff::revert_lines(old, new, side, lines);
@@ -167,7 +214,11 @@ impl Panel {
                 }
                 compare.rewrite_mine(&text);
             });
-            entries.push(("revert", "Revert Selected Lines", revert));
+            entries.push(("revert", "Revert Selected Lines", revert.clone()));
+            compare.offer_hunks(vec![
+                ("Stage", "Stage this hunk", stage),
+                ("Revert", "Revert this hunk to the index", revert),
+            ]);
         }
         compare.offer(entries);
     }
@@ -197,25 +248,29 @@ impl Panel {
     }
 
     /// One watch per comparison: asking for the same one again replaces the old entry.
-    fn watch(&self, what: What, target: Target) {
+    fn watch(&self, what: Comparison, target: Target) {
         let mut watches = self.watches.borrow_mut();
-        watches.retain(|w| !(w.what.key == what.key && w.what.sides.tag() == what.sides.tag()));
+        watches.retain(|w| !(w.what.key == what.key && tag(&w.what.sides) == tag(&what.sides)));
         watches.push(Watch { what, target });
     }
 
-    /// Re-read every comparison still open, now that what git says has moved under it.
+    /// Re-read every comparison still open, now that what git says has moved under it. A commit
+    /// never changes; the index does.
     pub(super) fn reload_diffs(self: &Rc<Self>) {
         self.watches.borrow_mut().retain(|w| w.target.alive());
-        let watches = self.watches.borrow().clone();
+        let watches: Vec<Watch> = (self.watches.borrow().iter())
+            .filter(|w| !matches!(w.what.sides, Sides::Commit { .. }))
+            .cloned()
+            .collect();
         if watches.is_empty() {
             return;
         }
         let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
             let reads = {
-                let whats: Vec<What> = watches.iter().map(|w| w.what.clone()).collect();
+                let whats: Vec<Comparison> = watches.iter().map(|w| w.what.clone()).collect();
                 crate::work::off_thread("git", move || {
-                    whats.iter().map(|w| w.read(&vault)).collect::<Vec<_>>()
+                    whats.iter().map(|w| read(w, &vault)).collect::<Vec<_>>()
                 })
                 .await
             };
@@ -244,77 +299,54 @@ impl Panel {
     }
 }
 
-/// Which two things a row's diff compares.
-#[derive(Clone)]
-pub(super) enum Sides {
-    /// HEAD against the index: what this commit would add. `orig` is the path a staged rename
-    /// or copy came from, which is the one HEAD has.
-    Staged { orig: Option<String> },
-    /// The index against the file on disk: what is not staged yet.
-    Worktree,
-    /// The index against nothing: a file deleted from the working tree, which has no tab to
-    /// compare inside, so this is a tab of its own the way a staged change is.
-    Deleted,
-    /// One commit against its first parent, which is what a file under an expanded history row
-    /// shows. `parent` is `None` on a root commit, whose left side is simply empty. `orig` is the
-    /// path a rename or copy came from, which is the one the parent has.
-    Commit {
-        oid: String,
-        parent: Option<String>,
-        orig: Option<String>,
-    },
+/// The revision the left pane reads, `None` meaning there is nothing on that side at all.
+fn left_rev(sides: &Sides) -> Option<&str> {
+    match sides {
+        Sides::Staged { .. } => Some("HEAD"),
+        Sides::Worktree | Sides::Deleted => Some(""),
+        Sides::Commit { parent, .. } => parent.as_deref(),
+    }
 }
 
-impl Sides {
-    /// The revision the left pane reads, `None` meaning there is nothing on that side at all.
-    fn left_rev(&self) -> Option<&str> {
-        match self {
-            Sides::Staged { .. } => Some("HEAD"),
-            Sides::Worktree | Sides::Deleted => Some(""),
-            Sides::Commit { parent, .. } => parent.as_deref(),
-        }
+fn left_title(sides: &Sides) -> String {
+    match sides {
+        Sides::Staged { .. } => "HEAD".to_string(),
+        Sides::Worktree | Sides::Deleted => "Index".to_string(),
+        Sides::Commit { parent, .. } => match parent {
+            Some(parent) => short(parent),
+            None => "Nothing".to_string(),
+        },
     }
+}
 
-    fn left_title(&self) -> String {
-        match self {
-            Sides::Staged { .. } => "HEAD".to_string(),
-            Sides::Worktree | Sides::Deleted => "Index".to_string(),
-            Sides::Commit { parent, .. } => match parent {
-                Some(parent) => short(parent),
-                None => "Nothing".to_string(),
-            },
-        }
+fn right_title(sides: &Sides) -> String {
+    match sides {
+        Sides::Staged { .. } => "Index".to_string(),
+        Sides::Worktree => "Working Tree".to_string(),
+        Sides::Deleted => "Deleted".to_string(),
+        Sides::Commit { oid, .. } => short(oid),
     }
+}
 
-    fn right_title(&self) -> String {
-        match self {
-            Sides::Staged { .. } => "Index".to_string(),
-            Sides::Worktree => "Working Tree".to_string(),
-            Sides::Deleted => "Deleted".to_string(),
-            Sides::Commit { oid, .. } => short(oid),
-        }
+/// What a comparison whose two sides carry the same text says instead of showing them. A row
+/// names a path; it does not hold what git said about it, and a commit's file list is read once
+/// and stays where it is, so either can be older than the repository it describes.
+fn nothing_to_show(sides: &Sides) -> &'static str {
+    match sides {
+        Sides::Staged { .. } => "has no staged changes",
+        Sides::Worktree | Sides::Deleted => "has no unstaged changes",
+        Sides::Commit { .. } => "is unchanged in this commit",
     }
+}
 
-    /// What a comparison whose two sides carry the same text says instead of showing them. A row
-    /// names a path; it does not hold what git said about it, and a commit's file list is read
-    /// once and stays where it is, so either can be older than the repository it describes.
-    fn nothing_to_show(&self) -> &'static str {
-        match self {
-            Sides::Staged { .. } => "has no staged changes",
-            Sides::Worktree | Sides::Deleted => "has no unstaged changes",
-            Sides::Commit { .. } => "is unchanged in this commit",
-        }
-    }
-
-    /// What keys the tab, so the comparisons of one file are a tab each and asking twice reveals
-    /// the one already open.
-    fn tag(&self) -> String {
-        match self {
-            Sides::Staged { .. } => "index".to_string(),
-            Sides::Worktree => "worktree".to_string(),
-            Sides::Deleted => "deleted".to_string(),
-            Sides::Commit { oid, .. } => format!("commit:{}", short(oid)),
-        }
+/// What keys the tab, so the comparisons of one file are a tab each and asking twice reveals the
+/// one already open.
+fn tag(sides: &Sides) -> String {
+    match sides {
+        Sides::Staged { .. } => "index".to_string(),
+        Sides::Worktree => "worktree".to_string(),
+        Sides::Deleted => "deleted".to_string(),
+        Sides::Commit { oid, .. } => format!("commit:{}", short(oid)),
     }
 }
 
@@ -324,21 +356,11 @@ fn line_endings_only(left: &str, right: &str) -> bool {
     left != right && crate::diff::normalise(left) == crate::diff::normalise(right)
 }
 
-/// What one comparison compares: the half of a [`Watch`] the worker reads with.
-#[derive(Clone)]
-struct What {
-    repo: Repo,
-    /// Repository-relative, which is what git is asked with.
-    rel: String,
-    /// Vault key, which is what the working tree is read by and the tab is keyed by.
-    key: String,
-    sides: Sides,
-}
-
-/// A comparison that is open: what it compares, and where it is on screen.
+/// A comparison that is open: what it compares, the half the worker reads with, and where it
+/// is on screen.
 #[derive(Clone)]
 pub(super) struct Watch {
-    what: What,
+    what: Comparison,
     target: Target,
 }
 
@@ -359,90 +381,97 @@ impl Target {
     }
 }
 
-impl What {
-    /// Both sides, on the worker, or the toast that says which one could not be read.
-    fn read(&self, vault: &Vault) -> Result<(Blob, Blob), String> {
-        let left = match self.sides.left_rev() {
-            Some(rev) => self.side(vault, rev, self.left_rel())?,
-            None => Blob::Text(String::new()),
-        };
-        let right = match &self.sides {
-            Sides::Staged { .. } => self.side(vault, "", &self.rel)?,
-            // The working tree side is the file itself, which on a remote vault is on the other
-            // machine: reading it through the vault is what makes the diff work there as well
-            // as here. It is read even though the tab shows its own buffer, so that the same
-            // hop answers "is this binary" for both.
-            Sides::Worktree => self.worktree(vault)?,
-            Sides::Deleted => Blob::Text(String::new()),
-            Sides::Commit { oid, .. } => self.side(vault, oid, &self.rel)?,
-        };
-        Ok((left, right))
-    }
+/// Both sides of `what`, on the worker, or the toast that says which one could not be read.
+fn read(what: &Comparison, vault: &Vault) -> Result<(Blob, Blob), String> {
+    let left = match left_rev(&what.sides) {
+        Some(rev) => side(what, vault, rev, left_rel(what))?,
+        None => Blob::Text(String::new()),
+    };
+    let right = match &what.sides {
+        Sides::Staged { .. } => side(what, vault, "", &what.rel)?,
+        // The working tree side is the file itself, which on a remote vault is on the other
+        // machine: reading it through the vault is what makes the diff work there as well
+        // as here. It is read even though the tab shows its own buffer, so that the same
+        // hop answers "is this binary" for both.
+        Sides::Worktree => worktree(what, vault)?,
+        Sides::Deleted => Blob::Text(String::new()),
+        Sides::Commit { oid, .. } => side(what, vault, oid, &what.rel)?,
+    };
+    Ok((left, right))
+}
 
-    /// The path the left side is read at: the old one, where a commit or the index renamed the
-    /// file.
-    fn left_rel(&self) -> &str {
-        match &self.sides {
-            Sides::Staged { orig: Some(orig) }
-            | Sides::Commit {
-                orig: Some(orig), ..
-            } => orig,
-            _ => &self.rel,
+/// The path the left side is read at: the old one, where a commit or the index renamed the file.
+fn left_rel(what: &Comparison) -> &str {
+    match &what.sides {
+        Sides::Staged { orig: Some(orig) }
+        | Sides::Commit {
+            orig: Some(orig), ..
+        } => orig,
+        _ => &what.rel,
+    }
+}
+
+/// `rel` at `rev`. A file git has none of there is a new or deleted file, and an empty string is
+/// exactly the right thing to diff against. A read that failed is not that: an empty side would
+/// draw the whole file as added or deleted, so it is the toast instead.
+fn side(what: &Comparison, vault: &Vault, rev: &str, rel: &str) -> Result<Blob, String> {
+    match vault.git_show(&what.repo, rev, rel) {
+        Ok(blob) => Ok(blob.unwrap_or_else(|| Blob::Text(String::new()))),
+        Err(e) => {
+            let at = match rev {
+                "" => "the index".to_string(),
+                rev => short(rev),
+            };
+            Err(format!("Cannot read {} at {at}: {e:#}", split_name(rel).1))
         }
     }
+}
 
-    /// `rel` at `rev`. A file git has none of there is a new or deleted file, and an empty string
-    /// is exactly the right thing to diff against. A read that failed is not that: an empty side
-    /// would draw the whole file as added or deleted, so it is the toast instead.
-    fn side(&self, vault: &Vault, rev: &str, rel: &str) -> Result<Blob, String> {
-        match vault.git_show(&self.repo, rev, rel) {
-            Ok(blob) => Ok(blob.unwrap_or_else(|| Blob::Text(String::new()))),
-            Err(e) => {
-                let at = match rev {
-                    "" => "the index".to_string(),
-                    rev => short(rev),
-                };
-                Err(format!("Cannot read {} at {at}: {e:#}", split_name(rel).1))
-            }
-        }
+/// The file on disk, as the working-tree side of a comparison.
+///
+/// A repository above the vault root gives its files absolute keys ([`vault_key`]), and
+/// `Vault::read_text` refuses those: it resolves through `Local::join`, which rejects a path
+/// with a root component rather than escape the vault. Such a file is read directly instead,
+/// which is right because a key is only absolute when the file is outside the vault — and
+/// impossible on a remote vault, where "outside the vault" is on the other machine and the
+/// toast has to say so rather than diff against nothing.
+fn worktree(what: &Comparison, vault: &Vault) -> Result<Blob, String> {
+    let outside = Path::new(&what.key).is_absolute();
+    // Outside the vault on a remote vault is on the other machine, and the path would name
+    // this one's file if it named anything: refusing is the only honest answer.
+    if outside && vault.is_remote() {
+        let name = split_name(&what.rel).1;
+        return Err(format!("{name} is outside the vault on the remote host"));
     }
-
-    /// The file on disk, as the working-tree side of a comparison.
-    ///
-    /// A repository above the vault root gives its files absolute keys ([`vault_key`]), and
-    /// `Vault::read_text` refuses those: it resolves through `Local::join`, which rejects a path
-    /// with a root component rather than escape the vault. Such a file is read directly instead,
-    /// which is right because a key is only absolute when the file is outside the vault — and
-    /// impossible on a remote vault, where "outside the vault" is on the other machine and the
-    /// toast has to say so rather than diff against nothing.
-    fn worktree(&self, vault: &Vault) -> Result<Blob, String> {
-        let outside = Path::new(&self.key).is_absolute();
-        // Outside the vault on a remote vault is on the other machine, and the path would name
-        // this one's file if it named anything: refusing is the only honest answer.
-        if outside && vault.is_remote() {
-            let name = split_name(&self.rel).1;
-            return Err(format!("{name} is outside the vault on the remote host"));
+    let read = match outside {
+        true => accent_core::fs::read_text(Path::new(&what.key)),
+        false => vault.read_text(&what.key),
+    };
+    Ok(match read {
+        // With the line endings the file has, each line its own, which reading it as text
+        // takes away: a change of those alone is a change to git, and [`line_endings_only`]
+        // has to see it. A file that is not UTF-8 cannot be read as it is, and has CRLF put
+        // back on every line.
+        Ok(accent_api::fs::Read::Text(t)) if t.crlf => {
+            let raw = match outside {
+                true => accent_core::fs::read_note(Path::new(&what.key)),
+                false => vault.read(&what.key),
+            };
+            Blob::Text(raw.map_or_else(
+                |_| accent_api::fs::for_disk(&t.text, true, false),
+                |(text, _)| text,
+            ))
         }
-        let read = match outside {
-            true => accent_core::fs::read_text(Path::new(&self.key)),
-            false => vault.read_text(&self.key),
-        };
-        Ok(match read {
-            // With the line endings the file has, which reading it as text takes away: a change
-            // of those alone is a change to git, and [`line_endings_only`] has to see it.
-            Ok(accent_api::fs::Read::Text(t)) => {
-                Blob::Text(accent_api::fs::for_disk(&t.text, t.crlf, false))
-            }
-            Ok(_) => Blob::Binary,
-            // A file that is no longer there really is a deletion, and an empty right side is
-            // what draws one. This used to be every absolute key as well, which drew a file
-            // whose repository is above the vault root as wholly deleted.
-            Err(e) => {
-                tracing::debug!("reading {}: {e}", self.key);
-                Blob::Text(String::new())
-            }
-        })
-    }
+        Ok(accent_api::fs::Read::Text(t)) => Blob::Text(t.text),
+        Ok(_) => Blob::Binary,
+        // A file that is no longer there really is a deletion, and an empty right side is
+        // what draws one. This used to be every absolute key as well, which drew a file
+        // whose repository is above the vault root as wholly deleted.
+        Err(e) => {
+            tracing::debug!("reading {}: {e}", what.key);
+            Blob::Text(String::new())
+        }
+    })
 }
 
 #[cfg(test)]
@@ -467,14 +496,14 @@ mod tests {
             orig: None,
         };
         assert_eq!(
-            Sides::Staged { orig: None }.nothing_to_show(),
+            nothing_to_show(&Sides::Staged { orig: None }),
             "has no staged changes"
         );
-        assert_eq!(commit.nothing_to_show(), "is unchanged in this commit");
+        assert_eq!(nothing_to_show(&commit), "is unchanged in this commit");
         // A deleted file's row sits in the same section as a modified one, and says the same.
         assert_eq!(
-            Sides::Deleted.nothing_to_show(),
-            Sides::Worktree.nothing_to_show()
+            nothing_to_show(&Sides::Deleted),
+            nothing_to_show(&Sides::Worktree)
         );
     }
 }

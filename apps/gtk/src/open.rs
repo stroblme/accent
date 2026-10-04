@@ -1145,7 +1145,8 @@ impl App {
     /// so asking for the same one twice brings the tab already showing it up to date rather than
     /// stacking a second copy; `file` is the name behind it, which decides how it is coloured.
     /// It opens as the pane's preview, like a file clicked in the tree: a list of changed files
-    /// is exactly the surface that would otherwise stack a tab per click.
+    /// is exactly the surface that would otherwise stack a tab per click. A `restored` one goes
+    /// into the pane the session restore keeps for it, kept and behind what that pane shows.
     pub fn open_diff(
         self: &Rc<Self>,
         key: &str,
@@ -1153,10 +1154,13 @@ impl App {
         title: &str,
         old: (&str, &str),
         new: (&str, &str),
+        restored: bool,
     ) -> Rc<difftab::DiffTab> {
         if let Some(Doc::Diff(tab)) = self.doc_for(key) {
             tab.set_texts(old.1, new.1);
-            self.reveal_page(&tab.page);
+            if !restored {
+                self.reveal_page(&tab.page);
+            }
             return tab;
         }
         let flavour = match doc::kind_of(file) {
@@ -1165,7 +1169,7 @@ impl App {
         };
         let font = self.config.borrow().editor_font.clone();
         let tab = difftab::DiffTab::open(
-            &self.tabs(),
+            &self.tabs_for(key),
             key,
             file,
             title,
@@ -1176,8 +1180,12 @@ impl App {
             self.zoom.get(),
         );
         self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
-        self.select_new_page(&tab.page, Opened::Preview);
-        self.mark_opened(&tab.page, Opened::Preview);
+        let how = match restored {
+            true => Opened::Restored,
+            false => Opened::Preview,
+        };
+        self.select_new_page(&tab.page, how);
+        self.mark_opened(&tab.page, how);
         tab
     }
 

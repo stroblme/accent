@@ -110,17 +110,22 @@ impl Pool {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
                 row.add_css_class("linked");
                 row.add_css_class("osd");
-                for (label, tip, keep_own) in [
-                    ("Take", "Replace this hunk in Mine with Theirs", false),
-                    ("Both", "Keep both versions of this hunk", true),
-                ] {
+                // The comparison's buttons as they are now, which is once and for all: a hunk is
+                // only ever claimed on the pane beside the editor, a companion that goes with its
+                // comparison.
+                let buttons = match self.owner.borrow().upgrade() {
+                    Some(compare) => compare.hunk_buttons.borrow().clone(),
+                    None => Vec::new(),
+                };
+                for (label, tip, on) in buttons {
                     let button = gtk::Button::with_label(label);
                     button.add_css_class("caption");
                     button.set_tooltip_text(Some(tip));
+                    button.update_property(&[gtk::accessible::Property::Description(tip)]);
                     crate::widgets::claim_press(&button);
                     button.connect_clicked(self.act(&role, move |compare, role| {
                         if let Role::Hunk(hunk) = role {
-                            compare.take(hunk, keep_own);
+                            on(compare, hunk);
                         }
                     }));
                     row.append(&button);

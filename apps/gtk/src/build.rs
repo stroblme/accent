@@ -640,17 +640,16 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 app.open_preview(key);
             }
         }),
-        open_diff: Box::new(move |key, file, title, old, new| {
+        open_diff: Box::new(move |key, file, title, old, new, restored| {
             diff.upgrade()
-                .map(|app| app.open_diff(key, file, title, old, new))
+                .map(|app| app.open_diff(key, file, title, old, new, restored))
         }),
-        compare_file: Box::new(move |key, title, text, register| {
+        compare_file: Box::new(move |key, title, text, restored, register| {
             let Some(app) = compare.upgrade() else {
                 return;
             };
             let (title, text) = (title.to_string(), text.to_string());
-            // The file's own tab, as a preview like any other single click in the sidebar.
-            app.with_tab(key, Opened::Preview, "compare", move |app, tab| {
+            let show = move |app: &Rc<App>, tab: &Rc<Tab>| {
                 let name = doc::file_name(&tab.rel()).to_string();
                 let compare = tab.compare(
                     &format!("{name} (Working Tree)"),
@@ -667,7 +666,18 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 // a walk took into the index first reaches the watcher as no change at all. Asked
                 // here, a tab that is reads the file again, and the comparison with it.
                 app.file_changed(tab);
-            });
+            };
+            match restored {
+                // The tab the restore has just put back, where it is and behind what its pane
+                // shows: a reveal would be the reader's going there.
+                true => {
+                    if let Some(tab) = app.tab_for(key) {
+                        show(&app, &tab);
+                    }
+                }
+                // The file's own tab, as a preview like any other single click in the sidebar.
+                false => app.with_tab(key, Opened::Preview, "compare", show),
+            }
         }),
         trash: Box::new(move |keys| {
             if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {

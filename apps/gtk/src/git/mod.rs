@@ -102,13 +102,15 @@ pub struct Hooks {
     /// Open a file in a tab, by vault key.
     pub open: Box<dyn Fn(&str)>,
     /// Open a comparison of two texts that are not files: key, the file name behind it, the tab
-    /// title, then (title, text) for each side. Hands the tab back so a refresh can reach it.
-    pub open_diff: Box<dyn Fn(&str, &str, &str, (&str, &str), (&str, &str)) -> Option<Rc<DiffTab>>>,
+    /// title, then (title, text) for each side, and whether a session restore is putting it back
+    /// ([`Panel::restore`]). Hands the tab back so a refresh can reach it.
+    pub open_diff:
+        Box<dyn Fn(&str, &str, &str, (&str, &str), (&str, &str), bool) -> Option<Rc<DiffTab>>>,
     /// Compare a file's working tree with the index, inside the file's own tab: key, the index
-    /// side's title and text, and what to call once the comparison exists so a refresh can reach
-    /// it. That call answers whether the comparison is worth keeping; `false` takes it down again
-    /// ([`Panel::show`]).
-    pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>) -> bool>)>,
+    /// side's title and text, whether a session restore is putting it back, and what to call once
+    /// the comparison exists so a refresh can reach it. That call answers whether the comparison
+    /// is worth keeping; `false` takes it down again ([`Panel::show`]).
+    pub compare_file: Box<dyn Fn(&str, &str, &str, bool, Box<dyn FnOnce(Weak<Compare>) -> bool>)>,
     /// Move vault files to the trash, with one toast for the lot, or delete them on a remote
     /// vault, which has none, without asking again: Discard's question has said so. Vault keys
     /// only, which is what leaves an untracked file outside the vault without a Discard button.
@@ -242,8 +244,9 @@ pub struct Panel {
     /// starts at the pane's creation, which the window follows with a discovery of its own, so a
     /// walk that is over within [`REDISCOVER`] asks for nothing more.
     discovered: Cell<i64>,
-    /// The comparisons open right now, re-read whenever a refresh lands: a diff tab is not a
-    /// snapshot. Weak, so a closed one falls out on the next pass.
+    /// The comparisons open right now, re-read whenever a refresh lands, a commit's excepted: a
+    /// diff tab is not a snapshot. And what the session keeps of them ([`Panel::kept`]). Weak, so
+    /// a closed one falls out on the next pass.
     watches: RefCell<Vec<Watch>>,
     /// How many comparisons a row has asked for, so only the last one asked shows: see
     /// [`Panel::compare`].
