@@ -70,6 +70,23 @@ pub(crate) fn set_model(view: &gtk::ListView, model: &impl IsA<gtk::SelectionMod
     });
 }
 
+/// Before `row` is taken out of its list box, hand the keyboard, where the row holds it, to the
+/// row showing after it, or else the one before, or else to `fallback`: GTK would give it to the
+/// first thing in the window it can focus, and scroll there (see [`set_model`]).
+pub(crate) fn hand_on_focus(row: &gtk::ListBoxRow, fallback: &impl IsA<gtk::Widget>) {
+    if !row.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN) {
+        return;
+    }
+    let shown =
+        |w: &gtk::Widget| w.is::<gtk::ListBoxRow>() && w.is_child_visible() && w.is_sensitive();
+    let beside = std::iter::successors(row.next_sibling(), |w| w.next_sibling())
+        .find(shown)
+        .or_else(|| std::iter::successors(row.prev_sibling(), |w| w.prev_sibling()).find(shown));
+    if !beside.is_some_and(|w| w.grab_focus()) {
+        fallback.grab_focus();
+    }
+}
+
 /// Whether the keyboard focus is on one of `view`'s rows.
 fn has_focus(view: &gtk::ListView) -> bool {
     view.root()

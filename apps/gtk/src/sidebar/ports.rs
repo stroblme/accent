@@ -90,9 +90,18 @@ pub(super) fn pane(data: &Rc<Data>) -> (gtk::Widget, Rc<dyn Fn()>) {
         }
     ));
 
+    let local = port_entry("Local");
+    let remote = port_entry("Remote");
+
     let drop_forward: DropForward = Rc::new({
-        let (data, show) = (data.clone(), show.clone());
+        let (data, show, local) = (data.clone(), show.clone(), local.downgrade());
         move |f, row: &gtk::ListBoxRow| {
+            // The keyboard on the row's button goes to the row beside it, or to the form where a
+            // forward is started once none is left. Before the row goes insensitive, which would
+            // take it away too.
+            if let Some(local) = local.upgrade() {
+                crate::widgets::hand_on_focus(row, &local);
+            }
             // Greyed out while ssh answers, so the button cannot ask a second time.
             row.set_sensitive(false);
             let (remove, show, row) = (data.remove_forward.clone(), show.clone(), row.clone());
@@ -123,8 +132,6 @@ pub(super) fn pane(data: &Rc<Data>) -> (gtk::Widget, Rc<dyn Fn()>) {
         )
     });
 
-    let local = port_entry("Local");
-    let remote = port_entry("Remote");
     // The arrow between the boxes is the direction, and pressing it flips it: the two ports stay
     // where they are, only which of them listens changes. Kept across Adds, so a run of forwards
     // the same way round is set once.

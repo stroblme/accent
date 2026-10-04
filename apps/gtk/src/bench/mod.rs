@@ -28,6 +28,7 @@ mod present;
 mod replace;
 mod scroll;
 mod search;
+mod start;
 mod style;
 mod suggest;
 mod synctex;
@@ -54,9 +55,9 @@ use files::{
 };
 use find::bench_find;
 use git::{
-    bench_git, bench_git_branch, bench_git_close, bench_git_focus, bench_git_init,
-    bench_git_markers, bench_git_press, bench_git_rebase, bench_git_scroll, bench_git_switch,
-    bench_git_sync_all, bench_git_sync_over_fetch,
+    bench_git, bench_git_branch, bench_git_close, bench_git_commit_focus, bench_git_focus,
+    bench_git_init, bench_git_markers, bench_git_press, bench_git_rebase, bench_git_scroll,
+    bench_git_switch, bench_git_sync_all, bench_git_sync_over_fetch,
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
 use keys::{
@@ -76,6 +77,7 @@ use pdf::{
 use replace::bench_replace;
 use scroll::bench_scroll;
 use search::bench_search;
+pub(crate) use start::bench_start;
 use style::{
     bench_drag_fold, bench_follow, bench_listing, bench_numbers, bench_occurrences, bench_reveal,
     bench_seam, bench_style, bench_theme, bench_wrap,
@@ -105,7 +107,9 @@ use tags::bench_tags;
 /// `=focus` clicks rows and walks the keyboard over them through XTEST, and prints whether each
 /// row's buttons are out. `=scroll` clicks Stage half way down the scrolled changes list, then
 /// commits with the history scrolled, and prints whether the rows on screen stayed put (see
-/// `git::bench_git_scroll`).
+/// `git::bench_git_scroll`). `=commit` commits the one change left through XTEST and prints
+/// where the keyboard went (see `git::bench_git_commit_focus`). `ACCENT_BENCH_START=1`, on a
+/// `--new-window` launch, is the start screen's, which has no `App` (`start::bench_start`).
 /// `=switch` picks the second repository and clicks the history's first row
 /// at once, and prints what that asked for, then what each pick draws at once, every repository
 /// twice over (see `git::bench_git_switch`). `=markers:<rel>` resolves the conflict blocks a merge
@@ -911,6 +915,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 (None, "rebase") => bench_git_rebase(&app),
                 (None, "focus") => bench_git_focus(&app),
                 (None, "scroll") => bench_git_scroll(&app),
+                (None, "commit") => bench_git_commit_focus(&app),
                 (None, "switch") => bench_git_switch(&app),
                 (None, "branch") => bench_git_branch(&app),
                 (None, "syncall") => bench_git_sync_all(&app),

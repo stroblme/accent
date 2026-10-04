@@ -152,6 +152,7 @@ impl App {
         // A page picked from the Outline pane is a place left, as a PDF's outline row is.
         tab.connect_jump(on(|app, tab| app.mark_page(&tab.page)));
         tab.connect_page(on(|app, _| {
+            app.sync_diagram_tools();
             app.sync_status();
             app.follow_outline();
             app.save_session_soon();
@@ -165,6 +166,7 @@ impl App {
         tab.connect_selection(on(|_, _| {}));
         tab.connect_history(on(|app, tab| {
             if app.is_active_diagram(tab) {
+                app.sync_diagram_tools();
                 app.sync_history();
                 app.sync_status();
             }
@@ -250,6 +252,32 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// The insert tools over the diagram in front, greyed on the ring and in the palette while
+    /// its page has no layer to draw into, every one locked or hidden, as draw.io greys its
+    /// Insert actions (EditorUi.js `updateActionStates`); one in hand there is put down.
+    pub(crate) fn sync_diagram_tools(&self) {
+        let diagram = self.active_diagram();
+        let open = diagram.as_ref().is_none_or(|d| d.can_insert());
+        let inserts = [
+            Tool::Rect,
+            Tool::Ellipse,
+            Tool::Text,
+            Tool::Connector,
+            Tool::Image,
+        ];
+        for tool in inserts {
+            let name = tool.action().trim_start_matches("win.");
+            let action = self.window.lookup_action(name);
+            if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+                action.set_enabled(open);
+            }
+        }
+        if let Some(d) = diagram.filter(|d| !open && d.tool() != Tool::Select) {
+            d.set_tool(Tool::Select);
+            self.sync_status();
+        }
     }
 
     /// Put a tool in hand over the diagram in front. The same one twice puts it down again, and

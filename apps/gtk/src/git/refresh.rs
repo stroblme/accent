@@ -125,6 +125,7 @@ impl Panel {
             None => false,
         };
         let page = moved.then(|| fetched.commits.clone().unwrap_or_default());
+        let read_history = fetched.commits.is_some();
 
         {
             let mut state = self.state.borrow_mut();
@@ -165,6 +166,10 @@ impl Panel {
         if let Some(page) = page {
             self.has_more.set(page.len() >= fetched.rows);
             self.fill_log(page);
+        }
+        // The first refresh to read the history after a commit from the button has the commit.
+        if read_history && self.to_head.take() {
+            self.focus_head();
         }
         (self.hooks.changed)();
         self.reload_diffs();

@@ -3,10 +3,11 @@
 
 use super::mxgraph::{ellipse, rectangle};
 use super::{
-    Direction, Fill, LINE_ARCSIZE, Margins, Part, RECTANGLE_ROUNDING_FACTOR, add_points, polygon,
-    polyline, quarter, rect,
+    Direction, Fill, LINE_ARCSIZE, Margins, Part, Pen, RECTANGLE_ROUNDING_FACTOR, add_points,
+    polygon, polyline, quarter, rect,
 };
 use crate::geom::{PathCmd, Point, Rect};
+use crate::scene::Cap;
 use crate::style::Resolved;
 
 /// `mxConstants.ARROW_SIZE`: a flex arrow's head is `ARROW_SIZE / 5 · 3` long by default.
@@ -626,10 +627,10 @@ pub(super) fn cylinder_margins(rect: Rect, style: &Resolved) -> Margins {
 }
 
 /// `partialRectangle`: a filled box stroked only along the sides `top`, `right`, `bottom` and
-/// `left` leave on, all by default (`PartialRectangleShape`, Shapes.js 4544-4640), as ER tables
-/// draw their rows.
-// ponytail: draw.io caps these strokes square, so two sides meet on a full corner; they are
-// capped butt here. A table cell's grid lines drawn back over its fill are not drawn.
+/// `left` leave on, all by default, capped square so that two sides meet on a full corner
+/// (`PartialRectangleShape`, Shapes.js 5248-5340), as ER tables draw their rows.
+// ponytail: a table cell's grid lines drawn back over its fill (`paintTableCellLines`) are not
+// drawn; tables are not ported.
 pub(super) fn partial_rectangle(b: Rect, style: &Resolved) -> Vec<Part> {
     let side = |key: &str| style.get(key).is_none_or(|v| v == "1");
     let corners = [
@@ -647,7 +648,14 @@ pub(super) fn partial_rectangle(b: Rect, style: &Resolved) -> Vec<Part> {
             false => PathCmd::MoveTo(to),
         });
     }
-    vec![Part::filled(rect(b), Fill::Cell), Part::line(sides)]
+    let square = Pen {
+        cap: Cap::Square,
+        ..Pen::default()
+    };
+    vec![
+        Part::filled(rect(b), Fill::Cell),
+        Part::line(sides).with(square),
+    ]
 }
 
 /// `folder`: a box with a tab `tabWidth` by `tabHeight` on its top, at the right unless
@@ -1091,6 +1099,11 @@ mod tests {
                 PathCmd::LineTo(p(0.0, 50.0)),
                 PathCmd::LineTo(p(0.0, 0.0)),
             ]
+        );
+        assert_eq!(
+            parts[1].pen.cap,
+            Cap::Square,
+            "the sides meet on full corners"
         );
     }
 

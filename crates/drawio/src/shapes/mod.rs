@@ -13,6 +13,7 @@ pub use mxgraph::edge_line;
 pub(crate) use mxgraph::ellipse;
 
 use crate::geom::{self, PathCmd, Point, Rect};
+use crate::scene::{Cap, Join};
 use crate::style::{Color, Resolved};
 
 /// One piece of a shape and how the scene paints it: its fill, and whether it is stroked.
@@ -21,6 +22,17 @@ pub struct Part {
     pub path: Vec<PathCmd>,
     pub fill: Fill,
     pub stroke: bool,
+    pub pen: Pen,
+}
+
+/// How a part's stroke differs from the cell's, where the shape sets the canvas itself.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Pen {
+    pub cap: Cap,
+    pub join: Join,
+    /// Stroked dashed in this colour of the shape's own, whatever the cell's stroke, as a
+    /// swimlane's `separatorColor`.
+    pub dashed: Option<Color>,
 }
 
 /// What a [`Part`] is filled with.
@@ -44,6 +56,7 @@ impl Part {
             path,
             fill: Fill::Cell,
             stroke: true,
+            pen: Pen::default(),
         }
     }
 
@@ -53,7 +66,13 @@ impl Part {
             path,
             fill: Fill::None,
             stroke: true,
+            pen: Pen::default(),
         }
+    }
+
+    /// Its stroke drawn with `pen`.
+    fn with(self, pen: Pen) -> Part {
+        Part { pen, ..self }
     }
 
     /// Filled only, with `fill`.
@@ -62,6 +81,7 @@ impl Part {
             path,
             fill,
             stroke: false,
+            pen: Pen::default(),
         }
     }
 }
@@ -193,6 +213,9 @@ pub fn label_bounds(shape: &str, rect: Rect, style: &Resolved, inverted: bool) -
     use grapheditor as ge;
     match shape {
         "swimlane" => return mxgraph::swimlane_label(rect, style),
+        "rhombus" if style.flag("double", false) => {
+            return mxgraph::double_rhombus_label(rect, style);
+        }
         "doubleEllipse" | "startState" | "endState" => {
             return mxgraph::double_ellipse_label(rect, style);
         }
@@ -350,8 +373,8 @@ pub struct Placement {
     pub bounds: Rect,
     /// Mirrored across its vertical and horizontal middle, as drawn (`flipH`/`flipV`, swapped for
     /// a shape facing north or south).
-    flip_h: bool,
-    flip_v: bool,
+    pub flip_h: bool,
+    pub flip_v: bool,
     /// Degrees clockwise about the centre: `rotation` and the direction's quarter turns.
     pub degrees: f64,
 }

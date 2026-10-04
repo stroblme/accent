@@ -120,7 +120,7 @@ pub fn present(
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
     window.set_content(Some(&toolbar));
-    match recent_section(&window, &config, &on_open, &on_forget) {
+    match recent_section(&window, &config, &on_open, &on_forget, &open) {
         // Once there are vaults to go back to, they are what this screen is for, so they take the
         // window: no status page, whose icon and title would leave room for a row at most at the
         // default size. A long list fills the height between the margins and scrolls inside it.
@@ -183,6 +183,7 @@ fn recent_section(
     config: &Rc<RefCell<Config>>,
     on_open: &Rc<dyn Fn(PathBuf)>,
     on_forget: &Forget,
+    open: &gtk::Button,
 ) -> Option<(gtk::Box, gtk::SearchEntry)> {
     let recent = recent_vaults(config);
     if recent.is_empty() {
@@ -197,6 +198,11 @@ fn recent_section(
         .selection_mode(gtk::SelectionMode::None)
         .build();
     list.add_css_class("boxed-list");
+    // The window's keys, so typing searches wherever the keyboard has gone on this screen.
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Search recent vaults…")
+        .build();
+    search.set_key_capture_widget(Some(window));
     for path in recent {
         list.append(&recent_row(
             path,
@@ -204,6 +210,7 @@ fn recent_section(
             on_open,
             on_forget,
             &section,
+            (&search, open),
         ));
     }
     list.set_placeholder(Some(
@@ -215,11 +222,6 @@ fn recent_section(
             .build(),
     ));
 
-    // The window's keys, so typing searches wherever the keyboard has gone on this screen.
-    let search = gtk::SearchEntry::builder()
-        .placeholder_text("Search recent vaults…")
-        .build();
-    search.set_key_capture_widget(Some(window));
     list.set_filter_func({
         // Weak: the list is the entry's sibling, and the entry's handlers hold the list.
         let search = search.downgrade();
@@ -282,12 +284,15 @@ fn matches(query: &str, title: &str, subtitle: &str) -> bool {
         || subtitle.to_lowercase().contains(&query)
 }
 
+/// `fallbacks` are where the keyboard goes when its row is removed and no other row shows: the
+/// search while there are rows it hides, and Open Folder… once the list is empty.
 fn recent_row(
     path: PathBuf,
     home: Option<&Path>,
     on_open: &Rc<dyn Fn(PathBuf)>,
     on_forget: &Forget,
     section: &gtk::Box,
+    fallbacks: (&gtk::SearchEntry, &gtk::Button),
 ) -> adw::ActionRow {
     let (title, subtitle) = labels(&path, home);
     let row = adw::ActionRow::builder()
@@ -314,12 +319,13 @@ fn recent_row(
     forget.connect_clicked({
         // Weak: the section holds this row, so a strong handle would be a cycle.
         let (path, on_forget, section) = (path.clone(), on_forget.clone(), section.downgrade());
+        let (search, open) = (fallbacks.0.downgrade(), fallbacks.1.downgrade());
         move |button| {
             // Looked up rather than captured, so the row does not hold a reference to itself.
             let row = button
                 .ancestor(adw::ActionRow::static_type())
                 .map(|r| r.downgrade());
-            let section = section.clone();
+            let (section, search, open) = (section.clone(), search.clone(), open.clone());
             let removed = move || {
                 let Some(row) = row.and_then(|row| row.upgrade()) else {
                     return;
@@ -327,6 +333,13 @@ fn recent_row(
                 let Some(list) = row.parent().and_downcast::<gtk::ListBox>() else {
                     return;
                 };
+                let fallback: Option<gtk::Widget> = match list.row_at_index(1) {
+                    Some(_) => search.upgrade().map(Cast::upcast),
+                    None => open.upgrade().map(Cast::upcast),
+                };
+                if let (Some(row), Some(fallback)) = (row.downcast_ref(), fallback) {
+                    crate::widgets::hand_on_focus(row, &fallback);
+                }
                 list.remove(&row);
                 // Nothing left to offer: the rule, the search and the card are what "the vaults
                 // it has seen" is made of, and an empty one says nothing. `recent_section`

@@ -58,13 +58,39 @@ pub enum Paint {
     },
 }
 
-/// How an outline is stroked. Joins are mitred and caps butt, as in draw.io's SVG.
+/// How an outline is stroked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
     pub color: Color,
     pub width: f64,
     /// Alternating on/off lengths in page units, already scaled by the width.
     pub dash: Option<Vec<f64>>,
+    pub cap: Cap,
+    pub join: Join,
+}
+
+/// How a stroke's open ends are capped: butt unless a shape asks for square
+/// (`mxAbstractCanvas2D.setLineCap`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cap {
+    #[default]
+    Butt,
+    Square,
+}
+
+/// How a stroke's corners are joined (`setLineJoin`, `setMiterLimit`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Join {
+    /// Mitred up to this many times the width, bevelled beyond.
+    Miter(f64),
+    Round,
+}
+
+impl Default for Join {
+    /// draw.io's canvas: mitred, limit 10 (`mxAbstractCanvas2D` state, `stroke-miterlimit:10`).
+    fn default() -> Join {
+        Join::Miter(10.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -148,8 +174,9 @@ pub enum Prim {
         border: Option<Color>,
         opacity: f64,
     },
-    /// A picture filling `rect` (keeping its aspect within it when `keep_aspect`), turned
-    /// `rotation` degrees about the centre of `rect`.
+    /// A picture filling `rect` (keeping its aspect within it when `keep_aspect`), mirrored
+    /// across its middle by `flip_h` and `flip_v`, then turned `rotation` degrees about the
+    /// centre of `rect`.
     Image {
         cell: CellId,
         locked: bool,
@@ -157,6 +184,8 @@ pub enum Prim {
         source: ImageSource,
         keep_aspect: bool,
         rotation: f64,
+        flip_h: bool,
+        flip_v: bool,
         opacity: f64,
     },
 }
@@ -359,7 +388,7 @@ impl<'a> Builder<'a> {
             .enumerate()
         {
             let fill = fill(&style, part.fill, &part.path, &place);
-            let stroke = stroke.clone().filter(|_| part.stroke);
+            let stroke = part_stroke(&style, stroke.as_ref(), &part);
             if fill.is_none() && stroke.is_none() && !hittable {
                 continue;
             }
@@ -375,7 +404,7 @@ impl<'a> Builder<'a> {
             });
         }
         if shape == "image" {
-            self.image(cell, rect, &style, rotation, opacity, locked);
+            self.image(cell, &place, &style, opacity, locked);
         }
         let offset = cell
             .geometry
@@ -392,16 +421,17 @@ impl<'a> Builder<'a> {
         );
     }
 
-    /// A picture cell's background, the picture, and its border (`mxImageShape`).
+    /// A picture cell's background, the picture, and its border (`mxImageShape`), placed as its
+    /// shape is: facing its direction, mirrored by its flips and turned.
     fn image(
         &mut self,
         cell: &Cell,
-        rect: Rect,
+        place: &Placement,
         style: &Resolved,
-        rotation: f64,
         opacity: f64,
         locked: bool,
     ) {
+        let (rect, rotation) = (place.bounds, place.degrees);
         let mut outline = shapes::rect(rect);
         geom::rotate_path(&mut outline, rect.centre(), rotation);
         if let Some(bg) = style.color("imageBackground") {
@@ -427,6 +457,8 @@ impl<'a> Builder<'a> {
                 source,
                 keep_aspect: style.flag("imageAspect", true),
                 rotation,
+                flip_h: place.flip_h,
+                flip_v: place.flip_v,
                 opacity,
             });
         }
@@ -440,6 +472,8 @@ impl<'a> Builder<'a> {
                     color: border,
                     width: style.num("strokeWidth", 1.0),
                     dash: None,
+                    cap: Cap::Butt,
+                    join: Join::default(),
                 }),
                 opacity,
                 shadow: false,
@@ -487,8 +521,8 @@ impl<'a> Builder<'a> {
                     cell: cell.id.clone(),
                     locked,
                     fill: fill(&style, part.fill, &part.path, &Placement::default()),
+                    stroke: part_stroke(&style, line.as_ref(), &part),
                     path: part.path,
-                    stroke: line.clone().filter(|_| part.stroke),
                     opacity,
                     shadow: shadow && i == 0,
                 });
@@ -836,13 +870,32 @@ fn paint(style: &Resolved, outline: &[PathCmd], place: &Placement) -> Option<Pai
     })
 }
 
-/// A cell's stroke, or `None` for `strokeColor=none`. A dashed line's pattern is in multiples of
-/// the width unless `fixDash=1` (`mxSvgCanvas2D.createDashPattern`).
+/// How `part` of a shape is stroked: with the cell's stroke `cell`, or a dashed colour of its
+/// own, in the pen the shape gives it; `None` when it is not stroked.
+fn part_stroke(style: &Resolved, cell: Option<&Stroke>, part: &shapes::Part) -> Option<Stroke> {
+    let stroke = match part.pen.dashed {
+        Some(colour) => Some(stroke_in(style, colour, true)),
+        None => cell.filter(|_| part.stroke).cloned(),
+    };
+    stroke.map(|s| Stroke {
+        cap: part.pen.cap,
+        join: part.pen.join,
+        ..s
+    })
+}
+
+/// A cell's stroke, or `None` for `strokeColor=none`.
 fn stroke(style: &Resolved) -> Option<Stroke> {
-    let alpha = style.num("strokeOpacity", 100.0) / 100.0;
-    let color = style.color("strokeColor")?.fade(alpha);
+    let color = style.color("strokeColor")?;
+    Some(stroke_in(style, color, style.flag("dashed", false)))
+}
+
+/// The cell's stroke in `color`, at its `strokeOpacity` and width. A dashed line's pattern is in
+/// multiples of the width unless `fixDash=1` (`mxSvgCanvas2D.createDashPattern`).
+fn stroke_in(style: &Resolved, color: Color, dashed: bool) -> Stroke {
+    let color = color.fade(style.num("strokeOpacity", 100.0) / 100.0);
     let width = style.num("strokeWidth", 1.0).max(0.0);
-    let dash = style.flag("dashed", false).then(|| {
+    let dash = dashed.then(|| {
         let scale = if style.flag("fixDash", false) {
             1.0
         } else {
@@ -861,7 +914,13 @@ fn stroke(style: &Resolved) -> Option<Stroke> {
             false => pattern,
         }
     });
-    Some(Stroke { color, width, dash })
+    Stroke {
+        color,
+        width,
+        dash,
+        cap: Cap::Butt,
+        join: Join::default(),
+    }
 }
 
 #[cfg(test)]
@@ -1173,6 +1232,34 @@ mod tests {
             "triangle;direction=north;flipV=1;",
             Point::new(40.0, 40.0)
         ));
+    }
+
+    #[test]
+    fn a_picture_is_placed_as_its_shape_is() {
+        let placed = |style: &str| {
+            let r = Rect::new(0.0, 0.0, 80.0, 40.0);
+            let p = page(vec![Cell::new_vertex("i", "1", r, style, "")]);
+            scene(&p).prims.into_iter().find_map(|prim| match prim {
+                Prim::Image {
+                    rect,
+                    rotation,
+                    flip_h,
+                    flip_v,
+                    ..
+                } => Some((rect, rotation, flip_h, flip_v)),
+                _ => None,
+            })
+        };
+        let r = Rect::new(0.0, 0.0, 80.0, 40.0);
+        assert_eq!(
+            placed("shape=image;image=x.png;flipH=1;"),
+            Some((r, 0.0, true, false))
+        );
+        // Facing south it is drawn 40 by 80 and turned a quarter, its flips swapped.
+        assert_eq!(
+            placed("shape=image;image=x.png;flipH=1;direction=south;"),
+            Some((Rect::new(20.0, -20.0, 40.0, 80.0), 90.0, false, true))
+        );
     }
 
     #[test]

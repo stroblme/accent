@@ -29,8 +29,12 @@ use webkit6::prelude::WebViewExt;
 /// presented and left again. Last, presenting again, real keys: a held `Ctrl+Tab` pressed twice
 /// and Escape before Ctrl comes up, then one held and let go, every change of the chord, the card
 /// and what is presented printing as `bench present keys`; Page Down over the presented note and
-/// PDF (`<kind>_page_down`, the note's `scrollY` or the PDF's page before and after); and F5 and
-/// Escape pressed in the presented shell (`shell_F5`, `shell_Escape`, both to read
+/// PDF (`<kind>_page_down`, the note's `scrollY` or the PDF's page before and after); the status
+/// bar's menus over the PDF by pointer, `bar_menu_<step>` saying whether a menu is up, the bar
+/// with it and the zoom: the zoom readout right-clicked (`open`), the pointer up over the page
+/// (`away`), Fit Width picked (`pick`, the bar gone with the pointer off it), the page count
+/// clicked (`page`) and Escape (`escape`, the bar staying under the pointer); and F5 and Escape
+/// pressed in the presented shell (`shell_F5`, `shell_Escape`, both to read
 /// `presenting=false`). `bench present xtest <steps>` asks for those steps, under Xvfb
 /// `build-aux/xtest.py :N "<steps>"`, the first of them giving the window the X input focus.
 /// `bench present shot <case>` is a second and a half held for a screenshot.
@@ -241,6 +245,67 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
                 screen(&app)
             );
         }
+        // The status bar's menus over the presented PDF, by real pointer: the zoom readout
+        // right-clicked, the pointer then up over the page and Fit Width picked; the page count
+        // clicked and its menu put away by Escape with the pointer still on the bar. The pointer
+        // comes onto a control only once the bar is up: GTK aims a press at the widget the last
+        // motion was over, which for a pointer at rest as the bar came up is the page under it.
+        let (dx, dy) = app.window.surface_transform();
+        let strip = f64::from(app.window.height()) - 4.0 + dy;
+        println!(
+            "bench present xtest move {} {strip}",
+            f64::from(app.window.width()) / 2.0 + dx
+        );
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let centre = |widget: &gtk::Widget| {
+            let b = widget.compute_bounds(&app.window)?;
+            let x = f64::from(b.x() + b.width() / 2.0) + dx;
+            Some((x, f64::from(b.y() + b.height() / 2.0) + dy))
+        };
+        let zoom = app.statusbar.zoom().clone();
+        let page = app
+            .statusbar
+            .facts_control()
+            .clone()
+            .upcast::<gtk::Widget>();
+        let (Some((zx, zy)), Some((px, py))) = (centre(&zoom), centre(&page)) else {
+            println!("bench present bar_menu bar not drawn");
+            return bench_quit(&app);
+        };
+        let state = |case: &str| {
+            println!(
+                "bench present bar_menu_{case} menu={} bar={} pdf_zoom={:?}",
+                app.statusbar.menu_open(),
+                app.toolbar.reveals_bottom_bars(),
+                app.active_pdf().and_then(|pdf| pdf.zoom_label())
+            )
+        };
+        println!("bench present xtest move {zx} {zy}; sleep 0.3; down 3; up 3");
+        glib::timeout_future(Duration::from_millis(800)).await;
+        state("open");
+        println!(
+            "bench present xtest move {zx} {}; move {zx} {}",
+            zy - 60.0,
+            zy - 150.0
+        );
+        glib::timeout_future(Duration::from_millis(800)).await;
+        state("away");
+        match menu_item(&zoom, "Fit Width") {
+            Some((x, y)) => {
+                println!("bench present xtest move {x} {y}; sleep 0.3; down; up");
+                glib::timeout_future(Duration::from_millis(800)).await;
+            }
+            None => println!("bench present bar_menu Fit Width not found"),
+        }
+        state("pick");
+        println!(
+            "bench present xtest move {px} {strip}; sleep 0.6; move {px} {py}; sleep 0.3; down; up"
+        );
+        glib::timeout_future(Duration::from_millis(1600)).await;
+        state("page");
+        println!("bench present xtest key Escape");
+        glib::timeout_future(Duration::from_millis(800)).await;
+        state("escape");
         // F5 and Escape leave from a presented shell, which has every other key.
         let shell = app
             .docs()
@@ -277,6 +342,28 @@ async fn position(app: &Rc<App>) -> String {
     view.evaluate_javascript_future("scrollY", None, None)
         .await
         .map_or("?".into(), |y| format!("scrollY={}", y.to_double()))
+}
+
+/// The middle of the row reading `text` in the menu hung off `host`, on the window's surface,
+/// which sits at the screen's origin under Xvfb: the menu's own surface is placed on it.
+fn menu_item(host: &gtk::Widget, text: &str) -> Option<(f64, f64)> {
+    fn label(widget: &gtk::Widget, text: &str) -> Option<gtk::Widget> {
+        std::iter::successors(widget.first_child(), |w| w.next_sibling()).find_map(|w| {
+            match w.downcast_ref::<gtk::Label>() {
+                Some(l) if l.label() == text => Some(w),
+                _ => label(&w, text),
+            }
+        })
+    }
+    let popover = std::iter::successors(host.first_child(), |w| w.next_sibling())
+        .find_map(|w| w.downcast::<gtk::Popover>().ok())?;
+    let b = label(popover.upcast_ref(), text)?.compute_bounds(&popover)?;
+    let popup = popover.surface()?.downcast::<gtk::gdk::Popup>().ok()?;
+    let (sx, sy) = popover.surface_transform();
+    Some((
+        f64::from(popup.position_x()) + sx + f64::from(b.x() + b.width() / 2.0),
+        f64::from(popup.position_y()) + sy + f64::from(b.y() + b.height() / 2.0),
+    ))
 }
 
 /// A pause for a screenshot of the note and the PDF, which are the two looks worth comparing.

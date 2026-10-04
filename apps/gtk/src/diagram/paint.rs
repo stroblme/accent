@@ -12,7 +12,8 @@ use std::rc::Rc;
 
 use accent_core::recolour;
 use accent_drawio::{
-    Align, Color, Font, ImageSource, Marks, Paint, PathCmd, Point, Prim, Rect, Run, Stroke, VAlign,
+    Align, Cap, Color, Font, ImageSource, Join, Marks, Paint, PathCmd, Point, Prim, Rect, Run,
+    Stroke, VAlign,
 };
 use gtk::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
@@ -365,6 +366,8 @@ pub fn prim(
             source,
             keep_aspect,
             rotation,
+            flip_h,
+            flip_v,
             opacity,
             ..
         } => {
@@ -375,7 +378,7 @@ pub fn prim(
                 // download into the ssh-style cache is the upgrade.
                 ImageSource::Url(_) => None,
             };
-            rotated(snapshot, r.centre(), *rotation, || {
+            placed(snapshot, r.centre(), *rotation, (*flip_h, *flip_v), || {
                 with_opacity(snapshot, *opacity, || match &picture {
                     Some(p) => {
                         let t = &p.texture;
@@ -488,12 +491,21 @@ pub fn to_gsk(path: &[PathCmd], frame: &Frame) -> gsk::Path {
     builder.to_path()
 }
 
-/// A stroke as draw.io's SVG draws one: mitred joins, butt caps, dashes in multiples of the
-/// width (the crate has already scaled them by it).
+/// A stroke as draw.io's SVG draws one: its caps and joins, dashes in multiples of the width
+/// (the crate has already scaled them by it).
 pub fn stroke_of(s: &Stroke, scale: f64) -> gsk::Stroke {
     let stroke = gsk::Stroke::new((s.width * scale) as f32);
-    stroke.set_line_join(gsk::LineJoin::Miter);
-    stroke.set_line_cap(gsk::LineCap::Butt);
+    match s.join {
+        Join::Miter(limit) => {
+            stroke.set_line_join(gsk::LineJoin::Miter);
+            stroke.set_miter_limit(limit as f32);
+        }
+        Join::Round => stroke.set_line_join(gsk::LineJoin::Round),
+    }
+    stroke.set_line_cap(match s.cap {
+        Cap::Butt => gsk::LineCap::Butt,
+        Cap::Square => gsk::LineCap::Square,
+    });
     if let Some(dash) = &s.dash {
         let dash: Vec<f32> = dash.iter().map(|d| (d * scale) as f32).collect();
         stroke.set_dash(&dash);
@@ -618,6 +630,29 @@ fn rotated(snapshot: &gtk::Snapshot, centre: Point, degrees: f64, paint: impl Fn
     snapshot.translate(&graphene::Point::new(-centre.x as f32, -centre.y as f32));
     paint();
     snapshot.restore();
+}
+
+/// `paint` mirrored across `centre` by `(flip_h, flip_v)`, then turned `degrees` about it, as
+/// draw.io's canvas composes a shape's flips and rotation (`mxSvgCanvas2D.rotate`).
+fn placed(
+    snapshot: &gtk::Snapshot,
+    centre: Point,
+    degrees: f64,
+    (flip_h, flip_v): (bool, bool),
+    paint: impl FnOnce(),
+) {
+    rotated(snapshot, centre, degrees, || {
+        if !flip_h && !flip_v {
+            return paint();
+        }
+        let sign = |flip: bool| if flip { -1.0 } else { 1.0 };
+        snapshot.save();
+        snapshot.translate(&gpoint(centre));
+        snapshot.scale(sign(flip_h), sign(flip_v));
+        snapshot.translate(&graphene::Point::new(-centre.x as f32, -centre.y as f32));
+        paint();
+        snapshot.restore();
+    })
 }
 
 /// The largest rectangle of a `w`×`h` picture's shape that fits in `r`, centred.
