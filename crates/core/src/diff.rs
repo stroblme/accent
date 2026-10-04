@@ -275,6 +275,41 @@ pub fn revert_lines(old: &str, new: &str, side: Side, picked: RangeInclusive<usi
     mix(old, new, side, &picked, false)
 }
 
+/// The lines of the other side facing `side`'s lines `span` (1-based, inclusive): those on the
+/// rows the span covers, or, where none of those rows has one, the empty range between the lines
+/// above and below them (`n + 1..=n`), which leaves those two equally near. What focus mode's line
+/// fade is measured from in the column beside the editor.
+pub fn facing(
+    lines: &[DiffLine],
+    rows: &[Row],
+    side: Side,
+    span: &RangeInclusive<usize>,
+) -> RangeInclusive<usize> {
+    let number = |side: Side, row: &Row| side.of(row).and_then(|i| side.number(&lines[i]));
+    let first = rows
+        .iter()
+        .position(|row| number(side, row).is_some_and(|n| n >= *span.start()))
+        .unwrap_or(rows.len());
+    let end = rows
+        .iter()
+        .rposition(|row| number(side, row).is_some_and(|n| n <= *span.end()))
+        .map_or(first, |last| (last + 1).max(first));
+    let mut theirs = rows[first..end]
+        .iter()
+        .filter_map(|row| number(side.other(), row));
+    match (theirs.next(), theirs.next_back()) {
+        (Some(from), to) => from..=to.unwrap_or(from),
+        (None, _) => {
+            let above = rows[..first]
+                .iter()
+                .rev()
+                .find_map(|row| number(side.other(), row))
+                .unwrap_or(0);
+            above + 1..=above
+        }
+    }
+}
+
 /// Put a text back together row by row: a row the selection covers gives its new side's line
 /// when `apply`ing and its old side's when reverting, and every other row the opposite. An
 /// unchanged row is the same line on both.
@@ -562,6 +597,34 @@ mod tests {
             apply_lines("a\nb\nc\n", "a\nX", Side::Old, 2..=2),
             "a\nX\nc\n",
             "the c left alone follows what is now the last line"
+        );
+    }
+
+    #[test]
+    fn the_lines_facing_a_span_are_on_its_rows_or_either_side_of_the_blank() {
+        // First and last, as a tuple: an empty range is what this answers beside a blank.
+        let facing_in = |old, new, side, span| {
+            let lines = lines(old, new);
+            let facing = facing(&lines, &align(&lines), side, &span);
+            (*facing.start(), *facing.end())
+        };
+        // `b` changed to `B`, `X` added beside `c` deleted, `a` and `d` the same.
+        let (old, new) = ("a\nb\nc\nd\n", "a\nB\nX\nd\n");
+        assert_eq!(facing_in(old, new, Side::New, 1..=1), (1, 1));
+        assert_eq!(facing_in(old, new, Side::New, 3..=3), (3, 3), "on one row");
+        assert_eq!(facing_in(old, new, Side::New, 2..=4), (2, 4));
+        // Only added: the blank faces the lines either side of it.
+        let (old, new) = ("a\nb\n", "a\nX\nY\nb\n");
+        assert_eq!(facing_in(old, new, Side::New, 2..=3), (2, 1));
+        assert_eq!(
+            facing_in(old, new, Side::New, 5..=5),
+            (3, 2),
+            "past the end"
+        );
+        assert_eq!(
+            facing_in(old, new, Side::Old, 2..=2),
+            (4, 4),
+            "the other way"
         );
     }
 

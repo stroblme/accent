@@ -537,6 +537,25 @@ impl Compare {
         // laid out bare until then.
         if let Some(mine) = editable {
             let buffer = this.pane(mine).buffer.clone();
+            // Focus mode's line fade on the other column is measured from the lines facing the
+            // editor's carets, so stepping through the changes keeps the two columns' focus level,
+            // and drawn again as those carets move: its own caret nobody moves.
+            if let Some(theirs) = this
+                .pane(mine.other())
+                .view
+                .downcast_ref::<crate::multicaret::View>()
+            {
+                let w = weak.clone();
+                theirs.fade_from(move || w.upgrade()?.facing(mine));
+                let theirs = theirs.downgrade();
+                let id = buffer.connect_mark_set(move |buffer, _, mark| {
+                    let caret = [buffer.get_insert(), buffer.selection_bound()].contains(mark);
+                    if let Some(theirs) = theirs.upgrade().filter(|t| caret && t.fade_shown()) {
+                        theirs.queue_draw();
+                    }
+                });
+                connect(buffer.clone().upcast(), id);
+            }
             let id = buffer.connect_changed(reclaim);
             connect(buffer.clone().upcast(), id);
             // And the lines an edit touches are marked as GTK's to lay out again, before the
@@ -628,6 +647,28 @@ impl Compare {
         if value != adj.value() {
             adj.set_value(value);
         }
+    }
+
+    /// Focus mode's line fade on the column beside the editor, which comes and goes with the
+    /// editor's own.
+    pub fn set_fade(&self, on: bool) {
+        let theirs = self.editable.map(|mine| &self.pane(mine.other()).view);
+        if let Some(theirs) = theirs.and_then(|v| v.downcast_ref::<crate::multicaret::View>()) {
+            theirs.set_fade(on);
+        }
+    }
+
+    /// The lines of the column beside the editor that face the editor's carets, 0-based: what
+    /// focus mode's line fade is measured from there.
+    fn facing(&self, mine: Side) -> Option<RangeInclusive<i32>> {
+        let view = self
+            .pane(mine)
+            .view
+            .downcast_ref::<crate::multicaret::View>()?;
+        let span = crate::fade::span(view);
+        let span = *span.start() as usize + 1..=*span.end() as usize + 1;
+        let facing = diff::facing(&self.lines.borrow(), &self.rows.borrow(), mine, &span);
+        Some(*facing.start() as i32 - 1..=*facing.end() as i32 - 1)
     }
 
     /// Re-read both buffers and lay the diff over them: the tints, the emphasis, the hidden runs

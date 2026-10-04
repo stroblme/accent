@@ -47,7 +47,7 @@ pub struct Branch {
 ///
 /// `x` and `y` are porcelain's two state columns — index and worktree — with `.` for "unchanged"
 /// and `?` for untracked, which is how the [`Status`] filters below tell the three lists apart.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Entry {
     pub path: String,
     /// Where a rename or copy came from.
@@ -103,13 +103,15 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Commit {
     pub id: String,
     pub parents: Vec<String>,
     /// Decorations: the branches and tags pointing here, HEAD's first (see [`parse_refs`]).
     pub refs: Vec<Ref>,
+    /// The author's name and email as `git log` gives them, `.mailmap` applied.
     pub author: String,
+    pub email: String,
     /// Author time, unix seconds.
     pub time: i64,
     pub summary: String,
@@ -118,7 +120,7 @@ pub struct Commit {
 }
 
 /// One decoration on a commit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Ref {
     /// As git shortens it: `main`, `origin/main`, `v1`, `HEAD` for a detached HEAD, or `stash`.
     pub name: String,
@@ -128,7 +130,7 @@ pub struct Ref {
 }
 
 /// What a [`Ref`] is, in the order a commit lists them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RefKind {
     /// A detached HEAD, which names no branch.
     Head,
@@ -141,7 +143,7 @@ pub enum RefKind {
 
 /// A commit placed on the history graph: which column it sits in, and which columns the edges
 /// entering and leaving it occupy. See [`lanes`] for what the three edge lists mean.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LogRow {
     pub commit: Commit,
     pub column: usize,
@@ -158,7 +160,7 @@ pub struct LogRow {
     pub forks: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Submodule {
     pub path: String,
     pub oid: String,
@@ -822,7 +824,7 @@ pub fn log(repo: &Repo, skip: usize, n: usize) -> Result<Vec<Commit>, Error> {
             "--decorate=full",
             // Unit and record separators: a summary line can hold anything else, including tabs,
             // and a body holds newlines, so the record separator has to be neither.
-            "--format=%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1f%b%x1e",
+            "--format=%H%x1f%P%x1f%D%x1f%aN%x1f%aE%x1f%at%x1f%s%x1f%b%x1e",
         ],
         true,
     )?;
@@ -849,6 +851,7 @@ fn parse_log(bytes: &[u8]) -> Vec<Commit> {
                 parents,
                 refs,
                 author: fields.next()?.to_string(),
+                email: fields.next()?.to_string(),
                 time: fields.next()?.parse().unwrap_or(0),
                 summary: fields.next().unwrap_or_default().to_string(),
                 // Last, so its newlines are the record's own trailing whitespace and the trim

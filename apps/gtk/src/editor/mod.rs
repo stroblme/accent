@@ -968,10 +968,14 @@ impl Tab {
         true
     }
 
-    /// Focus mode's line fade, which the view subclass paints (`fade.rs`).
+    /// Focus mode's line fade, which the view subclass paints (`fade.rs`), on a comparison's
+    /// other column too.
     pub fn set_fade(&self, on: bool) {
         if let Some(view) = self.view.downcast_ref::<multicaret::View>() {
             view.set_fade(on);
+        }
+        if let Some(compare) = self.comparison() {
+            compare.set_fade(on);
         }
     }
 

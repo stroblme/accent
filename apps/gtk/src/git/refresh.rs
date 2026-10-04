@@ -164,7 +164,7 @@ impl Panel {
         );
         if let Some(page) = page {
             self.has_more.set(page.len() >= fetched.rows);
-            self.fill_log(page, 0);
+            self.fill_log(page);
         }
         (self.hooks.changed)();
         self.reload_diffs();

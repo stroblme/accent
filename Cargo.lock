@@ -18,6 +18,7 @@ dependencies = [
  "libspelling",
  "pulldown-cmark",
  "serde_json",
+ "similar",
  "sourceview5",
  "tracing",
  "tracing-subscriber",

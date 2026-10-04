@@ -20,7 +20,7 @@ const SHOWN_REFS: usize = 3;
 // commits are a handful at a time, so the size of the commit variant costs nothing a second box
 // would save.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum LogItem {
     Commit(LogRow),
     /// A file the commit above it changed, shown while that commit is expanded.
@@ -114,31 +114,21 @@ impl Panel {
         });
     }
 
-    /// Put `commits` on the graph. `keep` is how many leading rows the store already holds
-    /// unchanged: [`git::lanes`] is one forward pass, so a Load More can only append, and
-    /// appending leaves the reader where they were instead of scrolling back to the top.
-    pub(super) fn fill_log(self: &Rc<Self>, commits: Vec<Commit>, keep: usize) {
-        // A fill still under way holds fewer rows than `keep` counts, so the page is drawn whole.
-        let keep = match self.log_fill.cancel() {
-            true => 0,
-            false => keep,
-        };
+    /// Put `commits` on the graph, splicing only the rows that changed ([`changed_runs`]): a Load
+    /// More appends, and a refresh after a commit puts it in above the rows on screen, which stay
+    /// where they are instead of scrolling back to the top.
+    pub(super) fn fill_log(self: &Rc<Self>, commits: Vec<Commit>) {
         // Which commit was open, so it can be opened again below. A refresh lands on every
         // commit, pull and checkout, and the file list closing under each of them was the one
         // thing about the history that did not survive one.
         let was = self.expanded.borrow().clone();
         self.collapse();
         let rows = git::lanes(commits);
-        let keep = keep.min(rows.len()) as u32;
-        let mut items: Vec<glib::BoxedAnyObject> = rows[keep as usize..]
-            .iter()
-            .cloned()
-            .map(|row| glib::BoxedAnyObject::new(LogItem::Commit(row)))
-            .collect();
-        // The splice reaches the end of the store, so this is also what takes the row away again
-        // once the last page has come in.
+        let mut items: Vec<LogItem> = rows.iter().cloned().map(LogItem::Commit).collect();
+        // The last row, while git has more; the splice takes it away again once the last page
+        // has come in.
         if self.has_more.get() {
-            items.push(glib::BoxedAnyObject::new(LogItem::More));
+            items.push(LogItem::More);
         }
         // Once every row is in, and only where the commit is still in the page and nothing was
         // opened meanwhile: `toggle` asks git for the file list again and splices it back under
@@ -147,9 +137,7 @@ impl Panel {
         let weak = Rc::downgrade(self);
         self.log_fill.splice(
             &self.log,
-            keep,
-            self.log.n_items().saturating_sub(keep),
-            items,
+            changed_runs(&self.log, &items),
             || false,
             move || {
                 if let (Some(panel), Some(row)) = (weak.upgrade(), again)
@@ -179,7 +167,7 @@ impl Panel {
         self.collapse();
         let commits = self.state.borrow().commits.clone();
         self.has_more.set(commits.len() >= PAGE);
-        self.fill_log(commits, 0);
+        self.fill_log(commits);
     }
 
     /// Show, or hide again, the files one commit changed.
@@ -288,9 +276,7 @@ impl Panel {
                 state.commits.extend(page);
                 state.commits.clone()
             };
-            // `skip` is how many commit rows the store already had, which after the collapse
-            // inside `fill_log` is exactly how many of them stay.
-            panel.fill_log(commits, skip);
+            panel.fill_log(commits);
         });
     }
 
@@ -667,11 +653,14 @@ fn ago(now: i64, then: i64) -> String {
     }
 }
 
-/// What hovering a commit says: where it sits, what it is called, and the whole message.
+/// What hovering a commit says: where it sits, what it is called, who wrote it, and the whole
+/// message.
 ///
 /// The decorations `git log` already fetched rather than a `git branch --contains` per hover, so
 /// a commit that is no branch tip simply has no first line; the branch its lane draws
 /// ([`git::lanes`]) is the "On" line, where a branch or a tag above it on that lane names one.
+/// The author as `git log` names them, `Name <email>`, and not the committer, which `git log`
+/// leaves out too.
 fn commit_tooltip(row: &LogRow) -> String {
     let c = &row.commit;
     let mut head = match c.refs.is_empty() {
@@ -681,6 +670,7 @@ fn commit_tooltip(row: &LogRow) -> String {
     if let Some(lane) = &row.lane {
         head = format!("{head}\nOn {lane}");
     }
+    head = format!("{head}\n{} <{}>", c.author, c.email);
     let message = match c.body.is_empty() {
         true => c.summary.clone(),
         false => format!("{}\n\n{}", c.summary, c.body),
@@ -734,7 +724,8 @@ mod tests {
             id: id.to_string(),
             parents: Vec::new(),
             refs: Vec::new(),
-            author: "a".to_string(),
+            author: "A U Thor".to_string(),
+            email: "author@example.com".to_string(),
             time: 0,
             summary: "s".to_string(),
             body: String::new(),
@@ -755,15 +746,18 @@ mod tests {
     }
 
     #[test]
-    fn commit_tooltip_says_where_the_commit_is_and_what_it_says() {
+    fn commit_tooltip_says_where_the_commit_is_who_wrote_it_and_what_it_says() {
         let mut c = commit_at("abcdef1234567");
         c.summary = "subject".to_string();
-        assert_eq!(commit_tooltip(&placed(&c, None)), "abcdef1\n\nsubject");
+        assert_eq!(
+            commit_tooltip(&placed(&c, None)),
+            "abcdef1\nA U Thor <author@example.com>\n\nsubject"
+        );
 
         c.body = "why it happened\nand a second line".to_string();
         assert_eq!(
             commit_tooltip(&placed(&c, Some("side"))),
-            "abcdef1\nOn side\n\nsubject\n\nwhy it happened\nand a second line"
+            "abcdef1\nOn side\nA U Thor <author@example.com>\n\nsubject\n\nwhy it happened\nand a second line"
         );
 
         c.refs = vec![
@@ -773,7 +767,7 @@ mod tests {
         ];
         assert_eq!(
             commit_tooltip(&placed(&c, Some("main"))),
-            "HEAD -> main, origin/main, tag: v1\nabcdef1\nOn main\n\nsubject\n\nwhy it happened\nand a second line"
+            "HEAD -> main, origin/main, tag: v1\nabcdef1\nOn main\nA U Thor <author@example.com>\n\nsubject\n\nwhy it happened\nand a second line"
         );
     }
 

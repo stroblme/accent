@@ -15,7 +15,7 @@ const FILE_INSET: i32 = 22;
 
 /// Which list a row belongs to, which is what decides the letter it shows, the buttons it offers
 /// and what activating it compares.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(super) enum Section {
     Conflicts,
     Staged,
@@ -24,7 +24,7 @@ pub(super) enum Section {
 
 /// One line of the changes list. Headers are rows of their own rather than list sections, so the
 /// whole thing is one flat `ListStore` and an empty section is simply two rows that are not there.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Row {
     Header {
         title: &'static str,
@@ -121,10 +121,10 @@ impl Panel {
     /// Draw the changes list from what the last refresh learned, and nothing else: what the
     /// grouping preference and a folder row both need, neither being a reason to ask git again.
     ///
-    /// Only the run of rows that differs is spliced, a few at a time ([`Fill`]), as the log
-    /// compares before it draws: a save, a watcher event and the `.git` write a Stage makes each
-    /// land a refresh that mostly says what is on screen already, and a row spliced out from under
-    /// a press loses its release — which is how Stage clicks went missing. So a row has to carry
+    /// Only the runs of rows that differ are spliced, a few at a time ([`changed_runs`], [`Fill`]):
+    /// a save, a watcher event and the `.git` write a Stage makes each land a refresh that mostly
+    /// says what is on screen already, and a row spliced out from under a press loses its release
+    /// — which is how Stage clicks went missing. So a row has to carry
     /// everything its binding draws; the one thing it does not, the view, empties the list in
     /// [`Panel::set_tree`]. Nothing moves while a press is down over the list, a fill under way
     /// included: its release redraws.
@@ -148,28 +148,13 @@ impl Panel {
                 _ => Vec::new(),
             }
         };
-        let held: Vec<Row> = (0..self.changes.n_items())
-            .filter_map(|i| boxed(self.changes.item(i)))
-            .collect();
-        let (at, removed, added) = changed_run(&held, &rows);
-        if removed == 0 && added == 0 {
+        let runs = changed_runs(&self.changes, &rows);
+        if runs.is_empty() {
             return;
         }
-        let items: Vec<glib::BoxedAnyObject> = rows
-            .into_iter()
-            .skip(at)
-            .take(added)
-            .map(glib::BoxedAnyObject::new)
-            .collect();
         let pressed = self.pressed.clone();
-        self.changes_fill.splice(
-            &self.changes,
-            at as u32,
-            removed as u32,
-            items,
-            move || pressed.get(),
-            || {},
-        );
+        self.changes_fill
+            .splice(&self.changes, runs, move || pressed.get(), || {});
     }
 
     /// Activate the row `path` is listed on, as a click on it does, and say which section it was
@@ -843,20 +828,6 @@ fn only_segment(group: &[&Entry], prefix: &str) -> Option<String> {
         .then(|| first.to_string())
 }
 
-/// The one run of `rows` that differs from `held`: where it starts, how many of `held` it replaces
-/// and how many of `rows` replace them. What the rows before and after it share is left out, so
-/// their widgets stay where they are.
-fn changed_run<T: PartialEq>(held: &[T], rows: &[T]) -> (usize, usize, usize) {
-    let head = held.iter().zip(rows).take_while(|(a, b)| a == b).count();
-    let tail = held[head..]
-        .iter()
-        .rev()
-        .zip(rows[head..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    (head, held.len() - head - tail, rows.len() - head - tail)
-}
-
 /// The one letter a row shows: the side of porcelain's two that the section is about.
 fn status_letter(e: &Entry, section: Section) -> char {
     match section {
@@ -1063,20 +1034,6 @@ mod tests {
             shape(&rows[1..]),
             [(0, "src/x.md".to_string()), (0, "a.md".to_string())]
         );
-    }
-
-    #[test]
-    fn changed_run_leaves_the_rows_either_side_of_a_change_alone() {
-        assert_eq!(changed_run(&[1, 2, 3], &[1, 2, 3]), (3, 0, 0), "nothing");
-        // Staging `b` opens a Staged section above and takes `b` out of Changes: the rows after
-        // it keep their widgets.
-        assert_eq!(
-            changed_run(&["C", "a", "b", "c", "d"], &["S", "b", "C", "a", "c", "d"]),
-            (0, 3, 4)
-        );
-        assert_eq!(changed_run(&[1, 2, 3], &[1, 3]), (1, 1, 0), "a row gone");
-        assert_eq!(changed_run(&[1, 3], &[1, 2, 3]), (1, 0, 1), "a row come");
-        assert_eq!(changed_run(&[1, 1], &[1, 1, 1]), (2, 0, 1), "no overlap");
     }
 
     #[test]
