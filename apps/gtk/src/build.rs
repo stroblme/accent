@@ -294,6 +294,7 @@ pub fn build_window(
         preferences: OnceCell::new(),
         preview: RefCell::new(None),
         inverted_images: Rc::default(),
+        web_images: Rc::default(),
         told_unheld: Cell::new(false),
         split,
         sidebar_column,

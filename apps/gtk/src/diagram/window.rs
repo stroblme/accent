@@ -112,6 +112,7 @@ impl App {
             place,
         );
         self.wire_diagram(&tab);
+        tab.allow_web(self.web_images.borrow().contains(key));
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.
         if doc::is_loose_key(key) {
             tab.watch_file(glib::clone!(
@@ -174,6 +175,13 @@ impl App {
         tab.connect_autosave(on(|app, tab| app.save_diagram(tab, false)));
         tab.connect_image(on(|app, tab| app.pick_image(tab)));
         tab.connect_banner(on(|app, tab| app.resolve_diagram(tab)));
+        // Load: remembered for the file, and the note in the preview drawn again with them.
+        tab.connect_web(on(|app, tab| {
+            app.web_images.borrow_mut().insert(tab.key());
+            app.save_session_soon();
+            tab.allow_web(true);
+            app.reshow_preview_image(&tab.key());
+        }));
         let weak = Rc::downgrade(self);
         tab.connect_toast(move |text| {
             if let Some(app) = weak.upgrade() {

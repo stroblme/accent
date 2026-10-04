@@ -304,6 +304,9 @@ struct App {
     /// The images Invert Image Colours has turned round, by key, until the app quits: in their
     /// tabs and in the preview alike, which reads it as it serves each image.
     inverted_images: Rc<RefCell<HashSet<String>>>,
+    /// The diagrams whose pictures on the web may be downloaded, by key: the reader said Load on
+    /// the diagram's banner. Kept in the session, and read by the preview as it serves an embed.
+    web_images: Rc<RefCell<HashSet<String>>>,
     /// Whether this window has said that its shells are not held (no `accent-cli` beside it).
     told_unheld: Cell<bool>,
     /// Every file and every tag in the vault, as the palette lists them. Kept warm in the

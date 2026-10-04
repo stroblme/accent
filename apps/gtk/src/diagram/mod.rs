@@ -17,6 +17,7 @@ mod props;
 mod render;
 mod tools;
 mod view;
+mod web;
 mod window;
 
 use std::cell::{Cell, RefCell};
@@ -46,6 +47,11 @@ pub struct DiagramTab {
     pub page: adw::TabPage,
     /// "This diagram changed on disk", while the tab holds edits the file does not.
     banner: adw::Banner,
+    /// "This diagram links images from the web", while it does and the reader has not said Load.
+    web_banner: adw::Banner,
+    /// Whether the pictures the diagram links from the web are downloaded and drawn: the reader
+    /// said Load, now or in another session (the window's `web_images`).
+    web: Cell<bool>,
     /// The canvas's overlay: the ring and the label editor float over the page in it.
     overlay: gtk::Overlay,
     view: DiagramView,
@@ -95,6 +101,8 @@ pub struct DiagramTab {
     on_image: Hook,
     on_banner: Hook,
     on_options: Hook,
+    /// The web banner's Load.
+    on_web: Hook,
     /// Something to tell the reader in a toast: what was copied, or that there was nothing to
     /// paste.
     on_toast: TextHook,
@@ -126,8 +134,13 @@ pub fn open(
         .title("This diagram changed on disk")
         .button_label("Resolve…")
         .build();
+    let web_banner = adw::Banner::builder()
+        .title("This diagram links images from the web")
+        .button_label("Load")
+        .build();
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
     host.append(&banner);
+    host.append(&web_banner);
     host.append(&overlay);
 
     let page = tabs.append(&host);
@@ -145,6 +158,8 @@ pub fn open(
         path: RefCell::new(path.to_path_buf()),
         page,
         banner,
+        web_banner,
+        web: Cell::new(false),
         overlay,
         view,
         ring,
@@ -175,6 +190,7 @@ pub fn open(
         on_image: RefCell::new(None),
         on_banner: RefCell::new(None),
         on_options: RefCell::new(None),
+        on_web: RefCell::new(None),
         on_toast: RefCell::new(None),
     });
     if has_math {
@@ -225,6 +241,11 @@ pub fn open(
         #[weak]
         tab,
         move |_| tab.emit(&tab.on_banner)
+    ));
+    tab.web_banner.connect_button_clicked(glib::clone!(
+        #[weak]
+        tab,
+        move |_| tab.emit(&tab.on_web)
     ));
     tab.wire_keys();
     tab.wire_wheel();
@@ -726,12 +747,54 @@ impl DiagramTab {
         }
     }
 
+    /// Whether the pictures the diagram links from the web are drawn.
+    pub fn web_allowed(&self) -> bool {
+        self.web.get()
+    }
+
+    /// Draw the pictures the diagram links from the web, or not: the window says so on opening,
+    /// from what the reader said before, and when they say Load.
+    pub fn allow_web(self: &Rc<Self>, on: bool) {
+        self.web.set(on);
+        self.view.set_web(on);
+        self.sync_web();
+    }
+
+    /// The web banner shown while the diagram links pictures from the web the reader has not
+    /// said Load for; once they have, whichever of them are not downloaded yet are, and the
+    /// page is drawn again when they come in. Asked on opening, on Load and after every change.
+    fn sync_web(self: &Rc<Self>) {
+        let urls = web::urls(self.editor.borrow().file());
+        self.web_banner
+            .set_revealed(!urls.is_empty() && !self.web.get());
+        let missing: Vec<String> = urls
+            .into_iter()
+            .filter(|url| !web::path(url).is_file())
+            .collect();
+        if !self.web.get() || missing.is_empty() {
+            return;
+        }
+        let tab = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let (fetched, failed) = web::fetch(&missing).await;
+            let Some(tab) = tab.upgrade() else { return };
+            if fetched > 0 {
+                tab.refresh();
+            }
+            if failed > 0 {
+                let what = if failed == 1 { "image" } else { "images" };
+                tab.toast(&format!("Cannot load {failed} {what} from the web"));
+            }
+        });
+    }
+
     /// After any change to the model, an undo included.
     fn changed(self: &Rc<Self>) {
         self.save.edits.set(self.save.edits.get() + 1);
         self.save.modified.set(true);
         self.set_title();
         self.refresh();
+        self.sync_web();
         self.fill_props();
         self.emit(&self.on_history);
         self.emit(&self.on_selection);
@@ -1186,6 +1249,18 @@ impl DiagramTab {
         self.view.scale()
     }
 
+    /// Whether the web banner is out, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn web_banner_shown(&self) -> bool {
+        self.web_banner.is_revealed()
+    }
+
+    /// The web banner's Load, pressed by a drill.
+    #[cfg(feature = "bench")]
+    pub fn press_load(&self) {
+        self.web_banner.emit_by_name::<()>("button-clicked", &[]);
+    }
+
     /// The Layers group's rows as a drill reads them, the topmost first.
     #[cfg(feature = "bench")]
     pub fn layer_rows(&self) -> Vec<String> {
@@ -1343,6 +1418,7 @@ impl DiagramTab {
         self.banner.set_revealed(false);
         self.set_title();
         self.refresh();
+        self.sync_web();
         self.fill_props();
         self.emit(&self.on_pages);
         self.emit(&self.on_history);
@@ -1657,6 +1733,11 @@ impl DiagramTab {
         }
     }
 
+    /// The web banner's Load.
+    pub fn connect_web(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
+        *self.on_web.borrow_mut() = Some(Rc::new(f));
+    }
+
     /// The changed-on-disk banner's button.
     pub fn connect_banner(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
         *self.on_banner.borrow_mut() = Some(Rc::new(f));
@@ -1765,6 +1846,12 @@ fn pair(text: &str) -> Option<(f64, f64)> {
         .map(|s| s.parse::<f64>().ok().filter(|n| n.is_finite()));
     let (a, b) = (numbers.next()??, numbers.next()??);
     numbers.next().is_none().then_some((a, b))
+}
+
+/// Whether the picture at `url` on the web has been downloaded, for a drill.
+#[cfg(feature = "bench")]
+pub fn web_downloaded(url: &str) -> bool {
+    web::path(url).is_file()
 }
 
 /// The names of `file`'s pages as the Outline pane lists them: a page with none is "Page N".

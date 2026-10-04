@@ -318,6 +318,11 @@ impl App {
                 .filter(Doc::persists)
                 .map(|d| d.key())
                 .collect(),
+            web_images: {
+                let mut keys: Vec<String> = self.web_images.borrow().iter().cloned().collect();
+                keys.sort();
+                keys
+            },
         };
         match self.restored.get() {
             true => session,
@@ -654,6 +659,9 @@ impl App {
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
         self.set_zoom(session.zoom);
+        // Before the tabs too: a diagram opening draws its pictures on the web, or asks.
+        let allowed = session.web_images.iter().cloned();
+        self.web_images.borrow_mut().extend(allowed);
         if let Some(layout) = session.panes() {
             self.restore_panes(layout, session);
         }
@@ -1078,6 +1086,11 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
     stored.pdf.extend(now.pdf);
     stored.diagram.extend(now.diagram);
     stored.terminals.extend(now.terminals);
+    for key in now.web_images {
+        if !stored.web_images.contains(&key) {
+            stored.web_images.push(key);
+        }
+    }
     stored
 }
 

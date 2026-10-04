@@ -425,6 +425,7 @@ impl App {
         let preview = preview::Preview::new(
             move |rel: &str| resolve(rel),
             self.inverted_images.clone(),
+            self.web_images.clone(),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,

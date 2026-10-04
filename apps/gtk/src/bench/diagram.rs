@@ -73,8 +73,12 @@ const LAYERED: &str = r#"<mxfile host="accent">
 /// `=present:<rel>,<pdf>` is presentation over both (`present`); `=look:<rel>:<dir>` walks
 /// the sample through the themes (`look`); `=export:<rel>:<dir>` exports and prints it into
 /// `<dir>` (`export`); `=props:<rel>` works the Properties pane's Position, Size and Style
-/// groups (`props`), and `=layers:<rel>` its Layers group over a slide template (`layers`).
+/// groups (`props`), `=layers:<rel>` its Layers group over a slide template (`layers`), and
+/// `=web:<rel>:<url>` a picture linked from the web (`web`).
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
+    if let Some((rel, url)) = arg.strip_prefix("web:").and_then(|a| a.split_once(':')) {
+        return web(app, rel, url);
+    }
     if let Some(rel) = arg.strip_prefix("layers:") {
         return layers(app, rel);
     }
@@ -227,7 +231,7 @@ fn export(app: &Rc<App>, rel: &str, dir: &Path) {
         }
         let print = dir.join("print.pdf");
         let _ = std::fs::remove_file(&print);
-        let op = operation(&tab.file(), tab.typesetter().as_ref(), "print").await;
+        let op = operation(&tab.file(), tab.typesetter().as_ref(), false, "print").await;
         op.set_export_filename(&print);
         // From an idle, as Print… runs it: the export runs a main loop of its own.
         let ran = gio::GioFuture::new(&op, |op, _, done| {
@@ -241,7 +245,7 @@ fn export(app: &Rc<App>, rel: &str, dir: &Path) {
         // A note's embed: the first page, its formula typeset by the typesetter no tab holds.
         for page in [None, Some("Two")] {
             let started = Instant::now();
-            let svg = crate::diagram::embed::svg(&tab.path(), page).await;
+            let svg = crate::diagram::embed::svg(&tab.path(), page, false).await;
             println!(
                 "bench diagram embed page={page:?} ms={:.0} bytes={} pictures={}",
                 ms_since(started),
@@ -856,6 +860,81 @@ fn layers(app: &Rc<App>, rel: &str) {
                 "bench diagram shot {}",
                 shoot(app.window.upcast_ref(), Path::new(&path))
             );
+        }
+        bench_quit(&app);
+    });
+}
+
+/// A diagram of one picture linked from `url` (written to `rel` when there is none), opened:
+/// whether the web banner is out, the canvas's pixel at the picture's middle, whether the picture
+/// is downloaded and how many pictures a note's embed of the diagram draws; then, while the
+/// banner is out, the same once Load is pressed and the download has landed, and the session
+/// saved. Run twice on one scratch home, the second time with the server down: the banner stays
+/// in and the picture is drawn from the download.
+fn web(app: &Rc<App>, rel: &str, url: &str) {
+    let path = app.root().join(rel);
+    if !path.exists() {
+        let diagram = format!(
+            r#"<mxfile><diagram name="Web" id="bench-web"><mxGraphModel page="1" pageWidth="400" pageHeight="300"><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="w" style="shape=image;image={url};" vertex="1" parent="1">
+            <mxGeometry x="100" y="100" width="80" height="80" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#
+        );
+        std::fs::write(&path, diagram).expect("write the diagram");
+    }
+    let (app, rel, url) = (app.clone(), rel.to_string(), url.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        app.open_path(&rel);
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        let Some(tab) = app.active_diagram() else {
+            println!("bench diagram no_tab");
+            return bench_quit(&app);
+        };
+        let state = |when: &str| {
+            let canvas = tab.key_target();
+            let r = tab.frame_of("w").map(|r| tab.to_widget(&r));
+            let pixel = r.zip(picture(&canvas)).map(|(r, shot)| {
+                let mut downloader = gdk::TextureDownloader::new(&shot);
+                downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+                let (bytes, stride) = downloader.download_bytes();
+                let i = (r.y + r.h / 2.0) as usize * stride + (r.x + r.w / 2.0) as usize * 4;
+                [bytes[i], bytes[i + 1], bytes[i + 2]]
+            });
+            println!(
+                "bench diagram web {when} banner={} allowed={} pixel={pixel:?} downloaded={}",
+                tab.web_banner_shown(),
+                tab.web_allowed(),
+                crate::diagram::web_downloaded(&url)
+            );
+        };
+        let embed = |web: bool| {
+            let path = tab.path();
+            async move {
+                let svg = crate::diagram::embed::svg(&path, None, web).await;
+                svg.map_or(0, |s| s.matches("<image").count())
+            }
+        };
+        bench_pump();
+        state("opened");
+        let allowed = app.web_images.borrow().contains(&rel);
+        println!("bench diagram web embed pictures={}", embed(allowed).await);
+        if tab.web_banner_shown() {
+            tab.press_load();
+            let asked = Instant::now();
+            while !crate::diagram::web_downloaded(&url) && asked.elapsed() < Duration::from_secs(5)
+            {
+                glib::timeout_future(Duration::from_millis(50)).await;
+            }
+            glib::timeout_future(Duration::from_millis(300)).await;
+            bench_pump();
+            state("loaded");
+            let allowed = app.web_images.borrow().contains(&rel);
+            println!("bench diagram web embed pictures={}", embed(allowed).await);
+            app.save_session();
+            let stored = app.vault().map(|v| v.session().web_images);
+            println!("bench diagram web session={stored:?}");
         }
         bench_quit(&app);
     });
