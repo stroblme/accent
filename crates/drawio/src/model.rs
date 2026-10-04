@@ -219,16 +219,17 @@ impl Page {
         }
     }
 
-    /// The layer new cells go into: the first one not locked (`locked=1`), so that what is drawn
-    /// can be picked again. draw.io puts them in its default parent, the first layer until the
-    /// reader picks another in the Layers dialog, and disables inserting while that layer is
-    /// locked (EditorUi.js `updateActionStates` 6004-6096, Graph.js `isCellLocked` 1431-1444).
-    /// `None` when every layer is locked or there is none.
-    // ponytail: a layer the reader picks, as draw.io's Layers dialog does, is the upgrade.
+    /// The layer new cells go into while the reader has picked none, or the one picked is locked
+    /// or hidden: the topmost that is neither, so that what is drawn shows and can be picked
+    /// again. draw.io puts them in its default parent, the first layer until the reader picks
+    /// another in the Layers dialog, and disables inserting while that layer is locked
+    /// (EditorUi.js `updateActionStates` 6004-6096, Graph.js `isCellLocked` 1431-1444). `None`
+    /// when every layer is locked or hidden, or there is none.
     pub fn default_parent(&self) -> Option<&str> {
         self.layers()
             .into_iter()
-            .find(|c| c.style.get("locked") != Some("1"))
+            .rev()
+            .find(|c| c.is_visible() && !c.is_locked())
             .map(|c| c.id.as_str())
     }
 
@@ -403,6 +404,11 @@ impl Cell {
     /// `visible="0"` hides a cell and everything under it.
     pub fn is_visible(&self) -> bool {
         self.attr("visible") != Some("0")
+    }
+
+    /// `locked=1` keeps a cell, and everything under it, from being picked or changed.
+    pub fn is_locked(&self) -> bool {
+        self.style.get("locked") == Some("1")
     }
 }
 

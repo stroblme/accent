@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::Error;
 use crate::geom::{Point, Rect};
-use crate::model::{Cell, CellId, File, Geometry, Page, guid};
+use crate::model::{Cell, CellId, File, Geometry, Page, guid, set_attr};
 use crate::route::Constraint;
 use crate::scene::Scene;
 use crate::style::Style;
@@ -30,6 +30,9 @@ pub struct Editor {
     redo: Vec<Snapshot>,
     dirty: bool,
     ids: Ids,
+    /// The layer the reader picked for new cells: kept for the session, never written and never
+    /// an undo step, as draw.io's default parent is.
+    current: Option<CellId>,
 }
 
 /// What an undo or redo step puts back: one page, or the whole page list when pages were added
@@ -74,6 +77,7 @@ impl Editor {
                 prefix: guid(),
                 next: 1,
             },
+            current: None,
         }
     }
 
@@ -122,7 +126,8 @@ impl Editor {
         true
     }
 
-    /// A vertex at `rect` (absolute), inside `parent` or the page's first unlocked layer.
+    /// A vertex at `rect` (absolute), inside `parent` or the layer new cells go into
+    /// ([`Editor::set_current_layer`]).
     pub fn add_vertex(
         &mut self,
         page: usize,
@@ -131,10 +136,11 @@ impl Editor {
         style: &str,
         label: &str,
     ) -> Result<CellId, Error> {
+        let current = self.current.clone();
         self.edit(page, |p, ids| {
             let parent = match parent {
                 Some(id) => check(p, [id]).map(|()| id.to_string())?,
-                None => default_layer(p)?,
+                None => default_layer(p, current.as_deref())?,
             };
             // A layer has no rectangle and places its children from the page origin.
             let origin = p.absolute_rect(&parent).unwrap_or_default();
@@ -146,8 +152,8 @@ impl Editor {
         })
     }
 
-    /// An edge in the page's first unlocked layer. An end without a cell dangles at its point;
-    /// an end with one keeps the point too, as draw.io writes it.
+    /// An edge in the layer new cells go into. An end without a cell dangles at its point; an
+    /// end with one keeps the point too, as draw.io writes it.
     pub fn add_edge(
         &mut self,
         page: usize,
@@ -155,9 +161,10 @@ impl Editor {
         target: (Option<&str>, Point),
         style: &str,
     ) -> Result<CellId, Error> {
+        let current = self.current.clone();
         self.edit(page, |p, ids| {
             check(p, [source.0, target.0].into_iter().flatten())?;
-            let layer = default_layer(p)?;
+            let layer = default_layer(p, current.as_deref())?;
             let id = ids.fresh(p);
             p.cells
                 .push(Cell::new_edge(&id, &layer, source, target, style));
@@ -361,12 +368,14 @@ impl Editor {
         let [first, rest @ ..] = from else {
             return Ok(Vec::new());
         };
+        let current = self.current.clone();
+        let current = current.as_deref();
         if rest.is_empty() {
-            return self.edit(page, |p, ids| paste_into(p, ids, first, dx, dy));
+            return self.edit(page, |p, ids| paste_into(p, ids, current, first, dx, dy));
         }
         self.file.page(page)?;
         let mut pages = self.file.pages.clone();
-        let pasted = paste_into(&mut pages[page], &mut self.ids, first, dx, dy)?;
+        let pasted = paste_into(&mut pages[page], &mut self.ids, current, first, dx, dy)?;
         for from in rest {
             let mut added = from.clone();
             added.set_id(&guid());
@@ -476,6 +485,75 @@ impl Editor {
         Ok(())
     }
 
+    /// Pick layer `id` for new cells, `None` for the page's default ([`Page::default_parent`]),
+    /// which also takes them while the one picked is locked or hidden. Not an edit; the caller
+    /// lets go of it on a page switch, as draw.io's root change resets its default parent.
+    pub fn set_current_layer(&mut self, id: Option<CellId>) {
+        self.current = id;
+    }
+
+    /// The layer picked for new cells while it is still one of page `page`'s, the page's
+    /// default otherwise: the layer the Layers list marks.
+    pub fn current_layer(&self, page: usize) -> Option<&str> {
+        let p = self.file.page(page).ok()?;
+        let layers = p.layers();
+        let picked = self.current.as_deref();
+        picked
+            .filter(|id| layers.iter().any(|l| l.id == *id))
+            .or_else(|| p.default_parent())
+    }
+
+    /// A layer on top of the others, named `name`, as draw.io's Add Layer makes one. Its id.
+    pub fn add_layer(&mut self, page: usize, name: &str) -> Result<CellId, Error> {
+        self.edit(page, |p, ids| {
+            let root = p.root().ok_or(Error::Refused("the page has no root"))?;
+            let root = root.id.clone();
+            let id = ids.fresh(p);
+            let mut layer = Cell::layer(&id, &root);
+            layer.set_label(name);
+            p.cells.push(layer);
+            Ok(id)
+        })
+    }
+
+    /// Rename layer `id`: its value, which draw.io's Layers dialog shows.
+    pub fn rename_layer(&mut self, page: usize, id: &str, name: &str) -> Result<(), Error> {
+        self.edit(page, |p, _| {
+            cell_mut(p, id)?.set_label(name);
+            Ok(())
+        })
+    }
+
+    /// Show or hide cell `id`, a layer above all, as draw.io writes it: `visible="0"`, or no
+    /// attribute at all.
+    pub fn set_visible(&mut self, page: usize, id: &str, visible: bool) -> Result<(), Error> {
+        self.edit(page, |p, _| {
+            let attrs = &mut cell_mut(p, id)?.attrs;
+            match visible {
+                true => attrs.retain(|(k, _)| k != "visible"),
+                false => set_attr(attrs, "visible", "0"),
+            }
+            Ok(())
+        })
+    }
+
+    /// Delete layer `id` with everything on it and every edge left without an end, as one step.
+    /// Refused for the page's last layer: a page always has one to draw on.
+    pub fn delete_layer(&mut self, page: usize, id: &str) -> Result<(), Error> {
+        self.edit(page, |p, _| {
+            let layers = p.layers();
+            if !layers.iter().any(|l| l.id == id) {
+                return Err(Error::NoCell(id.to_string()));
+            }
+            if layers.len() == 1 {
+                return Err(Error::Refused("a page keeps at least one layer"));
+            }
+            let gone = with_subtrees(p, [id.to_string()]);
+            remove_with_edges(p, gone);
+            Ok(())
+        })
+    }
+
     /// Change a copy of page `index` and put it in place if `change` succeeds and changed
     /// something, the page as it was becoming the undo step.
     fn edit<T>(
@@ -530,7 +608,7 @@ impl Editor {
 }
 
 /// Paste `from`, a page read off the clipboard, onto `page` as draw.io's `importGraphModel`
-/// does: the cells of a page with one layer go into the first unlocked layer, moved by
+/// does: the cells of a page with one layer go into the layer new cells go into, moved by
 /// (`dx`, `dy`), and each layer of one with several comes as a layer of its own; every cell
 /// takes a fresh id, and a reference to a cell that was not pasted goes. What was pasted onto
 /// a layer.
@@ -538,6 +616,7 @@ impl Editor {
 fn paste_into(
     page: &mut Page,
     new_ids: &mut Ids,
+    current: Option<&str>,
     from: &Page,
     dx: f64,
     dy: f64,
@@ -559,7 +638,7 @@ fn paste_into(
     let layers: Vec<CellId> = from.layers().iter().map(|l| fresh[&l.id].clone()).collect();
     let pasted: Vec<CellId>;
     if let [layer] = layers.as_slice() {
-        let into = default_layer(page)?;
+        let into = default_layer(page, current)?;
         copies.retain(|c| &c.id != layer);
         for copy in &mut copies {
             if copy.parent.as_ref() == Some(layer) {
@@ -673,7 +752,12 @@ fn delete(p: &mut Page, ids: &[CellId]) {
         .map(|c| c.id.as_str())
         .collect();
     let chosen = ids.iter().filter(|id| !kept.contains(id.as_str()));
-    let mut gone = with_subtrees(p, chosen.cloned());
+    let gone = with_subtrees(p, chosen.cloned());
+    remove_with_edges(p, gone);
+}
+
+/// Remove the cells in `gone` and every edge they leave without an end.
+fn remove_with_edges(p: &mut Page, mut gone: HashSet<CellId>) {
     // An edge can end on another edge, so removing one can leave the next without an end.
     loop {
         let cut = |end: &Option<CellId>| end.as_ref().is_some_and(|id| gone.contains(id));
@@ -1071,12 +1155,22 @@ fn cell_mut<'a>(page: &'a mut Page, id: &str) -> Result<&'a mut Cell, Error> {
         .ok_or_else(|| Error::NoCell(id.to_string()))
 }
 
-/// The layer new cells go into ([`Page::default_parent`]), refused when there is none.
-fn default_layer(page: &Page) -> Result<CellId, Error> {
-    match page.default_parent() {
+/// The layer new cells go into: `current` while it is a layer of `page` neither locked nor
+/// hidden, [`Page::default_parent`] otherwise; refused when there is none.
+fn default_layer(page: &Page, current: Option<&str>) -> Result<CellId, Error> {
+    let layers = page.layers();
+    let picked = layers
+        .iter()
+        .find(|l| Some(l.id.as_str()) == current && l.is_visible() && !l.is_locked());
+    match picked
+        .map(|l| l.id.as_str())
+        .or_else(|| page.default_parent())
+    {
         Some(id) => Ok(id.to_string()),
-        None if page.layers().is_empty() => Err(Error::Refused("the page has no layer")),
-        None => Err(Error::Refused("every layer on this page is locked")),
+        None if layers.is_empty() => Err(Error::Refused("the page has no layer")),
+        None => Err(Error::Refused(
+            "every layer on this page is locked or hidden",
+        )),
     }
 }
 
@@ -1269,28 +1363,85 @@ mod tests {
     }
 
     #[test]
-    fn new_cells_go_into_the_first_unlocked_layer() {
+    fn new_cells_go_into_the_current_layer_else_the_topmost_open_one() {
         let locked = |id| Cell {
             style: Style::parse("locked=1;"),
             ..Cell::layer(id, "0")
         };
-        let mut e = open([Cell::layer("2", "0"), Cell::layer("3", "0")]);
+        let hidden = Cell {
+            attrs: vec![("visible".into(), "0".into())],
+            ..Cell::layer("3", "0")
+        };
+        let mut e = open([Cell::layer("2", "0"), hidden]);
         e.file.pages[0].cells[1] = locked("1");
+        // Picked, but locked: the topmost layer neither locked nor hidden takes them.
+        e.set_current_layer(Some("1".into()));
+        assert_eq!(e.current_layer(0), Some("1"));
         let v = e.add_vertex(0, None, Rect::default(), "", "").unwrap();
         let ends = (None, Point::default());
         let f = e.add_edge(0, ends, ends, "").unwrap();
-        let parent = |id: &str| e.page(0).unwrap().cell(id).unwrap().parent.clone();
-        assert_eq!(parent(&v).as_deref(), Some("2"));
-        assert_eq!(parent(&f).as_deref(), Some("2"));
+        let parent = |e: &Editor, id: &str| e.page(0).unwrap().cell(id).unwrap().parent.clone();
+        assert_eq!(parent(&e, &v).as_deref(), Some("2"));
+        assert_eq!(parent(&e, &f).as_deref(), Some("2"));
+        e.set_visible(0, "3", true).unwrap();
+        e.set_current_layer(None);
+        assert_eq!(e.current_layer(0), Some("3"));
+        let v = e.add_vertex(0, None, Rect::default(), "", "").unwrap();
+        assert_eq!(parent(&e, &v).as_deref(), Some("3"));
 
         let mut e = open(Vec::new());
         e.file.pages[0].cells[1] = locked("1");
         let r = e.add_vertex(0, None, Rect::default(), "", "");
         assert!(matches!(
             r,
-            Err(Error::Refused("every layer on this page is locked"))
+            Err(Error::Refused(
+                "every layer on this page is locked or hidden"
+            ))
         ));
         assert!(!e.can_undo());
+    }
+
+    #[test]
+    fn layers_are_added_locked_hidden_reordered_and_deleted_a_step_each() {
+        let mut e = editor();
+        let layers = |e: &Editor| -> Vec<String> {
+            let page = e.page(0).unwrap();
+            page.layers().iter().map(|l| l.id.clone()).collect()
+        };
+        let top = e.add_layer(0, "Untitled Layer").unwrap();
+        assert_eq!(layers(&e), ["1", top.as_str()]);
+        assert_eq!(e.current_layer(0), Some(top.as_str()));
+        let v = e.add_vertex(0, None, Rect::default(), "", "").unwrap();
+        let ends = (Some("a"), Point::default());
+        let f = e
+            .add_edge(0, ends, (Some(&v), Point::default()), "")
+            .unwrap();
+        e.set_style(0, std::slice::from_ref(&top), "locked", Some("1"))
+            .unwrap();
+        e.set_visible(0, "1", false).unwrap();
+        e.rename_layer(0, &top, "Top").unwrap();
+        // Written as draw.io writes them, and read back.
+        let read = File::from_bytes(e.file().to_xml().as_bytes()).unwrap();
+        let page = &read.pages[0];
+        assert!(!page.cell("1").unwrap().is_visible());
+        let layer = page.cell(&top).unwrap();
+        assert!(layer.is_locked() && layer.label() == "Top");
+        assert_eq!(page.default_parent(), None);
+        e.reorder(0, std::slice::from_ref(&top), ZOrder::Backward)
+            .unwrap();
+        assert_eq!(layers(&e), [top.as_str(), "1"]);
+        // Its cells go with it, and the edge from a shape on another layer to one of them.
+        e.delete_layer(0, &top).unwrap();
+        assert_eq!(layers(&e), ["1"]);
+        assert_eq!(order(&e), ["0", "1", "a", "b", "e"]);
+        assert!(matches!(
+            e.delete_layer(0, "1"),
+            Err(Error::Refused("a page keeps at least one layer"))
+        ));
+        assert_eq!(e.undo.len(), 8, "one step each");
+        e.undo();
+        let page = e.page(0).unwrap();
+        assert!(page.cell(&v).is_some() && page.cell(&f).is_some());
     }
 
     #[test]
@@ -1461,7 +1612,7 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_takes_fresh_ids_on_the_first_unlocked_layer_and_a_cut_lets_edges_go() {
+    fn a_paste_takes_fresh_ids_on_the_current_layer_and_a_cut_lets_edges_go() {
         let mut e = editor();
         let drawn = crate::scene::scene(e.page(0).unwrap());
         let xml = crate::clipboard::copy(e.page(0).unwrap(), &list(&["a", "e"]), &drawn);
