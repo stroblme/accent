@@ -172,6 +172,12 @@ impl App {
         tab.connect_autosave(on(|app, tab| app.save_diagram(tab, false)));
         tab.connect_image(on(|app, tab| app.pick_image(tab)));
         tab.connect_banner(on(|app, tab| app.resolve_diagram(tab)));
+        let weak = Rc::downgrade(self);
+        tab.connect_toast(move |text| {
+            if let Some(app) = weak.upgrade() {
+                app.toast(text);
+            }
+        });
         // Into the config, to every open diagram, and onto disk a second later, as a PDF's picks.
         tab.connect_options(on(|app, tab| {
             app.config.borrow_mut().diagram = tab.options();

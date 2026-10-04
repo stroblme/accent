@@ -28,6 +28,7 @@ use crate::diff::{Compare, Side};
 use crate::difftab::DiffTab;
 
 use crate::highlight;
+use crate::widgets::{icon_button, reveal_on_hover};
 
 mod actions;
 mod branch;
@@ -1110,14 +1111,12 @@ fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
 /// keeps them. A list makes rows for its first 200 items whether anyone points at them or not, and
 /// picking another repository has GTK take every one of them apart again, so only the rows someone
 /// has been on pay for their buttons. The keyboard landing on a row reveals them
-/// ([`changes::reveal_on_hover`]), so they are there before Tab moves on to them.
+/// ([`reveal_on_hover`]), so they are there before Tab moves on to them.
 fn revealed_actions(
     item: &gtk::ListItem,
     build: impl Fn(&gtk::ListItem) -> gtk::Box + 'static,
 ) -> gtk::Revealer {
-    let revealer = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideLeft)
-        .build();
+    let revealer = crate::widgets::hover_revealer();
     revealer.connect_reveal_child_notify(glib::clone!(
         #[weak]
         item,
@@ -1128,18 +1127,6 @@ fn revealed_actions(
         }
     ));
     revealer
-}
-
-fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
-    let button = gtk::Button::builder()
-        .icon_name(icon)
-        .tooltip_text(tooltip)
-        .valign(gtk::Align::Center)
-        .build();
-    button.add_css_class("flat");
-    // The tooltip's words are its name for a screen reader too, an icon having none of its own.
-    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
-    button
 }
 
 fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {

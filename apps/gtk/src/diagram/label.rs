@@ -8,15 +8,19 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use accent_drawio::{CellId, Rect};
+use accent_drawio::{CellId, Rect, VAlign};
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene, pango};
 
 use crate::editor::{self, Flavour};
 
-/// The smallest box the editor is given, in pixels: a label on a hairline edge still needs room
-/// for a word.
-const MIN_SIZE: (f64, f64) = (160.0, 40.0);
+/// The narrowest the editor is, in pixels: a label on a hairline edge still needs room for a
+/// word.
+const MIN_WIDTH: f64 = 160.0;
+
+/// draw.io lays a label's lines out 1.2 font sizes apart (`mxConstants.LINE_HEIGHT`): the editor
+/// is never shorter than one.
+const LINE_HEIGHT: f64 = 1.2;
 
 pub struct LabelEditor {
     pub cell: CellId,
@@ -48,12 +52,26 @@ pub fn label_zoom(px: f64, doc_pt: f64) -> f64 {
     (px / doc_px.max(1.0)).clamp(0.6, 3.0)
 }
 
-/// The box the editor is given over a label `at` on screen: the label's own, grown to the
-/// smallest one a word can be typed in and centred on it. The corner may be off the canvas,
-/// where the overlay clips it — a label scrolled past the edge is gone, not pinned to it.
-fn box_at(at: Rect) -> (f64, f64, f64, f64) {
-    let (w, h) = (at.w.max(MIN_SIZE.0), at.h.max(MIN_SIZE.1));
+/// The box the editor is given over a label `at` on screen, its text `px` tall: the label's own,
+/// grown evenly round it to a word's width and a line's height. The corner may be off the
+/// canvas, where the overlay clips it — a label scrolled past the edge is gone, not pinned to it.
+fn box_at(at: Rect, px: f64) -> (f64, f64, f64, f64) {
+    let (w, h) = (at.w.max(MIN_WIDTH), at.h.max(px * LINE_HEIGHT));
     (at.x - (w - at.w) / 2.0, at.y - (h - at.h) / 2.0, w, h)
+}
+
+/// Where the editor goes over a label laid out at `rect`, aligned `valign`: a label inside its
+/// shape is edited in the box within the shape's spacing. draw.io lowers a top-aligned label 5
+/// units past it and lifts a bottom-aligned one 1 (`mxText.baseSpacingTop`/`Bottom`), which
+/// would hang the editor over the shape's bottom edge.
+pub fn label_box(rect: Rect, valign: VAlign, inside: bool) -> Rect {
+    use accent_drawio::scene::{BASE_SPACING_BOTTOM, BASE_SPACING_TOP};
+    let dy = match (inside, valign) {
+        (true, VAlign::Top) => -BASE_SPACING_TOP,
+        (true, VAlign::Bottom) => BASE_SPACING_BOTTOM,
+        _ => 0.0,
+    };
+    rect.translate(0.0, dy)
 }
 
 impl LabelEditor {
@@ -71,14 +89,20 @@ impl LabelEditor {
         spellcheck: bool,
     ) -> Rc<LabelEditor> {
         let (view, buffer) = editor::overlay_view(markdown);
-        view.set_left_margin(6);
-        view.set_right_margin(6);
-        view.set_top_margin(6);
-        view.set_bottom_margin(6);
+        // Lines as close as draw.io sets them, so a label that fits its shape fits the editor.
+        view.set_left_margin(2);
+        view.set_right_margin(2);
+        view.set_top_margin(0);
+        view.set_bottom_margin(0);
+        view.set_pixels_above_lines(0);
+        view.set_pixels_below_lines(0);
         view.set_widget_name(&editor::next_view_name());
+        // No scrollbar: one would make the box as tall as its trough, past a short label. Text
+        // longer than the box still scrolls to the caret.
         let frame = gtk::ScrolledWindow::builder()
             .child(&view)
             .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::External)
             .css_classes(["accent-label-editor", "view"])
             .build();
         let layer = gtk::Fixed::builder()
@@ -137,7 +161,7 @@ impl LabelEditor {
     /// and where it goes again on every scroll and zoom of the canvas. Nothing here touches the
     /// focus, so the keyboard and what was typed stay where they are.
     pub fn place_at(&self, at: Rect, px: f64) {
-        let (x, y, w, h) = box_at(at);
+        let (x, y, w, h) = box_at(at, px);
         self.frame.set_size_request(w as i32, h as i32);
         self.layer.move_(&self.frame, x, y);
         // The font only when the zoom moved: it is a provider on the whole display, far too much
@@ -147,12 +171,15 @@ impl LabelEditor {
         }
     }
 
-    /// Where the editor is on the canvas and how big its text is there: what the drills watch
-    /// while the page moves under it.
+    /// Where the editor is on the canvas, its size, how tall its text is laid out and how big
+    /// that text is: what the drills watch while the page moves under it.
     #[cfg(feature = "bench")]
-    pub fn at(&self) -> (f64, f64, f64) {
+    pub fn at(&self) -> (Rect, f64, f64) {
         let (x, y) = self.layer.child_position(&self.frame);
-        (x, y, self.px.get())
+        let (w, h) = (self.frame.width(), self.frame.height());
+        let at = Rect::new(x, y, f64::from(w), f64::from(h));
+        let content = self.view.measure(gtk::Orientation::Vertical, w).1;
+        (at, f64::from(content), self.px.get())
     }
 
     /// The note font, zoomed to `px` on screen.
@@ -257,12 +284,22 @@ mod tests {
 
     #[test]
     fn a_label_scrolled_off_the_edge_keeps_its_box() {
-        // A 40x20 label scrolled just past the canvas's left edge: a box big enough to type in,
-        // centred on the label, and left at the negative corner the overlay clips.
-        let (x, y, w, h) = super::box_at(Rect::new(-30.0, 100.0, 40.0, 20.0));
-        assert_eq!((w, h), super::MIN_SIZE);
-        assert_eq!(x, -30.0 - (super::MIN_SIZE.0 - 40.0) / 2.0);
-        assert_eq!(y, 100.0 - (super::MIN_SIZE.1 - 20.0) / 2.0);
+        // A 40x20 label of 20 px text scrolled just past the canvas's left edge: a box a word
+        // wide and a line tall, centred on the label, and left at the negative corner the
+        // overlay clips.
+        let (x, y, w, h) = super::box_at(Rect::new(-30.0, 100.0, 40.0, 20.0), 20.0);
+        assert_eq!((w, h), (super::MIN_WIDTH, 24.0));
+        assert_eq!((x, y), (-30.0 - (super::MIN_WIDTH - 40.0) / 2.0, 98.0));
+    }
+
+    #[test]
+    fn a_top_aligned_label_is_edited_inside_its_shape() {
+        // A `text;` cell at (100, 300, 80, 30), painted 5 below its spacing.
+        let painted = Rect::new(102.0, 307.0, 76.0, 26.0);
+        let top = accent_drawio::VAlign::Top;
+        let inside = Rect::new(102.0, 302.0, 76.0, 26.0);
+        assert_eq!(super::label_box(painted, top, true), inside);
+        assert_eq!(super::label_box(painted, top, false), painted);
     }
 
     #[test]

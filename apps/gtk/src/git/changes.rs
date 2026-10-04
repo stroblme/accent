@@ -336,84 +336,12 @@ fn entry_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     entry
 }
 
-/// The marker class on a list row whose buttons already follow its hover ([`reveal_on_hover`]).
-const WATCHED: &str = "git-row";
-
 /// Which of a row's three buttons was pressed.
 #[derive(Clone, Copy)]
 enum Act {
     Stage,
     Unstage,
     Discard,
-}
-
-/// Show a row's buttons while the pointer or the keyboard is on it, and give them no width at all
-/// the rest of the time, so the name beside them reads out to the whole width of the pane and is
-/// cut short only where there is really something to give way to. A `GtkRevealer` does both: shut,
-/// it measures nothing, and it slides them in and out at full opacity, the same way whether the
-/// pointer or the focus is what let them go.
-///
-/// Watched on the list row rather than on the stack inside it: that is the widget GTK marks with
-/// PRELIGHT while the pointer is anywhere on it and with FOCUS_WITHIN while one of its buttons has
-/// the keyboard — and it is the one the keyboard lands on first, so Tab reveals the buttons it
-/// would otherwise never be able to reach.
-///
-/// A click gives the row the focus as well, taking it back even from a button pressed inside it,
-/// and that focus is the pointer's: it keeps the buttons no longer than the pointer stays, or a
-/// commit clicked open would keep them out until the focus went somewhere else. So a press marks
-/// the row until both the pointer and the focus have left it. GTK's FOCUS_VISIBLE cannot tell the
-/// two apart: it outlasts a key by three seconds whatever is clicked meanwhile, and then drops
-/// what the keyboard reached.
-pub(super) fn reveal_on_hover(row: &gtk::Widget) {
-    // Once per list row widget, which is recycled and bound again and again. The class is the
-    // marker, there being nowhere else to keep one bit on a widget GTK made for itself.
-    // ponytail: it is also a hook if a row of this list ever wants styling of its own.
-    if row.has_css_class(WATCHED) {
-        return;
-    }
-    row.add_css_class(WATCHED);
-    let clicked = Rc::new(Cell::new(false));
-    let press = gtk::GestureClick::new();
-    // Ahead of the row's own gesture and of any button's, which are what move the focus.
-    press.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let mark = clicked.clone();
-    press.connect_pressed(move |_, _, _, _| mark.set(true));
-    row.add_controller(press);
-    row.connect_state_flags_changed(move |row, _| {
-        let flags = row.state_flags();
-        let hovered = flags.contains(gtk::StateFlags::PRELIGHT);
-        let focused = flags.contains(gtk::StateFlags::FOCUS_WITHIN);
-        // Not on the focus leaving alone: moving it between the row and a button inside takes it
-        // off the row and puts it back, which a press does with the pointer still on the row.
-        if !hovered && !focused {
-            clicked.set(false);
-        }
-        let on = hovered || (focused && !clicked.get());
-        for revealer in revealers(row) {
-            revealer.set_reveal_child(on);
-        }
-    });
-}
-
-/// Every [`actions`] revealer under `row` — one per layout the row's stack can show.
-fn revealers(row: &gtk::Widget) -> Vec<gtk::Revealer> {
-    let mut found = Vec::new();
-    let mut todo = vec![row.clone()];
-    while let Some(widget) = todo.pop() {
-        let widget = match widget.downcast::<gtk::Revealer>() {
-            Ok(revealer) => {
-                found.push(revealer);
-                continue;
-            }
-            Err(widget) => widget,
-        };
-        let mut child = widget.first_child();
-        while let Some(c) = child {
-            child = c.next_sibling();
-            todo.push(c);
-        }
-    }
-    found
 }
 
 /// A row's Stage / Unstage / Discard buttons, the same three on a file and on a folder. They show

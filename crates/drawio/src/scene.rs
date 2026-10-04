@@ -260,8 +260,8 @@ impl<'a> Builder<'a> {
 
 /// draw.io's extra room above a top-aligned label and below a bottom-aligned one
 /// (`mxText.prototype.baseSpacingTop`/`Bottom`, overridden in Graph.js).
-const BASE_SPACING_TOP: f64 = 5.0;
-const BASE_SPACING_BOTTOM: f64 = 1.0;
+pub const BASE_SPACING_TOP: f64 = 5.0;
+pub const BASE_SPACING_BOTTOM: f64 = 1.0;
 
 /// `mxConstants.DEFAULT_FONTSIZE`: a label's size when its style has none. The stylesheet gives
 /// every vertex 12 and every edge 11, so this is for a style that skips it (a leading `;`).

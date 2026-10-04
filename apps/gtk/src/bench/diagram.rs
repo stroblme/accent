@@ -39,6 +39,30 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 </mxfile>
 "#;
 
+/// A page of two layers, as a slide template has them: a locked one with no name holding the
+/// template's shape, and "Content" over it with a shape the edge `e` joins to the template's.
+const LAYERED: &str = r#"<mxfile host="accent">
+  <diagram name="Slide" id="bench-layers">
+    <mxGraphModel grid="1" gridSize="10" page="1" pageWidth="800" pageHeight="500">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" style="locked=1;" parent="0" />
+        <mxCell id="bg" value="Template" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="40" y="40" width="200" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="2" value="Content" parent="0" />
+        <mxCell id="c" value="C" style="ellipse;whiteSpace=wrap;html=1;" parent="2" vertex="1">
+          <mxGeometry x="400" y="200" width="120" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="e" style="endArrow=classic;html=1;" parent="2" source="bg" target="c" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
+"#;
+
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits the diagram at `rel` (written from a sample first when
 /// there is none) and prints each step; `=shot:<rel>:<dir>` paints every page of it into
 /// `<dir>/page-N.png` and prints how long each took; `=hold:<rel>[:<tool>]` prints where the
@@ -48,10 +72,17 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 /// most edges on it moving live, and everything on the page moving as a box;
 /// `=present:<rel>,<pdf>` is presentation over both (`present`); `=look:<rel>:<dir>` walks
 /// the sample through the themes (`look`); `=export:<rel>:<dir>` exports and prints it into
-/// `<dir>` (`export`).
+/// `<dir>` (`export`); `=props:<rel>` works the Properties pane's Position, Size and Style
+/// groups (`props`), and `=layers:<rel>` its Layers group over a slide template (`layers`).
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
+    if let Some(rel) = arg.strip_prefix("layers:") {
+        return layers(app, rel);
+    }
     if let Some(rel) = arg.strip_prefix("preview:") {
         return preview(app, rel);
+    }
+    if let Some(rel) = arg.strip_prefix("props:") {
+        return props(app, rel);
     }
     if let Some((rel, dir)) = arg.strip_prefix("export:").and_then(|a| a.split_once(':')) {
         return export(app, rel, Path::new(dir));
@@ -427,6 +458,32 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
         );
     }
     tab.finish_label();
+    // The label editor over a shape and over a top-aligned text cell, against the cell on
+    // screen: how far it reaches past the cell's top and bottom edges, and how tall its text is
+    // laid out in it.
+    for id in ["a", "m"] {
+        tab.select(vec![id.to_string()]);
+        tab.edit_label();
+        // Laid out at its font, which a provider brings in on a frame of its own.
+        for _ in 0..20 {
+            bench_pump();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let cell = tab.frame_of(id).map(|r| tab.to_widget(&r));
+        if let (Some(cell), Some((at, content, px, _))) = (cell, tab.label_at()) {
+            let rect =
+                |r: accent_drawio::Rect| format!("{:.1},{:.1},{:.1},{:.1}", r.x, r.y, r.w, r.h);
+            println!(
+                "bench diagram label {id} cell={} editor={} content={content:.1} px={px:.1} \
+                 over_top={:.1} over_bottom={:.1}",
+                rect(cell),
+                rect(at),
+                cell.y - at.y,
+                at.y + at.h - (cell.y + cell.h)
+            );
+        }
+        tab.finish_label();
+    }
     println!(
         "bench diagram properties shown={} showing={} sidebar_floor={}",
         sidebar.has_pane("properties"),
@@ -445,6 +502,311 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
                 .measure(gtk::Orientation::Horizontal, -1)
                 .0
         );
+        bench_quit(&app);
+    });
+}
+
+/// The Properties pane over the sample (written to `rel` when there is none): shape `a`'s
+/// Position and Size rows before and after a nudge, X and Width changed in one burst and taken
+/// back by one undo, the Position group's buttons away and then out while the pointer is on it,
+/// Copy Position read back off the clipboard and pasted onto `b`, `a`'s style pasted onto `b`,
+/// and a size pasted from a clipboard holding a style, with the toast each says.
+fn props(app: &Rc<App>, rel: &str) {
+    let path = app.root().join(rel);
+    if !path.exists() {
+        std::fs::write(&path, SAMPLE).expect("write the sample diagram");
+    }
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        app.open_path(&rel);
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        // Once the session restore has put Files back.
+        app.show_pane("properties");
+        let Some(tab) = app.active_diagram() else {
+            println!("bench diagram no_tab");
+            return bench_quit(&app);
+        };
+        let pane = tab.properties();
+        let group = |title: &str| {
+            find_widget(&pane, &|w| {
+                w.downcast_ref::<adw::PreferencesGroup>()
+                    .is_some_and(|g| g.title() == title)
+            })
+        };
+        // In its group: the Page group has a Width and a Height of its own.
+        let spin = |title: &str| {
+            let within = group(if title.len() == 1 { "Position" } else { "Size" })?;
+            find_widget(&within, &|w| {
+                w.downcast_ref::<adw::SpinRow>()
+                    .is_some_and(|r| r.title() == title)
+            })
+            .and_downcast::<adw::SpinRow>()
+        };
+        let rows = || ["X", "Y", "Width", "Height"].map(|t| spin(t).map(|r| r.text().to_string()));
+        let click = |tooltip: &str| {
+            let button = find_widget(&pane, &|w| {
+                w.is::<gtk::Button>() && w.tooltip_text().as_deref() == Some(tooltip)
+            });
+            match button.and_downcast::<gtk::Button>() {
+                Some(button) => button.emit_clicked(),
+                None => println!("bench diagram props no_button {tooltip}"),
+            }
+        };
+        let style = |id: &str| tab.file().pages[0].cell(id).map(|c| c.style.to_string());
+        tab.select(vec!["a".to_string()]);
+        println!("bench diagram props a rows={:?}", rows());
+        tab.nudge(30.0, 0.0);
+        println!("bench diagram props nudged rows={:?}", rows());
+        if let (Some(x), Some(w)) = (spin("X"), spin("Width")) {
+            x.set_value(250.0);
+            w.set_value(200.0);
+        }
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!(
+            "bench diagram props burst frame={:?} rows={:?}",
+            tab.frame_of("a"),
+            rows()
+        );
+        tab.undo();
+        println!("bench diagram props undo frame={:?}", tab.frame_of("a"));
+        tab.redo();
+
+        // PRELIGHT by hand, Xvfb having no pointer: the flag GTK puts on what it is over.
+        let group = group("Position");
+        let revealed = || {
+            let group = group.as_ref()?;
+            let revealer = find_widget(group, &|w| w.is::<gtk::Revealer>());
+            Some(revealer.and_downcast::<gtk::Revealer>()?.reveals_child())
+        };
+        let away = revealed();
+        if let Some(group) = &group {
+            group.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+        }
+        println!(
+            "bench diagram props hover away={away:?} out={:?}",
+            revealed()
+        );
+        // A picture of the pane with the buttons out, for looking at rather than asserting on.
+        if let Ok(path) = std::env::var("ACCENT_BENCH_SHOT") {
+            glib::timeout_future(Duration::from_millis(400)).await;
+            println!(
+                "bench diagram shot {}",
+                shoot(app.window.upcast_ref(), Path::new(&path))
+            );
+        }
+        if let Some(group) = &group {
+            group.unset_state_flags(gtk::StateFlags::PRELIGHT);
+        }
+
+        click("Copy Position");
+        let said = super::export::toast(&app, "Copied position").await;
+        let clipboard = tab.key_target().clipboard().read_text_future().await;
+        println!(
+            "bench diagram props copy said={said:?} clipboard={:?}",
+            clipboard.ok().flatten()
+        );
+        tab.select(vec!["b".to_string()]);
+        click("Paste Position");
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!(
+            "bench diagram props paste_position b={:?}",
+            tab.frame_of("b")
+        );
+
+        tab.select(vec!["a".to_string()]);
+        click("Copy Style");
+        let said = super::export::toast(&app, "Copied style").await;
+        tab.select(vec!["b".to_string()]);
+        click("Paste Style");
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!(
+            "bench diagram props paste_style said={said:?} a={:?} b={:?}",
+            style("a"),
+            style("b")
+        );
+        click("Paste Size");
+        let said = super::export::toast(&app, "No size").await;
+        println!(
+            "bench diagram props paste_size said={said:?} b={:?} history={:?}",
+            tab.frame_of("b"),
+            tab.history()
+        );
+        bench_quit(&app);
+    });
+}
+
+/// The Properties pane's Layers group over a slide template (written to `rel` when there is
+/// none): the template's shape not picked on its locked layer and picked once it is unlocked,
+/// let go of when it is locked again; the Content layer hidden, its shape and edge undrawn; a
+/// layer added on top and current, a paste landing in it, Content picked and a paste landing
+/// there; the new layer moved down, Content renamed, and the template's layer deleted with its
+/// shape and the edge from it, as one step; then the lock and the hiding written to the file.
+fn layers(app: &Rc<App>, rel: &str) {
+    let path = app.root().join(rel);
+    if !path.exists() {
+        std::fs::write(&path, LAYERED).expect("write the layered diagram");
+    }
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        app.open_path(&rel);
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        app.show_pane("properties");
+        let Some(tab) = app.active_diagram() else {
+            println!("bench diagram no_tab");
+            return bench_quit(&app);
+        };
+        let find = |root: &gtk::Widget, tooltip: &str| {
+            let found = find_widget(root, &|w| {
+                w.is::<gtk::Button>() && w.tooltip_text().as_deref() == Some(tooltip)
+            });
+            found.and_downcast::<gtk::Button>()
+        };
+        let press = |id: &str, tooltip: &str| {
+            let row = tab.layer_row(id);
+            match row.and_then(|r| find(r.upcast_ref(), tooltip)) {
+                Some(button) => button.emit_clicked(),
+                None => println!("bench diagram layers no_button {id} {tooltip}"),
+            }
+        };
+        let rows = || tab.layer_rows();
+        let parent = |id: &str| {
+            let file = tab.file();
+            file.pages[0].cell(id).and_then(|c| c.parent.clone())
+        };
+        let cells = || {
+            let file = tab.file();
+            let ids = file.pages[0].cells.iter().map(|c| c.id.clone());
+            ids.collect::<Vec<_>>()
+        };
+        println!(
+            "bench diagram layers open rows={:?} pick_bg={:?}",
+            rows(),
+            tab.pick("bg")
+        );
+        // Every revealer in a row, its Move and Delete buttons' and libadwaita's own, before and
+        // while the pointer is on it (PRELIGHT by hand, Xvfb having no pointer).
+        if let Some(row) = tab.layer_row("2") {
+            let revealers = || {
+                let mut out = Vec::new();
+                let mut todo = vec![row.clone().upcast::<gtk::Widget>()];
+                while let Some(w) = todo.pop() {
+                    if let Some(r) = w.downcast_ref::<gtk::Revealer>() {
+                        out.push((r.has_css_class("accent-hover-actions"), r.reveals_child()));
+                    }
+                    let mut child = w.first_child();
+                    while let Some(c) = child {
+                        child = c.next_sibling();
+                        todo.push(c);
+                    }
+                }
+                out
+            };
+            let away = revealers();
+            row.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+            println!(
+                "bench diagram layers hover away={away:?} out={:?}",
+                revealers()
+            );
+            row.unset_state_flags(gtk::StateFlags::PRELIGHT);
+        }
+        press("1", "Unlock Layer");
+        println!(
+            "bench diagram layers unlocked rows={:?} pick_bg={:?}",
+            rows(),
+            tab.pick("bg")
+        );
+        tab.select(vec!["bg".to_string()]);
+        press("1", "Lock Layer");
+        println!(
+            "bench diagram layers relocked selection={:?}",
+            tab.selection()
+        );
+        tab.select(vec!["c".to_string()]);
+        press("2", "Hide Layer");
+        println!(
+            "bench diagram layers hidden rows={:?} selection={:?} pick_c={:?} e={:?}",
+            rows(),
+            tab.selection(),
+            tab.pick("c"),
+            tab.frame_of("e")
+        );
+        press("2", "Show Layer");
+
+        match find(&tab.properties(), "Add Layer") {
+            Some(add) => add.emit_clicked(),
+            None => println!("bench diagram layers no_button Add Layer"),
+        }
+        let added = tab.file().pages[0].layers().last().map(|l| l.id.clone());
+        let added = added.unwrap_or_default();
+        tab.paste_text("Pasted");
+        let pasted = tab.selection();
+        println!(
+            "bench diagram layers added rows={:?} paste_parent={:?}",
+            rows(),
+            pasted.first().and_then(|id| parent(id))
+        );
+        if let Some(row) = tab.layer_row("2") {
+            row.emit_by_name::<()>("entry-activated", &[]);
+        }
+        tab.paste_text("Again");
+        let pasted = tab.selection();
+        println!(
+            "bench diagram layers picked rows={:?} paste_parent={:?}",
+            rows(),
+            pasted.first().and_then(|id| parent(id))
+        );
+        press(&added, "Move Layer Down");
+        if let Some(row) = tab.layer_row("2") {
+            row.set_text("Slide");
+            row.emit_by_name::<()>("apply", &[]);
+        }
+        println!("bench diagram layers moved_renamed rows={:?}", rows());
+        press("1", "Delete Layer");
+        println!(
+            "bench diagram layers deleted rows={:?} cells={:?}",
+            rows(),
+            cells()
+        );
+        tab.undo();
+        println!(
+            "bench diagram layers undo rows={:?} cells={:?}",
+            rows(),
+            cells()
+        );
+        tab.redo();
+        press("2", "Lock Layer");
+        press(&added, "Hide Layer");
+        let flushed = app.flush_diagram(&tab);
+        let disk = std::fs::read(tab.path()).expect("the file");
+        let back = accent_drawio::File::from_bytes(&disk).expect("it reads back");
+        let written: Vec<String> = back.pages[0]
+            .layers()
+            .iter()
+            .map(|l| {
+                format!(
+                    "{}:{:?} style={} attrs={:?}",
+                    l.id,
+                    l.label(),
+                    l.style,
+                    l.attrs
+                )
+            })
+            .collect();
+        println!(
+            "bench diagram layers flush {:?} written={written:?}",
+            flushed.map_err(|e| e.to_string())
+        );
+        // A picture of the group, for looking at rather than asserting on.
+        if let Ok(path) = std::env::var("ACCENT_BENCH_SHOT") {
+            tab.undo();
+            glib::timeout_future(Duration::from_millis(400)).await;
+            println!(
+                "bench diagram shot {}",
+                shoot(app.window.upcast_ref(), Path::new(&path))
+            );
+        }
         bench_quit(&app);
     });
 }
@@ -538,7 +900,7 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                 let label = tab.label_at();
                 println!(
                     "bench diagram label at={:?} px={:?} focus={:?} scale={:.3}",
-                    label.map(|(x, y, ..)| (x.round(), y.round())),
+                    label.map(|(at, ..)| (at.x.round(), at.y.round())),
                     label.map(|(.., px, _)| (px * 10.0).round() / 10.0),
                     label.map(|(.., focus)| focus),
                     tab.scale()

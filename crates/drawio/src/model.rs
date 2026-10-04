@@ -233,6 +233,20 @@ impl Page {
             .map(|c| c.id.as_str())
     }
 
+    /// Whether cell `id` is drawn: it, its layer and every cell between them show (`visible`).
+    pub fn is_shown(&self, id: &str) -> bool {
+        let mut cell = self.cell(id);
+        // Counted against a `parent` loop, as `origin_of` counts.
+        for _ in 0..=self.cells.len() {
+            match cell {
+                Some(c) if !c.is_visible() => return false,
+                Some(c) => cell = c.parent.as_deref().and_then(|p| self.cell(p)),
+                None => return true,
+            }
+        }
+        true
+    }
+
     /// Where a cell's geometry is measured from: the absolute top-left of its parent vertex, or
     /// the page origin under a layer. Edges do not offset their children this way.
     pub fn origin_of(&self, id: &str) -> Point {

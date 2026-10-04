@@ -7,7 +7,7 @@ use crate::geom::{Point, Rect};
 use crate::model::{Cell, CellId, File, Geometry, Page, guid, set_attr};
 use crate::route::Constraint;
 use crate::scene::Scene;
-use crate::style::Style;
+use crate::style::{EDGE_LOOK, LOOK, Style, TEXT_LOOK};
 
 /// Where [`Editor::reorder`] moves cells among their siblings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +236,11 @@ impl Editor {
         pairs: &[(&str, Option<&str>)],
     ) -> Result<(), Error> {
         self.edit(page, |p, _| set_styles(p, ids, pairs))
+    }
+
+    /// [`paste_style`] on page `page`, as one step.
+    pub fn paste_style(&mut self, page: usize, ids: &[CellId], from: &Style) -> Result<(), Error> {
+        self.edit(page, |p, _| paste_style(p, ids, from))
     }
 
     /// Replace a cell's whole style string.
@@ -1139,6 +1144,37 @@ pub fn set_styles(
     Ok(())
 }
 
+/// Paste style `from` onto every cell in `ids` as draw.io's Paste Style does
+/// (`Graph.pasteCellStyles`, forced): each look key a cell draws with becomes what `from` draws
+/// with, its shape kept. A text cell takes the text keys alone, and an edge's keys go to edges
+/// only. What is written is as little as that takes: a key `from` draws without is taken off
+/// the cell, or set to `none` where the cell would still draw with it.
+// Graph.js 8404-8540; diagramly/Menus.js 910-917
+pub fn paste_style(page: &mut Page, ids: &[CellId], from: &Style) -> Result<(), Error> {
+    for id in ids {
+        let cell = cell_mut(page, id)?;
+        let (want, have) = (from.resolve(cell.edge), cell.style.resolve(cell.edge));
+        let keys = match (cell.style.names("text"), cell.edge) {
+            (true, _) => TEXT_LOOK.iter().collect::<Vec<_>>(),
+            (false, false) => LOOK.iter().chain(TEXT_LOOK).collect(),
+            (false, true) => LOOK.iter().chain(TEXT_LOOK).chain(EDGE_LOOK).collect(),
+        };
+        for &key in keys {
+            match (want.get(key), have.get(key)) {
+                (w, h) if w == h => {}
+                (Some(w), _) => cell.style.set(key, Some(w)),
+                (None, _) => {
+                    cell.style.set(key, None);
+                    if cell.style.resolve(cell.edge).get(key).is_some() {
+                        cell.style.set(key, Some("none"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `NoCell` for the first of `ids` that is not on `page`.
 fn check<S: AsRef<str>>(page: &Page, ids: impl IntoIterator<Item = S>) -> Result<(), Error> {
     for id in ids {
@@ -1399,6 +1435,40 @@ mod tests {
             ))
         ));
         assert!(!e.can_undo());
+    }
+
+    #[test]
+    fn a_pasted_style_gives_its_look_and_keeps_the_shape() {
+        let cell = |id, style| Cell::new_vertex(id, "1", Rect::default(), style, "");
+        let mut e = open([
+            cell("r", "rounded=1;strokeColor=#0000ff;html=1;"),
+            cell("t", "text;html=1;"),
+            Cell::new_edge(
+                "f",
+                "1",
+                (None, Point::default()),
+                (None, Point::default()),
+                "",
+            ),
+        ]);
+        let from = Style::parse("ellipse;fillColor=#ff0000;dashed=1;fontSize=20;endArrow=block;");
+        e.paste_style(0, &list(&["r", "t", "f"]), &from).unwrap();
+        let style = |e: &Editor, id: &str| e.page(0).unwrap().cell(id).unwrap().style.to_string();
+        // The default stroke drawn again, the arrow head an edge's alone.
+        assert_eq!(
+            style(&e, "r"),
+            "strokeColor=default;html=1;dashed=1;fillColor=#ff0000;fontSize=20;"
+        );
+        assert_eq!(style(&e, "t"), "text;html=1;fontSize=20;");
+        assert_eq!(
+            style(&e, "f"),
+            "dashed=1;fillColor=#ff0000;fontSize=20;endArrow=block;"
+        );
+        // A look drawn without a fill takes the fill off.
+        e.paste_style(0, &list(&["r"]), &Style::parse("text;"))
+            .unwrap();
+        assert!(style(&e, "r").contains("fillColor=none;"));
+        assert_eq!(e.undo.len(), 2, "one step each");
     }
 
     #[test]
