@@ -33,7 +33,9 @@ pub use label::{Marks, Run};
 pub use model::{Cell, CellId, File, Page};
 pub use placeholders::{Context, Now};
 pub use route::{Constraint, anchors};
-pub use scene::{Align, Font, ImageSource, Paint, Prim, Scene, Stroke, VAlign, scene, scene_with};
+pub use scene::{
+    Align, Cap, Font, ImageSource, Join, Paint, Prim, Scene, Stroke, VAlign, scene, scene_with,
+};
 pub use style::{Color, Resolved, Style, presets};
 pub use xml::decode_data_uri;
 

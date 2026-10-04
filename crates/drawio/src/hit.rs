@@ -118,6 +118,8 @@ mod tests {
                 color: Color::BLACK,
                 width,
                 dash: None,
+                cap: Default::default(),
+                join: Default::default(),
             }),
             opacity: 1.0,
             shadow: false,

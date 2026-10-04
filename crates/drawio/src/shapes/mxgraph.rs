@@ -2,8 +2,8 @@
 //! The shapes mxGraph registers itself (mxCellRenderer.js 130-145), and its edge line.
 
 use super::{
-    Direction, Fill, LINE_ARCSIZE, Margins, Part, RECTANGLE_ROUNDING_FACTOR, add_points, polygon,
-    polyline, quarter, rect,
+    Direction, Fill, LINE_ARCSIZE, Margins, Part, Pen, RECTANGLE_ROUNDING_FACTOR, add_points,
+    polygon, polyline, quarter, rect,
 };
 use crate::geom::{PathCmd, Point, Rect};
 use crate::style::Resolved;
@@ -127,12 +127,29 @@ fn double_ellipse_margin(b: Rect, style: &Resolved) -> f64 {
 }
 
 /// `rhombus`: a diamond through the middles of the sides (`mxRhombus.paintVertexShape`,
-/// mxRhombus.js 64-75).
-// ponytail: draw.io's `double=1` second diamond inside (Shapes.js 2371-2420) is not drawn.
+/// mxRhombus.js 64-75), and with draw.io's `double=1` a second one inside it, filled and stroked
+/// again (Shapes.js 2849-2873).
 pub(super) fn rhombus(b: Rect, style: &Resolved) -> Vec<Part> {
-    let (w, h) = (b.w, b.h);
-    let pts = [(w / 2.0, 0.0), (w, h / 2.0), (w / 2.0, h), (0.0, h / 2.0)];
-    vec![Part::body(polygon(b, style, &pts, &[]))]
+    let diamond = |b: Rect| {
+        let (w, h) = (b.w, b.h);
+        let pts = [(w / 2.0, 0.0), (w, h / 2.0), (w / 2.0, h), (0.0, h / 2.0)];
+        Part::body(polygon(b, style, &pts, &[]))
+    };
+    let mut parts = vec![diamond(b)];
+    if style.flag("double", false) {
+        let inner = double_rhombus_label(b, style);
+        if inner.w > 0.0 && inner.h > 0.0 {
+            parts.push(diamond(inner));
+        }
+    }
+    parts
+}
+
+/// A `double=1` rhombus's inner diamond, where its label keeps too (Shapes.js 2836-2847): in by
+/// twice the stroke and a unit, at least 4, and the style's `margin`.
+pub(super) fn double_rhombus_label(rect: Rect, style: &Resolved) -> Rect {
+    let m = (style.num("strokeWidth", 1.0) + 1.0).max(2.0) * 2.0 + style.num("margin", 0.0);
+    Rect::new(rect.x + m, rect.y + m, rect.w - 2.0 * m, rect.h - 2.0 * m)
 }
 
 /// `triangle`: pointing east from its left side (`mxTriangle.redrawPath`, mxTriangle.js 51-55).
@@ -234,10 +251,11 @@ pub(super) fn line(b: Rect) -> Vec<Part> {
 }
 
 /// `swimlane`: a title bar `startSize` high (wide with `horizontal=0`) over a body, which is
-/// filled with `swimlaneFillColor` if at all and otherwise takes clicks only on its stroke, and
-/// the divider between them (`mxSwimlane.paintVertexShape`, `paintSwimlane`,
-/// `paintRoundedSwimlane` and `paintDivider`, mxSwimlane.js 247-633).
-// ponytail: `footerSize`, `separatorColor`, the title's image and `glass` are not drawn.
+/// filled with `swimlaneFillColor` if at all and otherwise takes clicks only on its stroke, the
+/// divider between them, a footer `footerSize` deep at the far end in the title's fill, and a
+/// dashed `separatorColor` line down the far side (`mxSwimlane.paintVertexShape`,
+/// `paintSwimlane`, `paintRoundedSwimlane`, `paintFooter`, `paintDivider` and `paintSeparator`).
+// ponytail: the title's image and `glass` are not drawn.
 pub(super) fn swimlane(b: Rect, style: &Resolved) -> Vec<Part> {
     let start = style.num("startSize", DEFAULT_STARTSIZE).max(0.0);
     if start == 0.0 && !style.flag("fixedHeader", true) {
@@ -306,9 +324,8 @@ pub(super) fn swimlane(b: Rect, style: &Resolved) -> Vec<Part> {
         }
     };
     let mut parts = vec![Part {
-        path: head,
-        fill: Fill::Cell,
         stroke: style.flag("swimlaneHead", true),
+        ..Part::body(head)
     }];
     if start < if horizontal { h } else { w } {
         let lane = style.color("swimlaneFillColor");
@@ -316,9 +333,9 @@ pub(super) fn swimlane(b: Rect, style: &Resolved) -> Vec<Part> {
         let fill = lane.map_or(Fill::None, Fill::Own);
         if stroke || lane.is_some() {
             parts.push(Part {
-                path: body,
                 fill,
                 stroke,
+                ..Part::body(body)
             });
         }
     }
@@ -329,7 +346,65 @@ pub(super) fn swimlane(b: Rect, style: &Resolved) -> Vec<Part> {
         };
         parts.push(Part::line(polyline(&divider)));
     }
+    let footer = style
+        .num("footerSize", 0.0)
+        .max(0.0)
+        .min(if horizontal { h } else { w } - start);
+    if footer > 0.0 {
+        parts.push(Part {
+            fill: style.color("fillColor").map_or(Fill::None, Fill::Own),
+            ..Part::body(swimlane_footer(b, horizontal, footer, r))
+        });
+    }
+    if let Some(colour) = style.color("separatorColor") {
+        let separator = match horizontal {
+            true => [p(w, start), p(w, h)],
+            false => [p(start, 0.0), p(w, 0.0)],
+        };
+        parts.push(Part::line(polyline(&separator)).with(Pen {
+            dashed: Some(colour),
+            ..Pen::default()
+        }));
+    }
     parts
+}
+
+/// A swimlane's footer, `footer` deep at the end away from the title, following the body's
+/// corners of radius `r` (`mxSwimlane.paintFooter`): where the footer is shallower than the
+/// corner, from where the corner's curve crosses its top.
+fn swimlane_footer(b: Rect, horizontal: bool, footer: f64, r: f64) -> Vec<PathCmd> {
+    let (w, h) = (b.w, b.h);
+    let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
+    // Worked out as the horizontal lane does it; the vertical one swaps x and y and mirrors
+    // the footer to the right-hand end.
+    let len = if horizontal { w } else { h };
+    let at = |along: f64, up: f64| match horizontal {
+        true => p(along, h - up),
+        false => p(w - up, along),
+    };
+    let rr = (len / 2.0).min(r);
+    let mut path = if footer >= r {
+        vec![
+            PathCmd::MoveTo(at(0.0, footer)),
+            PathCmd::LineTo(at(0.0, r)),
+            PathCmd::QuadTo(at(0.0, 0.0), at(rr, 0.0)),
+            PathCmd::LineTo(at(len - rr, 0.0)),
+            PathCmd::QuadTo(at(len, 0.0), at(len, r)),
+            PathCmd::LineTo(at(len, footer)),
+        ]
+    } else {
+        // The corner's quad split where it crosses the footer's top, at `t` along it.
+        let t = 1.0 - (footer / r).sqrt();
+        let (pa, ba) = (rr * t * t, rr * t);
+        vec![
+            PathCmd::MoveTo(at(pa, footer)),
+            PathCmd::QuadTo(at(ba, 0.0), at(rr, 0.0)),
+            PathCmd::LineTo(at(len - rr, 0.0)),
+            PathCmd::QuadTo(at(len - ba, 0.0), at(len - pa, footer)),
+        ]
+    };
+    path.push(PathCmd::Close);
+    path
 }
 
 /// A rounded swimlane's corner radius (`mxSwimlane.getSwimlaneArcSize`, mxSwimlane.js 177-191).
@@ -531,5 +606,42 @@ mod tests {
         assert_eq!(swimlane_label(r, &s), Rect::new(0.0, 0.0, 200.0, 23.0));
         let s = style("swimlane;flipV=1;", false);
         assert_eq!(swimlane_label(r, &s), Rect::new(0.0, 77.0, 200.0, 23.0));
+    }
+
+    #[test]
+    fn a_swimlane_has_a_footer_and_a_separator_on_request() {
+        let r = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let s = "swimlane;footerSize=30;separatorColor=#ff0000;fillColor=#00ff00;";
+        let parts = swimlane(r, &style(s, false));
+        assert_eq!(parts.len(), 5);
+        let p = Point::new;
+        let footer = &parts[3];
+        assert_eq!(footer.fill, Fill::Own(crate::style::Color::rgb(0, 255, 0)));
+        assert_eq!(
+            path_bounds(&footer.path),
+            Some(Rect::new(0.0, 70.0, 200.0, 30.0))
+        );
+        let separator = &parts[4];
+        assert_eq!(corners(&separator.path), [p(200.0, 23.0), p(200.0, 100.0)]);
+        assert!(separator.pen.dashed.is_some());
+        // Rounded, a footer shallower than the corner starts where the corner's curve crosses
+        // its top: a quarter of the 20 radius deep, a quarter of it in.
+        let s = "swimlane;rounded=1;startSize=20;footerSize=5;arcSize=50;";
+        let footer = &swimlane(r, &style(s, false))[3];
+        assert!(near(start(&footer.path), Point::new(5.0, 95.0)));
+    }
+
+    #[test]
+    fn a_double_rhombus_has_a_second_diamond_inside() {
+        let r = Rect::new(0.0, 0.0, 80.0, 40.0);
+        let parts = vertex("rhombus", r, &style("rhombus;double=1;", false));
+        assert_eq!(parts.len(), 2);
+        // Twice the stroke and a unit in, at least 4.
+        let inner = path_bounds(&parts[1].path).unwrap();
+        assert!(
+            same_box(inner, Rect::new(4.0, 4.0, 72.0, 32.0)),
+            "{inner:?}"
+        );
+        assert_eq!(parts[1].fill, Fill::Cell);
     }
 }
