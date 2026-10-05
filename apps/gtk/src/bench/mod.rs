@@ -83,7 +83,7 @@ use search::bench_search;
 pub(crate) use start::bench_start;
 use style::{
     bench_drag_fold, bench_follow, bench_listing, bench_numbers, bench_occurrences, bench_reveal,
-    bench_seam, bench_style, bench_theme, bench_wrap,
+    bench_seam, bench_style, bench_theme, bench_typing, bench_wrap,
 };
 use tags::bench_tags;
 
@@ -159,10 +159,13 @@ use tags::bench_tags;
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
-/// or a drop out of a styled or folded line brings its tags along. `=wrap:<rel>,<rel>…` opens each
-/// file in a narrow window and prints where every line's wrapped rows hang, then times the wrap
-/// indent on 10k lines of code in the last one. `=dragfold:<rel>` selects a folded section and
-/// prints where to press and let go for XTEST, then what a real drag of it left in the note.
+/// or a drop out of a styled or folded line brings its tags along, and last whether a run of edits
+/// leaves every tag where a fresh pass puts it (`mismatch=0`). `=typing:<rel>` types into 4 to
+/// 256 KB of note and prints the main thread's busy share (see `style::bench_typing`).
+/// `=wrap:<rel>,<rel>…` opens each file in a narrow window and prints where every line's wrapped
+/// rows hang, then times the wrap indent on 10k lines of code in the last one. `=dragfold:<rel>`
+/// selects a folded section and prints where to press and let go for XTEST, then what a real drag
+/// of it left in the note.
 /// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
 /// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK; then
 /// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`), draws the view
@@ -969,6 +972,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("listing:") {
                 return bench_listing(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("typing:") {
+                return bench_typing(&app, rel);
             }
             return match rel.strip_prefix("wrap:") {
                 Some(rels) => bench_wrap(&app, rels),

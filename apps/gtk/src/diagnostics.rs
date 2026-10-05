@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use crate::lang;
+use crate::{highlight, lang};
 use accent_api::{Diagnostic, Pos, Severity};
 use gtk::prelude::*;
 use gtk::{gdk, pango};
@@ -85,8 +85,9 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
 /// Paint `items` over the buffer, replacing whatever was there, and say how many end-of-line
 /// messages went up.
 ///
-/// Everything is removed first rather than diffed: a publish is the server's whole answer for the
-/// file, and a buffer-wide tag lift is one pass over a text nobody has scrolled through yet.
+/// A publish is the server's whole answer for the file, but the underlines are moved only where
+/// they changed ([`highlight::sync_tag`]): an underline is something GTK lays a line out again
+/// for, and a note re-publishes after every pause in the typing.
 pub fn render(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -94,9 +95,7 @@ pub fn render(
     items: &[Diagnostic],
 ) -> usize {
     let (start, end) = buffer.bounds();
-    for name in TAGS {
-        buffer.remove_tag_by_name(name, &start, &end);
-    }
+    let mut underlined: BTreeMap<&str, Vec<std::ops::Range<i32>>> = BTreeMap::new();
     for category in [MARK_ERROR, MARK_WARNING] {
         buffer.remove_source_marks(&start, &end, Some(category));
     }
@@ -113,7 +112,10 @@ pub fn render(
         if from == to {
             to.forward_char();
         }
-        buffer.apply_tag_by_name(tag_of(item.severity), &from, &to);
+        underlined
+            .entry(tag_of(item.severity))
+            .or_default()
+            .push(from.offset()..to.offset());
 
         let (category, style) = match item.severity {
             Severity::Error => (MARK_ERROR, AnnotationStyle::Error),
@@ -143,6 +145,12 @@ pub fn render(
                 }
                 shown.2 += 1;
             }
+        }
+    }
+    let table = buffer.tag_table();
+    for name in TAGS {
+        if let Some(tag) = table.lookup(name) {
+            highlight::sync_tag(buffer, &tag, underlined.remove(name).unwrap_or_default());
         }
     }
     let annotated = lines.len();

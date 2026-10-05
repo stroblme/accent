@@ -5,6 +5,7 @@ use accent_core::csv;
 use accent_core::markdown::{self, Span, Style};
 use gtk::prelude::*;
 use gtk::{gdk, pango};
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// Byte offset -> char offset. `markdown::analyze` reports byte ranges, `TextBuffer` iters count
@@ -78,6 +79,8 @@ fn tag_name(style: Style) -> &'static str {
 /// The heading tags, `h1` first: what a caller that asks "is this a heading" looks up, so the
 /// names live here with the tags themselves rather than as literals at every such site.
 pub const HEADING_TAGS: [&str; 6] = ["h1", "h2", "h3", "h4", "h5", "h6"];
+/// The paragraph tags [`hang`] gives each heading level's margins, `hang1` first.
+const HANG_TAGS: [&str; 6] = ["hang1", "hang2", "hang3", "hang4", "hang5", "hang6"];
 /// The fenced-block tag, for the same reason.
 pub const CODEBLOCK: &str = "codeblock";
 
@@ -302,38 +305,151 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     }
 }
 
-/// Re-analyse the whole buffer, re-apply our tags, and hand the analysis back — with the byte to
-/// character table it was tagged through, so a caller that also wants the links in the buffer's
-/// own coordinates neither parses the note twice nor rebuilds the table. Roughly 0.08 ms on a
-/// 2 KB note and 6 ms on half a megabyte, which is what lets short notes restyle on the
-/// keystroke; the analysis needs the text as one contiguous copy, so it stays on the main thread
-/// either way.
+/// Re-analyse the whole buffer, bring our tags in line with it, and hand the analysis back — with
+/// the byte to character table it was tagged through, so a caller that also wants the links in
+/// the buffer's own coordinates neither parses the note twice nor rebuilds the table. The
+/// analysis needs the text as one contiguous copy, so it stays on the main thread.
+///
+/// Only what differs is touched ([`sync_tag`]): removing every tag over the whole note and
+/// applying it back, which this did until 2026-10, had GTK lay the whole note out again on every
+/// pass. Each tag's ranges are read back off the buffer itself rather than kept from the last
+/// pass, so an edit, a reload, an undo or [`apply_line`] in between leave nothing to keep in
+/// step, and a theme change, which restyles the tags themselves, needs no pass at all.
 pub fn apply(buffer: &sourceview5::Buffer) -> (markdown::Analysis, Offsets) {
     let (start, end) = buffer.bounds();
     let text = buffer.text(&start, &end, true);
-    for name in TAG_NAMES {
-        buffer.remove_tag_by_name(name, &start, &end);
-    }
     let analysis = markdown::analyze(&text);
     let offsets = Offsets::new(&text);
+    let mut wanted: HashMap<&str, Vec<Range<i32>>> = HashMap::new();
     for span in &analysis.spans {
-        tag_span(buffer, &offsets, &text, span);
+        let range = offsets.char_of(span.range.start)..offsets.char_of(span.range.end);
+        for name in tags_of(&text, span) {
+            wanted.entry(name).or_default().push(range.clone());
+        }
+    }
+    let table = buffer.tag_table();
+    for name in TAG_NAMES {
+        if let Some(tag) = table.lookup(name) {
+            sync_tag(buffer, &tag, wanted.remove(name).unwrap_or_default());
+        }
     }
     (analysis, offsets)
 }
 
-/// Tag one span, with the hanging indent that pulls an ATX heading's `#` markers out into the
-/// gutter where the span is one. Shared with [`apply_line`], which hands it spans clipped to a
+/// Put `tag` over exactly the characters `want` covers, removing and applying it only where the
+/// buffer has it otherwise: each apply or remove has GTK lay its whole range out again, whether
+/// the tag was there or not, for any tag that can change a line's size — a font, a margin, an
+/// underline.
+pub fn sync_tag(buffer: &sourceview5::Buffer, tag: &gtk::TextTag, want: Vec<Range<i32>>) {
+    let want = merged(want);
+    let have = runs(buffer, tag);
+    let at = |range: &Range<i32>| {
+        (
+            buffer.iter_at_offset(range.start),
+            buffer.iter_at_offset(range.end),
+        )
+    };
+    for range in minus(&have, &want) {
+        let (s, e) = at(&range);
+        buffer.remove_tag(tag, &s, &e);
+    }
+    for range in minus(&want, &have) {
+        let (s, e) = at(&range);
+        buffer.apply_tag(tag, &s, &e);
+    }
+}
+
+/// The parts of `a` that `b` does not cover. Both sorted by start and neither overlapping itself.
+fn minus(a: &[Range<i32>], b: &[Range<i32>]) -> Vec<Range<i32>> {
+    let (mut out, mut first) = (Vec::new(), 0);
+    for r in a {
+        // What ends before `r` starts ends before every later range of `a` starts too.
+        while first < b.len() && b[first].end <= r.start {
+            first += 1;
+        }
+        let mut from = r.start;
+        for cut in b[first..].iter().take_while(|cut| cut.start < r.end) {
+            if cut.start > from {
+                out.push(from..cut.start);
+            }
+            from = from.max(cut.end);
+        }
+        if from < r.end {
+            out.push(from..r.end);
+        }
+    }
+    out
+}
+
+/// Where `tag` lies in `buffer`, as character ranges in order.
+pub fn runs(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) -> Vec<Range<i32>> {
+    let (mut out, mut at) = (Vec::new(), buffer.start_iter());
+    while at.starts_tag(Some(tag)) || at.forward_to_tag_toggle(Some(tag)) {
+        let start = at.offset();
+        at.forward_to_tag_toggle(Some(tag));
+        out.push(start..at.offset());
+    }
+    out
+}
+
+/// `ranges` sorted, with the ones that overlap or touch joined and the empty ones gone: the
+/// shape [`runs`] reads a tag back in.
+fn merged(mut ranges: Vec<Range<i32>>) -> Vec<Range<i32>> {
+    ranges.sort_by_key(|r| r.start);
+    let mut out: Vec<Range<i32>> = Vec::with_capacity(ranges.len());
+    for r in ranges.into_iter().filter(|r| r.start < r.end) {
+        match out.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => out.push(r),
+        }
+    }
+    out
+}
+
+/// The tags whose ranges in `buffer` differ from what a fresh pass over the same text gives:
+/// every span tagged one by one on a buffer that had none, which is what [`apply`] did before it
+/// diffed. For `ACCENT_BENCH_STYLE`, after a run of edits.
+#[cfg(feature = "bench")]
+pub fn mismatches(buffer: &sourceview5::Buffer) -> Vec<&'static str> {
+    let fresh = sourceview5::Buffer::new(None);
+    install_tags(&fresh);
+    let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+    fresh.set_text(&text);
+    let offsets = Offsets::new(&text);
+    for span in &markdown::analyze(&text).spans {
+        tag_span(&fresh, &offsets, &text, span);
+    }
+    let lookup = |buffer: &sourceview5::Buffer, name: &str| {
+        let tag = buffer.tag_table().lookup(name).expect("an installed tag");
+        merged(runs(buffer, &tag))
+    };
+    TAG_NAMES
+        .iter()
+        .copied()
+        .filter(|name| lookup(buffer, name) != lookup(&fresh, name))
+        .collect()
+}
+
+/// The tags a span is given: its style's, and where the span is an ATX heading the hanging indent
+/// that pulls its `#` markers out into the gutter. [`apply_line`] hands it spans clipped to a
 /// single line: clipping can only move a start past the `#` markers, and a line that has not got
 /// them has nothing to hang.
+fn tags_of(text: &str, span: &Span) -> impl Iterator<Item = &'static str> {
+    let hang = match span.style {
+        Style::Heading(level) if is_atx(text, span.range.start) => {
+            Some(HANG_TAGS[usize::from(level.clamp(1, 6)) - 1])
+        }
+        _ => None,
+    };
+    std::iter::once(tag_name(span.style)).chain(hang)
+}
+
+/// Tag one span with [`tags_of`] it, over whatever is there already.
 fn tag_span(buffer: &sourceview5::Buffer, offsets: &Offsets, text: &str, span: &Span) {
     let s = buffer.iter_at_offset(offsets.char_of(span.range.start));
     let e = buffer.iter_at_offset(offsets.char_of(span.range.end));
-    buffer.apply_tag_by_name(tag_name(span.style), &s, &e);
-    if let Style::Heading(level) = span.style
-        && is_atx(text, span.range.start)
-    {
-        buffer.apply_tag_by_name(&format!("hang{}", level.clamp(1, 6)), &s, &e);
+    for name in tags_of(text, span) {
+        buffer.apply_tag_by_name(name, &s, &e);
     }
 }
 
@@ -702,6 +818,18 @@ mod tests {
             .map(|s| s.range)
             .collect();
         assert_eq!(got, vec![12..15, 10..12, 18..20, 10..20]);
+    }
+
+    /// What [`apply`] removes and applies: the ranges one side has and the other has not, with
+    /// the wanted ones joined first the way GTK reads a tag back.
+    #[test]
+    fn only_the_difference_is_touched() {
+        let want = merged(vec![10..20, 0..5, 15..25, 5..6, 30..30]);
+        assert_eq!(want, vec![0..6, 10..25]);
+        let have = vec![0..6, 12..14, 22..40];
+        assert_eq!(minus(&have, &want), vec![25..40]);
+        assert_eq!(minus(&want, &have), vec![10..12, 14..22]);
+        assert!(minus(&want, &want).is_empty());
     }
 
     /// The six column hues: distinct, a sixth of the wheel apart, wrapping once past 1.0, with the
