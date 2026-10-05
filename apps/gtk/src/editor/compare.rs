@@ -209,8 +209,7 @@ impl Tab {
             title("Incoming", labels.as_ref().map(|l| &l.1)),
         ];
         let name = crate::doc::file_name(&self.rel()).to_string();
-        let mine = format!("{name} (Result)");
-        let hosted = self.host(&mine, "Stop Merging", None, "Merge", |tab, editor| {
+        let hosted = self.host(&name, "Stop Merging", None, "Merge", |tab, editor| {
             // The blocks keep their tints; their buttons go beside them, in every column.
             tab.conflicts.set_band(false);
             let side = |stage: usize| {
@@ -223,8 +222,20 @@ impl Tab {
                 )
             };
             let (left, right) = (side(diff::merge::CURRENT), side(diff::merge::INCOMING));
+            let header = editor.header.clone();
             let merge =
                 diff::Merge::new([left, editor, right], stages, titles, tab.conflicts.clone());
+            // "(Result)" after the name, which gives way to it in a narrow column.
+            if let Some(name) = header.first_child() {
+                let result = gtk::Label::builder()
+                    .label("(Result)")
+                    .xalign(0.0)
+                    .hexpand(true)
+                    .css_classes(["heading", "dim-label"])
+                    .build();
+                name.set_hexpand(false);
+                header.insert_child_after(&result, Some(&name));
+            }
             Hosted::Merge(merge)
         });
         match hosted {
