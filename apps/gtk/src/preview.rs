@@ -43,6 +43,18 @@ fn find_options(options: Options) -> webkit6::FindOptions {
 /// WebKit's own guard against a query that matches the whole page; the counter says "500+" past it.
 const FIND_LIMIT: u32 = 500;
 
+/// How long a WebKit view nobody is using is kept, and its web process of 60 to 120 MB: a preview
+/// out of sight, the diagram formulas' typesetter with nothing to typeset. Long enough that Split
+/// view toggled off and on again, or the next formula of the diagram being drawn, finds it still
+/// there. Two seconds under `ACCENT_BENCH_WEBIDLE`, whose drill waits it out.
+pub fn idle_for() -> std::time::Duration {
+    #[cfg(feature = "bench")]
+    if std::env::var_os("ACCENT_BENCH_WEBIDLE").is_some() {
+        return std::time::Duration::from_secs(2);
+    }
+    std::time::Duration::from_secs(5 * 60)
+}
+
 /// Tracing target for what the page's own JavaScript says, so
 /// `RUST_LOG=accent::preview=debug accent <vault>` gives the preview's console and nothing else.
 /// Its own target for the reason `accent::saves` has one: the answer is a handful of lines.

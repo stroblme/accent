@@ -302,8 +302,11 @@ struct App {
     /// Built on idle once the window is up, so the first open of Preferences is quick too.
     preferences: OnceCell<settings::Preferences>,
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
-    /// at startup by someone who only ever writes.
+    /// at startup by someone who only ever writes. Let go once out of sight for a while
+    /// (`preview_idle`), and built again the next time it is shown.
     preview: RefCell<Option<preview::Preview>>,
+    /// The pending release of the preview, from when it went out of sight.
+    preview_idle: widgets::Debounce,
     /// The images Invert Image Colours has turned round, by key, until the app quits: in their
     /// tabs and in the preview alike, which reads it as it serves each image.
     inverted_images: Rc<RefCell<HashSet<String>>>,

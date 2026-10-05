@@ -226,7 +226,16 @@ impl App {
                 }
                 false => {}
             }
-            widget.set_visible(rendered || self.mode.get() == Mode::Split && !presenting);
+            let shown = rendered || self.mode.get() == Mode::Split && !presenting;
+            widget.set_visible(shown);
+            match shown {
+                true => self.preview_idle.cancel(),
+                false => self.preview_idle.call_once(glib::clone!(
+                    #[weak(rename_to = app)]
+                    self,
+                    move || app.drop_preview()
+                )),
+            }
         }
         if presenting {
             if let Some(pdf) = self.active_pdf() {
@@ -415,6 +424,24 @@ impl App {
         glib::idle_add_local_once(move || {
             widget.grab_focus();
         });
+    }
+
+    /// Let the preview go, out of sight for [`preview::idle_for`]: its web process ends with it,
+    /// the view having a `WebContext` of its own, and WebKit's network process too once no other
+    /// view is left. The next render that shows it builds another ([`App::ensure_preview`]) and
+    /// scrolls it to the caret, as any render does. [`App::lay_out`] calls the release off as
+    /// it shows the preview, so it never takes one on screen.
+    fn drop_preview(&self) {
+        let Some(preview) = self.preview.take() else {
+            return;
+        };
+        let widget = preview.widget();
+        match widget.parent() {
+            Some(parent) if parent == *self.paned.upcast_ref::<gtk::Widget>() => {
+                self.paned.set_end_child(gtk::Widget::NONE)
+            }
+            _ => widget.unparent(),
+        }
     }
 
     fn ensure_preview(self: &Rc<Self>) {

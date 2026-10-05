@@ -230,6 +230,10 @@ use tags::bench_tags;
 /// and prints what the process holds after each, then opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
+/// `ACCENT_BENCH_WEBIDLE=<note>` shortens how long an unused WebKit view keeps its process to two
+/// seconds, and prints the WebKit processes as the preview and the diagram formulas' typesetter
+/// are used, left and used again (`memory::bench_webidle`). It writes two diagrams, so point it at
+/// a scratch vault.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload;
 /// `=zoom:<rel_svg>,…` steps an SVG in and back, printing what it is drawn from as the zoom settles.
@@ -540,6 +544,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let preview_look = std::env::var("ACCENT_BENCH_PREVIEW_LOOK").ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let memory = std::env::var("ACCENT_BENCH_MEMORY").ok();
+    let webidle = std::env::var("ACCENT_BENCH_WEBIDLE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let drawing = std::env::var("ACCENT_BENCH_DRAWING").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
@@ -596,6 +601,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && panes.is_none()
         && compare.is_none()
         && memory.is_none()
+        && webidle.is_none()
         && pdf.is_none()
         && drawing.is_none()
         && tabs.is_none()
@@ -642,6 +648,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = memory {
             return memory::bench_memory(&app, &arg);
+        }
+        if let Some(note) = webidle {
+            return memory::bench_webidle(&app, &note);
         }
         if let Some(rel) = compare {
             // These make a repository in the vault root, or stage and commit in the one there.
