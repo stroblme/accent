@@ -105,6 +105,21 @@ fn foreign_ink_pdf() -> Vec<u8> {
     ])
 }
 
+/// One 200 x 100 pt page with a sticky note another reader left — a `/Text` by Grace at
+/// (150, 60)–(170, 80) with its `/Popup` and no `/AP` — and a hidden one beside it.
+fn commented_pdf() -> Vec<u8> {
+    pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Annots[4 0 R 5 0 R 6 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Text/Rect[150 20 170 40]/Contents(Is this right?)/T(Grace)\
+         /C[1 1 0]/Popup 5 0 R/F 4>>"
+            .to_string(),
+        "<</Type/Annot/Subtype/Popup/Rect[100 40 200 100]/Parent 4 0 R>>".to_string(),
+        "<</Type/Annot/Subtype/Text/Rect[10 20 30 40]/Contents(gone)/F 2>>".to_string(),
+    ])
+}
+
 /// Write the tiny PDF into a tempdir and open it, or `None` if pdfium is missing.
 fn open_tiny_with(highlight: bool) -> Option<(tempfile::TempDir, PdfDoc)> {
     open_pdf(&tiny_pdf(highlight))
@@ -1095,6 +1110,54 @@ fn links_read_dest_and_uri() {
         second[0].target,
         LinkTarget::Uri("https://example.org".to_string())
     );
+}
+
+/// A highlight's `/Contents` is a comment over its quads; the link beside it is none.
+#[test]
+fn a_highlight_with_contents_is_a_comment() {
+    let Some((_d, doc)) = open_tiny_with(true) else {
+        return;
+    };
+    let comments = doc.comments(0).unwrap();
+    assert_eq!(comments.len(), 1, "{comments:?}");
+    assert_eq!(comments[0].text, "check this");
+    assert_eq!(comments[0].author, None);
+    let [q] = comments[0].areas[..] else {
+        panic!("{comments:?}");
+    };
+    assert!(
+        (q.left - 18.0).abs() < 0.5 && (q.top - 36.0).abs() < 0.5 && (q.bottom - 64.0).abs() < 0.5,
+        "{q:?}"
+    );
+    assert!(doc.comments(1).unwrap().is_empty());
+}
+
+/// A sticky note is one comment by its author over its `/Rect`, which pdfium paints an icon in
+/// though the note has no appearance stream; its popup and a hidden note are not comments.
+#[test]
+fn a_sticky_note_is_a_comment_by_its_author() {
+    let Some((_d, doc)) = open_pdf(&commented_pdf()) else {
+        return;
+    };
+    let comments = doc.comments(0).unwrap();
+    assert_eq!(comments.len(), 1, "{comments:?}");
+    assert_eq!(comments[0].text, "Is this right?");
+    assert_eq!(comments[0].author.as_deref(), Some("Grace"));
+    let [r] = comments[0].areas[..] else {
+        panic!("{comments:?}");
+    };
+    assert!(
+        (r.left - 150.0).abs() < 0.5 && (r.top - 60.0).abs() < 0.5 && (r.bottom - 80.0).abs() < 0.5,
+        "{r:?}"
+    );
+    let img = doc.render_page(0, 1.0, Theme::Plain).unwrap();
+    let inked = (60..80).any(|y: u32| {
+        (150..170).any(|x: u32| {
+            let i = ((y * img.width + x) * 4) as usize;
+            img.data[i..i + 3].iter().any(|&c| c < 200)
+        })
+    });
+    assert!(inked, "pdfium paints the note's icon");
 }
 
 #[test]
