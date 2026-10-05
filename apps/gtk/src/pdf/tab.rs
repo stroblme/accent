@@ -103,6 +103,13 @@ pub struct PdfTab {
     /// The zoom to restore when presentation mode ends.
     pub(super) presenting: Cell<Option<PdfZoom>>,
     pub(super) links: RefCell<std::collections::HashMap<usize, Vec<pdf::Link>>>,
+    /// What other readers wrote on each page, asked for with its links.
+    pub(super) comments: RefCell<HashMap<usize, Vec<pdf::Comment>>>,
+    /// The tooltip's content for the comments it last showed, kept while the pointer stays on
+    /// them: GTK asks again on every motion, and a new widget each time would rebuild the tooltip.
+    pub(super) tip: RefCell<Option<(Vec<pdf::Comment>, gtk::Widget)>>,
+    /// The comments a click pinned, in a popover whose text can be selected.
+    pub(super) pinned: RefCell<Option<gtk::Popover>>,
     /// Each page's glyphs, fetched the first time someone drags across that page.
     pub(super) glyphs: RefCell<std::collections::HashMap<usize, Vec<pdf::Glyph>>>,
     /// The selected text, for Ctrl+C.
@@ -269,6 +276,9 @@ pub fn open(
         pending: Cell::new(Some(place)),
         pending_select: Cell::new(None),
         links: RefCell::new(std::collections::HashMap::new()),
+        comments: RefCell::default(),
+        tip: RefCell::default(),
+        pinned: RefCell::default(),
         glyphs: RefCell::new(std::collections::HashMap::new()),
         selected: RefCell::new(String::new()),
         ranges: RefCell::new(Vec::new()),
@@ -333,6 +343,7 @@ pub fn open(
     ));
     tab.wire_keys();
     tab.wire_preview();
+    tab.wire_comments();
     tab.wire_menu();
 
     // Nothing about the document is known yet, and deliberately so: opening it and measuring its
@@ -702,6 +713,16 @@ impl PdfTab {
     pub(super) fn ask_inks(&self) {
         for page in self.view.visible_pages() {
             self.ask(Request::Inks(page));
+        }
+    }
+
+    /// Ask for the links and comments of every page at least partly on screen, the first time
+    /// it is.
+    pub(super) fn ask_links(&self) {
+        for page in self.view.visible_pages() {
+            if !self.links.borrow().contains_key(&page) {
+                self.ask(Request::Links(page));
+            }
         }
     }
 

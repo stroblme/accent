@@ -957,6 +957,42 @@ impl Gen {
         Self::pdf_of(&objs)
     }
 
+    /// One 400 x 300 pt page of three lines that other readers marked up, none of the marks with
+    /// an appearance stream of its own but the typed text: a highlight by Ada with a comment, an
+    /// underline with a comment and a link on its last word, a strike-out without one, Grace's
+    /// sticky note with its popup, a hidden note and a `/FreeText`.
+    /// `ACCENT_BENCH_PDF=comments:` knows where each is.
+    fn comments_pdf() -> Vec<u8> {
+        let content = "BT /F1 14 Tf 40 250 Td (Ada highlighted this line.) Tj ET\n\
+                       BT /F1 14 Tf 40 220 Td (This line is underlined, with a link.) Tj ET\n\
+                       BT /F1 14 Tf 40 190 Td (This line is struck out.) Tj ET\n";
+        let typed = "BT /F1 12 Tf 4 10 Td (Typed on the page.) Tj ET\n";
+        let quad = |x1: u32, y0: u32| {
+            let y1 = y0 + 18;
+            format!("/Rect [38 {y0} {x1} {y1}] /QuadPoints [38 {y1} {x1} {y1} 38 {y0} {x1} {y0}]")
+        };
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R] >>".to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+            format!("<< /Type /Annot /Subtype /Highlight {} /C [1 1 0] /T (Ada) /Contents (Worth a second look.) /F 4 >>", quad(194, 246)),
+            format!("<< /Type /Annot /Subtype /Underline {} /C [0 0.6 0] /Contents (Underlined without a name.) /F 4 >>", quad(250, 216)),
+            "<< /Type /Annot /Subtype /Link /Rect [222 216 246 234] /Border [0 0 0] /Dest [3 0 R /XYZ 0 300 0] >>".to_string(),
+            format!("<< /Type /Annot /Subtype /StrikeOut {} /C [1 0 0] /F 4 >>", quad(176, 186)),
+            "<< /Type /Annot /Subtype /Text /Rect [340 240 360 260] /Name /Comment /C [1 0.8 0] /T (Grace) /Contents (Is this right?) /Popup 11 0 R /F 4 >>".to_string(),
+            "<< /Type /Annot /Subtype /Popup /Rect [300 140 400 240] /Parent 10 0 R >>".to_string(),
+            "<< /Type /Annot /Subtype /Text /Rect [340 200 360 220] /Contents (Hidden.) /F 2 >>".to_string(),
+            "<< /Type /Annot /Subtype /FreeText /Rect [40 80 240 110] /DA (/Helv 12 Tf 0 g) /Contents (Typed on the page.) /AP << /N 14 0 R >> /F 4 >>".to_string(),
+            format!(
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 200 30] /Resources << /Font << /F1 4 0 R >> >> /Length {} >>\nstream\n{typed}endstream",
+                typed.len()
+            ),
+        ];
+        Self::pdf_of(&objs)
+    }
+
     /// These objects as a PDF, numbered from 1 with the catalog first, and their xref.
     fn pdf_of(objs: &[String]) -> Vec<u8> {
         let mut out = Vec::with_capacity(1024);
@@ -1146,10 +1182,10 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     let venv_in = (files / 40).clamp(2, 1000);
     let venv_ext = (files / 20).clamp(4, 2000);
 
-    // 34: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
-    // Syncthing artefacts, pyvenv.cfg, the five-page PDF, the image-theming figures and their
-    // note), which the bulk fill has to leave room for.
-    let floor = notes + 34 + venv_in + flat_imgs + flat_pdfs + excal;
+    // 35: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
+    // Syncthing artefacts, pyvenv.cfg, the five-page and the commented PDF, the image-theming
+    // figures and their note), which the bulk fill has to leave room for.
+    let floor = notes + 35 + venv_in + flat_imgs + flat_pdfs + excal;
     if files < floor {
         bail!("--files {files} is too small for --notes {notes}: need at least {floor}");
     }
@@ -1447,6 +1483,7 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
         g.write(&format!("Attachments/{name}"), &b)?;
     }
     g.write("Attachments/pages.pdf", &Gen::pages_pdf(5))?;
+    g.write("Attachments/comments.pdf", &Gen::comments_pdf())?;
     // Image auto-theming's drill inputs: three figures a dark theme recolours, and a photo (noise,
     // to the classifier) it leaves alone.
     g.write("Attachments/figure.png", &figure_png())?;

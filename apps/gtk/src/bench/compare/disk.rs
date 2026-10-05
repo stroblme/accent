@@ -696,11 +696,15 @@ fn top(view: &gtk::TextView) -> String {
 /// for each press the hidden runs and the line at the top of the view before and after
 /// (`on hidden=10->0 top="line 181"@-250->"line 181"@-250`): every run opens, and letting go
 /// hides them all again, the one opened by hand too, the line at the top staying where it was
-/// in every frame painted meanwhile (`away=0/…`, see [`painted`]). Then at the start of the file,
-/// where the first run opens downwards from the top of the view and collapses again under it
-/// (`start on … top="line 17 "@24->"line 1 w"@24`), and last the two blobs read again three lines
-/// longer at the top, as the Git pane's refresh reads them (`reread`). Writes the note, so point it
-/// at a scratch vault.
+/// in every frame painted meanwhile (`away=0/…`, see [`painted`]). Then with the caret on a change
+/// two thirds down the view, under a hidden run, where the caret's line stays instead, in every
+/// frame but for the padding above it settling (`caret … caret="line 220"@361->"line 220"@361
+/// strayed=20`, the most it was off in a frame painted meanwhile), and the divider between
+/// the columns dragged, the line at the top staying (`editor resize`, see [`bench_resize`]). Then
+/// at the start of the file, where the first run opens downwards from the top of the view and
+/// collapses again under it (`start on … top="line 17 "@24->"line 1 w"@24`), the blobs' toggle
+/// and divider, and last the two blobs read again three lines longer at the top, as the Git pane's
+/// refresh reads them (`reread`). Writes the note, so point it at a scratch vault.
 pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -749,6 +753,37 @@ pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
                 bench_unfold(&compare, &views, on).await
             );
         }
+        // The caret on a change under a hidden run, two thirds down the view.
+        if let Some(line) = tab.buffer.iter_at_line(219) {
+            tab.buffer.place_cursor(&line);
+            let mark = tab.buffer.create_mark(None, &line, true);
+            tab.view.scroll_to_mark(&mark, 0.0, true, 0.0, 0.66);
+            tab.buffer.delete_mark(&mark);
+            wait(500).await;
+        }
+        for on in [true, false] {
+            let (caret, y, strayed) = (caret_at(view), caret_y(view), Rc::new(Cell::new(0)));
+            let clock = view.frame_clock();
+            let id = clock.as_ref().map(|clock| {
+                let (strayed, view) = (strayed.clone(), view.clone());
+                clock.connect_after_paint(move |_| {
+                    strayed.set(strayed.get().max((caret_y(&view) - y).abs()))
+                })
+            });
+            let unfold = bench_unfold(&compare, &views, on).await;
+            if let (Some(clock), Some(id)) = (clock, id) {
+                clock.disconnect(id);
+            }
+            println!(
+                "bench compare_unfold caret {unfold} caret={caret}->{} strayed={}",
+                caret_at(view),
+                strayed.get()
+            );
+        }
+        println!(
+            "bench compare_unfold editor resize {}",
+            bench_resize(&compare, &views).await
+        );
         // The run over the file's first lines collapses again under the top of the view.
         compare.vadjustment().set_value(0.0);
         wait(500).await;
@@ -788,6 +823,10 @@ pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
                 bench_unfold(compare, &views, on).await
             );
         }
+        println!(
+            "bench compare_unfold blobs resize {}",
+            bench_resize(compare, &views).await
+        );
         // The Git pane's refresh reading both blobs again, each three lines longer at the top,
         // which keeps the line at the top of the view the same way.
         let longer = |text: &str| format!("new 1\nnew 2\nnew 3\n{text}");
@@ -841,6 +880,40 @@ async fn bench_unfold(compare: &diff::Compare, views: &[gtk::TextView; 2], on: b
         compare.counts().2,
         toggle.is_sensitive()
     )
+}
+
+/// The divider between the columns dragged 200 px, narrowing the column of the first of `views`,
+/// which rewraps both, and the lines at the top of `views` (see [`painted`]): the narrower column
+/// has the taller line of each row, so the line at its top is the row's.
+async fn bench_resize(compare: &diff::Compare, views: &[gtk::TextView; 2]) -> String {
+    let Some(paned) = compare.widget().downcast_ref::<gtk::Paned>() else {
+        return "paned=none".to_string();
+    };
+    let by = match pane_view(compare.widget(), false).as_ref() == Some(&views[0]) {
+        true => -200,
+        false => 200,
+    };
+    let tops = painted(views, || paned.set_position(paned.position() + by)).await;
+    format!("{tops} misaligned={}", compare.misaligned())
+}
+
+/// The caret's line in `view`, its first eight characters, and how far below the top of the view
+/// it is.
+fn caret_at(view: &gtk::TextView) -> String {
+    let buffer = view.buffer();
+    let at = buffer.iter_at_mark(&buffer.get_insert());
+    let mut end = at;
+    end.forward_to_line_end();
+    let text: String = buffer.text(&at, &end, true).chars().take(8).collect();
+    format!("{text:?}@{}", caret_y(view))
+}
+
+/// How far below the top of `view` its caret is.
+fn caret_y(view: &gtk::TextView) -> i32 {
+    let buffer = view.buffer();
+    view.iter_location(&buffer.iter_at_mark(&buffer.get_insert()))
+        .y()
+        - view.visible_rect().y()
 }
 
 /// Run `act` and say where the line at the top of the first of `views` was before and is once

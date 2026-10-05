@@ -35,6 +35,8 @@ pub enum Reply {
         image: accent_core::pdf::RgbaImage,
     },
     Links(usize, Vec<accent_core::pdf::Link>),
+    /// What other readers wrote on one page, answered with its links.
+    Comments(usize, Vec<pdf::Comment>),
     /// One page's glyphs and their boxes, for selecting text on it.
     Text(usize, Vec<accent_core::pdf::Glyph>),
     Outline(Vec<accent_core::pdf::Outline>),
@@ -118,6 +120,7 @@ pub enum Request {
         theme: pdf::Theme,
         wants: Vec<Want>,
     },
+    /// One page's links, and its comments with them.
     Links(usize),
     /// The glyphs of one page, so text on it can be selected.
     Text(usize),

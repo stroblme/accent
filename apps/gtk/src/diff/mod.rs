@@ -525,13 +525,17 @@ impl Compare {
                 }
             });
             // Everything wraps, so a pane's width is its horizontal page size: a paned drag or a
-            // window resize lands here and re-measures the rows.
+            // window resize lands here and re-measures the rows, the line at the top staying.
             let w = weak.clone();
             let hadj = pane.scroller.hadjustment();
-            let id = hadj.connect_page_size_notify(move |_| {
-                if let Some(c) = w.upgrade() {
-                    c.schedule_relayout();
+            // GTK notifies on every allocation, the same width or not.
+            let width = Cell::new(hadj.page_size());
+            let id = hadj.connect_page_size_notify(move |hadj| {
+                let Some(c) = w.upgrade() else { return };
+                if width.replace(hadj.page_size()) != hadj.page_size() {
+                    c.rewrapped();
                 }
+                c.schedule_relayout();
             });
             connect(hadj.upcast(), id);
         }
@@ -648,6 +652,56 @@ impl Compare {
         pane.buffer.set_text(&text);
         editor::style_companion(pane.flavour, &pane.buffer, &pane.view);
         self.refresh();
+    }
+
+    /// The editor's caret line, and how far below the top of the view its row starts, while that
+    /// row starts on screen.
+    fn caret_line(&self) -> Option<Keep> {
+        let mine = self.editable?;
+        let buffer = &self.pane(mine).buffer;
+        let n = buffer.iter_at_mark(&buffer.get_insert()).line() as usize + 1;
+        let (lines, rows, grid) = (self.lines.borrow(), self.rows.borrow(), self.grid.borrow());
+        let row = rows
+            .iter()
+            .position(|row| mine.of(row).and_then(|i| mine.number(&lines[i])) == Some(n))?;
+        let seen = self.panes[0].view.visible_rect();
+        let at = grid.tops.get(row)? - seen.y();
+        (0..seen.height())
+            .contains(&at)
+            .then_some(Keep::Line(mine, n, at))
+    }
+
+    /// A new width rewraps every line, and each view keeps its own top line in place as GTK lays
+    /// them out again, both on the one scroll they share: the line at the top is held instead,
+    /// until the rows have settled at the new width.
+    fn rewrapped(&self) {
+        if self.keep.get().is_none() {
+            self.hold(self.top_line(self.editable.unwrap_or(Side::New)));
+            self.settling.set(SETTLE);
+        }
+    }
+
+    /// Keep `keep` until the rows are laid, a [`Keep::Line`] held again after each layout GTK
+    /// makes meanwhile, before it is painted: the lines GTK lays out in the frame itself move a
+    /// kept line without moving the scroll.
+    fn hold(&self, keep: Option<Keep>) {
+        let held = matches!(self.keep.replace(keep), Some(Keep::Line(..)));
+        let clock = self.panes[0].view.frame_clock();
+        let (false, Some(Keep::Line(..)), Some(clock)) = (held, keep, clock) else {
+            return;
+        };
+        let id: Rc<Cell<Option<glib::SignalHandlerId>>> = Rc::default();
+        let (w, own) = (self.weak.clone(), id.clone());
+        id.set(Some(clock.connect_layout(
+            move |clock| match w.upgrade().map(|c| (c.keep.get(), c)) {
+                Some((Some(Keep::Line(side, n, at)), c)) => c.hold_line(side, n, at),
+                _ => {
+                    if let Some(id) = own.take() {
+                        clock.disconnect(id);
+                    }
+                }
+            },
+        )));
     }
 
     /// Where the reader is, as a line of `side`: the one in the row at the top of the view, or in
@@ -1012,12 +1066,13 @@ impl Compare {
     }
 
     /// Every run opened, as Show All Unchanged Lines goes down, or every one hidden again as it
-    /// comes up, those opened one by one too, but for the one holding the caret. The line at the
-    /// top of the view stays there, as a re-read side's does ([`Compare::set_side`]).
+    /// comes up, those opened one by one too, but for the one holding the caret. The caret's line
+    /// stays where it is on screen; with the caret off screen, the line at the top of the view
+    /// stays there, as a re-read side's does ([`Compare::set_side`]).
     fn toggle_all(&self) {
         if !matches!(self.keep.get(), Some(Keep::FirstHunk)) {
-            self.keep
-                .set(self.top_line(self.editable.unwrap_or(Side::New)));
+            let top = || self.top_line(self.editable.unwrap_or(Side::New));
+            self.hold(self.caret_line().or_else(top));
         }
         if !self.unfold.is_active() {
             self.opened.borrow_mut().clear();

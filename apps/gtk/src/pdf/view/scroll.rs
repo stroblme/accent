@@ -2,6 +2,7 @@
 //! page or a rectangle of one, and the layout kept across a resize or a zoom.
 
 use adw::prelude::*;
+use gtk::gdk;
 use gtk::subclass::prelude::*;
 
 use super::PdfView;
@@ -137,6 +138,20 @@ impl PdfView {
             .find(|(_, r)| cy >= r.y && cy <= r.y + r.h && cx >= r.x && cx <= r.x + r.w)?;
         let (x, y) = layout.to_page(page, cx, cy)?;
         Some((page, x, y))
+    }
+
+    /// A rectangle of a page, in its own points, in widget coordinates: the inverse of
+    /// [`Self::page_point`].
+    pub fn widget_rect(&self, page: usize, r: &accent_core::pdf::Rect) -> Option<gdk::Rectangle> {
+        let layout = self.imp().layout.borrow();
+        let rect = layout.rect_of(layout.pages.get(page)?, r);
+        let (ox, oy) = self.scroll_offset();
+        Some(gdk::Rectangle::new(
+            (f64::from(rect.x()) - ox).floor() as i32,
+            (f64::from(rect.y()) - oy).floor() as i32,
+            rect.width().ceil() as i32,
+            rect.height().ceil() as i32,
+        ))
     }
 
     pub(super) fn content_at(&self, x: f64, y: f64) -> (f32, f32) {

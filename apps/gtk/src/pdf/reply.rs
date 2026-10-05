@@ -14,12 +14,13 @@ use super::tab::PdfTab;
 
 impl PdfTab {
     /// Forget what is kept of each page that cannot follow it to another number or document: the
-    /// strokes the tools know, the links, and the glyphs with the selection made of them — an
-    /// export or a rebuild moves the text, and a stale index would paint the selection elsewhere.
-    /// Each is asked for again as it is needed.
+    /// strokes the tools know, the links and comments, and the glyphs with the selection made of
+    /// them — an export or a rebuild moves the text, and a stale index would paint the selection
+    /// elsewhere. Each is asked for again as it is needed.
     pub(super) fn forget_pages(&self) {
         self.view.clear_inks();
         self.links.borrow_mut().clear();
+        self.comments.borrow_mut().clear();
         self.glyphs.borrow_mut().clear();
         self.clear_selection();
     }
@@ -29,6 +30,9 @@ impl PdfTab {
         match reply {
             Reply::Links(page, links) => {
                 self.links.borrow_mut().insert(page, links);
+            }
+            Reply::Comments(page, comments) => {
+                self.comments.borrow_mut().insert(page, comments);
             }
             Reply::Text(page, glyphs) => self.text_landed(page, glyphs),
             Reply::Outline(outline) => {
@@ -47,6 +51,10 @@ impl PdfTab {
                 // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
                 self.view.refresh_page(page, area);
                 self.thumbs.queue_draw();
+                // An export writes each highlight's quote in, which is a comment from now on.
+                self.links.borrow_mut().remove(&page);
+                self.comments.borrow_mut().remove(&page);
+                self.ask_links();
                 if self.wants_inks() {
                     self.ask_inks();
                 }
@@ -169,14 +177,14 @@ impl PdfTab {
             link.page = edit.map(link.page).unwrap_or(link.page);
         }
         // Asked again under the new numbers: the bookmarks' pages, where the notes'
-        // highlights land, the strokes a tool in hand needs, this page's links, and the
-        // search's matches.
+        // highlights land, the strokes a tool in hand needs, the links and comments on screen,
+        // and the search's matches.
         self.ask(Request::Outline);
         self.ask(Request::Highlights(self.notes.borrow().clone()));
         if self.wants_inks() {
             self.ask_inks();
         }
-        self.ask(Request::Links(self.view.current_page()));
+        self.ask_links();
         let (searched, options) = self.searched.borrow().clone();
         if !searched.is_empty() {
             self.find(&searched, options, false);
@@ -225,6 +233,7 @@ impl PdfTab {
             None => self.view.scroll_to(anchor),
         }
         self.ask(Request::Outline);
+        self.ask_links();
         // The strokes went with the old document, and a tool in hand needs this one's.
         if self.wants_inks() {
             self.ask_inks();

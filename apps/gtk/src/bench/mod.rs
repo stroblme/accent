@@ -74,8 +74,8 @@ use panes::{
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_closed,
-    bench_pdf_deep, bench_pdf_dropped, bench_pdf_failed, bench_pdf_pages, bench_pdf_renaming,
-    bench_pdf_render, bench_pdf_stale, bench_pdf_strip, bench_sketch,
+    bench_pdf_comments, bench_pdf_deep, bench_pdf_dropped, bench_pdf_failed, bench_pdf_pages,
+    bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip, bench_sketch,
 };
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -209,7 +209,8 @@ use tags::bench_tags;
 /// (`compare::bench_compare_page`). `=press:<rel>` prints where to press the overlaid buttons with
 /// XTEST and where the carets are after each press (`compare::bench_compare_press`).
 /// `=unfold:<rel>` presses Show All Unchanged Lines and lets it go, in the note's tab and in a tab
-/// of two blobs, printing the hidden runs and the line at the top of the view each time
+/// of two blobs, printing the hidden runs and the line at the top of the view each time, or the
+/// caret's line where it is on screen, then drags the divider between the columns
 /// (`compare::bench_compare_unfold`).
 /// `=runaway:<rel>` lays a comparison again eight times before GTK lays out what it re-padded,
 /// printing the padding of a paragraph under a blank line after each
@@ -304,6 +305,12 @@ use tags::bench_tags;
 /// build of an article in a scratch vault. A build without a SyncTeX file prints the palette's
 /// rows for both commands and the `.tex` tab's menu each second for eight instead, for a
 /// secondary press through XTEST to turn its Show in PDF into "(no SyncTeX data)".
+/// `=comments:<rel_path>` writes a note linking to the first word of the generated vault's
+/// `Attachments/comments.pdf` (`rel_path`), then prints, over each comment and each mark without
+/// one, what the tooltip shows, what a click pins and whether a tooltip shows after it; the same
+/// with the pen in hand and over the note's highlight, which opens the note; then the comments
+/// once Export Highlights has written the note's quote in (`pdf::bench_pdf_comments`). It writes
+/// a note and the PDF, so point it at a scratch vault.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand, and what the vault holds under its name. `=sketch:<rel_note>` fires
@@ -721,6 +728,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("closed:") {
                 return bench_pdf_closed(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("comments:") {
+                return bench_pdf_comments(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("synctex:") {
                 return synctex::bench_synctex(&app, rel);

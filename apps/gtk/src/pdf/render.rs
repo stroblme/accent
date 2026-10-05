@@ -208,6 +208,9 @@ fn render_loop(
                     if let Ok(links) = doc.links(page) {
                         send(view, Reply::Links(page, links));
                     }
+                    if let Ok(comments) = doc.comments(page) {
+                        send(view, Reply::Comments(page, comments));
+                    }
                 }
                 Request::Text(page) => {
                     if let Some(found) = glyphs_of(&doc, &mut glyphs, page) {

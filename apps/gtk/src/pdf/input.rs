@@ -33,10 +33,6 @@ impl PdfTab {
             #[weak(rename_to = tab)]
             self,
             move |page| {
-                // Links are fetched per page, the first time one comes into view.
-                if !tab.links.borrow().contains_key(&page) {
-                    tab.ask(Request::Links(page));
-                }
                 tab.thumbs.set_framed(page);
                 tab.on_page.emit(&tab);
             }
@@ -45,6 +41,7 @@ impl PdfTab {
             #[weak(rename_to = tab)]
             self,
             move || {
+                tab.ask_links();
                 if tab.wants_inks() {
                     tab.ask_inks();
                 }
