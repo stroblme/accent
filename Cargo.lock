@@ -12,6 +12,7 @@ dependencies = [
  "anyhow",
  "cairo-rs",
  "chrono",
+ "futures-channel",
  "glib-build-tools",
  "gtk4",
  "libadwaita",

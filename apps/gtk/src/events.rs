@@ -3,9 +3,6 @@
 use super::*;
 use accent_core::path::parent_dir;
 
-/// The vault worker is polled instead of woken; 120 ms is below what a progress label needs.
-const POLL: Duration = Duration::from_millis(120);
-
 impl App {
     /// Point every tab at or under `from` at the same place under `to`. The watcher's rename
     /// does this, and so does a move of our own before it reloads the notes it rewrote: those
@@ -412,24 +409,32 @@ impl App {
     }
 }
 
-/// Drain whatever the vault worker has said since the last tick.
+/// Hand the window what the vault worker says, as it says it.
 ///
-/// This source is also what *owns* the window's state: every other closure holds `App` weakly, so
-/// that a closed tab, a finished dialog or a dropped controller cannot keep it alive by accident.
-///
-/// ponytail: a 120 ms poll instead of wiring an `async-channel` into the GLib context. One timeout
-/// source, no extra dependency, and the latency is below what a progress label needs.
+/// A thread waits on the worker's channel and passes each event on to one the main loop awaits,
+/// so the window sleeps until there is something to do: the 120 ms poll this replaces woke it
+/// eight times a second for nothing. The thread ends with the vault, which is the last to hold
+/// the other end, or at the first event after the window has gone.
 pub fn start_events(app: &Rc<App>, events: Receiver<Event>) {
-    // Weak, and the source ends with the window: `Shell.windows` holds the only strong `App`, so
-    // closing a window drops it along with its vault, its worker thread and its WebKit process.
+    // Weak: `Shell.windows` holds the only strong `App`, so closing a window drops it along with
+    // its vault, its worker thread and its WebKit process.
     let app = Rc::downgrade(app);
-    glib::timeout_add_local(POLL, move || {
-        let Some(app) = app.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        for event in events.try_iter() {
+    let (tx, mut rx) = futures_channel::mpsc::unbounded();
+    let _ = std::thread::Builder::new()
+        .name("accent-events".to_string())
+        .spawn(move || {
+            for event in events {
+                if tx.unbounded_send(event).is_err() {
+                    break;
+                }
+            }
+        });
+    glib::spawn_future_local(async move {
+        while let Ok(event) = rx.recv().await {
+            let Some(app) = app.upgrade() else {
+                return;
+            };
             app.on_event(event);
         }
-        glib::ControlFlow::Continue
     });
 }

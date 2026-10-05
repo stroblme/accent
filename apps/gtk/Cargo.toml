@@ -45,6 +45,9 @@ serde_json.workspace = true
 pulldown-cmark.workspace = true
 # The Git pane's lists splice only the rows a refresh changed (`git::changed_runs`); core's too.
 similar = { version = "3", default-features = false }
+# The vault's events reach the main loop through a channel it awaits (`events::start_events`).
+# Already built for gio; `recv` is from 0.3.34.
+futures-channel = "0.3.34"
 
 [build-dependencies]
 # Compiles the completion-kind icons into the binary's GResource.
