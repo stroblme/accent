@@ -154,7 +154,8 @@ impl PdfTab {
     /// After the link handler, which answers on the press — a link inside a highlight is still a
     /// link, and following it is what a click on one has always meant. With Ctrl held it is Go
     /// to Source instead, every LaTeX viewer's SyncTeX click, which does nothing where the window
-    /// has disabled it, on a PDF with no SyncTeX file.
+    /// has disabled it, on a PDF with no SyncTeX file. Nothing with a tool in hand: the page is
+    /// the tool's, and the Eraser's click was an erase.
     pub(super) fn clicked_highlight(
         self: &Rc<Self>,
         view: &PdfView,
@@ -162,7 +163,7 @@ impl PdfTab {
         y: f64,
         state: gtk::gdk::ModifierType,
     ) {
-        if self.link_at(view, x, y).is_some() {
+        if view.mode() != super::Mode::Select || self.link_at(view, x, y).is_some() {
             return;
         }
         if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {

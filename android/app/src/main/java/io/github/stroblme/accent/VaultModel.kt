@@ -787,14 +787,23 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------------------- search
 
-    fun search(query: String) = viewModelScope.launch(Dispatchers.IO) {
-        val v = vault ?: return@launch
-        if (query.isBlank()) {
-            _state.update { it.copy(results = emptyList()) }
-            return@launch
+    /**
+     * What the box asked last. An answer to anything else is dropped: the core interrupts a search
+     * a newer one supersedes, and its answer, an error, would otherwise empty the list.
+     */
+    @Volatile private var asking = ""
+
+    fun search(query: String) {
+        asking = query
+        viewModelScope.launch(Dispatchers.IO) {
+            val v = vault ?: return@launch
+            if (query.isBlank()) {
+                _state.update { it.copy(results = emptyList()) }
+                return@launch
+            }
+            val hits = runCatching { v.search(query, 100u, false) }.getOrDefault(emptyList())
+            if (asking == query) _state.update { it.copy(results = hits) }
         }
-        val hits = runCatching { v.search(query, 100u, false) }.getOrDefault(emptyList())
-        _state.update { it.copy(results = hits) }
     }
 
     /** The query has been marked on the page. One-shot, the same way [said] is. */

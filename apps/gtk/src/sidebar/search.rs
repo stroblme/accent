@@ -1129,6 +1129,10 @@ pub(super) struct Pane {
     pub(super) apply: gtk::Button,
     #[cfg(feature = "bench")]
     pub(super) state: Rc<dyn Fn() -> (String, Vec<String>, String)>,
+    /// How many queries are on worker threads, superseded ones included: what
+    /// `ACCENT_BENCH_SEARCH=type:` counts after the last keystroke.
+    #[cfg(feature = "bench")]
+    pub(super) running: Rc<dyn Fn() -> usize>,
     /// The list of rows, which `ACCENT_BENCH_SEARCH=more:` activates a row of and reads the
     /// scroll of.
     #[cfg(feature = "bench")]
@@ -1546,6 +1550,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                 )
             }
         }),
+        #[cfg(feature = "bench")]
+        running: Rc::new(move || search.running.get()),
     }
 }
 

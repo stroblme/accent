@@ -18,7 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use accent_drawio::{Align, Color, Font, Marks, Run};
 use adw::prelude::*;
@@ -50,7 +50,11 @@ pub struct Rendered {
 }
 
 pub struct Typesetter {
-    view: webkit6::WebView,
+    /// Made when a batch needs one, and let go with its web process once nothing has been asked
+    /// for a while: see [`Typesetter::finish`].
+    view: RefCell<Option<webkit6::WebView>>,
+    /// Itself, for the handlers of a view made later.
+    me: Weak<Typesetter>,
     done: RefCell<HashMap<u64, Option<Rendered>>>,
     queued: RefCell<Vec<Label>>,
     /// The labels of the document loaded now, in its order; empty while nothing is in flight.
@@ -61,6 +65,8 @@ pub struct Typesetter {
     scheduled: Cell<bool>,
     /// Who paints again when labels come in; one that answers `false` is gone and dropped.
     on_ready: RefCell<Vec<Box<dyn Fn() -> bool>>>,
+    /// The pending release of the view, from the last batch back.
+    idle: crate::widgets::Debounce,
 }
 
 thread_local! {
@@ -71,15 +77,33 @@ thread_local! {
 // ponytail: what it has typeset is kept for the app's life, every diagram's formulas together;
 // dropping the pictures no view has painted for a while is the upgrade if that ever weighs.
 pub fn shared() -> Rc<Typesetter> {
-    SHARED.with(|t| {
-        t.get_or_init(|| Typesetter::new(&gtk::Overlay::new()))
-            .clone()
-    })
+    SHARED.with(|t| t.get_or_init(Typesetter::new).clone())
 }
 
 impl Typesetter {
-    /// A typesetter whose view lives, unseen and untouchable, in `host`.
-    fn new(host: &gtk::Overlay) -> Rc<Typesetter> {
+    fn new() -> Rc<Typesetter> {
+        Rc::new_cyclic(|me| Typesetter {
+            view: RefCell::default(),
+            me: me.clone(),
+            done: RefCell::new(HashMap::new()),
+            queued: RefCell::new(Vec::new()),
+            batch: RefCell::new(Vec::new()),
+            lost: Cell::new(false),
+            scheduled: Cell::new(false),
+            on_ready: RefCell::new(Vec::new()),
+            idle: crate::widgets::Debounce::new(crate::preview::idle_for()),
+        })
+    }
+
+    /// The view, made the first time a batch needs one since the last was let go.
+    fn view(&self) -> webkit6::WebView {
+        let mut view = self.view.borrow_mut();
+        view.get_or_insert_with(|| self.make_view()).clone()
+    }
+
+    /// A view that lives, unseen and untouchable, in a host of its own.
+    fn make_view(&self) -> webkit6::WebView {
+        let host = gtk::Overlay::new();
         let settings = webkit6::Settings::new();
         settings.set_enable_javascript_markup(false);
         settings.set_enable_media(false);
@@ -101,35 +125,24 @@ impl Typesetter {
         host.add_overlay(&view);
         host.set_measure_overlay(&view, false);
         host.set_clip_overlay(&view, true);
-        let typesetter = Rc::new(Typesetter {
-            view,
-            done: RefCell::new(HashMap::new()),
-            queued: RefCell::new(Vec::new()),
-            batch: RefCell::new(Vec::new()),
-            lost: Cell::new(false),
-            scheduled: Cell::new(false),
-            on_ready: RefCell::new(Vec::new()),
-        });
-        let weak = Rc::downgrade(&typesetter);
-        typesetter.view.connect_load_changed(move |_, event| {
+        let weak = self.me.clone();
+        view.connect_load_changed(move |_, event| {
             if event == webkit6::LoadEvent::Finished
                 && let Some(t) = weak.upgrade()
             {
                 glib::spawn_future_local(async move { t.collect().await });
             }
         });
-        let weak = Rc::downgrade(&typesetter);
-        typesetter
-            .view
-            .connect_web_process_terminated(move |_, reason| {
-                tracing::warn!("the diagram formulas' web process ended: {reason:?}");
-                if let Some(t) = weak.upgrade()
-                    && reason != webkit6::WebProcessTerminationReason::TerminatedByApi
-                {
-                    t.lost();
-                }
-            });
-        typesetter
+        let weak = self.me.clone();
+        view.connect_web_process_terminated(move |_, reason| {
+            tracing::warn!("the diagram formulas' web process ended: {reason:?}");
+            if let Some(t) = weak.upgrade()
+                && reason != webkit6::WebProcessTerminationReason::TerminatedByApi
+            {
+                t.lost();
+            }
+        });
+        view
     }
 
     /// WebKit's process died under the view — a crash, or past its memory limit — and the batch
@@ -148,6 +161,12 @@ impl Typesetter {
             }
         }
         self.finish();
+    }
+
+    /// How many labels have been typeset into pictures. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn typeset(&self) -> usize {
+        self.done.borrow().values().filter(|r| r.is_some()).count()
     }
 
     /// Whether anything is waiting to be typeset or in the middle of it.
@@ -197,6 +216,7 @@ impl Typesetter {
             return;
         }
         *self.batch.borrow_mut() = labels;
+        self.idle.cancel();
         self.load();
     }
 
@@ -218,7 +238,7 @@ impl Typesetter {
              ul {{ margin: 0; padding-left: 1.2em; }}\
              </style></head><body>{body}</body></html>"
         );
-        self.view.load_html(&page, None);
+        self.view().load_html(&page, None);
     }
 
     /// The document is laid out: measure every label, take one picture, and cut it up.
@@ -227,8 +247,8 @@ impl Typesetter {
         if keys.is_empty() {
             return;
         }
-        let measured = self
-            .view
+        let view = self.view();
+        let measured = view
             .evaluate_javascript_future(MEASURE, None, None)
             .await
             .map(|v| v.to_str().to_string());
@@ -237,7 +257,7 @@ impl Typesetter {
         if let Ok(m) = &measured
             && self.holds(&keys)
         {
-            let limit = MAX_PICTURE / (RENDER_ZOOM * f64::from(self.view.scale_factor()));
+            let limit = MAX_PICTURE / (RENDER_ZOOM * f64::from(view.scale_factor()));
             let fit = fitting(&parse_boxes(m).1, limit);
             if fit < keys.len() {
                 let rest = self.batch.borrow_mut().split_off(fit);
@@ -245,8 +265,7 @@ impl Typesetter {
                 return self.load();
             }
         }
-        let shot = self
-            .view
+        let shot = view
             .snapshot_future(
                 webkit6::SnapshotRegion::FullDocument,
                 webkit6::SnapshotOptions::TRANSPARENT_BACKGROUND,
@@ -310,10 +329,21 @@ impl Typesetter {
             .eq(keys.iter().copied())
     }
 
+    /// The batch is done: say so, and load what has been asked for since. With nothing left, the
+    /// view goes once nothing more has come for [`crate::preview::idle_for`], and its web process
+    /// and network session with it; the labels typeset stay, and the next batch makes a view.
     fn finish(&self) {
         self.batch.borrow_mut().clear();
         self.on_ready.borrow_mut().retain(|f| f());
         self.run();
+        if !self.busy() {
+            let me = self.me.clone();
+            self.idle.call(move || {
+                if let Some(t) = me.upgrade() {
+                    t.view.take();
+                }
+            });
+        }
     }
 }
 

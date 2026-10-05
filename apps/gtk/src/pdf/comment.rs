@@ -1,6 +1,6 @@
 //! What other readers wrote on a page — an annotation's `/Contents` — as the reading view's
-//! tooltip while the pointer is over it, and in a popover a click pins, where it can be selected
-//! and copied.
+//! tooltip while the pointer is over it, in a popover a click pins, where it can be selected and
+//! copied, and as the Outline pane's list of every comment in the document.
 
 use std::rc::Rc;
 
@@ -87,12 +87,75 @@ impl PdfTab {
     /// A click that was not a drag, on no link and no note's highlight: pin the comments under it
     /// in a popover. It closes as a popover does, on `Escape` or a click elsewhere.
     pub(super) fn pin_comments(self: &Rc<Self>, x: f64, y: f64) {
-        let Some((_, hit)) = self.comments_at(x, y) else {
+        if let Some((_, hit)) = self.comments_at(x, y) {
+            self.pin(&hit, x, y);
+        }
+    }
+
+    /// The Outline pane's rows for the comments of every page read so far, under a "Comments"
+    /// heading and their page's row, each its author and its first line; none for a document
+    /// without. Each row jumps to its page, and to a comment by its place on the page.
+    pub fn comment_rows(&self) -> Vec<(crate::sidebar::Line, (usize, Option<usize>))> {
+        use crate::sidebar::Line;
+        let comments = self.comments.borrow();
+        let mut pages: Vec<usize> = comments
+            .iter()
+            .filter(|(_, on)| !on.is_empty())
+            .map(|(page, _)| *page)
+            .collect();
+        if pages.is_empty() {
+            return Vec::new();
+        }
+        pages.sort_unstable();
+        let mut rows = vec![(Line::new(0, "Comments".to_string()), (0, None))];
+        for page in pages {
+            rows.push((Line::new(1, format!("Page {}", page + 1)), (page, None)));
+            for (at, comment) in comments[&page].iter().enumerate() {
+                let first = comment.text.lines().map(str::trim).find(|l| !l.is_empty());
+                let line = Line {
+                    level: 2,
+                    lead: comment.author.clone().unwrap_or_default(),
+                    text: first.unwrap_or_default().to_string(),
+                };
+                rows.push((line, (page, Some(at))));
+            }
+        }
+        rows
+    }
+
+    /// The `at`th comment on `page`, brought into view and pinned as a click on it pins it: the
+    /// Outline pane's row for it.
+    pub fn show_comment(self: &Rc<Self>, page: usize, at: usize) {
+        let comment = self
+            .comments
+            .borrow()
+            .get(&page)
+            .and_then(|c| c.get(at))
+            .cloned();
+        let Some(comment) = comment else {
             return;
         };
+        let Some(area) = comment.areas.iter().copied().reduce(pdf::Rect::union) else {
+            return;
+        };
+        self.jumping();
+        self.view.reveal(page, area);
+        if let Some(r) = self.view.widget_rect(page, &area) {
+            let (x, y) = (r.x() + r.width() / 2, r.y() + r.height() / 2);
+            self.pin(&[comment], x.into(), y.into());
+        }
+    }
+
+    /// Pin `comments` in a popover pointing at a point of the reading view, in place of any
+    /// pinned before.
+    fn pin(self: &Rc<Self>, comments: &[pdf::Comment], x: f64, y: f64) {
+        let old = self.pinned.borrow_mut().take();
+        if let Some(old) = old {
+            old.popdown();
+        }
         let popover = gtk::Popover::builder()
             .position(gtk::PositionType::Top)
-            .child(&card(&hit, true))
+            .child(&card(comments, true))
             .build();
         // On the box, at its own coordinates, as the page's menu is (`selection_menu`).
         let at = gtk::graphene::Point::new(x as f32, y as f32);
@@ -128,6 +191,12 @@ impl PdfTab {
     #[cfg(feature = "bench")]
     pub fn page_comments(&self, page: usize) -> Option<Vec<pdf::Comment>> {
         self.comments.borrow().get(&page).cloned()
+    }
+
+    /// How many pages' comments have been read, and the popover pinned. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn comments_read(&self) -> (usize, Option<gtk::Popover>) {
+        (self.comments.borrow().len(), self.pinned.borrow().clone())
     }
 
     /// What the tooltip shows at a point of the reading view. Only drills ask.

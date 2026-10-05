@@ -14,6 +14,7 @@ mod search;
 
 use crate::walk::FileKind;
 use anyhow::{Context, Result};
+pub use rusqlite::InterruptHandle;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension};
 use schema::{BODIES, DROP_ALL, SCHEMA, SCHEMA_VERSION};
@@ -194,6 +195,12 @@ impl Index {
         let conn = Connection::open(db_path)
             .with_context(|| format!("opening index {}", db_path.display()))?;
         Self::from_conn(conn)
+    }
+
+    /// What stops the statement this connection is running, from any thread: that statement fails
+    /// as interrupted, and the next one runs as usual.
+    pub fn interrupt_handle(&self) -> InterruptHandle {
+        self.conn.get_interrupt_handle()
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {

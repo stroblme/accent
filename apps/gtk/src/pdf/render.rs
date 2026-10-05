@@ -212,6 +212,25 @@ fn render_loop(
                         send(view, Reply::Comments(page, comments));
                     }
                 }
+                Request::Comments(mut page) => {
+                    // A page at a time, as a search walks: a tile asked for meanwhile waits for
+                    // one page's annotations at most. A page that will not read is said to have
+                    // none, so what the tab kept of it from before goes.
+                    let pages = doc.page_count();
+                    while page < pages {
+                        match rx.try_recv() {
+                            Ok(newer) => {
+                                interrupt(&mut queue, Request::Comments(page), newer);
+                                break;
+                            }
+                            Err(TryRecvError::Disconnected) => return None,
+                            Err(TryRecvError::Empty) => {}
+                        }
+                        let comments = doc.comments(page).unwrap_or_default();
+                        send(view, Reply::Comments(page, comments));
+                        page += 1;
+                    }
+                }
                 Request::Text(page) => {
                     if let Some(found) = glyphs_of(&doc, &mut glyphs, page) {
                         send(view, Reply::Text(page, found.clone()));

@@ -1,6 +1,6 @@
-//! The Outline pane: a document's headings, or a PDF's bookmarks, as rows that jump.
+//! The Outline pane: a document's headings, or a PDF's bookmarks and comments, as rows that jump.
 
-use crate::widgets::{label_factory, row_text, scroller, status_page};
+use crate::widgets::{factory, scroller, status_page};
 use adw::prelude::*;
 use gtk::{glib, pango};
 use std::cell::{Cell, RefCell};
@@ -76,6 +76,26 @@ fn spliced(row: u32, at: usize, removed: usize, added: usize) -> u32 {
     }
 }
 
+/// What a row shows: how far in it is, its text, and a dim word before the text, a comment's
+/// author. Level 0 is a heading over the rows after it, small and dim as the Search pane's, which
+/// opens nothing.
+#[derive(Clone, Default, PartialEq)]
+pub struct Line {
+    pub level: u8,
+    pub lead: String,
+    pub text: String,
+}
+
+impl Line {
+    pub fn new(level: u8, text: String) -> Line {
+        Line {
+            level,
+            text,
+            lead: String::new(),
+        }
+    }
+}
+
 /// What activating a row does, by the row's position. Shared with the list's `activate` handler,
 /// which clones it out before it runs: a jump moves the focus, and what that sets off may refill
 /// the list.
@@ -97,9 +117,9 @@ pub(super) struct List {
     /// What the pane shows: the rows, over `below` when there is one.
     pub(super) root: gtk::Widget,
     model: gtk::StringList,
-    /// Each row's level and text as shown: what a refill is compared with, and where a row being
-    /// bound reads its indent.
-    rows: Rc<RefCell<Vec<(u8, String)>>>,
+    /// Each row as shown: what a refill is compared with, and where a row being bound reads its
+    /// indent and its lead.
+    rows: Rc<RefCell<Vec<Line>>>,
     /// Replaced on every refill, because an edit moves where the rows jump to even when they read
     /// the same.
     jump: Jump,
@@ -111,28 +131,65 @@ pub(super) struct List {
     shown: Rc<Cell<u32>>,
     /// A scroll is waiting for the list's first layout.
     waiting: Rc<Cell<bool>>,
+    /// The pointer is over the list, which is then the reader's: see [`List::follow`].
+    hovered: Rc<Cell<bool>>,
 }
 
 impl List {
     pub(super) fn new(key: &str, below: Option<gtk::Widget>) -> List {
         let model = gtk::StringList::new(&[]);
-        let rows: Rc<RefCell<Vec<(u8, String)>>> = Rc::default();
+        let rows: Rc<RefCell<Vec<Line>>> = Rc::default();
         let jump: Jump = Rc::new(RefCell::new(Rc::new(|_| {})));
         let followed = Rc::new(Cell::new(gtk::INVALID_LIST_POSITION));
 
-        let factory = label_factory(pango::EllipsizeMode::End, {
-            let rows = rows.clone();
-            move |label, item| {
-                if let Some(text) = row_text(item) {
-                    label.set_text(&text);
-                    let level = rows
-                        .borrow()
-                        .get(item.position() as usize)
-                        .map_or(1, |(level, _)| *level);
-                    label.set_margin_start(INDENT * i32::from(level.saturating_sub(1)));
+        let factory = factory(
+            |_| {
+                let lead = gtk::Label::builder()
+                    .xalign(0.0)
+                    .max_width_chars(16)
+                    .ellipsize(pango::EllipsizeMode::End)
+                    .css_classes(["dim-label"])
+                    .build();
+                let text = gtk::Label::builder()
+                    .xalign(0.0)
+                    .hexpand(true)
+                    .ellipsize(pango::EllipsizeMode::End)
+                    .build();
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                row.append(&lead);
+                row.append(&text);
+                row
+            },
+            {
+                let rows = rows.clone();
+                move |row: &gtk::Box, item| {
+                    let (Some(lead), Some(text)) = (
+                        row.first_child().and_downcast::<gtk::Label>(),
+                        row.last_child().and_downcast::<gtk::Label>(),
+                    ) else {
+                        return;
+                    };
+                    let rows = rows.borrow();
+                    let Some(line) = rows.get(item.position() as usize) else {
+                        return;
+                    };
+                    text.set_text(&line.text);
+                    lead.set_text(&line.lead);
+                    lead.set_visible(!line.lead.is_empty());
+                    row.set_margin_start(INDENT * i32::from(line.level.saturating_sub(1)));
+                    // A recycled row may have been a heading, so every row sets all four. A
+                    // heading starts a group, so it stands off the rows above it.
+                    let heading = line.level == 0;
+                    item.set_activatable(!heading);
+                    item.set_selectable(!heading);
+                    row.set_margin_top(if heading { 12 } else { 0 });
+                    text.set_css_classes(match heading {
+                        true => &["caption-heading", "dim-label"],
+                        false => &[],
+                    });
                 }
-            }
-        });
+            },
+        );
 
         // Nothing selected until the caret is in a section: the selection says where it is.
         let selection = gtk::SingleSelection::new(Some(model.clone()));
@@ -151,10 +208,19 @@ impl List {
         });
         // Single-click activate also selects on hover, so the caret's row is put back once the
         // pointer leaves, as the file tree does with the open file's.
+        let hovered: Rc<Cell<bool>> = Rc::default();
         let motion = gtk::EventControllerMotion::new();
+        motion.connect_enter({
+            let hovered = hovered.clone();
+            move |_, _, _| hovered.set(true)
+        });
         motion.connect_leave({
-            let (selection, followed) = (selection.clone(), followed.clone());
-            move |_| select(&selection, followed.get())
+            let (selection, followed, hovered) =
+                (selection.clone(), followed.clone(), hovered.clone());
+            move |_| {
+                hovered.set(false);
+                select(&selection, followed.get());
+            }
         });
         view.add_controller(motion);
         let rows_widget: gtk::Widget = scroller(&view).upcast();
@@ -173,17 +239,23 @@ impl List {
             followed,
             shown: Rc::new(Cell::new(gtk::INVALID_LIST_POSITION)),
             waiting: Rc::default(),
+            hovered,
         }
     }
 
     /// Select `row`, the one the caret is in, and scroll `shown` into view as little as it takes:
     /// the same row, or the first while the caret is above it, which takes the list to its top.
     /// `None` selects nothing, or scrolls nowhere. Neither activates a row nor moves the focus, so
-    /// the editor keeps the keyboard and nothing jumps.
+    /// the editor keeps the keyboard and nothing jumps. Nothing moves while the pointer is over the
+    /// list, which is being read: a PDF comment's row jumps to a page under another bookmark, and
+    /// following it would scroll the row clicked away. The row comes back as the pointer leaves.
     pub(super) fn follow(&self, row: Option<usize>, shown: Option<usize>) {
         let position = |row: Option<usize>| row.map_or(gtk::INVALID_LIST_POSITION, |r| r as u32);
         self.followed.set(position(row));
         self.shown.set(position(shown));
+        if self.hovered.get() {
+            return;
+        }
         select(&self.selection, self.followed.get());
         if self.view.height() > 0 {
             reveal(&self.view, self.shown.get());
@@ -206,20 +278,17 @@ impl List {
     /// Show `rows`, splicing in only the run that differs from what is shown.
     pub(super) fn fill<T: Copy + 'static>(
         &self,
-        rows: &[(u8, String, T)],
+        rows: &[(Line, T)],
         on_jump: impl Fn(T) + 'static,
     ) {
-        let shown: Vec<(u8, String)> = rows
-            .iter()
-            .map(|(level, text, _)| (*level, text.clone()))
-            .collect();
+        let shown: Vec<Line> = rows.iter().map(|(line, _)| line.clone()).collect();
         let (at, removed, added) = changed_run(&self.rows.borrow(), &shown);
-        // Before the splice, because binding the new rows reads their levels from here.
+        // Before the splice, because binding the new rows reads them from here.
         *self.rows.borrow_mut() = shown;
         let shown = self.rows.borrow();
         let texts: Vec<&str> = shown[at..at + added]
             .iter()
-            .map(|(_, text)| text.as_str())
+            .map(|line| line.text.as_str())
             .collect();
         self.model.splice(at as u32, removed as u32, &texts);
         // An edit leaves the selection on the row it was on, which the splice would drop when
@@ -228,12 +297,33 @@ impl List {
             .set(spliced(self.followed.get(), at, removed, added));
         select(&self.selection, self.followed.get());
 
-        let targets: Vec<T> = rows.iter().map(|(_, _, target)| *target).collect();
+        let targets: Vec<T> = rows.iter().map(|(_, target)| *target).collect();
         *self.jump.borrow_mut() = Rc::new(move |row| {
             if let Some(target) = targets.get(row as usize) {
                 on_jump(*target);
             }
         });
+    }
+}
+
+#[cfg(feature = "bench")]
+impl List {
+    /// The rows as they read, indented by level, a lead before its text and a heading in
+    /// capitals, and the list, to activate one of them on.
+    pub(super) fn lines(&self) -> (Vec<String>, gtk::ListView) {
+        let lines = self.rows.borrow();
+        let lines = lines
+            .iter()
+            .map(|l| match l.level {
+                0 => l.text.to_uppercase(),
+                level => {
+                    let indent = "  ".repeat(usize::from(level - 1));
+                    let lead = (!l.lead.is_empty()).then(|| format!("[{}] ", l.lead));
+                    format!("{indent}{}{}", lead.unwrap_or_default(), l.text)
+                }
+            })
+            .collect();
+        (lines, self.view.clone())
     }
 }
 

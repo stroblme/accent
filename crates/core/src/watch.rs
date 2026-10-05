@@ -114,6 +114,10 @@ impl Watcher {
         };
 
         let debounce = Duration::from_millis(300);
+        // How often the debouncer looks for events that have stood that long, waking whether or
+        // not it holds any: its default, a quarter of the debounce, was 13 wakeups a second of an
+        // idle window. Half of it reports a change 300 to 450 ms after it, not 300 to 375.
+        let tick = Some(debounce / 2);
         let backend = if over_budget(dir_count) {
             tracing::warn!(
                 dir_count,
@@ -125,7 +129,7 @@ impl Watcher {
             let config = notify::Config::default().with_poll_interval(Duration::from_secs(2));
             let mut d = new_debouncer_opt::<_, notify::PollWatcher, RecommendedCache>(
                 debounce,
-                None,
+                tick,
                 handler,
                 RecommendedCache::new(),
                 config,
@@ -133,7 +137,7 @@ impl Watcher {
             watch_all(&mut d, root, dirs)?;
             Backend::Poll(d)
         } else {
-            let mut d = new_debouncer(debounce, None, handler)?;
+            let mut d = new_debouncer(debounce, tick, handler)?;
             watch_all(&mut d, root, dirs)?;
             Backend::Native(d)
         };

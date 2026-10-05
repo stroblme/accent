@@ -122,6 +122,9 @@ pub enum Request {
     },
     /// One page's links, and its comments with them.
     Links(usize),
+    /// Every page's comments from this page on, for the Outline pane's list. A batch, as a
+    /// search is: a newer one replaces it, and anything else is a detour it resumes after.
+    Comments(usize),
     /// The glyphs of one page, so text on it can be selected.
     Text(usize),
     Outline,

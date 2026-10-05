@@ -326,6 +326,7 @@ pub fn build_window(
         pinned: RefCell::new(Vec::new()),
         tree_painted: Cell::new(0),
         refresh: widgets::Debounce::new(RENDER),
+        preview_idle: widgets::Debounce::new(preview::idle_for()),
         pdf_links: widgets::Debounce::new(PDF_LINKS),
         session: widgets::Debounce::new(session::SESSION),
         recent_files: RefCell::new(Vec::new()),

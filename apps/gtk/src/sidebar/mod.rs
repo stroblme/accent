@@ -13,7 +13,7 @@ mod search;
 mod tags;
 mod widgets;
 
-pub use outline::{above, outline_note};
+pub use outline::{Line, above, outline_note};
 pub use ports::Data as PortsData;
 pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
@@ -113,6 +113,8 @@ struct VaultPanes {
     apply_replace: gtk::Button,
     #[cfg(feature = "bench")]
     search_state: Rc<dyn Fn() -> (String, Vec<String>, String)>,
+    #[cfg(feature = "bench")]
+    search_running: Rc<dyn Fn() -> usize>,
     #[cfg(feature = "bench")]
     search_view: gtk::ListView,
     references: gtk::StringList,
@@ -277,6 +279,8 @@ impl Sidebar {
                         #[cfg(feature = "bench")]
                         search_state: search.state,
                         #[cfg(feature = "bench")]
+                        search_running: search.running,
+                        #[cfg(feature = "bench")]
                         search_view: search.view,
                         references,
                         references_stack,
@@ -434,7 +438,7 @@ impl Sidebar {
     pub fn set_outline_rows<T: Copy + 'static>(
         &self,
         key: &str,
-        rows: &[(u8, String, T)],
+        rows: &[(Line, T)],
         on_jump: impl Fn(T) + 'static,
         below: Option<&gtk::Widget>,
     ) -> bool {
@@ -473,6 +477,20 @@ impl Sidebar {
     #[cfg(feature = "bench")]
     pub fn outline_child(&self) -> Option<gtk::Widget> {
         self.outline_bin.child()
+    }
+
+    /// The Outline pane's rows as they read, a lead before its text and a heading in capitals,
+    /// and `activate` that of them, as a click does. What `ACCENT_BENCH_PDF=comments:` reads.
+    #[cfg(feature = "bench")]
+    pub fn outline_lines(&self, activate: Option<usize>) -> Vec<String> {
+        let Some((lines, view)) = self.outline_list.borrow().as_ref().map(|l| l.lines()) else {
+            return Vec::new();
+        };
+        // Out of the borrow: what the row does may refill the list.
+        if let Some(row) = activate {
+            view.emit_by_name::<()>("activate", &[&(row as u32)]);
+        }
+        lines
     }
 
     /// The tag list is out of date.
@@ -588,6 +606,14 @@ impl Sidebar {
             Some(panes) => (panes.search_state)(),
             None => (String::new(), Vec::new(), String::new()),
         }
+    }
+
+    /// How many of the Search pane's queries are on worker threads, for `ACCENT_BENCH_SEARCH`.
+    #[cfg(feature = "bench")]
+    pub fn search_running(&self) -> usize {
+        self.panes
+            .as_ref()
+            .map_or(0, |panes| (panes.search_running)())
     }
 
     /// The Search pane's query and replace boxes, for `ACCENT_BENCH_SEARCH=seed:`.

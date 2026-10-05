@@ -230,6 +230,10 @@ use tags::bench_tags;
 /// and prints what the process holds after each, then opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
+/// `ACCENT_BENCH_WEBIDLE=<note>` shortens how long an unused WebKit view keeps its process to two
+/// seconds, and prints the WebKit processes as the preview and the diagram formulas' typesetter
+/// are used, left and used again (`memory::bench_webidle`). It writes two diagrams, so point it at
+/// a scratch vault.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload;
 /// `=zoom:<rel_svg>,…` steps an SVG in and back, printing what it is drawn from as the zoom settles.
@@ -315,9 +319,13 @@ use tags::bench_tags;
 /// `=comments:<rel_path>` writes a note linking to the first word of the generated vault's
 /// `Attachments/comments.pdf` (`rel_path`), then prints, over each comment and each mark without
 /// one, what the tooltip shows, what a click pins and whether a tooltip shows after it; the same
-/// with the pen in hand and over the note's highlight, which opens the note; then the comments
-/// once Export Highlights has written the note's quote in (`pdf::bench_pdf_comments`). It writes
-/// a note and the PDF, so point it at a scratch vault.
+/// with the pen in hand, and over the note's highlight with the Eraser in hand, which opens
+/// nothing, and with none, which opens the note; then the comments
+/// once Export Highlights has written the note's quote in, the Outline pane's list of them, and
+/// where its row of the last page's comment goes and what it pins (`pdf::bench_pdf_comments`). It
+/// writes a note and the PDF, so point it at a scratch vault. `=walk:<rel_path>` times reading
+/// every page's comments for that list against the first screen painting, and how soon closing
+/// the tab ends it (`pdf::bench_pdf_walk`); point it at a few hundred pages.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand, and what the vault holds under its name. `=sketch:<rel_note>` fires
@@ -536,6 +544,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let preview_look = std::env::var("ACCENT_BENCH_PREVIEW_LOOK").ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let memory = std::env::var("ACCENT_BENCH_MEMORY").ok();
+    let webidle = std::env::var("ACCENT_BENCH_WEBIDLE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let drawing = std::env::var("ACCENT_BENCH_DRAWING").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
@@ -592,6 +601,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && panes.is_none()
         && compare.is_none()
         && memory.is_none()
+        && webidle.is_none()
         && pdf.is_none()
         && drawing.is_none()
         && tabs.is_none()
@@ -638,6 +648,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = memory {
             return memory::bench_memory(&app, &arg);
+        }
+        if let Some(note) = webidle {
+            return memory::bench_webidle(&app, &note);
         }
         if let Some(rel) = compare {
             // These make a repository in the vault root, or stage and commit in the one there.
@@ -741,6 +754,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("comments:") {
                 return bench_pdf_comments(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("walk:") {
+                return pdf::bench_pdf_walk(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("synctex:") {
                 return synctex::bench_synctex(&app, rel);
