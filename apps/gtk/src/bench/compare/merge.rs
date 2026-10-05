@@ -9,9 +9,10 @@ use crate::diff::merge::BASE;
 /// `merge.conflictStyle = diff3` writes one. It activates the file's Merge Conflicts row and
 /// prints, once the view has settled: the side columns' titles, the rows, the blocks, the hidden
 /// runs and the buttons, and `misaligned=0`, the claim, with the caret's line (`opened`); where
-/// each column's button on the first block's strip sits (`strip`, one height), holding three
+/// each column's button on the first block's strip sits (`strip`, one height); how many lines of
+/// each side are tinted (`tints`), every side line beside a block among them, holding three
 /// seconds for a screenshot (`hold`); a word typed into the first block (`typed`); the first block
-/// taken from the left column's arrow (`current`), the next by Accept Incoming from the palette
+/// taken from the left column's arrow (`current`, and `tints` again), the next by Accept Incoming from the palette
 /// with the caret in it (`incoming`), the last by the middle's Both (`both`), each with the lines
 /// it left; the left column switched to the base (`base`); Show All Unchanged Lines down and up
 /// (`all`); a divider dragged (`resize`); and the view left (`left`). Point it at a throwaway
@@ -133,6 +134,7 @@ pub(in crate::bench) fn bench_compare_merge(app: &Rc<App>, rel: &str) {
             line(caret_line()),
         );
         println!("bench compare_merge strip {:?}", merge.block_centres(0));
+        println!("bench compare_merge tints {:?}", merge.tinted());
         // For a screenshot.
         println!("bench compare_merge hold");
         wait(3000).await;
@@ -150,6 +152,7 @@ pub(in crate::bench) fn bench_compare_merge(app: &Rc<App>, rel: &str) {
         merge.press(0, 0);
         wait(800).await;
         println!("bench compare_merge current {:?} {}", line(10), state());
+        println!("bench compare_merge tints {:?}", merge.tinted());
 
         let first = accent_core::conflict::blocks(&tab.text())
             .first()

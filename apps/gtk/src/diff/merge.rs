@@ -303,39 +303,62 @@ impl Merge {
                 pane.buffer.remove_tag_by_name(TAG_SIDE, &start, &end);
             }
         }
+        let tint = |c: usize, n: usize| {
+            let buffer = &self.pane(c).buffer;
+            let at = |offset| buffer.iter_at_offset(offset);
+            buffer.apply_tag_by_name(TAG_SIDE, &at(starts[c][n - 1]), &at(starts[c][n]));
+        };
         // A side's line that is not the file's.
         for (c, side) in [(0, &three.left), (2, &three.right)] {
-            let buffer = &self.pane(c).buffer;
             for line in side.iter().filter(|line| line.op == Op::Delete) {
-                let Some(n) = line.old_line else { continue };
-                let (from, to) = (starts[c][n - 1], starts[c][n]);
-                let at = |offset| buffer.iter_at_offset(offset);
-                buffer.apply_tag_by_name(TAG_SIDE, &at(from), &at(to));
+                if let Some(n) = line.old_line {
+                    tint(c, n);
+                }
             }
         }
 
-        // The rows, with one of room before each block's `<<<<<<<` line.
+        // The rows, with one of room before each block's `<<<<<<<` line. A side's lines beside a
+        // block are tinted too, where they are the file's: the block reads across all three
+        // columns until it is taken.
         let number = |lines: &[DiffLine], i: Option<usize>| i.and_then(|i| lines[i].old_line);
         let blocks = conflict::blocks(&texts[MID]);
-        let block_lines: Vec<usize> = blocks
+        let line_at = |byte: usize| {
+            let at = texts[MID][..byte].chars().count() as i32;
+            starts[MID][..starts[MID].len() - 1].partition_point(|&s| s <= at)
+        };
+        let block_lines: Vec<(usize, usize)> = blocks
             .iter()
-            .map(|block| {
-                let at = texts[MID][..block.range.start].chars().count() as i32;
-                starts[MID][..starts[MID].len() - 1].partition_point(|&s| s <= at)
-            })
+            .map(|block| (line_at(block.range.start), line_at(block.theirs.end)))
             .collect();
         let (mut lines, mut changed, mut rooms) = (Vec::new(), Vec::new(), Vec::new());
+        // The `>>>>>>>` line of the block the rows are in.
+        let mut inside = None;
         for (row, differs) in three.rows.iter().zip(three.changed()) {
-            if row.mid.is_some_and(|n| block_lines.contains(&n)) {
+            if let Some(&(_, end)) = block_lines
+                .iter()
+                .find(|(start, _)| row.mid == Some(*start))
+            {
                 rooms.push(lines.len());
                 lines.push([None; 3]);
                 changed.push(true);
+                inside = Some(end);
             }
-            lines.push([
+            let line = [
                 number(&three.left, row.left),
                 row.mid,
                 number(&three.right, row.right),
-            ]);
+            ];
+            if inside.is_some() {
+                for c in [0, 2] {
+                    if let Some(n) = line[c] {
+                        tint(c, n);
+                    }
+                }
+            }
+            if row.mid.is_some() && row.mid == inside {
+                inside = None;
+            }
+            lines.push(line);
             changed.push(differs);
         }
 
@@ -543,6 +566,18 @@ impl Merge {
             })?;
             let bounds = widget.compute_bounds(&self.columns.paned)?;
             Some((bounds.y() + bounds.height() / 2.0).round() as i32)
+        })
+    }
+
+    /// How many lines of each side column carry its tint.
+    pub fn tinted(&self) -> [usize; 2] {
+        [0, 2].map(|c| {
+            let buffer = &self.pane(c).buffer;
+            let tag = buffer.tag_table().lookup(TAG_SIDE);
+            (0..buffer.line_count())
+                .filter_map(|n| buffer.iter_at_line(n))
+                .filter(|at| tag.as_ref().is_some_and(|tag| at.has_tag(tag)))
+                .count()
         })
     }
 
