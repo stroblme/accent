@@ -70,6 +70,9 @@ pub struct Conflicts {
     buffer: sourceview5::Buffer,
     /// Off while a comparison is up, which lays its own tints and buttons over the same lines.
     enabled: Cell<bool>,
+    /// Off while a merge view is up, which keeps the tints and lays its own buttons beside each
+    /// block, in room it leaves above it in every column: see `diff::Merge`.
+    band: Cell<bool>,
     /// Where each block the last find saw starts, in characters.
     starts: RefCell<Vec<i32>>,
     /// One row of buttons per block, the `i`th serving the `i`th block. Kept, as a comparison
@@ -95,6 +98,7 @@ impl Conflicts {
             view: view.clone(),
             buffer: buffer.clone(),
             enabled: Cell::new(true),
+            band: Cell::new(true),
             starts: RefCell::default(),
             rows: RefCell::default(),
             pending: RefCell::default(),
@@ -150,7 +154,9 @@ impl Conflicts {
             // The line's own characters: a tag that ends at the next line's start is taken by
             // text typed there, which would give that line a band of its own.
             let len = text[head.clone()].trim_end_matches(['\n', '\r']).len();
-            tag(BAND, head.start..head.start + len);
+            if self.band.get() {
+                tag(BAND, head.start..head.start + len);
+            }
         }
         *self.starts.borrow_mut() = blocks
             .iter()
@@ -168,6 +174,19 @@ impl Conflicts {
         self.unmark();
         self.starts.borrow_mut().clear();
         self.lay();
+    }
+
+    /// The band and its buttons off, or back: see [`Conflicts::band`].
+    pub fn set_band(&self, on: bool) {
+        self.band.set(on);
+        self.find();
+        self.lay();
+    }
+
+    /// Resolve the `i`th block the last find saw with `take`, as its band's button does.
+    pub fn accept(&self, i: usize, take: Take) -> bool {
+        let at = self.starts.borrow().get(i).copied();
+        at.is_some_and(|at| self.resolve(|span| span.start == at, take))
     }
 
     /// Take every tint off, and the band from the lines that have one. Only from those: a band is
@@ -237,7 +256,7 @@ impl Conflicts {
         for (i, row) in rows.iter().enumerate() {
             let at = starts
                 .get(i)
-                .filter(|_| editable)
+                .filter(|_| editable && self.band.get())
                 .map(|&at| self.buffer.iter_at_offset(at))
                 .filter(|at| !at.tags().iter().any(|tag| tag.is_invisible()));
             row.set_visible(at.is_some());
@@ -286,10 +305,8 @@ impl Conflicts {
             crate::widgets::claim_press(&button);
             let weak = self.weak.clone();
             button.connect_clicked(move |_| {
-                let Some(c) = weak.upgrade() else { return };
-                let at = c.starts.borrow().get(i).copied();
-                if let Some(at) = at {
-                    c.resolve(|span| span.start == at, take);
+                if let Some(c) = weak.upgrade() {
+                    c.accept(i, take);
                 }
             });
             row.append(&button);

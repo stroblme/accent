@@ -250,6 +250,52 @@ fn an_unmerged_entry_is_a_conflict() {
 }
 
 #[test]
+fn show_reads_a_conflicts_stages() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init(dir);
+    write_file(dir, "both.md", "base\n");
+    write_file(dir, "gone.md", "kept\n");
+    commit_all(dir, "base");
+    ok(dir, &["checkout", "-q", "-b", "side"]);
+    write_file(dir, "both.md", "side\n");
+    write_file(dir, "added.md", "side added\n");
+    ok(dir, &["rm", "-q", "gone.md"]);
+    commit_all(dir, "side");
+    ok(dir, &["checkout", "-q", "main"]);
+    write_file(dir, "both.md", "main\n");
+    write_file(dir, "added.md", "main added\n");
+    write_file(dir, "gone.md", "kept, changed\n");
+    commit_all(dir, "main");
+    assert!(!sh(dir, &["merge", "side"]).status.success());
+
+    let repo = open(dir);
+    let text = |s: &str| Some(Blob::Text(s.into()));
+    let stages = |path| [":1", ":2", ":3"].map(|rev| show(&repo, rev, path).unwrap());
+    assert_eq!(
+        stages("both.md"),
+        [text("base\n"), text("main\n"), text("side\n")]
+    );
+    assert_eq!(
+        stages("added.md"),
+        [None, text("main added\n"), text("side added\n")],
+        "added on both sides: no base"
+    );
+    assert_eq!(
+        stages("gone.md"),
+        [text("kept\n"), text("kept, changed\n"), None],
+        "deleted by theirs"
+    );
+    assert!(
+        show(&repo, "", "both.md").is_err(),
+        "the index of an unmerged file is no file, as before"
+    );
+}
+
+#[test]
 fn ahead_behind_counts_against_a_local_clone() {
     if !have_git() {
         return;

@@ -198,7 +198,7 @@ impl Panel {
         };
         match sides_for(*section, entry) {
             Some(sides) => self.compare(&entry.path, key, sides),
-            None => (self.hooks.open)(key),
+            None => self.open_merge(&entry.path, key),
         }
     }
 }
@@ -247,9 +247,10 @@ fn chevron_icon(open: bool) -> &'static str {
     }
 }
 
-/// What activating a changed file compares, or `None` for a conflict, which is resolved in the
-/// file rather than in a diff of two sides that both lost. A file deleted from the working tree
-/// has no tab to compare inside, so it gets one of its own: the index against nothing.
+/// What activating a changed file compares, or `None` for a conflict, which opens as a merge of
+/// the file between its two sides rather than as a diff of two texts. A file deleted from the
+/// working tree has no tab to compare inside, so it gets one of its own: the index against
+/// nothing.
 fn sides_for(section: Section, entry: &Entry) -> Option<Sides> {
     match section {
         Section::Conflicts => None,

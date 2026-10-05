@@ -111,6 +111,9 @@ pub struct Hooks {
     /// the comparison exists so a refresh can reach it. That call answers whether the comparison
     /// is worth keeping; `false` takes it down again ([`Panel::show`]).
     pub compare_file: Box<dyn Fn(&str, &str, &str, bool, Box<dyn FnOnce(Weak<Compare>) -> bool>)>,
+    /// Show a file git left unmerged as a merge, in its own tab: key, and the conflict's base,
+    /// current and incoming texts.
+    pub merge_file: Box<dyn Fn(&str, [String; 3])>,
     /// Move vault files to the trash, with one toast for the lot, or delete them on a remote
     /// vault, which has none, without asking again: Discard's question has said so. Vault keys
     /// only, which is what leaves an untracked file outside the vault without a Discard button.

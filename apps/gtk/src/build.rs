@@ -616,7 +616,8 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
 /// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
 /// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
 fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
-    let (toast, open, diff, compare, trash, changed, syncing) = (
+    let (toast, open, diff, compare, merge, trash, changed, syncing) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -678,6 +679,17 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 // The file's own tab, as a preview like any other single click in the sidebar.
                 false => app.with_tab(key, Opened::Preview, "compare", show),
             }
+        }),
+        merge_file: Box::new(move |key, stages| {
+            let Some(app) = merge.upgrade() else {
+                return;
+            };
+            // The file's own tab, as a preview like any other single click in the sidebar.
+            app.with_tab(key, Opened::Preview, "merge", move |app, tab| {
+                tab.merge(stages);
+                // As a comparison's: the tab may be behind the disk, where the markers are.
+                app.file_changed(tab);
+            });
         }),
         trash: Box::new(move |keys| {
             if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {

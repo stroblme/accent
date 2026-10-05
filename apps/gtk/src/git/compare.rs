@@ -44,6 +44,66 @@ impl Panel {
         });
     }
 
+    /// Open the file at `rel`, keyed `key`, git left unmerged as a merge of its stages. Read as
+    /// a comparison is, the last row clicked opening. A conflict that is not two texts — a binary,
+    /// or a side that deleted the file — opens as the file alone, saying why.
+    pub(super) fn open_merge(self: &Rc<Self>, rel: &str, key: &str) {
+        let repo = {
+            let state = self.state.borrow();
+            match state.repos.get(state.selected) {
+                Some(repo) => repo.clone(),
+                None => return,
+            }
+        };
+        let asked = self.asked.get() + 1;
+        self.asked.set(asked);
+        let (panel, vault, rel, key) = (
+            self.clone(),
+            self.hooks.vault.clone(),
+            rel.to_string(),
+            key.to_string(),
+        );
+        glib::spawn_future_local(async move {
+            let read = {
+                let rel = rel.clone();
+                crate::work::off_thread("git", move || {
+                    [":1", ":2", ":3"].map(|stage| vault.git_show(&repo, stage, &rel))
+                })
+                .await
+            };
+            let Some(read) = read.filter(|_| panel.asked.get() == asked) else {
+                return;
+            };
+            let name = split_name(&rel).1;
+            let [base, current, incoming] = match read {
+                [Ok(base), Ok(current), Ok(incoming)] => [base, current, incoming],
+                read => {
+                    let why = read.into_iter().find_map(Result::err);
+                    let why = why.map(|e| format!("{e:#}")).unwrap_or_default();
+                    return (panel.hooks.toast)(&format!("Cannot read {name}'s conflict: {why}"));
+                }
+            };
+            let say = |why: &str| {
+                (panel.hooks.toast)(&format!("{name} {why}"));
+                (panel.hooks.open)(&key);
+            };
+            let (Some(current), Some(incoming)) = (current, incoming) else {
+                return say("was deleted on one side: keep it with Stage, or delete it");
+            };
+            let text = |blob: Option<Blob>| match blob {
+                Some(Blob::Text(text)) => Some(text),
+                Some(Blob::Binary) => None,
+                None => Some(String::new()),
+            };
+            match [text(base), text(Some(current)), text(Some(incoming))] {
+                [Some(base), Some(current), Some(incoming)] => {
+                    (panel.hooks.merge_file)(&key, [base, current, incoming])
+                }
+                _ => say("is binary"),
+            }
+        });
+    }
+
     /// Open `what` again as a session restore puts it back: into the pane the restore keeps for
     /// its tab, in front of nothing, and saying nothing where there is nothing left to show. `done`
     /// runs once it is open or given up.

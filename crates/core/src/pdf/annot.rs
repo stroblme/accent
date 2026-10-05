@@ -13,7 +13,7 @@ use super::ink::{
 };
 use super::text::{line_top, same_quads, selection_quads};
 use super::{
-    Cut, Glyph, Highlight, InkPath, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock,
+    Comment, Cut, Glyph, Highlight, InkPath, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock,
 };
 use crate::index::PdfLink;
 
@@ -89,6 +89,34 @@ impl PdfDoc {
             .iter()
             .enumerate()
             .flat_map(|(page, p)| highlights_of(page, &p))
+            .collect())
+    }
+
+    /// What other readers wrote on one page: each viewable annotation's `/Contents`, in `/Annots`
+    /// order. A link's and a form field's text is no comment, a popup's is its parent's, and a
+    /// `/FreeText`'s is already on the page.
+    pub fn comments(&self, page: usize) -> Result<Vec<Comment>> {
+        use PdfPageAnnotationType::{FreeText, Link, Popup, Widget, XfaWidget};
+        let _guard = lock();
+        let p = self.page(page)?;
+        let height = p.height().value;
+        Ok(p.annotations()
+            .iter()
+            .filter(|a| {
+                !matches!(
+                    a.annotation_type(),
+                    Link | Popup | Widget | XfaWidget | FreeText
+                )
+            })
+            .filter(|a| !a.is_hidden() && !a.is_printable_but_not_viewable())
+            .filter_map(|a| {
+                let text = a.contents().filter(|t| !t.trim().is_empty())?;
+                Some(Comment {
+                    areas: areas(&a, height),
+                    text,
+                    author: a.creator().filter(|t| !t.trim().is_empty()),
+                })
+            })
             .collect())
     }
 
@@ -613,26 +641,31 @@ fn highlights_of(page: usize, p: &PdfPage<'_>) -> Vec<Highlight> {
         if a.annotation_type() != PdfPageAnnotationType::Highlight {
             continue;
         }
-        let mut quads: Vec<Rect> = a
-            .attachment_points()
-            .iter()
-            .map(|q| Rect::from_pdf(q.to_rect(), page_height))
-            .collect();
-        // Not every producer writes /QuadPoints; /Rect is the coarse fallback.
-        if quads.is_empty()
-            && let Ok(b) = a.bounds()
-        {
-            quads.push(Rect::from_pdf(b, page_height));
-        }
         let c = annotation_color(&a).unwrap_or(PdfColor::new(255, 255, 0, 255));
         out.push(Highlight {
             page,
-            quads,
+            quads: areas(&a, page_height),
             color: [c.red(), c.green(), c.blue(), c.alpha()],
             contents: a.contents(),
         });
     }
     out
+}
+
+/// Where an annotation sits: its `/QuadPoints`, or its `/Rect` for one without — not every
+/// producer writes quads, and most kinds of annotation have none.
+fn areas(a: &PdfPageAnnotation<'_>, page_height: f32) -> Vec<Rect> {
+    let mut quads: Vec<Rect> = a
+        .attachment_points()
+        .iter()
+        .map(|q| Rect::from_pdf(q.to_rect(), page_height))
+        .collect();
+    if quads.is_empty()
+        && let Ok(b) = a.bounds()
+    {
+        quads.push(Rect::from_pdf(b, page_height));
+    }
+    quads
 }
 
 fn annotation_color(a: &PdfPageAnnotation<'_>) -> Option<PdfColor> {

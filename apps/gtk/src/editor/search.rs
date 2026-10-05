@@ -525,10 +525,10 @@ impl Tab {
     /// out want their end-of-line messages back, and a comparison's run opens on both sides.
     pub(super) fn revealed_at(&self, offset: i32) {
         self.paint_diagnostics();
-        if let Some(compare) = self.comparison()
-            && !compare.open_hiding(offset)
+        if let Some(hosted) = self.hosted()
+            && !hosted.open_hiding(offset)
         {
-            compare.refresh();
+            hosted.refresh();
         }
     }
 
@@ -695,8 +695,8 @@ impl Tab {
         // "unchanged lines" button — there is no caret moved here for the comparison to keep the
         // run open around.
         let laid = self
-            .comparison()
-            .is_some_and(|compare| compare.open_hiding(iter.offset()));
+            .hosted()
+            .is_some_and(|hosted| hosted.open_hiding(iter.offset()));
         let revealed = fold::reveal(self.text_buffer(), &iter);
         if revealed {
             // As above: a fold opened here has lines back on screen to write on.

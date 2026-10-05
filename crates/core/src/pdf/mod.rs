@@ -299,6 +299,15 @@ pub struct Highlight {
     pub contents: Option<String>,
 }
 
+/// What another reader wrote on a page: an annotation's `/Contents`, its author, and where it
+/// answers the pointer. A comment, not a note: a note is a markdown file here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Comment {
+    pub areas: Vec<Rect>,
+    pub text: String,
+    pub author: Option<String>,
+}
+
 /// Where a `/Link` annotation points.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LinkTarget {

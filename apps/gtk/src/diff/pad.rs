@@ -3,7 +3,7 @@
 
 use adw::prelude::*;
 
-use super::{ADDED_HUE, Band, REMOVED_HUE, Side};
+use super::Band;
 
 /// The blank space above a paragraph, and below the last, that keeps the two columns level: one
 /// tag per pixel count, named this plus the count, so a paragraph's padding can be read back off
@@ -36,24 +36,29 @@ pub(super) struct Pads {
 /// after the last line goes below it, or to `rest` on a side with no line. This is the whole
 /// correctness surface of the alignment, so it is a plain function over plain numbers.
 pub(super) fn padding(
-    old: &[Option<i32>],
-    new: &[Option<i32>],
+    columns: &[Vec<Option<i32>>],
     extra: &[i32],
     changed: &[bool],
-) -> ([Pads; 2], Vec<i32>) {
-    let n = old.len();
-    let mut pads = [(); 2].map(|_| Pads {
-        above: vec![0; n],
-        below: vec![0; n],
-        rest: 0,
-    });
+) -> (Vec<Pads>, Vec<i32>) {
+    let n = extra.len();
+    let mut pads: Vec<Pads> = (0..columns.len())
+        .map(|_| Pads {
+            above: vec![0; n],
+            below: vec![0; n],
+            rest: 0,
+        })
+        .collect();
     let mut tops = Vec::with_capacity(n);
-    let (mut y, mut carry, mut last) = (0, [0, 0], [None::<usize>; 2]);
+    let (mut y, mut carry, mut last) = (
+        0,
+        vec![0; columns.len()],
+        vec![None::<usize>; columns.len()],
+    );
     for r in 0..n {
         tops.push(y);
-        let h = old[r].unwrap_or(0).max(new[r].unwrap_or(0)) + extra[r];
+        let h = columns.iter().map(|c| c[r].unwrap_or(0)).max().unwrap_or(0) + extra[r];
         y += h;
-        for (s, side) in [old, new].into_iter().enumerate() {
+        for (s, side) in columns.iter().enumerate() {
             let Some(own) = side[r] else {
                 carry[s] += h;
                 continue;
@@ -65,33 +70,31 @@ pub(super) fn padding(
             (carry[s], last[s]) = (h - own, Some(r));
         }
     }
-    for s in 0..2 {
+    for (s, pad) in pads.iter_mut().enumerate() {
         match last[s] {
-            Some(l) => pads[s].below[l] += carry[s],
-            None => pads[s].rest = carry[s],
+            Some(l) => pad.below[l] += carry[s],
+            None => pad.rest = carry[s],
         }
     }
     (pads, tops)
 }
 
-/// Where `side` has no line in a hunk at all — the other side only adds, or only deletes — the
-/// blank that levels it, as `(y, height, hue)` rows for `multicaret::View::set_bands`, in the hue
-/// of the lines it faces. A run of rows it has no line in that touches a changed line of its own
-/// is part of a change already, and that line's tint covers it (see [`padding`]).
+/// Where `column` has no line in a hunk at all — another column only adds, or only deletes — the
+/// blank that levels it, as `(y, height, hue)` rows for `multicaret::View::set_bands`, in `hue`,
+/// the hue of the lines it faces. A run of rows it has no line in that touches a changed line of
+/// its own is part of a change already, and that line's tint covers it (see [`padding`]).
 pub(super) fn bands(
-    heights: &[Vec<Option<i32>>; 2],
+    heights: &[Vec<Option<i32>>],
     extra: &[i32],
     changed: &[bool],
     tops: &[i32],
-    side: Side,
+    column: usize,
+    hue: (f32, f32, f32),
 ) -> Vec<Band> {
-    let (n, own) = (changed.len(), &heights[side.idx()]);
-    let hue = match side {
-        Side::Old => ADDED_HUE,
-        Side::New => REMOVED_HUE,
+    let (n, own) = (changed.len(), &heights[column]);
+    let bottom = |r: usize| {
+        tops[r] + heights.iter().map(|h| h[r].unwrap_or(0)).max().unwrap_or(0) + extra[r]
     };
-    let bottom =
-        |r: usize| tops[r] + heights[0][r].unwrap_or(0).max(heights[1][r].unwrap_or(0)) + extra[r];
     let lacks = |r: usize| changed[r] && own[r].is_none();
     let mut out = Vec::new();
     let mut r = 0;
@@ -333,15 +336,16 @@ fn pad_tag(buffer: &sourceview5::Buffer, prefix: &str, px: i32) -> gtk::TextTag 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::{ADDED_HUE, REMOVED_HUE};
 
     #[test]
     fn padding_keeps_every_row_level_and_hands_a_fillers_share_on() {
         // Row 1 is a two-line paragraph on the old side facing one line; row 2 is a filler on
         // the old side; row 3 exists on both. Rows 1 and 2 are one change.
-        let old = [Some(10), Some(20), None, Some(10)];
-        let new = [Some(10), Some(10), Some(10), Some(10)];
+        let old = vec![Some(10), Some(20), None, Some(10)];
+        let new = vec![Some(10), Some(10), Some(10), Some(10)];
         let changed = [false, true, true, false];
-        let (pads, tops) = padding(&old, &new, &[0; 4], &changed);
+        let (pads, tops) = padding(&[old, new], &[0; 4], &changed);
         assert_eq!(tops, vec![0, 10, 30, 40]);
         assert_eq!(pads[0].above, vec![0; 4]);
         assert_eq!(
@@ -359,8 +363,10 @@ mod tests {
         // A deletion with no line of its own on the new side: the blank has no changed line to
         // go under, so it waits above the next one.
         let (pads, _) = padding(
-            &[Some(10), Some(10), Some(10)],
-            &[Some(10), None, Some(10)],
+            &[
+                vec![Some(10), Some(10), Some(10)],
+                vec![Some(10), None, Some(10)],
+            ],
             &[0; 3],
             &[false, true, false],
         );
@@ -380,31 +386,39 @@ mod tests {
         let (extra, changed) = ([0; 4], [false, true, true, false]);
         let tops = [0, 10, 30, 40];
         assert_eq!(
-            bands(&heights, &extra, &changed, &tops, Side::New),
+            bands(&heights, &extra, &changed, &tops, 1, REMOVED_HUE),
             vec![(10, 30, REMOVED_HUE)]
         );
-        assert_eq!(bands(&heights, &extra, &changed, &tops, Side::Old), vec![]);
+        assert_eq!(
+            bands(&heights, &extra, &changed, &tops, 0, ADDED_HUE),
+            vec![]
+        );
 
         // A deletion under a changed pair is that change's blank, which its own tint covers.
         let heights = [
             vec![Some(10), Some(20), Some(10), Some(10)],
             vec![Some(10), Some(10), None, Some(10)],
         ];
-        assert_eq!(bands(&heights, &extra, &changed, &tops, Side::New), vec![]);
+        assert_eq!(
+            bands(&heights, &extra, &changed, &tops, 1, REMOVED_HUE),
+            vec![]
+        );
     }
 
     #[test]
     fn trailing_fillers_and_gap_space_go_below_the_last_line() {
-        let old = [Some(10), None, None];
-        let new = [Some(10), Some(10), Some(10)];
-        let (pads, _) = padding(&old, &new, &[0, 0, 0], &[false, true, true]);
+        let old = vec![Some(10), None, None];
+        let new = vec![Some(10), Some(10), Some(10)];
+        let (pads, _) = padding(&[old, new], &[0, 0, 0], &[false, true, true]);
         assert_eq!(pads[0].below, vec![20, 0, 0]);
         assert_eq!(pads[1].above, vec![0, 0, 0]);
 
         // A hidden run leaves the same blank on both sides, so the alignment is unmoved.
         let (pads, tops) = padding(
-            &[Some(10), None, Some(10)],
-            &[Some(10), None, Some(10)],
+            &[
+                vec![Some(10), None, Some(10)],
+                vec![Some(10), None, Some(10)],
+            ],
             &[0, 5, 0],
             &[false; 3],
         );
@@ -416,8 +430,38 @@ mod tests {
     #[test]
     fn a_side_with_no_line_at_all_leaves_the_whole_column_under_its_text() {
         // A file a commit added: nothing on the old side to pad.
-        let (pads, _) = padding(&[None, None], &[Some(20), Some(30)], &[0, 0], &[true, true]);
+        let (pads, _) = padding(
+            &[vec![None, None], vec![Some(20), Some(30)]],
+            &[0, 0],
+            &[true, true],
+        );
         assert_eq!((pads[0].rest, pads[1].rest), (50, 0));
         assert_eq!(pads[0].below, vec![0, 0]);
+    }
+
+    #[test]
+    fn three_columns_level_on_the_tallest() {
+        // Row 1: the middle column's line is the tallest; the left has none there.
+        let (pads, tops) = padding(
+            &[
+                vec![Some(10), None, Some(10)],
+                vec![Some(10), Some(30), Some(10)],
+                vec![Some(10), Some(20), Some(10)],
+            ],
+            &[0; 3],
+            &[false, true, false],
+        );
+        assert_eq!(tops, vec![0, 10, 40]);
+        assert_eq!(
+            pads[0].above,
+            vec![0, 0, 30],
+            "the left's blank waits above its next line"
+        );
+        assert_eq!(pads[1].below, vec![0; 3]);
+        assert_eq!(
+            pads[2].below,
+            vec![0, 10, 0],
+            "the right's shorter change takes the rest"
+        );
     }
 }

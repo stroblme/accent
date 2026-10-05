@@ -1205,6 +1205,119 @@ pub(super) fn bench_sketch(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// Other readers' comments on the generated vault's `Attachments/comments.pdf` (`rel`), with a
+/// note linking to its first word written first, so a note's highlight lies over one comment.
+///
+/// At the middle of each comment on the page, and at the marks the generator left without one —
+/// the strike-out, the typed text, the hidden note, the link on the underlined line — and an empty
+/// spot: what the tooltip shows, what a click that was not a drag pins, and whether a tooltip
+/// shows after it. Then the first comment with the pen in hand, the note's highlight, whose click
+/// opens the note, and the comments after Export Highlights has written the note's quote in.
+pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        online(&app).await;
+        let note = "Comment links.md".to_string();
+        if let Some(vault) = app.vault().cloned() {
+            let text = format!("[[{rel}#page=1&selection=0,0,0,3|Ada]]\n");
+            if let Err(e) = vault.save(&note, &text, None) {
+                println!("bench comments note_not_written {e:?}");
+            }
+            let linked = until(|| {
+                let links = vault.backlinks(&rel).ok()?;
+                links.iter().any(|b| b.src_rel_path == note).then_some(())
+            });
+            println!("bench comments linked={}", linked.await.is_some());
+        }
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench comments no_tab");
+            return bench_quit(&app);
+        };
+        let Ok(view) = pdf.views()[0].clone().downcast::<pdfview::PdfView>() else {
+            return bench_quit(&app);
+        };
+        // A point of the page, in its own points from the top left, in the view's coordinates.
+        let at = |(x, y): (f32, f32)| {
+            let r = view.widget_rect(0, &accent_core::pdf::Rect::from_corners((x, y), (x, y)))?;
+            Some((f64::from(r.x()), f64::from(r.y())))
+        };
+        // "Ada", where the note's highlight lands.
+        let ada = at((52.0, 46.0));
+        let landed = until(|| {
+            let (x, y) = ada?;
+            view.highlight_at(x, y)?;
+            pdf.page_comments(0)
+        });
+        let comments = landed.await.unwrap_or_default();
+        println!("bench comments page=0 count={}", comments.len());
+        let probe = |name: &str, point: Option<(f64, f64)>| {
+            let Some((x, y)) = point else {
+                return println!("bench comments {name} off_screen");
+            };
+            let shows = pdf.hover_at(x, y).map(|tip| labels(&tip));
+            let pinned = pdf.click_at(x, y);
+            let pins = pinned.as_ref().map(|p| labels(p.upcast_ref()));
+            let tip_after = pdf.hover_at(x, y).is_some();
+            let up = pinned.as_ref().is_some_and(|p| p.is_visible());
+            if let Some(pinned) = pinned {
+                pinned.popdown();
+            }
+            println!(
+                "bench comments {name} shows={shows:?} pins={pins:?} up={up} tip_after={tip_after}"
+            );
+        };
+        for c in &comments {
+            let a = c.areas[0];
+            let middle = ((a.left + a.right) / 2.0, (a.top + a.bottom) / 2.0);
+            probe(c.author.as_deref().unwrap_or("nameless"), at(middle));
+        }
+        // Where gen-vault's `comments_pdf` puts them.
+        for (name, point) in [
+            ("struck", (107.0, 105.0)),
+            ("typed", (140.0, 205.0)),
+            ("hidden", (350.0, 90.0)),
+            ("link", (234.0, 75.0)),
+            ("empty", (300.0, 270.0)),
+        ] {
+            probe(name, at(point));
+        }
+        pdf.set_mode(pdfview::Mode::Pen);
+        probe("pen", at((116.0, 45.0)));
+        pdf.set_mode(pdfview::Mode::Select);
+        probe("note", ada);
+        let opened = until(|| app.tab_for(&note)).await.is_some();
+        println!("bench comments note_opened={opened}");
+        // Export Highlights writes the note's quote into the file: a comment from then on.
+        app.open_path(&rel);
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-export-highlights", None);
+        let more = until(|| {
+            pdf.page_comments(0)
+                .filter(|now| now.len() > comments.len())
+        });
+        let count = more.await.map(|now| now.len());
+        let shows = ada
+            .and_then(|(x, y)| pdf.hover_at(x, y))
+            .map(|tip| labels(&tip));
+        println!("bench comments exported count={count:?} note shows={shows:?}");
+        bench_quit(&app);
+    });
+}
+
+/// Every label's text under `w`, the selectable ones marked `*`.
+fn labels(w: &gtk::Widget) -> Vec<String> {
+    let mut out: Vec<String> = w
+        .downcast_ref::<gtk::Label>()
+        .map(|l| format!("{}{}", l.label(), if l.is_selectable() { "*" } else { "" }))
+        .into_iter()
+        .collect();
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        out.extend(labels(&c));
+        child = c.next_sibling();
+    }
+    out
+}
+
 /// Once a remote vault answers; a local one at once.
 pub(super) async fn online(app: &Rc<App>) {
     for _ in 0..150 {

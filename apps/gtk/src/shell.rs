@@ -380,6 +380,7 @@ impl Shell {
         // Out of the borrow before the drop: `App` reaches a long way as it goes.
         drop(windows);
         drop(app);
+        crate::malloc::trim_soon();
     }
 
     pub fn command_line(

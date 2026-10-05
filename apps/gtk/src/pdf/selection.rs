@@ -148,7 +148,8 @@ impl PdfTab {
     }
 
     /// A click on the page: follow a link if there is one under it.
-    /// A click that was not a drag: open the note whose link paints a highlight here.
+    /// A click that was not a drag: open the note whose link paints a highlight here, or else pin
+    /// the comments under it.
     ///
     /// After the link handler, which answers on the press — a link inside a highlight is still a
     /// link, and following it is what a click on one has always meant. With Ctrl held it is Go
@@ -170,7 +171,7 @@ impl PdfTab {
             return;
         }
         let Some(at) = view.highlight_at(x, y) else {
-            return;
+            return self.pin_comments(x, y);
         };
         let note = self
             .notes

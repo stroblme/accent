@@ -204,11 +204,18 @@ fn is_equal(lines: &[DiffLine], row: &Row) -> bool {
 
 /// The maximal runs of rows that are not unchanged on both sides, as ranges into `rows`.
 pub fn hunks(lines: &[DiffLine], rows: &[Row]) -> Vec<Range<usize>> {
+    hunks_of(&changed(lines, rows))
+}
+
+/// Per row, whether it is anything but the same unchanged line on both sides.
+fn changed(lines: &[DiffLine], rows: &[Row]) -> Vec<bool> {
+    rows.iter().map(|row| !is_equal(lines, row)).collect()
+}
+
+/// The maximal runs of rows `changed` marks, as ranges: [`hunks`] over rows of any shape.
+pub fn hunks_of(changed: &[bool]) -> Vec<Range<usize>> {
     let mut out: Vec<Range<usize>> = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        if is_equal(lines, row) {
-            continue;
-        }
+    for (i, _) in changed.iter().enumerate().filter(|(_, c)| **c) {
         match out.last_mut() {
             Some(last) if last.end == i => last.end = i + 1,
             _ => out.push(i..i + 1),
@@ -228,10 +235,15 @@ const MIN_GAP: usize = 3;
 /// have a hunk on one side only and keep one margin. A file with no hunks at all has nothing to
 /// show, so all of it is one gap.
 pub fn gaps(lines: &[DiffLine], rows: &[Row], context: usize) -> Vec<Range<usize>> {
-    let hunks = hunks(lines, rows);
+    gaps_of(&changed(lines, rows), context)
+}
+
+/// [`gaps`] over rows of any shape, `changed` saying which rows are not unchanged everywhere.
+pub fn gaps_of(changed: &[bool], context: usize) -> Vec<Range<usize>> {
+    let hunks = hunks_of(changed);
     let (Some(first), Some(last)) = (hunks.first(), hunks.last()) else {
         // Nothing changed, so a changes-only view shows nothing and hides all of it.
-        let whole = 0..rows.len();
+        let whole = 0..changed.len();
         return if whole.len() < MIN_GAP {
             Vec::new()
         } else {
@@ -248,10 +260,92 @@ pub fn gaps(lines: &[DiffLine], rows: &[Row], context: usize) -> Vec<Range<usize
             out.push(start + context..end - context);
         }
     }
-    if rows.len() - last.end > context {
-        out.push(last.end + context..rows.len());
+    if changed.len() - last.end > context {
+        out.push(last.end + context..changed.len());
     }
     out.retain(|gap| gap.len() >= MIN_GAP);
+    out
+}
+
+/// One row of a three-column view: what [`align3`] puts beside a line of the middle text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row3 {
+    /// Index into [`Three::left`] of the left text's line on this row.
+    pub left: Option<usize>,
+    /// The middle text's line, 1-based.
+    pub mid: Option<usize>,
+    /// Index into [`Three::right`] of the right text's line on this row.
+    pub right: Option<usize>,
+}
+
+/// Two texts aligned beside a third: a merge's ours and theirs beside the file being resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Three {
+    /// The left text against the middle one, as [`lines`] gives it.
+    pub left: Vec<DiffLine>,
+    /// The right text against the middle one.
+    pub right: Vec<DiffLine>,
+    pub rows: Vec<Row3>,
+}
+
+impl Three {
+    /// Per row, whether it is anything but one unchanged line in all three columns: what
+    /// [`hunks_of`] and [`gaps_of`] take.
+    pub fn changed(&self) -> Vec<bool> {
+        let same =
+            |lines: &[DiffLine], i: Option<usize>| i.is_some_and(|i| lines[i].op == Op::Equal);
+        self.rows
+            .iter()
+            .map(|row| !(same(&self.left, row.left) && same(&self.right, row.right)))
+            .collect()
+    }
+}
+
+/// `left` and `right` each aligned against `mid`, as [`align`] aligns two texts, on one set of
+/// rows: a line of `mid` is a row of its own with the line each side pairs it with, and the lines
+/// a side has that `mid` lacks are rows before the `mid` line they come before, the two sides'
+/// sharing rows. So a merge's ours stays level with the ours part of a conflict block in the file
+/// and theirs with its theirs part, and each text keeps its own lines in order, each once.
+pub fn align3(left: &str, mid: &str, right: &str) -> Three {
+    let (l, r) = (lines(left, mid), lines(right, mid));
+    let (ls, rs) = (beside(&l), beside(&r));
+    let ends = ls.len();
+    let mut rows = Vec::new();
+    for (k, ((l_before, l_at), (r_before, r_at))) in ls.into_iter().zip(rs).enumerate() {
+        for i in 0..l_before.len().max(r_before.len()) {
+            rows.push(Row3 {
+                left: l_before.get(i).copied(),
+                mid: None,
+                right: r_before.get(i).copied(),
+            });
+        }
+        // The last entry is what comes after the middle text's last line.
+        if k + 1 < ends {
+            rows.push(Row3 {
+                left: l_at,
+                mid: Some(k + 1),
+                right: r_at,
+            });
+        }
+    }
+    Three {
+        left: l,
+        right: r,
+        rows,
+    }
+}
+
+/// For each line of the new text, and once more for its end: the old text's lines before it
+/// that the new text lacks, and the old line [`align`] puts beside it, as indices into `lines`.
+fn beside(lines: &[DiffLine]) -> Vec<(Vec<usize>, Option<usize>)> {
+    let (mut out, mut before) = (Vec::new(), Vec::new());
+    for row in align(lines) {
+        match row.new {
+            Some(_) => out.push((std::mem::take(&mut before), row.old)),
+            None => before.extend(row.old),
+        }
+    }
+    out.push((before, None));
     out
 }
 
@@ -626,6 +720,96 @@ mod tests {
             (4, 4),
             "the other way"
         );
+    }
+
+    /// [`align3`]'s rows as each column's line numbers, after checking that every column shows
+    /// each of its text's lines once and in order.
+    fn numbers3(left: &str, mid: &str, right: &str) -> Vec<[Option<usize>; 3]> {
+        let three = align3(left, mid, right);
+        let number = |lines: &[DiffLine], i: Option<usize>| i.and_then(|i| lines[i].old_line);
+        let rows: Vec<[Option<usize>; 3]> = three
+            .rows
+            .iter()
+            .map(|row| {
+                [
+                    number(&three.left, row.left),
+                    row.mid,
+                    number(&three.right, row.right),
+                ]
+            })
+            .collect();
+        for (c, text) in [left, mid, right].into_iter().enumerate() {
+            let shown: Vec<usize> = rows.iter().filter_map(|row| row[c]).collect();
+            let all: Vec<usize> = (1..=text.lines().count()).collect();
+            assert_eq!(shown, all, "column {c}");
+        }
+        rows
+    }
+
+    #[test]
+    fn three_columns_keep_each_side_beside_its_part_of_a_conflict_block() {
+        let (ours, theirs) = ("a\nX\nc\n", "a\nY\nc\n");
+        let file = "a\n<<<<<<< HEAD\nX\n=======\nY\n>>>>>>> side\nc\n";
+        assert_eq!(
+            numbers3(ours, file, theirs),
+            [
+                [Some(1), Some(1), Some(1)],
+                [None, Some(2), None],
+                [Some(2), Some(3), None],
+                [None, Some(4), None],
+                [None, Some(5), Some(2)],
+                [None, Some(6), None],
+                [Some(3), Some(7), Some(3)],
+            ]
+        );
+        let three = align3(ours, file, theirs);
+        assert_eq!(
+            three.changed(),
+            [false, true, true, true, true, true, false]
+        );
+
+        // Accept Current: theirs' line is now a change beside ours.
+        let three = align3(ours, ours, theirs);
+        assert_eq!(three.changed(), [false, true, false]);
+        assert_eq!(
+            numbers3(ours, ours, theirs),
+            [
+                [Some(1), Some(1), Some(1)],
+                [Some(2), Some(2), Some(2)],
+                [Some(3), Some(3), Some(3)]
+            ]
+        );
+        assert_eq!(three.right[three.rows[1].right.unwrap()].op, Op::Delete);
+        assert!(!align3(ours, ours, ours).changed().contains(&true));
+    }
+
+    #[test]
+    fn lines_both_sides_add_in_one_place_share_rows() {
+        assert_eq!(
+            numbers3("a\nL1\nL2\nb\n", "a\nb\n", "a\nR1\nb\nz\n"),
+            [
+                [Some(1), Some(1), Some(1)],
+                [Some(2), None, Some(2)],
+                [Some(3), None, None],
+                [Some(4), Some(2), Some(3)],
+                [None, None, Some(4)],
+            ]
+        );
+    }
+
+    #[test]
+    fn three_columns_hide_unchanged_runs_as_two_do() {
+        let base: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        let changed = base.replace("line 10\n", "line ten\n");
+        let three = align3(&changed, &base, &base);
+        let two = lines(&changed, &base);
+        assert_eq!(
+            gaps_of(&three.changed(), 3),
+            gaps(&two, &align(&two), 3),
+            "one changed row either way"
+        );
+        assert_eq!(gaps_of(&three.changed(), 3), [0..6, 13..20]);
+        assert_eq!(hunks_of(&three.changed()), vec![9..10]);
     }
 
     #[test]
