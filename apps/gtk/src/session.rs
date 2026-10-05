@@ -757,7 +757,7 @@ impl App {
             // open or given up drops `asked`, which puts the panes back.
             if let Some(what) = compared
                 .clone()
-                .filter(|what| what.sides != Sides::Worktree)
+                .filter(|what| !matches!(what.sides, Sides::Worktree | Sides::Merge))
             {
                 if let Some(git) = self.git.get() {
                     let waiting = Waiting {
@@ -775,7 +775,8 @@ impl App {
                 continue;
             }
             // At once rather than from `Asked`'s idle, so nothing a landing moves is painted before
-            // it is put back. A note compared with the index comes back compared.
+            // it is put back. A note compared with the index comes back compared, and one merging
+            // as a merge while git still lists it unmerged.
             self.with_tab(key, Opened::Restored, "restore", move |app, _| {
                 asked.landed.set(true);
                 app.put_back(&asked.restore);

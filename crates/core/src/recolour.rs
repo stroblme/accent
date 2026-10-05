@@ -44,12 +44,36 @@ pub fn recolour_pixel(px: [u8; 4], paper: [u8; 3], ink: [u8; 3]) -> [u8; 4] {
     [map(0, r), map(1, g), map(2, b), px[3]]
 }
 
+/// [`LUMA`] in 65536ths, rounded so the three still sum to one: white is exactly the top of the
+/// ramp.
+const LUMA_Q16: [u32; 3] = [13_933, 46_871, 4_732];
+
+/// The steps of the ramp [`recolour`] looks up, a sixteenth of a byte level each.
+const STEPS: i32 = 255 * 16;
+
 /// [`recolour_pixel`] over a whole RGBA8 buffer, in place. A PDF's page and tile renders and a
 /// decoded image all come through here, so they cannot drift apart.
+///
+/// The same remap in integers, five times faster on a tile: the luma to a sixteenth of a level,
+/// and each channel's `ink + Y·(paper − ink − 1)` at that luma looked up rather than worked out.
+/// Within a step of a byte of [`recolour_pixel`], and exactly the paper and the ink at the ends.
 pub fn recolour(data: &mut [u8], paper: [u8; 3], ink: [u8; 3]) {
+    // In bytes and rounded: `ink + y·(paper − ink − 255) / STEPS`.
+    let ramp: Vec<[i16; 3]> = (0..=STEPS)
+        .map(|y| {
+            [0, 1, 2].map(|i| {
+                let (paper, ink) = (i32::from(paper[i]), i32::from(ink[i]));
+                let at = ink * STEPS + y * (paper - ink - 255);
+                (at + STEPS / 2).div_euclid(STEPS) as i16
+            })
+        })
+        .collect();
     for px in data.as_chunks_mut::<4>().0 {
-        let out = recolour_pixel([px[0], px[1], px[2], px[3]], paper, ink);
-        px.copy_from_slice(&out);
+        let luma: u32 = (0..3).map(|i| LUMA_Q16[i] * u32::from(px[i])).sum();
+        let offset = ramp[((luma + 2048) >> 12) as usize];
+        for i in 0..3 {
+            px[i] = (i16::from(px[i]) + offset[i]).clamp(0, 255) as u8;
+        }
     }
 }
 
@@ -341,6 +365,30 @@ mod tests {
         recolour(&mut data, paper, ink);
         assert_eq!(data[..4], recolour_pixel([255, 255, 255, 255], paper, ink));
         assert_eq!(data[4..], recolour_pixel([0, 0, 0, 128], paper, ink));
+    }
+
+    /// The buffer's integer path against the pixel's float one, over every fifth level of each
+    /// channel: never more than a step of a byte apart, and white and black exactly paper and ink.
+    #[test]
+    fn recolour_is_the_pixel_remap_within_a_step() {
+        let levels = || (0..=255u8).step_by(5);
+        let pixels: Vec<[u8; 4]> = levels()
+            .flat_map(|r| levels().flat_map(move |g| levels().map(move |b| [r, g, b, 200])))
+            .collect();
+        for (paper, ink) in PALETTES {
+            let mut data = pixels.concat();
+            recolour(&mut data, paper, ink);
+            for (&px, out) in pixels.iter().zip(data.as_chunks::<4>().0) {
+                let want = recolour_pixel(px, paper, ink);
+                let near = (0..4).all(|i| out[i].abs_diff(want[i]) <= 1);
+                assert!(near, "{px:?} -> {out:?}, pixel path {want:?}");
+            }
+            let mut ends = [255, 255, 255, 255, 0, 0, 0, 255];
+            recolour(&mut ends, paper, ink);
+            let [p0, p1, p2] = paper;
+            let [i0, i1, i2] = ink;
+            assert_eq!(ends, [p0, p1, p2, 255, i0, i1, i2, 255]);
+        }
     }
 
     /// Whatever applies the matrix — an SVG filter, a GPU node — paints what the CPU path would.

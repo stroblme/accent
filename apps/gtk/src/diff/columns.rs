@@ -84,6 +84,8 @@ pub(super) struct Grid {
     #[cfg(feature = "bench")]
     pub(super) extra: Vec<i32>,
     pub(super) tops: Vec<i32>,
+    /// Where the last row ends.
+    pub(super) end: i32,
 }
 
 pub(super) struct Columns {
@@ -107,6 +109,8 @@ pub(super) struct Columns {
     /// The bottom margin each view was last given here, and how much of it is the blank under a
     /// column with no line: see [`Columns::page_bottom`].
     bottoms: Vec<Cell<(i32, i32)>>,
+    /// What the host wants done once a relayout has laid the grid: see [`super::links`].
+    pub(super) relaid: RefCell<Option<Box<dyn Fn()>>>,
     /// Where the view is kept until a relayout has laid every row, which clears it. The first
     /// hunk, as the comparison is built: a diff opens on what changed rather than on the top of a
     /// file whose first difference is four hundred lines down. The scroll a run was opened at (see
@@ -194,6 +198,7 @@ impl Columns {
             settling: Cell::new(0),
             own,
             bottoms: (0..n).map(|_| Cell::default()).collect(),
+            relaid: RefCell::default(),
             keep: Cell::new(Some(Keep::FirstHunk)),
             handlers: RefCell::new(Vec::new()),
         });
@@ -600,13 +605,21 @@ impl Columns {
             };
             view.move_overlay(widget, x.max(0), y);
         }
+        let end = tops.last().map_or(0, |top| {
+            let last = |c: &Vec<Option<i32>>| c[count - 1].unwrap_or(0);
+            top + heights.iter().map(last).max().unwrap_or(0) + extra[count - 1]
+        });
         *self.grid.borrow_mut() = Grid {
             #[cfg(feature = "bench")]
             heights,
             #[cfg(feature = "bench")]
             extra,
             tops,
+            end,
         };
+        if let Some(relaid) = self.relaid.borrow().as_ref() {
+            relaid();
+        }
         // Every view laid out again in the next frame, ahead of painting any. GTK lays a view out
         // from an idle of its own and repaints it once it has, so one column could reach the
         // screen a frame ahead of another: a keystroke's own line in the editor a frame after

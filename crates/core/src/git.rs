@@ -65,6 +65,9 @@ pub enum Sides {
         parent: Option<String>,
         orig: Option<String>,
     },
+    /// A file git left unmerged, between its current side (`:2`) and its incoming one (`:3`): a
+    /// merge, in the file's own tab.
+    Merge,
 }
 
 /// Where HEAD is and how far it has drifted from its upstream.

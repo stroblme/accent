@@ -25,6 +25,7 @@ use crate::editor::{self, Flavour};
 #[cfg(feature = "bench")]
 mod bench;
 mod columns;
+mod links;
 pub mod merge;
 mod pad;
 mod pool;

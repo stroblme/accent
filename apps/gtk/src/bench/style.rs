@@ -28,6 +28,7 @@ pub(super) fn bench_style(app: &Rc<App>, rel: &str) {
             println!("bench style_debounced {}", bench_heading_at(&tab, 0));
             glib::spawn_future_local(async move {
                 bench_style_paste(&tab).await;
+                bench_style_retag(&tab).await;
                 bench_quit(&app);
             });
         });
@@ -132,6 +133,139 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
             over("fold")
         );
     }
+}
+
+/// Edit a note the way a reader does — inside a heading and around one, a fence opened and closed
+/// again, a list, a paste, an undo, beside a folded section — once at a size that restyles on the
+/// keystroke and once at one that waits for the debounce, and print the tags that then lie
+/// anywhere other than where a fresh pass over the same text puts them. `mismatch=0` is the claim
+/// that re-tagging only what changed leaves what re-tagging everything would.
+async fn bench_style_retag(tab: &Rc<Tab>) {
+    const NOTE: &str = "# Title\n\nSome prose with **bold** and a [[Link]].\n\n## Fold me\n\
+                        hidden line\n\n- one\n- two\n\nLast paragraph.\n";
+    let settle = || glib::timeout_future(Duration::from_millis(300));
+    for filler in [0, 20 * 1024] {
+        let body = "filler text for a long-ish note\n".repeat(filler / 32);
+        tab.set_text(&format!("{NOTE}{body}"));
+        let fold = accent_api::Fold {
+            start_line: 4,
+            end_line: 5,
+        };
+        crate::fold::fold(tab.buffer.upcast_ref(), fold);
+        // ASCII throughout, so a byte offset is also the character offset the buffer counts in.
+        let at = |needle: &str| tab.text().find(needle).expect("bench needle") as i32;
+        let typed = |offset: i32, text: &str| {
+            tab.buffer.place_cursor(&tab.buffer.iter_at_offset(offset));
+            for ch in text.chars() {
+                tab.buffer.insert_at_cursor(&ch.to_string());
+            }
+        };
+        let delete = |offset: i32, chars: i32| {
+            let mut from = tab.buffer.iter_at_offset(offset);
+            tab.buffer
+                .delete(&mut from, &mut tab.buffer.iter_at_offset(offset + chars));
+        };
+        typed(at("Title"), "Big ");
+        typed(at("Some prose"), "# ");
+        settle().await;
+        delete(at("# Some prose"), 2);
+        typed(at("- one"), "```\n");
+        settle().await;
+        typed(at("Last"), "```\n");
+        settle().await;
+        delete(at("```\n- one"), 4);
+        typed(at("Last"), "- three\n");
+        settle().await;
+        let mut end = tab.buffer.iter_at_offset(at("Last"));
+        tab.buffer
+            .insert(&mut end, "## Pasted\n\n*em* and `code`\n");
+        settle().await;
+        let undone = tab.buffer.can_undo();
+        tab.buffer.undo();
+        settle().await;
+        let off = crate::highlight::mismatches(&tab.buffer);
+        println!(
+            "bench style_retag chars={} undone={undone} mismatch={} {off:?}",
+            tab.buffer.char_count(),
+            off.len()
+        );
+    }
+}
+
+/// Typed words, a character every [`TYPING_EVERY`], [`TYPING_KEYS`] of them per size.
+const TYPING_WORDS: &str = "the quick brown fox jumps over the lazy dog ";
+const TYPING_KEYS: usize = 40;
+const TYPING_EVERY: Duration = Duration::from_millis(150);
+/// What a note is made of at every size: a section of prose with the markup a note carries.
+const TYPING_SECTION: &str = "## Section\n\nSome prose with **bold**, *emphasis*, `code`, a \
+    [[Wiki Link]] and a #tag, plus a [link](https://example.org). A second sentence that runs on \
+    for a while, so that the line wraps in a window of ordinary width, as prose does.\n\n\
+    - a list item with **bold**\n- [ ] a task\n- [x] a done task\n\n> a quote with *emphasis*\n\n\
+    ```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\n";
+
+/// `ACCENT_BENCH_STYLE=typing:<rel>` fills the note at `rel` with 4, 15, 64 and 256 KB of
+/// sections and types into the middle of each at a key every 150 ms, printing the main thread's
+/// CPU time over the run against the wall time: what a keystroke costs once GTK has laid out
+/// whatever the restyle touched, which a timer around the restyle itself cannot see. 15 rather
+/// than 16 so that size styles on every keystroke, below `editor::INSTANT`. `idle` is the same
+/// share over the second before the typing, so a layout of the fill still running shows, and
+/// `pass_us` what one more full pass over the typed note costs, changing nothing.
+/// `typing:<rel>:<kb>` types into that one size, for a profiler.
+pub(super) fn bench_typing(app: &Rc<App>, arg: &str) {
+    let (rel, sizes) = match arg.rsplit_once(':') {
+        Some((rel, kb)) if kb.parse::<usize>().is_ok() => (rel, vec![kb.parse().unwrap_or(4)]),
+        _ => (arg, vec![4, 15, 64, 256]),
+    };
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        // CPU time of the thread asking, the main one here, in nanoseconds.
+        let cpu = || {
+            std::fs::read_to_string("/proc/thread-self/schedstat")
+                .ok()
+                .and_then(|s| s.split_whitespace().next()?.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        let busy = |cpu: u64, wall: Duration| cpu as f64 / wall.as_nanos() as f64;
+        for kb in sizes {
+            tab.set_text(&TYPING_SECTION.repeat(kb * 1024 / TYPING_SECTION.len()));
+            let middle = tab.buffer.line_count() / 2;
+            if let Some(at) = tab.buffer.iter_at_line(middle) {
+                tab.buffer.place_cursor(&at);
+            }
+            tab.view
+                .scroll_to_mark(&tab.buffer.get_insert(), 0.0, true, 0.0, 0.5);
+            glib::timeout_future(Duration::from_secs(3)).await;
+            let (idle, t0) = (cpu(), Instant::now());
+            glib::timeout_future(Duration::from_secs(1)).await;
+            let idle = busy(cpu() - idle, t0.elapsed());
+            let (cpu0, t0) = (cpu(), Instant::now());
+            for ch in TYPING_WORDS.chars().cycle().take(TYPING_KEYS) {
+                tab.buffer.insert_at_cursor(&ch.to_string());
+                glib::timeout_future(TYPING_EVERY).await;
+            }
+            // The debounced pass after the last key, and the layout it leaves.
+            glib::timeout_future(Duration::from_millis(500)).await;
+            let (used, wall) = (cpu() - cpu0, t0.elapsed());
+            // One full pass over the note as it now stands, which changes nothing.
+            let pass = Instant::now();
+            crate::highlight::apply(&tab.buffer);
+            println!(
+                "bench style_typing kb={kb} chars={} keys={TYPING_KEYS} wall_ms={} cpu_ms={} \
+                 busy={:.2} idle={idle:.2} pass_us={}",
+                tab.buffer.char_count(),
+                wall.as_millis(),
+                used / 1_000_000,
+                busy(used, wall),
+                pass.elapsed().as_micros()
+            );
+        }
+        bench_quit(&app);
+    });
 }
 
 /// The pointer's half of `drop_fold`, held for XTEST: a section folded under its heading and

@@ -616,7 +616,8 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
 /// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
 /// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
 fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
-    let (toast, open, diff, compare, merge, trash, changed, syncing) = (
+    let (toast, open, diff, compare, merge, leave, trash, changed, syncing) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -680,16 +681,37 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 false => app.with_tab(key, Opened::Preview, "compare", show),
             }
         }),
-        merge_file: Box::new(move |key, stages| {
+        merge_file: Box::new(move |key, stages, here, register| {
             let Some(app) = merge.upgrade() else {
                 return;
             };
-            // The file's own tab, as a preview like any other single click in the sidebar.
-            app.with_tab(key, Opened::Preview, "merge", move |app, tab| {
-                tab.merge(stages);
+            let show = move |app: &Rc<App>, tab: &Rc<Tab>| {
+                let merge = tab.merge(stages);
+                register(Rc::downgrade(&merge));
+                let (weak, tab_weak) = (Rc::downgrade(app), Rc::downgrade(tab));
+                merge.connect_resolved(move || {
+                    if let (Some(app), Some(tab)) = (weak.upgrade(), tab_weak.upgrade()) {
+                        app.mark_resolved(&tab);
+                    }
+                });
                 // As a comparison's: the tab may be behind the disk, where the markers are.
                 app.file_changed(tab);
-            });
+            };
+            match here {
+                // The tab showing the file, where it is: a restore's, or a comparison's.
+                true => {
+                    if let Some(tab) = app.tab_for(key) {
+                        show(&app, &tab);
+                    }
+                }
+                // The file's own tab, as a preview like any other single click in the sidebar.
+                false => app.with_tab(key, Opened::Preview, "merge", show),
+            }
+        }),
+        leave: Box::new(move |key| {
+            if let Some(tab) = leave.upgrade().and_then(|app| app.tab_for(key)) {
+                tab.leave_compare();
+            }
         }),
         trash: Box::new(move |keys| {
             if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {
