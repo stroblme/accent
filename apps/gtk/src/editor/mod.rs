@@ -67,8 +67,8 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 /// unstyled while typing: [`highlight::apply_line`] re-tags the caret's line on every keystroke,
 /// so markup appears as it is typed the way Apostrophe does it either side of the threshold.
 const INSTANT: i32 = 16 * 1024;
-/// DESIGN.md, Motion: save 1 s after the last edit.
-const AUTOSAVE: Duration = Duration::from_secs(1);
+/// DESIGN.md, Motion: save 1 s after the last edit. A diagram and a PDF's drawing share it.
+pub(crate) const AUTOSAVE: Duration = Duration::from_secs(1);
 /// The cursor callback drives the preview's scroll sync; 100 ms is below what the eye follows.
 const CURSOR: Duration = Duration::from_millis(100);
 /// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell

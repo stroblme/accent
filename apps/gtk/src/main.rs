@@ -109,7 +109,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use toasts::Toast;
 use wire::{choice_row, wire_pane, wire_tree, wire_window, written_at};
-use zoom::{picture_of, stepped_zoom, zoom_on_pinch, zoom_on_wheel};
+use zoom::{picture_of, stepped_zoom, track_pointer, zoom_on_pinch, zoom_on_wheel};
 
 const APP_ID: &str = "io.github.stroblme.Accent";
 
@@ -541,7 +541,7 @@ impl App {
     /// the pane the reader is in and leaves the other pane's query and open state alone — and
     /// over a shell it opens nothing at all, there being nothing of ours to search there.
     fn open_find(&self, mode: find::Mode) {
-        let pane = self.reader_pane();
+        let pane = self.pane();
         if self.shows_shell(&pane) {
             return;
         }
@@ -1139,7 +1139,7 @@ impl App {
                 self,
                 #[weak]
                 term,
-                move |out, _| {
+                move |out| {
                     term.set_zoom(stepped_zoom(term.zoom(), out));
                     app.refresh_zoom();
                 }

@@ -901,16 +901,16 @@ impl App {
         // On the scroller rather than the picture: while the image is fitted it is smaller than
         // the viewport, and a wheel over the empty space around it has to zoom too. Bubble
         // phase, ahead of the scroller's own controller, as everywhere else.
-        let viewer = Rc::downgrade(&image);
+        let (viewer, pointer) = (Rc::downgrade(&image), track_pointer(&scroller));
         zoom_on_wheel(
             &scroller,
             gtk::PropagationPhase::Bubble,
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |out, at| {
+                move |out| {
                     if let Some(image) = viewer.upgrade() {
-                        app.zoom_image(&image, Some(out), at);
+                        app.zoom_image(&image, Some(out), pointer.get());
                     }
                 }
             ),
@@ -1586,7 +1586,7 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |out, _| app.set_zoom(stepped_zoom(app.zoom.get(), out))
+                move |out| app.set_zoom(stepped_zoom(app.zoom.get(), out))
             ),
         );
 

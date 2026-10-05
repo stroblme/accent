@@ -424,8 +424,8 @@ impl App {
                 Some(d) => d.group(),
                 None => self.open_find(find::Mode::Goto),
             },
-            "find-next" => self.reader_pane().find.step(true),
-            "find-previous" => self.reader_pane().find.step(false),
+            "find-next" => self.pane().find.step(true),
+            "find-previous" => self.pane().find.step(false),
             // `Ctrl+D` over a diagram duplicates the selection: an application accelerator is
             // dispatched at the window, so the canvas cannot claim the chord for itself.
             "duplicate-line" => match self.active_diagram() {

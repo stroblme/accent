@@ -43,7 +43,7 @@ impl App {
         let Some(picture) = picture_of(&image.page) else {
             return;
         };
-        let zoom = zoom.map(|zoom| zoom.clamp(pdfview::MIN_SCALE, pdfview::MAX_SCALE));
+        let zoom = zoom.map(clamp_scale);
         image.zoom.set(zoom);
         let size = set_image_zoom(&picture, zoom);
         if let (Some(size), Ok(scroller)) =
@@ -216,6 +216,20 @@ pub fn clamp_zoom(zoom: f64) -> f64 {
     ((zoom * 10.0).round() / 10.0).clamp(0.5, 3.0)
 }
 
+/// The range a PDF, a diagram and an image zoom in, as a multiple of their own size: below a tenth
+/// nothing is legible, and past eight times one PDF page is hundreds of megabytes of tiles.
+pub const MIN_SCALE: f64 = 0.1;
+pub const MAX_SCALE: f64 = 8.0;
+
+/// A zoom held to [`MIN_SCALE`]..=[`MAX_SCALE`]; one that is not finite (a NaN) is 1.0.
+pub fn clamp_scale(scale: f64) -> f64 {
+    if scale.is_finite() {
+        scale.clamp(MIN_SCALE, MAX_SCALE)
+    } else {
+        1.0
+    }
+}
+
 /// One step in or out from `zoom`: the next multiple of [`ZOOM_STEP`], so a PDF fitted to the
 /// window at 137 % lands on 140 % rather than 147 %. Shared with `pdfview`, so a chord, a wheel
 /// notch and a pinch mean the same amount of zoom whichever kind of tab is in front.
@@ -251,12 +265,12 @@ pub fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
     total.trunc() as i32
 }
 
-/// Ctrl+scroll on `widget` steps whatever it is that zooms there: `step(true, at)` is one step
-/// out, `step(false, at)` one step in. One notch is one step, the same amount the chords move.
+/// Ctrl+scroll on `widget` steps whatever it is that zooms there: `step(true)` is one step out,
+/// `step(false)` one step in. One notch is one step, the same amount the chords move.
 ///
-/// `at` is where the pointer is in the widget, for a zoom that keeps what is under it where it
-/// is — which is what a PDF page does and what a font size has no use for. A controller of its
-/// own tracks it, because a scroll event carries no widget coordinate.
+/// A zoom that keeps what is under the pointer where it is — which is what a PDF page does and
+/// what a font size has no use for — reads where the pointer is from [`track_pointer`], or from
+/// the motion controller a canvas has already: a scroll event carries no widget coordinate.
 ///
 /// Each controller owns its own accumulator, because a smooth-scroll device sends one notch as
 /// several fractional deltas and two widgets sharing the remainder would zoom each other. Without
@@ -268,8 +282,30 @@ pub fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
 pub fn zoom_on_wheel(
     widget: &impl IsA<gtk::Widget>,
     phase: gtk::PropagationPhase,
-    step: impl Fn(bool, Option<(f64, f64)>) + 'static,
+    step: impl Fn(bool) + 'static,
 ) {
+    let accum = Cell::new(0.0);
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    wheel.set_propagation_phase(phase);
+    wheel.connect_scroll(move |controller, _, dy| {
+        if !controller
+            .current_event_state()
+            .contains(gdk::ModifierType::CONTROL_MASK)
+        {
+            return glib::Propagation::Proceed;
+        }
+        let steps = wheel_steps(&accum, dy);
+        for _ in 0..steps.abs() {
+            step(steps > 0);
+        }
+        glib::Propagation::Stop
+    });
+    widget.add_controller(wheel);
+}
+
+/// Where the pointer is over `widget`, in its coordinates, until it leaves: what a Ctrl+scroll
+/// zooms around ([`zoom_on_wheel`]).
+pub fn track_pointer(widget: &impl IsA<gtk::Widget>) -> Rc<Cell<Option<(f64, f64)>>> {
     let at = Rc::new(Cell::new(None));
     let motion = gtk::EventControllerMotion::new();
     motion.connect_motion(glib::clone!(
@@ -283,24 +319,7 @@ pub fn zoom_on_wheel(
         move |_| at.set(None)
     ));
     widget.add_controller(motion);
-
-    let accum = Cell::new(0.0);
-    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
-    wheel.set_propagation_phase(phase);
-    wheel.connect_scroll(move |controller, _, dy| {
-        if !controller
-            .current_event_state()
-            .contains(gdk::ModifierType::CONTROL_MASK)
-        {
-            return glib::Propagation::Proceed;
-        }
-        let steps = wheel_steps(&accum, dy);
-        for _ in 0..steps.abs() {
-            step(steps > 0, at.get());
-        }
-        glib::Propagation::Stop
-    });
-    widget.add_controller(wheel);
+    at
 }
 
 /// The zoom a pinch has reached: the zoom it began at times `scale`, on the nearest tenth, the
@@ -356,6 +375,13 @@ mod tests {
         assert_eq!(clamp_zoom(0.1), 0.5, "no zooming down to nothing");
         assert_eq!(clamp_zoom(9.0), 3.0, "nor up past legibility");
         assert_eq!(clamp_zoom(1.24), 1.2, "a hand-edited state file is rounded");
+    }
+
+    #[test]
+    fn a_scale_stays_in_range_and_nan_is_its_own_size() {
+        assert_eq!(clamp_scale(1000.0), MAX_SCALE);
+        assert_eq!(clamp_scale(0.0), MIN_SCALE);
+        assert_eq!(clamp_scale(f64::NAN), 1.0);
     }
 
     #[test]

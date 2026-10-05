@@ -81,7 +81,11 @@ const TEXT: &str = "Foo foo food foo_bar\nÄ foo(1) FOO(22)\n";
 /// with it), `preview_case_word` 4, and for `oo` 6, 5 by case and 0 at word starts. With a PDF,
 /// the generated vault's `Attachments/pages.pdf` ("Page 1" to "Page 5"), the same over it, where
 /// Whole Word is whole words: `page` 5 and 0 by case, `Page` 5 by case, `Pag` 5 and 0 as a whole
-/// word. The note is closed, which writes it, and removed before the drill quits.
+/// word, each found showing its first hit (`1 of 5`); then [`stepping`], which writes the PDF, so
+/// run it on a scratch vault: `pdf_typed` page 3 `3 of 5`, `pdf_enter` page 4 `4 of 5`,
+/// `pdf_shift_enter` page 3 `3 of 5`, `pdf_wrapped` page 2 `1 of 1`, `pdf_edited` page 5
+/// `5 matches`, `pdf_edited_enter` page 5 `5 of 5`. The note is closed, which writes it, and
+/// removed before the drill quits.
 fn bench_find_options(app: &Rc<App>, pdf: Option<&str>) {
     let path = app.root().join(NOTE);
     if let Err(e) = std::fs::write(&path, TEXT) {
@@ -173,9 +177,80 @@ fn bench_find_options(app: &Rc<App>, pdf: Option<&str>) {
                     ("word", "Pag", false, true),
                 ],
             );
+            steps.extend(stepping());
         }
         run(app, bar, steps);
     });
+}
+
+/// The PDF's steps from the page being read: typed on the third page, the query shows its hit,
+/// Enter and Shift+Enter pressed for real (XTEST) step on and back, a query found only on the
+/// second page wraps round to it, and a page edit made while reading the last page searches
+/// again without moving the reader, Enter then showing that page's hit.
+fn stepping() -> Vec<Step> {
+    let pdf = |app: &Rc<App>| app.pdf_of(&app.pane());
+    vec![
+        // A step of its own, its search showing a hit as it lands.
+        Box::new(|_, bar| {
+            for button in bar.toggles() {
+                button.set_active(false);
+            }
+        }),
+        Box::new(move |app, _| {
+            if let Some(pdf) = pdf(app) {
+                pdf.goto_page(2);
+            }
+        }),
+        Box::new(|_, bar| typed(bar, "Page")),
+        Box::new(|app, bar| {
+            reading("pdf_typed", app, bar);
+            glib::spawn_future_local(super::git::xtest("move 700 450; focus; key Return"));
+        }),
+        Box::new(|_, _| {}),
+        Box::new(|app, bar| {
+            reading("pdf_enter", app, bar);
+            glib::spawn_future_local(super::git::xtest("key shift+Return"));
+        }),
+        Box::new(|_, _| {}),
+        // A hit only before the page being read, found by wrapping round.
+        Box::new(|app, bar| {
+            reading("pdf_shift_enter", app, bar);
+            typed(bar, "Page 2");
+        }),
+        Box::new(|app, bar| {
+            reading("pdf_wrapped", app, bar);
+            typed(bar, "Page");
+        }),
+        Box::new(move |app, _| {
+            if let Some(pdf) = pdf(app) {
+                pdf.goto_page(4);
+            }
+        }),
+        // The first two pages swapped, which leaves the page being read where it is.
+        Box::new(move |app, _| {
+            if let Some(pdf) = pdf(app) {
+                pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 1 });
+            }
+        }),
+        Box::new(|_, _| {}),
+        Box::new(|app, bar| {
+            reading("pdf_edited", app, bar);
+            glib::spawn_future_local(super::git::xtest("key Return"));
+        }),
+        Box::new(|_, _| {}),
+        Box::new(|app, bar| reading("pdf_edited_enter", app, bar)),
+    ]
+}
+
+/// The readout and the page being read, 1-based.
+fn reading(label: &str, app: &Rc<App>, bar: &Rc<Bar>) {
+    let page = app
+        .pdf_of(&app.pane())
+        .map_or(0, |pdf| pdf.current_page() + 1);
+    println!(
+        "bench find options case={label} page={page} readout={:?}",
+        bar.readout().0
+    );
 }
 
 /// For each of `walk`, a step setting the toggles to Match Case and Match Whole Word as it says

@@ -4,11 +4,13 @@
 //! The format work is `accent-drawio`'s; the canvas (`view.rs`) paints a page and turns gestures
 //! into [`Edit`]s. This is where an edit is applied — through [`DiagramTab::edit`], the one door
 //! every change goes through, which is what makes each one an undo step, marks the tab dirty
-//! and schedules the autosave.
+//! and schedules the autosave. Its label editing is in `label`, the Properties pane's half in
+//! `props`, and the canvas's menu, keys and wheel in `input`.
 
 pub mod embed;
 pub mod export;
 mod geometry;
+mod input;
 mod label;
 mod layers;
 mod math;
@@ -28,18 +30,16 @@ use accent_core::config::{DiagramConfig, DiagramPlace};
 use accent_core::fs::{Digest, Etag};
 use accent_drawio::{CellId, Editor, File, Point};
 use adw::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gio, glib};
 
 use crate::editor::{SaveState, Saves};
-use geometry::{Overshoot, Sheet, Zoom};
+use crate::widgets::{Debounce, Hook};
+use geometry::{Sheet, Zoom};
 pub use tools::Tool;
 use view::{DiagramView, Edit};
 
-/// How long after the last edit the file is written: a note's autosave.
-const AUTOSAVE: std::time::Duration = std::time::Duration::from_secs(1);
-
-type Hook = RefCell<Option<Rc<dyn Fn(&Rc<DiagramTab>)>>>;
-type TextHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
+type TabHook = Hook<dyn Fn(&Rc<DiagramTab>)>;
+type TextHook = Hook<dyn Fn(&str)>;
 
 pub struct DiagramTab {
     key: RefCell<String>,
@@ -85,24 +85,25 @@ pub struct DiagramTab {
     pasted: RefCell<(Option<String>, u32)>,
     /// What a note's tab keeps about its file, so the save path is the same one (`save.rs`).
     pub save: SaveState,
-    save_pending: Cell<bool>,
+    /// The write an edit schedules, which a burst of edits shares.
+    autosave: Debounce,
     /// A watch on the file itself, for a diagram from outside the vault, which no vault watcher
     /// covers. `None` for everything inside a vault, which the worker already reports on.
     monitor: RefCell<Option<gio::FileMonitor>>,
-    on_zoom: Hook,
-    on_page: Hook,
+    on_zoom: TabHook,
+    on_page: TabHook,
     /// Fired just before a page switch the reader asked for, so the pane can record where they
     /// were (Back).
-    on_jump: Hook,
-    on_pages: Hook,
-    on_selection: Hook,
-    on_history: Hook,
-    on_autosave: Hook,
-    on_image: Hook,
-    on_banner: Hook,
-    on_options: Hook,
+    on_jump: TabHook,
+    on_pages: TabHook,
+    on_selection: TabHook,
+    on_history: TabHook,
+    on_autosave: TabHook,
+    on_image: TabHook,
+    on_banner: TabHook,
+    on_options: TabHook,
     /// The web banner's Load.
-    on_web: Hook,
+    on_web: TabHook,
     /// Something to tell the reader in a toast: what was copied, or that there was nothing to
     /// paste.
     on_toast: TextHook,
@@ -178,20 +179,20 @@ pub fn open(
         options: Cell::new(DiagramConfig::default()),
         pasted: RefCell::new((None, 0)),
         save: SaveState::at(etag, digest),
-        save_pending: Cell::new(false),
+        autosave: Debounce::new(crate::editor::AUTOSAVE),
         monitor: RefCell::new(None),
-        on_zoom: RefCell::new(None),
-        on_page: RefCell::new(None),
-        on_jump: RefCell::new(None),
-        on_pages: RefCell::new(None),
-        on_selection: RefCell::new(None),
-        on_history: RefCell::new(None),
-        on_autosave: RefCell::new(None),
-        on_image: RefCell::new(None),
-        on_banner: RefCell::new(None),
-        on_options: RefCell::new(None),
-        on_web: RefCell::new(None),
-        on_toast: RefCell::new(None),
+        on_zoom: Hook::default(),
+        on_page: Hook::default(),
+        on_jump: Hook::default(),
+        on_pages: Hook::default(),
+        on_selection: Hook::default(),
+        on_history: Hook::default(),
+        on_autosave: Hook::default(),
+        on_image: Hook::default(),
+        on_banner: Hook::default(),
+        on_options: Hook::default(),
+        on_web: Hook::default(),
+        on_toast: Hook::default(),
     });
     if has_math {
         tab.view.set_typesetter(math::shared());
@@ -211,7 +212,7 @@ pub fn open(
         tab,
         move || {
             tab.place_label();
-            tab.emit(&tab.on_zoom)
+            tab.on_zoom.emit(&tab)
         }
     ));
     // The label editor sits at a place on screen: the page moving under it takes it along, and
@@ -234,18 +235,18 @@ pub fn open(
         tab,
         move |options| {
             tab.options.set(options);
-            tab.emit(&tab.on_options);
+            tab.on_options.emit(&tab);
         }
     ));
     tab.banner.connect_button_clicked(glib::clone!(
         #[weak]
         tab,
-        move |_| tab.emit(&tab.on_banner)
+        move |_| tab.on_banner.emit(&tab)
     ));
     tab.web_banner.connect_button_clicked(glib::clone!(
         #[weak]
         tab,
-        move |_| tab.emit(&tab.on_web)
+        move |_| tab.on_web.emit(&tab)
     ));
     tab.wire_keys();
     tab.wire_wheel();
@@ -315,7 +316,7 @@ impl DiagramTab {
         if i >= self.page_count() || i == self.page_index.get() {
             return;
         }
-        self.emit(&self.on_jump);
+        self.on_jump.emit(self);
         self.show_page(i);
     }
 
@@ -376,8 +377,8 @@ impl DiagramTab {
             Some(top) => self.view.land(top),
             None => self.view.set_zoom(Zoom::Fit),
         }
-        self.emit(&self.on_page);
-        self.emit(&self.on_selection);
+        self.on_page.emit(self);
+        self.on_selection.emit(self);
     }
 
     pub fn tool(&self) -> Tool {
@@ -498,203 +499,7 @@ impl DiagramTab {
         self.view.set_selection(&ids);
         *self.selection.borrow_mut() = ids;
         self.fill_props();
-        self.emit(&self.on_selection);
-    }
-
-    /// What the Properties pane shows for this diagram.
-    pub fn properties(&self) -> gtk::Widget {
-        self.props.widget().clone()
-    }
-
-    /// Put the selection's look, or the page's, into the Properties pane, and the page's layers.
-    fn fill_props(&self) {
-        let (target, layers, current) = {
-            let editor = self.editor.borrow();
-            let Ok(page) = editor.page(self.page_index.get()) else {
-                return;
-            };
-            let layers: Vec<layers::Layer> = page
-                .layers()
-                .iter()
-                .rev()
-                .map(|l| layers::Layer {
-                    id: l.id.clone(),
-                    name: l.label().to_string(),
-                    visible: l.is_visible(),
-                    locked: l.is_locked(),
-                })
-                .collect();
-            let current = editor
-                .current_layer(self.page_index.get())
-                .map(str::to_string);
-            let selection = self.selection.borrow();
-            let cells: Vec<&accent_drawio::Cell> =
-                selection.iter().filter_map(|id| page.cell(id)).collect();
-            let pinned = |id: &str| self.view.sheet().is_some_and(|s| s.is_pinned(id));
-            let geometry = match cells.as_slice() {
-                [cell] if cell.vertex => cell.geometry.as_ref().filter(|g| !g.relative),
-                _ => None,
-            };
-            let geometry = geometry.map(|g| (g.rect(), pinned(&cells[0].id)));
-            let target = match cells.first() {
-                Some(first) => props::Target::Cells {
-                    style: first.style.resolve(first.edge),
-                    raw: first.style.to_string(),
-                    count: cells.len(),
-                    vertices: cells.iter().any(|c| c.vertex),
-                    edges: cells.iter().any(|c| c.edge),
-                    fills: cells.iter().any(|c| c.takes_fill()),
-                    geometry,
-                },
-                None => props::Target::Page {
-                    name: page.name().to_string(),
-                    size: page.size(),
-                    background: page.background(),
-                },
-            };
-            (target, layers, current)
-        };
-        self.props.fill(&target);
-        self.props.fill_layers(&layers, current.as_deref());
-    }
-
-    /// A row of the Properties pane changed.
-    fn apply_property(self: &Rc<Self>, change: props::Change) {
-        let ids = self.selection();
-        match change {
-            props::Change::Style(pairs) if !ids.is_empty() => {
-                let pairs: Vec<(&str, Option<&str>)> =
-                    pairs.iter().map(|(k, v)| (*k, v.as_deref())).collect();
-                self.edit(|e, page| e.set_styles(page, &ids, &pairs));
-            }
-            props::Change::Raw(style) => {
-                if let [id] = ids.as_slice() {
-                    self.edit(|e, page| e.set_style_string(page, id, &style));
-                }
-            }
-            props::Change::PageAttr(key, value) => {
-                self.edit(|e, page| e.set_page_attr(page, key, value.as_deref()));
-            }
-            props::Change::PageName(name) if !name.trim().is_empty() => {
-                self.rename_page(name.trim());
-            }
-            props::Change::Geometry(rect) => {
-                if let [id] = ids.as_slice() {
-                    self.set_geometry(id, rect);
-                }
-            }
-            props::Change::Copy(clip) => self.copy_property(clip),
-            props::Change::Paste(clip) => self.paste_property(clip),
-            props::Change::Layer(change) => self.apply_layer(change),
-            _ => {}
-        }
-    }
-
-    /// A row of the Layers group changed.
-    fn apply_layer(self: &Rc<Self>, change: layers::LayerChange) {
-        use layers::LayerChange as L;
-        let pick = |id: Option<CellId>| {
-            self.editor.borrow_mut().set_current_layer(id);
-            self.fill_props();
-        };
-        match change {
-            L::Add => {
-                let mut added = None;
-                self.edit(|e, page| {
-                    added = Some(e.add_layer(page, "Untitled Layer")?);
-                    Ok(())
-                });
-                // As draw.io's Add Layer does, the new layer is the one drawn into.
-                if added.is_some() {
-                    pick(added);
-                }
-            }
-            L::Pick(id) => pick(Some(id)),
-            L::Rename(id, name) => self.edit(|e, page| e.rename_layer(page, &id, name.trim())),
-            L::Show(id, on) => self.edit(|e, page| e.set_visible(page, &id, on)),
-            L::Lock(id, on) => self.edit(|e, page| {
-                let ids = std::slice::from_ref(&id);
-                e.set_style(page, ids, "locked", on.then_some("1"))
-            }),
-            L::Raise(id, up) => {
-                let z = match up {
-                    true => accent_drawio::ZOrder::Forward,
-                    false => accent_drawio::ZOrder::Backward,
-                };
-                self.edit(|e, page| e.reorder(page, std::slice::from_ref(&id), z));
-            }
-            L::Delete(id) => self.edit(|e, page| e.delete_layer(page, &id)),
-        }
-    }
-
-    /// Give shape `id` the place and size `rect` in its parent, as the file has them.
-    fn set_geometry(self: &Rc<Self>, id: &str, rect: accent_drawio::Rect) {
-        self.edit(|e, page| {
-            let o = e.page(page)?.origin_of(id);
-            e.resize(page, id, rect.translate(o.x, o.y))
-        });
-    }
-
-    /// The one selected cell's position (`x, y`), size (`w, h`) or style string onto the
-    /// clipboard, as plain text.
-    fn copy_property(self: &Rc<Self>, clip: props::Clip) {
-        let text = {
-            let editor = self.editor.borrow();
-            let selection = self.selection.borrow();
-            let [id] = selection.as_slice() else { return };
-            let Some(cell) = editor
-                .page(self.page_index.get())
-                .ok()
-                .and_then(|p| p.cell(id))
-            else {
-                return;
-            };
-            let g = cell.geometry.as_ref().map(|g| g.rect()).unwrap_or_default();
-            let pair = |a, b| format!("{}, {}", props::number(a), props::number(b));
-            match clip {
-                props::Clip::Position => pair(g.x, g.y),
-                props::Clip::Size => pair(g.w, g.h),
-                props::Clip::Style => cell.style.to_string(),
-            }
-        };
-        self.view.clipboard().set_text(&text);
-        // A style string can run to a line of its own; a pair is short enough to read back.
-        match clip {
-            props::Clip::Style => self.toast("Copied style"),
-            _ => self.toast(&format!("Copied {} {text}", clip.noun())),
-        }
-    }
-
-    /// The clipboard's text onto the selection: a position or a size onto the one shape, a
-    /// style's look onto every cell selected, as one step (`Editor::paste_style`).
-    fn paste_property(self: &Rc<Self>, clip: props::Clip) {
-        let clipboard = self.view.clipboard();
-        let tab = Rc::downgrade(self);
-        glib::spawn_future_local(async move {
-            let text = clipboard.read_text_future().await.ok().flatten();
-            let Some(tab) = tab.upgrade() else { return };
-            let text = text.as_deref().map(str::trim).unwrap_or_default();
-            let ids = tab.selection();
-            let geometry = || {
-                let editor = tab.editor.borrow();
-                let page = editor.page(tab.page_index.get()).ok()?;
-                let [id] = ids.as_slice() else { return None };
-                Some(page.cell(id)?.geometry.as_ref()?.rect())
-            };
-            match (clip, pair(text), geometry()) {
-                (props::Clip::Position, Some((x, y)), Some(g)) => {
-                    tab.set_geometry(&ids[0], accent_drawio::Rect::new(x, y, g.w, g.h))
-                }
-                (props::Clip::Size, Some((w, h)), Some(g)) if w >= 0.0 && h >= 0.0 => {
-                    tab.set_geometry(&ids[0], accent_drawio::Rect::new(g.x, g.y, w, h))
-                }
-                (props::Clip::Style, ..) if text.contains('=') && !text.contains('\n') => {
-                    let style = accent_drawio::Style::parse(text);
-                    tab.edit(|e, page| e.paste_style(page, &ids, &style));
-                }
-                (clip, ..) => tab.toast(&format!("No {} on the clipboard", clip.noun())),
-            }
-        });
+        self.on_selection.emit(self);
     }
 
     pub fn select_all(self: &Rc<Self>) {
@@ -730,7 +535,7 @@ impl DiagramTab {
                 self.page_index.set(last);
             }
             self.changed();
-            self.emit(&self.on_pages);
+            self.on_pages.emit(self);
         }
     }
 
@@ -796,8 +601,8 @@ impl DiagramTab {
         self.refresh();
         self.sync_web();
         self.fill_props();
-        self.emit(&self.on_history);
-        self.emit(&self.on_selection);
+        self.on_history.emit(self);
+        self.on_selection.emit(self);
         self.save_soon();
     }
 
@@ -848,7 +653,7 @@ impl DiagramTab {
                     Ok(())
                 });
                 self.set_tool(Tool::Select);
-                self.emit(&self.on_zoom);
+                self.on_zoom.emit(self);
                 if let Some(id) = added {
                     self.select(vec![id]);
                     // A text box is made to be written in.
@@ -1027,7 +832,7 @@ impl DiagramTab {
             }
         }
         if self.page_count() != count {
-            self.emit(&self.on_pages);
+            self.on_pages.emit(self);
         }
         if !chosen.is_empty() {
             self.select(chosen);
@@ -1053,189 +858,6 @@ impl DiagramTab {
         if !ids.is_empty() {
             self.edit(|e, page| e.reorder(page, &ids, z));
         }
-    }
-
-    /// Edit the label of the one selected cell, in the note editor over it.
-    pub fn edit_label(self: &Rc<Self>) {
-        let selection = self.selection();
-        let [id] = selection.as_slice() else {
-            return;
-        };
-        let id = id.clone();
-        self.finish_label();
-        let Some(sheet) = self.view.sheet() else {
-            return;
-        };
-        let (markdown, inside) = {
-            let editor = self.editor.borrow();
-            let Ok(page) = editor.page(self.page_index.get()) else {
-                return;
-            };
-            let Some(cell) = page.cell(&id) else { return };
-            // A label inside its shape, rather than beside it or on an edge.
-            let style = cell.style.resolve(cell.edge);
-            let at = |key, middle| style.get(key).is_none_or(|v| v == middle);
-            (
-                accent_drawio::label::to_markdown(cell.label(), cell.is_html()),
-                cell.vertex
-                    && at("labelPosition", "center")
-                    && at("verticalLabelPosition", "middle"),
-            )
-        };
-        // Where the label is drawn, or where it will be for a cell that has none yet: halfway
-        // along an edge, over the whole of a shape.
-        let (mut place, size) = sheet
-            .scene
-            .prims
-            .iter()
-            .find_map(|p| match p {
-                accent_drawio::Prim::Text {
-                    cell,
-                    rect,
-                    font,
-                    valign,
-                    ..
-                } if *cell == id => Some((label::label_box(*rect, *valign, inside), font.size)),
-                _ => None,
-            })
-            .or_else(|| {
-                let m = sheet.edge_middle(&id)?;
-                Some((accent_drawio::Rect::new(m.x, m.y, 0.0, 0.0), 11.0))
-            })
-            .unwrap_or_else(|| (sheet.frame_of(&id).unwrap_or_default(), 12.0));
-        if let Some(r) = sheet.rect(&id).filter(|_| place.w < 1.0 || place.h < 1.0) {
-            place = r;
-        }
-        self.view.reveal(&place);
-        let editor = label::LabelEditor::open(
-            &self.overlay,
-            id,
-            &markdown,
-            place,
-            size,
-            self.font.borrow().as_deref(),
-            self.spellcheck.get(),
-        );
-        *self.label.borrow_mut() = Some(editor.clone());
-        self.place_label();
-        // A click outside finishes the label, from an idle rather than the handler: leaving is
-        // GTK moving the focus, and taking the editor off the canvas meanwhile left GTK walking
-        // up from a widget that was gone, over and over (the freeze). Only the editor that left:
-        // another may have opened by the time the idle runs.
-        let later = {
-            let (tab, left) = (Rc::downgrade(self), Rc::downgrade(&editor));
-            move || {
-                let (tab, left) = (tab.clone(), left.clone());
-                glib::idle_add_local_once(move || {
-                    let Some(tab) = tab.upgrade() else { return };
-                    let open = tab.label.borrow().as_ref().map(Rc::downgrade);
-                    if open.is_some_and(|open| open.ptr_eq(&left)) {
-                        tab.finish_label();
-                    }
-                });
-            }
-        };
-        let focus = gtk::EventControllerFocus::new();
-        focus.connect_leave({
-            let later = later.clone();
-            move |_| later()
-        });
-        editor.view().add_controller(focus);
-        label::wire_keys(
-            &editor,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                move || tab.finish_label()
-            ),
-        );
-        // Space that takes no keyboard moves no focus, so the press on it is heard on the window
-        // instead. Wired now that the editor is in place, and taken off again when it closes.
-        label::wire_press(&editor, later);
-        // Only now: a focus controller hears the focus leave only if it saw it come in, so a
-        // click outside finishes the label only when the grab comes after the wiring.
-        editor.focus();
-    }
-
-    /// Put the label editor back over its cell: where it opens, and again whenever the canvas
-    /// scrolls or zooms under it. Nothing when no label is being edited.
-    fn place_label(&self) {
-        let Some(editor) = self.label.borrow().clone() else {
-            return;
-        };
-        editor.place_at(
-            self.view.to_widget(&editor.place),
-            editor.font_size * self.view.scale(),
-        );
-    }
-
-    /// Put the label editor away, writing what was typed into the cell. Safe to call twice:
-    /// taking the editor off the canvas moves the focus, which calls it again.
-    pub fn finish_label(self: &Rc<Self>) {
-        let Some(editor) = self.label.borrow_mut().take() else {
-            return;
-        };
-        let typed = editor.changed();
-        editor.close(&self.overlay);
-        if let Some(markdown) = typed {
-            let id = editor.cell.clone();
-            self.edit(|e, page| e.set_label_markdown(page, &id, &markdown));
-        }
-        // Not when another label opened meanwhile: a double click on a second label finishes
-        // the first and opens the second in one turn, and taking the focus back would finish
-        // that one too.
-        let tab = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            if let Some(tab) = tab.upgrade().filter(|t| t.label.borrow().is_none()) {
-                tab.view.grab_focus();
-            }
-        });
-    }
-
-    /// Typing over the one selected shape: its label is edited with `typed` in place of what it
-    /// said, as draw.io does. `false` when there is nothing to type into.
-    fn type_into_label(self: &Rc<Self>, typed: Option<char>) -> bool {
-        let Some(c) = typed.filter(|c| !c.is_control()) else {
-            return false;
-        };
-        let one = match self.selection.borrow().as_slice() {
-            [id] => self.view.sheet().is_some_and(|s| !s.is_pinned(id)),
-            _ => false,
-        };
-        if !one {
-            return false;
-        }
-        self.edit_label();
-        let Some(editor) = self.label.borrow().clone() else {
-            return false;
-        };
-        editor.type_text(&c.to_string());
-        true
-    }
-
-    /// The cell whose label is being edited, if one is.
-    #[cfg(feature = "bench")]
-    pub fn editing_label(&self) -> Option<CellId> {
-        self.label.borrow().as_ref().map(|e| e.cell.clone())
-    }
-
-    /// Where the label editor sits on the canvas, how tall its text is laid out, how big that
-    /// text is and whether it holds the keyboard, for the drills that move the page under it.
-    #[cfg(feature = "bench")]
-    pub fn label_at(&self) -> Option<(accent_drawio::Rect, f64, f64, bool)> {
-        let editor = self.label.borrow().clone()?;
-        let (at, content, px) = editor.at();
-        Some((at, content, px, editor.has_focus()))
-    }
-
-    /// `Ctrl+Return` in the label editor, which the window's accelerator took first: finish the
-    /// label. `false` when no label is being edited here.
-    pub fn commit_label(self: &Rc<Self>) -> bool {
-        let editing = self.label.borrow().as_ref().is_some_and(|e| e.has_focus());
-        if editing {
-            self.finish_label();
-        }
-        editing
     }
 
     /// A page rectangle in the canvas's own coordinates.
@@ -1310,17 +932,6 @@ impl DiagramTab {
         self.view.sheet()?.frame_of(id)
     }
 
-    /// A cell's label as the label editor would show it.
-    #[cfg(feature = "bench")]
-    pub fn label_markdown(&self, id: &str) -> Option<String> {
-        let editor = self.editor.borrow();
-        let cell = editor.page(self.page_index.get()).ok()?.cell(id)?;
-        Some(accent_drawio::label::to_markdown(
-            cell.label(),
-            cell.is_html(),
-        ))
-    }
-
     pub fn set_spellcheck(&self, on: bool) {
         self.spellcheck.set(on);
     }
@@ -1336,19 +947,19 @@ impl DiagramTab {
             index = e.add_page(&name);
             Ok(())
         });
-        self.emit(&self.on_pages);
+        self.on_pages.emit(self);
         self.goto_page(index);
     }
 
     pub fn rename_page(self: &Rc<Self>, name: &str) {
         let name = name.to_string();
         self.edit(|e, page| e.rename_page(page, &name));
-        self.emit(&self.on_pages);
+        self.on_pages.emit(self);
     }
 
     pub fn delete_page(self: &Rc<Self>) {
         self.edit(|e, page| e.delete_page(page));
-        self.emit(&self.on_pages);
+        self.on_pages.emit(self);
     }
 
     /// Zoom a step in or out around the middle of the view.
@@ -1421,9 +1032,9 @@ impl DiagramTab {
         self.refresh();
         self.sync_web();
         self.fill_props();
-        self.emit(&self.on_pages);
-        self.emit(&self.on_history);
-        self.emit(&self.on_selection);
+        self.on_pages.emit(self);
+        self.on_history.emit(self);
+        self.on_selection.emit(self);
     }
 
     /// The file moved under edits nobody has saved: the banner holds the question.
@@ -1450,298 +1061,72 @@ impl DiagramTab {
         );
     }
 
-    /// Write the file a moment after the last edit, as a note's autosave does.
+    /// Write the file a second after an edit, once for a burst of them.
     fn save_soon(self: &Rc<Self>) {
-        if self.save_pending.replace(true) {
-            return;
-        }
-        glib::timeout_add_local_once(
-            AUTOSAVE,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                move || {
-                    tab.save_pending.set(false);
-                    tab.emit(&tab.on_autosave);
-                }
-            ),
-        );
-    }
-
-    /// Fire a window action from the canvas's own keys (the PDF tab's `run`).
-    fn run(&self, action: &str) {
-        let _ = self.view.activate_action(action, None);
-    }
-
-    /// The canvas's own menu on a secondary click, as a PDF page has one: the cell under the
-    /// pointer is selected first unless it is already, and empty page lets the selection go, as
-    /// draw.io's `mxPopupMenuHandler` does.
-    fn wire_menu(self: &Rc<Self>) {
-        let secondary = gtk::GestureClick::builder()
-            .button(gdk::BUTTON_SECONDARY)
-            .build();
-        secondary.connect_pressed(glib::clone!(
+        self.autosave.call_once(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            // Every entry edits, and a presented page is read only.
-            move |_, _, x, y| {
-                if tab.presenting.get().is_none() {
-                    tab.menu_at(x, y);
-                }
-            }
+            move || tab.on_autosave.emit(&tab)
         ));
-        self.view.add_controller(secondary);
-    }
-
-    /// The menu under the pointer, at widget `(x, y)`: the clipboard and Duplicate and Delete,
-    /// Group or Ungroup where they apply, the order, and Edit Label for one cell; over nothing
-    /// selected, Paste alone. Window actions, so the palette lists them and they can be rebound.
-    fn menu_at(self: &Rc<Self>, x: f64, y: f64) {
-        match self.view.cell_at(x, y) {
-            Some(cell) if !self.selection.borrow().contains(&cell) => self.select(vec![cell]),
-            Some(_) => {}
-            None => self.select(Vec::new()),
-        }
-        let ids = self.selection();
-        let menu = gio::Menu::new();
-        let section = |actions: &[&str]| {
-            let part = gio::Menu::new();
-            for action in actions {
-                part.append(Some(crate::actions::label_of(action)), Some(action));
-            }
-            if part.n_items() > 0 {
-                menu.append_section(None, &part);
-            }
-        };
-        if ids.is_empty() {
-            section(&["win.diagram-paste"]);
-        } else {
-            section(&[
-                "win.diagram-cut",
-                "win.diagram-copy",
-                "win.diagram-paste",
-                "win.diagram-duplicate",
-                "win.diagram-delete",
-            ]);
-            let groups = {
-                let editor = self.editor.borrow();
-                let page = editor.page(self.page_index.get());
-                let group =
-                    |id: &CellId| page.as_ref().is_ok_and(|p| p.children(id).next().is_some());
-                ids.iter().any(group)
-            };
-            let mut grouping = Vec::new();
-            if ids.len() > 1 {
-                grouping.push("win.diagram-group");
-            }
-            if groups {
-                grouping.push("win.diagram-ungroup");
-            }
-            section(&grouping);
-            section(&["win.diagram-to-front", "win.diagram-to-back"]);
-            if ids.len() == 1 {
-                section(&["win.diagram-edit-label"]);
-            }
-        }
-        // Parented to the tab's box, not the canvas, which allocates itself: a popover on it
-        // would never be presented again (DESIGN.md, States).
-        let Some(host) = self.page.child().downcast::<gtk::Box>().ok() else {
-            return;
-        };
-        let at = gtk::graphene::Point::new(x as f32, y as f32);
-        let at = self.view.compute_point(&host, &at).unwrap_or(at);
-        let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
-        crate::widgets::popup_menu(&host, &menu, Some(anchor));
-    }
-
-    /// The canvas's keys. Undo, Select All and Delete belong to whatever has the keyboard, so
-    /// they are the canvas's own and fire the window's actions rather than being accelerators
-    /// (the PDF doctrine, `actions.rs`).
-    fn wire_keys(self: &Rc<Self>) {
-        let keys = gtk::EventControllerKey::new();
-        keys.connect_key_pressed(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            #[upgrade_or]
-            glib::Propagation::Proceed,
-            move |_, key, _, state| {
-                let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
-                let alt = state.contains(gdk::ModifierType::ALT_MASK);
-                let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
-                let step = if shift { 10.0 } else { 1.0 };
-                let presenting = tab.presenting.get().is_some();
-                match key {
-                    // A presented page is a slide, which Space, the arrows and the paging keys
-                    // read on through, as they do a presented PDF, and nothing edits: a chord goes
-                    // on to the window, and any other key that reaches the canvas does nothing,
-                    // an arrow included, which would move the keyboard off the page.
-                    gdk::Key::space if presenting && shift => tab.run("win.diagram-previous-page"),
-                    gdk::Key::space | gdk::Key::Right | gdk::Key::Page_Down
-                        if presenting && !ctrl =>
-                    {
-                        tab.run("win.diagram-next-page")
-                    }
-                    gdk::Key::Left | gdk::Key::Page_Up if presenting && !ctrl => {
-                        tab.run("win.diagram-previous-page")
-                    }
-                    _ if presenting && (ctrl || alt) => return glib::Propagation::Proceed,
-                    _ if presenting => {}
-                    gdk::Key::z | gdk::Key::Z if ctrl && shift => tab.run("win.diagram-redo"),
-                    gdk::Key::z if ctrl => tab.run("win.diagram-undo"),
-                    gdk::Key::y if ctrl => tab.run("win.diagram-redo"),
-                    gdk::Key::a if ctrl => tab.run("win.diagram-select-all"),
-                    gdk::Key::c if ctrl => tab.run("win.diagram-copy"),
-                    gdk::Key::x if ctrl => tab.run("win.diagram-cut"),
-                    gdk::Key::v if ctrl => tab.run("win.diagram-paste"),
-                    gdk::Key::Delete | gdk::Key::BackSpace if ctrl => {
-                        tab.run("win.diagram-delete-all")
-                    }
-                    gdk::Key::Delete | gdk::Key::BackSpace => tab.run("win.diagram-delete"),
-                    gdk::Key::Return | gdk::Key::KP_Enter if !ctrl => {
-                        tab.run("win.diagram-edit-label")
-                    }
-                    gdk::Key::Page_Down if !ctrl => tab.run("win.diagram-next-page"),
-                    gdk::Key::Page_Up if !ctrl => tab.run("win.diagram-previous-page"),
-                    gdk::Key::Left if !ctrl => tab.nudge(-step, 0.0),
-                    gdk::Key::Right if !ctrl => tab.nudge(step, 0.0),
-                    gdk::Key::Up if !ctrl => tab.nudge(0.0, -step),
-                    gdk::Key::Down if !ctrl => tab.nudge(0.0, step),
-                    gdk::Key::space if !ctrl => tab.view.set_panning(true),
-                    gdk::Key::Escape if tab.tool.get() != Tool::Select => {
-                        tab.run("win.diagram-select")
-                    }
-                    gdk::Key::Escape if tab.has_selection() => tab.select(Vec::new()),
-                    _ if !ctrl && !alt && tab.type_into_label(key.to_unicode()) => {}
-                    _ => return glib::Propagation::Proceed,
-                }
-                glib::Propagation::Stop
-            }
-        ));
-        keys.connect_key_released(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_, key, _, _| {
-                if key == gdk::Key::space {
-                    tab.view.set_panning(false);
-                }
-            }
-        ));
-        self.view.add_controller(keys);
-        // A key held while the canvas lost the keyboard never comes up here.
-        let focus = gtk::EventControllerFocus::new();
-        focus.connect_leave(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_| tab.view.set_panning(false)
-        ));
-        self.view.add_controller(focus);
-    }
-
-    /// A plain wheel pushed on past the top or bottom of the page turns it ([`Overshoot`]). Ahead
-    /// of the scrolled window, which scrolls whatever this passes on.
-    fn wire_wheel(self: &Rc<Self>) {
-        let overshoot = Rc::new(Cell::new(Overshoot::default()));
-        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
-        wheel.connect_scroll(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            #[strong]
-            overshoot,
-            #[upgrade_or]
-            glib::Propagation::Proceed,
-            move |wheel, dx, dy| {
-                // Ctrl zooms (`zoom::zoom_on_wheel`), and Shift and a sideways swipe scroll across.
-                let held = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
-                if wheel.current_event_state().intersects(held) || dx.abs() >= dy.abs() {
-                    return glib::Propagation::Proceed;
-                }
-                let room = tab.view.has_room(dy > 0.0);
-                let ahead = tab.next_page(dy > 0.0).is_some();
-                let swipe = wheel.unit() == gdk::ScrollUnit::Surface;
-                let mut push = overshoot.get();
-                if let Some(forward) = push.scroll(dy, room, swipe) {
-                    tab.turn_page(forward);
-                }
-                overshoot.set(push);
-                // At the edge only the margin is left for the scrolled window to scroll, and a
-                // swipe it saw begin would be its own to the end (its `smooth_scroll`), never
-                // reaching here again: the push is kept while there is a page to turn to.
-                match room || !ahead {
-                    true => glib::Propagation::Proceed,
-                    false => glib::Propagation::Stop,
-                }
-            }
-        ));
-        // The fingers left the touchpad: the next swipe may turn the page again.
-        wheel.connect_scroll_end(move |_| overshoot.set(Overshoot::default()));
-        self.view.add_controller(wheel);
-    }
-
-    fn emit(self: &Rc<Self>, hook: &Hook) {
-        let f = hook.borrow().clone();
-        if let Some(f) = f {
-            f(self);
-        }
     }
 
     pub fn connect_zoom(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_zoom.borrow_mut() = Some(Rc::new(f));
+        self.on_zoom.set(Rc::new(f));
     }
 
     pub fn connect_page(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_page.borrow_mut() = Some(Rc::new(f));
+        self.on_page.set(Rc::new(f));
     }
 
     pub fn connect_jump(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_jump.borrow_mut() = Some(Rc::new(f));
+        self.on_jump.set(Rc::new(f));
     }
 
     pub fn connect_pages(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_pages.borrow_mut() = Some(Rc::new(f));
+        self.on_pages.set(Rc::new(f));
     }
 
     pub fn connect_selection(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_selection.borrow_mut() = Some(Rc::new(f));
+        self.on_selection.set(Rc::new(f));
     }
 
     pub fn connect_history(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_history.borrow_mut() = Some(Rc::new(f));
+        self.on_history.set(Rc::new(f));
     }
 
     pub fn connect_autosave(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_autosave.borrow_mut() = Some(Rc::new(f));
+        self.on_autosave.set(Rc::new(f));
     }
 
     /// The Image tool was picked: the window asks for a file.
     pub fn connect_image(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_image.borrow_mut() = Some(Rc::new(f));
+        self.on_image.set(Rc::new(f));
     }
 
     /// The ring's outer orbit changed how the tools draw.
     pub fn connect_options(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_options.borrow_mut() = Some(Rc::new(f));
+        self.on_options.set(Rc::new(f));
     }
 
     /// What to tell the reader in a toast.
     pub fn connect_toast(&self, f: impl Fn(&str) + 'static) {
-        *self.on_toast.borrow_mut() = Some(Rc::new(f));
+        self.on_toast.set(Rc::new(f));
     }
 
     fn toast(&self, text: &str) {
-        let f = self.on_toast.borrow().clone();
-        if let Some(f) = f {
+        if let Some(f) = self.on_toast.get() {
             f(text);
         }
     }
 
     /// The web banner's Load.
     pub fn connect_web(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_web.borrow_mut() = Some(Rc::new(f));
+        self.on_web.set(Rc::new(f));
     }
 
     /// The changed-on-disk banner's button.
     pub fn connect_banner(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
-        *self.on_banner.borrow_mut() = Some(Rc::new(f));
+        self.on_banner.set(Rc::new(f));
     }
 
     /// Embed a picture the window read, at the middle of what is on screen, no wider than 400.
@@ -1782,7 +1167,7 @@ impl DiagramTab {
 
     /// The Image tool: nothing to drag, the window's file dialog does the rest.
     pub fn ask_image(self: &Rc<Self>) {
-        self.emit(&self.on_image);
+        self.on_image.emit(self);
     }
 }
 
@@ -1838,17 +1223,6 @@ fn shown(index: usize, pages: usize) -> accent_drawio::Context {
     }
 }
 
-/// Two numbers as Copy Position and Copy Size write them, `x, y`, or with spaces alone between
-/// them.
-fn pair(text: &str) -> Option<(f64, f64)> {
-    let mut numbers = text
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<f64>().ok().filter(|n| n.is_finite()));
-    let (a, b) = (numbers.next()??, numbers.next()??);
-    numbers.next().is_none().then_some((a, b))
-}
-
 /// Whether the picture at `url` on the web has been downloaded, for a drill.
 #[cfg(feature = "bench")]
 pub fn web_downloaded(url: &str) -> bool {
@@ -1886,13 +1260,5 @@ mod tests {
         assert_eq!(page_named(&file, "Page-1"), Some(0));
         assert_eq!(page_named(&file, "Page 2"), Some(1));
         assert_eq!(page_named(&file, "Page-2"), None);
-    }
-
-    #[test]
-    fn a_copied_position_reads_back() {
-        assert_eq!(pair("100, 20.5"), Some((100.0, 20.5)));
-        assert_eq!(pair(" -3 4 "), Some((-3.0, 4.0)));
-        assert_eq!(pair("1, 2, 3"), None);
-        assert_eq!(pair("rounded=1;"), None);
     }
 }

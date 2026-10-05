@@ -224,6 +224,7 @@ fn render_loop(
                     text,
                     options,
                     from,
+                    mut walked,
                 } => {
                     // An empty query is the bar being cleared or closed: it has already pushed
                     // aside whatever was running, and there is nothing to look for.
@@ -231,8 +232,7 @@ fn render_loop(
                         continue;
                     }
                     let pages = doc.page_count();
-                    let mut at = from;
-                    while at < pages {
+                    while walked < pages {
                         // Between pages, and no finer: pdfium loads a page's text whole
                         // (`FPDFText_LoadPage`) and the search cursor runs over that, so one page
                         // is the smallest unit there is to stop at. Measured on a 500-page A4
@@ -244,7 +244,8 @@ fn render_loop(
                                     query,
                                     text,
                                     options,
-                                    from: at,
+                                    from,
+                                    walked,
                                 };
                                 interrupt(&mut queue, rest, newer);
                                 break;
@@ -252,6 +253,7 @@ fn render_loop(
                             Err(TryRecvError::Disconnected) => return None,
                             Err(TryRecvError::Empty) => {}
                         }
+                        let at = (from + walked) % pages;
                         match doc.search(at, &text, options) {
                             Ok(hits) if !hits.is_empty() => send(
                                 view,
@@ -263,7 +265,7 @@ fn render_loop(
                             ),
                             _ => {}
                         }
-                        at += 1;
+                        walked += 1;
                     }
                 }
                 Request::Ink {
@@ -683,12 +685,14 @@ mod tests {
     use super::super::protocol::Asker;
     use super::*;
 
-    fn search(query: u64, from: usize) -> Request {
+    /// A search started on the fourth page, `walked` pages on from there.
+    fn search(query: u64, walked: usize) -> Request {
         Request::Search {
             query,
             text: "q".to_string(),
             options: Default::default(),
-            from,
+            from: 3,
+            walked,
         }
     }
 
@@ -704,7 +708,8 @@ mod tests {
             queue.pop(),
             Some(Request::Search {
                 query: 2,
-                from: 10,
+                from: 3,
+                walked: 10,
                 ..
             })
         ));
@@ -715,7 +720,7 @@ mod tests {
             queue.pop(),
             Some(Request::Search {
                 query: 3,
-                from: 0,
+                walked: 0,
                 ..
             })
         ));

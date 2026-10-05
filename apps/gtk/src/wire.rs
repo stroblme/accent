@@ -158,7 +158,12 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             // This pane's bar, whether or not this pane has the keyboard: a tab dragged out of a
             // background pane must not leave that pane's bar holding a tab it no longer has.
             app.retarget_find(&pane);
-            app.set_active_pane(&pane);
+            // A tab come to the front of a pane the keyboard is not in — the note in front of
+            // it deleted by a sync — leaves the reader where they are typing, or Close Tab, the
+            // title and the find bar would go over there with them still here.
+            if app.keyboard_pane().is_none_or(|k| Rc::ptr_eq(&k, &pane)) {
+                app.set_active_pane(&pane);
+            }
             app.sync_active();
             // Under F5 the tab come to the front is the one presented, keyboard and all.
             if app.presenting.get().is_some() {
@@ -250,8 +255,31 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         app,
         move |tabs| app.set_drop_active(tabs.is_transferring_page())
     ));
+    // A press on a pane's tab bar is the reader going to that pane, as VS Code's editor groups
+    // have it: the pane becomes the active one and its document takes the keyboard, which a tab
+    // picked there used to leave, with the typing, in the pane it was in. Capture phase, ahead of
+    // the tab that takes the press, and without claiming it.
+    let press = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_PRIMARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    press.connect_pressed(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        move |_, _, _, _| {
+            if app.set_active_pane(&pane) {
+                app.sync_active();
+            }
+            if !app.keyboard_pane().is_some_and(|k| Rc::ptr_eq(&k, &pane)) {
+                app.focus_document(&pane);
+            }
+        }
+    ));
+    pane.bar.add_controller(press);
     // Clicking into a pane's editor makes it the one a note opens into, the same as picking one
-    // of its tabs would.
+    // of its tabs does.
     let focus = gtk::EventControllerFocus::new();
     focus.connect_enter(glib::clone!(
         #[weak]
@@ -772,12 +800,11 @@ fn ends_presenting(app: &App, event: &gdk::Event) -> bool {
         .any(|trigger| trigger.trigger(event, false) == gdk::KeyMatch::Exact)
 }
 
-/// An Escape nothing closer to the focus wanted: the find bar of the pane the reader is in goes
-/// first, then the comparison its tab is hosting, one per press, as the Stop Comparing button
-/// would. A diff tab of its own has no such button and is left alone. Says whether there was
-/// anything to put away.
+/// An Escape nothing closer to the focus wanted: the active pane's find bar goes first, then the
+/// comparison its tab is hosting, one per press, as the Stop Comparing button would. A diff tab of
+/// its own has no such button and is left alone. Says whether there was anything to put away.
 pub fn dismiss(app: &App) -> bool {
-    let pane = app.reader_pane();
+    let pane = app.pane();
     if pane.find.is_open() {
         pane.find.close();
         return true;

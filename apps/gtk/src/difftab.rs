@@ -96,4 +96,9 @@ impl DiffTab {
     pub fn comparison(&self) -> &Rc<Compare> {
         &self.compare
     }
+
+    /// What takes the keyboard when the tab's pane does: the right column, what it compares to.
+    pub fn key_target(&self) -> gtk::Widget {
+        gtk::prelude::Cast::upcast(self.views[1].clone())
+    }
 }

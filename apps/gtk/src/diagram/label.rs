@@ -12,6 +12,7 @@ use accent_drawio::{CellId, Rect, VAlign};
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene, pango};
 
+use super::DiagramTab;
 use crate::editor::{self, Flavour};
 
 /// The narrowest the editor is, in pixels: a label on a hairline edge still needs room for a
@@ -276,6 +277,202 @@ pub fn wire_press(editor: &Rc<LabelEditor>, finish: impl Fn() + 'static) {
     });
     root.add_controller(press.clone());
     *editor.press.borrow_mut() = Some((root, press));
+}
+
+impl DiagramTab {
+    /// Edit the label of the one selected cell, in the note editor over it.
+    pub fn edit_label(self: &Rc<Self>) {
+        let selection = self.selection();
+        let [id] = selection.as_slice() else {
+            return;
+        };
+        let id = id.clone();
+        self.finish_label();
+        let Some(sheet) = self.view.sheet() else {
+            return;
+        };
+        let (markdown, inside) = {
+            let editor = self.editor.borrow();
+            let Ok(page) = editor.page(self.page_index.get()) else {
+                return;
+            };
+            let Some(cell) = page.cell(&id) else { return };
+            // A label inside its shape, rather than beside it or on an edge.
+            let style = cell.style.resolve(cell.edge);
+            let at = |key, middle| style.get(key).is_none_or(|v| v == middle);
+            (
+                accent_drawio::label::to_markdown(cell.label(), cell.is_html()),
+                cell.vertex
+                    && at("labelPosition", "center")
+                    && at("verticalLabelPosition", "middle"),
+            )
+        };
+        // Where the label is drawn, or where it will be for a cell that has none yet: halfway
+        // along an edge, over the whole of a shape.
+        let (mut place, size) = sheet
+            .scene
+            .prims
+            .iter()
+            .find_map(|p| match p {
+                accent_drawio::Prim::Text {
+                    cell,
+                    rect,
+                    font,
+                    valign,
+                    ..
+                } if *cell == id => Some((label_box(*rect, *valign, inside), font.size)),
+                _ => None,
+            })
+            .or_else(|| {
+                let m = sheet.edge_middle(&id)?;
+                Some((accent_drawio::Rect::new(m.x, m.y, 0.0, 0.0), 11.0))
+            })
+            .unwrap_or_else(|| (sheet.frame_of(&id).unwrap_or_default(), 12.0));
+        if let Some(r) = sheet.rect(&id).filter(|_| place.w < 1.0 || place.h < 1.0) {
+            place = r;
+        }
+        self.view.reveal(&place);
+        let editor = LabelEditor::open(
+            &self.overlay,
+            id,
+            &markdown,
+            place,
+            size,
+            self.font.borrow().as_deref(),
+            self.spellcheck.get(),
+        );
+        *self.label.borrow_mut() = Some(editor.clone());
+        self.place_label();
+        // A click outside finishes the label, from an idle rather than the handler: leaving is
+        // GTK moving the focus, and taking the editor off the canvas meanwhile left GTK walking
+        // up from a widget that was gone, over and over (the freeze). Only the editor that left:
+        // another may have opened by the time the idle runs.
+        let later = {
+            let (tab, left) = (Rc::downgrade(self), Rc::downgrade(&editor));
+            move || {
+                let (tab, left) = (tab.clone(), left.clone());
+                glib::idle_add_local_once(move || {
+                    let Some(tab) = tab.upgrade() else { return };
+                    let open = tab.label.borrow().as_ref().map(Rc::downgrade);
+                    if open.is_some_and(|open| open.ptr_eq(&left)) {
+                        tab.finish_label();
+                    }
+                });
+            }
+        };
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave({
+            let later = later.clone();
+            move |_| later()
+        });
+        editor.view().add_controller(focus);
+        wire_keys(
+            &editor,
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || tab.finish_label()
+            ),
+        );
+        // Space that takes no keyboard moves no focus, so the press on it is heard on the window
+        // instead. Wired now that the editor is in place, and taken off again when it closes.
+        wire_press(&editor, later);
+        // Only now: a focus controller hears the focus leave only if it saw it come in, so a
+        // click outside finishes the label only when the grab comes after the wiring.
+        editor.focus();
+    }
+
+    /// Put the label editor back over its cell: where it opens, and again whenever the canvas
+    /// scrolls or zooms under it. Nothing when no label is being edited.
+    pub(super) fn place_label(&self) {
+        let Some(editor) = self.label.borrow().clone() else {
+            return;
+        };
+        editor.place_at(
+            self.view.to_widget(&editor.place),
+            editor.font_size * self.view.scale(),
+        );
+    }
+
+    /// Put the label editor away, writing what was typed into the cell. Safe to call twice:
+    /// taking the editor off the canvas moves the focus, which calls it again.
+    pub fn finish_label(self: &Rc<Self>) {
+        let Some(editor) = self.label.borrow_mut().take() else {
+            return;
+        };
+        let typed = editor.changed();
+        editor.close(&self.overlay);
+        if let Some(markdown) = typed {
+            let id = editor.cell.clone();
+            self.edit(|e, page| e.set_label_markdown(page, &id, &markdown));
+        }
+        // Not when another label opened meanwhile: a double click on a second label finishes
+        // the first and opens the second in one turn, and taking the focus back would finish
+        // that one too.
+        let tab = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(tab) = tab.upgrade().filter(|t| t.label.borrow().is_none()) {
+                tab.view.grab_focus();
+            }
+        });
+    }
+
+    /// Typing over the one selected shape: its label is edited with `typed` in place of what it
+    /// said, as draw.io does. `false` when there is nothing to type into.
+    pub(super) fn type_into_label(self: &Rc<Self>, typed: Option<char>) -> bool {
+        let Some(c) = typed.filter(|c| !c.is_control()) else {
+            return false;
+        };
+        let one = match self.selection.borrow().as_slice() {
+            [id] => self.view.sheet().is_some_and(|s| !s.is_pinned(id)),
+            _ => false,
+        };
+        if !one {
+            return false;
+        }
+        self.edit_label();
+        let Some(editor) = self.label.borrow().clone() else {
+            return false;
+        };
+        editor.type_text(&c.to_string());
+        true
+    }
+
+    /// The cell whose label is being edited, if one is.
+    #[cfg(feature = "bench")]
+    pub fn editing_label(&self) -> Option<CellId> {
+        self.label.borrow().as_ref().map(|e| e.cell.clone())
+    }
+
+    /// Where the label editor sits on the canvas, how tall its text is laid out, how big that
+    /// text is and whether it holds the keyboard, for the drills that move the page under it.
+    #[cfg(feature = "bench")]
+    pub fn label_at(&self) -> Option<(accent_drawio::Rect, f64, f64, bool)> {
+        let editor = self.label.borrow().clone()?;
+        let (at, content, px) = editor.at();
+        Some((at, content, px, editor.has_focus()))
+    }
+
+    /// `Ctrl+Return` in the label editor, which the window's accelerator took first: finish the
+    /// label. `false` when no label is being edited here.
+    pub fn commit_label(self: &Rc<Self>) -> bool {
+        let editing = self.label.borrow().as_ref().is_some_and(|e| e.has_focus());
+        if editing {
+            self.finish_label();
+        }
+        editing
+    }
+
+    /// A cell's label as the label editor would show it.
+    #[cfg(feature = "bench")]
+    pub fn label_markdown(&self, id: &str) -> Option<String> {
+        let editor = self.editor.borrow();
+        let cell = editor.page(self.page_index.get()).ok()?.cell(id)?;
+        Some(accent_drawio::label::to_markdown(
+            cell.label(),
+            cell.is_html(),
+        ))
+    }
 }
 
 #[cfg(test)]

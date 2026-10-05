@@ -127,9 +127,13 @@ pub enum Request {
         text: String,
         /// The find bar's Match Case and Match Whole Word.
         options: Options,
-        /// The first page still to look at. A query the reader interrupted comes back with this
-        /// moved on, so it finishes the document instead of stopping where it was pushed aside.
+        /// The page the search starts on, the one being read, so its first hit is found first.
+        /// It walks on to the end and wraps round to the page before this one.
         from: usize,
+        /// How many pages from `from` have been looked at. A query the reader interrupted comes
+        /// back with this moved on, so it finishes the document instead of stopping where it was
+        /// pushed aside.
+        walked: usize,
     },
     /// Where the note links that highlight this document land on the page today.
     Highlights(Vec<PdfLink>),

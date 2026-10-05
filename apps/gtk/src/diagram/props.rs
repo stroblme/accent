@@ -10,9 +10,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use accent_drawio::{Color, Rect, Resolved};
+use accent_drawio::{CellId, Color, Rect, Resolved};
 use adw::prelude::*;
+use gtk::glib;
 
+use super::DiagramTab;
 use crate::widgets::{Debounce, hover_revealer, icon_button, reveal_on_hover};
 
 /// What the pane shows.
@@ -752,13 +754,232 @@ fn hex(c: gtk::gdk::RGBA) -> String {
     Color::rgb(r, g, b).hex()
 }
 
+impl DiagramTab {
+    /// What the Properties pane shows for this diagram.
+    pub fn properties(&self) -> gtk::Widget {
+        self.props.widget().clone()
+    }
+
+    /// Put the selection's look, or the page's, into the Properties pane, and the page's layers.
+    pub(super) fn fill_props(&self) {
+        let (target, layers, current) = {
+            let editor = self.editor.borrow();
+            let Ok(page) = editor.page(self.page_index.get()) else {
+                return;
+            };
+            let layers: Vec<super::layers::Layer> = page
+                .layers()
+                .iter()
+                .rev()
+                .map(|l| super::layers::Layer {
+                    id: l.id.clone(),
+                    name: l.label().to_string(),
+                    visible: l.is_visible(),
+                    locked: l.is_locked(),
+                })
+                .collect();
+            let current = editor
+                .current_layer(self.page_index.get())
+                .map(str::to_string);
+            let selection = self.selection.borrow();
+            let cells: Vec<&accent_drawio::Cell> =
+                selection.iter().filter_map(|id| page.cell(id)).collect();
+            let pinned = |id: &str| self.view.sheet().is_some_and(|s| s.is_pinned(id));
+            let geometry = match cells.as_slice() {
+                [cell] if cell.vertex => cell.geometry.as_ref().filter(|g| !g.relative),
+                _ => None,
+            };
+            let geometry = geometry.map(|g| (g.rect(), pinned(&cells[0].id)));
+            let target = match cells.first() {
+                Some(first) => Target::Cells {
+                    style: first.style.resolve(first.edge),
+                    raw: first.style.to_string(),
+                    count: cells.len(),
+                    vertices: cells.iter().any(|c| c.vertex),
+                    edges: cells.iter().any(|c| c.edge),
+                    fills: cells.iter().any(|c| c.takes_fill()),
+                    geometry,
+                },
+                None => Target::Page {
+                    name: page.name().to_string(),
+                    size: page.size(),
+                    background: page.background(),
+                },
+            };
+            (target, layers, current)
+        };
+        self.props.fill(&target);
+        self.props.fill_layers(&layers, current.as_deref());
+    }
+
+    /// A row of the Properties pane changed.
+    pub(super) fn apply_property(self: &Rc<Self>, change: Change) {
+        let ids = self.selection();
+        match change {
+            Change::Style(pairs) if !ids.is_empty() => {
+                let pairs: Vec<(&str, Option<&str>)> =
+                    pairs.iter().map(|(k, v)| (*k, v.as_deref())).collect();
+                self.edit(|e, page| e.set_styles(page, &ids, &pairs));
+            }
+            Change::Raw(style) => {
+                if let [id] = ids.as_slice() {
+                    self.edit(|e, page| e.set_style_string(page, id, &style));
+                }
+            }
+            Change::PageAttr(key, value) => {
+                self.edit(|e, page| e.set_page_attr(page, key, value.as_deref()));
+            }
+            Change::PageName(name) if !name.trim().is_empty() => {
+                self.rename_page(name.trim());
+            }
+            Change::Geometry(rect) => {
+                if let [id] = ids.as_slice() {
+                    self.set_geometry(id, rect);
+                }
+            }
+            Change::Copy(clip) => self.copy_property(clip),
+            Change::Paste(clip) => self.paste_property(clip),
+            Change::Layer(change) => self.apply_layer(change),
+            _ => {}
+        }
+    }
+
+    /// A row of the Layers group changed.
+    fn apply_layer(self: &Rc<Self>, change: super::layers::LayerChange) {
+        use super::layers::LayerChange as L;
+        let pick = |id: Option<CellId>| {
+            self.editor.borrow_mut().set_current_layer(id);
+            self.fill_props();
+        };
+        match change {
+            L::Add => {
+                let mut added = None;
+                self.edit(|e, page| {
+                    added = Some(e.add_layer(page, "Untitled Layer")?);
+                    Ok(())
+                });
+                // As draw.io's Add Layer does, the new layer is the one drawn into.
+                if added.is_some() {
+                    pick(added);
+                }
+            }
+            L::Pick(id) => pick(Some(id)),
+            L::Rename(id, name) => self.edit(|e, page| e.rename_layer(page, &id, name.trim())),
+            L::Show(id, on) => self.edit(|e, page| e.set_visible(page, &id, on)),
+            L::Lock(id, on) => self.edit(|e, page| {
+                let ids = std::slice::from_ref(&id);
+                e.set_style(page, ids, "locked", on.then_some("1"))
+            }),
+            L::Raise(id, up) => {
+                let z = match up {
+                    true => accent_drawio::ZOrder::Forward,
+                    false => accent_drawio::ZOrder::Backward,
+                };
+                self.edit(|e, page| e.reorder(page, std::slice::from_ref(&id), z));
+            }
+            L::Delete(id) => self.edit(|e, page| e.delete_layer(page, &id)),
+        }
+    }
+
+    /// Give shape `id` the place and size `rect` in its parent, as the file has them.
+    fn set_geometry(self: &Rc<Self>, id: &str, rect: accent_drawio::Rect) {
+        self.edit(|e, page| {
+            let o = e.page(page)?.origin_of(id);
+            e.resize(page, id, rect.translate(o.x, o.y))
+        });
+    }
+
+    /// The one selected cell's position (`x, y`), size (`w, h`) or style string onto the
+    /// clipboard, as plain text.
+    fn copy_property(self: &Rc<Self>, clip: Clip) {
+        let text = {
+            let editor = self.editor.borrow();
+            let selection = self.selection.borrow();
+            let [id] = selection.as_slice() else { return };
+            let Some(cell) = editor
+                .page(self.page_index.get())
+                .ok()
+                .and_then(|p| p.cell(id))
+            else {
+                return;
+            };
+            let g = cell.geometry.as_ref().map(|g| g.rect()).unwrap_or_default();
+            let pair = |a, b| format!("{}, {}", number(a), number(b));
+            match clip {
+                Clip::Position => pair(g.x, g.y),
+                Clip::Size => pair(g.w, g.h),
+                Clip::Style => cell.style.to_string(),
+            }
+        };
+        self.view.clipboard().set_text(&text);
+        // A style string can run to a line of its own; a pair is short enough to read back.
+        match clip {
+            Clip::Style => self.toast("Copied style"),
+            _ => self.toast(&format!("Copied {} {text}", clip.noun())),
+        }
+    }
+
+    /// The clipboard's text onto the selection: a position or a size onto the one shape, a
+    /// style's look onto every cell selected, as one step (`Editor::paste_style`).
+    fn paste_property(self: &Rc<Self>, clip: Clip) {
+        let clipboard = self.view.clipboard();
+        let tab = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let text = clipboard.read_text_future().await.ok().flatten();
+            let Some(tab) = tab.upgrade() else { return };
+            let text = text.as_deref().map(str::trim).unwrap_or_default();
+            let ids = tab.selection();
+            let geometry = || {
+                let editor = tab.editor.borrow();
+                let page = editor.page(tab.page_index.get()).ok()?;
+                let [id] = ids.as_slice() else { return None };
+                Some(page.cell(id)?.geometry.as_ref()?.rect())
+            };
+            match (clip, pair(text), geometry()) {
+                (Clip::Position, Some((x, y)), Some(g)) => {
+                    tab.set_geometry(&ids[0], accent_drawio::Rect::new(x, y, g.w, g.h))
+                }
+                (Clip::Size, Some((w, h)), Some(g)) if w >= 0.0 && h >= 0.0 => {
+                    tab.set_geometry(&ids[0], accent_drawio::Rect::new(g.x, g.y, w, h))
+                }
+                (Clip::Style, ..) if text.contains('=') && !text.contains('\n') => {
+                    let style = accent_drawio::Style::parse(text);
+                    tab.edit(|e, page| e.paste_style(page, &ids, &style));
+                }
+                (clip, ..) => tab.toast(&format!("No {} on the clipboard", clip.noun())),
+            }
+        });
+    }
+}
+
+/// Two numbers as Copy Position and Copy Size write them, `x, y`, or with spaces alone between
+/// them.
+fn pair(text: &str) -> Option<(f64, f64)> {
+    let mut numbers = text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<f64>().ok().filter(|n| n.is_finite()));
+    let (a, b) = (numbers.next()??, numbers.next()??);
+    numbers.next().is_none().then_some((a, b))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::pair;
+
     #[test]
     fn numbers_are_written_as_draw_io_writes_them() {
         assert_eq!(super::number(12.0), "12");
         assert_eq!(super::number(1.5), "1.5");
         let c = gtk::gdk::RGBA::new(0.0, 150.0 / 255.0, 130.0 / 255.0, 1.0);
         assert_eq!(super::hex(c), "#009682");
+    }
+
+    #[test]
+    fn a_copied_position_reads_back() {
+        assert_eq!(pair("100, 20.5"), Some((100.0, 20.5)));
+        assert_eq!(pair(" -3 4 "), Some((-3.0, 4.0)));
+        assert_eq!(pair("1, 2, 3"), None);
+        assert_eq!(pair("rounded=1;"), None);
     }
 }
