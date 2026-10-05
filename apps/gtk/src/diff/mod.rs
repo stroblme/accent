@@ -15,18 +15,21 @@
 use accent_core::diff::{self, DiffLine, Op, Row};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use sourceview5::prelude::*;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ops::{Range, RangeInclusive};
 use std::rc::{Rc, Weak};
 
 use crate::editor::{self, Flavour};
 
+#[cfg(feature = "bench")]
+mod bench;
+mod columns;
 mod pad;
 mod pool;
 
-use pad::{UNMEASURED, bands, carried, is_pad, measure, pad, padding, reclaim, unmeasured};
+use columns::{Anchor, Columns, Rows};
+use pad::UNMEASURED;
 pub use pool::Pool;
 use pool::Role;
 
@@ -39,19 +42,6 @@ const TAG_REMOVED_EMPH: &str = "diff-removed-emph";
 pub(crate) const TAG_GAP: &str = "diff-gap";
 /// Unchanged lines kept on each side of a change, as `git diff` keeps them.
 const CONTEXT: usize = 3;
-
-/// Where the first hunk lands when a comparison opens, as a fraction of the view's height. A
-/// quarter down rather than at the top, so the lines that lead up to the change are visible too.
-const FIRST_HUNK_AT: f64 = 0.25;
-
-/// Blank space a hidden run leaves behind, for the button that opens it to sit in.
-const GAP_PX: i32 = 28;
-/// Inset of the hunk buttons from the pane's right edge.
-const INSET: i32 = 8;
-/// How often a relayout asks again for the heights GTK had not validated yet, and how long it
-/// waits between asking: GTK validates a screenful per idle, so a few are enough for any note.
-const SETTLE: u8 = 10;
-const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Row backgrounds. This is the one place DESIGN.md's "only accent, foreground and is_dark" rule
 /// bends: a diff has to read as green and red, and libadwaita publishes its success/error colours
@@ -161,17 +151,6 @@ pub fn pane(
     }
 }
 
-/// Put `scroller` on `adjustment`. GTK 4.22's `set_vadjustment` leaves the overlay scrollbar's
-/// fade handler, which a realized scroller connects to its adjustment, on the one it leaves; once
-/// the scroller is freed, the next scroll of that adjustment runs the handler on freed memory.
-/// Overlay scrolling switched off and back on around the swap takes the handler along.
-fn swap_vadjustment(scroller: &gtk::ScrolledWindow, adjustment: &gtk::Adjustment) {
-    let overlay = scroller.is_overlay_scrolling();
-    scroller.set_overlay_scrolling(false);
-    scroller.set_vadjustment(Some(adjustment));
-    scroller.set_overlay_scrolling(overlay);
-}
-
 /// What a companion holds: `\n` line endings, as the editor's own buffer does, so a line's
 /// character count is the same to the diff and to the buffer.
 pub(crate) fn normalise(text: &str) -> String {
@@ -255,45 +234,12 @@ fn hunk_lines(
     })
 }
 
-/// Where the overlaid buttons sit, in rows.
-#[derive(Clone, Copy)]
-enum Anchor {
-    /// At the right end of the row's top: the Take / Keep Both pair of the hunk starting there.
-    Hunk(usize),
-    /// Centred in the blank space a hidden run left at this row.
-    Gap(usize),
-}
-
 /// What an entry [`Compare::offer`] puts on the panes' menus does with a selection, and what a
 /// button [`Compare::offer_hunks`] puts on each hunk does with that hunk's lines.
 pub type OnLines = Rc<dyn Fn(Side, RangeInclusive<usize>, &str, &str)>;
 
 /// What a button on a hunk does, handed the hunk's rows.
 type OnHunk = Rc<dyn Fn(&Compare, Range<usize>)>;
-
-/// Where the view is kept until the rows are laid: see [`Compare::keep`].
-#[derive(Clone, Copy)]
-enum Keep {
-    /// The first hunk at [`FIRST_HUNK_AT`] of the page, which is where a comparison opens.
-    FirstHunk,
-    /// The scroll a hidden run was opened at, held there: see [`Compare::open_run`].
-    Scroll(f64),
-    /// Line `.1` of side `.0`, its row `.2` pixels below the top of the view: see
-    /// [`Compare::set_side`] and [`Compare::hold_line`].
-    Line(Side, usize, i32),
-}
-
-/// What a relayout measured: every row's natural height per side (`None` where the side has no
-/// visible line), the space both sides leave at a row on purpose, and where each row starts in
-/// the shared column.
-#[derive(Default)]
-struct Grid {
-    #[cfg(feature = "bench")]
-    heights: [Vec<Option<i32>>; 2],
-    #[cfg(feature = "bench")]
-    extra: Vec<i32>,
-    tops: Vec<i32>,
-}
 
 fn install_tags(buffer: &sourceview5::Buffer) {
     let table = buffer.tag_table();
@@ -362,17 +308,17 @@ fn restyle_tags(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
 
 /// Two columns with a diff laid over them. Built once over two buffers and kept in step with
 /// them from then on: [`Compare::refresh`] re-reads both and re-tags, and nothing here writes
-/// into a buffer except the hunk buttons, which edit the user's side as the user would.
+/// into a buffer except the hunk buttons, which edit the user's side as the user would. The rows
+/// are laid out level, the scroll is shared and the reader's place is kept by [`Columns`].
 pub struct Compare {
     weak: Weak<Compare>,
-    panes: [Pane; 2],
+    columns: Rc<Columns>,
     /// Which side is the user's own editor, if either. Its text is read, never set, and the hunk
     /// buttons write into it.
     editable: Option<Side>,
     /// The buttons each hunk carries on the pane beside the editor: a label, a tooltip, and what
     /// the button does.
     hunk_buttons: RefCell<Vec<(&'static str, &'static str, OnHunk)>>,
-    paned: gtk::Paned,
     lines: RefCell<Vec<DiffLine>>,
     rows: RefCell<Vec<Row>>,
     /// [`line_starts`] of each side's text.
@@ -386,25 +332,6 @@ pub struct Compare {
     opened: RefCell<HashSet<usize>>,
     /// Show All Unchanged Lines, in the title row: while it is down nothing is hidden.
     unfold: gtk::ToggleButton,
-    overlays: RefCell<Vec<(Side, gtk::Widget, Anchor)>>,
-    /// The grid the last relayout laid down, kept for [`Compare::misaligned`].
-    grid: RefCell<Grid>,
-    pending: RefCell<Option<glib::SourceId>>,
-    /// How many more times a relayout that had to estimate a height may ask GTK again. Reset
-    /// by every refresh; a bound, because a line GTK never validates would otherwise be asked
-    /// about forever.
-    settling: Cell<u8>,
-    /// The right column's own vertical adjustment, given up for the left one's while the
-    /// comparison lasts and handed back by [`Compare::leave`].
-    own_vadjustment: gtk::Adjustment,
-    /// The bottom margin each view was last given here, and how much of it is the blank under a
-    /// side with no line: see [`Compare::page_bottom`].
-    bottoms: [Cell<(i32, i32)>; 2],
-    /// Where the view is kept until a relayout has laid every row, which clears it. The first
-    /// hunk, as the comparison is built: a diff opens on what changed rather than on the top of a
-    /// file whose first difference is four hundred lines down. The scroll a run was opened at (see
-    /// [`Compare::open_run`]). After that where the view sits is the reader's business.
-    keep: Cell<Option<Keep>>,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
     /// Each pane's context menu as [`Compare::offer`] left it, and the one it replaced, to put
     /// back when the comparison goes. Empty until something is offered.
@@ -413,18 +340,6 @@ pub struct Compare {
     /// keystroke, a side re-read, a run opened — and what is drawn per line rather than per
     /// character has to follow them: see [`Compare::on_laid`].
     laid: RefCell<Option<Box<dyn Fn()>>>,
-}
-
-impl Drop for Compare {
-    /// The read-only columns go with the comparison: see [`editor::release`]. The editor's view
-    /// is its tab's.
-    fn drop(&mut self) {
-        for (pane, side) in self.panes.iter().zip([Side::Old, Side::New]) {
-            if self.editable != Some(side) {
-                editor::release(&pane.view);
-            }
-        }
-    }
 }
 
 impl Compare {
@@ -443,24 +358,6 @@ impl Compare {
         for pane in [&old, &new] {
             install_tags(&pane.buffer);
         }
-        // Vertical is shared, so two views of the same rows cannot drift apart. Horizontal
-        // stays per pane: everything wraps, so there is nothing to scroll sideways anyway.
-        let own_vadjustment = new.scroller.vadjustment();
-        swap_vadjustment(&new.scroller, &old.scroller.vadjustment());
-        // One height for both title rows: the editor's carries Stop Comparing and would stand
-        // taller, starting its column, and every row in it, that much lower. The group lives as
-        // long as the rows do.
-        let titles = gtk::SizeGroup::new(gtk::SizeGroupMode::Vertical);
-        titles.add_widget(&old.header);
-        titles.add_widget(&new.header);
-        // And one minimum width for both columns, which is what splits them evenly: a paned whose
-        // position was never set divides its width in the ratio of the two, on every allocation
-        // until a drag sets one. A position set from an idle once the paned was mapped was lost
-        // whenever the idle ran before the first allocation, and the columns stayed split by
-        // their own minimums, the editor's the wider for its Stop Comparing.
-        let columns = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
-        columns.add_widget(&old.root);
-        columns.add_widget(&new.root);
 
         // Beside Stop Comparing on the editor's title row, or at the end of the right one's. A
         // click leaves the keyboard in the text.
@@ -476,33 +373,17 @@ impl Compare {
         };
         host.insert_child_after(&unfold, host.first_child().as_ref());
 
-        let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-        paned.set_start_child(Some(&old.root));
-        paned.set_end_child(Some(&new.root));
-        paned.set_resize_start_child(true);
-        paned.set_shrink_start_child(false);
-        paned.set_resize_end_child(true);
-        paned.set_shrink_end_child(false);
-
         let this = Rc::new_cyclic(|weak| Compare {
             weak: weak.clone(),
-            panes: [old, new],
+            columns: Columns::new(vec![old, new], editable.map(Side::idx)),
             editable,
             hunk_buttons: RefCell::new(takes),
-            paned,
             lines: RefCell::new(Vec::new()),
             rows: RefCell::new(Vec::new()),
             starts: RefCell::new([Vec::new(), Vec::new()]),
             hidden: RefCell::new(Vec::new()),
             opened: RefCell::new(HashSet::new()),
             unfold,
-            overlays: RefCell::new(Vec::new()),
-            grid: RefCell::new(Grid::default()),
-            pending: RefCell::new(None),
-            settling: Cell::new(0),
-            own_vadjustment,
-            bottoms: Default::default(),
-            keep: Cell::new(Some(Keep::FirstHunk)),
             handlers: RefCell::new(Vec::new()),
             offered: RefCell::new(Vec::new()),
             laid: RefCell::new(None),
@@ -514,53 +395,17 @@ impl Compare {
         let connect = |object: glib::Object, id: glib::SignalHandlerId| {
             this.handlers.borrow_mut().push((object, id));
         };
-        for pane in &this.panes {
+        for pane in &this.columns.panes {
             // `view.color()` only resolves the theme foreground once the widget is mapped, and
             // the layout only measures true once it has a font.
             let w = weak.clone();
             pane.view.connect_map(move |_| {
                 if let Some(c) = w.upgrade() {
                     c.restyle();
-                    c.schedule_relayout();
+                    c.columns.schedule_relayout();
                 }
             });
-            // Everything wraps, so a pane's width is its horizontal page size: a paned drag or a
-            // window resize lands here and re-measures the rows, the line at the top staying.
-            let w = weak.clone();
-            let hadj = pane.scroller.hadjustment();
-            // GTK notifies on every allocation, the same width or not.
-            let width = Cell::new(hadj.page_size());
-            let id = hadj.connect_page_size_notify(move |hadj| {
-                let Some(c) = w.upgrade() else { return };
-                if width.replace(hadj.page_size()) != hadj.page_size() {
-                    c.rewrapped();
-                }
-                c.schedule_relayout();
-            });
-            connect(hadj.upcast(), id);
         }
-        // GTK lays lines out lazily and the total height moves as it reaches them, as it does
-        // on a font change; the rows are re-measured each time it settles.
-        let w = weak.clone();
-        let vadj = this.panes[0].scroller.vadjustment();
-        let id = vadj.connect_upper_notify(move |_| {
-            if let Some(c) = w.upgrade() {
-                c.schedule_relayout();
-            }
-        });
-        connect(vadj.clone().upcast(), id);
-        // A scroll held by `Compare::open_run`, or a line kept by `set_side`, goes back to where
-        // it is held.
-        let w = weak.clone();
-        let id = vadj.connect_value_changed(move |adj| {
-            let Some(c) = w.upgrade() else { return };
-            match c.keep.get() {
-                Some(Keep::Scroll(value)) if adj.value() != value => adj.set_value(value),
-                Some(Keep::Line(side, n, at)) => c.hold_line(side, n, at),
-                _ => {}
-            }
-        });
-        connect(vadj.upcast(), id);
         let w = weak.clone();
         let style = adw::StyleManager::default();
         let id = style.connect_dark_notify(move |_| {
@@ -569,37 +414,25 @@ impl Compare {
             }
         });
         connect(style.upcast(), id);
-        // Text typed ahead of a line's padding goes back under it on the keystroke itself: above
-        // 16 KB the editor refreshes the comparison only on its debounce, and the line would be
-        // laid out bare until then.
-        if let Some(mine) = editable {
-            let buffer = this.pane(mine).buffer.clone();
-            // Focus mode's line fade on the other column is measured from the lines facing the
-            // editor's carets, so stepping through the changes keeps the two columns' focus level,
-            // and drawn again as those carets move: its own caret nobody moves.
-            if let Some(theirs) = this
+        // Focus mode's line fade on the other column is measured from the lines facing the
+        // editor's carets, so stepping through the changes keeps the two columns' focus level,
+        // and drawn again as those carets move: its own caret nobody moves.
+        if let Some(mine) = editable
+            && let Some(theirs) = this
                 .pane(mine.other())
                 .view
                 .downcast_ref::<crate::multicaret::View>()
-            {
-                let w = weak.clone();
-                theirs.fade_from(move || w.upgrade()?.facing(mine));
-                let theirs = theirs.downgrade();
-                let id = buffer.connect_mark_set(move |buffer, _, mark| {
-                    let caret = [buffer.get_insert(), buffer.selection_bound()].contains(mark);
-                    if let Some(theirs) = theirs.upgrade().filter(|t| caret && t.fade_shown()) {
-                        theirs.queue_draw();
-                    }
-                });
-                connect(buffer.clone().upcast(), id);
-            }
-            let id = buffer.connect_changed(reclaim);
-            connect(buffer.clone().upcast(), id);
-            // And the lines an edit touches are marked as GTK's to lay out again, before the
-            // buffer's `changed` lays the comparison over them: see `pad::measure`.
-            let id = buffer.connect_insert_text(|buffer, at, _| unmeasured(buffer, at, at));
-            connect(buffer.clone().upcast(), id);
-            let id = buffer.connect_delete_range(unmeasured);
+        {
+            let w = weak.clone();
+            theirs.fade_from(move || w.upgrade()?.facing(mine));
+            let theirs = theirs.downgrade();
+            let buffer = this.pane(mine).buffer.clone();
+            let id = buffer.connect_mark_set(move |buffer, _, mark| {
+                let caret = [buffer.get_insert(), buffer.selection_bound()].contains(mark);
+                if let Some(theirs) = theirs.upgrade().filter(|t| caret && t.fade_shown()) {
+                    theirs.queue_draw();
+                }
+            });
             connect(buffer.upcast(), id);
         }
 
@@ -610,7 +443,7 @@ impl Compare {
             }
         });
 
-        for pane in &this.panes {
+        for pane in &this.columns.panes {
             *pane.pool.owner.borrow_mut() = this.weak.clone();
         }
         this.lay(true);
@@ -618,11 +451,11 @@ impl Compare {
     }
 
     pub fn widget(&self) -> &gtk::Widget {
-        self.paned.upcast_ref()
+        self.columns.paned.upcast_ref()
     }
 
     fn pane(&self, side: Side) -> &Pane {
-        &self.panes[side.idx()]
+        &self.columns.panes[side.idx()]
     }
 
     fn text(&self, side: Side) -> String {
@@ -645,95 +478,14 @@ impl Compare {
         }
         // The rows are numbered anew under the reader, so their place is kept as a line of the
         // side that stays.
-        if !matches!(self.keep.get(), Some(Keep::FirstHunk)) {
-            self.keep.set(self.top_line(side.other()));
+        if !self.columns.opening() {
+            let top = self.columns.top_line(side.other().idx());
+            self.columns.keep.set(top);
         }
         let pane = self.pane(side);
         pane.buffer.set_text(&text);
         editor::style_companion(pane.flavour, &pane.buffer, &pane.view);
         self.refresh();
-    }
-
-    /// The editor's caret line, and how far below the top of the view its row starts, while that
-    /// row starts on screen.
-    fn caret_line(&self) -> Option<Keep> {
-        let mine = self.editable?;
-        let buffer = &self.pane(mine).buffer;
-        let n = buffer.iter_at_mark(&buffer.get_insert()).line() as usize + 1;
-        let (lines, rows, grid) = (self.lines.borrow(), self.rows.borrow(), self.grid.borrow());
-        let row = rows
-            .iter()
-            .position(|row| mine.of(row).and_then(|i| mine.number(&lines[i])) == Some(n))?;
-        let seen = self.panes[0].view.visible_rect();
-        let at = grid.tops.get(row)? - seen.y();
-        (0..seen.height())
-            .contains(&at)
-            .then_some(Keep::Line(mine, n, at))
-    }
-
-    /// A new width rewraps every line, and each view keeps its own top line in place as GTK lays
-    /// them out again, both on the one scroll they share: the line at the top is held instead,
-    /// until the rows have settled at the new width.
-    fn rewrapped(&self) {
-        if self.keep.get().is_none() {
-            self.hold(self.top_line(self.editable.unwrap_or(Side::New)));
-            self.settling.set(SETTLE);
-        }
-    }
-
-    /// Keep `keep` until the rows are laid, a [`Keep::Line`] held again after each layout GTK
-    /// makes meanwhile, before it is painted: the lines GTK lays out in the frame itself move a
-    /// kept line without moving the scroll.
-    fn hold(&self, keep: Option<Keep>) {
-        let held = matches!(self.keep.replace(keep), Some(Keep::Line(..)));
-        let clock = self.panes[0].view.frame_clock();
-        let (false, Some(Keep::Line(..)), Some(clock)) = (held, keep, clock) else {
-            return;
-        };
-        let id: Rc<Cell<Option<glib::SignalHandlerId>>> = Rc::default();
-        let (w, own) = (self.weak.clone(), id.clone());
-        id.set(Some(clock.connect_layout(
-            move |clock| match w.upgrade().map(|c| (c.keep.get(), c)) {
-                Some((Some(Keep::Line(side, n, at)), c)) => c.hold_line(side, n, at),
-                _ => {
-                    if let Some(id) = own.take() {
-                        clock.disconnect(id);
-                    }
-                }
-            },
-        )));
-    }
-
-    /// Where the reader is, as a line of `side`: the one in the row at the top of the view, or in
-    /// the nearest row above it that has one, and how far below the top of the view its row starts.
-    fn top_line(&self, side: Side) -> Option<Keep> {
-        let (lines, rows, grid) = (self.lines.borrow(), self.rows.borrow(), self.grid.borrow());
-        let seen = self.panes[0].view.visible_rect().y();
-        let top = grid.tops.partition_point(|&y| y <= seen).max(1);
-        let (row, n) = rows[..top.min(rows.len())]
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(r, row)| Some((r, side.number(&lines[side.of(row)?])?)))?;
-        Some(Keep::Line(side, n, grid.tops[row] - seen))
-    }
-
-    /// Scroll so line `n` of `side` starts `at` pixels below the top of the view where GTK has it
-    /// now, which is where it is drawn: what keeps a [`Keep::Line`] on screen while the rows are
-    /// laid. GTK lays out the lines that opened, hid or grew above it a few at a time, and keeps
-    /// each view's own top line in place as it does, both on the one scroll they share; a scroll
-    /// held where it was showed the lines above for as long as that took.
-    fn hold_line(&self, side: Side, n: usize, at: i32) {
-        let pane = self.pane(side);
-        let Some(line) = pane.buffer.iter_at_line(n as i32 - 1) else {
-            return;
-        };
-        let y = pane.view.line_yrange(&line).0;
-        let adj = self.panes[0].scroller.vadjustment();
-        let value = adj.value() + f64::from(y - pane.view.visible_rect().y() - at);
-        if value != adj.value() {
-            adj.set_value(value);
-        }
     }
 
     /// Focus mode's line fade on the column beside the editor, which comes and goes with the
@@ -954,7 +706,7 @@ impl Compare {
             hidden.push((gap, key));
         }
 
-        for pane in &self.panes {
+        for pane in &self.columns.panes {
             pane.pool.unclaim();
         }
         let mut overlays = Vec::new();
@@ -965,7 +717,7 @@ impl Compare {
             for hunk in diff::hunks(&lines, &rows) {
                 let row = hunk.start;
                 let widget = pane.pool.claim(&pane.view, Role::Hunk(hunk));
-                overlays.push((theirs, widget, Anchor::Hunk(row)));
+                overlays.push((theirs.idx(), widget, Anchor::Hunk(row)));
             }
         }
         for (gap, key) in &hidden {
@@ -976,20 +728,41 @@ impl Compare {
                     rows: gap.len(),
                 };
                 let widget = pane.pool.claim(&pane.view, role);
-                overlays.push((side, widget, Anchor::Gap(gap.start)));
+                overlays.push((side.idx(), widget, Anchor::Gap(gap.start)));
             }
         }
-        for pane in &self.panes {
+        for pane in &self.columns.panes {
             pane.pool.hide_unclaimed();
         }
 
+        let number = |side: Side, row: &Row| side.of(row).and_then(|i| side.number(&lines[i]));
+        let laid = Rows {
+            lines: [Side::Old, Side::New]
+                .map(|side| rows.iter().map(|row| number(side, row)).collect())
+                .to_vec(),
+            starts: starts.to_vec(),
+            // A row is a change where either side's line is: a changed pair, or a line the other
+            // side has none for.
+            changed: rows
+                .iter()
+                .map(|row| {
+                    [Side::Old, Side::New]
+                        .iter()
+                        .any(|side| side.of(row).is_some_and(|i| lines[i].op != Op::Equal))
+                })
+                .collect(),
+            hidden: hidden.iter().map(|(gap, _)| gap.clone()).collect(),
+            // The blank of a hunk that only adds or only deletes, in the hue of the lines it
+            // faces: green on the left facing an addition, red on the right facing a deletion.
+            hues: vec![ADDED_HUE, REMOVED_HUE],
+            first: diff::hunks(&lines, &rows).first().map(|hunk| hunk.start),
+            overlays,
+        };
         *self.lines.borrow_mut() = lines;
         *self.rows.borrow_mut() = rows;
         *self.starts.borrow_mut() = starts;
         *self.hidden.borrow_mut() = hidden;
-        *self.overlays.borrow_mut() = overlays;
-        self.settling.set(SETTLE);
-        self.relayout();
+        self.columns.lay(laid);
         if let Some(laid) = self.laid.borrow().as_ref() {
             laid();
         }
@@ -1003,50 +776,13 @@ impl Compare {
         *self.laid.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Put the first hunk at [`FIRST_HUNK_AT`] of the page, once.
-    fn reveal_first_hunk(&self) {
-        let row = {
-            let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
-            diff::hunks(&lines, &rows).first().map(|hunk| hunk.start)
-        };
-        // Nothing has changed yet — an untouched buffer against its own index side. The next
-        // relayout that finds a difference is the one that opens on it.
-        if let Some(row) = row {
-            let page = self.panes[0].scroller.vadjustment().page_size();
-            self.reveal(row, FIRST_HUNK_AT * page);
-        }
-    }
-
-    /// Put row `row` `at` pixels below the top of the view, from the rows the last relayout
-    /// measured, and let the view go. Both panes share the vertical adjustment, so setting it
-    /// scrolls both.
-    ///
-    /// The grid rather than GTK's own figures, and not before the relayout: GTK lays lines out
-    /// lazily and the padding just laid is not in its figures yet, so a `scroll_to_mark` made as
-    /// the comparison opened landed wherever the estimates put the line, which in a long file
-    /// with its unchanged runs folded away was nowhere near it.
-    fn reveal(&self, row: usize, at: f64) {
-        let Some(top) = self.grid.borrow().tops.get(row).copied() else {
-            return;
-        };
-        self.keep.set(None);
-        // `visible_rect` is in buffer coordinates and the adjustment is not — the top margin
-        // lies between them — so the scroll moves by the distance from what is on screen now.
-        let (adj, seen) = (
-            self.panes[0].scroller.vadjustment(),
-            self.panes[0].view.visible_rect(),
-        );
-        adj.set_value(adj.value() + f64::from(top - seen.y()) - at);
-    }
-
     /// Open the hidden run keyed `key`, as its button does, with the scroll held where it was
     /// until the rows are laid: the rows above stay, and the run opens downwards from the button's
     /// row. Left to GTK, each view keeps its own top line in place as the lines above it grow,
     /// both on the one scroll they share, so a run opened at the top of the view scrolled it by
     /// twice its height, and by twice the height laid so far while GTK caught up.
     fn open_run(&self, key: usize) {
-        let value = self.panes[0].scroller.vadjustment().value();
-        self.keep.set(Some(Keep::Scroll(value)));
+        self.columns.hold_scroll();
         self.open_lines(key);
         self.refresh();
     }
@@ -1070,9 +806,12 @@ impl Compare {
     /// stays where it is on screen; with the caret off screen, the line at the top of the view
     /// stays there, as a re-read side's does ([`Compare::set_side`]).
     fn toggle_all(&self) {
-        if !matches!(self.keep.get(), Some(Keep::FirstHunk)) {
-            let top = || self.top_line(self.editable.unwrap_or(Side::New));
-            self.hold(self.caret_line().or_else(top));
+        if !self.columns.opening() {
+            let top = || {
+                self.columns
+                    .top_line(self.editable.unwrap_or(Side::New).idx())
+            };
+            self.columns.hold(self.columns.caret_line().or_else(top));
         }
         if !self.unfold.is_active() {
             self.opened.borrow_mut().clear();
@@ -1123,38 +862,10 @@ impl Compare {
     pub fn leave(&self) {
         for side in [Side::Old, Side::New] {
             self.clear_marks(side);
-            let pane = self.pane(side);
-            let (start, end) = pane.buffer.bounds();
-            let mut pads = Vec::new();
-            pane.buffer.tag_table().foreach(|tag| {
-                if is_pad(tag) || tag.name().as_deref() == Some(UNMEASURED) {
-                    pads.push(tag.clone());
-                }
-            });
-            for tag in pads {
-                pane.buffer.remove_tag(&tag, &start, &end);
-            }
-            pane.pool.unclaim();
-            pane.pool.hide_unclaimed();
-            if let Some(view) = pane.view.downcast_ref::<crate::multicaret::View>() {
-                view.set_bands(Vec::new());
-            }
         }
-        self.overlays.borrow_mut().clear();
-        if let Some(id) = self.pending.borrow_mut().take() {
-            id.remove();
-        }
+        self.columns.leave();
         for (object, id) in self.handlers.borrow_mut().drain(..) {
             object.disconnect(id);
-        }
-        // Each column scrolls on its own again before the companion can go. A GtkTextView that is
-        // freed stays connected to its adjustment, so one left on the adjustment the editor keeps
-        // was called into after it was gone: a comparison left the moment it opened — a Changes
-        // row git had outgrown — crashed the window on the editor's next scroll.
-        swap_vadjustment(&self.panes[1].scroller, &self.own_vadjustment);
-        // And the editor its page's bottom margin, should it have been the side with no line.
-        if let Some(mine) = self.editable {
-            self.set_bottom(mine, self.page_bottom(mine), 0);
         }
         for (side, (menu, previous)) in [Side::Old, Side::New].into_iter().zip(self.offered.take())
         {
@@ -1169,7 +880,7 @@ impl Compare {
     }
 
     pub fn restyle(&self) {
-        for (i, pane) in self.panes.iter().enumerate() {
+        for (i, pane) in self.columns.panes.iter().enumerate() {
             if self.editable != Some([Side::Old, Side::New][i]) {
                 editor::restyle_companion(pane.flavour, &pane.buffer, &pane.view);
             }
@@ -1177,230 +888,9 @@ impl Compare {
         }
     }
 
-    /// Put the editor's page on the companion beside it: the margins, so the first row of each
-    /// starts level, the line spacing, and the tab width the Indent Width preference sets. The
-    /// heading markers hang in the left margin and are measured in the font, so they are hung
-    /// again where the margin moves and, with `refont`, after a font change, which only the
-    /// editor's tab hears of. The bottom margin is [`Compare::relayout`]'s.
+    /// Put the editor's page on the companion beside it: see [`Columns::follow_editor`].
     pub fn follow_editor(&self, refont: bool) {
-        let Some(mine) = self.editable else {
-            return;
-        };
-        let (from, companion) = (&self.pane(mine).view, self.pane(mine.other()));
-        let to = &companion.view;
-        let rehang = refont || to.left_margin() != from.left_margin();
-        to.set_top_margin(from.top_margin());
-        to.set_left_margin(from.left_margin());
-        to.set_right_margin(from.right_margin());
-        to.set_pixels_above_lines(from.pixels_above_lines());
-        to.set_pixels_below_lines(from.pixels_below_lines());
-        to.set_tab_width(from.tab_width());
-        if rehang {
-            editor::rehang_companion(companion.flavour, &companion.buffer, to);
-        }
-    }
-
-    /// The bottom margin the page gives `side`, without the blank a relayout left under a side
-    /// with no line: the editor's own, which a companion beside it takes as well. A margin
-    /// someone else has set since — the zoom — is the page's whole.
-    fn page_bottom(&self, side: Side) -> i32 {
-        let side = self.editable.unwrap_or(side);
-        let (set, blank) = self.bottoms[side.idx()].get();
-        let now = self.pane(side).view.bottom_margin();
-        if now == set { now - blank } else { now }
-    }
-
-    /// `side`'s bottom margin: the page's, and `blank` pixels more under a side with no line.
-    fn set_bottom(&self, side: Side, page: i32, blank: i32) {
-        self.pane(side).view.set_bottom_margin(page + blank);
-        self.bottoms[side.idx()].set((page + blank, blank));
-    }
-
-    fn schedule_relayout(&self) {
-        if self.pending.borrow().is_some() {
-            return;
-        }
-        let weak = self.weak.clone();
-        let id = glib::idle_add_local_once(move || {
-            if let Some(c) = weak.upgrade() {
-                *c.pending.borrow_mut() = None;
-                c.relayout();
-            }
-        });
-        *self.pending.borrow_mut() = Some(id);
-    }
-
-    /// Measure every row on both sides and pad whichever is shorter, then put the buttons where
-    /// the rows now are. Idempotent: a row whose padding has not changed is left alone, so a pass
-    /// that finds nothing to do invalidates nothing and the layout settles.
-    ///
-    /// ponytail: every visible row is laid out on every pass, which is a Pango layout per
-    /// paragraph — fine at the few hundred rows a note has, and debounced by the editor above
-    /// that. Measuring only the rows an edit touched is the upgrade if a long note shows it.
-    fn relayout(&self) {
-        let views = [&self.panes[0].view, &self.panes[1].view];
-        if !views.iter().all(|v| v.is_mapped()) {
-            return;
-        }
-        // Before anything is measured: a keystroke's refresh gets here ahead of the buffer's own
-        // `changed` handler.
-        if let Some(mine) = self.editable {
-            reclaim(&self.pane(mine).buffer);
-        }
-        self.follow_editor(false);
-        let lines = self.lines.borrow();
-        let rows = self.rows.borrow();
-        let starts = self.starts.borrow();
-        let hidden = self.hidden.borrow();
-        let is_hidden = |r: usize| hidden.iter().any(|(gap, _)| gap.contains(&r));
-        let estimated = Cell::new(false);
-        let heights: [Vec<Option<i32>>; 2] = [Side::Old, Side::New].map(|side| {
-            let pane = self.pane(side);
-            let st = &starts[side.idx()];
-            rows.iter()
-                .enumerate()
-                .map(|(r, row)| {
-                    if is_hidden(r) {
-                        return None;
-                    }
-                    let n = side.of(row).and_then(|i| side.number(&lines[i]))?;
-                    let (above, below) =
-                        carried(&pane.view, &pane.buffer.iter_at_offset(st[n - 1]));
-                    let (height, estimate) =
-                        measure(&pane.view, &pane.buffer, st[n - 1], st[n], above + below);
-                    estimated.set(estimated.get() || estimate);
-                    Some(height)
-                })
-                .collect()
-        });
-        let mut extra = vec![0; rows.len()];
-        for (gap, _) in hidden.iter() {
-            extra[gap.start] += GAP_PX;
-        }
-        // A row is a change where either side's line is: a changed pair, or a line the other
-        // side has none for.
-        let changed: Vec<bool> = rows
-            .iter()
-            .map(|row| {
-                [Side::Old, Side::New]
-                    .iter()
-                    .any(|side| side.of(row).is_some_and(|i| lines[i].op != Op::Equal))
-            })
-            .collect();
-        let (pads, tops) = padding(&heights[0], &heights[1], &extra, &changed);
-        // A side with no line at all has no paragraph to pad, so the blank that keeps it as tall
-        // as the other goes under its text, less the one empty line it shows. Left shorter, its
-        // view pulled the scroll the two share back into its own range whenever it was laid out,
-        // and a file a commit added could not be scrolled at all.
-        let pages = [Side::Old, Side::New].map(|side| self.page_bottom(side));
-        for side in [Side::Old, Side::New] {
-            let pane = self.pane(side);
-            let blank = match pads[side.idx()].rest {
-                0 => 0,
-                rest => rest - pane.view.line_yrange(&pane.buffer.start_iter()).1,
-            };
-            self.set_bottom(side, pages[side.idx()], blank.max(0));
-        }
-        for side in [Side::Old, Side::New] {
-            if let Some(view) = self
-                .pane(side)
-                .view
-                .downcast_ref::<crate::multicaret::View>()
-            {
-                view.set_bands(bands(&heights, &extra, &changed, &tops, side));
-            }
-        }
-
-        let mut repadded = false;
-        for side in [Side::Old, Side::New] {
-            let pane = self.pane(side);
-            let st = &starts[side.idx()];
-            let now = &pads[side.idx()];
-            // Every line on this side, hidden ones included, so a row that is hidden now or was
-            // the last one before an edit does not keep what it carried then.
-            for (r, row) in rows.iter().enumerate() {
-                let Some(n) = side.of(row).and_then(|i| side.number(&lines[i])) else {
-                    continue;
-                };
-                repadded |= pad(
-                    &pane.view,
-                    &pane.buffer,
-                    st[n - 1],
-                    st[n],
-                    now.above[r],
-                    now.below[r],
-                );
-            }
-        }
-
-        // Buffer coordinates, which start at the first paragraph — the view's top margin is
-        // outside them — and scroll with the text.
-        for (side, widget, anchor) in self.overlays.borrow().iter() {
-            let view = &self.pane(*side).view;
-            let width = view.visible_rect().width();
-            let (_, wanted, _, _) = widget.measure(gtk::Orientation::Horizontal, -1);
-            let (_, height, _, _) = widget.measure(gtk::Orientation::Vertical, -1);
-            let (x, y) = match *anchor {
-                Anchor::Hunk(row) => (width - wanted - INSET, tops[row]),
-                Anchor::Gap(row) => ((width - wanted) / 2, tops[row] + (GAP_PX - height) / 2),
-            };
-            view.move_overlay(widget, x.max(0), y);
-        }
-        *self.grid.borrow_mut() = Grid {
-            #[cfg(feature = "bench")]
-            heights,
-            #[cfg(feature = "bench")]
-            extra,
-            tops,
-        };
-        // Both views laid out again in the next frame, ahead of painting either. GTK lays a view
-        // out from an idle of its own and repaints it once it has, so one column could reach the
-        // screen a frame ahead of the other: a keystroke's own line in the editor a frame after
-        // the padding that answers it beside it.
-        if repadded {
-            for view in views {
-                view.queue_allocate();
-            }
-        }
-        // GTK had not laid some line out yet: ask again once it has. So too while the view waits
-        // to be put somewhere for a pass that moved nothing: padding GTK has not laid out yet is
-        // not in where the scroll puts a line, and each view keeps its top line where it was as it
-        // catches up.
-        let unsettled = estimated.get() || (self.keep.get().is_some() && repadded);
-        let exhausted = self.settling.get() == 0;
-        if unsettled && !exhausted && self.pending.borrow().is_none() {
-            self.settling.set(self.settling.get() - 1);
-            let weak = self.weak.clone();
-            let id = glib::timeout_add_local_once(SETTLE_AFTER, move || {
-                if let Some(c) = weak.upgrade() {
-                    *c.pending.borrow_mut() = None;
-                    c.relayout();
-                }
-            });
-            *self.pending.borrow_mut() = Some(id);
-        }
-        // Once every row is measured and laid as the grid has it, or GTK has been asked as often
-        // as it will be. After the borrows: moving the scroll runs handlers that may lay the
-        // comparison again.
-        let keep = self.keep.get().filter(|_| !unsettled || exhausted);
-        drop((lines, rows, starts, hidden));
-        match keep {
-            Some(Keep::FirstHunk) => self.reveal_first_hunk(),
-            // Held all along, and the rows above the run have not moved.
-            Some(Keep::Scroll(_)) => self.keep.set(None),
-            Some(Keep::Line(side, n, at)) => {
-                self.keep.set(None);
-                let row = {
-                    let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
-                    let number = |row: &Row| side.number(&lines[side.of(row)?]);
-                    rows.iter().position(|row| number(row) == Some(n))
-                };
-                if let Some(row) = row {
-                    self.reveal(row, f64::from(at));
-                }
-            }
-            None => {}
-        }
+        self.columns.follow_editor(refont);
     }
 
     // --- for the bench and the tests ----------------------------------------------------------
@@ -1412,220 +902,8 @@ impl Compare {
             rows.len(),
             diff::hunks(&lines, &rows).len(),
             self.hidden.borrow().len(),
-            self.overlays.borrow().len(),
+            self.columns.rows.borrow().overlays.len(),
         )
-    }
-
-    /// How many pixels lower the right column starts than the left one in the window: 0 is the
-    /// claim, and what [`Compare::misaligned`] cannot see, being in buffer coordinates.
-    #[cfg(feature = "bench")]
-    pub fn skew(&self) -> i32 {
-        let top = |side: Side| {
-            self.pane(side)
-                .scroller
-                .compute_point(&self.paned, &gtk::graphene::Point::zero())
-                .map_or(0.0, |p| p.y())
-        };
-        (top(Side::New) - top(Side::Old)).round() as i32
-    }
-
-    /// Whether the rows are laid and the view is where the comparison was keeping it: what a drill
-    /// waits for before it acts on a comparison just opened.
-    #[cfg(feature = "bench")]
-    pub fn settled(&self) -> bool {
-        self.keep.get().is_none() && self.pending.borrow().is_none()
-    }
-
-    /// Whether the first hunk's first line is inside its view right now, on the first side that
-    /// has a line in it: what a comparison has to open on.
-    #[cfg(feature = "bench")]
-    pub fn first_hunk_on_screen(&self) -> bool {
-        let Some((side, at)) = self.first_hunk_line() else {
-            return false;
-        };
-        let view = &self.pane(side).view;
-        let (line, seen) = (
-            view.iter_location(&self.pane(side).buffer.iter_at_offset(at)),
-            view.visible_rect(),
-        );
-        line.y() >= seen.y() && line.y() + line.height() <= seen.y() + seen.height()
-    }
-
-    /// Where the first hunk starts, in characters, on the first side with a line in it.
-    #[cfg(feature = "bench")]
-    fn first_hunk_line(&self) -> Option<(Side, i32)> {
-        let (lines, rows, starts) = (
-            self.lines.borrow(),
-            self.rows.borrow(),
-            self.starts.borrow(),
-        );
-        let hunk = diff::hunks(&lines, &rows).into_iter().next()?;
-        [Side::Old, Side::New].into_iter().find_map(|side| {
-            let n = hunk
-                .clone()
-                .find_map(|r| side.of(&rows[r]).and_then(|i| side.number(&lines[i])))?;
-            Some((side, starts[side.idx()][n - 1]))
-        })
-    }
-
-    /// Where the first hunk's lines and the ones after it start, as GTK lays them out: the row,
-    /// then the old and the new side's `y`, `None` where a side has no visible line in the row.
-    #[cfg(feature = "bench")]
-    pub fn first_hunk_tops(&self) -> Vec<(usize, Option<i32>, Option<i32>)> {
-        let hunk = {
-            let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
-            diff::hunks(&lines, &rows).first().cloned()
-        };
-        let Some(hunk) = hunk else {
-            return Vec::new();
-        };
-        let end = (hunk.end + 1).min(self.rows.borrow().len());
-        let top = |r, side| self.laid(r, side).map(|(_, actual, ..)| actual);
-        (hunk.start..end)
-            .map(|r| (r, top(r, Side::Old), top(r, Side::New)))
-            .collect()
-    }
-
-    /// The shared vertical scrollbar, for the bench to read and to move as a reader would.
-    #[cfg(feature = "bench")]
-    pub fn vadjustment(&self) -> gtk::Adjustment {
-        self.panes[0].scroller.vadjustment()
-    }
-
-    /// Whether row `r` is in a hidden run right now.
-    #[cfg(feature = "bench")]
-    pub fn hides_row(&self, r: usize) -> bool {
-        self.hidden.borrow().iter().any(|(gap, _)| gap.contains(&r))
-    }
-
-    /// Where the first change starts on the editor's side, in characters.
-    #[cfg(feature = "bench")]
-    pub fn opens_at(&self) -> Option<i32> {
-        let side = self.editable?;
-        let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
-        first_change(&lines, &rows, &self.starts.borrow()[side.idx()], side)
-    }
-
-    /// How many rows GTK lays out at a different height than the last relayout meant them to
-    /// have, on either side: the number the alignment stands or falls on, and 0 is the claim.
-    #[cfg(feature = "bench")]
-    pub fn misaligned(&self) -> usize {
-        let rows = self.rows.borrow().len();
-        if self.grid.borrow().tops.len() != rows {
-            return rows;
-        }
-        let off = |r, side| {
-            self.laid(r, side)
-                .is_some_and(|(expected, actual, ..)| expected != actual)
-        };
-        (0..rows)
-            .filter(|&r| off(r, Side::Old) || off(r, Side::New))
-            .count()
-    }
-
-    /// The rows on screen whose two lines GTK draws at different heights right now, and the first
-    /// of them spelled out (`row:old_y/new_y`, below the top of the view). `None` while an edit has
-    /// not been laid over yet, when the rows say nothing about the text.
-    #[cfg(feature = "bench")]
-    pub fn uneven(&self) -> Option<(usize, String)> {
-        let (lines, rows, starts) = (
-            self.lines.borrow(),
-            self.rows.borrow(),
-            self.starts.borrow(),
-        );
-        let fresh = |side: Side| {
-            starts[side.idx()].last().copied() == Some(self.pane(side).buffer.char_count())
-        };
-        if !fresh(Side::Old) || !fresh(Side::New) {
-            return None;
-        }
-        let height = self.panes[0].view.visible_rect().height();
-        let y = |r: usize, side: Side| {
-            let n = side.number(&lines[side.of(&rows[r])?])?;
-            let pane = self.pane(side);
-            let at = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
-            Some(pane.view.iter_location(&at).y() - pane.view.visible_rect().y())
-        };
-        let (mut count, mut first) = (0, String::new());
-        for r in 0..rows.len() {
-            if self.hides_row(r) {
-                continue;
-            }
-            let (Some(old), Some(new)) = (y(r, Side::Old), y(r, Side::New)) else {
-                continue;
-            };
-            if old != new && [old, new].iter().any(|y| (0..height).contains(y)) {
-                if count == 0 {
-                    first = format!("{r}:{old}/{new}");
-                }
-                count += 1;
-            }
-        }
-        Some((count, first))
-    }
-
-    /// The first row [`Compare::misaligned`] counts, spelled out: which row and side, what the
-    /// relayout expected, what GTK laid out, and the line. For the bench to print.
-    #[cfg(feature = "bench")]
-    pub fn first_misaligned(&self) -> Option<String> {
-        let rows = self.rows.borrow().len();
-        (0..rows)
-            .flat_map(|r| [Side::Old, Side::New].map(|side| (r, side)))
-            .find_map(|(r, side)| {
-                let (expected, actual, own, tallest) =
-                    self.laid(r, side).filter(|(e, a, ..)| e != a)?;
-                let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
-                let text = side
-                    .of(&rows[r])
-                    .map(|i| lines[i].text.clone())
-                    .unwrap_or_default();
-                Some(format!(
-                    "row={r} side={side:?} expected={expected} actual={actual} own={own} tallest={tallest} text={text:?}"
-                ))
-            })
-    }
-
-    /// Row `r`'s line on `side` as laid out: where the last relayout meant it to start, where GTK
-    /// put it, its own height and its row's, in buffer pixels. `None` where the side has no line.
-    #[cfg(feature = "bench")]
-    fn laid(&self, r: usize, side: Side) -> Option<(i32, i32, i32, i32)> {
-        let (lines, rows, starts) = (
-            self.lines.borrow(),
-            self.rows.borrow(),
-            self.starts.borrow(),
-        );
-        let grid = self.grid.borrow();
-        let own = grid.heights[side.idx()].get(r).copied().flatten()?;
-        let n = side.of(&rows[r]).and_then(|i| side.number(&lines[i]))?;
-        let tallest = grid.heights[0][r]
-            .unwrap_or(0)
-            .max(grid.heights[1][r].unwrap_or(0))
-            + grid.extra[r];
-        let pane = self.pane(side);
-        let expected = grid.tops[r] + pane.view.pixels_above_lines();
-        let iter = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
-        Some((expected, pane.view.iter_location(&iter).y(), own, tallest))
-    }
-
-    /// What the `Take` (or, with `keep_own`, the `Both`) button on the `i`th hunk does.
-    #[cfg(feature = "bench")]
-    pub fn take_hunk(&self, i: usize, keep_own: bool) {
-        let hunk = {
-            let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
-            diff::hunks(&lines, &rows).get(i).cloned()
-        };
-        if let Some(hunk) = hunk {
-            self.take(hunk, keep_own);
-        }
-    }
-
-    /// What the button on the `i`th hidden run does.
-    #[cfg(feature = "bench")]
-    pub fn open_gap(&self, i: usize) {
-        let key = self.hidden.borrow().get(i).map(|(_, key)| *key);
-        if let Some(key) = key {
-            self.open_run(key);
-        }
     }
 
     /// The same, for the run hiding `offset` in the editable pane: `true` when one was opened.

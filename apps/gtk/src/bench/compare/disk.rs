@@ -423,13 +423,13 @@ fn bench_banner_button(tab: &Tab) -> Option<glib::GString> {
 /// the editor scrolled the moment the other column has been freed: prints `gone=true` and the
 /// scroll, for two comparisons. With the disk copy first, which puts the copy's column on the
 /// editor's scrollbar: handing the column its own scrollbar back used to leave GTK's fade handler
-/// for it on the editor's adjustment (see `diff::swap_vadjustment`), so this scroll ran the handler
-/// on freed memory: a critical here (fatal under the drills' `G_DEBUG`), a segfault in a real
-/// session, the window crash of 2026-09-28. Then with the index of a repository the drill makes in
-/// the vault root, which puts the editor on the Index column's scrollbar: the editor's own
-/// scrollbar kept the fade handler it was given before the comparison, and taking that scrollbar
-/// back ran it on an indicator GTK had let go of, the same critical. Writes the note and makes a
-/// repository, so point it at a throwaway vault.
+/// for it on the editor's adjustment (see `diff::columns::swap_vadjustment`), so this scroll ran
+/// the handler on freed memory: a critical here (fatal under the drills' `G_DEBUG`), a segfault in
+/// a real session, the window crash of 2026-09-28. Then with the index of a repository the drill
+/// makes in the vault root, which puts the editor on the Index column's scrollbar: the editor's
+/// own scrollbar kept the fade handler it was given before the comparison, and taking that
+/// scrollbar back ran it on an indicator GTK had let go of, the same critical. Writes the note and
+/// makes a repository, so point it at a throwaway vault.
 pub(in crate::bench) fn bench_compare_left(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
