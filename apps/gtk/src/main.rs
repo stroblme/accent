@@ -50,6 +50,7 @@ mod recall;
 mod reconnect;
 mod references;
 mod relink;
+mod replace;
 mod ring;
 mod save;
 mod scrollable;

@@ -7,7 +7,8 @@
 //! `input` wiring its views, menu and keys to it, `reply` taking the render thread's answers and
 //! `disk` its file's saves and reloads. `organize` moves, inserts and deletes pages from the
 //! thumbnail strip, `export` writes the copy Export as PDF and Print hand on, and `source` is the
-//! page's half of SyncTeX. Nothing under `view` calls pdfium.
+//! page's half of SyncTeX. `window` is the window's side of a PDF tab: opening one and the PDF
+//! commands. Nothing under `view` calls pdfium.
 //!
 //! The names below are what the rest of the window says `pdfview::` and `pdftab::` to reach.
 
@@ -27,6 +28,7 @@ mod source;
 pub mod tab;
 pub mod tools;
 pub mod view;
+mod window;
 
 pub use cache::{LOWRES_W, TILE, TileKey, Want};
 pub use geometry::{Anchor, PdfZoom, Span, zoom_label};
