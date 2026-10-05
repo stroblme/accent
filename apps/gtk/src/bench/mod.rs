@@ -315,7 +315,8 @@ use tags::bench_tags;
 /// `=comments:<rel_path>` writes a note linking to the first word of the generated vault's
 /// `Attachments/comments.pdf` (`rel_path`), then prints, over each comment and each mark without
 /// one, what the tooltip shows, what a click pins and whether a tooltip shows after it; the same
-/// with the pen in hand and over the note's highlight, which opens the note; then the comments
+/// with the pen in hand, and over the note's highlight with the Eraser in hand, which opens
+/// nothing, and with none, which opens the note; then the comments
 /// once Export Highlights has written the note's quote in (`pdf::bench_pdf_comments`). It writes
 /// a note and the PDF, so point it at a scratch vault.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up

@@ -1211,8 +1211,9 @@ pub(super) fn bench_sketch(app: &Rc<App>, rel: &str) {
 /// At the middle of each comment on the page, and at the marks the generator left without one —
 /// the strike-out, the typed text, the hidden note, the link on the underlined line — and an empty
 /// spot: what the tooltip shows, what a click that was not a drag pins, and whether a tooltip
-/// shows after it. Then the first comment with the pen in hand, the note's highlight, whose click
-/// opens the note, and the comments after Export Highlights has written the note's quote in.
+/// shows after it. Then the first comment with the pen in hand, the note's highlight with the
+/// Eraser in hand, whose click opens nothing, and with none, whose click opens the note, and the
+/// comments after Export Highlights has written the note's quote in.
 pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -1283,6 +1284,14 @@ pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
         }
         pdf.set_mode(pdfview::Mode::Pen);
         probe("pen", at((116.0, 45.0)));
+        // The Eraser's click on the note's highlight is an erase, and opens nothing.
+        pdf.set_mode(pdfview::Mode::Eraser);
+        probe("eraser", ada);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        println!(
+            "bench comments eraser note_opened={}",
+            app.tab_for(&note).is_some()
+        );
         pdf.set_mode(pdfview::Mode::Select);
         probe("note", ada);
         let opened = until(|| app.tab_for(&note)).await.is_some();
