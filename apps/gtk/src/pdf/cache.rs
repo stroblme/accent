@@ -137,6 +137,12 @@ impl Cache {
             .collect();
     }
 
+    /// Let go of every tile and keep the stand-ins: what a tab nobody is looking at holds on to.
+    pub fn drop_tiles(&mut self) {
+        self.tiles.clear();
+        self.bytes = 0;
+    }
+
     pub fn clear(&mut self) {
         self.tiles.clear();
         self.lowres.clear();

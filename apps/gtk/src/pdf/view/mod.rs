@@ -167,7 +167,10 @@ impl PdfView {
     /// Take a rendered tile. Ignored if the document has moved on from the scale it was for.
     pub fn insert_tile(&self, key: TileKey, texture: gdk::MemoryTexture, bytes: usize) {
         self.imp().stale_tiles.borrow_mut().remove(&key);
-        self.cache().borrow_mut().insert(key, texture, bytes);
+        // A hidden view has let its tiles go, and these were asked for before it was hidden.
+        if self.is_mapped() {
+            self.cache().borrow_mut().insert(key, texture, bytes);
+        }
         // Whatever was drawn on this page is in its pixels now, so the stroke painted over the
         // top can go. Here rather than when the stroke was sent: the render is what replaces it,
         // and dropping it any earlier is a gap the reader sees.
@@ -822,6 +825,17 @@ mod imp {
 
         fn size_allocate(&self, _width: i32, _height: i32, _baseline: i32) {
             self.obj().relayout();
+        }
+
+        /// A tab switched away from lets go of its tiles, up to [`Cache`]'s 256 MB, and keeps
+        /// the stand-ins: coming back paints those and asks again, about 100 ms of blur.
+        fn unmap(&self) {
+            self.parent_unmap();
+            if !self.thumbnails.get() {
+                self.obj().cache().borrow_mut().drop_tiles();
+                // Or the same list asked for again would look already asked for.
+                self.asked.borrow_mut().clear();
+            }
         }
 
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
