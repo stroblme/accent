@@ -1213,7 +1213,9 @@ pub(super) fn bench_sketch(app: &Rc<App>, rel: &str) {
 /// spot: what the tooltip shows, what a click that was not a drag pins, and whether a tooltip
 /// shows after it. Then the first comment with the pen in hand, the note's highlight with the
 /// Eraser in hand, whose click opens nothing, and with none, whose click opens the note, and the
-/// comments after Export Highlights has written the note's quote in.
+/// comments after Export Highlights has written the note's quote in. Last the Outline pane's list
+/// of every page's comments, and its row for the third page's: the page it goes to and what it
+/// pins.
 pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -1308,8 +1310,92 @@ pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
             .and_then(|(x, y)| pdf.hover_at(x, y))
             .map(|tip| labels(&tip));
         println!("bench comments exported count={count:?} note shows={shows:?}");
+        // The Outline pane lists every page's comments; a row goes to its comment and pins it, as
+        // a click on it does.
+        app.show_pane("outline");
+        let Some(sidebar) = app.sidebar.get() else {
+            return bench_quit(&app);
+        };
+        let lines = until(|| {
+            let lines = sidebar.outline_lines(None);
+            let read = lines.iter().any(|l| l.contains("Second thoughts"));
+            read.then_some(lines)
+        });
+        let lines = lines.await.unwrap_or_default();
+        for line in &lines {
+            println!("bench comments listed {line}");
+        }
+        sidebar.outline_lines(lines.iter().position(|l| l.contains("Second thoughts")));
+        let pinned = pdf.comments_read().1;
+        let pins = pinned.as_ref().map(|p| labels(p.upcast_ref()));
+        let up = pinned.is_some_and(|p| p.is_visible());
+        let page = pdf.current_page() + 1;
+        println!("bench comments row page={page} pins={pins:?} up={up}");
         bench_quit(&app);
     });
+}
+
+/// The Outline pane's comments read off `rel`, a long document: when the first screen had painted
+/// and how many pages had been read by then, the same after a jump to the middle of it, and when
+/// every page had been read; then the document opened again and closed at once, and how long its
+/// thread outlived the tab, which ends the walk.
+pub(super) fn bench_pdf_walk(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let t0 = Instant::now();
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench walk no_tab");
+            return bench_quit(&app);
+        };
+        let pages = pdf.page_count();
+        println!("bench walk pages={pages} opened_ms={}", ms_since(t0) as u64);
+        settled(&pdf, "walk first_screen").await;
+        println!("bench walk first_screen read={}", pdf.comments_read().0);
+        pdf.goto_page(pages / 2);
+        settled(&pdf, "walk middle").await;
+        println!("bench walk middle read={}", pdf.comments_read().0);
+        while pdf.comments_read().0 < pages && t0.elapsed() < Duration::from_secs(60) {
+            glib::timeout_future(Duration::from_millis(20)).await;
+        }
+        println!(
+            "bench walk read={} all_ms={} rows={}",
+            pdf.comments_read().0,
+            ms_since(t0) as u64,
+            pdf.comment_rows().len()
+        );
+        app.close_page(&pdf.page);
+        drop(pdf);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(pdf) = opened(&app, &rel).await else {
+            return bench_quit(&app);
+        };
+        let at_close = pdf.comments_read().0;
+        app.close_page(&pdf.page);
+        drop(pdf);
+        let t1 = Instant::now();
+        while render_threads() > 0 && t1.elapsed() < Duration::from_secs(10) {
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
+        println!(
+            "bench walk closed read={at_close}/{pages} threads={} gone_ms={}",
+            render_threads(),
+            ms_since(t1) as u64
+        );
+        bench_quit(&app);
+    });
+}
+
+/// How many PDF render threads this process runs.
+fn render_threads() -> usize {
+    std::fs::read_dir("/proc/self/task")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|task| {
+            std::fs::read_to_string(task.path().join("comm"))
+                .is_ok_and(|c| c.trim() == "accent-pdf")
+        })
+        .count()
 }
 
 /// Every label's text under `w`, the selectable ones marked `*`.

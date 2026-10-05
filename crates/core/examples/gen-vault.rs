@@ -960,8 +960,8 @@ impl Gen {
     /// One 400 x 300 pt page of three lines that other readers marked up, none of the marks with
     /// an appearance stream of its own but the typed text: a highlight by Ada with a comment, an
     /// underline with a comment and a link on its last word, a strike-out without one, Grace's
-    /// sticky note with its popup, a hidden note and a `/FreeText`.
-    /// `ACCENT_BENCH_PDF=comments:` knows where each is.
+    /// sticky note with its popup, a hidden note and a `/FreeText`. Then a blank page, and a third
+    /// with Grace's note of two lines. `ACCENT_BENCH_PDF=comments:` knows where each is.
     fn comments_pdf() -> Vec<u8> {
         let content = "BT /F1 14 Tf 40 250 Td (Ada highlighted this line.) Tj ET\n\
                        BT /F1 14 Tf 40 220 Td (This line is underlined, with a link.) Tj ET\n\
@@ -973,7 +973,7 @@ impl Gen {
         };
         let objs = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R 15 0 R 16 0 R] /Count 3 >>".to_string(),
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R] >>".to_string(),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
             format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
@@ -989,6 +989,9 @@ impl Gen {
                 "<< /Type /XObject /Subtype /Form /BBox [0 0 200 30] /Resources << /Font << /F1 4 0 R >> >> /Length {} >>\nstream\n{typed}endstream",
                 typed.len()
             ),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300] /Annots [17 0 R] >>".to_string(),
+            "<< /Type /Annot /Subtype /Text /Rect [180 140 200 160] /Name /Comment /T (Grace) /Contents (Second thoughts.\\nOn the last page.) /F 4 >>".to_string(),
         ];
         Self::pdf_of(&objs)
     }

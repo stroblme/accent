@@ -14,13 +14,13 @@ use super::tab::PdfTab;
 
 impl PdfTab {
     /// Forget what is kept of each page that cannot follow it to another number or document: the
-    /// strokes the tools know, the links and comments, and the glyphs with the selection made of
-    /// them — an export or a rebuild moves the text, and a stale index would paint the selection
-    /// elsewhere. Each is asked for again as it is needed.
+    /// strokes the tools know, the links, and the glyphs with the selection made of them — an
+    /// export or a rebuild moves the text, and a stale index would paint the selection elsewhere.
+    /// Each is asked for again as it is needed. The comments stay until they are read again, so
+    /// the Outline pane's list does not empty and fill again under the reader.
     pub(super) fn forget_pages(&self) {
         self.view.clear_inks();
         self.links.borrow_mut().clear();
-        self.comments.borrow_mut().clear();
         self.glyphs.borrow_mut().clear();
         self.clear_selection();
     }
@@ -32,7 +32,15 @@ impl PdfTab {
                 self.links.borrow_mut().insert(page, links);
             }
             Reply::Comments(page, comments) => {
-                self.comments.borrow_mut().insert(page, comments);
+                let was = self.comments.borrow_mut().insert(page, comments.clone());
+                // The Outline pane lists them: refilled only when a page's comments change, not
+                // for each of a long document's pages read.
+                // ponytail: each such page refills the whole outline, every bookmark and comment
+                // row compared again; comments on thousands of pages pay that once a page as the
+                // walk reads them. One refill a frame is the upgrade if that ever shows.
+                if was.unwrap_or_default() != comments {
+                    self.on_outline.emit(self);
+                }
             }
             Reply::Text(page, glyphs) => self.text_landed(page, glyphs),
             Reply::Outline(outline) => {
@@ -51,10 +59,10 @@ impl PdfTab {
                 // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
                 self.view.refresh_page(page, area);
                 self.thumbs.queue_draw();
-                // An export writes each highlight's quote in, which is a comment from now on.
+                // An export writes each highlight's quote in, which is a comment from now on, on
+                // this page whether it is on screen or not: the Outline pane lists them all.
                 self.links.borrow_mut().remove(&page);
-                self.comments.borrow_mut().remove(&page);
-                self.ask_links();
+                self.ask(Request::Links(page));
                 if self.wants_inks() {
                     self.ask_inks();
                 }
@@ -156,6 +164,11 @@ impl PdfTab {
         self.view.repage(map);
         self.thumbs.repage(map);
         self.forget_pages();
+        let moved = std::mem::take(&mut *self.comments.borrow_mut());
+        *self.comments.borrow_mut() = moved
+            .into_iter()
+            .filter_map(|(page, comments)| Some((map(page)?, comments)))
+            .collect();
         self.view.set_sizes(sizes.clone());
         self.thumbs.set_sizes(sizes);
         match edit {
@@ -176,10 +189,11 @@ impl PdfTab {
         for link in self.notes.borrow_mut().iter_mut() {
             link.page = edit.map(link.page).unwrap_or(link.page);
         }
-        // Asked again under the new numbers: the bookmarks' pages, where the notes'
-        // highlights land, the strokes a tool in hand needs, the links and comments on screen,
-        // and the search's matches.
+        // Asked again under the new numbers: the bookmarks' pages, every page's comments, where
+        // the notes' highlights land, the strokes a tool in hand needs, the links and comments on
+        // screen, and the search's matches.
         self.ask(Request::Outline);
+        self.ask(Request::Comments(0));
         self.ask(Request::Highlights(self.notes.borrow().clone()));
         if self.wants_inks() {
             self.ask_inks();
@@ -217,6 +231,9 @@ impl PdfTab {
         self.view.forget_textures();
         self.thumbs.forget_textures();
         self.forget_pages();
+        self.comments
+            .borrow_mut()
+            .retain(|page, _| *page < sizes.len());
         self.view.set_sizes(sizes.clone());
         self.thumbs.set_sizes(sizes);
         match self.pending.take() {
@@ -233,6 +250,11 @@ impl PdfTab {
             None => self.view.scroll_to(anchor),
         }
         self.ask(Request::Outline);
+        // ponytail: every open and every reload reads every page's annotations for the Outline
+        // pane, shown or not: 552 pages in 0.3 s, off the main loop and between tiles. Asking
+        // only while the pane shows the document is the upgrade if a LaTeX build's reloads ever
+        // make it count.
+        self.ask(Request::Comments(0));
         self.ask_links();
         // The strokes went with the old document, and a tool in hand needs this one's.
         if self.wants_inks() {

@@ -317,8 +317,11 @@ use tags::bench_tags;
 /// one, what the tooltip shows, what a click pins and whether a tooltip shows after it; the same
 /// with the pen in hand, and over the note's highlight with the Eraser in hand, which opens
 /// nothing, and with none, which opens the note; then the comments
-/// once Export Highlights has written the note's quote in (`pdf::bench_pdf_comments`). It writes
-/// a note and the PDF, so point it at a scratch vault.
+/// once Export Highlights has written the note's quote in, the Outline pane's list of them, and
+/// where its row of the last page's comment goes and what it pins (`pdf::bench_pdf_comments`). It
+/// writes a note and the PDF, so point it at a scratch vault. `=walk:<rel_path>` times reading
+/// every page's comments for that list against the first screen painting, and how soon closing
+/// the tab ends it (`pdf::bench_pdf_walk`); point it at a few hundred pages.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand, and what the vault holds under its name. `=sketch:<rel_note>` fires
@@ -742,6 +745,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("comments:") {
                 return bench_pdf_comments(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("walk:") {
+                return pdf::bench_pdf_walk(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("synctex:") {
                 return synctex::bench_synctex(&app, rel);

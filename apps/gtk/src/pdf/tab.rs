@@ -175,6 +175,7 @@ pub struct PdfTab {
     pub(super) on_page: TabHook,
     /// Fired just before a jump, so the pane can record where the reader was.
     pub(super) on_jump: TabHook,
+    /// Fired when what the Outline pane lists changes: the bookmarks, or a page's comments.
     pub(super) on_outline: TabHook,
     /// Fired when the document's pages are known, which is when it stops being "opening".
     pub(super) on_open: TabHook,

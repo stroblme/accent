@@ -742,17 +742,16 @@ impl App {
                 };
                 return sidebar.set_outline(Some(&sidebar::outline_note(title, body)));
             }
-            let rows: Vec<(u8, String, usize)> = pdf
+            // A bookmark's row goes to its page, a comment's to the comment, which it pins.
+            let mut rows: Vec<(sidebar::Line, (usize, Option<usize>))> = pdf
                 .outline()
                 .iter()
                 .map(|entry| {
-                    (
-                        entry.depth as u8 + 1,
-                        entry.title.clone(),
-                        entry.page.unwrap_or(0),
-                    )
+                    let line = sidebar::Line::new(entry.depth as u8 + 1, entry.title.clone());
+                    (line, (entry.page.unwrap_or(0), None))
                 })
                 .collect();
+            rows.extend(pdf.comment_rows());
             if rows.is_empty() {
                 let thumbs = pdf.thumbnails();
                 if !sidebar.shows_below(&thumbs) {
@@ -764,7 +763,10 @@ impl App {
             let jump = glib::clone!(
                 #[weak]
                 pdf,
-                move |page| pdf.goto_page(page)
+                move |(page, comment)| match comment {
+                    Some(at) => pdf.show_comment(page, at),
+                    None => pdf.goto_page(page),
+                }
             );
             sidebar.set_outline_rows(&doc.key(), &rows, jump, Some(&pdf.thumbnails()));
             // The bookmarks are new, or a page edit moved them: either way the one the page being
@@ -773,11 +775,11 @@ impl App {
         }
         // A diagram's outline is its pages, as a PDF's is its bookmarks.
         if let Some(d) = doc.diagram() {
-            let rows: Vec<(u8, String, usize)> = d
+            let rows: Vec<(sidebar::Line, usize)> = d
                 .page_names()
                 .into_iter()
                 .enumerate()
-                .map(|(i, name)| (1, name, i))
+                .map(|(i, name)| (sidebar::Line::new(1, name), i))
                 .collect();
             let jump = glib::clone!(
                 #[weak]
@@ -811,6 +813,10 @@ impl App {
             };
             return sidebar.set_outline(Some(&sidebar::outline_note(title, &body)));
         }
+        let rows: Vec<_> = rows
+            .into_iter()
+            .map(|(level, text, at)| (sidebar::Line::new(level, text), at))
+            .collect();
         let fresh = sidebar.set_outline_rows(
             &doc.key(),
             &rows,
