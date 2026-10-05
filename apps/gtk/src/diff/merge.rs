@@ -19,6 +19,7 @@ use std::ops::Range;
 use std::rc::{Rc, Weak};
 
 use super::columns::{Anchor, Columns, GAP_PX, Rows};
+use super::links::Links;
 use super::pool::Role;
 use super::{
     ADDED_HUE, CONTEXT, INCOMING_HUE, Pane, TAG_GAP, install_tags, line_starts, normalise,
@@ -60,6 +61,8 @@ pub struct Merge {
     unfold: gtk::ToggleButton,
     /// The tab's conflict blocks, which the arrows resolve.
     conflicts: Rc<Conflicts>,
+    /// The connectors between the columns.
+    links: Links,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
     laid: RefCell<Option<Box<dyn Fn()>>>,
 }
@@ -106,6 +109,7 @@ impl Merge {
         mid.header
             .insert_child_after(&unfold, mid.header.first_child().as_ref());
 
+        let links = Links::new(&left, &right);
         let this = Rc::new_cyclic(|weak| Merge {
             weak: weak.clone(),
             columns: Columns::new(vec![left, mid, right], Some(MID)),
@@ -118,6 +122,7 @@ impl Merge {
             opened: RefCell::default(),
             unfold,
             conflicts,
+            links,
             handlers: RefCell::default(),
             laid: RefCell::default(),
         });
@@ -145,6 +150,29 @@ impl Merge {
                 }
             }));
         }
+        // The connectors follow the rows: drawn again on every scroll and every relayout.
+        for (i, strip) in this.links.strips.iter().enumerate() {
+            let w = weak.clone();
+            strip.set_draw_func(move |_, cr, width, _| {
+                if let Some(m) = w.upgrade() {
+                    m.links.draw(i, &m.columns, cr, width);
+                }
+            });
+        }
+        let w = weak.clone();
+        *this.columns.relaid.borrow_mut() = Some(Box::new(move || {
+            if let Some(m) = w.upgrade() {
+                m.links.queue_draw();
+            }
+        }));
+        let w = weak.clone();
+        let scroll = this.pane(0).scroller.vadjustment();
+        let id = scroll.connect_value_changed(move |_| {
+            if let Some(m) = w.upgrade() {
+                m.links.queue_draw();
+            }
+        });
+        connect(scroll.upcast(), id);
         let w = weak.clone();
         let style = adw::StyleManager::default();
         let id = style.connect_dark_notify(move |_| {
@@ -331,6 +359,11 @@ impl Merge {
             .map(|block| (line_at(block.range.start), line_at(block.theirs.end)))
             .collect();
         let (mut lines, mut changed, mut rooms) = (Vec::new(), Vec::new(), Vec::new());
+        // Per side, whether the row is one the side and the file differ in, a block's included:
+        // what the connectors between them are drawn over.
+        let mut differ: [Vec<bool>; 2] = Default::default();
+        let same =
+            |lines: &[DiffLine], i: Option<usize>| i.is_some_and(|i| lines[i].op == Op::Equal);
         // The `>>>>>>>` line of the block the rows are in.
         let mut inside = None;
         for (row, differs) in three.rows.iter().zip(three.changed()) {
@@ -341,6 +374,7 @@ impl Merge {
                 rooms.push(lines.len());
                 lines.push([None; 3]);
                 changed.push(true);
+                differ.iter_mut().for_each(|d| d.push(false));
                 inside = Some(end);
             }
             let line = [
@@ -354,6 +388,13 @@ impl Merge {
                         tint(c, n);
                     }
                 }
+            }
+            for (d, (side, i)) in differ
+                .iter_mut()
+                .zip([(&three.left, row.left), (&three.right, row.right)])
+            {
+                let any = i.is_some() || row.mid.is_some();
+                d.push(inside.is_some() || (any && !same(side, i)));
             }
             if row.mid.is_some() && row.mid == inside {
                 inside = None;
@@ -460,6 +501,25 @@ impl Merge {
             pane.pool.hide_unclaimed();
         }
 
+        // Each connector joins the rows of its run the side has lines in to those the file has.
+        let runs = [0, 1].map(|s| {
+            let extent = |run: &Range<usize>, c: usize| {
+                let has = |r: &usize| lines[*r][c].is_some();
+                match (run.clone().find(has), run.clone().rev().find(has)) {
+                    (Some(first), Some(last)) => first..last + 1,
+                    _ => run.start..run.start,
+                }
+            };
+            diff::hunks_of(&differ[s])
+                .iter()
+                .map(|run| match s {
+                    0 => [extent(run, 0), extent(run, MID)],
+                    _ => [extent(run, MID), extent(run, 2)],
+                })
+                .collect()
+        });
+        self.links.set_runs(runs);
+
         let mut extra = vec![0; lines.len()];
         for &room in &rooms {
             extra[room] = GAP_PX;
@@ -495,14 +555,15 @@ impl Merge {
             let pane = self.pane(column);
             editor::restyle_companion(pane.flavour, &pane.buffer, &pane.view);
             let tints = crate::conflict::tints(pane.view.color(), page);
-            let tint = match self.shown[side].get() {
-                CURRENT => tints[0].0,
-                BASE => tints[1].0,
-                _ => tints[2].0,
+            let (tint, marker) = match self.shown[side].get() {
+                CURRENT => tints[0],
+                BASE => tints[1],
+                _ => tints[2],
             };
             if let Some(tag) = pane.buffer.tag_table().lookup(TAG_SIDE) {
                 tag.set_paragraph_background_rgba(Some(&tint));
             }
+            self.links.set_tints(side, tint, marker);
         }
     }
 
@@ -567,6 +628,43 @@ impl Merge {
             let bounds = widget.compute_bounds(&self.columns.paned)?;
             Some((bounds.y() + bounds.height() / 2.0).round() as i32)
         })
+    }
+
+    /// Each connector's ends in its strip, as `(top, bottom)` on its left and on its right, by
+    /// strip, and how many of those ends are not where GTK draws the line of the row they stand
+    /// on: 0 is the claim, what [`Merge::misaligned`] is to the rows.
+    pub fn links(&self) -> ([Vec<super::links::Ends>; 2], usize) {
+        let ends = [0, 1].map(|i| self.links.ends(i, &self.columns));
+        let rows = self.columns.rows.borrow();
+        // Where GTK draws row `r`, in strip `i`'s pixels: in the first column with a line there.
+        let drawn = |i: usize, r: usize| -> Option<i32> {
+            if rows.hidden.iter().any(|gap| gap.contains(&r)) {
+                return None;
+            }
+            (0..3).find_map(|c| {
+                let n = rows.lines[c].get(r).copied().flatten()?;
+                let view = &self.pane(c).view;
+                let at = self.pane(c).buffer.iter_at_offset(rows.starts[c][n - 1]);
+                let y = view.iter_location(&at).y() - view.pixels_above_lines();
+                let (_, y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, 0, y);
+                let point = gtk::graphene::Point::new(0.0, y as f32);
+                let at = view.compute_point(&self.links.strips[i], &point)?;
+                Some(at.y().round() as i32)
+            })
+        };
+        let mut off = 0;
+        for (i, ends) in ends.iter().enumerate() {
+            let runs = self.links.runs(i);
+            off += runs.len().abs_diff(ends.len());
+            for (run, end) in runs.iter().zip(ends) {
+                for (span, (top, bottom)) in run.iter().zip(end) {
+                    for (r, y) in [(span.start, *top), (span.end, *bottom)] {
+                        off += usize::from(drawn(i, r).is_some_and(|at| at != y));
+                    }
+                }
+            }
+        }
+        (ends, off)
     }
 
     /// How many lines of each side column carry its tint.
