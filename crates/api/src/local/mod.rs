@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 
 use anyhow::Result;
 
-use accent_core::index::Index;
+use accent_core::index::{Index, InterruptHandle};
 
 use crate::paths::outside;
 use crate::worker::{self, Msg};
@@ -37,6 +37,11 @@ pub(crate) struct Local {
     /// of every note holds its connection for as long as it takes, and the main thread's
     /// `list_dir` and `backlinks` must never queue behind one on the same mutex.
     search: Mutex<Index>,
+    /// The Search pane's turn on `search`: how many of its queries have been asked, and whether
+    /// one of them is running there now ([`Local::supersede`]).
+    pane: Mutex<(u64, bool)>,
+    /// Stops the statement running on `search`.
+    interrupt: InterruptHandle,
     cfg: Mutex<VaultConfig>,
     /// The language providers answering for the open documents.
     pub(crate) lang: std::sync::Arc<language::Languages>,
@@ -110,7 +115,9 @@ impl Local {
             Local {
                 root,
                 index: Mutex::new(index),
+                interrupt: search.interrupt_handle(),
                 search: Mutex::new(search),
+                pane: Mutex::new((0, false)),
                 cfg: Mutex::new(cfg),
                 lang,
                 tx,
@@ -245,6 +252,37 @@ impl Local {
 
     fn searcher(&self) -> MutexGuard<'_, Index> {
         locked(&self.search)
+    }
+
+    /// Run one of the Search pane's queries on the search connection, superseding the ones asked
+    /// before it: the one running there is interrupted and those still waiting give up, each
+    /// answering with an error nobody reads, since the pane has moved past them. Every keystroke
+    /// in the box is a query, and each used to run to its end before the next could start, so the
+    /// rows for what was typed last came after all of them.
+    ///
+    /// Only these queries are stopped: the git pane's directory list and a Replace All's file list
+    /// share the connection and always run to their end.
+    fn supersede<T>(&self, query: impl FnOnce(&Index) -> Result<T>) -> Result<T> {
+        let mine = {
+            let mut pane = locked(&self.pane);
+            // Under the lock, so the query it reaches is still the one holding the connection.
+            if pane.1 {
+                self.interrupt.interrupt();
+            }
+            pane.0 += 1;
+            pane.0
+        };
+        let index = self.searcher();
+        {
+            let mut pane = locked(&self.pane);
+            if pane.0 != mine {
+                anyhow::bail!("superseded by a newer search");
+            }
+            pane.1 = true;
+        }
+        let answer = query(&index);
+        locked(&self.pane).1 = false;
+        answer
     }
 
     fn post(&self, msg: Msg) {

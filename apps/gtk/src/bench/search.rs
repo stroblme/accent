@@ -14,6 +14,8 @@ const INDEXED: Duration = Duration::from_secs(120);
 const TYPING: Duration = Duration::from_millis(100);
 /// How often those drills look at the rows, to time each change from the last keystroke.
 const LOOK: Duration = Duration::from_millis(2);
+/// How long after the last keystroke they wait, at most, for the queries still running to land.
+const DRAIN: Duration = Duration::from_secs(30);
 
 /// `ACCENT_BENCH_SEARCH=<query>[:<n>]` puts `<query>` in the Search pane, then writes `n` files
 /// holding it twice — one note unless the tail says otherwise, every second file a `.txt` rather
@@ -43,9 +45,11 @@ const LOOK: Duration = Duration::from_millis(2);
 /// `ACCENT_BENCH_SEARCH=type:<query>` is a different drill: it types `<query>` a character at a
 /// time, faster than the pane waits for, and prints the rows each time they change, with the
 /// milliseconds since the last keystroke: first the prefix rows, then the mid-word rows appended
-/// below them once the typing has stopped. `=walk:<query>` does the same with All on, where the
-/// walk past the index appends its rows last, under `Not Indexed`, and prints them once more with
-/// All off again (`all_off`). `RUST_LOG=accent=debug` prints one `sidebar pass` line per pass for
+/// below them once the typing has stopped; `last_key running=` is how many queries for the
+/// prefixes typed before were still on worker threads at the last keystroke, and `settled` when
+/// the rows last changed and when nothing was running any more (`drained_ms`). `=walk:<query>`
+/// does the same with All on, where the walk past the index appends its rows last, under
+/// `Not Indexed`, and prints them once more with All off again (`all_off`). `RUST_LOG=accent=debug` prints one `sidebar pass` line per pass for
 /// the whole query, not one per character.
 pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("seed:") {
@@ -346,16 +350,32 @@ fn bench_type(app: Rc<App>, typed: Vec<String>, i: usize, all: bool) {
         return;
     }
     let typed_at = Instant::now();
+    // Queries for prefixes the box has moved past that are still on a worker thread.
+    println!("bench search last_key running={}", sidebar.search_running());
     let seen = RefCell::new(sidebar.search_state());
+    // When the rows last changed, and since when nothing has been running.
+    let (changed, drained) = (Cell::new(0), Cell::new(None));
     glib::timeout_add_local(LOOK, move || {
         let state = app.sidebar.get().map(|s| s.search_state());
         if let Some(state) = state.filter(|state| *state != *seen.borrow()) {
-            bench_type_print(typed_at.elapsed().as_millis(), &state);
+            changed.set(typed_at.elapsed().as_millis());
+            bench_type_print(changed.get(), &state);
             seen.replace(state);
         }
-        if typed_at.elapsed() < SETTLE {
+        let running = app.sidebar.get().map_or(0, |s| s.search_running());
+        if running > 0 {
+            drained.set(None);
+        } else if drained.get().is_none() {
+            drained.set(Some(typed_at.elapsed().as_millis()));
+        }
+        if typed_at.elapsed() < SETTLE || (running > 0 && typed_at.elapsed() < DRAIN) {
             return glib::ControlFlow::Continue;
         }
+        println!(
+            "bench search settled final_ms={} drained_ms={:?} running={running}",
+            changed.get(),
+            drained.get()
+        );
         let Some(sidebar) = app.sidebar.get().filter(|_| all) else {
             bench_quit(&app);
             return glib::ControlFlow::Break;

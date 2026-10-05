@@ -114,6 +114,8 @@ struct VaultPanes {
     #[cfg(feature = "bench")]
     search_state: Rc<dyn Fn() -> (String, Vec<String>, String)>,
     #[cfg(feature = "bench")]
+    search_running: Rc<dyn Fn() -> usize>,
+    #[cfg(feature = "bench")]
     search_view: gtk::ListView,
     references: gtk::StringList,
     references_stack: gtk::Stack,
@@ -276,6 +278,8 @@ impl Sidebar {
                         apply_replace: search.apply,
                         #[cfg(feature = "bench")]
                         search_state: search.state,
+                        #[cfg(feature = "bench")]
+                        search_running: search.running,
                         #[cfg(feature = "bench")]
                         search_view: search.view,
                         references,
@@ -588,6 +592,14 @@ impl Sidebar {
             Some(panes) => (panes.search_state)(),
             None => (String::new(), Vec::new(), String::new()),
         }
+    }
+
+    /// How many of the Search pane's queries are on worker threads, for `ACCENT_BENCH_SEARCH`.
+    #[cfg(feature = "bench")]
+    pub fn search_running(&self) -> usize {
+        self.panes
+            .as_ref()
+            .map_or(0, |panes| (panes.search_running)())
     }
 
     /// The Search pane's query and replace boxes, for `ACCENT_BENCH_SEARCH=seed:`.

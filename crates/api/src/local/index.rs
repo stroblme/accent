@@ -34,7 +34,8 @@ impl Local {
         list_dir(&self.index(), &self.root, rel)
     }
 
-    /// Ranked full-text search. On the search connection, so a slow query cannot block the tree.
+    /// Ranked full-text search. On the search connection, so a slow query cannot block the tree,
+    /// and superseded by the next one the pane asks ([`supersede`](Local::supersede)).
     ///
     /// `include_ignored` is the sidebar's All toggle: off, what git ignores is left out of the
     /// results; on, it is put back. A note is in either way.
@@ -44,11 +45,11 @@ impl Local {
         limit: usize,
         include_ignored: bool,
     ) -> Result<Vec<SearchHit>> {
-        self.searcher().search(query, limit, include_ignored)
+        self.supersede(|index| index.search(query, limit, include_ignored))
     }
 
     /// The mid-word matches below a ranked search: [`Index::search_mid_word`], on the same
-    /// connection as [`search`](Self::search).
+    /// connection as [`search`](Self::search) and superseded as it is.
     pub fn search_mid_word(
         &self,
         query: &str,
@@ -56,14 +57,13 @@ impl Local {
         include_ignored: bool,
         skip: &[String],
     ) -> Result<Vec<SearchHit>> {
-        self.searcher()
-            .search_mid_word(query, limit, include_ignored, skip)
+        self.supersede(|index| index.search_mid_word(query, limit, include_ignored, skip))
     }
 
     /// Exact search: one row per match of `query` under `options`, capped at `limit`, plus how
     /// many there are in all, which is what a [`replace_all`](Self::replace_all) under the same
     /// `include_ignored` would rewrite. `include_ignored` means what it does in
-    /// [`search`](Self::search).
+    /// [`search`](Self::search), and it is superseded as that is.
     ///
     /// The pattern is compiled here, where the files are, because a `Regex` does not cross the
     /// wire: a remote caller sends what the user typed and the toggles, and case-insensitivity
@@ -76,7 +76,7 @@ impl Local {
         include_ignored: bool,
     ) -> Result<(Vec<Match>, usize)> {
         let re = search::pattern(query, options)?;
-        self.searcher().grep(&re, limit, include_ignored)
+        self.supersede(|index| index.grep(&re, limit, include_ignored))
     }
 
     /// The same exact search over the files the index does not hold at all: those under a
@@ -365,6 +365,39 @@ impl Local {
 mod tests {
     use crate::tests::*;
     use crate::{Event, Options, VaultConfig};
+
+    /// Of three queries asked while the first still holds the search connection, the newest runs
+    /// once it lets go and the one in between never does: the pane has already moved past it.
+    #[test]
+    fn a_newer_search_supersedes_the_ones_waiting() {
+        let f = Fixture::open(VaultConfig::default());
+        let crate::vault::Backend::Local(local) = &f.vault.backend else {
+            unreachable!("the fixture is a local vault")
+        };
+        let until = |done: fn(&(u64, bool)) -> bool| {
+            while !done(&crate::locked(&local.pane)) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|s| {
+            let first = s.spawn(move || {
+                local.supersede(|_| {
+                    let _ = wait.recv();
+                    Ok("first")
+                })
+            });
+            until(|pane| pane.1);
+            let second = s.spawn(|| local.supersede(|_| Ok("second")));
+            until(|pane| pane.0 == 2);
+            let third = s.spawn(|| local.supersede(|_| Ok("third")));
+            until(|pane| pane.0 == 3);
+            go.send(()).unwrap();
+            assert_eq!(first.join().unwrap().unwrap(), "first");
+            assert!(second.join().unwrap().is_err());
+            assert_eq!(third.join().unwrap().unwrap(), "third");
+        });
+    }
 
     #[test]
     fn open_reconciles_and_lists_the_root() {
