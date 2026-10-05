@@ -9,8 +9,8 @@ use accent_drawio::guide::Neighbour;
 use accent_drawio::handle::{self, Kind, Knob, Terminal};
 use accent_drawio::{CellId, Constraint, Context, Page, PathCmd, Point, Prim, Rect, Scene};
 
-pub const MIN_SCALE: f64 = 0.1;
-pub const MAX_SCALE: f64 = 8.0;
+use crate::zoom::clamp_scale;
+
 /// Room left around the drawing, in pixels on screen.
 pub const GAP: f64 = 24.0;
 /// A selection handle's side, in pixels on screen — the PDF's Adjust box's.
@@ -89,14 +89,6 @@ pub fn fit_scale(page: (f64, f64), viewport: (f64, f64)) -> f64 {
     let fit = ((viewport.0 - 2.0 * GAP) / page.0.max(1.0))
         .min((viewport.1 - 2.0 * GAP) / page.1.max(1.0));
     clamp_scale(fit)
-}
-
-pub fn clamp_scale(scale: f64) -> f64 {
-    if scale.is_finite() {
-        scale.clamp(MIN_SCALE, MAX_SCALE)
-    } else {
-        1.0
-    }
 }
 
 /// How far a touchpad swipe pushes on past the edge of the page to turn it: about what a wheel
@@ -866,6 +858,7 @@ impl Sheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zoom::{MAX_SCALE, MIN_SCALE};
     use accent_drawio::geom::corners;
 
     fn near(a: Point, b: Point) -> bool {

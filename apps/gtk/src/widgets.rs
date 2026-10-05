@@ -1,6 +1,7 @@
 //! The widgets and timers more than one pane was building the same way: an empty state, a
-//! scroller, a list factory of plain labels, and the two timers — a pulsing progress bar and a
-//! keystroke debounce — that every searching pane needs a copy of.
+//! scroller, a list factory of plain labels, the two timers — a pulsing progress bar and a
+//! keystroke debounce — that every searching pane needs a copy of, and the handler slot a tab's
+//! hooks are kept in.
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -428,6 +429,40 @@ impl Debounce {
     pub(crate) fn cancel(&self) {
         if let Some(id) = self.pending.borrow_mut().take() {
             id.remove();
+        }
+    }
+}
+
+/// The one handler a tab's `connect_*` sets and the tab calls back on: `F` is its signature,
+/// `dyn Fn(&Rc<Tab>)` for most.
+///
+/// A handler is free to reach back into the tab that called it, setting or firing a hook of its
+/// own, so it is cloned out of the cell before it runs ([`Hook::get`]), never called with the
+/// cell borrowed.
+pub(crate) struct Hook<F: ?Sized>(RefCell<Option<Rc<F>>>);
+
+impl<F: ?Sized> Default for Hook<F> {
+    fn default() -> Self {
+        Hook(RefCell::new(None))
+    }
+}
+
+impl<F: ?Sized> Hook<F> {
+    pub(crate) fn set(&self, f: Rc<F>) {
+        *self.0.borrow_mut() = Some(f);
+    }
+
+    /// The handler, to call once the cell is let go of.
+    pub(crate) fn get(&self) -> Option<Rc<F>> {
+        self.0.borrow().clone()
+    }
+}
+
+impl<T> Hook<dyn Fn(&Rc<T>)> {
+    /// Call the handler, if one is set, with the tab it is about.
+    pub(crate) fn emit(&self, on: &Rc<T>) {
+        if let Some(f) = self.get() {
+            f(on);
         }
     }
 }

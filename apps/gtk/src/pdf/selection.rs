@@ -177,8 +177,7 @@ impl PdfTab {
             .borrow()
             .get(at)
             .map(|l| (l.src_rel_path.clone(), l.byte_start.max(0) as usize));
-        let hook = self.on_note.borrow().clone();
-        if let (Some((rel, byte)), Some(f)) = (note, hook) {
+        if let (Some((rel, byte)), Some(f)) = (note, self.on_note.get()) {
             f(&rel, byte);
         }
     }
@@ -194,8 +193,7 @@ impl PdfTab {
                 self.view.goto_page(page, top);
             }
             LinkTarget::Uri(uri) => {
-                let handler = self.on_uri.borrow().clone();
-                if let Some(f) = handler {
+                if let Some(f) = self.on_uri.get() {
                     f(&uri);
                 }
             }

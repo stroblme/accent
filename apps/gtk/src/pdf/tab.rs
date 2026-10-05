@@ -5,10 +5,10 @@
 //! given. `render.rs` is the other half, one thread per open document; this is the reader
 //! between them — the history, the search and the outline that make it more than a viewer.
 
-use super::protocol::{Asker, Request};
+use super::protocol::Request;
 use super::ring;
-use super::selection::pages_of;
-use super::{self as pdfview, Anchor, PdfView, PdfZoom, Reply, Span, render};
+use super::{self as pdfview, Anchor, PdfView, PdfZoom, Span, render};
+use crate::widgets::{Debounce, Hook};
 use accent_api::{KeptLink, PdfLink};
 use accent_core::pdf;
 use accent_core::search::Options;
@@ -19,14 +19,6 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-
-/// How long after the last stroke the document is written out.
-const INK_SAVE: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// How long a changed file is left alone before it is read again. A PDF being written — a LaTeX
-/// run, a copy — changes every few hundred milliseconds until it is done, and read half-way it
-/// will not open, or opens with the pages written so far.
-const SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// The page commands, each on the page the page's own menu was opened on, or else the page being
 /// read ([`PdfTab::command_page`]): that menu and the status bar's page count offer the same three.
@@ -39,18 +31,18 @@ pub const PAGE_ACTIONS: [&str; 3] = [
 /// Where a document is being read, remembered per file in the session.
 pub use accent_core::config::PdfPlace as Place;
 
-pub(super) type Hook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>)>>>;
+pub(super) type TabHook = Hook<dyn Fn(&Rc<PdfTab>)>;
 /// A highlight was clicked: the note holding the link, and the byte it starts at.
-type NoteHook = RefCell<Option<Rc<dyn Fn(&str, usize)>>>;
+type NoteHook = Hook<dyn Fn(&str, usize)>;
 /// An export finished, with what it wrote or why it could not.
-type ExportHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, Result<usize, String>)>>>;
+type ExportHook = Hook<dyn Fn(&Rc<PdfTab>, Result<usize, String>)>;
 /// The drawing could not be written, and why.
-type FailHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, String)>>>;
+type FailHook = Hook<dyn Fn(&Rc<PdfTab>, String)>;
 /// A width or a colour was picked on the ring for a tool.
-type ChoiceHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice)>>>;
-type UriHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
+type ChoiceHook = Hook<dyn Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice)>;
+type UriHook = Hook<dyn Fn(&str)>;
 /// The pages were edited, or an edit walked by Undo or Redo: the edit made, and its step.
-type RepageHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, pdf::PageEdit, u32)>>>;
+type RepageHook = Hook<dyn Fn(&Rc<PdfTab>, pdf::PageEdit, u32)>;
 
 /// The notes' links following this document's page edits, which the window runs
 /// (`App::relink`): one rewrite at a time, in the order the edits were made, since each reads
@@ -132,8 +124,8 @@ pub struct PdfTab {
     pub(super) without_synctex: Cell<bool>,
     /// The line of text Show in PDF asked for while the document was still opening.
     pub(super) spot: Cell<Option<(usize, pdf::Rect)>>,
-    /// A save is already scheduled, so a burst of strokes costs one write.
-    pub(super) save_pending: Cell<bool>,
+    /// The write a stroke schedules, which a burst of strokes shares.
+    pub(super) autosave: Debounce,
     /// A write of this document is on its way somewhere else — the ssh upload of a remote
     /// vault's copy — and whether another save landed while it was. See [`PdfTab::claim_upload`].
     pub(super) uploading: Cell<bool>,
@@ -172,23 +164,23 @@ pub struct PdfTab {
     /// The search running shows its first hit when it lands: one the reader typed, not a page
     /// edit's search again, which leaves the reader where they are.
     pub(super) jump: Cell<bool>,
-    pub(super) on_zoom: Hook,
-    pub(super) on_page: Hook,
+    pub(super) on_zoom: TabHook,
+    pub(super) on_page: TabHook,
     /// Fired just before a jump, so the pane can record where the reader was.
-    pub(super) on_jump: Hook,
-    pub(super) on_outline: Hook,
+    pub(super) on_jump: TabHook,
+    pub(super) on_outline: TabHook,
     /// Fired when the document's pages are known, which is when it stops being "opening".
-    pub(super) on_open: Hook,
-    pub(super) on_matches: Hook,
+    pub(super) on_open: TabHook,
+    pub(super) on_matches: TabHook,
     pub(super) on_uri: UriHook,
-    pub(super) on_mode: Hook,
-    pub(super) on_history: Hook,
+    pub(super) on_mode: TabHook,
+    pub(super) on_history: TabHook,
     pub(super) on_note: NoteHook,
     pub(super) on_export: ExportHook,
     pub(super) on_save_failed: FailHook,
     /// Fired once the file on this machine holds what was drawn, for a vault whose real copy is
     /// somewhere else.
-    pub(super) on_saved: Hook,
+    pub(super) on_saved: TabHook,
     pub(super) on_choice: ChoiceHook,
     pub(super) on_repaged: RepageHook,
     pub relinks: RefCell<Relinks>,
@@ -285,7 +277,7 @@ pub fn open(
         pointed: Cell::new(None),
         without_synctex: Cell::new(false),
         spot: Cell::new(None),
-        save_pending: Cell::new(false),
+        autosave: Debounce::new(crate::editor::AUTOSAVE),
         uploading: Cell::new(false),
         upload_again: Cell::new(false),
         conflict_told: Cell::new(false),
@@ -300,21 +292,21 @@ pub fn open(
         matches: RefCell::new(Vec::new()),
         current: Cell::new(None),
         jump: Cell::new(false),
-        on_zoom: RefCell::new(None),
-        on_page: RefCell::new(None),
-        on_jump: RefCell::new(None),
-        on_outline: RefCell::new(None),
-        on_open: RefCell::new(None),
-        on_matches: RefCell::new(None),
-        on_uri: RefCell::new(None),
-        on_mode: RefCell::new(None),
-        on_history: RefCell::new(None),
-        on_note: RefCell::new(None),
-        on_export: RefCell::new(None),
-        on_save_failed: RefCell::new(None),
-        on_saved: RefCell::new(None),
-        on_choice: RefCell::new(None),
-        on_repaged: RefCell::new(None),
+        on_zoom: Hook::default(),
+        on_page: Hook::default(),
+        on_jump: Hook::default(),
+        on_outline: Hook::default(),
+        on_open: Hook::default(),
+        on_matches: Hook::default(),
+        on_uri: Hook::default(),
+        on_mode: Hook::default(),
+        on_history: Hook::default(),
+        on_note: Hook::default(),
+        on_export: Hook::default(),
+        on_save_failed: Hook::default(),
+        on_saved: Hook::default(),
+        on_choice: Hook::default(),
+        on_repaged: Hook::default(),
         relinks: RefCell::default(),
         monitor: RefCell::default(),
     });
@@ -326,7 +318,7 @@ pub fn open(
     view.connect_zoom(glib::clone!(
         #[weak]
         tab,
-        move || tab.emit(&tab.on_zoom)
+        move || tab.on_zoom.emit(&tab)
     ));
     tab.wire_strip(&thumbs);
     tab.wire_organize();
@@ -334,8 +326,7 @@ pub fn open(
         #[weak]
         tab,
         move |tool, choice| {
-            let hook = tab.on_choice.borrow().clone();
-            if let Some(f) = hook {
+            if let Some(f) = tab.on_choice.get() {
                 f(&tab, tool, choice);
             }
         }
@@ -386,6 +377,13 @@ impl PdfTab {
         if let Err(message) = self.start() {
             self.fail(&message);
         }
+    }
+
+    /// Start the render thread, which opens the document and then answers requests for it.
+    fn start(self: &Rc<Self>) -> Result<(), String> {
+        let weak = glib::SendWeakRef::from(self.view.downgrade());
+        *self.tx.borrow_mut() = Some(render::spawn(self.path(), weak)?);
+        Ok(())
     }
 
     pub fn page_count(&self) -> usize {
@@ -506,25 +504,6 @@ impl PdfTab {
     /// jump: a history full of single steps has nothing left to go back to.
     fn show_page(&self, page: usize) {
         self.view.goto_page(page, None);
-    }
-
-    /// Page from a key, through `win.pdf-next-page` / `win.pdf-previous-page`.
-    ///
-    /// The keys are dispatched here rather than from the window's accelerator table — a bare
-    /// `space` or arrow there would be taken from every entry in the app — but the *command* is
-    /// the window's, so the palette lists it and a menu or a script can fire it. This is the one
-    /// place the keys and the palette meet.
-    fn page(&self, forward: bool) {
-        self.run(match forward {
-            true => "win.pdf-next-page",
-            false => "win.pdf-previous-page",
-        });
-    }
-
-    /// Fire one of the window's commands from the page. What a key over a PDF does is a command
-    /// like any other, so it lists in the palette and can be rebound.
-    fn run(&self, action: &str) {
-        let _ = self.view.activate_action(action, None);
     }
 
     pub fn next_page(&self) {
@@ -709,18 +688,18 @@ impl PdfTab {
         if self.wants_inks() {
             self.ask_inks();
         }
-        self.emit(&self.on_mode);
+        self.on_mode.emit(self);
     }
 
     /// Whether the tool in hand needs to know what is drawn on the page, which every tool does:
     /// the Adjust tool takes hold of a stroke, the eraser has to find the one under the pointer,
     /// and a stylus's eraser tip erases under any of them.
-    fn wants_inks(&self) -> bool {
+    pub(super) fn wants_inks(&self) -> bool {
         self.view.mode() != pdfview::Mode::Select
     }
 
     /// Give those tools every page at least partly on screen.
-    fn ask_inks(&self) {
+    pub(super) fn ask_inks(&self) {
         for page in self.view.visible_pages() {
             self.ask(Request::Inks(page));
         }
@@ -772,20 +751,12 @@ impl PdfTab {
 
     /// Called when what Undo and Redo can reach changes.
     pub fn connect_history(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
-        *self.on_history.borrow_mut() = Some(Rc::new(f));
+        self.on_history.set(Rc::new(f));
     }
 
     /// Called when the pen is picked up or put down.
     pub fn connect_mode(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
-        *self.on_mode.borrow_mut() = Some(Rc::new(f));
-    }
-
-    /// Write out whatever has been drawn, if anything has.
-    ///
-    /// The thread answers when it gets there; nothing waits for it, because the write is atomic
-    /// and the channel is drained before the thread ends, so a tab closing still saves.
-    pub fn flush(self: &Rc<Self>) {
-        self.ask(Request::Save(None));
+        self.on_mode.set(Rc::new(f));
     }
 
     /// A blank page before or `after` the [`PdfTab::command_page`], the size of the page before
@@ -803,138 +774,29 @@ impl PdfTab {
         self.ask(Request::Pages(edit));
     }
 
-    /// The same as the tab closes, holding the tab until the write is done: its answer is what
-    /// sends a remote vault's copy back to the host (`connect_saved`), and a tab already gone
-    /// would never hear it.
-    pub fn flush_closing(self: &Rc<Self>) {
-        let (tx, rx) = channel();
-        self.ask(Request::Save(Some(tx)));
-        let tab = self.clone();
-        glib::spawn_future_local(async move {
-            while let Err(std::sync::mpsc::TryRecvError::Empty) = rx.try_recv() {
-                glib::timeout_future(std::time::Duration::from_millis(50)).await;
-            }
-            // The thread posts its answer as an idle before it lets go of `tx`, and idles of one
-            // priority run in the order they were added: this one runs after it.
-            glib::idle_add_local_once(move || drop(tab));
-        });
-    }
-
-    /// The same, but wait for it — the window is closing and the process is about to end, so a
-    /// write still on the render thread's queue would go with it.
-    ///
-    // ponytail: up to a second of the main loop, and only on the way out. The thread answers as
-    // soon as it finishes whatever tile it is on, so in practice this is a few milliseconds.
-    pub fn flush_blocking(self: &Rc<Self>) {
-        let (tx, rx) = channel();
-        self.ask(Request::Save(Some(tx)));
-        let _ = rx.recv_timeout(std::time::Duration::from_secs(1));
-    }
-
-    /// Write out a second after the last stroke, and once for a burst of them.
-    ///
-    /// The idiom the session save uses: a flag set once and cleared by its own callback, rather
-    /// than a `SourceId` removed and replaced, which is a critical if the source has already run.
-    fn save_soon(self: &Rc<Self>) {
-        if self.save_pending.replace(true) {
-            return;
-        }
-        glib::timeout_add_local_once(
-            INK_SAVE,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                move || {
-                    tab.save_pending.set(false);
-                    tab.flush();
-                }
-            ),
-        );
-    }
-
     /// Called when a highlight is clicked, with the note holding the link and the byte it is at.
     pub fn connect_note(&self, f: impl Fn(&str, usize) + 'static) {
-        *self.on_note.borrow_mut() = Some(Rc::new(f));
+        self.on_note.set(Rc::new(f));
     }
 
     /// Called when an export finishes, with what it wrote or why it could not.
     pub fn connect_choice(&self, f: impl Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice) + 'static) {
-        *self.on_choice.borrow_mut() = Some(Rc::new(f));
+        self.on_choice.set(Rc::new(f));
     }
 
     pub fn connect_export(&self, f: impl Fn(&Rc<PdfTab>, Result<usize, String>) + 'static) {
-        *self.on_export.borrow_mut() = Some(Rc::new(f));
+        self.on_export.set(Rc::new(f));
     }
 
     /// Called when a drawing could not be written out, with the reason to say.
     pub fn connect_save_failed(&self, f: impl Fn(&Rc<PdfTab>, String) + 'static) {
-        *self.on_save_failed.borrow_mut() = Some(Rc::new(f));
+        self.on_save_failed.set(Rc::new(f));
     }
 
     /// Called once a write has landed in the file this tab reads, which on a remote vault is the
     /// cached copy and not the document itself.
     pub fn connect_saved(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
-        *self.on_saved.borrow_mut() = Some(Rc::new(f));
-    }
-
-    /// Take the right to start sending the written-out file somewhere. `false` when one is
-    /// already on its way: that one is marked to go again rather than a second starting beside
-    /// it, so a burst of strokes costs two transfers and the far end is never more than one
-    /// behind.
-    pub fn claim_upload(&self) -> bool {
-        if self.uploading.replace(true) {
-            self.upload_again.set(true);
-            return false;
-        }
-        true
-    }
-
-    /// The transfer came back: `true` when a save landed while it was out and the file has to go
-    /// once more.
-    pub fn upload_done(&self) -> bool {
-        self.uploading.set(false);
-        self.upload_again.replace(false)
-    }
-
-    /// The far end refused this document and the copy beside it, so what was written is kept on
-    /// this machine. `true` the first time, which is the one the reader is told about: a reader
-    /// who keeps drawing writes once a second and every one of those is refused for the same
-    /// reason.
-    pub fn told_conflict(&self) -> bool {
-        !self.conflict_told.replace(true)
-    }
-
-    /// An upload of this document failed. `true` the first time, which is the one the reader is
-    /// told about: the saves after it fail the same way until one lands.
-    pub fn told_failure(&self) -> bool {
-        self.unsent.set(true);
-        !self.failure_told.replace(true)
-    }
-
-    /// An upload the dropped link stopped: nothing to tell, the banner says the link went.
-    pub fn lost_upload(&self) {
-        self.unsent.set(true);
-    }
-
-    /// Whether the last upload failed, so the file here has to go again once it can: when the
-    /// link is back.
-    pub fn unsent(&self) -> bool {
-        self.unsent.get()
-    }
-
-    /// The reader asked for another try: a refusal or a failure after it is news again.
-    pub fn forget_told(&self) {
-        self.conflict_told.set(false);
-        self.failure_told.set(false);
-    }
-
-    /// The conflict is over — an upload landed, the tab moved onto the copy it went into, or the
-    /// document was re-read from what the far end now holds — so the next refusal or failure is
-    /// news again.
-    pub fn clear_conflict(&self) {
-        self.conflict_told.set(false);
-        self.failure_told.set(false);
-        self.unsent.set(false);
+        self.on_saved.set(Rc::new(f));
     }
 
     /// The bookmarks, for the Outline pane.
@@ -983,7 +845,7 @@ impl PdfTab {
             from,
             walked: 0,
         });
-        self.emit(&self.on_matches);
+        self.on_matches.emit(self);
     }
 
     /// Step to the next or previous match and scroll it into view. With none shown, which a page
@@ -1006,11 +868,11 @@ impl PdfTab {
             (Some(at), false) => (at + total - 1) % total,
         };
         self.show_match(next);
-        self.emit(&self.on_matches);
+        self.on_matches.emit(self);
     }
 
     /// Make match `at` the current one and scroll it into view.
-    fn show_match(&self, at: usize) {
+    pub(super) fn show_match(&self, at: usize) {
         self.current.set(Some(at));
         let (page, rect) = self.matches.borrow()[at];
         self.view
@@ -1036,91 +898,25 @@ impl PdfTab {
         matches[..at].iter().filter(|(p, _)| *p == page).count()
     }
 
-    /// Re-read the file, keeping the page, the scroll and the zoom. A rebuilt PDF is the reason
-    /// this exists: a LaTeX loop should not send the reader back to page one.
-    ///
-    /// Once the file has been left alone for [`SETTLE`], not at once: every report of a change
-    /// pushes the reload back, so a file still being written is read once, when it is done.
-    ///
-    /// A write of our own is not a reason: the document in memory *is* what was written, and
-    /// re-reading it would drop annotations made since. There is no `own: true` to ride on the
-    /// way a note's save has one, because the bytes never went through the vault — so the etag
-    /// of what we wrote is what tells the two apart.
-    pub fn refresh(self: &Rc<Self>) {
-        if self.saved.get().is_some()
-            && accent_core::fs::Etag::of(&self.path()).ok() == self.saved.get()
-        {
-            return;
-        }
-        self.changed.set(std::time::Instant::now());
-        if !self.reload_due.replace(true) {
-            self.reload_when_settled(SETTLE);
-        }
-    }
-
-    /// Ask for the file again `wait` from now, or later if it has been reported changed since.
-    fn reload_when_settled(self: &Rc<Self>, wait: std::time::Duration) {
-        glib::timeout_add_local_once(
-            wait,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                move || match SETTLE.checked_sub(tab.changed.get().elapsed()) {
-                    Some(left) if !left.is_zero() => tab.reload_when_settled(left),
-                    _ => {
-                        tab.reload_due.set(false);
-                        tab.ask(Request::Reload);
-                    }
-                }
-            ),
-        );
-    }
-
-    /// Look at the file every [`SETTLE`] while it will not open, and read it again once it has
-    /// changed. The watcher reports a vault file's changes too; this is for a file no watcher
-    /// reports on — outside the vault, or in a folder git ignores — which would wait for good.
-    fn watch_while_failed(self: &Rc<Self>) {
-        let seen = Cell::new(accent_core::fs::Etag::of(&self.path()).ok());
-        glib::timeout_add_local(
-            SETTLE,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                #[upgrade_or]
-                glib::ControlFlow::Break,
-                move || {
-                    if !tab.failed.get() {
-                        return glib::ControlFlow::Break;
-                    }
-                    let now = accent_core::fs::Etag::of(&tab.path()).ok();
-                    if seen.replace(now) != now {
-                        tab.refresh();
-                    }
-                    glib::ControlFlow::Continue
-                }
-            ),
-        );
-    }
-
     pub fn connect_zoom(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
-        *self.on_zoom.borrow_mut() = Some(Rc::new(f));
+        self.on_zoom.set(Rc::new(f));
     }
 
     pub fn connect_jump(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
-        *self.on_jump.borrow_mut() = Some(Rc::new(f));
+        self.on_jump.set(Rc::new(f));
     }
 
     pub fn connect_page(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
-        *self.on_page.borrow_mut() = Some(Rc::new(f));
+        self.on_page.set(Rc::new(f));
     }
 
     pub fn connect_outline(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
-        *self.on_outline.borrow_mut() = Some(Rc::new(f));
+        self.on_outline.set(Rc::new(f));
     }
 
     /// Called once the document is open and its pages are known, and again after a reload.
     pub fn connect_opened(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
-        *self.on_open.borrow_mut() = Some(Rc::new(f));
+        self.on_open.set(Rc::new(f));
     }
 
     /// Whether the render thread is still opening the document.
@@ -1129,25 +925,17 @@ impl PdfTab {
     }
 
     pub fn connect_matches(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
-        *self.on_matches.borrow_mut() = Some(Rc::new(f));
+        self.on_matches.set(Rc::new(f));
     }
 
     pub fn connect_uri(&self, f: impl Fn(&str) + 'static) {
-        *self.on_uri.borrow_mut() = Some(Rc::new(f));
+        self.on_uri.set(Rc::new(f));
     }
 
     /// Called after every page edit, Undo and Redo included, with the edit made and its step:
     /// what the notes that name this document's pages by number have to follow.
     pub fn connect_repaged(&self, f: impl Fn(&Rc<PdfTab>, pdf::PageEdit, u32) + 'static) {
-        *self.on_repaged.borrow_mut() = Some(Rc::new(f));
-    }
-
-    pub(super) fn emit(self: &Rc<Self>, hook: &Hook) {
-        // Cloned out of the cell first: a handler is free to reach back into this tab.
-        let handler = hook.borrow().clone();
-        if let Some(f) = handler {
-            f(self);
-        }
+        self.on_repaged.set(Rc::new(f));
     }
 
     fn show_status(&self, message: &str) {
@@ -1181,7 +969,7 @@ impl PdfTab {
     ///
     /// Pages that were showing go: they are of a file that is not there any more. Where the
     /// reader was is kept for when it opens again.
-    fn fail(self: &Rc<Self>, message: &str) {
+    pub(super) fn fail(self: &Rc<Self>, message: &str) {
         if self.view.page_count() > 0 {
             self.resume.set(Some(self.view.anchor()));
             for view in [&self.view, &self.thumbs] {
@@ -1194,7 +982,7 @@ impl PdfTab {
             self.watch_while_failed();
         }
         self.show_status(message);
-        self.emit(&self.on_open);
+        self.on_open.emit(self);
     }
 
     pub(super) fn ask(&self, request: Request) {
@@ -1207,532 +995,7 @@ impl PdfTab {
     /// About to jump: the window records where the reader is, so Back returns here. Fired before
     /// the view moves, which is what makes `anchor()` still the place being left.
     pub(super) fn jumping(self: &Rc<Self>) {
-        self.emit(&self.on_jump);
-    }
-}
-
-impl PdfTab {
-    /// Start the render thread, which opens the document and then answers requests for it.
-    fn start(self: &Rc<Self>) -> Result<(), String> {
-        let weak = glib::SendWeakRef::from(self.view.downgrade());
-        *self.tx.borrow_mut() = Some(render::spawn(self.path(), weak)?);
-        Ok(())
-    }
-
-    /// Hook up one of the two views: what it wants rendered, and what comes back.
-    fn wire(self: &Rc<Self>, view: &PdfView) {
-        self.wire_strip(view);
-        view.connect_reply(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_, reply| tab.on_reply(reply)
-        ));
-        // A page's stand-in landed. It is all the strip paints of a page, and the strip hears of
-        // it only here: what it asks for is answered to the reading view, which repaints itself.
-        view.connect_lowres(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |page| {
-                tab.thumbs.queue_draw();
-                tab.band_landed(page);
-            }
-        ));
-        view.connect_page(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |page| {
-                // Links are fetched per page, the first time one comes into view.
-                if !tab.links.borrow().contains_key(&page) {
-                    tab.ask(Request::Links(page));
-                }
-                tab.thumbs.set_framed(page);
-                tab.emit(&tab.on_page);
-            }
-        ));
-        view.connect_shown(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move || {
-                if tab.wants_inks() {
-                    tab.ask_inks();
-                }
-            }
-        ));
-        view.connect_pressed(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |view, x, y| tab.click(view, x, y)
-        ));
-        view.connect_clicked(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |view, x, y, state| tab.clicked_highlight(view, x, y, state)
-        ));
-        view.connect_select(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_, span| tab.selected_between(span)
-        ));
-        view.connect_motion(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |view, x, y| {
-                // The pointer only changes when the answer does: a GDK call per pixel of travel
-                // is what the editor's link hover deliberately avoids too.
-                // While a tool is out, the cursor says so and nothing here takes it back: the
-                // page is not text to be selected, and a link is not to be followed.
-                if view.mode() != pdfview::Mode::Select {
-                    return;
-                }
-                let over = tab.link_at(view, x, y).is_some();
-                let on_page = view.page_point(x, y).is_some();
-                view.set_cursor_from_name(Some(match (over, on_page) {
-                    (true, _) => "pointer",
-                    // A page is text to be dragged across, and says so before anyone tries.
-                    (false, true) => "text",
-                    (false, false) => "default",
-                }));
-            }
-        ));
-        view.connect_ink(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |page, points| {
-                let mode = tab.view.mode();
-                let style = tab.view.ink_style(mode);
-                match (mode.shapes(), points.as_slice()) {
-                    (true, &[a, b]) => {
-                        if let Some(shape) = pdfview::shape_of(mode, a, b) {
-                            tab.ask(Request::Shape { page, shape, style });
-                        }
-                    }
-                    (true, _) => {}
-                    (false, _) => tab.ask(Request::Ink {
-                        page,
-                        points,
-                        style,
-                    }),
-                }
-            }
-        ));
-        view.connect_erase(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |page, id, partial, joined| tab.ask(Request::Erase {
-                page,
-                id,
-                joined,
-                partial
-            })
-        ));
-        view.connect_transform(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |page, id, matrix| tab.ask(Request::Transform { page, id, matrix })
-        ));
-    }
-
-    /// What both views answer: the tiles they want rendered, and a click that names a page.
-    ///
-    /// The rest of [`Self::wire`] is the reading view's alone. The strip is a column of
-    /// thumbnails, not a page being read: a drag across it used to select text in the reading
-    /// view, the pointer over it wore an I-beam, and scrolling it asked for the links and the
-    /// strokes of whatever page went past.
-    fn wire_strip(self: &Rc<Self>, view: &PdfView) {
-        view.connect_wants(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |view, scale, dark, wants| {
-                tab.ask(Request::Tiles {
-                    from: match *view == tab.thumbs {
-                        true => Asker::Strip,
-                        false => Asker::Reader,
-                    },
-                    scale,
-                    dark,
-                    theme: theme_of(dark),
-                    wants,
-                });
-            }
-        ));
-        view.connect_goto(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |page| tab.goto_page(page)
-        ));
-    }
-
-    /// The page's own menu, on a secondary click over it.
-    ///
-    /// Go to Source first, about the point the menu was opened on, where the window leaves it
-    /// enabled — a LaTeX build in a local vault (`App::sync_synctex`) — and hidden elsewhere.
-    ///
-    /// Copy and Copy Link to Selection when there is a selection, then Add Page Before, Add Page
-    /// After, Delete Page and Export Highlights, which are about the document rather than about
-    /// what is selected and so are always offered — a read-only or remote document says so in a
-    /// toast rather than by hiding the row. The page commands act on the page under the pointer,
-    /// where the status bar's page count and the palette act on the page being read. The drawing
-    /// tools are not here: they are the ring, which the header's Drawing button opens.
-    ///
-    /// `win.` actions rather than a group of the tab's own: that is what gives them a row in the
-    /// palette and a rebindable accelerator, which is the whole argument of DESIGN.md's keyboard
-    /// section. The tab keeps `Ctrl+C` in its key controller either way.
-    fn wire_menu(self: &Rc<Self>) {
-        let secondary = gtk::GestureClick::builder()
-            .button(gtk::gdk::BUTTON_SECONDARY)
-            .build();
-        secondary.connect_pressed(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_, _, x, y| {
-                tab.selection_menu(x, y);
-            }
-        ));
-        self.view.add_controller(secondary);
-    }
-
-    /// Put the menu under the pointer, at a point in the view's coordinates.
-    pub(crate) fn selection_menu(self: &Rc<Self>, x: f64, y: f64) -> gtk::PopoverMenu {
-        let menu = gio::Menu::new();
-        // Window actions, in sections, the way the terminal's menu is built: that is what puts
-        // them in the palette and lets them be rebound, which a tab-local group could not.
-        self.pointed.set(self.view.page_point(x, y));
-        let missing = self.without_synctex.get();
-        let source = crate::synctex::menu_item("win.pdf-go-to-source", missing);
-        let open = gio::Menu::new();
-        open.append_item(&source);
-        menu.append_section(None, &open);
-        if !self.selected.borrow().is_empty() {
-            let clipboard = gio::Menu::new();
-            for action in ["win.pdf-copy", "win.pdf-copy-link"] {
-                clipboard.append(Some(crate::actions::label_of(action)), Some(action));
-            }
-            menu.append_section(None, &clipboard);
-        }
-        let file = gio::Menu::new();
-        for action in PAGE_ACTIONS
-            .into_iter()
-            .chain(["win.pdf-export-highlights"])
-        {
-            file.append(Some(crate::actions::label_of(action)), Some(action));
-        }
-        menu.append_section(None, &file);
-        // Parented to the box rather than to the view, and pointed at the box's own coordinates:
-        // a popover hung off a widget with a `size_allocate` of its own never re-presents and
-        // freezes at its first-frame size (DESIGN.md, States).
-        let at = gtk::graphene::Point::new(x as f32, y as f32);
-        let at = self.view.compute_point(&self.host, &at).unwrap_or(at);
-        let anchor = gtk::gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
-        let popover = crate::widgets::popup_menu(&self.host, &menu, Some(anchor));
-        // From an idle: an item's action runs after `closed`, and Go to Source reads the point.
-        popover.connect_closed(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_| {
-                glib::idle_add_local_once(move || tab.pointed.set(None));
-            }
-        ));
-        popover
-    }
-
-    /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own;
-    /// the arrows are not — it binds a scroll step to `Ctrl+Up`/`Ctrl+Down` and leaves the bare
-    /// arrow keys to move the focus off the page — so they are wired here.
-    fn wire_keys(self: &Rc<Self>) {
-        let keys = gtk::EventControllerKey::new();
-        keys.connect_key_pressed(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            #[upgrade_or]
-            glib::Propagation::Proceed,
-            move |_, key, _, state| {
-                let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-                // Through the window's actions, not past them: the key is on the tab because
-                // `Ctrl+C` and `Ctrl+Z` belong to whatever has the keyboard, but what they do is
-                // the command the palette and the menus name.
-                if key == gtk::gdk::Key::c && state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
-                    tab.run("win.pdf-copy");
-                    return glib::Propagation::Stop;
-                }
-                // Undo and Redo, on the tab like Copy, with a tool in hand or not: `Ctrl+Z`
-                // belongs to whatever has the keyboard, and here that is the page, whose strokes
-                // and page edits are one history. Redo is `Ctrl+Shift+Z` or `Ctrl+Y`, the two a
-                // note's own undo answers to.
-                if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
-                    let history = match (key.to_lower(), shift) {
-                        (gtk::gdk::Key::z, false) => Some("win.pdf-undo"),
-                        (gtk::gdk::Key::z, true) | (gtk::gdk::Key::y, false) => {
-                            Some("win.pdf-redo")
-                        }
-                        _ => None,
-                    };
-                    if let Some(action) = history {
-                        tab.run(action);
-                        return glib::Propagation::Stop;
-                    }
-                }
-                // `Escape` puts the pen down.
-                if tab.mode() != pdfview::Mode::Select && key == gtk::gdk::Key::Escape {
-                    tab.set_mode(pdfview::Mode::Select);
-                    return glib::Propagation::Stop;
-                }
-                // `Space`, `n`, `p` and the arrows stay bare keys here rather than joining the
-                // table: an application accelerator is dispatched at the window ahead of whatever
-                // has the keyboard, so a bare `space` in it would stop every entry in the app
-                // from taking one. Paging still goes through the window's own commands below.
-                //
-                // Alt+Left and Alt+Right are Back and Forward, and Ctrl with an arrow is the
-                // scroller's own step: only the bare key reads the document.
-                let bare = !state.intersects(
-                    gtk::gdk::ModifierType::CONTROL_MASK
-                        | gtk::gdk::ModifierType::ALT_MASK
-                        | gtk::gdk::ModifierType::SUPER_MASK,
-                );
-                match key {
-                    gtk::gdk::Key::space if shift => tab.page(false),
-                    gtk::gdk::Key::space => tab.page(true),
-                    gtk::gdk::Key::n => tab.page(true),
-                    gtk::gdk::Key::p => tab.page(false),
-                    // A page back and a page forth whatever the zoom: horizontal movement is
-                    // Shift and the wheel, and one key cannot mean two things.
-                    gtk::gdk::Key::Left if bare => tab.page(false),
-                    gtk::gdk::Key::Right if bare => tab.page(true),
-                    gtk::gdk::Key::Up if bare => tab.view.scroll_step(false),
-                    gtk::gdk::Key::Down if bare => tab.view.scroll_step(true),
-                    _ => return glib::Propagation::Proceed,
-                }
-                glib::Propagation::Stop
-            }
-        ));
-        // Ctrl let go with the pointer still on the link: the preview was only ever the
-        // modifier's, so it goes with it.
-        keys.connect_key_released(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_, key, _, _| {
-                if matches!(key, gtk::gdk::Key::Control_L | gtk::gdk::Key::Control_R) {
-                    tab.hide_preview();
-                }
-            }
-        ));
-        self.view.add_controller(keys);
-    }
-
-    /// Forget what is kept of each page that cannot follow it to another number or document: the
-    /// strokes the tools know, the links, and the glyphs with the selection made of them — an
-    /// export or a rebuild moves the text, and a stale index would paint the selection elsewhere.
-    /// Each is asked for again as it is needed.
-    fn forget_pages(&self) {
-        self.view.clear_inks();
-        self.links.borrow_mut().clear();
-        self.glyphs.borrow_mut().clear();
-        self.clear_selection();
-    }
-
-    /// Everything from the render thread that is not a texture.
-    fn on_reply(self: &Rc<Self>, reply: Reply) {
-        match reply {
-            Reply::Links(page, links) => {
-                self.links.borrow_mut().insert(page, links);
-            }
-            Reply::Text(page, glyphs) => {
-                self.glyphs.borrow_mut().insert(page, glyphs);
-                // The drag that asked for them is usually still going, so answer it now rather
-                // than making the user drag again. A drag across a page break waits for the last
-                // page it covers: `select` needs all of them to know where the middle ones end.
-                let waiting = self
-                    .pending_select
-                    .get()
-                    .filter(|span| pages_of(*span).contains(&page));
-                if let Some(span) = waiting {
-                    let have = self.glyphs.borrow();
-                    if pages_of(span).all(|at| have.contains_key(&at)) {
-                        drop(have);
-                        self.pending_select.set(None);
-                        self.select(span);
-                    }
-                }
-                // Or a link is waiting for this page, which is Follow Link into the document.
-                if self.pending_show.get().is_some_and(|(at, _)| at == page) {
-                    self.apply_show();
-                }
-            }
-            Reply::Outline(outline) => {
-                *self.outline.borrow_mut() = outline;
-                self.emit(&self.on_outline);
-            }
-            Reply::Found { query, page, hits } => {
-                // A result for a query the user has already moved past.
-                if query != self.query.get() {
-                    return;
-                }
-                let found: Vec<pdf::Rect> = hits
-                    .iter()
-                    .filter_map(|hit| hit.iter().copied().reduce(pdf::Rect::union))
-                    .collect();
-                if found.is_empty() {
-                    return;
-                }
-                // Page order is the order a reader steps through them, and the thread walks from
-                // the page being read to the end and round from the first — so this page's
-                // matches go among the ones already found where a binary search places them,
-                // without sorting the list again per reply.
-                let mut matches = self.matches.borrow_mut();
-                let at = matches.partition_point(|(seen, _)| *seen <= page);
-                matches.splice(at..at, found.iter().map(|rect| (page, *rect)));
-                drop(matches);
-                let count = found.len();
-                self.view.add_marks(page, found);
-                match self.current.get() {
-                    // The first page with a hit, the walk having started on the page being read.
-                    None if self.jump.take() => self.show_match(at),
-                    // A page before the current match, the walk having wrapped round.
-                    Some(current) if at <= current => self.current.set(Some(current + count)),
-                    _ => {}
-                }
-                self.emit(&self.on_matches);
-            }
-            Reply::Highlights(map) => self.view.set_highlights(map),
-            Reply::Exported(result) => {
-                let hook = self.on_export.borrow().clone();
-                if let Some(f) = hook {
-                    f(self, result);
-                }
-            }
-            Reply::PageChanged(page, area) => {
-                // The reading view keeps painting what it has until the new render arrives; the
-                // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
-                self.view.refresh_page(page, area);
-                self.thumbs.queue_draw();
-                if self.wants_inks() {
-                    self.ask_inks();
-                }
-                self.save_soon();
-            }
-            Reply::Inks { page, inks, erases } => self.view.set_inks(page, inks, erases),
-            Reply::History { undo, redo } => {
-                self.history.set((undo, redo));
-                self.emit(&self.on_history);
-            }
-            Reply::Saved(etag) => {
-                self.saved.set(Some(etag));
-                let hook = self.on_saved.borrow().clone();
-                if let Some(f) = hook {
-                    f(self);
-                }
-            }
-            Reply::SaveFailed(why) => {
-                let hook = self.on_save_failed.borrow().clone();
-                if let Some(f) = hook {
-                    f(self, why);
-                }
-            }
-            Reply::Repaged { sizes, edit, step } => {
-                let anchor = self.view.anchor();
-                let map = |page| edit.map(page);
-                // One cache for both views, so it moves once; each view moves what it is still
-                // waiting on for a page.
-                self.view.cache().borrow_mut().repage(map);
-                self.view.repage(map);
-                self.thumbs.repage(map);
-                self.forget_pages();
-                self.view.set_sizes(sizes.clone());
-                self.thumbs.set_sizes(sizes);
-                match edit {
-                    // Land on the new page: putting one in is asking for somewhere to draw, and
-                    // a jump, so the reader can come back with Back.
-                    pdf::PageEdit::Insert(at) => self.goto_page(at),
-                    // The page the reader was on, wherever it went — or, deleted, the one that
-                    // took its place.
-                    _ => {
-                        let page = edit.map(anchor.page).unwrap_or(anchor.page);
-                        let anchor = Anchor { page, ..anchor }.clamped(self.page_count());
-                        self.view.scroll_to(anchor);
-                    }
-                }
-                // The highlights go with their pages at once. The notes holding them are
-                // rewritten behind this (`connect_repaged`), and the index's answer after that
-                // replaces these.
-                for link in self.notes.borrow_mut().iter_mut() {
-                    link.page = edit.map(link.page).unwrap_or(link.page);
-                }
-                // Asked again under the new numbers: the bookmarks' pages, where the notes'
-                // highlights land, the strokes a tool in hand needs, this page's links, and the
-                // search's matches.
-                self.ask(Request::Outline);
-                self.ask(Request::Highlights(self.notes.borrow().clone()));
-                if self.wants_inks() {
-                    self.ask_inks();
-                }
-                self.ask(Request::Links(self.view.current_page()));
-                let (searched, options) = self.searched.borrow().clone();
-                if !searched.is_empty() {
-                    self.find(&searched, options, false);
-                }
-                // The page count changed, or the page the reader is on did, with no scroll.
-                self.emit(&self.on_page);
-                // The strip's buttons are over whichever page is under the pointer now.
-                self.hover_thumbnail();
-                let hook = self.on_repaged.borrow().clone();
-                if let Some(f) = hook {
-                    f(self, edit, step);
-                }
-                self.save_soon();
-            }
-            Reply::Reloaded(sizes) => {
-                #[cfg(feature = "bench")]
-                self.opens.set(self.opens.get() + 1);
-                // Whatever the far end had that we did not is in hand now, so a refusal after
-                // this is a new conflict and worth saying again.
-                self.clear_conflict();
-                if self.failed.replace(false) {
-                    self.stack.set_visible_child_name("view");
-                }
-                // The anchor is taken now rather than when the reload was asked for: the reader
-                // may have moved while the file was being re-read. Or where they were when the
-                // file stopped opening, the pages having gone since.
-                let anchor = self.resume.take().unwrap_or_else(|| self.view.anchor());
-                let anchor = anchor.clamped(sizes.len());
-                self.view.forget_textures();
-                self.thumbs.forget_textures();
-                self.forget_pages();
-                self.view.set_sizes(sizes.clone());
-                self.thumbs.set_sizes(sizes);
-                match self.pending.take() {
-                    // The document just opened: go where the session left the reader, the pages
-                    // fading in, or crossfading from the spinner that was up in their place. A
-                    // reload, which a LaTeX build makes every few seconds, just shows them.
-                    Some(place) => {
-                        self.view.goto_page(place.page, None);
-                        match self.stack.visible_child_name().as_deref() {
-                            Some("opening") => self.stack.set_visible_child_name("view"),
-                            _ => crate::widgets::fade_in(&self.view),
-                        }
-                    }
-                    None => self.view.scroll_to(anchor),
-                }
-                self.ask(Request::Outline);
-                // The strokes went with the old document, and a tool in hand needs this one's.
-                if self.wants_inks() {
-                    self.ask_inks();
-                }
-                // A link followed into a document that was still opening waits here.
-                if let Some((page, sel)) = self.pending_show.get() {
-                    self.show_link(page, sel);
-                }
-                self.emit(&self.on_open);
-            }
-            Reply::Failed(message) => {
-                #[cfg(feature = "bench")]
-                self.opens.set(self.opens.get() + 1);
-                self.fail(&message);
-            }
-            // What the watcher says too, for a file it watches; this is the render thread
-            // finding out first, or for a file nothing watches.
-            Reply::Changed => self.refresh(),
-            // Textures never reach here; `PdfView::deliver` keeps those.
-            Reply::Tile(..) | Reply::Lowres { .. } => {}
-        }
+        self.on_jump.emit(self);
     }
 }
 

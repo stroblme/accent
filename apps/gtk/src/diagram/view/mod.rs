@@ -95,7 +95,7 @@ impl DiagramView {
             glib::clone!(
                 #[weak]
                 view,
-                move |out, at| view.zoom_step(out, at)
+                move |out| view.zoom_step(out, view.imp().over.get())
             ),
         );
         view
@@ -198,7 +198,7 @@ impl DiagramView {
     /// One zoom step in or out, keeping what is under `at` (widget coordinates) in place.
     pub fn zoom_step(&self, out: bool, at: Option<(f64, f64)>) {
         let from = self.scale();
-        let to = geometry::clamp_scale(crate::zoom::stepped_zoom(from, out));
+        let to = crate::zoom::clamp_scale(crate::zoom::stepped_zoom(from, out));
         self.zoom_around(Zoom::Scale(to), at);
     }
 
@@ -371,7 +371,7 @@ impl DiagramView {
                 let shown = sheet.shown();
                 geometry::fit_scale((shown.w, shown.h), (w, h))
             }
-            Zoom::Scale(s) => geometry::clamp_scale(s),
+            Zoom::Scale(s) => crate::zoom::clamp_scale(s),
         };
         let (frame, size) = geometry::frame(sheet.extent, scale, (w, h));
         if imp.frame.replace(frame).scale != frame.scale {
@@ -430,6 +430,8 @@ mod imp {
         pub pointer: Cell<Point>,
         /// Alt held in the drag under way: no snapping to the grid.
         pub free: Cell<bool>,
+        /// Where the pointer is over the canvas, until it leaves: what a Ctrl+wheel zooms around.
+        pub over: Cell<Option<(f64, f64)>>,
         pub cache: Cache,
         /// The colours the page is painted in.
         pub tint: Cell<Tint>,
@@ -460,6 +462,7 @@ mod imp {
                 moved: Cell::new(false),
                 pointer: Cell::new(Point::default()),
                 free: Cell::new(false),
+                over: Cell::new(None),
                 cache: Cache::default(),
                 tint: Cell::new(Tint::FILE),
                 typesetter: RefCell::new(None),
@@ -512,7 +515,7 @@ mod imp {
                     #[weak]
                     obj,
                     move |zoom, at| {
-                        let zoom = Zoom::Scale(geometry::clamp_scale(zoom));
+                        let zoom = Zoom::Scale(crate::zoom::clamp_scale(zoom));
                         if obj.zoom() != zoom {
                             obj.zoom_around(zoom, Some(at));
                         }
@@ -524,7 +527,15 @@ mod imp {
             motion.connect_motion(glib::clone!(
                 #[weak]
                 obj,
-                move |_, x, y| obj.hover(x, y)
+                move |_, x, y| {
+                    obj.imp().over.set(Some((x, y)));
+                    obj.hover(x, y);
+                }
+            ));
+            motion.connect_leave(glib::clone!(
+                #[weak]
+                obj,
+                move |_| obj.imp().over.set(None)
             ));
             obj.add_controller(motion);
 

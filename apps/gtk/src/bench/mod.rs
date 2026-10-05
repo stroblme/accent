@@ -15,6 +15,7 @@ mod dismiss;
 mod export;
 mod files;
 mod find;
+mod folders;
 mod git;
 mod ignored;
 mod image;
@@ -49,11 +50,13 @@ use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use export::bench_export;
 use files::{
-    bench_clip, bench_clip_outside, bench_close, bench_drop, bench_expand, bench_hidden,
-    bench_menu, bench_menu_press, bench_move, bench_paths, bench_save_as, bench_templates,
-    bench_transfer, bench_unfold, bench_watch,
+    bench_clip, bench_clip_outside, bench_close, bench_hidden, bench_paths, bench_save_as,
+    bench_templates, bench_transfer,
 };
 use find::bench_find;
+use folders::{
+    bench_drop, bench_expand, bench_menu, bench_menu_press, bench_move, bench_unfold, bench_watch,
+};
 use git::{
     bench_git, bench_git_branch, bench_git_close, bench_git_commit_focus, bench_git_focus,
     bench_git_init, bench_git_markers, bench_git_press, bench_git_rebase, bench_git_scroll,
@@ -464,12 +467,12 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…` opens those folders in the Files tree as clicks would and
 /// prints what it lists under each; `=race:<dir>`, `=renew:<dir>`, `=again:<dir>` and
 /// `=tab:<rel>` change a folder the index does not walk under the tree and a tab from outside
-/// accent and print whether they followed (`files::bench_unfold`). Those write, so only on a
+/// accent and print whether they followed (`folders::bench_unfold`). Those write, so only on a
 /// scratch vault.
 ///
 /// `ACCENT_BENCH_MOVE=<rel>,<rel>,…` moves those paths with Move to…, past its dialog, into a
 /// folder that is not there yet, then tries the two moves it refuses, and prints the dialog, the
-/// toasts and where the files are (`files::bench_move`). Only on a scratch vault under `/tmp`.
+/// toasts and where the files are (`folders::bench_move`). Only on a scratch vault under `/tmp`.
 ///
 /// `ACCENT_BENCH_SCROLL=<rel_dir>` scrolls the Files tree, the Git pane's two lists, the Search
 /// results and the Tags list half way down with the keyboard on a row, changes the vault and its

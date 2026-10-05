@@ -2,6 +2,7 @@
 //!
 //! Pure, so the arithmetic that decides what is on screen is testable without a display.
 
+use crate::zoom::{MAX_SCALE, MIN_SCALE, clamp_scale};
 use gtk::graphene;
 
 /// Between pages, and around the column. The 12 of DESIGN.md's spacing scale.
@@ -9,9 +10,6 @@ const GAP: f32 = 12.0;
 
 /// Points to CSS pixels at zoom 1.0. A PDF point is 1/72 inch and a CSS pixel 1/96.
 pub(super) const PT_TO_PX: f32 = 96.0 / 72.0;
-
-pub const MIN_SCALE: f64 = 0.1;
-pub const MAX_SCALE: f64 = 8.0;
 
 /// How the page is sized to the window. Defined in core, because the session remembers it.
 pub use accent_core::config::PdfZoom;
@@ -151,7 +149,7 @@ pub fn fit_scale(sizes: &[(f32, f32)], zoom: PdfZoom, vw: f32, vh: f32) -> f32 {
 /// `from` is a zoom, not a layout scale: one read back out of [`Layout::scale`] is an `f32`
 /// divided by [`PT_TO_PX`], a hair off the tenth the page was asked at.
 pub fn stepped(from: f64, out: bool) -> PdfZoom {
-    PdfZoom::Scale(crate::zoom::stepped_zoom(from, out).clamp(MIN_SCALE, MAX_SCALE))
+    PdfZoom::Scale(clamp_scale(crate::zoom::stepped_zoom(from, out)))
 }
 
 /// Where a reading position resumes from, given the zoom it resumes into.
@@ -170,9 +168,8 @@ pub fn resume_at(zoom: PdfZoom, anchor: Anchor) -> Anchor {
     }
 }
 
-/// A scale clamped to what is worth rendering: below the floor nothing is legible, above the
-/// ceiling one page is hundreds of megabytes of tiles.
-pub fn clamp_scale(scale: f32) -> f32 {
+/// A layout scale, in pixels per point, held to the zoom range ([`MIN_SCALE`]..=[`MAX_SCALE`]).
+pub fn clamp_layout(scale: f32) -> f32 {
     scale.clamp((MIN_SCALE as f32) * PT_TO_PX, (MAX_SCALE as f32) * PT_TO_PX)
 }
 
@@ -345,8 +342,8 @@ mod tests {
     #[test]
     fn a_scale_is_clamped_to_what_is_worth_rendering() {
         // The tenths themselves are `zoom::stepped_zoom`'s, and tested there.
-        assert_eq!(clamp_scale(1000.0), 8.0 * PT_TO_PX);
-        assert_eq!(clamp_scale(0.0), 0.1 * PT_TO_PX);
+        assert_eq!(clamp_layout(1000.0), 8.0 * PT_TO_PX);
+        assert_eq!(clamp_layout(0.0), 0.1 * PT_TO_PX);
     }
 
     #[test]
