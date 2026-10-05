@@ -1,8 +1,11 @@
 //! The `git` module's tests. They drive the real `git` binary in a temporary repository, so they
 //! live beside it rather than in `tests/`: everything they reach for is private to the module.
 
+use super::lanes::parse_refs;
 use super::*;
 use std::collections::BTreeSet;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 /// These tests drive the real `git` binary. On a machine without one they skip rather than
 /// fail: nothing in accent requires git to be installed.

@@ -46,7 +46,7 @@ use accent_core::synctex::build_dirs;
 use accent_core::walk::FileKind;
 use accent_lsp::types::DocumentSymbol;
 
-use super::external::Encoding;
+use super::external::map::Encoding;
 use super::{Completion, Kind, Range, byte_of};
 use crate::{FileRow, locked};
 

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 
-use super::external::line_of;
+use super::external::map::line_of;
 use super::{
     Completion, Completions, Fold, Fut, Hover, Kind, Language, Listing, Location, Pos, Range,
     Signature, Support, Symbol, latex,
