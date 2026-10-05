@@ -119,10 +119,13 @@ impl Merge {
         mid.header
             .insert_child_after(&resolved, mid.header.first_child().as_ref());
 
-        let links = Links::new(&left, &right);
+        let mut panes = [left, mid, right];
+        let links = Links::new(&mut panes);
+        let columns = Columns::new(panes.into(), Some(MID));
+        links.overlay.set_child(Some(&columns.paned));
         let this = Rc::new_cyclic(|weak| Merge {
             weak: weak.clone(),
-            columns: Columns::new(vec![left, mid, right], Some(MID)),
+            columns,
             stages,
             shown: [Cell::new(CURRENT), Cell::new(INCOMING)],
             pickers,
@@ -161,15 +164,14 @@ impl Merge {
                 }
             }));
         }
-        // The connectors follow the rows: drawn again on every scroll and every relayout.
-        for (i, strip) in this.links.strips.iter().enumerate() {
-            let w = weak.clone();
-            strip.set_draw_func(move |_, cr, width, _| {
-                if let Some(m) = w.upgrade() {
-                    m.links.draw(i, &m.columns, cr, width);
-                }
-            });
-        }
+        // The connectors follow the rows: drawn again on every scroll and every relayout, a new
+        // width included.
+        let w = weak.clone();
+        this.links.area.set_draw_func(move |_, cr, _, height| {
+            if let Some(m) = w.upgrade() {
+                m.links.draw(&m.columns, cr, height);
+            }
+        });
         let w = weak.clone();
         *this.columns.relaid.borrow_mut() = Some(Box::new(move || {
             if let Some(m) = w.upgrade() {
@@ -212,7 +214,7 @@ impl Merge {
     }
 
     pub fn widget(&self) -> &gtk::Widget {
-        self.columns.paned.upcast_ref()
+        self.links.overlay.upcast_ref()
     }
 
     fn pane(&self, column: usize) -> &Pane {
@@ -646,14 +648,14 @@ impl Merge {
         })
     }
 
-    /// Each connector's ends in its strip, as `(top, bottom)` on its left and on its right, by
-    /// strip, and how many of those ends are not where GTK draws the line of the row they stand
-    /// on: 0 is the claim, what [`Merge::misaligned`] is to the rows.
+    /// Each connector's ends, as `(top, bottom)` on its strip's left and on its right, by strip,
+    /// in the drawing's pixels, and how many of those ends are not where GTK draws the line of the
+    /// row they stand on: 0 is the claim, what [`Merge::misaligned`] is to the rows.
     pub fn links(&self) -> ([Vec<super::links::Ends>; 2], usize) {
         let ends = [0, 1].map(|i| self.links.ends(i, &self.columns));
         let rows = self.columns.rows.borrow();
-        // Where GTK draws row `r`, in strip `i`'s pixels: in the first column with a line there.
-        let drawn = |i: usize, r: usize| -> Option<i32> {
+        // Where GTK draws row `r`, in the drawing's pixels: in the first column with a line there.
+        let drawn = |r: usize| -> Option<i32> {
             if rows.hidden.iter().any(|gap| gap.contains(&r)) {
                 return None;
             }
@@ -664,7 +666,7 @@ impl Merge {
                 let y = view.iter_location(&at).y() - view.pixels_above_lines();
                 let (_, y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, 0, y);
                 let point = gtk::graphene::Point::new(0.0, y as f32);
-                let at = view.compute_point(&self.links.strips[i], &point)?;
+                let at = view.compute_point(&self.links.area, &point)?;
                 Some(at.y().round() as i32)
             })
         };
@@ -675,12 +677,17 @@ impl Merge {
             for (run, end) in runs.iter().zip(ends) {
                 for (span, (top, bottom)) in run.iter().zip(end) {
                     for (r, y) in [(span.start, *top), (span.end, *bottom)] {
-                        off += usize::from(drawn(i, r).is_some_and(|at| at != y));
+                        off += usize::from(drawn(r).is_some_and(|at| at != y));
                     }
                 }
             }
         }
         (ends, off)
+    }
+
+    /// How wide each column and each strip between them is.
+    pub fn widths(&self) -> ([i32; 3], [i32; 2]) {
+        self.links.widths()
     }
 
     /// How many lines of each side column carry its tint.
