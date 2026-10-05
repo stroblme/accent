@@ -44,9 +44,8 @@ impl Panel {
         });
     }
 
-    /// Open the file at `rel`, keyed `key`, git left unmerged as a merge of its stages. Read as
-    /// a comparison is, the last row clicked opening. A conflict that is not two texts — a binary,
-    /// or a side that deleted the file — opens as the file alone, saying why.
+    /// Open the file at `rel`, keyed `key`, git left unmerged as a merge of its stages: a row's
+    /// click, the last row clicked opening as a comparison's does.
     pub(super) fn open_merge(self: &Rc<Self>, rel: &str, key: &str) {
         let repo = {
             let state = self.state.borrow();
@@ -57,24 +56,36 @@ impl Panel {
         };
         let asked = self.asked.get() + 1;
         self.asked.set(asked);
-        let (panel, vault, rel, key) = (
-            self.clone(),
-            self.hooks.vault.clone(),
-            rel.to_string(),
-            key.to_string(),
-        );
+        let what = Comparison {
+            repo,
+            rel: rel.to_string(),
+            key: key.to_string(),
+            sides: Sides::Merge,
+        };
+        self.show_merge(what, Some(asked));
+    }
+
+    /// Open `what`, a file git left unmerged, as a merge of its stages, read in one worker hop.
+    /// `asked` is a row's click (see [`Panel::compare`]), which opens the file's tab as the
+    /// pane's preview; without it the merge goes into the tab already showing the file, as a
+    /// session restore puts one back or a comparison a merge has outgrown is switched to one,
+    /// and a file no longer unmerged stays as it is without a word. A conflict that is not two
+    /// texts — a binary, or a side that deleted the file — leaves the file alone, saying why.
+    fn show_merge(self: &Rc<Self>, what: Comparison, asked: Option<u64>) {
+        let (panel, vault) = (self.clone(), self.hooks.vault.clone());
         glib::spawn_future_local(async move {
             let read = {
-                let rel = rel.clone();
+                let (repo, rel) = (what.repo.clone(), what.rel.clone());
                 crate::work::off_thread("git", move || {
                     [":1", ":2", ":3"].map(|stage| vault.git_show(&repo, stage, &rel))
                 })
                 .await
             };
-            let Some(read) = read.filter(|_| panel.asked.get() == asked) else {
+            let fresh = asked.is_none_or(|asked| panel.asked.get() == asked);
+            let Some(read) = read.filter(|_| fresh) else {
                 return;
             };
-            let name = split_name(&rel).1;
+            let name = split_name(&what.rel).1.to_string();
             let [base, current, incoming] = match read {
                 [Ok(base), Ok(current), Ok(incoming)] => [base, current, incoming],
                 read => {
@@ -85,22 +96,33 @@ impl Panel {
             };
             let say = |why: &str| {
                 (panel.hooks.toast)(&format!("{name} {why}"));
-                (panel.hooks.open)(&key);
+                match asked {
+                    Some(_) => (panel.hooks.open)(&what.key),
+                    None => (panel.hooks.leave)(&what.key),
+                }
             };
-            let (Some(current), Some(incoming)) = (current, incoming) else {
-                return say("was deleted on one side: keep it with Stage, or delete it");
+            let (current, incoming) = match (current, incoming) {
+                (Some(current), Some(incoming)) => (current, incoming),
+                (None, None) if asked.is_none() => return,
+                _ => return say("was deleted on one side: keep it with Stage, or delete it"),
             };
             let text = |blob: Option<Blob>| match blob {
                 Some(Blob::Text(text)) => Some(text),
                 Some(Blob::Binary) => None,
                 None => Some(String::new()),
             };
-            match [text(base), text(Some(current)), text(Some(incoming))] {
-                [Some(base), Some(current), Some(incoming)] => {
-                    (panel.hooks.merge_file)(&key, [base, current, incoming])
+            let [Some(base), Some(current), Some(incoming)] =
+                [text(base), text(Some(current)), text(Some(incoming))]
+            else {
+                return say("is binary");
+            };
+            let (weak, key) = (Rc::downgrade(&panel), what.key.clone());
+            let register = Box::new(move |merge: Weak<Merge>| {
+                if let Some(panel) = weak.upgrade() {
+                    panel.watch(what, Target::Merge(merge));
                 }
-                _ => say("is binary"),
-            }
+            });
+            (panel.hooks.merge_file)(&key, [base, current, incoming], asked.is_none(), register);
         });
     }
 
@@ -108,6 +130,10 @@ impl Panel {
     /// its tab, in front of nothing, and saying nothing where there is nothing left to show. `done`
     /// runs once it is open or given up.
     pub fn restore(self: &Rc<Self>, what: Comparison, done: impl FnOnce() + 'static) {
+        if what.sides == Sides::Merge {
+            self.show_merge(what, None);
+            return done();
+        }
         let (panel, vault) = (self.clone(), self.hooks.vault.clone());
         glib::spawn_future_local(async move {
             let read = {
@@ -129,6 +155,7 @@ impl Panel {
         let tab = |w: &Watch| match &w.target {
             Target::Tab(compare) => compare.upgrade().map(|_| w.what.key.clone()),
             Target::Diff(tab) => tab.upgrade().map(|tab| tab.key()),
+            Target::Merge(merge) => merge.upgrade().map(|_| w.what.key.clone()),
         };
         watches
             .iter()
@@ -200,7 +227,7 @@ impl Panel {
                 };
                 (self.hooks.compare_file)(&key, &left_title, &left, restored, Box::new(register));
             }
-            Sides::Staged { .. } | Sides::Deleted | Sides::Commit { .. } => {
+            Sides::Staged { .. } | Sides::Deleted | Sides::Commit { .. } | Sides::Merge => {
                 // The same test, made where this side can make it: before the tab is opened
                 // rather than once it holds a comparison. A Staged row the index has outgrown
                 // and a file listed under a commit that did not change it both read the same
@@ -241,7 +268,7 @@ impl Panel {
         let (name, label, unstage) = match what.sides {
             Sides::Worktree => ("stage", "Stage Selected Lines", false),
             Sides::Staged { .. } => ("unstage", "Unstage Selected Lines", true),
-            Sides::Deleted | Sides::Commit { .. } => return,
+            Sides::Deleted | Sides::Commit { .. } | Sides::Merge => return,
         };
         let (panel, repo, rel) = (Rc::downgrade(self), what.repo.clone(), what.rel.clone());
         let stage: OnLines = Rc::new(move |side, lines, old, new| {
@@ -315,13 +342,23 @@ impl Panel {
     }
 
     /// Re-read every comparison still open, now that what git says has moved under it. A commit
-    /// never changes; the index does.
+    /// never changes; the index does. A merge ends once git no longer lists its file as unmerged,
+    /// and a working-tree comparison of a file a merge has since left unmerged becomes its merge:
+    /// told from the status this refresh read, git refusing the index side of such a file.
     pub(super) fn reload_diffs(self: &Rc<Self>) {
         self.watches.borrow_mut().retain(|w| w.target.alive());
-        let watches: Vec<Watch> = (self.watches.borrow().iter())
-            .filter(|w| !matches!(w.what.sides, Sides::Commit { .. }))
-            .cloned()
-            .collect();
+        let (open, mut watches) = (self.watches.borrow().clone(), Vec::new());
+        for w in open {
+            match (&w.what.sides, self.unmerged(&w.what)) {
+                (Sides::Merge, Some(false)) => (self.hooks.leave)(&w.what.key),
+                (Sides::Worktree, Some(true)) => {
+                    let sides = Sides::Merge;
+                    self.show_merge(Comparison { sides, ..w.what }, None);
+                }
+                (Sides::Commit { .. } | Sides::Merge, _) => {}
+                _ => watches.push(w),
+            }
+        }
         if watches.is_empty() {
             return;
         }
@@ -353,9 +390,29 @@ impl Panel {
                             tab.set_texts(&left, &right);
                         }
                     }
+                    // Never re-read: the conflict's stages stay what they were until it ends.
+                    Target::Merge(_) => {}
                 }
             }
         });
+    }
+
+    /// Whether the last refresh found `what`'s file unmerged, `None` where it read nothing of its
+    /// repository.
+    fn unmerged(&self, what: &Comparison) -> Option<bool> {
+        let state = self.state.borrow();
+        let at = state.repos.iter().position(|repo| *repo == what.repo)?;
+        let status = state.statuses.get(at)?;
+        Some(status.conflicts().any(|entry| entry.path == what.rel))
+    }
+
+    /// The merge open on `key`, which Mark Resolved stages.
+    pub(super) fn merge_on(&self, key: &str) -> Option<Comparison> {
+        let watches = self.watches.borrow();
+        let open = watches.iter().filter(|w| w.target.alive());
+        open.map(|w| &w.what)
+            .find(|what| what.key == key && what.sides == Sides::Merge)
+            .cloned()
     }
 }
 
@@ -365,6 +422,7 @@ fn left_rev(sides: &Sides) -> Option<&str> {
         Sides::Staged { .. } => Some("HEAD"),
         Sides::Worktree | Sides::Deleted => Some(""),
         Sides::Commit { parent, .. } => parent.as_deref(),
+        Sides::Merge => Some(":2"),
     }
 }
 
@@ -376,6 +434,7 @@ fn left_title(sides: &Sides) -> String {
             Some(parent) => short(parent),
             None => "Nothing".to_string(),
         },
+        Sides::Merge => "Current".to_string(),
     }
 }
 
@@ -385,6 +444,7 @@ fn right_title(sides: &Sides) -> String {
         Sides::Worktree => "Working Tree".to_string(),
         Sides::Deleted => "Deleted".to_string(),
         Sides::Commit { oid, .. } => short(oid),
+        Sides::Merge => "Incoming".to_string(),
     }
 }
 
@@ -396,6 +456,7 @@ fn nothing_to_show(sides: &Sides) -> &'static str {
         Sides::Staged { .. } => "has no staged changes",
         Sides::Worktree | Sides::Deleted => "has no unstaged changes",
         Sides::Commit { .. } => "is unchanged in this commit",
+        Sides::Merge => "has no conflict",
     }
 }
 
@@ -407,6 +468,7 @@ fn tag(sides: &Sides) -> String {
         Sides::Worktree => "worktree".to_string(),
         Sides::Deleted => "deleted".to_string(),
         Sides::Commit { oid, .. } => format!("commit:{}", short(oid)),
+        Sides::Merge => "merge".to_string(),
     }
 }
 
@@ -430,6 +492,8 @@ enum Target {
     Tab(Weak<Compare>),
     /// A tab of its own over two blobs.
     Diff(Weak<DiffTab>),
+    /// The file's own tab, merging it.
+    Merge(Weak<Merge>),
 }
 
 impl Target {
@@ -437,6 +501,7 @@ impl Target {
         match self {
             Target::Tab(w) => w.strong_count() > 0,
             Target::Diff(w) => w.strong_count() > 0,
+            Target::Merge(w) => w.strong_count() > 0,
         }
     }
 }
@@ -456,6 +521,7 @@ fn read(what: &Comparison, vault: &Vault) -> Result<(Blob, Blob), String> {
         Sides::Worktree => worktree(what, vault)?,
         Sides::Deleted => Blob::Text(String::new()),
         Sides::Commit { oid, .. } => side(what, vault, oid, &what.rel)?,
+        Sides::Merge => side(what, vault, ":3", &what.rel)?,
     };
     Ok((left, right))
 }

@@ -184,6 +184,17 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.conflict-current", "Accept Current Change", &[]),
     ("win.conflict-incoming", "Accept Incoming Change", &[]),
     ("win.conflict-both", "Accept Both Changes", &[]),
+    (
+        "win.conflict-all-current",
+        "Accept All Current Changes",
+        &[],
+    ),
+    (
+        "win.conflict-all-incoming",
+        "Accept All Incoming Changes",
+        &[],
+    ),
+    ("win.merge-resolved", "Mark Resolved", &[]),
     ("win.conflict-next", "Next Conflict", &[]),
     ("win.conflict-previous", "Previous Conflict", &[]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>w"]),
@@ -630,6 +641,22 @@ impl App {
                     self.toast("No conflict at the caret");
                 }
             }
+            "conflict-all-current" | "conflict-all-incoming" => {
+                let take = match name {
+                    "conflict-all-current" => Take::Current,
+                    _ => Take::Incoming,
+                };
+                if !self
+                    .active()
+                    .is_some_and(|tab| tab.conflicts().accept_all(take))
+                {
+                    self.toast("No conflicts in this file");
+                }
+            }
+            "merge-resolved" => match self.active().filter(|tab| tab.merging().is_some()) {
+                Some(tab) => self.mark_resolved(&tab),
+                None => self.toast("No merge to mark resolved"),
+            },
             "conflict-next" | "conflict-previous" => {
                 let forward = name == "conflict-next";
                 if !self
@@ -680,6 +707,17 @@ impl App {
             "about" => self.about(),
             _ => tracing::warn!("no handler for action {name}"),
         }
+    }
+
+    /// Mark Resolved, from a merge view's title row or the palette: the file written as it stands,
+    /// then staged (`git::Panel::mark_resolved`). A file that could not be written is not.
+    pub(crate) fn mark_resolved(self: &Rc<Self>, tab: &Rc<Tab>) {
+        let Some(git) = self.git.get() else {
+            return;
+        };
+        self.save_tab_now(tab);
+        let left = accent_core::conflict::blocks(&tab.text()).len();
+        git.mark_resolved(&tab.rel(), !tab.save.modified.get(), left);
     }
 
     /// Run `f` on the active text tab. Over anything else the action is a no-op, which is what

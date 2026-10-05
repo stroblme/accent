@@ -24,7 +24,7 @@ use accent_api::git::{self, Blob, Branch, Commit, Entry, LogRow, Repo, Status, S
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 
-use crate::diff::{Compare, Side};
+use crate::diff::{Compare, Merge, Side};
 use crate::difftab::DiffTab;
 
 use crate::highlight;
@@ -111,9 +111,12 @@ pub struct Hooks {
     /// the comparison exists so a refresh can reach it. That call answers whether the comparison
     /// is worth keeping; `false` takes it down again ([`Panel::show`]).
     pub compare_file: Box<dyn Fn(&str, &str, &str, bool, Box<dyn FnOnce(Weak<Compare>) -> bool>)>,
-    /// Show a file git left unmerged as a merge, in its own tab: key, and the conflict's base,
-    /// current and incoming texts.
-    pub merge_file: Box<dyn Fn(&str, [String; 3])>,
+    /// Show a file git left unmerged as a merge, in its own tab: key, the conflict's base, current
+    /// and incoming texts, whether it goes into the tab already showing the file rather than the
+    /// pane's preview, and what to call once the merge exists so a refresh can reach it.
+    pub merge_file: Box<dyn Fn(&str, [String; 3], bool, Box<dyn FnOnce(Weak<Merge>)>)>,
+    /// Put the file's tab back to the file alone, from a comparison or a merge git has moved past.
+    pub leave: Box<dyn Fn(&str)>,
     /// Move vault files to the trash, with one toast for the lot, or delete them on a remote
     /// vault, which has none, without asking again: Discard's question has said so. Vault keys
     /// only, which is what leaves an untracked file outside the vault without a Discard button.

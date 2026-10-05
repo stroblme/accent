@@ -59,6 +59,8 @@ pub struct Merge {
     opened: RefCell<HashSet<usize>>,
     /// Show All Unchanged Lines, in the middle column's title row.
     unfold: gtk::ToggleButton,
+    /// Mark Resolved, beside it.
+    resolved: gtk::Button,
     /// The tab's conflict blocks, which the arrows resolve.
     conflicts: Rc<Conflicts>,
     /// The connectors between the columns.
@@ -108,6 +110,14 @@ impl Merge {
             .build();
         mid.header
             .insert_child_after(&unfold, mid.header.first_child().as_ref());
+        let resolved = gtk::Button::builder()
+            .icon_name("object-select-symbolic")
+            .tooltip_text("Mark Resolved")
+            .css_classes(["flat"])
+            .focus_on_click(false)
+            .build();
+        mid.header
+            .insert_child_after(&resolved, mid.header.first_child().as_ref());
 
         let links = Links::new(&left, &right);
         let this = Rc::new_cyclic(|weak| Merge {
@@ -121,6 +131,7 @@ impl Merge {
             hidden: RefCell::default(),
             opened: RefCell::default(),
             unfold,
+            resolved,
             conflicts,
             links,
             handlers: RefCell::default(),
@@ -217,6 +228,11 @@ impl Merge {
     /// Re-read the file and lay the columns over it again: on every edit of the middle column.
     pub fn refresh(&self) {
         self.lay(false);
+    }
+
+    /// Run `f` on Mark Resolved in the title row.
+    pub fn connect_resolved(&self, f: impl Fn() + 'static) {
+        self.resolved.connect_clicked(move |_| f());
     }
 
     /// Run `f` whenever the rows have been laid again, and once now: see `Compare::on_laid`.

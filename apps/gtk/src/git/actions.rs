@@ -667,6 +667,45 @@ impl Panel {
         });
     }
 
+    /// Mark Resolved, from the merge open on `key`: its file staged, which takes it out of Merge
+    /// Conflicts, and the merge view with it once the refresh after has read that. `saved` says
+    /// the file on disk is what the view shows, and nothing is staged otherwise; `left` blocks
+    /// still in it are asked about first, git taking their markers for text.
+    pub fn mark_resolved(self: &Rc<Self>, key: &str, saved: bool, left: usize) {
+        let Some(what) = self.merge_on(key) else {
+            return;
+        };
+        let name = split_name(&what.rel).1.to_string();
+        if !saved {
+            let why = format!("{name} could not be saved, so it is not marked resolved");
+            return (self.hooks.toast)(&why);
+        }
+        let blocks = match left {
+            1 => "a conflict".to_string(),
+            n => format!("{n} conflicts"),
+        };
+        let question =
+            format!("{name} still has {blocks}, whose markers would be committed as text.");
+        let (panel, done) = (self.clone(), format!("Marked {name} resolved"));
+        let stage = move || {
+            let job = move |vault: &Vault, _: &Repo| {
+                vault.git_stage(&what.repo, &[what.rel]).map(|()| done)
+            };
+            panel.command(format!("mark {name} resolved"), false, Fail::Say, job);
+        };
+        match left {
+            0 => stage(),
+            _ => dialogs::confirm(
+                &self.hooks.window,
+                "Mark Resolved?",
+                &question,
+                "Mark Resolved",
+                true,
+                stage,
+            ),
+        }
+    }
+
     pub(super) fn unstage(self: &Rc<Self>, paths: Vec<String>) {
         let n = paths.len();
         self.write("unstage", paths, move |vault, repo, paths| {

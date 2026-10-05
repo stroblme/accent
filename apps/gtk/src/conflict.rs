@@ -334,18 +334,41 @@ impl Conflicts {
         let Some(block) = blocks.iter().find(|block| pick(chars(block))) else {
             return false;
         };
-        let (kept, span) = (block.resolve(&text, take), chars(block));
+        self.replace(chars(block), &block.resolve(&text, take));
+        true
+    }
+
+    /// Resolve every block with `take`, as one undo step: Accept All Current and Accept All
+    /// Incoming. Only the stretch from the first block to the last is rewritten, so the caret and
+    /// the folds either side of it stay put. `false` when there is none, or the view takes no
+    /// edits.
+    pub fn accept_all(&self, take: Take) -> bool {
+        if !self.view.is_editable() {
+            return false;
+        }
+        let (text, offsets, blocks) = self.read();
+        let (Some(first), Some(last)) = (blocks.first(), blocks.last()) else {
+            return false;
+        };
+        let kept = conflict::resolve_all(&text, take);
+        let tail = text.len() - last.range.end;
+        let span = offsets.char_of(first.range.start)..offsets.char_of(last.range.end);
+        self.replace(span, &kept[first.range.start..kept.len() - tail]);
+        true
+    }
+
+    /// The characters `span` replaced with `text`, as one undo step.
+    fn replace(&self, span: Range<i32>, text: &str) {
         self.buffer.begin_user_action();
         let (mut from, mut to) = (
             self.buffer.iter_at_offset(span.start),
             self.buffer.iter_at_offset(span.end),
         );
         self.buffer.delete(&mut from, &mut to);
-        self.buffer.insert(&mut from, &kept);
+        self.buffer.insert(&mut from, text);
         self.buffer.end_user_action();
         // Above 16 KB the host finds the blocks again only on its debounce.
         self.find();
-        true
     }
 
     /// Put the caret on the start of the next block after it, or the one before it with
