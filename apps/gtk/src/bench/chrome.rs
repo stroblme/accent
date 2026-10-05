@@ -281,17 +281,17 @@ async fn bench_chrome_key(app: &Rc<App>, target: &gtk::Widget, case: &str, chord
     );
 }
 
-/// Focus mode and the find bar over two panes, at High, through real input
+/// The active pane, focus mode and the find bar over two panes, at High, through real input
 /// (`build-aux/xtest.py`, spawned per step): `<relA>` on the left, `<relB>` on the right with
-/// `<relC>` behind it. A find bar opened on the left and a query typed into it, a letter typed on
-/// the right, one on the left; then two ways the right pane becomes the active one with the
-/// keyboard left behind on the left: `<relB>`'s tab picked in the right pane's bar, and, after a
-/// click on each side, `<relB>`'s file deleted, which closes its tab and brings `<relC>` to the
-/// front behind the reader's back. After each, a click into the left note, a letter typed and
-/// `Ctrl+F`. It prints which pane is active, which has the keyboard, which recede, whether the
-/// left note's text fades and which find bar is open: the pane typed in is the one that stays,
-/// and `Ctrl+F` opens its bar. It types into the notes and deletes `<relB>`, so point it at a
-/// scratch vault.
+/// `<relC>` in front of it. A find bar opened on the left and a query typed into it, a letter
+/// typed on the right, one on the left; `<relB>`'s tab pressed in the right pane's bar with the
+/// keyboard on the left, and a letter typed; back on the left, `<relC>` opened again as a link to
+/// it would; back on the left again, `<relC>`'s file deleted, which closes its tab and brings
+/// `<relB>` to the front behind the reader's back, then a letter typed on the left and `Ctrl+F`.
+/// It prints which pane is active and which has the keyboard, which must agree, which recede,
+/// whether the left note's text fades, which find bar is open and the active pane's document,
+/// which Close Tab closes and the title names. It types into the notes and deletes `<relC>`, so
+/// point it at a scratch vault.
 pub(super) fn bench_chrome_find(app: &Rc<App>, rels: &str) {
     scratch_only(app, "ACCENT_BENCH_CHROME=find:");
     let [a, b, c] = rels.split(',').collect::<Vec<_>>()[..] else {
@@ -332,13 +332,14 @@ pub(super) fn bench_chrome_find(app: &Rc<App>, rels: &str) {
                 .map_or("none", side);
             println!(
                 "bench chrome_find {step} active={} keyboard={keyboard} away_left={} \
-                 away_right={} fade_left={} find_left={} find_right={}",
+                 away_right={} fade_left={} find_left={} find_right={} front={:?}",
                 side(&app.pane()),
                 left.widget().has_css_class("chrome-away"),
                 right.widget().has_css_class("chrome-away"),
                 tab_a.ghost_view().is_some_and(|v| v.fading()),
                 left.find.is_open(),
                 right.find.is_open(),
+                app.active_doc().map(|doc| doc.key()),
             );
         };
         let (va, vb) = (
@@ -361,19 +362,21 @@ pub(super) fn bench_chrome_find(app: &Rc<App>, rels: &str) {
             ),
             ("type_right", format!("move {vb}; down; up; type x")),
             ("type_left", format!("move {va}; down; up; type y")),
-            ("pick_right_tab", format!("move {tab_label}; down; up")),
-            ("type_left_after_pick", type_left.clone()),
-            ("find_after_pick", "key Escape; key ctrl+f".into()),
-            (
-                "back_left",
-                format!("key Escape; move {vb}; down; up; move {va}; down; up"),
-            ),
+            ("press_right_tab", format!("move {tab_label}; down; up")),
+            ("type_after_press", "move 5 5; type w".into()),
+            ("back_left", format!("key Escape; {type_left}")),
         ] {
             super::git::xtest(&steps).await;
             state(step);
         }
+        // What a link to it does: the note is open already, so its tab comes to the front.
+        app.open_preview(&c);
+        glib::timeout_future(Duration::from_millis(600)).await;
+        state("opened_right");
+        super::git::xtest(&type_left).await;
+        state("back_left_again");
         // Deleted behind the reader's back, as a sync or a checkout does.
-        let _ = std::fs::remove_file(app.root().join(&b));
+        let _ = std::fs::remove_file(app.root().join(&c));
         glib::timeout_future(Duration::from_millis(1500)).await;
         state("closed_behind");
         super::git::xtest(&type_left).await;

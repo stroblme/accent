@@ -4,29 +4,23 @@
 use super::*;
 
 impl App {
-    /// The pane a note opens into: the last one whose tab was selected or whose editor had focus.
+    /// The pane the reader is in, which a note opens into: the one holding the keyboard, or
+    /// where the keyboard is in no pane, the last one it or a pick of a tab was in. Every way into
+    /// a pane gives it the keyboard — a click into its document or its tab bar, a tab moved or
+    /// revealed there — and a tab coming to the front of a pane the keyboard is not in leaves it
+    /// alone (`wire::wire_pane`), so the two are one.
     pub fn pane(&self) -> Rc<Pane> {
         self.active_pane.borrow().clone()
     }
 
-    /// The pane the reader is in: the one holding the keyboard, else the active one. Not the
-    /// active one first: a tab picked in another pane's bar, or brought to its front behind the
-    /// reader's back (a sync deleting the note in front), makes that pane the active one and
-    /// leaves the keyboard where it was, and a click into the note being typed in moves no focus
-    /// to say otherwise. What the keyboard asks of a pane goes here: focus mode, the find bar.
-    pub fn reader_pane(&self) -> Rc<Pane> {
-        let focus = self.focused();
-        let holding = self
-            .panes
+    /// The pane holding the keyboard, if one does.
+    pub(crate) fn keyboard_pane(&self) -> Option<Rc<Pane>> {
+        let focus = self.focused()?;
+        self.panes
             .borrow()
             .iter()
-            .find(|pane| {
-                focus
-                    .as_ref()
-                    .is_some_and(|focus| focus.is_ancestor(pane.widget()))
-            })
-            .cloned();
-        holding.unwrap_or_else(|| self.pane())
+            .find(|pane| focus.is_ancestor(pane.widget()))
+            .cloned()
     }
 
     /// The active pane's tab view. Every `self.tabs` of the single-pane window went through here.
@@ -40,10 +34,15 @@ impl App {
 
     /// Bring a page to the front of whichever pane holds it, and make that pane the active one.
     /// A note that is already open is never opened twice, so this is what "open" does for it.
+    /// The keyboard goes with it from another pane — a link followed to a note open beside it —
+    /// and stays in the sidebar, where a list being walked keeps it.
     pub fn reveal_page(&self, page: &adw::TabPage) {
         if let Some(pane) = self.pane_of(page) {
             pane.tabs.set_selected_page(page);
             self.set_active_pane(&pane);
+            if self.keyboard_pane().is_some_and(|k| !Rc::ptr_eq(&k, &pane)) {
+                self.focus_document(&pane);
+            }
         }
     }
 
@@ -417,9 +416,13 @@ impl App {
         };
         let to = &panes[i];
         from.tabs.transfer_page(&page, &to.tabs, to.tabs.n_pages());
-        // Selecting it is what makes the destination the active pane, retargets its find bar and
-        // saves the session, all through the `selected-page` handler the pane already has.
+        // Selecting it retargets the destination's find bar and saves the session, through the
+        // `selected-page` handler the pane already has; the keyboard, still in the pane it came
+        // from until the idle below, leaves the active pane to this.
         to.tabs.set_selected_page(&page);
+        if self.set_active_pane(to) {
+            self.sync_active();
+        }
         self.focus_document(to);
     }
 
@@ -523,15 +526,19 @@ impl App {
     ///
     /// The document's own widget rather than the page's child: `grab_focus` on a container takes
     /// the first thing in it that will have it, which for a note is whatever its banner is showing
-    /// and for a shell is the scroller around vte, which cannot hear a keystroke. An image, a
-    /// status page and a two-blob comparison have no keys of their own and are left alone.
+    /// and for a shell is the scroller around vte, which cannot hear a keystroke. An image and a
+    /// status page have no keys of their own beyond scrolling and a button, and take it in their
+    /// page; a two-blob comparison in its right column: the keyboard has to be in the pane the
+    /// reader went to, or it would stay the other pane's.
     pub(crate) fn focus_document(&self, pane: &Pane) {
         let widget: gtk::Widget = match self.doc_of(pane) {
             Some(Doc::Text(tab)) => tab.view.clone().upcast(),
             Some(Doc::Terminal(term)) => term.view.clone().upcast(),
             Some(Doc::Pdf(pdf)) => pdf.key_target(),
             Some(Doc::Diagram(d)) => d.key_target(),
-            _ => return,
+            Some(Doc::Diff(d)) => d.key_target(),
+            Some(doc @ (Doc::Image(_) | Doc::Status(_))) => doc.page().child(),
+            None => return,
         };
         // From an idle, as a new terminal's own focus is (see [`Self::open_terminal_at`]): the
         // page has only just been attached, and a widget still mid-reparenting is not one GTK

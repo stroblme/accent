@@ -145,9 +145,9 @@ use tags::bench_tags;
 /// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
 /// for XTEST presses of the keys that step through a note, the preview and a PDF, and prints
 /// whether each one faded the chrome (see `chrome::bench_chrome_keys`). `=find:<a>,<b>,<c>`
-/// makes the right of two panes the active one with the keyboard on the left, by a tab picked in
-/// its bar and by `<b>` deleted on disk, types on the left through XTEST and prints which pane
-/// recedes at High and whose find bar `Ctrl+F` opens (see `chrome::bench_chrome_find`).
+/// presses a tab in the other of two panes' bar, opens a note open there again and deletes the one
+/// in front of it, through XTEST, and prints the active pane beside the one with the keyboard,
+/// which pane recedes at High and whose find bar `Ctrl+F` opens (see `chrome::bench_chrome_find`).
 /// `=present:<note>,<pdf>,<image>,<side>` presents a note, a PDF, an image and a shell from one of
 /// two panes and prints what F5 shows, the find bar, a held `Ctrl+Tab`'s card, Escape over it, a
 /// toast against the status bar, and the layout leaving F5 puts back (see

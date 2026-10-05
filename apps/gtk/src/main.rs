@@ -541,7 +541,7 @@ impl App {
     /// the pane the reader is in and leaves the other pane's query and open state alone — and
     /// over a shell it opens nothing at all, there being nothing of ours to search there.
     fn open_find(&self, mode: find::Mode) {
-        let pane = self.reader_pane();
+        let pane = self.pane();
         if self.shows_shell(&pane) {
             return;
         }

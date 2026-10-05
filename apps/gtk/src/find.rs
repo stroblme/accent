@@ -260,6 +260,26 @@ impl Bar {
             this,
             move |_| bar.step(true)
         ));
+        // Shift+Enter steps back, as in VS Code's find; the entry's `activate` takes Enter alone.
+        let back = gtk::EventControllerKey::new();
+        back.set_propagation_phase(gtk::PropagationPhase::Capture);
+        back.connect_key_pressed(glib::clone!(
+            #[weak(rename_to = bar)]
+            this,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, key, _, state| match key {
+                gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter
+                    if (state & gtk::accelerator_get_default_mod_mask())
+                        == gdk::ModifierType::SHIFT_MASK =>
+                {
+                    bar.step(false);
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        ));
+        query.add_controller(back);
         // A toggle changes what the query means, so the query is asked again.
         for button in &toggles {
             button.connect_toggled(glib::clone!(

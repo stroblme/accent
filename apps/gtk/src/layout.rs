@@ -561,10 +561,10 @@ impl App {
         // matches rather than letting the bar count them.
         if let Some(pdf) = self.pdf_of(pane) {
             match op {
-                find::PreviewOp::Find(text, options) => pdf.find(&text, options),
+                find::PreviewOp::Find(text, options) => pdf.find(&text, options, true),
                 find::PreviewOp::Next => pdf.step_match(true),
                 find::PreviewOp::Previous => pdf.step_match(false),
-                find::PreviewOp::Clear => pdf.find("", Default::default()),
+                find::PreviewOp::Clear => pdf.find("", Default::default(), false),
                 // Only the Return moves a PDF. A live preview under a half-typed page number
                 // renders pages nobody asked to read, and it has already left the page Back is
                 // supposed to return to, so the committed jump would have nothing to remember.
@@ -670,13 +670,13 @@ impl App {
         // The lines between the panes and along their edges too, which would otherwise frame the
         // panes that are receding (`.dividers-hidden` in `install_chrome_css`).
         self.window.add_css_class("dividers-hidden");
-        let writing = self.reader_pane();
+        let active = self.pane();
         for pane in self.panes.borrow().iter() {
-            if !Rc::ptr_eq(pane, &writing) {
+            if !Rc::ptr_eq(pane, &active) {
                 pane.widget().add_css_class("chrome-away");
             }
         }
-        if let Some(tab) = self.tab_of(&writing) {
+        if let Some(tab) = self.active() {
             tab.set_fade(true);
         }
     }
@@ -724,10 +724,7 @@ impl App {
         let in_popover = self
             .focused()
             .is_some_and(|w| w.ancestor(gtk::Popover::static_type()).is_some());
-        in_popover
-            || self
-                .tab_of(&self.reader_pane())
-                .is_some_and(|tab| tab.banner.is_revealed())
+        in_popover || self.active().is_some_and(|tab| tab.banner.is_revealed())
     }
 }
 

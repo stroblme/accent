@@ -169,6 +169,9 @@ pub struct PdfTab {
     pub(super) searched: RefCell<(String, Options)>,
     pub(super) matches: RefCell<Vec<(usize, pdf::Rect)>>,
     pub(super) current: Cell<Option<usize>>,
+    /// The search running shows its first hit when it lands: one the reader typed, not a page
+    /// edit's search again, which leaves the reader where they are.
+    pub(super) jump: Cell<bool>,
     pub(super) on_zoom: Hook,
     pub(super) on_page: Hook,
     /// Fired just before a jump, so the pane can record where the reader was.
@@ -296,6 +299,7 @@ pub fn open(
         searched: RefCell::default(),
         matches: RefCell::new(Vec::new()),
         current: Cell::new(None),
+        jump: Cell::new(false),
         on_zoom: RefCell::new(None),
         on_page: RefCell::new(None),
         on_jump: RefCell::new(None),
@@ -951,13 +955,23 @@ impl PdfTab {
         self.organize.pane.clone().upcast()
     }
 
-    /// Search the whole document, by case and by whole words where `options` says so. An empty
-    /// query clears what is shown.
-    pub fn find(self: &Rc<Self>, text: &str, options: Options) {
+    /// Search the whole document, by case and by whole words where `options` says so, from the
+    /// page being read and round, showing the first hit as it lands where `jump` says so. An
+    /// empty query clears what is shown.
+    pub fn find(self: &Rc<Self>, text: &str, options: Options, jump: bool) {
+        // From the hit shown while it is on screen, as the editor searches from its caret: the
+        // reveal can leave the middle of the view on the next page, and a query typed further
+        // must not move on from the hit it shows. Not after a page edit, which renumbered it.
+        let shown = self.current.get().map(|at| self.matches.borrow()[at].0);
+        let from = shown
+            .filter(|page| jump && self.view.visible_pages().contains(page))
+            .unwrap_or_else(|| self.current_page());
         *self.searched.borrow_mut() = (text.to_string(), options);
         self.matches.borrow_mut().clear();
         self.current.set(None);
+        self.jump.set(jump);
         self.view.set_marks(std::collections::HashMap::new());
+        self.view.set_current_mark(None);
         self.query.set(self.query.get() + 1);
         // Sent even when there is nothing to look for: a query of the same kind takes over from
         // the one running, so this is what stops a search the reader has cleared or closed the
@@ -966,29 +980,42 @@ impl PdfTab {
             query: self.query.get(),
             text: text.to_string(),
             options,
-            from: 0,
+            from,
+            walked: 0,
         });
         self.emit(&self.on_matches);
     }
 
-    /// Step to the next or previous match and scroll it into view.
+    /// Step to the next or previous match and scroll it into view. With none shown, which a page
+    /// edit's search again leaves, the first from the page being read.
     pub fn step_match(self: &Rc<Self>, forward: bool) {
         let total = self.matches.borrow().len();
         if total == 0 {
             return;
         }
         let next = match (self.current.get(), forward) {
-            (None, true) => 0,
-            (None, false) => total - 1,
+            (None, _) => {
+                let page = self.current_page();
+                let after = self.matches.borrow().partition_point(|(p, _)| *p < page);
+                match forward {
+                    true => after % total,
+                    false => (after + total - 1) % total,
+                }
+            }
             (Some(at), true) => (at + 1) % total,
             (Some(at), false) => (at + total - 1) % total,
         };
-        self.current.set(Some(next));
-        let (page, rect) = self.matches.borrow()[next];
-        self.view
-            .set_current_mark(Some((page, self.index_on_page(next))));
-        self.view.reveal(page, rect);
+        self.show_match(next);
         self.emit(&self.on_matches);
+    }
+
+    /// Make match `at` the current one and scroll it into view.
+    fn show_match(&self, at: usize) {
+        self.current.set(Some(at));
+        let (page, rect) = self.matches.borrow()[at];
+        self.view
+            .set_current_mark(Some((page, self.index_on_page(at))));
+        self.view.reveal(page, rect);
     }
 
     /// "3 of 12", or what to say when there is nothing.
@@ -1546,14 +1573,23 @@ impl PdfTab {
                 if found.is_empty() {
                     return;
                 }
-                // Page order is the order a reader steps through them, and the thread walks the
-                // document forwards — so this page's matches go after the ones already found,
-                // which a binary search places without sorting the list again per reply.
+                // Page order is the order a reader steps through them, and the thread walks from
+                // the page being read to the end and round from the first — so this page's
+                // matches go among the ones already found where a binary search places them,
+                // without sorting the list again per reply.
                 let mut matches = self.matches.borrow_mut();
                 let at = matches.partition_point(|(seen, _)| *seen <= page);
                 matches.splice(at..at, found.iter().map(|rect| (page, *rect)));
                 drop(matches);
+                let count = found.len();
                 self.view.add_marks(page, found);
+                match self.current.get() {
+                    // The first page with a hit, the walk having started on the page being read.
+                    None if self.jump.take() => self.show_match(at),
+                    // A page before the current match, the walk having wrapped round.
+                    Some(current) if at <= current => self.current.set(Some(current + count)),
+                    _ => {}
+                }
                 self.emit(&self.on_matches);
             }
             Reply::Highlights(map) => self.view.set_highlights(map),
@@ -1631,7 +1667,7 @@ impl PdfTab {
                 self.ask(Request::Links(self.view.current_page()));
                 let (searched, options) = self.searched.borrow().clone();
                 if !searched.is_empty() {
-                    self.find(&searched, options);
+                    self.find(&searched, options, false);
                 }
                 // The page count changed, or the page the reader is on did, with no scroll.
                 self.emit(&self.on_page);
