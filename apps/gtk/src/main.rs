@@ -36,6 +36,7 @@ mod hover;
 mod lang;
 mod layout;
 mod look;
+mod malloc;
 mod marks;
 mod multicaret;
 mod nav;
@@ -146,6 +147,7 @@ fn ms() -> u128 {
 }
 
 fn main() -> glib::ExitCode {
+    malloc::tune();
     // ssh spawns accent as its own askpass helper; that process only answers the question.
     if let Some(code) = askpass::maybe_run() {
         return code;

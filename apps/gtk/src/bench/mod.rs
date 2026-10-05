@@ -223,7 +223,8 @@ use tags::bench_tags;
 /// (`compare::bench_compare_typing`). `=session:save:<rel>,<other>` then `=session:back:…` on
 /// one scratch home leave comparisons with git open across a restart and print what came back
 /// (`compare::bench_compare_session`).
-/// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` opens and closes every kind of tab, a
+/// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` reads the PDF through, hides and closes it
+/// and prints what the process holds after each, then opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
 /// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of

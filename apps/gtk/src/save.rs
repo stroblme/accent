@@ -618,6 +618,7 @@ impl App {
             if let Some(at) = pdf.ring_at() {
                 self.ring_at.set(Some(at));
             }
+            crate::malloc::trim_soon();
         }
         // A diagram closing was asked about already (`wire.rs`), so a failure here is the
         // answer "discard" having been given, or the file gone. A label still being typed goes
