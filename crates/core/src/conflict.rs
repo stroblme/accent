@@ -158,6 +158,18 @@ pub fn blocks(text: &str) -> Vec<Block> {
     found
 }
 
+/// `text` with every block resolved by `take`: Accept All Current or Accept All Incoming.
+pub fn resolve_all(text: &str, take: Take) -> String {
+    let (mut out, mut at) = (String::with_capacity(text.len()), 0);
+    for block in blocks(text) {
+        out.push_str(&text[at..block.range.start]);
+        out.push_str(&block.resolve(text, take));
+        at = block.range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 /// `text` with the marker lines of every block blanked to spaces, so it parses as the two sides
 /// with a blank line between them at the same byte offsets; `None` where there is no block.
 pub fn blank_markers(text: &str) -> Option<String> {
@@ -282,6 +294,14 @@ mod tests {
         let b = &blocks(text)[0];
         assert_eq!(b.range.end, text.len());
         assert_eq!(b.resolve(text, Take::Both), "ours\ntheirs");
+    }
+
+    #[test]
+    fn resolving_all_keeps_one_side_of_every_block_and_the_text_between() {
+        let text = "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> side\nb\n<<<<<<< HEAD\n1\n=======\n2\n>>>>>>> side\nc\n";
+        assert_eq!(resolve_all(text, Take::Current), "a\nx\nb\n1\nc\n");
+        assert_eq!(resolve_all(text, Take::Incoming), "a\ny\nb\n2\nc\n");
+        assert_eq!(resolve_all("no block\n", Take::Both), "no block\n");
     }
 
     #[test]

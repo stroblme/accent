@@ -732,15 +732,23 @@ impl Blob {
 /// A revision is peeled to its commit first. git words a full object name it does not have the
 /// same way as a path the commit lacks, so a commit asked of the wrong repository would read as
 /// a file that is not there; peeled, it is "invalid object name", which stays an error.
+///
+/// `:1`, `:2` and `:3` are an unmerged file's base, ours and theirs, and a stage the conflict
+/// has none of — no base where both sides added the file, no theirs where they deleted it — is
+/// `None` too.
 pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Blob>, Error> {
+    let stage = matches!(rev, ":1" | ":2" | ":3");
     let object = match rev {
         "" => format!(":{path}"),
+        _ if stage => format!("{rev}:{path}"),
         rev => format!("{rev}^{{commit}}:{path}"),
     };
     match run(&repo.root, &["show", &object], true) {
         Ok(bytes) => Ok(Some(Blob::of(&bytes))),
         Err(Error::Git(msg))
-            if msg.contains("does not exist") || msg.contains("exists on disk, but not in") =>
+            if msg.contains("does not exist")
+                || msg.contains("exists on disk, but not in")
+                || (stage && msg.contains("but not at stage")) =>
         {
             Ok(None)
         }
