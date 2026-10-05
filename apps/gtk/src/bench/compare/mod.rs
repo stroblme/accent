@@ -8,6 +8,7 @@ use accent_api::{Fold, Severity};
 
 mod disk;
 mod git;
+mod merge;
 
 pub(super) use disk::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_folds,
@@ -18,6 +19,7 @@ pub(super) use git::{
     bench_compare_clicks, bench_compare_lines, bench_compare_pads, bench_compare_pick,
     bench_compare_row, bench_compare_session, bench_compare_stale, bench_compare_typing,
 };
+pub(super) use merge::bench_compare_merge;
 
 /// What the newest toast over the window reads, whatever it says: [`bench_said`] looks for a
 /// failure.

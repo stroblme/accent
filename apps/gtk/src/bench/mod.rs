@@ -42,9 +42,9 @@ use chrome::{bench_chrome, bench_chrome_find, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_clicks, bench_compare_conflict, bench_compare_diag,
     bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_left,
-    bench_compare_lines, bench_compare_pads, bench_compare_page, bench_compare_pick,
-    bench_compare_press, bench_compare_row, bench_compare_runaway, bench_compare_session,
-    bench_compare_stale, bench_compare_typing, bench_compare_unfold,
+    bench_compare_lines, bench_compare_merge, bench_compare_pads, bench_compare_page,
+    bench_compare_pick, bench_compare_press, bench_compare_row, bench_compare_runaway,
+    bench_compare_session, bench_compare_stale, bench_compare_typing, bench_compare_unfold,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -208,6 +208,9 @@ use tags::bench_tags;
 /// companion shares with the editor, across a zoom and a new Indent Width
 /// (`compare::bench_compare_page`). `=press:<rel>` prints where to press the overlaid buttons with
 /// XTEST and where the carets are after each press (`compare::bench_compare_press`).
+/// `=merge:<rel>` merges two branches that conflict over `<rel>` in a repository it makes, opens
+/// the merge view from the Merge Conflicts row and takes each block's sides
+/// (`compare::bench_compare_merge`).
 /// `=unfold:<rel>` presses Show All Unchanged Lines and lets it go, in the note's tab and in a tab
 /// of two blobs, printing the hidden runs and the line at the top of the view each time, or the
 /// caret's line where it is on screen, then drags the divider between the columns
@@ -635,7 +638,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = compare {
             // These make a repository in the vault root, or stage and commit in the one there.
             if [
-                "lines:", "row:", "left:", "pads:", "clicks", "typing:", "session:",
+                "lines:", "row:", "left:", "pads:", "clicks", "typing:", "session:", "merge:",
             ]
             .iter()
             .any(|mode| rel.starts_with(mode))
@@ -683,6 +686,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("press:") {
                 return bench_compare_press(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("merge:") {
+                return bench_compare_merge(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("unfold:") {
                 return bench_compare_unfold(&app, rel);

@@ -3,6 +3,7 @@
 use accent_core::diff;
 use adw::prelude::*;
 
+use super::columns::Columns;
 use super::{Compare, Side, first_change};
 
 impl Compare {
@@ -91,17 +92,7 @@ impl Compare {
     /// How many rows GTK lays out at a different height than the last relayout meant them to
     /// have, on either side: the number the alignment stands or falls on, and 0 is the claim.
     pub fn misaligned(&self) -> usize {
-        let rows = self.rows.borrow().len();
-        if self.columns.grid.borrow().tops.len() != rows {
-            return rows;
-        }
-        let off = |r, side| {
-            self.laid(r, side)
-                .is_some_and(|(expected, actual, ..)| expected != actual)
-        };
-        (0..rows)
-            .filter(|&r| off(r, Side::Old) || off(r, Side::New))
-            .count()
+        self.columns.misaligned()
     }
 
     /// The rows on screen whose two lines GTK draws at different heights right now, and the first
@@ -164,25 +155,9 @@ impl Compare {
             })
     }
 
-    /// Row `r`'s line on `side` as laid out: where the last relayout meant it to start, where GTK
-    /// put it, its own height and its row's, in buffer pixels. `None` where the side has no line.
+    /// Row `r`'s line on `side` as laid out: see [`Columns::laid`].
     fn laid(&self, r: usize, side: Side) -> Option<(i32, i32, i32, i32)> {
-        let (lines, rows, starts) = (
-            self.lines.borrow(),
-            self.rows.borrow(),
-            self.starts.borrow(),
-        );
-        let grid = self.columns.grid.borrow();
-        let own = grid.heights[side.idx()].get(r).copied().flatten()?;
-        let n = side.of(&rows[r]).and_then(|i| side.number(&lines[i]))?;
-        let tallest = grid.heights[0][r]
-            .unwrap_or(0)
-            .max(grid.heights[1][r].unwrap_or(0))
-            + grid.extra[r];
-        let pane = self.pane(side);
-        let expected = grid.tops[r] + pane.view.pixels_above_lines();
-        let iter = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
-        Some((expected, pane.view.iter_location(&iter).y(), own, tallest))
+        self.columns.laid(r, side.idx())
     }
 
     /// What the `Take` (or, with `keep_own`, the `Both`) button on the `i`th hunk does.
@@ -202,5 +177,48 @@ impl Compare {
         if let Some(key) = key {
             self.open_run(key);
         }
+    }
+}
+
+impl Columns {
+    /// How many rows GTK lays out at a different height than the last relayout meant them to
+    /// have, in any column: the number the alignment stands or falls on, and 0 is the claim.
+    pub(super) fn misaligned(&self) -> usize {
+        let rows = self.rows.borrow().changed.len();
+        if self.grid.borrow().tops.len() != rows {
+            return rows;
+        }
+        let off = |r, c| {
+            self.laid(r, c)
+                .is_some_and(|(expected, actual, ..)| expected != actual)
+        };
+        (0..rows)
+            .filter(|&r| (0..self.panes.len()).any(|c| off(r, c)))
+            .count()
+    }
+
+    /// Row `r`'s line in column `c` as laid out: where the last relayout meant it to start, where
+    /// GTK put it, its own height and its row's, in buffer pixels. `None` where the column has no
+    /// line there.
+    pub(super) fn laid(&self, r: usize, c: usize) -> Option<(i32, i32, i32, i32)> {
+        let (rows, grid) = (self.rows.borrow(), self.grid.borrow());
+        let own = grid.heights[c].get(r).copied().flatten()?;
+        let n = rows.lines[c][r]?;
+        let tallest = grid
+            .heights
+            .iter()
+            .map(|h| h[r].unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            + grid.extra[r];
+        let pane = &self.panes[c];
+        let expected = grid.tops[r] + pane.view.pixels_above_lines();
+        let iter = pane.buffer.iter_at_offset(rows.starts[c][n - 1]);
+        Some((expected, pane.view.iter_location(&iter).y(), own, tallest))
+    }
+
+    /// Whether the rows are laid and the view is where it was being kept: what a drill waits for.
+    pub(super) fn settled(&self) -> bool {
+        self.keep.get().is_none() && self.pending.borrow().is_none()
     }
 }

@@ -681,8 +681,8 @@ impl Tab {
         diagnostics::restyle(&self.buffer, &self.view);
         self.fold_renderer.restyle(&self.view);
         self.conflicts.restyle();
-        if let Some(compare) = self.comparison() {
-            compare.restyle();
+        if let Some(hosted) = self.hosted() {
+            hosted.restyle();
         }
     }
 
@@ -895,8 +895,8 @@ impl Tab {
     /// list item's own indent; four columns is also the tab stop CommonMark reads a note's tab at.
     pub fn set_indent_width(&self, columns: u32) {
         self.view.set_tab_width(columns);
-        if let Some(compare) = self.comparison() {
-            compare.follow_editor(false);
+        if let Some(hosted) = self.hosted() {
+            hosted.follow_editor(false);
         }
     }
 
@@ -1211,8 +1211,8 @@ impl Tab {
         }
         // The tags the sticky title reads are the ones that were just re-applied.
         self.update_sticky();
-        if let Some(compare) = self.comparison() {
-            compare.refresh();
+        if let Some(hosted) = self.hosted() {
+            hosted.refresh();
         }
         self.conflicts.find();
     }

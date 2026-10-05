@@ -421,8 +421,8 @@ impl Tab {
                 }
                 wrap::measure(&tab.view);
                 // A comparison's companion is set in the same font, and takes the page with it.
-                if let Some(compare) = tab.comparison() {
-                    compare.follow_editor(true);
+                if let Some(hosted) = tab.hosted() {
+                    hosted.follow_editor(true);
                 }
             }
         ));

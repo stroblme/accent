@@ -25,10 +25,12 @@ use crate::editor::{self, Flavour};
 #[cfg(feature = "bench")]
 mod bench;
 mod columns;
+pub mod merge;
 mod pad;
 mod pool;
 
 use columns::{Anchor, Columns, Rows};
+pub use merge::Merge;
 use pad::UNMEASURED;
 pub use pool::Pool;
 use pool::Role;
@@ -444,7 +446,20 @@ impl Compare {
         });
 
         for pane in &this.columns.panes {
-            *pane.pool.owner.borrow_mut() = this.weak.clone();
+            let w = this.weak.clone();
+            *pane.pool.act.borrow_mut() = Some(Rc::new(move |role, i| {
+                let Some(c) = w.upgrade() else { return };
+                match role {
+                    Role::Gap { key, .. } => c.open_run(key),
+                    Role::Hunk(hunk) => {
+                        let on = c.hunk_buttons.borrow().get(i).map(|(.., on)| on.clone());
+                        if let Some(on) = on {
+                            on(&c, hunk);
+                        }
+                    }
+                    Role::Block(_) => {}
+                }
+            }));
         }
         this.lay(true);
         this
@@ -714,6 +729,9 @@ impl Compare {
             && let Some(mine) = self.editable
         {
             let (theirs, pane) = (mine.other(), self.pane(mine.other()));
+            *pane.pool.buttons.borrow_mut() = (self.hunk_buttons.borrow().iter())
+                .map(|(label, tip, _)| (*label, *tip))
+                .collect();
             for hunk in diff::hunks(&lines, &rows) {
                 let row = hunk.start;
                 let widget = pane.pool.claim(&pane.view, Role::Hunk(hunk));
@@ -752,6 +770,7 @@ impl Compare {
                 })
                 .collect(),
             hidden: hidden.iter().map(|(gap, _)| gap.clone()).collect(),
+            extra: vec![0; rows.len()],
             // The blank of a hunk that only adds or only deletes, in the hue of the lines it
             // faces: green on the left facing an addition, red on the right facing a deletion.
             hues: vec![ADDED_HUE, REMOVED_HUE],

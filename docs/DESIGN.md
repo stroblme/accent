@@ -168,7 +168,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Create Branch… is `git switch -c` from HEAD, with no base picker. What `git check-ref-format` would refuse in the name becomes a dash, as VS Code makes one (`my new branch` is created as `my-new-branch`), and a dim line under the field says what will be created whenever that is not what was typed; Create is insensitive while nothing nameable is typed.
 - Merge Branch… merges another local branch into HEAD with no fast-forward flag, so git's default and the user's `merge.ff` decide. The toast says what came of it — up to date, fast-forwarded, merged, or conflicts in N files — read off the repository, not off git's words.
 - A stopped merge raises an `AdwBanner` over the pane, "A merge is in progress", until committed or aborted; its Abort asks first, since it discards every resolution made so far. A stopped rebase raises the same banner reading "A rebase is in progress": Commit reads Continue and the message box goes, each commit keeping its own message, and Abort asks the same question. A Continue that stops again leaves the banner up.
-- Conflicts are the Merge Conflicts section's rows: a row opens the note with git's markers and their Accept buttons (Editor), Stage marks it resolved, and nothing opens on its own.
+- Conflicts are the Merge Conflicts section's rows: a row opens the file as a merge (Merge), Stage marks it resolved, and nothing opens on its own.
 - Sync and Commit share a row, the pane's two actions: a row of its own costs 40 px the changes and the history need. Sync carries the ahead and behind counts and `mail-send-receive-symbolic`.
 - Sync pulls then pushes, both halves every time: the counts come from a background fetch (on opening the vault, on picking a repository, every five minutes while the window has focus), so they are a readout, not a decision. A failed pull stops there and keeps its transcript.
 - On a remote vault git runs on the host, which finishes a command within its own bounds whatever the link does. A command whose link drops part way fails in the link's words and says the host may still finish it, and that the pane shows what it did once the link is back: the reconnect refreshes it, and so does what the host finishes later, which moves a ref the vault watches.
@@ -203,7 +203,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A sticky block title over the top of the view pins the opening line of the heading or fenced block the first visible line is in, as VS Code pins a function signature, until that line is back on screen; the innermost block wins. Only those two blocks, both already tagged by the styling pass: a language's own structure would need a parser. A plain label in the document font, aligned with the text, on a `.view` box with a rule under it; never in a code or CSV tab.
 - **Git's conflict markers are decorated as VS Code decorates them**, in every text tab: a block's current side tinted green and its incoming side blue, each marker line more strongly than its side, a diff3 base grey and `=======` bare. Accept Current, Accept Incoming and Accept Both sit in a band the `<<<<<<<` line is given above itself, the comparison's `.osd` row of buttons, and each replaces the block with what it keeps as one undo step.
 - A block is git's seven-character markers at the start of their lines, in order (`accent_core::conflict`); one edited out of order loses its tint and buttons alone, the blocks after it keeping theirs. They are found again as the styling is, on the keystroke up to 16 KB and on the debounce above.
-- The markers are not markdown: read as it, `=======` would make the current side a heading and `>>>>>>>` a quote, so the analysis blanks them and each side is styled as the prose it is. While a comparison is up the blocks go bare, the comparison being a merge of its own.
+- The markers are not markdown: read as it, `=======` would make the current side a heading and `>>>>>>>` a quote, so the analysis blanks them and each side is styled as the prose it is. While a comparison is up the blocks go bare, the comparison being a merge of its own; while a merge view is up they keep their tints, and their buttons move to the merge's strips (Merge).
 
 ### Code editor
 
@@ -476,6 +476,15 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Every comparison follows the document zoom, page margins included. A read-only side beside the editor takes the editor's page whatever moves it: its heading markers hang in the same margin, and a tab is as wide as the Indent Width makes it there.
 - The sticky block title stays off while a comparison is up: the other side has none, and one over the editor's first row alone puts the two first rows out of level.
 
+### Merge
+
+- A file git left unmerged opens from its Merge Conflicts row as a merge in its own tab: three columns on one scroll, the current side on the left, the file in the middle as the editor, the incoming side on the right, the rows kept level as a comparison keeps them (`diff::align3`, `diff::columns`).
+- The middle column is the result: the working-tree file with git's markers, edited and saved as any note, so a merge left half done is still the file git has, and what a terminal or another editor sees.
+- Each side column's title is its choice of git's stages — Current, Base, Incoming, named by the markers' labels, `HEAD` and the branch, which a rebase swaps — and its lines are tinted where they differ from the file, in the tint of the stage it shows. The middle column keeps the conflict blocks' own tints.
+- Every column leaves a strip of room above each block: an arrow on a side's strip, » on the left and « on the right, takes the side that column shows, and Both in the middle takes both, each one undo step. Accept Current, Accept Incoming and Accept Both from the palette act on the block holding the caret.
+- It opens with the unchanged runs hidden and the caret on the first block; the runs, Show All Unchanged Lines and a new width behave as in a comparison. Stop Merging, beside the toggle, leaves it.
+- A conflict that is not two texts — a binary, or a side that deleted the file — opens as the plain file, and a toast says why.
+
 ### Language servers
 
 - One client for every text tab: accent's own index answers for markdown (Architecture), and a real server (clangd, rust-analyzer, pyright, taplo, …) starts on demand for code and stops when its last document closes, so nothing runs for a file nobody has open.
@@ -708,7 +717,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - `Escape` is the way out of whatever is up, one thing per press.
 - While a `Ctrl+Tab` chord is held it goes back to the tab the chord started from and does nothing else, ahead of everything: the chord is what is up, its card on screen or not.
 - In presentation mode it ends presentation and does nothing else, ahead of the rest, so a presented shell or preview cannot keep it.
-- Otherwise it brings the hidden chrome back, takes no key from anyone, and the nearest thing over the document takes it: the word popup, painted ghost text or a signature popover; failing that, the focused pane's find or go-to-line bar, from the bar or the document (only that pane's, so a query in the other half of a split survives); failing that, the comparison the pane's tab hosts stops, as Stop Comparing does. A diff that is a tab of its own is closed like any tab.
+- Otherwise it brings the hidden chrome back, takes no key from anyone, and the nearest thing over the document takes it: the word popup, painted ghost text or a signature popover; failing that, the focused pane's find or go-to-line bar, from the bar or the document (only that pane's, so a query in the other half of a split survives); failing that, the comparison or the merge the pane's tab hosts stops, as Stop Comparing does. A diff that is a tab of its own is closed like any tab.
 - A primary click outside the palette, Preferences or About closes it, as Escape does, and reaches nothing under it, a bottom sheet in a window under 450 × 360 px included. An `AdwAlertDialog` stays, its question waiting for an answer, and so does a dialog under one (Preferences under Restore Defaults' question): libadwaita keeps an alert floating at every window size, and a floating dialog's dimming closes nothing.
 - It has no `GAction` and no palette entry: it names no one thing.
 

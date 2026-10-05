@@ -21,7 +21,7 @@ use crate::editor;
 const FIRST_HUNK_AT: f64 = 0.25;
 
 /// Blank space a hidden run leaves behind, for the button that opens it to sit in.
-const GAP_PX: i32 = 28;
+pub(super) const GAP_PX: i32 = 28;
 /// Inset of the hunk buttons from the pane's right edge.
 const INSET: i32 = 8;
 /// How often a relayout asks again for the heights GTK had not validated yet, and how long it
@@ -36,6 +36,9 @@ pub(super) enum Anchor {
     Hunk(usize),
     /// Centred in the blank space a hidden run left at this row.
     Gap(usize),
+    /// In the blank space the host left at this row on purpose ([`Rows::extra`]), at its start,
+    /// centre or end.
+    Room(usize, gtk::Align),
 }
 
 /// Where the view is kept until the rows are laid: see [`Columns::keep`].
@@ -61,6 +64,8 @@ pub(super) struct Rows {
     pub(super) changed: Vec<bool>,
     /// The rows hidden right now.
     pub(super) hidden: Vec<Range<usize>>,
+    /// Per row, the blank space every column leaves there on purpose, for buttons to sit in.
+    pub(super) extra: Vec<i32>,
     /// Per column, the hue of the blank it leaves where it has no line in a change.
     pub(super) hues: Vec<(f32, f32, f32)>,
     /// The first hunk's first row, where a comparison opens.
@@ -529,7 +534,7 @@ impl Columns {
                     .collect()
             })
             .collect();
-        let mut extra = vec![0; count];
+        let mut extra = rows.extra.clone();
         for gap in &rows.hidden {
             extra[gap.start] += GAP_PX;
         }
@@ -584,6 +589,14 @@ impl Columns {
             let (x, y) = match *anchor {
                 Anchor::Hunk(row) => (width - wanted - INSET, tops[row]),
                 Anchor::Gap(row) => ((width - wanted) / 2, tops[row] + (GAP_PX - height) / 2),
+                Anchor::Room(row, align) => {
+                    let x = match align {
+                        gtk::Align::Start => INSET,
+                        gtk::Align::End => width - wanted - INSET,
+                        _ => (width - wanted) / 2,
+                    };
+                    (x, tops[row] + (rows.extra[row] - height) / 2)
+                }
             };
             view.move_overlay(widget, x.max(0), y);
         }

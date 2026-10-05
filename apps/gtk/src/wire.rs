@@ -809,7 +809,7 @@ pub fn dismiss(app: &App) -> bool {
         pane.find.close();
         return true;
     }
-    match app.tab_of(&pane).filter(|tab| tab.comparison().is_some()) {
+    match app.tab_of(&pane).filter(|tab| tab.hosted().is_some()) {
         Some(tab) => {
             tab.leave_compare();
             true
