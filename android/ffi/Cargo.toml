@@ -2,6 +2,7 @@
 name = "accent-android"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 # Not published, not built by a desktop `cargo build`: it is only in `members`, never in
 # `default-members`.

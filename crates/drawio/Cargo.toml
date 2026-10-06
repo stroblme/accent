@@ -2,6 +2,7 @@
 name = "accent-drawio"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 # GPL-3.0-or-later like the rest of the workspace. The files headed "Derived from" port Apache-2.0
 # code from mxGraph/draw.io; Apache-2.0 flows into GPLv3, and its terms are met by LICENSE-APACHE,
 # NOTICE and those headers.

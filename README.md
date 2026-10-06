@@ -52,7 +52,7 @@ The Android app lives in [`android/`](android/) and uses the same Rust core thro
 
 ### Desktop requirements
 
-The desktop build needs [Rust](https://rustup.rs) ≥ 1.92, a C compiler, pkg-config, and development files for GTK ≥ 4.18, libadwaita ≥ 1.7, GtkSourceView ≥ 5.18, WebKitGTK 6.0, VTE for GTK 4 ≥ 0.78, and libspelling. `make requirements` reports what is missing and installs nothing. Git, SSH, [Merl](https://github.com/stroblme/merl), and language servers enable their corresponding features.
+The desktop build needs [Rust](https://rustup.rs) ≥ 1.95, a C compiler, pkg-config, and development files for GTK ≥ 4.18, libadwaita ≥ 1.7, GtkSourceView ≥ 5.18, WebKitGTK 6.0, VTE for GTK 4 ≥ 0.78, and libspelling. `make requirements` reports what is missing and installs nothing. Git, SSH, [Merl](https://github.com/stroblme/merl), and language servers enable their corresponding features.
 
 <details>
 <summary>Package examples for Linux distributions</summary>
