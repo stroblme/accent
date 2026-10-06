@@ -630,7 +630,12 @@ pub(in crate::bench) fn bench_compare_gap(app: &Rc<App>, rel: &str) {
         }
         tab.set_text(&edited);
         app.compare_with_disk(&tab);
-        wait(1200).await;
+        for _ in 0..100 {
+            if tab.comparison().is_some() {
+                break;
+            }
+            wait(50).await;
+        }
         let Some(compare) = tab.comparison() else {
             println!("bench compare_gap none");
             return bench_quit(&app);
@@ -653,7 +658,6 @@ pub(in crate::bench) fn bench_compare_gap(app: &Rc<App>, rel: &str) {
             ("new", &edited),
             false,
         );
-        wait(1200).await;
         let compare = diff.comparison();
         let Some(view) = pane_view(compare.widget(), true) else {
             println!("bench compare_gap blobs none");
@@ -958,6 +962,7 @@ async fn painted(views: &[gtk::TextView; 2], act: impl FnOnce()) -> String {
 /// say where the scroll and the lines above and under the button were before and after, and how far
 /// the scroll strayed meanwhile.
 async fn bench_gap(compare: &diff::Compare, view: &gtk::TextView, pick: Option<usize>) -> String {
+    settled(compare).await;
     let adj = compare.vadjustment();
     let buttons = overlaid(view, "⋯");
     let Some((top, button)) = buttons.get(pick.unwrap_or(buttons.len() / 2)).cloned() else {

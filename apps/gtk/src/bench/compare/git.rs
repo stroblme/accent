@@ -209,14 +209,21 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Half a page further down the comparison, as a wheel turn goes, and where the shared scrollbar
-/// is once the comparison has had time to lay itself again.
+/// Half a page further down the comparison, as a wheel turn goes, once it has settled, and where
+/// the shared scrollbar is once the comparison has had time to lay itself again, with its upper
+/// and page size: a `got` short of `want` at `upper - page` was clamped.
 async fn bench_scroll(compare: &diff::Compare) -> String {
+    settled(compare).await;
     let adj = compare.vadjustment();
     let want = (adj.value() + adj.page_size() / 2.0).min(adj.upper() - adj.page_size());
     adj.set_value(want);
     glib::timeout_future(Duration::from_millis(500)).await;
-    format!("want={want} got={}", adj.value())
+    format!(
+        "want={want} got={} upper={} page={}",
+        adj.value(),
+        adj.upper(),
+        adj.page_size()
+    )
 }
 
 /// Where the minimap's own scroll is while it is on, which has to follow the editor's.
