@@ -341,6 +341,9 @@ pub struct Tab {
     /// while Ctrl is held, and translating a byte offset there meant copying the text up to the
     /// pointer each time.
     links: RefCell<Vec<(Range<i32>, Link)>>,
+    /// A note's words, counted on the first ask after an edit: the status bar asks far more
+    /// often than the text changes. `None` until then.
+    words: Cell<Option<usize>>,
     /// The underline under what a Ctrl+click would follow, and what it is showing. See
     /// [`follow`].
     follow_tag: gtk::TextTag,
@@ -688,6 +691,16 @@ impl Tab {
         if let Some(hosted) = self.hosted() {
             hosted.restyle();
         }
+    }
+
+    /// The text's words, as the status bar counts them for a note.
+    pub fn words(&self) -> usize {
+        let words = self
+            .words
+            .get()
+            .unwrap_or_else(|| crate::statusbar::word_count(&self.text()));
+        self.words.set(Some(words));
+        words
     }
 
     /// Git's conflict markers in this tab, for the palette's Accept and Next Conflict commands.
@@ -1139,8 +1152,10 @@ impl Tab {
 
     fn on_changed(self: &Rc<Self>) {
         self.note_turn(true, false);
-        // Ahead of the early return: a reload changes what the query matches too.
+        // Ahead of the early return: a reload changes what the query matches too, and the
+        // words it has.
         self.find_edited();
+        self.words.set(None);
         if self.loading.get() {
             return;
         }
