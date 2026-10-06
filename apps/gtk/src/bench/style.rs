@@ -66,6 +66,13 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
             };
             crate::fold::fold(tab.buffer.upcast_ref(), fold);
         }
+        // The text going gave up the primary selection the last case left, and on X11 the server
+        // answers with a SelectionClear that GDK reads later. Read after the selection below has
+        // claimed it again in the same millisecond, it passes for another owner's, and GTK
+        // unselects the buffer before the middle click's read: nothing pasted. So it is read
+        // first: the server answers before the sync returns, and GDK's events go ahead of an idle.
+        tab.view.display().sync();
+        glib::timeout_future_with_priority(glib::Priority::DEFAULT_IDLE, Duration::ZERO).await;
         // ASCII throughout, so a byte offset is also the character offset the buffer counts in.
         let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
         let len = selected.len() as i32;
