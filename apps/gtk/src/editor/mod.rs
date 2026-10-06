@@ -60,16 +60,18 @@ pub(crate) use text::{caret, line_end, line_prefix};
 /// How long a long note waits after the last keystroke before it is re-analysed.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 /// Notes at or below this many characters get a *full* re-style on the keystroke. Measured cost
-/// of a full pass, which reads every tag back off the buffer and touches only what changed, on
-/// markup-dense text (`ACCENT_BENCH_STYLE=typing:`'s `pass_us`, 2026-10): 0.6 ms at 4 KB, 1.6 ms
-/// at 15 KB, 4.4 ms at 64 KB, 17 ms at 256 KB. This size stays well inside a frame and still
-/// covers the notes people actually write (median 3.5 KB in the test vault). A longer note keeps
-/// the debounce for the full pass, which grows with the note — but it is not left unstyled while
-/// typing: [`highlight::apply_line`] re-tags the caret's line on every keystroke, so markup
-/// appears as it is typed the way Apostrophe does it either side of the threshold.
+/// of a full pass, which reads every tag back off the buffer in one walk and touches only what
+/// changed, on markup-dense text (`ACCENT_BENCH_STYLE=typing:`'s `pass_us`, best of nine,
+/// 2026-10-06): 0.2 ms at 4 KB, 0.55 ms at 15 KB, 1.15 ms at 32 KB, 2.4 ms at 64 KB, 10 ms at
+/// 256 KB. This size stays well inside a frame and still covers the notes people actually write
+/// (median 3.5 KB in the test vault). A longer note keeps the debounce for the full pass, which
+/// grows with the note — but it is not left unstyled while typing: [`highlight::apply_line`]
+/// re-tags the caret's line on every keystroke, so markup appears as it is typed the way
+/// Apostrophe does it either side of the threshold.
 ///
-/// ponytail: set when a pass removed and re-applied every tag (21 ms at 64 KB); with the diff it
-/// could rise to about 64 KB, if far edits styled on the keystroke ever matter.
+/// The pass is not all a keystroke here costs, so the cheaper walk did not move this: at 31 KB
+/// the median keystroke (`key_us`) took 3–6 ms with the full pass against 0.9–1.6 ms with the
+/// caret's line alone (2026-10-06).
 const INSTANT: i32 = 16 * 1024;
 /// DESIGN.md, Motion: save 1 s after the last edit. A diagram and a PDF's drawing share it.
 pub(crate) const AUTOSAVE: Duration = Duration::from_secs(1);

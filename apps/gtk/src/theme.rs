@@ -77,14 +77,19 @@ const BACKDROP: [&str; 3] = ["headerbar", "sidebar", "secondary-sidebar"];
 const RAISED: [&str; 4] = ["popover", "dialog", "card", "thumbnail"];
 
 thread_local! {
-    /// The Solarized provider, so the next `apply` can take it off the display again.
-    static PROVIDER: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
+    /// The Solarized provider and whether it holds the dark half, so the next `apply` can leave
+    /// it be or take it off the display again.
+    static PROVIDER: RefCell<Option<(gtk::CssProvider, bool)>> = const { RefCell::new(None) };
     /// What the user picked, for `refresh` and for the two lookups below.
     static CHOICE: Cell<Theme> = const { Cell::new(Theme::System) };
 }
 
 /// Put `theme` on screen: the colour scheme libadwaita understands, plus our own variables when
 /// the answer is Solarized.
+///
+/// Every window asks, as it is built and on each dark or accent notify, so the provider is
+/// swapped only when the half it would hold differs from the one it holds: a swap restyles every
+/// widget in every window.
 pub fn apply(theme: Theme) {
     CHOICE.set(theme);
     adw::StyleManager::default().set_color_scheme(match theme {
@@ -97,21 +102,25 @@ pub fn apply(theme: Theme) {
     let Some(display) = gdk::Display::default() else {
         return;
     };
+    let wanted = (theme == Theme::Solarized).then(is_dark);
     PROVIDER.with_borrow_mut(|slot| {
-        if let Some(old) = slot.take() {
-            gtk::style_context_remove_provider_for_display(&display, &old);
-        }
-        if theme != Theme::Solarized {
+        if slot.as_ref().map(|(_, dark)| *dark) == wanted {
             return;
         }
+        if let Some((old, _)) = slot.take() {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        let Some(dark) = wanted else {
+            return;
+        };
         let provider = gtk::CssProvider::new();
-        provider.load_from_string(&css(is_dark()));
+        provider.load_from_string(&css(dark));
         gtk::style_context_add_provider_for_display(
             &display,
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
-        *slot = Some(provider);
+        *slot = Some((provider, dark));
     });
 }
 

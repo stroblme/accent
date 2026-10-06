@@ -208,7 +208,8 @@ const TYPING_SECTION: &str = "## Section\n\nSome prose with **bold**, *emphasis*
 /// CPU time over the run against the wall time: what a keystroke costs once GTK has laid out
 /// whatever the restyle touched, which a timer around the restyle itself cannot see. 15 rather
 /// than 16 so that size styles on every keystroke, below `editor::INSTANT`. `idle` is the same
-/// share over the second before the typing, so a layout of the fill still running shows, and
+/// share over the second before the typing, so a layout of the fill still running shows,
+/// `key_us` the median keystroke's own time, the styling it runs before it returns included, and
 /// `pass_us` what one more full pass over the typed note costs, changing nothing.
 /// `typing:<rel>:<kb>` types into that one size, for a profiler.
 pub(super) fn bench_typing(app: &Rc<App>, arg: &str) {
@@ -244,10 +245,14 @@ pub(super) fn bench_typing(app: &Rc<App>, arg: &str) {
             glib::timeout_future(Duration::from_secs(1)).await;
             let idle = busy(cpu() - idle, t0.elapsed());
             let (cpu0, t0) = (cpu(), Instant::now());
+            let mut keys = Vec::with_capacity(TYPING_KEYS);
             for ch in TYPING_WORDS.chars().cycle().take(TYPING_KEYS) {
+                let key = Instant::now();
                 tab.buffer.insert_at_cursor(&ch.to_string());
+                keys.push(key.elapsed().as_micros());
                 glib::timeout_future(TYPING_EVERY).await;
             }
+            keys.sort_unstable();
             // The debounced pass after the last key, and the layout it leaves.
             glib::timeout_future(Duration::from_millis(500)).await;
             let (used, wall) = (cpu() - cpu0, t0.elapsed());
@@ -256,11 +261,12 @@ pub(super) fn bench_typing(app: &Rc<App>, arg: &str) {
             crate::highlight::apply(&tab.buffer);
             println!(
                 "bench style_typing kb={kb} chars={} keys={TYPING_KEYS} wall_ms={} cpu_ms={} \
-                 busy={:.2} idle={idle:.2} pass_us={}",
+                 busy={:.2} idle={idle:.2} key_us={} pass_us={}",
                 tab.buffer.char_count(),
                 wall.as_millis(),
                 used / 1_000_000,
                 busy(used, wall),
+                keys[TYPING_KEYS / 2],
                 pass.elapsed().as_micros()
             );
         }

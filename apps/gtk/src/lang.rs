@@ -11,6 +11,7 @@
 
 use crate::editor::{Flavour, Tab};
 use accent_api::{Kind, Pos, Support, Symbol, Vault};
+use futures_channel::oneshot;
 use gtk::glib;
 use gtk::prelude::*;
 use sourceview5::prelude::*;
@@ -23,9 +24,6 @@ use std::time::Duration;
 /// gutter chevrons follow the last edit by 300 ms, as the preview does. The ghost text comes
 /// first and sooner, after [`GHOST`]; the rest of the wait is served after it.
 const REFRESH: Duration = Duration::from_millis(300);
-
-/// How long a second flush waits for the one already in flight before looking again.
-const SETTLE: Duration = Duration::from_millis(2);
 
 /// How long after the last keystroke ghost text is asked for. Short, because it is painted at
 /// the caret, where a wait is read as the suggestion being gone; the answer itself costs a
@@ -64,8 +62,9 @@ pub struct State {
     /// characters it had not been given.
     version: Cell<u64>,
     sent: Cell<u64>,
-    /// A flush is in flight. The next caller waits it out rather than starting a second one.
-    flushing: Cell<bool>,
+    /// The callers waiting out the flush in flight, `None` while there is none: the next caller
+    /// waits for it rather than starting a second one.
+    waiting: RefCell<Option<Vec<oneshot::Sender<()>>>>,
     /// The "no language server" toast has been said for this tab; it is not said again.
     toasted: Cell<bool>,
     /// The vault this document is open on. `None` for a tab outside every vault, which has
@@ -313,10 +312,18 @@ pub fn resync(tab: &Rc<Tab>) {
 /// flush before they ask — wait for one round trip between them, and a change that fails leaves
 /// the version unsent so the next caller carries it again.
 pub async fn flush(tab: Rc<Tab>) {
-    // A poll rather than a shared future: awaiting somebody else's in-flight work needs a
-    // primitive glib does not have, and the whole wait is one round trip long.
-    while tab.lang.flushing.get() {
-        glib::timeout_future(SETTLE).await;
+    // Looked at again once woken: another waiter may have started the next flush by then.
+    loop {
+        let woken = match tab.lang.waiting.borrow_mut().as_mut() {
+            Some(waiting) => {
+                let (wake, woken) = oneshot::channel();
+                waiting.push(wake);
+                woken
+            }
+            None => break,
+        };
+        // A send or a dropped sender: either way the flush it waited for is over.
+        let _ = woken.await;
     }
     let Some(vault) = tab.lang.vault() else {
         return;
@@ -336,22 +343,25 @@ pub async fn flush(tab: Rc<Tab>) {
     }
 }
 
-/// Marks a flush as in flight for as long as it lives — a dropped future included, which is what
-/// the next keystroke does to the refresh a flush may be running inside. Without the drop the
-/// mark would outlive the request and every later flush would wait for a round trip that is no
-/// longer happening.
+/// Marks a flush as in flight for as long as it lives, and wakes whoever waited for it as it
+/// goes — a dropped future included, which is what the next keystroke does to the refresh a flush
+/// may be running inside. Without the drop the mark would outlive the request and every later
+/// flush would wait for a round trip that is no longer happening.
 struct Flushing(Rc<Tab>);
 
 impl Flushing {
     fn new(tab: Rc<Tab>) -> Self {
-        tab.lang.flushing.set(true);
+        *tab.lang.waiting.borrow_mut() = Some(Vec::new());
         Flushing(tab)
     }
 }
 
 impl Drop for Flushing {
     fn drop(&mut self) {
-        self.0.lang.flushing.set(false);
+        for wake in self.0.lang.waiting.take().into_iter().flatten() {
+            // A waiter dropped meanwhile is not there to hear it, and needs nothing.
+            let _ = wake.send(());
+        }
     }
 }
 

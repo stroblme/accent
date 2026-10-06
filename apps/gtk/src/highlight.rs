@@ -328,10 +328,13 @@ pub fn apply(buffer: &sourceview5::Buffer) -> (markdown::Analysis, Offsets) {
         }
     }
     let table = buffer.tag_table();
-    for name in TAG_NAMES {
-        if let Some(tag) = table.lookup(name) {
-            sync_tag(buffer, &tag, wanted.remove(name).unwrap_or_default());
-        }
+    let (names, tags): (Vec<&str>, Vec<gtk::TextTag>) = TAG_NAMES
+        .iter()
+        .filter_map(|&name| Some((name, table.lookup(name)?)))
+        .unzip();
+    let have = runs_of(buffer, &tags);
+    for ((name, tag), have) in names.into_iter().zip(&tags).zip(have) {
+        sync_runs(buffer, tag, &have, wanted.remove(name).unwrap_or_default());
     }
     (analysis, offsets)
 }
@@ -341,19 +344,28 @@ pub fn apply(buffer: &sourceview5::Buffer) -> (markdown::Analysis, Offsets) {
 /// the tag was there or not, for any tag that can change a line's size — a font, a margin, an
 /// underline.
 pub fn sync_tag(buffer: &sourceview5::Buffer, tag: &gtk::TextTag, want: Vec<Range<i32>>) {
+    sync_runs(buffer, tag, &runs(buffer, tag), want);
+}
+
+/// [`sync_tag`], told where `tag` lies now.
+fn sync_runs(
+    buffer: &sourceview5::Buffer,
+    tag: &gtk::TextTag,
+    have: &[Range<i32>],
+    want: Vec<Range<i32>>,
+) {
     let want = merged(want);
-    let have = runs(buffer, tag);
     let at = |range: &Range<i32>| {
         (
             buffer.iter_at_offset(range.start),
             buffer.iter_at_offset(range.end),
         )
     };
-    for range in minus(&have, &want) {
+    for range in minus(have, &want) {
         let (s, e) = at(&range);
         buffer.remove_tag(tag, &s, &e);
     }
-    for range in minus(&want, &have) {
+    for range in minus(&want, have) {
         let (s, e) = at(&range);
         buffer.apply_tag(tag, &s, &e);
     }
@@ -388,6 +400,41 @@ pub fn runs(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) -> Vec<Range<i32>>
         let start = at.offset();
         at.forward_to_tag_toggle(Some(tag));
         out.push(start..at.offset());
+    }
+    out
+}
+
+/// [`runs`] for each of `tags`, read in one walk over every toggle in the buffer. A walk per tag
+/// goes over the text again for each, skipping only stretches the tag never touches, which in a
+/// note dense with markup is little of it.
+fn runs_of(buffer: &sourceview5::Buffer, tags: &[gtk::TextTag]) -> Vec<Vec<Range<i32>>> {
+    let index = |tag: &gtk::TextTag| tags.iter().position(|t| t == tag);
+    let mut out = vec![Vec::new(); tags.len()];
+    let mut open = vec![None; tags.len()];
+    let mut at = buffer.start_iter();
+    loop {
+        let offset = at.offset();
+        for tag in at.toggled_tags(false) {
+            if let Some(i) = index(&tag)
+                && let Some(start) = open[i].take()
+            {
+                out[i].push(start..offset);
+            }
+        }
+        for tag in at.toggled_tags(true) {
+            if let Some(i) = index(&tag) {
+                open[i] = Some(offset);
+            }
+        }
+        if !at.forward_to_tag_toggle(None::<&gtk::TextTag>) {
+            break;
+        }
+    }
+    // What runs to the end of the text, where the walk has stopped.
+    for (runs, start) in out.iter_mut().zip(open) {
+        if let Some(start) = start {
+            runs.push(start..at.offset());
+        }
     }
     out
 }
