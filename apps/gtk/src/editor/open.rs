@@ -280,7 +280,7 @@ pub fn open(
         diagnostics: RefCell::new(Vec::new()),
         annotations,
         diagnostics_hidden: Cell::new(false),
-        annotated: Cell::new(0),
+        annotated: RefCell::default(),
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
         font: RefCell::new(None),
@@ -357,7 +357,7 @@ pub fn open(
             #[weak(rename_to = tab)]
             tab,
             move |_| {
-                if tab.annotated.get() > 0 {
+                if !tab.annotated.borrow().is_empty() {
                     let weak = Rc::downgrade(&tab);
                     tab.refit.call(move || {
                         if let Some(tab) = weak.upgrade() {

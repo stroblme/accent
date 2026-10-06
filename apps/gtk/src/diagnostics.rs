@@ -82,8 +82,12 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     set(HINT, crate::theme::at(fg, HINT_ALPHA));
 }
 
-/// Paint `items` over the buffer, replacing whatever was there, and say how many end-of-line
-/// messages went up.
+/// The end-of-line messages up, by line: each one's annotation and the whole text it was cut
+/// from, which [`refit`] cuts again when the line changes.
+pub type Shown = BTreeMap<i32, (sourceview5::Annotation, String)>;
+
+/// Paint `items` over the buffer, replacing whatever was there, and return the end-of-line
+/// messages that went up.
 ///
 /// A publish is the server's whole answer for the file, but the underlines are moved only where
 /// they changed ([`highlight::sync_tag`]): an underline is something GTK lays a line out again
@@ -93,7 +97,7 @@ pub fn render(
     buffer: &sourceview5::Buffer,
     provider: &sourceview5::AnnotationProvider,
     items: &[Diagnostic],
-) -> usize {
+) -> Shown {
     let (start, end) = buffer.bounds();
     let mut underlined: BTreeMap<&str, Vec<std::ops::Range<i32>>> = BTreeMap::new();
     for category in [MARK_ERROR, MARK_WARNING] {
@@ -153,20 +157,58 @@ pub fn render(
             highlight::sync_tag(buffer, &tag, underlined.remove(name).unwrap_or_default());
         }
     }
-    let annotated = lines.len();
+    let mut shown = Shown::new();
     for (line, (style, message, more)) in lines {
         let text = match more {
             0 => message,
             n => format!("{message} (+{n} more)"),
         };
-        provider.add_annotation(&sourceview5::Annotation::new(
-            Some(&fit(view, line, text)),
+        let annotation = sourceview5::Annotation::new(
+            Some(&fit(view, line, text.clone())),
             None::<gtk::gio::Icon>,
             line,
             style,
-        ));
+        );
+        provider.add_annotation(&annotation);
+        shown.insert(line, (annotation, text));
     }
-    annotated
+    shown
+}
+
+/// Cut the message on `line`, if it has one, to the room the line leaves now: an edit there moves
+/// the line's end, and the message cut for the old end ran past the column's edge. An annotation
+/// cannot be given new text, so a new one takes its place.
+pub fn refit(
+    view: &sourceview5::View,
+    provider: &sourceview5::AnnotationProvider,
+    shown: &mut Shown,
+    line: i32,
+) {
+    let Some((annotation, text)) = shown.get_mut(&line) else {
+        return;
+    };
+    let cut = fit(view, line, text.clone());
+    if annotation.description() == cut {
+        return;
+    }
+    provider.remove_annotation(annotation);
+    *annotation =
+        sourceview5::Annotation::new(Some(&cut), None::<gtk::gio::Icon>, line, annotation.style());
+    provider.add_annotation(annotation);
+}
+
+/// Each message up as its characters shown beside those its line has room for now. Only
+/// `ACCENT_BENCH_DIAG` reads it.
+#[cfg(feature = "bench")]
+pub fn cuts(view: &sourceview5::View, shown: &Shown) -> Vec<(usize, usize)> {
+    let chars = |s: &str| s.chars().count();
+    shown
+        .iter()
+        .map(|(line, (annotation, text))| {
+            let fits = fit(view, *line, text.clone());
+            (chars(&annotation.description()), chars(&fits))
+        })
+        .collect()
 }
 
 /// `text` cut to the room between the end of `line` and the right edge of the text column.

@@ -359,10 +359,10 @@ pub struct Tab {
     /// no messages at the ends of the lines. What the server said is still held above, so the
     /// hover still answers for a line and the status bar still counts them.
     diagnostics_hidden: Cell<bool>,
-    /// How many end-of-line messages the last paint put up, which is fewer than the lines with
-    /// one whenever a comparison has collapsed some of them. Only `ACCENT_BENCH_COMPARE` reads
-    /// it: the provider cannot be counted back.
-    annotated: Cell<usize>,
+    /// The end-of-line messages the last paint put up, which are fewer than the lines with one
+    /// whenever a comparison has collapsed some of them, with the whole text each was cut from:
+    /// the provider cannot be read back.
+    annotated: RefCell<diagnostics::Shown>,
     /// The blocks the server says can be hidden, and the chevrons beside their headers. What is
     /// hidden right now lives in the buffer's own tag, not here.
     folds: RefCell<Vec<Fold>>,
@@ -739,18 +739,21 @@ impl Tab {
             true => &[],
             false => &items,
         };
-        self.annotated.set(diagnostics::render(
-            &self.view,
-            &self.buffer,
-            &self.annotations,
-            painted,
-        ));
+        *self.annotated.borrow_mut() =
+            diagnostics::render(&self.view, &self.buffer, &self.annotations, painted);
     }
 
     /// How many end-of-line messages the last paint put up. `ACCENT_BENCH_COMPARE=diag:` only.
     #[cfg(feature = "bench")]
     pub fn annotated(&self) -> usize {
-        self.annotated.get()
+        self.annotated.borrow().len()
+    }
+
+    /// Each of them as its characters shown beside those its line has room for now.
+    /// `ACCENT_BENCH_DIAG` only.
+    #[cfg(feature = "bench")]
+    pub fn cuts(&self) -> Vec<(usize, usize)> {
+        diagnostics::cuts(&self.view, &self.annotated.borrow())
     }
 
     /// What the server said, painted or not: what the status bar counts and the hover reads back.
@@ -1178,6 +1181,15 @@ impl Tab {
             let line = caret(&self.buffer).line();
             highlight::apply_line(&self.buffer, line);
         }
+        // An end-of-line message is cut to the room its line leaves (`diagnostics::fit`), and
+        // typing on that line takes some of it: the caret's line is measured again now, styled,
+        // rather than by the next publish.
+        diagnostics::refit(
+            &self.view,
+            &self.annotations,
+            &mut self.annotated.borrow_mut(),
+            caret(&self.buffer).line(),
+        );
         // The change bars are a second whole-buffer copy and a line diff against the committed
         // text, which is too much to spend on a keystroke however short the note is, and nothing
         // a typist watches: they follow the debounce at either size.

@@ -464,7 +464,8 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_DIAG=<rel_code_file>` hands a code tab an error, a warning and a hint, then
 /// presses the status bar's count twice, printing what the count says and how much of the answer
-/// the text is carrying each time.
+/// the text is carrying each time; then types after a long message and prints whether it was cut
+/// again for the line's new end. It writes the file: point it at a scratch vault.
 ///
 /// `ACCENT_BENCH_SEARCH=<query>[:<n>]` leaves `<query>` in the Search pane and writes `n` notes
 /// holding it behind the pane's back, printing the rows before, after and once they are gone
