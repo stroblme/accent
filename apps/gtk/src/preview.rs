@@ -1107,7 +1107,9 @@ fn dim(c: gdk::RGBA, alpha: f32) -> String {
 
 /// The whole preview look, derived from three values plus the document font. The alphas are the
 /// ones `highlight.rs::restyle` gives the editor, so the two panes read as one app; so are a
-/// conflict block's tints (`conflict::tints`), its sides boxed where the editor tints lines.
+/// conflict block's tints (`conflict::tints`), its sides boxed where the editor tints lines. A
+/// caption is its marker line's tint laid over the page, opaque, as the editor lays that line:
+/// left translucent, the side's own tint under it showed through and darkened it.
 fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) -> String {
     let (text, accent) = (css_rgba(fg), css_rgba(accent));
     let (surface, quote, rule) = (dim(fg, 0.07), dim(fg, 0.6), dim(fg, 0.15));
@@ -1120,7 +1122,7 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) 
                 ".conflict-{side} {{ background: {}; }}\n\
                  .conflict-{side} > .conflict-label {{ background: {}; }}\n",
                 css_rgba(body),
-                css_rgba(head)
+                css_rgba(crate::theme::over(head, page))
             )
         })
         .collect();
@@ -1218,7 +1220,7 @@ mod tests {
     }
 
     /// A conflict block's boxes are the editor's tints of its sides, their captions the tints of
-    /// the marker lines, so the two panes show one block.
+    /// the marker lines over the page, so the two panes show one block.
     #[test]
     fn theme_css_tints_a_conflict_as_the_editor_does() {
         let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0);
@@ -1231,7 +1233,7 @@ mod tests {
             assert!(css.contains(&rule), "{rule} in {css}");
             let rule = format!(
                 ".conflict-{side} > .conflict-label {{ background: {}; }}",
-                css_rgba(head)
+                css_rgba(theme::over(head, page))
             );
             assert!(css.contains(&rule), "{rule} in {css}");
         }
