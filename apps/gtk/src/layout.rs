@@ -691,11 +691,14 @@ impl App {
         for widget in self.chrome() {
             widget.add_css_class("chrome-hidden");
         }
+        // And the lines the scrolled windows draw against the bars, which would stay behind
+        // (`.bars-hidden` in `install_chrome_css`).
+        self.window.add_css_class("bars-hidden");
         if level != FocusMode::High {
             return;
         }
-        // The lines between the panes and along their edges too, which would otherwise frame the
-        // panes that are receding (`.dividers-hidden` in `install_chrome_css`).
+        // The lines between the panes too, which would otherwise frame the panes that are
+        // receding (`.dividers-hidden`).
         self.window.add_css_class("dividers-hidden");
         let active = self.pane();
         for pane in self.panes.borrow().iter() {
@@ -718,6 +721,7 @@ impl App {
         for widget in self.chrome() {
             widget.remove_css_class("chrome-hidden");
         }
+        self.window.remove_css_class("bars-hidden");
         self.window.remove_css_class("dividers-hidden");
         for pane in self.panes.borrow().iter() {
             pane.widget().remove_css_class("chrome-away");
