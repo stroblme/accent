@@ -133,11 +133,13 @@ pub struct Config {
     /// Accelerator overrides, keyed by full action name ("win.save"). Only what the user changed
     /// is stored, so the built-in table stays the source of truth for everything else; an empty
     /// list means the action is deliberately unbound.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub shortcuts: BTreeMap<String, Vec<String>>,
     pub search: SearchConfig,
     pub drawing: DrawingConfig,
     pub diagram: DiagramConfig,
     /// Keyed by canonical vault path.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub vaults: BTreeMap<String, VaultConfig>,
 }
 
@@ -269,6 +271,7 @@ pub struct VaultConfig {
     /// job reads: empty is the note's own folder, `./sub` a folder inside it, anything else a
     /// folder from the vault root ([`crate::attachment::folder`]).
     pub attachment_folder: String,
+    #[serde(skip_serializing_if = "LspConfig::is_empty")]
     pub lsp: LspConfig,
 }
 
@@ -278,6 +281,13 @@ pub struct VaultConfig {
 #[serde(default)]
 pub struct LspConfig {
     pub servers: BTreeMap<String, Vec<String>>,
+}
+
+impl LspConfig {
+    /// Nothing chosen: written as nothing, rather than as a bare `lsp.servers` header.
+    fn is_empty(&self) -> bool {
+        self.servers.is_empty()
+    }
 }
 
 impl Default for VaultConfig {
@@ -704,18 +714,26 @@ pub fn rename_in(list: &mut [String], from: &str, to: &str) {
 /// `daily_*` keys are left to [`daily_keys`], which explains them properly.
 fn unknown_keys(table: &toml::Table) -> Vec<String> {
     // The struct's own field names, read off a serialised value rather than kept as a second
-    // list. `editor_font` is skipped when `None`, so it is filled in to be seen.
+    // list. `editor_font` is skipped when `None` and the maps when empty, so each is filled in
+    // to be seen.
     fn names<T: Serialize>(v: T) -> Vec<String> {
         toml::Value::try_from(v)
             .ok()
             .and_then(|v| v.as_table().map(|t| t.keys().cloned().collect()))
             .unwrap_or_default()
     }
+    let one = || BTreeMap::from([(String::new(), Vec::new())]);
+    let vault = VaultConfig {
+        lsp: LspConfig { servers: one() },
+        ..VaultConfig::default()
+    };
     let top = names(Config {
         editor_font: Some(String::new()),
+        shortcuts: one(),
+        vaults: BTreeMap::from([(String::new(), vault.clone())]),
         ..Config::default()
     });
-    let vault = names(VaultConfig::default());
+    let vault = names(vault);
     let mut out: Vec<String> = table.keys().filter(|k| !top.contains(k)).cloned().collect();
     if let Some(vaults) = table.get("vaults").and_then(toml::Value::as_table) {
         for (name, v) in vaults {
@@ -785,6 +803,15 @@ fn merge(
     lost: &mut Vec<String>,
 ) -> Option<toml::Value> {
     use toml::Value::Table;
+    // An empty map is not written at all (`Config::shortcuts`), so a table on one side and
+    // nothing on the other is that table emptied there, and its keys still merge one by one.
+    // A table the merge leaves empty is left out again, as it would be written.
+    let empty = Table(toml::Table::new());
+    let (ours, theirs) = match (ours, theirs) {
+        (Some(Table(_)), None) => (ours, Some(&empty)),
+        (None, Some(Table(_))) => (Some(&empty), theirs),
+        sides => sides,
+    };
     if let (Some(Table(o)), Some(Table(t))) = (ours, theirs) {
         let b = match base {
             Some(Table(b)) => b.clone(),
@@ -792,15 +819,18 @@ fn merge(
         };
         let keys: std::collections::BTreeSet<&String> =
             b.keys().chain(o.keys()).chain(t.keys()).collect();
-        let merged = keys.into_iter().filter_map(|k| {
-            let at = if at.is_empty() {
-                k.clone()
-            } else {
-                format!("{at}.{k}")
-            };
-            Some((k.clone(), merge(b.get(k), o.get(k), t.get(k), &at, lost)?))
-        });
-        return Some(Table(merged.collect()));
+        let merged: toml::Table = keys
+            .into_iter()
+            .filter_map(|k| {
+                let at = if at.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{at}.{k}")
+                };
+                Some((k.clone(), merge(b.get(k), o.get(k), t.get(k), &at, lost)?))
+            })
+            .collect();
+        return (!merged.is_empty()).then_some(Table(merged));
     }
     if theirs == base {
         return ours.cloned();
@@ -1018,6 +1048,28 @@ daily_template = "DailyNote.md"
         assert_eq!(again.diagram, c.diagram);
     }
 
+    /// An empty map is left out rather than written as a bare `[shortcuts]` header, and reads
+    /// back as the empty map it was.
+    #[test]
+    fn a_default_config_writes_no_empty_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("config.toml");
+        Config::default().write(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("[shortcuts]"), "{text}");
+        assert!(!text.contains("[vaults"), "{text}");
+        assert_eq!(Config::read(&p).unwrap(), Config::default());
+        assert!(unknown_keys(&text.parse().unwrap()).is_empty());
+
+        // Nor a vault's `lsp.servers` while it names no server.
+        let mut c = Config::default();
+        c.vaults.insert("/v".into(), VaultConfig::default());
+        c.write(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("lsp"), "{text}");
+        assert_eq!(Config::read(&p).unwrap(), c);
+    }
+
     #[test]
     fn touch_moves_to_the_front_and_caps() {
         let mut list = Vec::new();
@@ -1125,6 +1177,44 @@ daily_template = "DailyNote.md"
         assert!(merged.drawing.mouse);
         assert_eq!(merged.theme, Theme::Dark);
         assert_eq!(lost, ["theme"]);
+    }
+
+    /// A map emptied on one side is not written at all, and still merges key by key with the
+    /// other side's change: accent's last shortcut unbound while one was added by hand.
+    #[test]
+    fn a_map_emptied_on_one_side_merges_key_by_key() {
+        let value = |c: &Config| toml::Value::try_from(c).unwrap();
+        let mut base = Config::default();
+        base.shortcuts.insert("win.a".into(), vec!["F1".into()]);
+        let mut ours = base.clone();
+        ours.shortcuts.clear();
+        let mut file = base.clone();
+        file.shortcuts.insert("win.b".into(), vec!["F2".into()]);
+
+        let mut lost = Vec::new();
+        let merged = merge(
+            Some(&value(&base)),
+            Some(&value(&ours)),
+            Some(&value(&file)),
+            "",
+            &mut lost,
+        );
+        let merged: Config = merged.unwrap().try_into().unwrap();
+        assert_eq!(
+            merged.shortcuts,
+            BTreeMap::from([("win.b".into(), vec!["F2".into()])])
+        );
+        assert!(lost.is_empty(), "{lost:?}");
+
+        // Emptied by accent alone, it is left out of the merge, as it is out of the file.
+        let merged = merge(
+            Some(&value(&base)),
+            Some(&value(&ours)),
+            Some(&value(&base)),
+            "",
+            &mut lost,
+        );
+        assert!(merged.unwrap().get("shortcuts").is_none());
     }
 
     /// The `!BUG`: a hand edit made while accent ran was written over by accent's next save.
