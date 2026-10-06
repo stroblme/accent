@@ -1,5 +1,6 @@
 //! The Replace All drill: what the Search pane lists once the vault has been rewritten under it.
 
+use super::files::until;
 use super::*;
 
 /// A word nothing in a vault would already hold, so the rewrite reaches one note and one note
@@ -7,8 +8,7 @@ use super::*;
 const MARKER: &str = "zzreplacemarker";
 /// The note the drill writes and takes away again, so it never rewrites anything of the reader's.
 const NOTE: &str = "accent-bench-replace.md";
-/// Long enough for the index to take the note in, and for the query's 50 ms debounce plus the
-/// worker thread behind it.
+/// Long enough for a rewrite or an undo, and the query the pane asks again behind it.
 const SETTLE: Duration = Duration::from_millis(1200);
 
 /// `ACCENT_BENCH_REPLACE=1` writes a note holding one unique word, searches for it with the
@@ -36,26 +36,27 @@ pub(super) fn bench_replace(app: &Rc<App>) {
         return bench_quit(app);
     }
     let app = app.clone();
-    glib::timeout_add_local_once(SETTLE, move || {
+    glib::spawn_future_local(async move {
+        // The index answers the search, and a cold one takes the note in only once its first walk
+        // is over: many seconds on `make vault`.
+        until(|| app.reconciled.get()).await;
         let Some(sidebar) = app.sidebar.get() else {
             return bench_replace_done(&app, &path);
         };
         sidebar.show_replace();
         sidebar.set_search_text(MARKER);
         sidebar.set_replace_text("zzreplaced");
+        // Until the note's row is listed: a query asked before the worker took the note in gets it
+        // from the requery the note's update brings.
+        until(|| sidebar.search_state().0 == "results").await;
+        bench_replace_print(&app, &path, "before");
+        sidebar.press_replace_all();
         glib::timeout_add_local_once(SETTLE, move || {
-            let Some(sidebar) = app.sidebar.get() else {
-                return bench_replace_done(&app, &path);
-            };
-            bench_replace_print(&app, &path, "before");
-            sidebar.press_replace_all();
+            bench_replace_print(&app, &path, "after");
+            app.undo_replace();
             glib::timeout_add_local_once(SETTLE, move || {
-                bench_replace_print(&app, &path, "after");
-                app.undo_replace();
-                glib::timeout_add_local_once(SETTLE, move || {
-                    bench_replace_print(&app, &path, "undone");
-                    bench_replace_skip(app, path);
-                });
+                bench_replace_print(&app, &path, "undone");
+                bench_replace_skip(app, path);
             });
         });
     });
