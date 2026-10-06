@@ -125,6 +125,32 @@ fn is_padded(tab: &Rc<Tab>, at: &gtk::TextIter) -> bool {
     })
 }
 
+/// Wait until `compare` has laid its rows and let go of where it was keeping the view — the first
+/// hunk as it opens, the scroll a run was opened at, the top line across a rewrap — or ten
+/// seconds, and then for the frame that allocates its buttons where the last relayout put them. A
+/// drill's scroll made before that is taken back once the rows are laid.
+pub(super) async fn settled(compare: &diff::Compare) {
+    for _ in 0..200 {
+        if compare.settled() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    let Some(clock) = compare.widget().frame_clock() else {
+        return;
+    };
+    let (done, painted) = futures_channel::oneshot::channel();
+    let done = Cell::new(Some(done));
+    let id = clock.connect_after_paint(move |_| {
+        if let Some(done) = done.take() {
+            let _ = done.send(());
+        }
+    });
+    clock.request_phase(gdk::FrameClockPhase::AFTER_PAINT);
+    let _ = painted.await;
+    clock.disconnect(id);
+}
+
 /// The view of one pane of a comparison: the left one, or the right with `end`.
 pub(super) fn pane_view(paned: &gtk::Widget, end: bool) -> Option<gtk::TextView> {
     let paned = paned.downcast_ref::<gtk::Paned>()?;

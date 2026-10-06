@@ -492,23 +492,22 @@ impl App {
     }
 
     fn ask_overwrite(self: &Rc<Self>, tab: &Rc<Tab>) {
-        let dialog = adw::AlertDialog::new(
-            Some("File Changed on Disk"),
-            Some(&format!(
-                "{} was modified elsewhere since you opened it.",
-                tab.rel()
-            )),
-        );
         // Compare rather than Reload: reloading threw the buffer away on one click, and the
         // resolver shows both sides and now lets them be merged by hand.
-        dialog.add_responses(&[
-            ("cancel", "Cancel"),
-            ("compare", "Compare"),
-            ("overwrite", "Overwrite"),
-        ]);
-        dialog.set_response_appearance("overwrite", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
+        let dialog = dialogs::alert(
+            "File Changed on Disk",
+            &format!("{} was modified elsewhere since you opened it.", tab.rel()),
+            &[
+                ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                ("compare", "Compare", adw::ResponseAppearance::Default),
+                (
+                    "overwrite",
+                    "Overwrite",
+                    adw::ResponseAppearance::Destructive,
+                ),
+            ],
+            "cancel",
+        );
 
         let (app, tab) = (self.clone(), tab.clone());
         dialogs::choose(
@@ -576,17 +575,16 @@ impl App {
             }
             e => format!("{rel} could not be saved: {e}"),
         };
-        let dialog = adw::AlertDialog::new(Some("Unsaved Changes"), Some(&body));
         // Overwriting means writing again, which is the very thing that just failed for want of a
         // connection: offering it would be offering nothing.
-        let mut responses: Vec<(&str, &str)> = vec![("cancel", "Cancel"), ("discard", "Discard")];
+        let mut responses = vec![
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            ("discard", "Discard", adw::ResponseAppearance::Destructive),
+        ];
         if !matches!(error, SaveError::Offline) {
-            responses.push(("overwrite", "Overwrite"));
+            responses.push(("overwrite", "Overwrite", adw::ResponseAppearance::Default));
         }
-        dialog.add_responses(&responses);
-        dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
+        let dialog = dialogs::alert("Unsaved Changes", &body, &responses, "cancel");
 
         let app = self.clone();
         dialogs::choose(&dialog, Some(&self.window), move |response| {
