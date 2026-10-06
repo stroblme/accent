@@ -249,6 +249,18 @@ pub fn at(colour: gdk::RGBA, alpha: f32) -> gdk::RGBA {
     gdk::RGBA::new(colour.red(), colour.green(), colour.blue(), alpha)
 }
 
+/// `colour` laid over the opaque `page`, as the one opaque colour the eye gets there.
+pub fn over(colour: gdk::RGBA, page: gdk::RGBA) -> gdk::RGBA {
+    let a = colour.alpha();
+    let mix = |c: f32, p: f32| a * c + (1.0 - a) * p;
+    gdk::RGBA::new(
+        mix(colour.red(), page.red()),
+        mix(colour.green(), page.green()),
+        mix(colour.blue(), page.blue()),
+        1.0,
+    )
+}
+
 /// The system accent, for painting with. [`accent_rgb`] is the same colour on its way into a
 /// file.
 pub fn accent() -> gdk::RGBA {

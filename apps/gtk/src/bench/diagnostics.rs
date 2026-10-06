@@ -55,6 +55,7 @@ pub(super) fn bench_diagnostics(app: &Rc<App>, rel: &str) {
             bench_pump();
         }
         bench_gutter(&tab);
+        bench_refit(&tab);
         bench_quit(&app);
     });
 }
@@ -89,6 +90,41 @@ fn bench_gutter(tab: &Rc<Tab>) {
     step("arrow");
     tab.buffer.place_cursor(&tab.buffer.start_iter());
     step("home");
+}
+
+/// An error whose message is too long for its line's room, then typing at the end of that line:
+/// `cut` is the characters of the message shown and `fits` those the line has room for, which
+/// must agree as published, as typed (read before the frame that shows the keystroke) and once
+/// settled. As typed they did not: the message was cut again only by a publish or by the
+/// width's own refit 150 ms after a layout, and ran past the column's edge until then. The file's own text goes back at the end, but the typing has marked the tab,
+/// which writes it on its way out: point the drill at a scratch vault (`make vault VAULT=/tmp/…`).
+fn bench_refit(tab: &Rc<Tab>) {
+    let own = tab.text();
+    let mut long = diagnostic(Severity::Error, 0, 0, 1);
+    long.message = "a message long enough to be cut at the column's edge ".repeat(8);
+    // The steps above end on a third press of the count, which hid them.
+    tab.hide_diagnostics(false);
+    tab.set_diagnostics(vec![long]);
+    bench_frame();
+    let says = |case: &str| {
+        for (cut, fits) in tab.cuts() {
+            println!("bench diag refit case={case} cut={cut} fits={fits}");
+        }
+    };
+    says("published");
+    let Some(mut end) = tab.buffer.iter_at_line(0) else {
+        return;
+    };
+    end.forward_to_line_end();
+    tab.buffer.place_cursor(&end);
+    // A word at a time, and short of a wrap: a wrapped line ends further left again.
+    for _ in 0..3 {
+        tab.buffer.insert_at_cursor(" typed");
+    }
+    says("typed");
+    bench_frame();
+    says("settled");
+    tab.set_text(&own);
 }
 
 /// Wait for a frame. The frame clock ticks on a timer, so pumping the main loop alone paints

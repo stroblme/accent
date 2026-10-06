@@ -1005,11 +1005,13 @@ thread_local! {
 /// The app's own rules. The chrome fade (DESIGN.md) is opacity only, so the layout never
 /// shifts and neither the focus order nor accessibility notices; with `gtk-enable-animations` off
 /// the class still toggles but there is no transition, so the chrome snaps instead of fading and
-/// nothing becomes unreachable. `.dividers-hidden` is High's addition, on the window: every paned
-/// handle, and the undershoot line a scrolled window draws where it meets a flat bar, since a
-/// divider left at full strength frames the panes that recede. The undershoot is a CSS node of the
-/// scrolled window's own rather than a widget, so it takes its line and gradient away where
-/// everything else takes opacity. `.accent-flat` puts the two columns on the note's own background
+/// nothing becomes unreachable. `.bars-hidden` goes on the window with the bars, at Medium and High
+/// alike: the undershoot line a scrolled window draws where it meets a flat bar would otherwise
+/// stay across the head and the foot of the column once the bars have gone. The undershoot is a
+/// CSS node of the scrolled window's own rather than a widget, so it takes its line and gradient
+/// away where everything else takes opacity. `.dividers-hidden` is High's addition, on the window:
+/// every paned handle, since a divider left at full strength frames the panes that recede.
+/// `.accent-flat` puts the two columns on the note's own background
 /// so nothing bands against it, on a class of ours rather than on `headerbar` globally; on the find
 /// bar it reaches the box Adwaita paints (`searchbar > revealer > box`), since the bar's own node
 /// is covered by it, and takes away the shade line Adwaita draws under that box, black in dark.
@@ -1116,9 +1118,9 @@ fn install_chrome_css() {
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-away {{ opacity: {away}; }} \
-             .dividers-hidden paned > separator {{ opacity: 0; }} \
-             .dividers-hidden scrolledwindow > undershoot {{ box-shadow: none; \
+             .bars-hidden scrolledwindow > undershoot {{ box-shadow: none; \
                background-image: none; }} \
+             .dividers-hidden paned > separator {{ opacity: 0; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              .accent-drop-bar {{ background-color: var(--accent-bg-color); border-radius: 2px; }} \
              .accent-page-strip:drop(active) {{ box-shadow: none; }} \

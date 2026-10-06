@@ -1041,11 +1041,11 @@ async fn bench_new_file(app: &Rc<App>, case: &str) {
 /// Solarized follows the system between its two halves and Xvfb has no portal to move the system
 /// with, so its dark half is a second launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 ///
-/// `before` is read the instant the switch has been made and says what the tags still hold;
-/// `after` is the same tags once the deferred pass has run. What to look for is `after`: every
-/// foreground-derived tag must be that line's own `view_fg` at its alpha. When the pass ran
-/// inside the notify they were the outgoing theme's instead — `listmarker=rgba(0,0,6,0.4)`,
-/// near-black, against a `view_fg` of `rgb(255,255,255)`, which is the invisible bullet.
+/// `painted` is read as the first frame after the switch paints, and `after` 300 ms later. Every
+/// foreground-derived tag must be that line's own `view_fg` at its alpha in both, and the two
+/// lines must agree. When the pass ran inside the notify they were the outgoing theme's in both —
+/// `listmarker=rgba(0,0,6,0.4)`, near-black, against a `view_fg` of `rgb(255,255,255)`, which is
+/// the invisible bullet; when it ran on an idle after the frame, in `painted` alone.
 ///
 /// `scheme_text` is beside them to say why `view_fg` is the right thing to mix from. It is the
 /// style scheme's own `text` foreground, and in none of the four themes is it what reaches the
@@ -1064,12 +1064,43 @@ pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
         for theme in [Theme::Light, Theme::Dark, Theme::Solarized] {
             crate::theme::apply(theme);
             app.restyle_all();
-            println!("bench theme {theme:?} before {}", bench_theme_colours(&tab));
+            let shown = tab.clone();
+            let painted = bench_painted(&tab.view, move || bench_theme_colours(&shown)).await;
+            println!("bench theme {theme:?} painted {painted}");
             glib::timeout_future(Duration::from_millis(300)).await;
             println!("bench theme {theme:?} after {}", bench_theme_colours(&tab));
         }
         bench_quit(&app);
     });
+}
+
+/// What `read` says as `widget`'s next frame paints: what that frame shows, whatever runs after
+/// it. A frame whose paint never comes says so.
+async fn bench_painted(
+    widget: &impl IsA<gtk::Widget>,
+    read: impl Fn() -> String + 'static,
+) -> String {
+    let Some(clock) = widget.frame_clock() else {
+        return "no_frame_clock".to_string();
+    };
+    let seen: Rc<RefCell<Option<String>>> = Rc::default();
+    let handler = clock.connect_paint({
+        let seen = seen.clone();
+        move |_| {
+            if seen.borrow().is_none() {
+                seen.replace(Some(read()));
+            }
+        }
+    });
+    widget.queue_draw();
+    for _ in 0..1000 {
+        if seen.borrow().is_some() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(1)).await;
+    }
+    clock.disconnect(handler);
+    seen.take().unwrap_or_else(|| "no_paint".to_string())
 }
 
 /// See `ACCENT_BENCH_NUMBERS` in `install_bench_hooks`.

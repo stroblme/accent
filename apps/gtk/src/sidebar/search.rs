@@ -50,6 +50,9 @@ const SHOW_AFTER: u32 = 2;
 const WIDEN_AFTER: Duration = Duration::from_millis(350);
 /// The heading over the rows All's walk found past the index.
 const NOT_INDEXED: &str = "Not Indexed";
+/// The heading over the rows that hold a ranked query inside a word, which says where the prefix
+/// hits above them end.
+const INSIDE_WORDS: &str = "Inside Words";
 /// Most rows one opened "+N more" row lists; any left over stay behind a tail row of their own,
 /// which opens the same way. A step the reader can take in, by the user's choice: a file with
 /// thousands of matches is walked a hundred at a time rather than poured into the list, and a
@@ -737,7 +740,7 @@ impl Search {
         let cut = cut || hits.len() >= room;
         self.counted.set((found, files, cut));
         self.count.set_text(&count_label(found, files, cut, cut));
-        let rows = open_tails(fts_rows(hits, query), bodies, &accent_markup_colour());
+        let rows = open_tails(mid_word_rows(hits, query), bodies, &accent_markup_colour());
         let objects: Vec<glib::BoxedAnyObject> =
             rows.into_iter().map(glib::BoxedAnyObject::new).collect();
         self.results.splice(self.results.n_items(), 0, &objects);
@@ -1088,23 +1091,38 @@ fn grep_rows(
     rows
 }
 
+/// The rows that hold a ranked query mid-word, under a heading that says so: they are listed
+/// below the prefix hits and cannot be ranked against them.
+fn mid_word_rows(hits: Vec<SearchHit>, query: &str) -> Vec<Row> {
+    if hits.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = vec![heading(INSIDE_WORDS)];
+    rows.extend(fts_rows(hits, query));
+    rows
+}
+
 /// The rows All's walk found past the index, under a heading that says so: the matched line
 /// marked as a grep row's is, and no replacement preview, because Replace All never opens them.
 fn walked_rows(walked: Vec<Match>, re: &Regex, accent: &str) -> Vec<Row> {
     if walked.is_empty() {
         return Vec::new();
     }
-    let heading = Row {
+    let mut rows = vec![heading(NOT_INDEXED)];
+    rows.extend(grep_rows(walked, re, None, true, accent));
+    rows
+}
+
+/// A row naming the rows under it, which opens nothing.
+fn heading(name: &str) -> Row {
+    Row {
         rel_path: String::new(),
         at: None,
-        name: NOT_INDEXED.to_string(),
+        name: name.to_string(),
         dir: String::new(),
         snippet: String::new(),
         more: None,
-    };
-    let mut rows = vec![heading];
-    rows.extend(grep_rows(walked, re, None, true, accent));
-    rows
+    }
 }
 
 pub(super) struct Pane {
@@ -1780,6 +1798,25 @@ mod tests {
             .collect();
         assert_eq!(seen, [("", NOT_INDEXED), ("node_modules/dep.js", "dep.js")]);
         assert_eq!(rows[1].snippet, "// <b>zorblat</b>");
+    }
+
+    #[test]
+    fn mid_word_rows_come_under_a_heading_of_their_own() {
+        assert!(mid_word_rows(Vec::new(), "afe").is_empty());
+        let hit = SearchHit {
+            rel_path: "menu.md".into(),
+            title: None,
+            snippet: "Uni«café»".into(),
+            at: Some(3..8),
+            line: Some(1),
+            more: 0,
+        };
+        let rows = mid_word_rows(vec![hit], "afe");
+        let seen: Vec<_> = rows
+            .iter()
+            .map(|r| (r.rel_path.as_str(), r.name.as_str()))
+            .collect();
+        assert_eq!(seen, [("", INSIDE_WORDS), ("menu.md", "menu.md")]);
     }
 
     #[test]

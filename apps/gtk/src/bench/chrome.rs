@@ -53,7 +53,7 @@ fn bench_chrome_levels(app: &Rc<App>) {
 
 /// What the chrome and the panes carry: the header's and the sidebar's fade, the active note's
 /// minimap, how many panes recede, whether the active note's line fade is on, and whether the
-/// dividers are gone.
+/// dividers and the line along the status bar are gone.
 fn chrome_state(app: &Rc<App>) -> String {
     let hidden = |w: &gtk::Widget| w.has_css_class("chrome-hidden");
     let tab = app.active();
@@ -64,7 +64,7 @@ fn chrome_state(app: &Rc<App>) -> String {
         .filter(|pane| pane.widget().has_css_class("chrome-away"))
         .count();
     format!(
-        "hidden={} sidebar={} map={} away={away} fade={} dividers={}",
+        "hidden={} sidebar={} map={} away={away} fade={} dividers={} undershoot={}",
         hidden(app.header.upcast_ref()),
         app.sidebar.get().is_some_and(|s| hidden(s.widget())),
         tab.as_ref().is_some_and(|t| hidden(t.minimap())),
@@ -72,6 +72,7 @@ fn chrome_state(app: &Rc<App>) -> String {
             .and_then(|t| t.ghost_view())
             .is_some_and(|view| view.fading()),
         !app.window.has_css_class("dividers-hidden"),
+        !app.window.has_css_class("bars-hidden"),
     )
 }
 

@@ -961,20 +961,45 @@ impl App {
     /// the accent moved: the notes' tags and schemes, both sides of a comparison, the PDF pages,
     /// the images, the preview and the shells.
     ///
-    /// One turn of the main loop later, never inside the change itself. `AdwStyleManager` raises
-    /// `notify::dark` *before* it swaps the stylesheet on the display, so for the whole of that
-    /// emission `view.color()` still resolves to the theme being left — and half of what this
-    /// pass writes is mixed from that foreground: a note's list markers, heading markers, quotes
-    /// and code backgrounds, the gutter's change bars, the diagnostic underlines, the fold
-    /// chevrons, a comparison's row tints and the preview's own CSS. Run there, every one of them
-    /// came out in the outgoing theme, which on a light-to-dark switch is near-black ink on a
-    /// near-black page.
+    /// Never inside the change itself. `AdwStyleManager` raises `notify::dark` *before* it swaps
+    /// the stylesheet on the display, so for the whole of that emission `view.color()` still
+    /// resolves to the theme being left — and half of what this pass writes is mixed from that
+    /// foreground: a note's list markers, heading markers, quotes and code backgrounds, the
+    /// gutter's change bars, the diagnostic underlines, the fold chevrons, a comparison's row
+    /// tints and the preview's own CSS. Run there, every one of them came out in the outgoing
+    /// theme, which on a light-to-dark switch is near-black ink on a near-black page.
+    ///
+    /// Nor on an idle after it: the frame that paints the new stylesheet ran first, the new page
+    /// under the old theme's tags (`ACCENT_BENCH_THEME`'s `painted`). The pass runs in that
+    /// frame's layout phase instead, after the window's own handler has validated the new style
+    /// and before anything is painted, and what it changes is laid out again within the frame. A
+    /// window with no frame clock has not been on screen, and takes it on an idle.
     fn restyle_all(self: &Rc<Self>) {
-        glib::idle_add_local_once(glib::clone!(
-            #[weak(rename_to = app)]
-            self,
-            move || app.restyle_now()
-        ));
+        let app = Rc::downgrade(self);
+        let restyle = move || {
+            if let Some(app) = app.upgrade() {
+                app.restyle_now();
+            }
+        };
+        let Some(clock) = self.window.frame_clock() else {
+            glib::idle_add_local_once(restyle);
+            return;
+        };
+        // After the window's handler, which is the one that validates the style.
+        let handler = Rc::new(RefCell::new(None));
+        let id = clock.connect_local("layout", true, {
+            let handler = handler.clone();
+            move |values| {
+                if let (Some(id), Ok(clock)) = (handler.take(), values[0].get::<gdk::FrameClock>())
+                {
+                    clock.disconnect(id);
+                }
+                restyle();
+                None
+            }
+        });
+        handler.replace(Some(id));
+        clock.request_phase(gdk::FrameClockPhase::LAYOUT);
     }
 
     /// The pass itself, once the cascade has settled. Split out only so the deferral above is the
