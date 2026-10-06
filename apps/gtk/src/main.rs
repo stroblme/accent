@@ -891,7 +891,7 @@ impl App {
             Some(Doc::Text(tab)) => match tab.flavour() {
                 editor::Flavour::Note => (
                     Some("Markdown".to_string()),
-                    Some(statusbar::words_label(statusbar::word_count(&tab.text()))),
+                    Some(statusbar::words_label(tab.words())),
                 ),
                 // A code tab counts what is wrong with it instead: words are a prose fact.
                 editor::Flavour::Code => (

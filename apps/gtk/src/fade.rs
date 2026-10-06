@@ -170,6 +170,8 @@ mod tests {
     /// A line holding a find-bar match keeps all of itself however far it is from the caret,
     /// and the lines around it fade as they would without it.
     #[test]
+    // A match's lines are a range, and a list of one of them is what this is about.
+    #[allow(clippy::single_range_in_vec_init)]
     fn a_line_holding_a_match_is_not_veiled() {
         let found = [10..=11];
         assert_eq!(cover(10, &(0..=0), &found), 0.0);

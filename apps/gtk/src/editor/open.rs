@@ -274,6 +274,7 @@ pub fn open(
         revealed: Cell::new(false),
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
+        words: Cell::new(None),
         follow_tag,
         follow: RefCell::new(Follow::default()),
         diagnostics: RefCell::new(Vec::new()),

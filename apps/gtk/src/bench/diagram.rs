@@ -318,7 +318,7 @@ fn exported(path: &Path) -> String {
     downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
     let (bytes, _) = downloader.download_bytes();
     let mut counts: HashMap<&[u8], usize> = HashMap::new();
-    for pixel in bytes.chunks_exact(4) {
+    for pixel in bytes.as_chunks::<4>().0 {
         *counts.entry(pixel).or_default() += 1;
     }
     let paper = counts.into_iter().max_by_key(|(_, n)| *n).map(|(p, _)| p);

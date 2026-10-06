@@ -147,7 +147,6 @@ impl PdfTab {
         self.view.set_selection(Vec::new());
     }
 
-    /// A click on the page: follow a link if there is one under it.
     /// A click that was not a drag: open the note whose link paints a highlight here, or else pin
     /// the comments under it.
     ///
@@ -184,6 +183,7 @@ impl PdfTab {
         }
     }
 
+    /// A press on the page: drop the selection, and follow a link if there is one under it.
     pub(super) fn click(self: &Rc<Self>, view: &PdfView, x: f64, y: f64) {
         self.clear_selection();
         let Some(target) = self.link_at(view, x, y) else {

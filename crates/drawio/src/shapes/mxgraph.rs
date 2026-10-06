@@ -60,8 +60,10 @@ fn bezier_line(pts: &[Point]) -> Vec<PathCmd> {
     }
     path.extend(
         pts[1..]
-            .chunks_exact(3)
-            .map(|c| PathCmd::CurveTo(c[0], c[1], c[2])),
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|&[a, b, c]| PathCmd::CurveTo(a, b, c)),
     );
     path
 }
