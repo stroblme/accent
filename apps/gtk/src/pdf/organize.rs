@@ -130,8 +130,8 @@ impl PdfTab {
                         return;
                     };
                     match delete {
-                        true => tab.edit_pages(PageEdit::Delete(page)),
-                        false => tab.edit_pages(PageEdit::Insert(page + 1)),
+                        true => tab.edit_pages(PageEdit::delete(page)),
+                        false => tab.edit_pages(PageEdit::insert(page + 1)),
                     }
                 }
             ));

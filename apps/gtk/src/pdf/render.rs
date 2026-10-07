@@ -406,6 +406,28 @@ fn render_loop(
                     }
                     Err(e) => tracing::warn!("{edit:?}: {e:#}"),
                 },
+                Request::Import { at, source, name } => {
+                    let before = doc.page_count();
+                    // pdfium's reason goes to the log; the reader can only drop another file.
+                    let imported = PdfDoc::open(&source)
+                        .map_err(|e| (e, "it does not open as a PDF"))
+                        .and_then(|source| {
+                            let made = ink.import_pages(&mut doc, at, &source);
+                            made.map_err(|e| (e, "its pages would not copy"))
+                        });
+                    let pages = match imported {
+                        Ok((edit, step)) => {
+                            ink.dirty = true;
+                            repaged(&doc, &mut glyphs, &mut exported, view, edit, step);
+                            Ok(doc.page_count() - before)
+                        }
+                        Err((e, why)) => {
+                            tracing::warn!("importing {}: {e:#}", source.display());
+                            Err(why.to_string())
+                        }
+                    };
+                    send(view, Reply::Imported { name, pages });
+                }
                 request @ (Request::Undo | Request::Redo) => {
                     let redo = matches!(request, Request::Redo);
                     for walked in ink.walk(&mut doc, redo) {

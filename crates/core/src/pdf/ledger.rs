@@ -205,11 +205,8 @@ impl Ink {
     /// id, which Undo and Redo hand back with it.
     pub fn edit_pages(&mut self, doc: &mut PdfDoc, edit: PageEdit) -> Result<u32> {
         let kept = match edit {
-            PageEdit::Delete(_) => Some(Box::new(Kept {
-                doc: doc.snapshot()?,
-                ids: self.ids.clone(),
-            })),
-            PageEdit::Insert(_) | PageEdit::Move { .. } => None,
+            PageEdit::Delete { .. } => Some(self.keep(doc)?),
+            PageEdit::Insert { .. } | PageEdit::Move { .. } => None,
         };
         self.edit(doc, edit)?;
         let id = fresh_id();
@@ -217,19 +214,50 @@ impl Ink {
         Ok(id)
     }
 
-    /// Make one page edit, a page put in being a blank one. What the ledger knows of every other
-    /// page follows it to its new number.
+    /// Put every page of `source` in at `at`, after the last page for `None`, as one step. The
+    /// document is kept first, as for a delete, so Undo swaps it back in and Redo swaps the pages
+    /// back without reading `source` again. The edit the pages made, and the step's id.
+    pub fn import_pages(
+        &mut self,
+        doc: &mut PdfDoc,
+        at: Option<usize>,
+        source: &PdfDoc,
+    ) -> Result<(PageEdit, u32)> {
+        let kept = Some(self.keep(doc)?);
+        let at = at.unwrap_or_else(|| doc.page_count());
+        let count = doc.import_pages(source, at)?;
+        let edit = PageEdit::Insert { at, count };
+        self.follow(edit);
+        let id = fresh_id();
+        self.record(Step::Paged { edit, kept, id }, false);
+        Ok((edit, id))
+    }
+
+    /// The document as it stands and the names of its annotations, for a step to swap back in.
+    fn keep(&self, doc: &PdfDoc) -> Result<Box<Kept>> {
+        Ok(Box::new(Kept {
+            doc: doc.snapshot()?,
+            ids: self.ids.clone(),
+        }))
+    }
+
+    /// Make one page edit, the pages put in being blank ones.
     fn edit(&mut self, doc: &mut PdfDoc, edit: PageEdit) -> Result<()> {
         match edit {
-            PageEdit::Insert(at) => doc.insert_page(at)?,
-            PageEdit::Delete(page) => doc.delete_page(page)?,
+            PageEdit::Insert { at, count } => (0..count).try_for_each(|_| doc.insert_page(at))?,
+            PageEdit::Delete { at, count } => (0..count).try_for_each(|_| doc.delete_page(at))?,
             PageEdit::Move { from, to } => doc.move_page(from, to)?,
         }
+        self.follow(edit);
+        Ok(())
+    }
+
+    /// What the ledger knows of every page follows `edit` to the page's new number.
+    fn follow(&mut self, edit: PageEdit) {
         self.ids = std::mem::take(&mut self.ids)
             .into_iter()
             .filter_map(|(page, slots)| Some((edit.map(page)?, slots)))
             .collect();
-        Ok(())
     }
 
     /// Whether Undo, and then Redo, has anything to walk.
@@ -466,7 +494,7 @@ mod tests {
             return;
         };
         let mut ink = Ink::default();
-        let insert = ink.edit_pages(&mut doc, PageEdit::Insert(1)).unwrap();
+        let insert = ink.edit_pages(&mut doc, PageEdit::insert(1)).unwrap();
         let moved = ink
             .edit_pages(&mut doc, PageEdit::Move { from: 2, to: 0 })
             .unwrap();
@@ -475,16 +503,48 @@ mod tests {
         let undo = PageEdit::Move { from: 0, to: 2 };
         assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo, moved)]);
         assert_eq!(page_texts(&doc), ["Hello accent", "", "Second page"]);
-        let undo = PageEdit::Delete(1);
+        let undo = PageEdit::delete(1);
         assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo, insert)]);
         assert_eq!(page_texts(&doc), ["Hello accent", "Second page"]);
         assert_eq!(ink.history(), (false, true));
 
-        let redo = PageEdit::Insert(1);
+        let redo = PageEdit::insert(1);
         assert_eq!(ink.walk(&mut doc, true), [Walked::Pages(redo, insert)]);
         ink.walk(&mut doc, true);
         assert_eq!(page_texts(&doc), ["Second page", "Hello accent", ""]);
         assert_eq!(ink.history(), (true, false));
+    }
+
+    /// Another document's pages go in where they were dropped, as one step: the bookmarks into the
+    /// page they went before follow it, Undo takes them all out, Redo puts them back without the
+    /// other document, and the file saved holds them.
+    #[test]
+    fn undo_and_redo_walk_an_import() {
+        let Some((dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let source = reopen(&dir, &doc);
+        let mut ink = Ink::default();
+        let (edit, id) = ink.import_pages(&mut doc, Some(1), &source).unwrap();
+        drop(source);
+        assert_eq!(edit, PageEdit::Insert { at: 1, count: 2 });
+        let imported = ["Hello accent", "Hello accent", "Second page", "Second page"];
+        assert_eq!(page_texts(&doc), imported);
+        let marks =
+            |doc: &PdfDoc| -> Vec<_> { doc.outline().unwrap().iter().map(|o| o.page).collect() };
+        assert_eq!(marks(&doc), [Some(3), Some(3)]);
+
+        let undo = PageEdit::Delete { at: 1, count: 2 };
+        assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo, id)]);
+        assert_eq!(page_texts(&doc), ["Hello accent", "Second page"]);
+        assert_eq!(ink.walk(&mut doc, true), [Walked::Pages(edit, id)]);
+        assert_eq!(page_texts(&reopen(&dir, &doc)), imported);
+
+        // With no place given, after the last page.
+        let source = reopen(&dir, &doc);
+        let (edit, _) = ink.import_pages(&mut doc, None, &source).unwrap();
+        assert_eq!(edit, PageEdit::Insert { at: 4, count: 4 });
+        assert_eq!(doc.page_count(), 8);
     }
 
     /// Strokes and page edits walk back in the order they were made, through one history: a
@@ -519,7 +579,7 @@ mod tests {
         // number.
         draw(&mut doc, &mut ink, 0);
         draw(&mut doc, &mut ink, 1);
-        ink.edit_pages(&mut doc, PageEdit::Delete(0)).unwrap();
+        ink.edit_pages(&mut doc, PageEdit::delete(0)).unwrap();
         draw(&mut doc, &mut ink, 0);
         assert_eq!(pages(&doc), [second(2)]);
 
@@ -578,7 +638,7 @@ mod tests {
         // The second page, which the link and both bookmarks name; then the first, which holds
         // the link.
         for page in [1, 0] {
-            ink.edit_pages(&mut doc, PageEdit::Delete(page)).unwrap();
+            ink.edit_pages(&mut doc, PageEdit::delete(page)).unwrap();
             ink.walk(&mut doc, false);
             assert_eq!(targets(&doc), before, "page {page} put back");
             ink.walk(&mut doc, true);
@@ -588,7 +648,7 @@ mod tests {
         assert_eq!(targets(&reopen(&dir, &doc)), before);
 
         // An Export Highlights made since a delete goes with its Undo and comes back with Redo.
-        ink.edit_pages(&mut doc, PageEdit::Delete(1)).unwrap();
+        ink.edit_pages(&mut doc, PageEdit::delete(1)).unwrap();
         let had = doc.annotation_count(0).unwrap();
         let quads = vec![pdf::Rect::from_corners((20.0, 30.0), (90.0, 50.0))];
         let color = [255, 255, 0, 255];

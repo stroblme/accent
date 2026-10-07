@@ -218,7 +218,7 @@ impl View {
         let y = self.iter_location(&caret(&self.buffer())).y() - rect.y();
         let align = f64::from(y) / f64::from(rect.height().max(1));
         let mut lines = 0;
-        while row.forward_visible_line() && row.line() <= bottom.line() {
+        while crate::fold::visible_line(&mut row, true) && row.line() <= bottom.line() {
             lines += 1;
         }
         (lines.max(1), align.clamp(0.0, 1.0))

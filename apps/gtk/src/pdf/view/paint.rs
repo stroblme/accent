@@ -1,6 +1,7 @@
 //! The page painted from cached tiles: the paper, the tiles on screen over a blurred stand-in,
 //! and what is drawn over a page — highlights, the selection, live strokes, the stroke the Adjust
-//! tool holds and the search's marks — and the tiles still wanted, asked for once per change.
+//! tool holds and the search's marks — the line a dropped PDF's pages would go in at, and the
+//! tiles still wanted, asked for once per change.
 
 use adw::prelude::*;
 use gtk::subclass::prelude::*;
@@ -8,9 +9,12 @@ use gtk::{gdk, graphene, gsk};
 
 use super::imp;
 use crate::pdf::cache::{TILE, TileKey, Want, reach, tiles_across, tiles_within};
-use crate::pdf::geometry::page_at;
+use crate::pdf::geometry::{gap_middle, page_at};
 use crate::pdf::tools::{HANDLE, Mode, mapped};
 use crate::theme;
+
+/// How thick the line a dropped PDF's pages would go in at is: the thumbnail strip's drop bar.
+const DROP_LINE: f32 = 3.0;
 
 impl imp::PdfView {
     /// What `snapshot` draws.
@@ -283,6 +287,19 @@ impl imp::PdfView {
                     snapshot.append_color(&colour, &layout.rect_of(rect, mark));
                 }
             }
+        }
+        // A PDF dragged over the pages: the line across the gap its pages would go into.
+        if let Some(gap) = self.drop_gap.get()
+            && let Some(beside) = layout
+                .pages
+                .get(gap)
+                .or_else(|| layout.pages.get(gap.checked_sub(1)?))
+        {
+            let y = gap_middle(&layout, gap) - DROP_LINE / 2.0;
+            let line = graphene::Rect::new(beside.x, y, beside.w, DROP_LINE);
+            snapshot.push_rounded_clip(&gsk::RoundedRect::from_rect(line, DROP_LINE / 2.0));
+            snapshot.append_color(&accent, &line);
+            snapshot.pop();
         }
         drop(marks);
         drop(selection);

@@ -1163,8 +1163,13 @@ mod tests {
         );
         assert_eq!((got.moved, got.left), (3, vec![]));
         // An edit that leaves every page it names where it was writes nothing.
-        let still = repaged(src, PageEdit::Insert(3), &[]);
+        let still = repaged(src, PageEdit::insert(3), &[]);
         assert_eq!((still.text, still.moved), (None, 0));
+        // Another PDF's three pages dropped in before the second: the links after them follow.
+        let src = "[[p.pdf#page=1]] [[p.pdf#page=2&selection=0,0,0,4|Hi]]";
+        let dropped = repaged(src, PageEdit::Insert { at: 1, count: 3 }, &[]);
+        let want = "[[p.pdf#page=1]] [[p.pdf#page=5&selection=0,0,0,4|Hi]]";
+        assert_eq!((dropped.text.as_deref(), dropped.moved), (Some(want), 1));
     }
 
     /// A link into a deleted page is left and handed back; the Undo that puts the page back is
@@ -1176,16 +1181,16 @@ mod tests {
             "[[p.pdf#page=2]] [[p.pdf#page=3]] [[p.pdf#page=2|again]] [[p.pdf#page=1]]",
             "[[p.pdf#page=3]] [[p.pdf#page=2]]",
         ] {
-            let deleted = repaged(src, PageEdit::Delete(1), &[]);
+            let deleted = repaged(src, PageEdit::delete(1), &[]);
             let text = deleted.text.expect("a link moved");
             assert!(!deleted.left.is_empty(), "{src}");
-            let undone = repaged(&text, PageEdit::Insert(1), &deleted.left);
+            let undone = repaged(&text, PageEdit::insert(1), &deleted.left);
             assert_eq!(undone.text.as_deref(), Some(src));
             assert!(undone.left.is_empty());
         }
         let deleted = repaged(
             "[[p.pdf#page=2]] [[p.pdf#page=3]] [[p.pdf#page=2|again]]",
-            PageEdit::Delete(1),
+            PageEdit::delete(1),
             &[],
         );
         assert_eq!(deleted.moved, 1);
@@ -1199,11 +1204,11 @@ mod tests {
     #[test]
     fn a_left_link_is_kept_by_its_anchor() {
         let src = "[[p.pdf#page=2|old]] [[p.pdf#page=3]]";
-        let deleted = repaged(src, PageEdit::Delete(1), &[]);
+        let deleted = repaged(src, PageEdit::delete(1), &[]);
         let left = "[[p.pdf#page=2|old]] [[p.pdf#page=2]]";
         assert_eq!(deleted.text.as_deref(), Some(left));
         let retyped = "[[Papers/p.pdf#page=2|new]] [[p.pdf#page=2]]";
-        let undone = repaged(retyped, PageEdit::Insert(1), &deleted.left);
+        let undone = repaged(retyped, PageEdit::insert(1), &deleted.left);
         let want = "[[Papers/p.pdf#page=2|new]] [[p.pdf#page=3]]";
         assert_eq!(undone.text.as_deref(), Some(want));
     }
@@ -1229,11 +1234,11 @@ mod tests {
             ))
         );
         assert_eq!(got.moved, 2);
-        let deleted = repaged(src, PageEdit::Delete(0), &[]);
+        let deleted = repaged(src, PageEdit::delete(0), &[]);
         assert_eq!(deleted.left, [("page=1".to_string(), 0)]);
         let undone = repaged(
             deleted.text.as_deref().unwrap(),
-            PageEdit::Insert(0),
+            PageEdit::insert(0),
             &deleted.left,
         );
         assert_eq!(undone.text.as_deref(), Some(src));

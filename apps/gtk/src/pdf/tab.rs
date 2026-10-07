@@ -43,6 +43,8 @@ type ChoiceHook = Hook<dyn Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice)>;
 type UriHook = Hook<dyn Fn(&str)>;
 /// The pages were edited, or an edit walked by Undo or Redo: the edit made, and its step.
 type RepageHook = Hook<dyn Fn(&Rc<PdfTab>, pdf::PageEdit, u32)>;
+/// Another PDF's pages went in: its name, and how many or why they could not.
+type ImportHook = Hook<dyn Fn(&Rc<PdfTab>, &str, Result<usize, String>)>;
 
 /// The notes' links following this document's page edits, which the window runs
 /// (`App::relink`): one rewrite at a time, in the order the edits were made, since each reads
@@ -83,6 +85,9 @@ pub struct PdfTab {
     /// Requests to the render thread. Dropping it is what ends the thread, so it is dropped with
     /// the tab and nothing else has to be joined.
     pub(super) tx: RefCell<Option<Sender<Request>>>,
+    /// The imports asked for before the render thread started, a PDF dropped onto a row whose tab
+    /// is still opening, which it is handed once it starts.
+    pub(super) waiting: RefCell<Vec<Request>>,
     /// Colours inverted against the system's choice, for a document that renders badly either way.
     pub(super) inverted: Cell<bool>,
     /// The palette the cached tiles were rendered in, so a theme change can tell that they are
@@ -191,6 +196,7 @@ pub struct PdfTab {
     pub(super) on_saved: TabHook,
     pub(super) on_choice: ChoiceHook,
     pub(super) on_repaged: RepageHook,
+    pub(super) on_imported: ImportHook,
     pub relinks: RefCell<Relinks>,
     /// The monitor on a loose file, which nothing else watches (`App::watch_loose`).
     pub monitor: RefCell<Option<gio::FileMonitor>>,
@@ -265,6 +271,7 @@ pub fn open(
         organize: super::organize::Organize::new(&thumb_strip),
         thumb_strip,
         tx: RefCell::new(None),
+        waiting: RefCell::default(),
         inverted: Cell::new(false),
         theme: Cell::new(theme_of(adw::StyleManager::default().is_dark())),
         failed: Cell::new(false),
@@ -318,6 +325,7 @@ pub fn open(
         on_saved: Hook::default(),
         on_choice: Hook::default(),
         on_repaged: Hook::default(),
+        on_imported: Hook::default(),
         relinks: RefCell::default(),
         monitor: RefCell::default(),
     });
@@ -333,6 +341,7 @@ pub fn open(
     ));
     tab.wire_strip(&thumbs);
     tab.wire_organize();
+    tab.wire_drop();
     tab.ring.connect_choice(glib::clone!(
         #[weak]
         tab,
@@ -394,7 +403,11 @@ impl PdfTab {
     /// Start the render thread, which opens the document and then answers requests for it.
     fn start(self: &Rc<Self>) -> Result<(), String> {
         let weak = glib::SendWeakRef::from(self.view.downgrade());
-        *self.tx.borrow_mut() = Some(render::spawn(self.path(), weak)?);
+        let tx = render::spawn(self.path(), weak)?;
+        for request in self.waiting.take() {
+            let _ = tx.send(request);
+        }
+        *self.tx.borrow_mut() = Some(tx);
         Ok(())
     }
 
@@ -785,7 +798,7 @@ impl PdfTab {
     /// it. After the last page it is a notebook's answer to running out of paper.
     pub fn add_page(self: &Rc<Self>, after: bool) {
         let at = self.command_page() + usize::from(after);
-        self.edit_pages(pdf::PageEdit::Insert(at));
+        self.edit_pages(pdf::PageEdit::insert(at));
     }
 
     /// Put a blank page in, take one out, or move one, at once: each is a step Undo takes back, a
@@ -958,6 +971,11 @@ impl PdfTab {
     /// what the notes that name this document's pages by number have to follow.
     pub fn connect_repaged(&self, f: impl Fn(&Rc<PdfTab>, pdf::PageEdit, u32) + 'static) {
         self.on_repaged.set(Rc::new(f));
+    }
+
+    /// Called once another PDF's pages went in, with its name and how many, or why they did not.
+    pub fn connect_imported(&self, f: impl Fn(&Rc<PdfTab>, &str, Result<usize, String>) + 'static) {
+        self.on_imported.set(Rc::new(f));
     }
 
     fn show_status(&self, message: &str) {

@@ -722,10 +722,17 @@ fn layers(app: &Rc<App>, rel: &str) {
             let ids = file.pages[0].cells.iter().map(|c| c.id.clone());
             ids.collect::<Vec<_>>()
         };
+        // AdwEntryRow's pencil, which a layer's row hides: a press on the row edits its name.
+        let pencil = tab.layer_row("2").and_then(|row| {
+            find_widget(row.upcast_ref(), &|w| {
+                w.has_css_class("edit-icon") && w.is_visible() && w.is_child_visible()
+            })
+        });
         println!(
-            "bench diagram layers open rows={:?} pick_bg={:?}",
+            "bench diagram layers open rows={:?} pick_bg={:?} pencil={}",
             rows(),
-            tab.pick("bg")
+            tab.pick("bg"),
+            pencil.is_some()
         );
         // Every revealer in a row, its Move and Delete buttons' and libadwaita's own, before and
         // while the pointer is on it (PRELIGHT by hand, Xvfb having no pointer).

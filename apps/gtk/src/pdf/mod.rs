@@ -6,16 +6,17 @@
 //! the channel to the render thread, `view` is the widget and `tab` the reader around it, with
 //! `input` wiring its views, menu and keys to it, `reply` taking the render thread's answers,
 //! `disk` its file's saves and reloads and `comment` showing what other readers wrote on a page.
-//! `organize` moves, inserts and deletes pages from the thumbnail strip, `export` writes the copy
-//! Export as PDF and Print hand on, and `source` is the page's half of SyncTeX. `window` is the
-//! window's side of a PDF tab: opening one and the PDF commands. Nothing under `view` calls
-//! pdfium.
+//! `organize` moves, inserts and deletes pages from the thumbnail strip, `drop` puts another PDF's
+//! pages in where it is dropped on the pages, `export` writes the copy Export as PDF and Print
+//! hand on, and `source` is the page's half of SyncTeX. `window` is the window's side of a PDF
+//! tab: opening one and the PDF commands. Nothing under `view` calls pdfium.
 //!
 //! The names below are what the rest of the window says `pdfview::` and `pdftab::` to reach.
 
 pub mod cache;
 mod comment;
 mod disk;
+mod drop;
 pub mod export;
 pub mod geometry;
 mod input;

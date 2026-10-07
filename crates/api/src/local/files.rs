@@ -900,7 +900,7 @@ mod tests {
         // The page that was first is the third now; deleting it leaves the highlight on it.
         let deleted = f
             .vault
-            .repage_links("paper.pdf", PageEdit::Delete(2), &[])
+            .repage_links("paper.pdf", PageEdit::delete(2), &[])
             .unwrap();
         assert_eq!(deleted.moved, 0);
         assert_eq!(
@@ -913,7 +913,7 @@ mod tests {
         );
         let undone = f
             .vault
-            .repage_links("paper.pdf", PageEdit::Insert(2), &deleted.left)
+            .repage_links("paper.pdf", PageEdit::insert(2), &deleted.left)
             .unwrap();
         assert_eq!((undone.moved, undone.rewritten.len()), (0, 0));
         assert_eq!(

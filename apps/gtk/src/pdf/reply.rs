@@ -83,6 +83,11 @@ impl PdfTab {
                 }
             }
             Reply::Repaged { sizes, edit, step } => self.repaged(sizes, edit, step),
+            Reply::Imported { name, pages } => {
+                if let Some(f) = self.on_imported.get() {
+                    f(self, &name, pages);
+                }
+            }
             Reply::Reloaded(sizes) => self.reloaded(sizes),
             Reply::Failed(message) => {
                 #[cfg(feature = "bench")]
@@ -174,7 +179,7 @@ impl PdfTab {
         match edit {
             // Land on the new page: putting one in is asking for somewhere to draw, and
             // a jump, so the reader can come back with Back.
-            pdf::PageEdit::Insert(at) => self.goto_page(at),
+            pdf::PageEdit::Insert { at, .. } => self.goto_page(at),
             // The page the reader was on, wherever it went — or, deleted, the one that
             // took its place.
             _ => {

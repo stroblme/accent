@@ -508,6 +508,18 @@ impl PdfView {
         self.queue_draw();
     }
 
+    /// Draw the line in the gap a dropped PDF's pages would go into, or none.
+    pub fn set_drop_gap(&self, gap: Option<usize>) {
+        if self.imp().drop_gap.replace(gap) != gap {
+            self.queue_draw();
+        }
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn drop_gap(&self) -> Option<usize> {
+        self.imp().drop_gap.get()
+    }
+
     /// The boxes of the selected glyphs, in page points, per page: one entry for a selection
     /// inside a page, one per page for a drag that ran across a page break.
     pub fn set_selection(&self, selection: Vec<(usize, Vec<accent_core::pdf::Rect>)>) {
@@ -658,6 +670,8 @@ mod imp {
         /// Where the pointer is over the view, until it leaves: what a Ctrl+wheel zooms around.
         pub over: Cell<Option<(f64, f64)>>,
         pub current_mark: Cell<Option<(usize, usize)>>,
+        /// The gap between pages a PDF dragged over the view would go into, where a line shows.
+        pub drop_gap: Cell<Option<usize>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
         /// The scale, colour scheme and cache generation [`Self::asked`] was for. Every event that
@@ -724,6 +738,7 @@ mod imp {
                 dot: Cell::new(false),
                 over: Cell::new(None),
                 current_mark: Cell::new(None),
+                drop_gap: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false, 0)),
                 #[cfg(feature = "bench")]

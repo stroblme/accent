@@ -788,7 +788,7 @@ impl App {
     /// Whether the file is there is not asked here: on a remote vault that is a round trip on the
     /// main thread before every open. The reader's worker finds out anyway, and says so through
     /// [`cannot_open`](Self::cannot_open).
-    fn locate(&self, key: &str) -> Option<(String, PathBuf)> {
+    pub(crate) fn locate(&self, key: &str) -> Option<(String, PathBuf)> {
         if doc::is_loose_key(key) {
             let path = PathBuf::from(key);
             return path.is_file().then(|| (key.to_string(), path));

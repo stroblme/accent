@@ -72,11 +72,13 @@ use outline::bench_outline;
 use panes::{
     bench_apart, bench_back, bench_collapse, bench_cycle, bench_layout, bench_layout_pick,
     bench_panes, bench_pin, bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
+    bench_tree,
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_closed,
-    bench_pdf_comments, bench_pdf_deep, bench_pdf_dropped, bench_pdf_failed, bench_pdf_pages,
-    bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip, bench_sketch,
+    bench_pdf_comments, bench_pdf_deep, bench_pdf_dropped, bench_pdf_failed, bench_pdf_insert,
+    bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip,
+    bench_sketch,
 };
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -212,9 +214,10 @@ use tags::bench_tags;
 /// companion shares with the editor, across a zoom and a new Indent Width
 /// (`compare::bench_compare_page`). `=press:<rel>` prints where to press the overlaid buttons with
 /// XTEST and where the carets are after each press (`compare::bench_compare_press`).
-/// `=reader:<rel>` prints where to turn the wheel, press Page Down and drag a scrollbar with XTEST
-/// while the comparison is still on its way to its first hunk, and whether it took the scroll
-/// back (`compare::bench_compare_reader`).
+/// `=reader:<rel>` prints where to turn the wheel, press Page Down or Ctrl+End and drag a scrollbar
+/// or the minimap with XTEST while the comparison is still on its way to its first hunk, and
+/// whether it took the scroll back or held the line it left at the top
+/// (`compare::bench_compare_reader`).
 /// `=merge:<rel>` merges two branches that conflict over `<rel>` in a repository it makes, opens
 /// the merge view from the Merge Conflicts row and takes each block's sides
 /// (`compare::bench_compare_merge`).
@@ -295,6 +298,12 @@ use tags::bench_tags;
 /// items of the page's own menu without and with a selection, and of the status bar's page
 /// count's menu.
 /// Point it at a scratch copy of the generated vault's `Attachments/pages.pdf`.
+/// `=insert:<rel_path>,<source>` drops the PDF `source` onto `rel_path` every way there is: its
+/// row from the Files tree onto the pages through XTEST, the line watched, as a file from another
+/// application onto the pages, and both onto `rel_path`'s row, each undone, printing the pages on
+/// disk, the links of a note into it and the toasts after each (`pdf::bench_pdf_insert`). Both at
+/// the root of a scratch vault, copies of the generated vault's `Attachments/pages.pdf` and
+/// `Attachments/comments.pdf`, whose pop-up pdfium's copy left pointing into it.
 /// `=strip:<rel_path>` is the pointer's half, held for XTEST: it opens the document with the
 /// Outline pane up and prints the same every two seconds for 40 s, so a hover and a drag along the
 /// thumbnail strip (`build-aux/xtest.py :N "drag X0 Y0 X1 Y1"`) can be watched landing in the
@@ -348,6 +357,10 @@ use tags::bench_tags;
 /// Reload Window, then prints the panes, the size and whether the typing was written, before and
 /// in the window that comes back (see `panes::bench_reload`); any window will do: a vault's, one
 /// opened on a file, `--terminal` or `terminal://<name>`.
+/// `=tree:<a>,<b>,<c>` clicks `a` and then `b` in the Files tree, double-clicks `c` and then
+/// `a`, drags `b` onto the right edge of the pane, all through XTEST, then pins `c` and fires
+/// Close Tabs in Pane over the left pane, and prints each pane's tabs after every step: the vault
+/// root has to list the three, as a scratch vault of three notes does.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
@@ -734,6 +747,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = rel.strip_prefix("pages:") {
                 return bench_pdf_pages(&app, rel);
             }
+            if let Some(arg) = rel.strip_prefix("insert:") {
+                return bench_pdf_insert(&app, arg);
+            }
             if let Some(arg) = rel.strip_prefix("bookmarks:") {
                 return bench_pdf_bookmarks(&app, arg);
             }
@@ -866,6 +882,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rels) = rels.strip_prefix("back:") {
                 return bench_back(&app, rels);
+            }
+            if let Some(rels) = rels.strip_prefix("tree:") {
+                return bench_tree(&app, rels);
             }
             if let Some(pdf) = rels.strip_prefix("loose:") {
                 return loose::bench_loose(&app, pdf);

@@ -51,6 +51,11 @@ pub(super) enum Keep {
     /// Line `.1` of column `.0`, its row `.2` pixels below the top of the view: see
     /// [`Columns::top_line`] and [`Columns::hold_line`].
     Line(usize, usize, i32),
+    /// Line `.1` of column `.0`, its text `.2` pixels below the top of the view where GTK draws
+    /// it: the line the reader's scroll left at the top ([`Columns::let_go`]). Held as a
+    /// [`Keep::Line`] is, but by its text, which a blank laid again above it does not move, and
+    /// let go where it is once the rows are laid rather than put back from the grid.
+    Read(usize, usize, i32),
 }
 
 /// What the host lays the columns out from, laid again on every refresh.
@@ -114,9 +119,17 @@ pub(super) struct Columns {
     /// Where the view is kept until a relayout has laid every row, which clears it, or the reader
     /// scrolls ([`let_go_on_input`]). The first hunk, as the comparison is built: a diff opens on
     /// what changed rather than on the top of a file whose first difference is four hundred lines
-    /// down. The scroll a run was opened at (see [`Columns::hold_scroll`]). After that where the
-    /// view sits is the reader's business.
+    /// down. The scroll a run was opened at (see [`Columns::hold_scroll`]). The line the reader's
+    /// scroll left at the top (see [`Columns::let_go`]). After that where the view sits is the
+    /// reader's business.
     pub(super) keep: Cell<Option<Keep>>,
+    /// Whether GTK is stepping the frame's animations, and whether one of them stepped the scroll
+    /// in this frame: a scroll GTK animates moves a kept line along rather than being taken back
+    /// (see [`Columns::hold`]).
+    ticking: Cell<bool>,
+    stepped: Cell<bool>,
+    /// The frame clock's handlers that hold a kept line, while one is kept.
+    hooks: Rc<RefCell<Vec<glib::SignalHandlerId>>>,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
 }
 
@@ -160,64 +173,85 @@ fn split(roots: &[&gtk::Widget]) -> gtk::Paned {
     paned
 }
 
-/// The reader scrolling anywhere in `root` — a wheel turn, a press on a scrollbar, a page key —
-/// ends whatever [`Columns::keep`] holds, which would otherwise take the scroll back once the rows
-/// are laid. Heard in the capture phase, ahead of the scroll it makes; the comparison's own
-/// scrolls set the adjustment and pass none of these. The root is the comparison's own, so the
-/// controllers go with it.
+/// The reader scrolling anywhere in `root` — a wheel turn, a page key, Ctrl+Home or Ctrl+End, a
+/// press on a scrollbar or the minimap — ends whatever [`Columns::keep`] holds, which would
+/// otherwise take the scroll back once the rows are laid, and has the line it leaves at the top
+/// held instead ([`Columns::let_go`]): after the wheel turn, after the key once GTK's first
+/// layout of the lines has made the scroll a key only queues while they are not laid out, and
+/// once the press is let go. Heard in the capture phase, ahead of the scroll the input makes; the
+/// comparison's own scrolls set the adjustment and pass none of these. The root is the
+/// comparison's own, so the controllers go with it.
 fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
-    let let_go = || {
-        let columns = columns.clone();
-        move || {
-            if let Some(c) = columns.upgrade() {
-                c.keep.set(None);
-            }
-        }
-    };
     let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let go = let_go();
+    let w = columns.clone();
     wheel.connect_scroll(move |wheel, _, _| {
         // With Control the wheel zooms: see `zoom::zoom_on_wheel`.
-        let state = wheel.current_event_state();
-        if !state.contains(gdk::ModifierType::CONTROL_MASK) {
-            go();
+        let zoom = wheel
+            .current_event_state()
+            .contains(gdk::ModifierType::CONTROL_MASK);
+        if let Some(c) = w.upgrade().filter(|_| !zoom) {
+            c.let_go(Some(glib::Priority::HIGH));
         }
         glib::Propagation::Proceed
     });
     root.add_controller(wheel);
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let go = let_go();
+    let w = columns.clone();
     keys.connect_key_pressed(move |_, key, _, state| {
-        if pages(key, state) {
-            go();
+        if let Some(c) = w.upgrade().filter(|_| scrolls(key, state)) {
+            c.let_go(Some(glib::Priority::from(gtk::PRIORITY_RESIZE as i32)));
         }
         glib::Propagation::Proceed
     });
     root.add_controller(keys);
+    // A drag on the scrollbar or the minimap claims the press, so its release is heard as an
+    // event rather than by a gesture.
+    let dragged = Rc::new(Cell::new(false));
     let press = gtk::GestureClick::new();
     press.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let go = let_go();
+    let (w, drag) = (columns.clone(), dragged.clone());
     press.connect_pressed(move |press, _, x, y| {
+        let bar = |w: gtk::Widget| {
+            w.ancestor(gtk::Scrollbar::static_type())
+                .or_else(|| w.ancestor(sourceview5::Map::static_type()))
+                .is_some()
+        };
         let picked = press
             .widget()
             .and_then(|w| w.pick(x, y, gtk::PickFlags::DEFAULT));
-        if picked.is_some_and(|w| w.ancestor(gtk::Scrollbar::static_type()).is_some()) {
-            go();
+        if let Some(c) = w.upgrade().filter(|_| picked.is_some_and(bar)) {
+            drag.set(c.let_go(None));
         }
     });
     root.add_controller(press);
+    let release = gtk::EventControllerLegacy::new();
+    release.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let w = columns.clone();
+    release.connect_event(move |_, event| {
+        if event.event_type() == gdk::EventType::ButtonRelease
+            && dragged.take()
+            && let Some(c) = w.upgrade()
+        {
+            c.hold_after(glib::Priority::HIGH);
+        }
+        glib::Propagation::Proceed
+    });
+    root.add_controller(release);
 }
 
-/// Whether `key` scrolls the view a page: Page Up or Down, but not with Control, which switches
-/// tabs.
-fn pages(key: gdk::Key, state: gdk::ModifierType) -> bool {
-    let page = matches!(
-        key,
-        gdk::Key::Page_Up | gdk::Key::Page_Down | gdk::Key::KP_Page_Up | gdk::Key::KP_Page_Down
-    );
-    page && !state.contains(gdk::ModifierType::CONTROL_MASK)
+/// Whether `key` is the reader scrolling: Page Up or Down, but not with Control, which switches
+/// tabs, and Ctrl+Home or Ctrl+End. An arrow that takes the caret past the edge is not.
+fn scrolls(key: gdk::Key, state: gdk::ModifierType) -> bool {
+    let control = state.contains(gdk::ModifierType::CONTROL_MASK);
+    match key {
+        gdk::Key::Page_Up | gdk::Key::Page_Down | gdk::Key::KP_Page_Up | gdk::Key::KP_Page_Down => {
+            !control
+        }
+        gdk::Key::Home | gdk::Key::End | gdk::Key::KP_Home | gdk::Key::KP_End => control,
+        _ => false,
+    }
 }
 
 impl Columns {
@@ -261,6 +295,9 @@ impl Columns {
             bottoms: (0..n).map(|_| Cell::default()).collect(),
             relaid: RefCell::default(),
             keep: Cell::new(Some(Keep::FirstHunk)),
+            ticking: Cell::new(false),
+            stepped: Cell::new(false),
+            hooks: Rc::default(),
             handlers: RefCell::new(Vec::new()),
         });
 
@@ -302,10 +339,14 @@ impl Columns {
         let w = weak.clone();
         let id = vadj.connect_value_changed(move |adj| {
             let Some(c) = w.upgrade() else { return };
+            c.stepped.set(c.stepped.get() || c.ticking.get());
             match c.keep.get() {
                 Some(Keep::Scroll(value)) if adj.value() != value => adj.set_value(value),
-                Some(Keep::Line(column, n, at)) => c.hold_line(column, n, at),
-                _ => {}
+                // An animated scroll moves the kept line along: see `Columns::hold`.
+                Some(Keep::Line(column, ..) | Keep::Read(column, ..)) if c.stepped.get() => {
+                    c.keep.set(Some(c.line_on_top(column)));
+                }
+                _ => c.hold_kept(),
             }
         });
         connect(vadj.upcast(), id);
@@ -373,27 +414,101 @@ impl Columns {
         }
     }
 
-    /// Keep `keep` until the rows are laid, a [`Keep::Line`] held again after each layout GTK
-    /// makes meanwhile, before it is painted: the lines GTK lays out in the frame itself move a
-    /// kept line without moving the scroll.
+    /// Keep `keep` until the rows are laid, a kept line ([`Keep::Line`], [`Keep::Read`]) held
+    /// again after each layout GTK makes meanwhile, before it is painted: the lines GTK lays out in
+    /// the frame itself move a kept line without moving the scroll. A scroll GTK animates
+    /// meanwhile — a page key's, one to the caret — moves the kept line along instead, through
+    /// the frames it steps the scroll in: GTK steps its animations in a frame's update, which
+    /// [`Columns::ticking`] marks, and any scroll set meanwhile, a step back included, would end
+    /// the animation.
     pub(super) fn hold(&self, keep: Option<Keep>) {
-        let held = matches!(self.keep.replace(keep), Some(Keep::Line(..)));
-        let clock = self.panes[0].view.frame_clock();
-        let (false, Some(Keep::Line(..)), Some(clock)) = (held, keep, clock) else {
+        self.keep.set(keep);
+        let unhooked = self.hooks.borrow().is_empty();
+        let (Some(Keep::Line(..) | Keep::Read(..)), true, Some(clock)) =
+            (keep, unhooked, self.panes[0].view.frame_clock())
+        else {
             return;
         };
-        let id: Rc<Cell<Option<glib::SignalHandlerId>>> = Rc::default();
-        let (w, own) = (self.weak.clone(), id.clone());
-        id.set(Some(clock.connect_layout(
-            move |clock| match w.upgrade().map(|c| (c.keep.get(), c)) {
-                Some((Some(Keep::Line(column, n, at)), c)) => c.hold_line(column, n, at),
-                _ => {
-                    if let Some(id) = own.take() {
-                        clock.disconnect(id);
-                    }
+        // The comparison while it keeps a line; once it does not, the handlers go.
+        let kept = {
+            let (w, ids) = (self.weak.clone(), self.hooks.clone());
+            move |clock: &gdk::FrameClock| {
+                let c = w.upgrade();
+                if let Some(c) = c
+                    .as_ref()
+                    .filter(|c| matches!(c.keep.get(), Some(Keep::Line(..) | Keep::Read(..))))
+                {
+                    return Some(c.clone());
                 }
-            },
-        )));
+                if let Some(c) = c {
+                    c.ticking.set(false);
+                    c.stepped.set(false);
+                }
+                for id in ids.borrow_mut().drain(..) {
+                    clock.disconnect(id);
+                }
+                None
+            }
+        };
+        let k = kept.clone();
+        let before = clock.connect_before_paint(move |clock| {
+            if let Some(c) = k(clock) {
+                c.ticking.set(true);
+                c.stepped.set(false);
+            }
+        });
+        // After GTK's own handlers, which step the animations.
+        let k = kept.clone();
+        let update = clock.connect_local("update", true, move |args| {
+            if let Some(c) = k(&args[0].get().ok()?) {
+                c.ticking.set(false);
+            }
+            None
+        });
+        let layout = clock.connect_layout(move |clock| {
+            if let Some(c) = kept(clock).filter(|c| !c.stepped.get()) {
+                c.hold_kept();
+            }
+        });
+        self.hooks.borrow_mut().extend([before, update, layout]);
+    }
+
+    /// The reader's input has ended what the view was kept at, if anything (`let_go_on_input`);
+    /// and once the input has made its scroll, at `after`, the line it left at the top is held
+    /// instead until the rows are laid: left to GTK, each column keeps its own top line as it
+    /// lays out the lines above, all on the one scroll they share. Nothing kept, nothing to hold:
+    /// the rows were laid already. Whether something was kept.
+    fn let_go(&self, after: Option<glib::Priority>) -> bool {
+        let kept = self.keep.take().is_some();
+        if let (true, Some(after)) = (kept, after) {
+            self.hold_after(after);
+        }
+        kept
+    }
+
+    /// Hold the line at the top of the view, at `after`, until the rows are laid: see
+    /// [`Columns::let_go`].
+    fn hold_after(&self, after: glib::Priority) {
+        let w = self.weak.clone();
+        glib::idle_add_local_full(after, move || {
+            if let Some(c) = w.upgrade() {
+                c.hold(Some(c.line_on_top(c.editable.unwrap_or(c.panes.len() - 1))));
+                c.settling.set(SETTLE);
+                c.schedule_relayout();
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    /// The line at the top of `column`, and how far below the top of the view its text starts as
+    /// GTK has it laid out: where the reader left it. [`Columns::top_line`] reads the grid
+    /// instead, which is behind GTK while the rows are laid.
+    fn line_on_top(&self, column: usize) -> Keep {
+        let view = &self.panes[column].view;
+        let seen = view.visible_rect().y();
+        let line = view.line_at_y(seen).0;
+        let at = view.iter_location(&line).y() - seen;
+        Keep::Read(column, line.line() as usize + 1, at)
     }
 
     /// Where the reader is, as a line of `column`: the one in the row at the top of the view, or in
@@ -411,17 +526,31 @@ impl Columns {
         Some(Keep::Line(column, n, grid.tops[row] - seen))
     }
 
+    /// Hold the kept line, if one is kept, where it is kept: see [`Columns::hold_line`].
+    fn hold_kept(&self) {
+        match self.keep.get() {
+            Some(Keep::Line(column, n, at)) => self.hold_line(column, n, at, false),
+            Some(Keep::Read(column, n, at)) => self.hold_line(column, n, at, true),
+            _ => {}
+        }
+    }
+
     /// Scroll so line `n` of `column` starts `at` pixels below the top of the view where GTK has
-    /// it now, which is where it is drawn: what keeps a [`Keep::Line`] on screen while the rows are
+    /// it now, which is where it is drawn: what keeps a kept line on screen while the rows are
     /// laid. GTK lays out the lines that opened, hid or grew above it a few at a time, and keeps
     /// each view's own top line in place as it does, all on the one scroll they share; a scroll
-    /// held where it was showed the lines above for as long as that took.
-    fn hold_line(&self, column: usize, n: usize, at: i32) {
+    /// held where it was showed the lines above for as long as that took. The line starts where
+    /// its paragraph does, the blank above it included, or with `text` where its text does: the
+    /// reader's line ([`Keep::Read`]) stays where it was seen however the blank above it is laid.
+    fn hold_line(&self, column: usize, n: usize, at: i32, text: bool) {
         let pane = &self.panes[column];
         let Some(line) = pane.buffer.iter_at_line(n as i32 - 1) else {
             return;
         };
-        let y = pane.view.line_yrange(&line).0;
+        let y = match text {
+            true => pane.view.iter_location(&line).y(),
+            false => pane.view.line_yrange(&line).0,
+        };
         let adj = &self.own[0];
         let value = adj.value() + f64::from(y - pane.view.visible_rect().y() - at);
         if value != adj.value() {
@@ -715,8 +844,9 @@ impl Columns {
         drop(rows);
         match keep {
             Some(Keep::FirstHunk) => self.reveal_first_hunk(),
-            // Held all along, and the rows above the run have not moved.
-            Some(Keep::Scroll(_)) => self.keep.set(None),
+            // Held all along: the rows above the run have not moved, and the reader's line is
+            // where GTK draws it.
+            Some(Keep::Scroll(_) | Keep::Read(..)) => self.keep.set(None),
             Some(Keep::Line(column, n, at)) => {
                 self.keep.set(None);
                 let row = self.rows.borrow().lines[column]
@@ -736,11 +866,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_page_key_ends_the_keep_but_not_as_a_tab_switch() {
-        let plain = gdk::ModifierType::empty();
-        assert!(pages(gdk::Key::Page_Down, plain));
-        assert!(pages(gdk::Key::KP_Page_Up, gdk::ModifierType::SHIFT_MASK));
-        assert!(!pages(gdk::Key::Page_Up, gdk::ModifierType::CONTROL_MASK));
-        assert!(!pages(gdk::Key::Down, plain));
+    fn page_keys_and_control_home_or_end_are_the_reader_scrolling() {
+        let (plain, control) = (gdk::ModifierType::empty(), gdk::ModifierType::CONTROL_MASK);
+        assert!(scrolls(gdk::Key::Page_Down, plain));
+        assert!(scrolls(gdk::Key::KP_Page_Up, gdk::ModifierType::SHIFT_MASK));
+        assert!(!scrolls(gdk::Key::Page_Up, control), "a tab switch");
+        assert!(scrolls(gdk::Key::End, control));
+        assert!(scrolls(gdk::Key::KP_Home, control));
+        assert!(!scrolls(gdk::Key::Home, plain), "the start of the line");
+        assert!(!scrolls(gdk::Key::Down, plain));
     }
 }

@@ -20,7 +20,7 @@ mod drag;
 mod listing;
 
 pub use drag::dropped_paths;
-use drag::{Import, Move, import_target, move_content, move_target};
+use drag::{Append, Import, Move, import_target, move_content, move_target};
 use listing::{Asked, ShowHidden, Watches, children_model, fill, watch_unindexed};
 pub use listing::{decode, dot_named};
 
@@ -659,9 +659,10 @@ fn root_row(label: &str) -> gtk::Box {
 /// with the rel_path of an activated non-directory row and `false`, and again with `true` when the
 /// click turns out to be a double click, `on_drag` with `true` while a row is being dragged out of
 /// the tree and `false` when it is over, so the panes can put their drop zones up for the duration,
-/// `on_move` with each path a drag carried and the path it was dropped onto, and `on_import` with
+/// `on_move` with each path a drag carried and the path it was dropped onto, `on_import` with
 /// the files another application dropped in, the folder they go into and whether the drag was a
-/// move.
+/// move, and `on_append` with a PDF dropped onto another PDF's row and that row's path.
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     vault: Arc<Vault>,
     root: &gio::ListStore,
@@ -670,6 +671,7 @@ pub fn build(
     on_drag: impl Fn(bool) + 'static,
     on_move: impl Fn(Vec<(String, String)>) + 'static,
     on_import: impl Fn(Vec<PathBuf>, String, bool) + 'static,
+    on_append: impl Fn(String, String) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let asked = Asked::default();
@@ -710,15 +712,19 @@ pub fn build(
     let dragging: Rc<dyn Fn(bool)> = Rc::new(on_drag);
     let moves: Move = Rc::new(on_move);
     let imports: Import = Rc::new(on_import);
+    let appends: Append = Rc::new(on_append);
     let vault_row = root_row(&root_label);
-    vault_row.add_controller(move_target(&moves, |_, _, _| Some(String::new())));
-    vault_row.add_controller(import_target(&imports, |_, _, _| Some(String::new())));
+    vault_row.add_controller(move_target(&moves, &appends, |_, _, _| Some(String::new())));
+    vault_row.add_controller(import_target(&imports, &appends, |_, _, _| {
+        Some(String::new())
+    }));
     let bind_ignored = ignored.clone();
     let bind_cut = cut.clone();
     let (bind_marked, bind_start) = (marked.clone(), start.clone());
     let drag_marked = marked.clone();
     let row_moves = moves.clone();
     let row_imports = imports.clone();
+    let row_appends = appends.clone();
     // A folder's listing is kept for as long as the window is open, which is what makes binding
     // its row free, and it moves only when the vault says the folder changed. So each opening of
     // a folder lists it again: a dependency tree is watched by nothing, and a folder whose news
@@ -840,9 +846,9 @@ pub fn build(
                 (!row.dependency)
                     .then(|| crate::fileops::row_dir(Some((&row.rel, row.is_dir()))).to_string())
             };
-            expander.add_controller(move_target(&row_moves, row_dir));
+            expander.add_controller(move_target(&row_moves, &row_appends, row_dir));
             // The same row takes files from another application, into the same folder.
-            expander.add_controller(import_target(&row_imports, row_dir));
+            expander.add_controller(import_target(&row_imports, &row_appends, row_dir));
             expander
         },
         // Widget lookups and two setters only: no database access on the bind path.
@@ -1109,8 +1115,8 @@ pub fn build(
         let view = target.widget()?.downcast::<gtk::ListView>().ok()?;
         row_at(&view, x, y).is_none().then(String::new)
     };
-    view.add_controller(move_target(&moves, blank));
-    view.add_controller(import_target(&imports, blank));
+    view.add_controller(move_target(&moves, &appends, blank));
+    view.add_controller(import_target(&imports, &appends, blank));
 
     let scroller = scroller(&view);
     // ponytail: a plain `GtkBox` around the scroller, purely so the context menu has a

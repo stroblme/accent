@@ -594,6 +594,24 @@ fn a_page_inserted_between_two_is_blank_and_sized_like_the_one_before() {
     assert_eq!(doc.outline().unwrap()[0].page, Some(2));
 }
 
+/// pdfium's copy of a page leaves a pop-up's `/Parent` naming the markup in the document it came
+/// from, which a save follows once that document has closed. Cut loose, the copy saves, and its
+/// comment still reads.
+#[test]
+fn an_imported_page_saves_once_its_document_has_closed() {
+    let Some((dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    let (_src, source) = open_pdf(&commented_pdf()).unwrap();
+    assert_eq!(doc.import_pages(&source, 1).unwrap(), 1);
+    drop(source);
+    let doc = reopen(&dir, &doc);
+    assert_eq!(page_texts(&doc), ["Hello accent", "", "Second page"]);
+    let comments = doc.comments(1).unwrap();
+    let said: Vec<_> = comments.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(said, ["Is this right?"]);
+}
+
 #[test]
 fn a_page_is_deleted_and_the_last_one_is_kept() {
     let Some((dir, mut doc)) = open_tiny() else {
