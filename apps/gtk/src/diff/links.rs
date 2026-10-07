@@ -3,7 +3,8 @@
 //! lines in to the rows the right one has. The rows are level, so a band runs straight where both
 //! cover the same rows and curves where one covers fewer: a merge side's one line fanning out to
 //! the whole conflict block it is part of in the file, an added line narrowing to the point it went
-//! in at. A comparison's buttons on a hunk sit at the top of its band, one to a half of the strip.
+//! in at. A band's buttons — a hunk's, a conflict block's — sit at its top, one to a half of the
+//! strip.
 //!
 //! Drawn from the grid the last relayout laid ([`Columns`]), again on every relayout and scroll.
 
@@ -16,10 +17,15 @@ use std::rc::{Rc, Weak};
 use super::Pane;
 use super::columns::Columns;
 
-/// The room each column gives up for the strips: an outer column all of it towards its
-/// neighbour, a middle one half on either side, so a strip between two columns is two shares and
-/// a divider wide, and one beside a middle column a share and a half.
-const SHARE: i32 = 22;
+/// The room each of `n` columns gives up for the strips: an outer column all of it to its one
+/// strip, a middle one half to either of its two, so their text stays equally wide. Either way a
+/// strip is about 45 px and the divider wide, room for a button in each half.
+fn share(n: usize) -> i32 {
+    match n {
+        2 => 22,
+        _ => 30,
+    }
+}
 
 /// The rows a band joins in the column on the strip's left and in the one on its right. An empty
 /// range is a column with no line in the run, which the band narrows to a point at.
@@ -28,18 +34,21 @@ pub(super) type Run = [Range<usize>; 2];
 /// Where a band starts and ends, `(top, bottom)`, on the strip's left and on its right.
 pub type Ends = [(i32, i32); 2];
 
+/// A band: the rows it joins, and the key a press on its buttons is handed, where it has any.
+pub(super) type Band = (Run, Option<usize>);
+
 /// What a strip button shows: its icon, its accessible name, and its tooltip, which is its
 /// accessible description too.
 pub(super) type Dress = (&'static str, &'static str, &'static str);
 
-/// What a press on a strip button does, handed its strip, the run whose band it is on, and the
+/// What a press on a strip button does, handed its strip, the key of the band it is on, and the
 /// half of the strip it sits in, 0 the left.
 pub(super) type Act = Rc<dyn Fn(usize, usize, usize)>;
 
-/// A strip button, and where it is: `(strip, run, half)`.
+/// A strip button, and where it is: `(strip, band, half, key)`.
 struct Slot {
     button: gtk::Button,
-    at: Rc<Cell<(usize, usize, usize)>>,
+    at: Rc<Cell<(usize, usize, usize, usize)>>,
     /// What it shows, dressed again only when that changes: a keystroke lays every run again.
     dress: Cell<Option<Dress>>,
 }
@@ -64,11 +73,11 @@ pub(super) struct Links {
     area: gtk::DrawingArea,
     /// Each column as it was before it gave up its share: where its title and text are.
     roots: Vec<gtk::Widget>,
-    runs: RefCell<Vec<Vec<Run>>>,
+    runs: RefCell<Vec<Vec<Band>>>,
     /// Each strip's fill and outline at its left edge and at its right: a band shades from the
     /// tint of the column on its left to that of the one on its right.
     tints: RefCell<Vec<[(gdk::RGBA, gdk::RGBA); 2]>>,
-    /// Per strip, the button each half carries on every band, if any.
+    /// Per strip, the button each half carries on every band with a key, if any.
     dress: RefCell<Vec<[Option<Dress>; 2]>>,
     /// The buttons, handed out to the bands in order on every lay, the ones left over hidden.
     slots: RefCell<Vec<Slot>>,
@@ -87,13 +96,13 @@ fn button_y(top: i32, bottom: i32, text: i32, h: i32) -> i32 {
 
 impl Links {
     /// Room for a strip between each two of `panes`. The paned splits the columns in the ratio of
-    /// their widths, which `Columns` makes one, so each giving up the same share keeps their text
+    /// their widths, which `Columns` makes one, so each giving up the same room keeps their text
     /// equally wide. A strip straddles the divider between its columns, and is drawn over it.
     pub(super) fn new(panes: &mut [Pane]) -> Links {
         let n = panes.len();
         let share = |c: usize| match c == 0 || c == n - 1 {
-            true => SHARE,
-            false => SHARE / 2,
+            true => share(n),
+            false => share(n) / 2,
         };
         let roots = (panes.iter_mut().enumerate())
             .map(|(c, pane)| {
@@ -143,7 +152,7 @@ impl Links {
         });
     }
 
-    /// The buttons on every band of strip `i`, by half.
+    /// The buttons on every band of strip `i` with a key, by half.
     pub(super) fn set_buttons(&self, i: usize, dress: [Option<Dress>; 2]) {
         self.dress.borrow_mut()[i] = dress;
     }
@@ -153,21 +162,23 @@ impl Links {
         *self.act.borrow_mut() = Some(act);
     }
 
-    /// Each strip's bands, left to right, and the buttons on them.
-    pub(super) fn set_runs(&self, runs: Vec<Vec<Run>>) {
+    /// Each strip's bands, left to right, and the buttons on those with a key.
+    pub(super) fn set_runs(&self, runs: Vec<Vec<Band>>) {
         {
             let dress = self.dress.borrow();
             let mut slots = self.slots.borrow_mut();
             let mut n = 0;
             for (i, strip) in runs.iter().enumerate() {
-                for k in 0..strip.len() {
+                for (k, (_, key)) in strip.iter().enumerate() {
                     for (h, look) in dress[i].iter().enumerate() {
-                        let Some(look) = *look else { continue };
+                        let (Some(key), Some(look)) = (*key, *look) else {
+                            continue;
+                        };
                         if n == slots.len() {
                             slots.push(self.slot());
                         }
                         let slot = &slots[n];
-                        slot.at.set((i, k, h));
+                        slot.at.set((i, k, h, key));
                         if slot.dress.replace(Some(look)) != Some(look) {
                             dress_button(&slot.button, look);
                         }
@@ -190,13 +201,13 @@ impl Links {
             .css_classes(["flat", "accent-strip-button"])
             .focus_on_click(false)
             .build();
-        let (act, at) = (self.act.clone(), Rc::new(Cell::new((0, 0, 0))));
+        let (act, at) = (self.act.clone(), Rc::new(Cell::new((0, 0, 0, 0))));
         let here = at.clone();
         button.connect_clicked(move |_| {
             let act = act.borrow().clone();
             if let Some(act) = act {
-                let (i, k, h) = here.get();
-                act(i, k, h);
+                let (i, _, h, key) = here.get();
+                act(i, key, h);
             }
         });
         self.overlay.add_overlay(&button);
@@ -217,14 +228,17 @@ impl Links {
         let slot = slots
             .iter()
             .find(|s| s.button.upcast_ref::<gtk::Widget>() == widget)?;
-        let (i, k, h) = slot.at.get();
+        let (i, k, h, _) = slot.at.get();
         let w = widget.measure(gtk::Orientation::Horizontal, -1).1;
         let height = widget.measure(gtk::Orientation::Vertical, -1).1;
         let runs = self.runs.borrow();
-        let laid = runs.get(i).and_then(|strip| strip.get(k)).and_then(|run| {
-            let [(a0, a1), (b0, b1)] = end(i, run, columns, &self.area)?;
-            Some((a0.min(b0), a1.max(b1), self.span(i)?))
-        });
+        let laid = runs
+            .get(i)
+            .and_then(|strip| strip.get(k))
+            .and_then(|(run, _)| {
+                let [(a0, a1), (b0, b1)] = end(i, run, columns, &self.area)?;
+                Some((a0.min(b0), a1.max(b1), self.span(i)?))
+            });
         let Some((top, bottom, (x0, x1))) = laid else {
             return Some(gdk::Rectangle::new(-2 * w, -2 * height, w, height));
         };
@@ -329,14 +343,17 @@ impl Links {
         let runs = self.runs.borrow();
         let runs = runs.get(i).map_or(&[][..], Vec::as_slice);
         runs.iter()
-            .filter_map(|run| end(i, run, columns, &self.area))
+            .filter_map(|(run, _)| end(i, run, columns, &self.area))
             .collect()
     }
 
     /// Strip `i`'s runs, for the bench.
     #[cfg(feature = "bench")]
     pub(super) fn runs(&self, i: usize) -> Vec<Run> {
-        self.runs.borrow().get(i).cloned().unwrap_or_default()
+        let runs = self.runs.borrow();
+        runs.get(i).map_or(Vec::new(), |strip| {
+            strip.iter().map(|(run, _)| run.clone()).collect()
+        })
     }
 
     /// How wide each column and each strip is, for the bench.
@@ -395,13 +412,21 @@ impl Links {
         )
     }
 
-    /// The shown strip buttons, each with where it is, `(strip, run, half)`, and its accessible
-    /// name, for the bench.
+    /// The shown strip buttons, each with the first row of its band and its accessible name, for
+    /// the bench.
     #[cfg(feature = "bench")]
-    pub(super) fn buttons(&self) -> Vec<((usize, usize, usize), &'static str, gtk::Button)> {
-        let slots = self.slots.borrow();
+    pub(super) fn buttons(&self) -> Vec<(usize, &'static str, gtk::Button)> {
+        let (slots, runs) = (self.slots.borrow(), self.runs.borrow());
         (slots.iter().filter(|s| s.button.is_visible()))
-            .filter_map(|s| Some((s.at.get(), s.dress.get()?.1, s.button.clone())))
+            .filter_map(|s| {
+                let (i, k, ..) = s.at.get();
+                let [left, right] = &runs.get(i)?.get(k)?.0;
+                Some((
+                    left.start.min(right.start),
+                    s.dress.get()?.1,
+                    s.button.clone(),
+                ))
+            })
             .collect()
     }
 }

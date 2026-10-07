@@ -212,15 +212,16 @@ use tags::bench_tags;
 /// note, and then in a tab of two blobs, and prints where the rows around each button went
 /// (`compare::bench_compare_gap`). `=page:<rel>` prints the sticky title and the page the
 /// companion shares with the editor, across a zoom and a new Indent Width
-/// (`compare::bench_compare_page`). `=press:<rel>` prints where to press the overlaid buttons with
-/// XTEST and where the carets are after each press (`compare::bench_compare_press`).
+/// (`compare::bench_compare_page`). `=press:<rel>` prints where to press a "⋯" button and a hunk's
+/// Take and Keep Both in the strip with XTEST, and where the carets are after each press
+/// (`compare::bench_compare_press`).
 /// `=reader:<rel>` prints where to turn the wheel, press Page Down or Ctrl+End and drag a scrollbar
 /// or the minimap with XTEST while the comparison is still on its way to its first hunk, and
 /// whether it took the scroll back or held the line it left at the top
 /// (`compare::bench_compare_reader`).
 /// `=merge:<rel>` merges two branches that conflict over `<rel>` in a repository it makes, opens
-/// the merge view from the Merge Conflicts row and takes each block's sides
-/// (`compare::bench_compare_merge`).
+/// the merge view from the Merge Conflicts row and takes each block's sides from the buttons on
+/// its band, printing where to press them with XTEST (`compare::bench_compare_merge`).
 /// `=unfold:<rel>` presses Show All Unchanged Lines and lets it go, in the note's tab and in a tab
 /// of two blobs, printing the hidden runs and the line at the top of the view each time, or the
 /// caret's line where it is on screen, then drags the divider between the columns

@@ -177,36 +177,14 @@ impl Compare {
         }
     }
 
-    /// The shown strip buttons named `label`, top to bottom, each with the `y` its hunk starts at
-    /// in buffer coordinates.
+    /// The shown strip buttons named `label`: see [`Columns::strip_buttons`].
     pub fn strip_buttons(&self, label: &str) -> Vec<(i32, gtk::Button)> {
-        let hunks = {
-            let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
-            diff::hunks(&lines, &rows)
-        };
-        let grid = self.columns.grid.borrow();
-        let mut buttons: Vec<(i32, gtk::Button)> = (self.columns.links.buttons().into_iter())
-            .filter(|(_, name, _)| *name == label)
-            .filter_map(|((_, run, _), _, button)| {
-                Some((*grid.tops.get(hunks.get(run)?.start)?, button))
-            })
-            .collect();
-        buttons.sort_by_key(|(y, _)| *y);
-        buttons
+        self.columns.strip_buttons(label)
     }
 
-    /// The strip as laid now: how wide the columns and the strip are, where the buttons on screen
-    /// are against the columns (`over=0`, none on a column, is the claim), how many of them are
-    /// not at the top of their bands (`stale=0`), and how many connector ends are off the rows
-    /// they stand on (`links_off=0`).
+    /// The strip as laid now: see [`Columns::strip`].
     pub fn strip(&self) -> String {
-        let (columns, strips) = self.columns.links.widths();
-        let (buttons, rects, over, stale) = self.columns.links.rects(&self.columns);
-        let (_, off) = self.columns.links_check();
-        format!(
-            "widths={columns:?}/{strips:?} buttons={buttons:?} columns={rects:?} over={over} \
-             stale={stale} links_off={off}"
-        )
+        self.columns.strip()
     }
 
     /// What the button on the `i`th hidden run does.
@@ -258,6 +236,32 @@ impl Columns {
     /// Whether the rows are laid and the view is where it was being kept: what a drill waits for.
     pub(super) fn settled(&self) -> bool {
         self.keep.get().is_none() && self.pending.borrow().is_none()
+    }
+
+    /// The shown strip buttons named `label`, top to bottom, each with the `y` its band starts at
+    /// in buffer coordinates.
+    pub(super) fn strip_buttons(&self, label: &str) -> Vec<(i32, gtk::Button)> {
+        let grid = self.grid.borrow();
+        let mut buttons: Vec<(i32, gtk::Button)> = (self.links.buttons().into_iter())
+            .filter(|(_, name, _)| *name == label)
+            .filter_map(|(row, _, button)| Some((*grid.tops.get(row)?, button)))
+            .collect();
+        buttons.sort_by_key(|(y, _)| *y);
+        buttons
+    }
+
+    /// The strips as laid now: how wide the columns and the strips are, where the buttons on
+    /// screen are against the columns (`over=0`, none on a column, is the claim), how many of them
+    /// are not at the top of their bands (`stale=0`), and how many connector ends are off the rows
+    /// they stand on (`links_off=0`).
+    pub(super) fn strip(&self) -> String {
+        let (columns, strips) = self.links.widths();
+        let (buttons, rects, over, stale) = self.links.rects(self);
+        let (_, off) = self.links_check();
+        format!(
+            "widths={columns:?}/{strips:?} buttons={buttons:?} columns={rects:?} over={over} \
+             stale={stale} links_off={off}"
+        )
     }
 
     /// Each connector's ends, as `(top, bottom)` on its strip's left and on its right, by strip,

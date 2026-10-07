@@ -8,15 +8,18 @@ use crate::diff::merge::BASE;
 /// incoming side alone, which git merges by itself; the block at line 30 is then given a base, as
 /// `merge.conflictStyle = diff3` writes one. It activates the file's Merge Conflicts row and
 /// prints, once the view has settled: the side columns' titles, the rows, the blocks, the hidden
-/// runs and the buttons, and `misaligned=0`, the claim, with the caret's line (`opened`); where
-/// each column's button on the first block's strip sits (`strip`, one height); how many lines of
-/// each side are tinted (`tints`), every side line beside a block among them; how wide each column
-/// and each strip between them is (`widths`, the columns one width); where each connector between
-/// the columns ends, against where the rows it joins are drawn (`links`, `off=0` the claim),
-/// holding three seconds for a screenshot (`hold`); a word typed into the first block (`typed`);
-/// the first block taken from the left column's arrow (`current`, and `tints` again), the next by
-/// Accept Incoming from the palette with the caret in it (`incoming`), the last by the middle's
-/// Both (`both`), each with the lines it left; the left column switched to the base (`base`); Show
+/// runs and the buttons, and `misaligned=0`, the claim, with the caret's line (`opened`); the
+/// strips as laid (`strip`: their buttons against the columns, `over=0 stale=0` the claim, see
+/// `Columns::strip`); how many lines of each side are tinted (`tints`), every side line beside a
+/// block among them; how wide each column and each strip between them is (`widths`, the columns
+/// one width); where each connector between the columns ends, against where the rows it joins are
+/// drawn (`links`, `off=0` the claim), holding three seconds for a screenshot (`hold`); a word
+/// typed into the first block (`typed`); the first block taken by the Accept Current arrow on its
+/// band (`current`, and `tints` again), the next by its Accept Incoming arrow (`incoming`), the
+/// last by its Accept Both (`both`), each with the lines it left. The three are pressed through
+/// the real pointer: `aim <x> <y>`, after the strip as laid then, is the middle of each, for
+/// `build-aux/xtest.py :N "move <x> <y>; focus; down; up"` within ten seconds. Then the left
+/// column switched to the base (`base`); Show
 /// All Unchanged Lines down and up (`all`); a divider dragged (`resize`, and `links` again), and
 /// the view scrolled (`scrolled`, the connectors once more); and the view left (`left`). Then it
 /// opens again from the row and is left and put back as a session restore puts it (`restored`, with
@@ -142,7 +145,7 @@ pub(in crate::bench) fn bench_compare_merge(app: &Rc<App>, rel: &str) {
             caret_line(),
             line(caret_line()),
         );
-        println!("bench compare_merge strip {:?}", merge.block_centres(0));
+        println!("bench compare_merge strip {}", merge.strip());
         println!("bench compare_merge tints {:?}", merge.tinted());
         let (columns, strips) = merge.widths();
         println!("bench compare_merge widths columns={columns:?} strips={strips:?}");
@@ -165,28 +168,55 @@ pub(in crate::bench) fn bench_compare_merge(app: &Rc<App>, rel: &str) {
         wait(800).await;
         println!("bench compare_merge typed {:?} {}", line(11), state());
 
-        merge.press(0, 0);
-        wait(800).await;
+        // The first block's button named `label`, scrolled halfway down the view and pressed
+        // through the real pointer.
+        let press = async |label: &str| {
+            let Some((top, button)) = merge.strip_buttons(label).first().cloned() else {
+                return println!("bench compare_merge {label:?} none");
+            };
+            let view = merge.view(0);
+            if let Some(adj) = view.vadjustment() {
+                let seen = view.visible_rect();
+                adj.set_value(adj.value() + f64::from(top - seen.y()) - adj.page_size() / 2.0);
+            }
+            wait(500).await;
+            println!("bench compare_merge strip {}", merge.strip());
+            let middle = gtk::graphene::Point::new(
+                button.width() as f32 / 2.0,
+                button.height() as f32 / 2.0,
+            );
+            let (sx, sy) = app.window.surface_transform();
+            if let Some(p) = button
+                .root()
+                .and_then(|root| button.compute_point(&root, &middle))
+            {
+                println!(
+                    "bench compare_merge aim {:.0} {:.0}",
+                    f64::from(p.x()) + sx,
+                    f64::from(p.y()) + sy
+                );
+            }
+            let blocks = merge.counts().1;
+            for _ in 0..100 {
+                wait(100).await;
+                if merge.counts().1 != blocks {
+                    break;
+                }
+            }
+            wait(800).await;
+        };
+        press("Accept Current").await;
         println!("bench compare_merge current {:?} {}", line(10), state());
         println!("bench compare_merge tints {:?}", merge.tinted());
 
-        let first = accent_core::conflict::blocks(&tab.text())
-            .first()
-            .map(|b| b.ours.start);
-        if let Some(at) = first {
-            let chars = tab.text()[..at].chars().count() as i32;
-            tab.buffer.place_cursor(&tab.buffer.iter_at_offset(chars));
-        }
-        let _ = WidgetExt::activate_action(&app.window, "win.conflict-incoming", None);
-        wait(800).await;
+        press("Accept Incoming").await;
         println!(
             "bench compare_merge incoming {:?} {}",
             [line(30), line(31)],
             state()
         );
 
-        merge.press(0, 1);
-        wait(800).await;
+        press("Accept Both").await;
         let both: Vec<String> = (51..=52).map(line).collect();
         println!("bench compare_merge both {both:?} {}", state());
 

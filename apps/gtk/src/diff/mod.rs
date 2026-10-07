@@ -31,12 +31,11 @@ pub mod merge;
 mod pad;
 mod pool;
 
-use columns::{Anchor, Columns, Rows};
+use columns::{Columns, Rows};
 use links::{Dress, run_of};
 pub use merge::Merge;
 use pad::UNMEASURED;
 pub use pool::Pool;
-use pool::Role;
 
 const TAG_ADDED: &str = "diff-added";
 const TAG_REMOVED: &str = "diff-removed";
@@ -449,16 +448,16 @@ impl Compare {
 
         for pane in &this.columns.panes {
             let w = this.weak.clone();
-            *pane.pool.act.borrow_mut() = Some(Rc::new(move |role, _| {
-                if let (Some(c), Role::Gap { key, .. }) = (w.upgrade(), role) {
+            *pane.pool.act.borrow_mut() = Some(Rc::new(move |key| {
+                if let Some(c) = w.upgrade() {
                     c.open_run(key);
                 }
             }));
         }
         let w = this.weak.clone();
-        this.columns.links.set_act(Rc::new(move |_, run, half| {
+        this.columns.links.set_act(Rc::new(move |_, i, half| {
             if let Some(c) = w.upgrade() {
-                c.press(run, half);
+                c.press(i, half);
             }
         }));
         this.lay(true);
@@ -603,11 +602,11 @@ impl Compare {
         self.refresh();
     }
 
-    /// What the button in `half` of the strip does on hunk `run`.
-    fn press(&self, run: usize, half: usize) {
+    /// What the button in `half` of the strip does on hunk `i`.
+    fn press(&self, i: usize, half: usize) {
         let hunk = {
             let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
-            diff::hunks(&lines, &rows).get(run).cloned()
+            diff::hunks(&lines, &rows).get(i).cloned()
         };
         // Out of the borrow: taking a hunk edits the editor, which lays the comparison again.
         let on = self
@@ -780,22 +779,21 @@ impl Compare {
         for (gap, key) in &hidden {
             for side in [Side::Old, Side::New] {
                 let pane = self.pane(side);
-                let role = Role::Gap {
-                    key: *key,
-                    rows: gap.len(),
-                };
-                let widget = pane.pool.claim(&pane.view, role);
-                overlays.push((side.idx(), widget, Anchor::Gap(gap.start)));
+                let widget = pane.pool.claim(&pane.view, *key, gap.len());
+                overlays.push((side.idx(), widget, gap.start));
             }
         }
         for pane in &self.columns.panes {
             pane.pool.hide_unclaimed();
         }
 
-        // Each connector joins a hunk's lines on the left to its lines on the right.
+        // Each connector joins a hunk's lines on the left to its lines on the right, and its
+        // buttons are handed the hunk's index.
         let hunks = diff::hunks(&lines, &rows);
         let has = |k: usize, r: usize| [Side::Old, Side::New][k].of(&rows[r]).is_some();
-        let runs = hunks.iter().map(|hunk| run_of(hunk, has)).collect();
+        let runs = (hunks.iter().enumerate())
+            .map(|(i, hunk)| (run_of(hunk, has), Some(i)))
+            .collect();
         let buttons = self.hunk_buttons.borrow();
         let dress = [0, 1].map(|half| buttons.get(half).map(|(dress, _)| *dress));
         drop(buttons);
@@ -819,7 +817,6 @@ impl Compare {
                 })
                 .collect(),
             hidden: hidden.iter().map(|(gap, _)| gap.clone()).collect(),
-            extra: vec![0; rows.len()],
             first: hunks.first().map(|hunk| hunk.start),
             overlays,
         };

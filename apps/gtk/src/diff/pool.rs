@@ -4,32 +4,18 @@ use adw::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// What one overlaid button is for right now.
-#[derive(Clone)]
-pub(super) enum Role {
-    /// Opens the hidden run keyed `key`, `rows` long.
-    Gap { key: usize, rows: usize },
-    /// Takes a side of the `i`th conflict block in a merge.
-    Block(usize),
-}
-
-/// What a press does: handed the role its button's slot holds right now, and which of the slot's
-/// buttons it was.
-pub(super) type Act = Rc<dyn Fn(Role, usize)>;
+/// What a press does: handed the key of the hidden run its button opens right now.
+pub(super) type Act = Rc<dyn Fn(usize)>;
 
 struct Slot {
-    widget: gtk::Widget,
-    /// The gap button itself, to relabel.
-    label: Option<gtk::Button>,
-    /// A block's buttons, dressed again at each claim: the arrow on a merge's column takes the
-    /// side the column shows.
-    buttons: Vec<gtk::Button>,
-    role: Rc<RefCell<Role>>,
+    button: gtk::Button,
+    /// The key of the hidden run the button opens.
+    key: Rc<Cell<usize>>,
     /// Whether the refresh under way has handed this slot out.
     claimed: Cell<bool>,
 }
 
-/// The buttons laid over one view, kept for reuse.
+/// The "⋯ N unchanged lines" buttons laid over one view, kept for reuse.
 ///
 /// GTK 4.22 has no public way to take an overlay back off a text view — `gtk_text_view_remove`
 /// knows the anchored children and the four border children, and warns for anything else — so
@@ -38,53 +24,39 @@ struct Slot {
 /// comparison it hosts and the buttons parented to it have to as well.
 ///
 /// A refresh hands the buttons out again in order, [`Pool::unclaim`] to [`Pool::hide_unclaimed`],
-/// so the button a block or a run had is the one it gets back, and one still wanted is never
-/// hidden in between: a keystroke re-diffs, and must not take every button off and put it back.
+/// so the button a run had is the one it gets back, and one still wanted is never hidden in
+/// between: a keystroke re-diffs, and must not take every button off and put it back.
 #[derive(Default)]
 pub struct Pool {
     /// What the comparison laid over the view right now does with a press, asked at the press:
     /// the buttons outlive the comparison that made them.
     pub(super) act: RefCell<Option<Act>>,
-    /// The labels or icon names, and the tooltips, of a block's buttons: whichever this view's
-    /// merge asks for, which a row is made with and dressed in at every claim.
-    pub(super) buttons: RefCell<Vec<(&'static str, &'static str)>>,
     slots: RefCell<Vec<Slot>>,
 }
 
 impl Pool {
-    /// A shown button for `role`: the first one of the same kind this refresh has not handed out
-    /// yet, or a new one laid over `view`.
-    pub(super) fn claim(self: &Rc<Self>, view: &sourceview5::View, role: Role) -> gtk::Widget {
-        let same_kind = |slot: &Slot| {
-            matches!(
-                (&*slot.role.borrow(), &role),
-                (Role::Gap { .. }, Role::Gap { .. }) | (Role::Block(_), Role::Block(_))
-            )
-        };
+    /// A shown button for the hidden run keyed `key`, `rows` long: the first one this refresh has
+    /// not handed out yet, or a new one laid over `view`.
+    pub(super) fn claim(
+        self: &Rc<Self>,
+        view: &sourceview5::View,
+        key: usize,
+        rows: usize,
+    ) -> gtk::Widget {
         let mut slots = self.slots.borrow_mut();
-        let at = match slots
-            .iter()
-            .position(|slot| !slot.claimed.get() && same_kind(slot))
-        {
+        let at = match slots.iter().position(|slot| !slot.claimed.get()) {
             Some(at) => at,
             None => {
-                slots.push(self.build(view, &role));
+                slots.push(self.build(view));
                 slots.len() - 1
             }
         };
         let slot = &slots[at];
-        if let (Some(button), Role::Gap { rows, .. }) = (&slot.label, &role) {
-            button.set_label(&format!("⋯ {rows} unchanged lines"));
-        }
-        if matches!(role, Role::Block(_)) {
-            for (button, (name, tip)) in slot.buttons.iter().zip(self.buttons.borrow().iter()) {
-                dress(button, name, tip);
-            }
-        }
-        *slot.role.borrow_mut() = role;
+        slot.button.set_label(&format!("⋯ {rows} unchanged lines"));
+        slot.key.set(key);
         slot.claimed.set(true);
-        slot.widget.set_visible(true);
-        slot.widget.clone()
+        slot.button.set_visible(true);
+        slot.button.clone().upcast()
     }
 
     /// Every button up for claiming again. None is hidden yet.
@@ -98,74 +70,32 @@ impl Pool {
     pub(super) fn hide_unclaimed(&self) {
         for slot in self.slots.borrow().iter() {
             if !slot.claimed.get() {
-                slot.widget.set_visible(false);
+                slot.button.set_visible(false);
             }
         }
     }
 
-    fn build(self: &Rc<Self>, view: &sourceview5::View, role: &Role) -> Slot {
-        let role = Rc::new(RefCell::new(role.clone()));
-        let (widget, label, buttons) = match &*role.borrow() {
-            Role::Gap { .. } => {
-                let button = gtk::Button::new();
-                button.add_css_class("flat");
-                button.add_css_class("caption");
-                button.set_tooltip_text(Some("Show these lines"));
-                crate::widgets::claim_press(&button);
-                button.connect_clicked(self.act(&role, 0));
-                (button.clone().upcast(), Some(button), Vec::new())
+    /// A new button laid over `view`. Its press runs the comparison's [`Pool::act`] as it is at
+    /// the press, with the key the slot holds then; weak on the pool, because the button is a
+    /// child of the view the pool's slots hold.
+    fn build(self: &Rc<Self>, view: &sourceview5::View) -> Slot {
+        let button = gtk::Button::new();
+        button.add_css_class("flat");
+        button.add_css_class("caption");
+        button.set_tooltip_text(Some("Show these lines"));
+        crate::widgets::claim_press(&button);
+        let (pool, key) = (Rc::downgrade(self), Rc::new(Cell::new(0)));
+        let pressed = key.clone();
+        button.connect_clicked(move |_| {
+            if let Some(act) = pool.upgrade().and_then(|p| p.act.borrow().clone()) {
+                act(pressed.get());
             }
-            // The merge's buttons as they are now, which is once and for all: a block's buttons
-            // on a merge's column are those of the column.
-            Role::Block(_) => {
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-                row.add_css_class("linked");
-                row.add_css_class("osd");
-                let mut buttons = Vec::new();
-                for (i, (name, tip)) in self.buttons.borrow().iter().enumerate() {
-                    let button = gtk::Button::new();
-                    button.add_css_class("caption");
-                    dress(&button, name, tip);
-                    crate::widgets::claim_press(&button);
-                    button.connect_clicked(self.act(&role, i));
-                    row.append(&button);
-                    buttons.push(button);
-                }
-                (row.upcast(), None, buttons)
-            }
-        };
-        view.add_overlay(&widget, 0, 0);
+        });
+        view.add_overlay(&button, 0, 0);
         Slot {
-            widget,
-            label,
-            buttons,
-            role,
+            button,
+            key,
             claimed: Cell::new(false),
         }
     }
-
-    /// What the `i`th button of a slot does: the comparison's [`Pool::act`] as it is at the press,
-    /// with the role the slot holds then. Weak on the pool, because the button is a child of the
-    /// view the pool's slots hold.
-    fn act(self: &Rc<Self>, role: &Rc<RefCell<Role>>, i: usize) -> impl Fn(&gtk::Button) + use<> {
-        let (pool, role) = (Rc::downgrade(self), role.clone());
-        move |_| {
-            let Some(act) = pool.upgrade().and_then(|p| p.act.borrow().clone()) else {
-                return;
-            };
-            let role = role.borrow().clone();
-            act(role, i);
-        }
-    }
-}
-
-/// Give `button` its label, or its icon where `name` is a symbolic icon's, and its tooltip, which
-/// is its accessible description too.
-fn dress(button: &gtk::Button, name: &str, tip: &str) {
-    match name.ends_with("-symbolic") {
-        true => button.set_icon_name(name),
-        false => button.set_label(name),
-    }
-    button.set_tooltip_text(Some(tip));
-    button.update_property(&[gtk::accessible::Property::Description(tip)]);
 }

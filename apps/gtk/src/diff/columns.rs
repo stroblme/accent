@@ -23,23 +23,11 @@ use crate::editor;
 const FIRST_HUNK_AT: f64 = 0.25;
 
 /// Blank space a hidden run leaves behind, for the button that opens it to sit in.
-pub(super) const GAP_PX: i32 = 28;
-/// Inset of the buttons in the room a host leaves from the pane's edges.
-const INSET: i32 = 8;
+const GAP_PX: i32 = 28;
 /// How often a relayout asks again for the heights GTK had not validated yet, and how long it
 /// waits between asking: GTK validates a screenful per idle, so a few are enough for any note.
 const SETTLE: u8 = 10;
 const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Where the overlaid buttons sit, in rows.
-#[derive(Clone, Copy)]
-pub(super) enum Anchor {
-    /// Centred in the blank space a hidden run left at this row.
-    Gap(usize),
-    /// In the blank space the host left at this row on purpose ([`Rows::extra`]), at its start,
-    /// centre or end.
-    Room(usize, gtk::Align),
-}
 
 /// Where the view is kept until the rows are laid: see [`Columns::keep`].
 #[derive(Clone, Copy)]
@@ -69,17 +57,16 @@ pub(super) struct Rows {
     pub(super) changed: Vec<bool>,
     /// The rows hidden right now.
     pub(super) hidden: Vec<Range<usize>>,
-    /// Per row, the blank space every column leaves there on purpose, for buttons to sit in.
-    pub(super) extra: Vec<i32>,
     /// The first hunk's first row, where a comparison opens.
     pub(super) first: Option<usize>,
-    /// The buttons laid over the rows, by column.
-    pub(super) overlays: Vec<(usize, gtk::Widget, Anchor)>,
+    /// The buttons that open the hidden runs, by column, each centred in the blank space its run
+    /// left at this row.
+    pub(super) overlays: Vec<(usize, gtk::Widget, usize)>,
 }
 
 /// What a relayout measured: every row's natural height per column (`None` where the column has
-/// no visible line), the space every column leaves at a row on purpose, and where each row starts
-/// in the shared grid.
+/// no visible line), the space every column leaves at a row for a hidden run's button, and where
+/// each row starts in the shared grid.
 #[derive(Default)]
 pub(super) struct Grid {
     #[cfg(feature = "bench")]
@@ -742,7 +729,7 @@ impl Columns {
                     .collect()
             })
             .collect();
-        let mut extra = rows.extra.clone();
+        let mut extra = vec![0; count];
         for gap in &rows.hidden {
             extra[gap.start] += GAP_PX;
         }
@@ -783,22 +770,12 @@ impl Columns {
 
         // Buffer coordinates, which start at the first paragraph — the view's top margin is
         // outside them — and scroll with the text.
-        for (c, widget, anchor) in rows.overlays.iter() {
+        for (c, widget, row) in rows.overlays.iter() {
             let view = &self.panes[*c].view;
             let width = view.visible_rect().width();
             let (_, wanted, _, _) = widget.measure(gtk::Orientation::Horizontal, -1);
             let (_, height, _, _) = widget.measure(gtk::Orientation::Vertical, -1);
-            let (x, y) = match *anchor {
-                Anchor::Gap(row) => ((width - wanted) / 2, tops[row] + (GAP_PX - height) / 2),
-                Anchor::Room(row, align) => {
-                    let x = match align {
-                        gtk::Align::Start => INSET,
-                        gtk::Align::End => width - wanted - INSET,
-                        _ => (width - wanted) / 2,
-                    };
-                    (x, tops[row] + (rows.extra[row] - height) / 2)
-                }
-            };
+            let (x, y) = ((width - wanted) / 2, tops[*row] + (GAP_PX - height) / 2);
             view.move_overlay(widget, x.max(0), y);
         }
         let end = tops.last().map_or(0, |top| {

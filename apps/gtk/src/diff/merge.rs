@@ -1,9 +1,9 @@
 //! A file git left unmerged, in three columns: a side of the conflict, the file itself with git's
 //! markers in it, and the other side. The middle column is the tab's own editor, where the merge
 //! is made; the side columns are read-only, each showing one of the conflict's stages — Current,
-//! Base or Incoming, from the title row — and tinted where it differs from the file. Above each
-//! conflict block every column leaves a strip of room: an arrow on a side's strip takes that side
-//! (`Conflicts::accept`), Both in the middle takes both.
+//! Base or Incoming, from the title row — and tinted where it differs from the file. A strip
+//! between each side and the file joins the two, and each conflict block's band in it carries the
+//! buttons that take its sides (`Conflicts::accept`).
 //!
 //! The rows are [`diff::align3`]'s, laid out by [`Columns`] as a comparison's are: one scroll,
 //! padding that keeps each row level, unchanged runs hidden behind a button, the reader's line
@@ -18,9 +18,8 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::rc::{Rc, Weak};
 
-use super::columns::{Anchor, Columns, GAP_PX, Rows};
+use super::columns::{Columns, Rows};
 use super::links::run_of;
-use super::pool::Role;
 use super::{CONTEXT, Pane, TAG_GAP, install_tags, line_starts, normalise};
 use crate::conflict::Conflicts;
 use crate::editor;
@@ -45,8 +44,7 @@ pub struct Merge {
     shown: [Cell<usize>; 2],
     /// The title row's choice of stage, left and right.
     pickers: [gtk::DropDown; 2],
-    /// Per row, the line each column shows there: [`Three`]'s rows with a row of room before each
-    /// conflict block.
+    /// Per row, the line each column shows there: [`Three`]'s rows.
     lines: RefCell<Vec<[Option<usize>; 3]>>,
     /// Per column, where each line of its text starts, in characters.
     starts: RefCell<[Vec<i32>; 3]>,
@@ -137,7 +135,7 @@ impl Merge {
         let connect = |object: glib::Object, id: glib::SignalHandlerId| {
             this.handlers.borrow_mut().push((object, id));
         };
-        for (column, pane) in this.columns.panes.iter().enumerate() {
+        for pane in &this.columns.panes {
             // As a comparison's: the theme foreground and the font are there once it is mapped.
             let w = weak.clone();
             pane.view.connect_map(move |_| {
@@ -147,14 +145,20 @@ impl Merge {
                 }
             });
             let w = weak.clone();
-            *pane.pool.act.borrow_mut() = Some(Rc::new(move |role, _| {
-                let Some(m) = w.upgrade() else { return };
-                match role {
-                    Role::Gap { key, .. } => m.open_run(key),
-                    Role::Block(i) => m.accept(i, column),
+            *pane.pool.act.borrow_mut() = Some(Rc::new(move |key| {
+                if let Some(m) = w.upgrade() {
+                    m.open_run(key);
                 }
             }));
         }
+        // A button on a block's band takes the side of the column whose half it is in, the
+        // file's taking both.
+        let w = weak.clone();
+        this.columns.links.set_act(Rc::new(move |strip, i, half| {
+            if let Some(m) = w.upgrade() {
+                m.accept(i, strip + half);
+            }
+        }));
         let w = weak.clone();
         let style = adw::StyleManager::default();
         let id = style.connect_dark_notify(move |_| {
@@ -238,8 +242,8 @@ impl Merge {
         self.refresh();
     }
 
-    /// Take a side of the `i`th conflict block, from an arrow on `column`'s strip: the side that
-    /// column shows, or both from the middle.
+    /// Take a side of the `i`th conflict block, from a button in `column`'s half of a strip: the
+    /// side that column shows, or both from the middle.
     fn accept(&self, i: usize, column: usize) {
         let take = match column {
             MID => Take::Both,
@@ -332,7 +336,7 @@ impl Merge {
             }
         }
 
-        // The rows, with one of room before each block's `<<<<<<<` line. A side's lines beside a
+        // The rows, and where each block's `<<<<<<<` line is among them. A side's lines beside a
         // block are tinted too, where they are the file's: the block reads across all three
         // columns until it is taken.
         let number = |lines: &[DiffLine], i: Option<usize>| i.and_then(|i| lines[i].old_line);
@@ -345,7 +349,7 @@ impl Merge {
             .iter()
             .map(|block| (line_at(block.range.start), line_at(block.theirs.end)))
             .collect();
-        let (mut lines, mut changed, mut rooms) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut lines, mut changed, mut block_rows) = (Vec::new(), Vec::new(), Vec::new());
         // Per side, whether the row is one the side and the file differ in, a block's included:
         // what the connectors between them are drawn over.
         let mut differ: [Vec<bool>; 2] = Default::default();
@@ -358,10 +362,7 @@ impl Merge {
                 .iter()
                 .find(|(start, _)| row.mid == Some(*start))
             {
-                rooms.push(lines.len());
-                lines.push([None; 3]);
-                changed.push(true);
-                differ.iter_mut().for_each(|d| d.push(false));
+                block_rows.push(lines.len());
                 inside = Some(end);
             }
             let line = [
@@ -439,68 +440,67 @@ impl Merge {
             hidden.push((gap, key));
         }
 
-        // The buttons: a hidden run's in every column, and the arrows on each block's strip.
+        // A hidden run's button in every column.
         for pane in &self.columns.panes {
             pane.pool.unclaim();
         }
         let mut overlays = Vec::new();
         for (c, pane) in self.columns.panes.iter().enumerate() {
             for (gap, key) in &hidden {
-                let role = Role::Gap {
-                    key: *key,
-                    rows: gap.len(),
-                };
-                let widget = pane.pool.claim(&pane.view, role);
-                overlays.push((c, widget, Anchor::Gap(gap.start)));
-            }
-            let (button, align) = match c {
-                MID => (
-                    (
-                        "Both",
-                        "Accept Both: the current change, then the incoming one",
-                    ),
-                    gtk::Align::Center,
-                ),
-                _ => {
-                    let icon = match c {
-                        0 => "go-next-symbolic",
-                        _ => "go-previous-symbolic",
-                    };
-                    let tip = match self.shown[c / 2].get() {
-                        CURRENT => "Accept Current",
-                        INCOMING => "Accept Incoming",
-                        _ => continue,
-                    };
-                    let align = match c {
-                        0 => gtk::Align::End,
-                        _ => gtk::Align::Start,
-                    };
-                    ((icon, tip), align)
-                }
-            };
-            *pane.pool.buttons.borrow_mut() = vec![button];
-            for (i, &room) in rooms.iter().enumerate() {
-                let widget = pane.pool.claim(&pane.view, Role::Block(i));
-                overlays.push((c, widget, Anchor::Room(room, align)));
+                let widget = pane.pool.claim(&pane.view, *key, gap.len());
+                overlays.push((c, widget, gap.start));
             }
         }
         for pane in &self.columns.panes {
             pane.pool.hide_unclaimed();
         }
 
-        // Each connector joins the rows of its run the side has lines in to those the file has.
+        // Each connector joins the rows of its run the side has lines in to those the file has,
+        // a run cut where a block starts, so every block has a band of its own, which carries its
+        // buttons.
+        let cut = |run: &Range<usize>| {
+            let mut from = run.start;
+            let mut parts: Vec<Range<usize>> = (block_rows.iter())
+                .filter(|&&r| run.start < r && r < run.end)
+                .map(|&r| {
+                    let part = from..r;
+                    from = r;
+                    part
+                })
+                .collect();
+            parts.push(from..run.end);
+            parts
+        };
         let runs = [0, 1].map(|s| {
             let has = |k: usize, r: usize| lines[r][s + k].is_some();
-            (diff::hunks_of(&differ[s]).iter())
-                .map(|run| run_of(run, has))
+            (diff::hunks_of(&differ[s]).iter().flat_map(cut))
+                .map(|run| {
+                    let block = block_rows.iter().position(|&r| r == run.start);
+                    (run_of(&run, has), block)
+                })
                 .collect()
         });
-        self.columns.links.set_runs(runs.to_vec());
+        // In the left strip an arrow from the left column's half takes the stage that column
+        // shows and + in the file's half takes both, in the right strip an arrow from the right
+        // column's half takes the stage it shows; none from a column showing the base.
+        let arrow = |side: usize, icon| {
+            let label = match self.shown[side].get() {
+                CURRENT => "Accept Current",
+                INCOMING => "Accept Incoming",
+                _ => return None,
+            };
+            Some((icon, label, label))
+        };
+        let both = (
+            "list-add-symbolic",
+            "Accept Both",
+            "Accept Both: the current change, then the incoming one",
+        );
+        let links = &self.columns.links;
+        links.set_buttons(0, [arrow(0, "go-next-symbolic"), Some(both)]);
+        links.set_buttons(1, [None, arrow(1, "go-previous-symbolic")]);
+        links.set_runs(runs.to_vec());
 
-        let mut extra = vec![0; lines.len()];
-        for &room in &rooms {
-            extra[room] = GAP_PX;
-        }
         let laid = Rows {
             lines: (0..3)
                 .map(|c| lines.iter().map(|line| line[c]).collect())
@@ -509,7 +509,6 @@ impl Merge {
             first: diff::hunks_of(&changed).first().map(|hunk| hunk.start),
             changed,
             hidden: hidden.iter().map(|(gap, _)| gap.clone()).collect(),
-            extra,
             overlays,
         };
         *self.lines.borrow_mut() = lines;
@@ -574,34 +573,24 @@ impl Merge {
 
     /// (rows, conflict blocks, hidden runs, buttons) on screen right now.
     pub fn counts(&self) -> (usize, usize, usize, usize) {
+        let blocks = conflict::blocks(&self.text(MID)).len();
         let rows = self.columns.rows.borrow();
-        let blocks = rows.extra.iter().filter(|&&px| px > 0).count();
         (
             rows.changed.len(),
             blocks,
             rows.hidden.len(),
-            rows.overlays.len(),
+            rows.overlays.len() + self.columns.links.shown(),
         )
     }
 
-    /// The middle of the `i`th block's buttons in each column, in the window, `None` where a
-    /// column has none: the three are one strip, so the claim is one height.
-    pub fn block_centres(&self, i: usize) -> [Option<i32>; 3] {
-        let rows = self.columns.rows.borrow();
-        let room = rows
-            .extra
-            .iter()
-            .enumerate()
-            .filter(|(_, px)| **px > 0)
-            .nth(i)
-            .map(|(r, _)| r);
-        [0, 1, 2].map(|c| {
-            let (_, widget, _) = rows.overlays.iter().find(|(column, _, anchor)| {
-                *column == c && matches!(anchor, Anchor::Room(r, _) if Some(*r) == room)
-            })?;
-            let bounds = widget.compute_bounds(&self.columns.paned)?;
-            Some((bounds.y() + bounds.height() / 2.0).round() as i32)
-        })
+    /// The shown strip buttons named `label`: see `Columns::strip_buttons`.
+    pub fn strip_buttons(&self, label: &str) -> Vec<(i32, gtk::Button)> {
+        self.columns.strip_buttons(label)
+    }
+
+    /// The strips as laid now: see `Columns::strip`.
+    pub fn strip(&self) -> String {
+        self.columns.strip()
     }
 
     /// Each connector's ends, as `(top, bottom)` on its strip's left and on its right, by strip,
@@ -626,11 +615,6 @@ impl Merge {
                 .filter(|at| tag.as_ref().is_some_and(|tag| at.has_tag(tag)))
                 .count()
         })
-    }
-
-    /// What the button on block `i`'s strip in `column` does.
-    pub fn press(&self, i: usize, column: usize) {
-        self.accept(i, column);
     }
 
     /// What each side column's title row says it shows.
