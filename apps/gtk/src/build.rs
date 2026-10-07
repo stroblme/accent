@@ -430,11 +430,19 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
         app.config.borrow().show_hidden,
         // The row's kind used to decide what opened. `open_path` reads the name itself, so the
         // tree no longer has to agree with it about what a file is. A row opens as a preview:
-        // one click is looking, not keeping.
+        // one click is looking, not keeping. A double click keeps the tab its first click opened,
+        // as a double click on the tab does.
         glib::clone!(
             #[weak]
             app,
-            move |_kind, rel: &str| app.open_preview(rel)
+            move |_kind, rel: &str, double| match double {
+                true => {
+                    if let Some(doc) = app.doc_for(rel) {
+                        app.promote(doc.page());
+                    }
+                }
+                false => app.open_preview(rel),
+            }
         ),
         // A drag out of the tree is the only notice the panes get that their drop zones should
         // go up; a tab drag announces itself through `AdwTabView:is-transferring-page`.
