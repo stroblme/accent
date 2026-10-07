@@ -1,5 +1,6 @@
 //! Dropping onto the tree: a row dragged within it moves, files from another application are
-//! copied in, and a shut folder a drag rests on springs open.
+//! copied in, a PDF dropped onto another PDF's row puts its pages after the other's, and a shut
+//! folder a drag rests on springs open.
 
 use super::*;
 
@@ -16,6 +17,22 @@ pub(super) fn move_content(rel: &str) -> gdk::ContentProvider {
 
 /// What a drop is handed to: each path a drag carried, and the path it goes to.
 pub(super) type Move = Rc<dyn Fn(Vec<(String, String)>)>;
+
+/// What a PDF dropped onto another PDF's row is handed to: the one dropped, a vault path or the
+/// absolute path of a file from another application, and the row's path.
+pub(super) type Append = Rc<dyn Fn(String, String)>;
+
+/// The PDF row under `target` and the one PDF of `carried` dropped onto it, which goes after its
+/// last page rather than beside it. A PDF dropped onto itself is a move as before, so refused.
+fn appending(target: &gtk::DropTarget, carried: &[String]) -> Option<(String, String)> {
+    let row = target_row(target)?.item().as_ref().and_then(decode)?;
+    let pdf = |rel: &str| crate::doc::kind_of(rel) == crate::doc::Kind::Pdf;
+    let onto = !row.dependency && !row.is_dir() && pdf(&row.rel);
+    match carried {
+        [one] if onto && pdf(one) && *one != row.rel => Some((one.clone(), row.rel)),
+        _ => None,
+    }
+}
 
 /// The paths a tree drag is carrying: one row, or the marked set a marked row carries along
 /// (a `GtkStringList`, which no pane takes either — there is no one note in it to open).
@@ -85,6 +102,7 @@ fn target_row(target: &gtk::DropTarget) -> Option<gtk::TreeListRow> {
 /// on the row is then the whole of the feedback, and there is nothing else to draw.
 pub(super) fn move_target(
     on_move: &Move,
+    on_append: &Append,
     dir: impl Fn(&gtk::DropTarget, f64, f64) -> Option<String> + 'static,
 ) -> gtk::DropTarget {
     let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::MOVE);
@@ -96,11 +114,16 @@ pub(super) fn move_target(
     // could only be taken once the drop had already happened.
     target.set_preload(true);
     let dir = Rc::new(dir);
+    // Whether a drop here does anything: a PDF's pages put after another's, or a move.
     let planned = {
         let dir = dir.clone();
         move |target: &gtk::DropTarget, x, y| {
-            let moves = moves_into(&dragged(&target.value()?), &dir(target, x, y)?);
-            (!moves.is_empty()).then_some(moves)
+            let carried = dragged(&target.value()?);
+            if appending(target, &carried).is_some() {
+                return Some(());
+            }
+            let moves = moves_into(&carried, &dir(target, x, y)?);
+            (!moves.is_empty()).then_some(())
         }
     };
     let planned = Rc::new(planned);
@@ -110,7 +133,7 @@ pub(super) fn move_target(
     let answer = {
         let (planned, spring) = (planned.clone(), spring.clone());
         move |target: &gtk::DropTarget, x, y| match planned(target, x, y) {
-            Some(_) => {
+            Some(()) => {
                 spring_open(&spring, target_row(target));
                 gdk::DragAction::MOVE
             }
@@ -130,15 +153,20 @@ pub(super) fn move_target(
         let spring = spring.clone();
         move |_| spring_open(&spring, None)
     });
-    let on_move = on_move.clone();
+    let (on_move, on_append) = (on_move.clone(), on_append.clone());
     target.connect_drop(move |target, value, x, y| {
         spring_open(&spring, None);
         // The value is handed over here rather than read back off the target, which is the one
         // place it is certain to have arrived.
+        let carried = dragged(value);
+        if let Some((one, onto)) = appending(target, &carried) {
+            on_append(one, onto);
+            return true;
+        }
         let Some(dir) = dir(target, x, y) else {
             return false;
         };
-        let moves = moves_into(&dragged(value), &dir);
+        let moves = moves_into(&carried, &dir);
         if moves.is_empty() {
             return false;
         }
@@ -161,9 +189,11 @@ pub(super) type Import = Rc<dyn Fn(Vec<PathBuf>, String, bool)>;
 /// `GdkFileList` is the type rather than `text/uri-list`: GDK deserialises the one into the other,
 /// so this takes what every file manager offers without reading a stream by hand. A drop that
 /// offers **only** move is moved — that is Shift held in the file manager — and anything else is
-/// copied, which is what a plain drag between applications means.
+/// copied, which is what a plain drag between applications means. One PDF copied onto a PDF's row
+/// puts its pages after that PDF's instead; moved, it moves in beside it as before.
 pub(super) fn import_target(
     on_import: &Import,
+    on_append: &Append,
     dir: impl Fn(&gtk::DropTarget, f64, f64) -> Option<String> + 'static,
 ) -> gtk::DropTarget {
     let target = gtk::DropTarget::new(
@@ -194,13 +224,19 @@ pub(super) fn import_target(
         let spring = spring.clone();
         move |_| spring_open(&spring, None)
     });
-    let on_import = on_import.clone();
+    let (on_import, on_append) = (on_import.clone(), on_append.clone());
     target.connect_drop(move |target, value, x, y| {
         spring_open(&spring, None);
         let (Some(into), Some(files)) = (dir(target, x, y), dropped_paths(value)) else {
             return false;
         };
-        on_import(files, into, wanted(target) == gdk::DragAction::MOVE);
+        let moving = wanted(target) == gdk::DragAction::MOVE;
+        let carried: Vec<String> = files.iter().map(|f| f.to_string_lossy().into()).collect();
+        if let Some((one, onto)) = appending(target, &carried).filter(|_| !moving) {
+            on_append(one, onto);
+            return true;
+        }
+        on_import(files, into, moving);
         true
     });
     target

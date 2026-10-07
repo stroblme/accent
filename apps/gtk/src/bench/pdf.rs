@@ -1,6 +1,6 @@
 //! Drills over a PDF: the layout either side of Fit Height, the page Add Page After puts in, the
-//! page edits and their menus, the Outline pane following the reader, and the blank document New
-//! Drawing writes.
+//! page edits and their menus, another PDF dropped onto one, the Outline pane following the
+//! reader, and the blank document New Drawing writes.
 
 use super::*;
 
@@ -180,6 +180,173 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
         );
         bench_quit(&app);
     });
+}
+
+/// A PDF dropped onto another, every way in: `arg` is `<rel>,<source rel>`, both at the vault
+/// root, `rel` of several pages with a note written first linking into its pages 1 to 3. The
+/// source's row dragged from the tree through XTEST onto the gap between `rel`'s first two pages,
+/// the line there watched while the drag rests and after the drop; Undo, Redo and Undo. Then the source as a file
+/// from another application dropped before the first page, through the reading view's own file
+/// drop target, as Xvfb carries no drag between two processes; Undo. Then the source's row
+/// dragged onto `rel`'s row, and the file dropped onto that row, each appending, each undone; and
+/// `rel`'s own row dragged onto its pages, which inserts nothing. After each, the pages on disk,
+/// the note's links, what the toasts said and how many pages the vault holds, which on a remote
+/// one is the host's copy.
+pub(super) fn bench_pdf_insert(app: &Rc<App>, arg: &str) {
+    let Some((rel, from)) = arg.split_once(',') else {
+        return bench_quit(app);
+    };
+    let (app, rel, from) = (app.clone(), rel.to_string(), from.to_string());
+    glib::spawn_future_local(async move {
+        let note = linked_note(&app, &rel).await;
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench insert no_tab");
+            return bench_quit(&app);
+        };
+        // Small enough that the first pages and the gaps between them are on screen.
+        pdf.set_zoom(pdfview::PdfZoom::Scale(0.25));
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let said = Cell::new(app.toasted.get());
+        let step = |what: &str| {
+            let told = app.toasts.shown().into_iter();
+            let told: Vec<String> = told.filter(|t| t.contains("nsert")).collect();
+            println!(
+                "bench insert {what} {} {} told={told:?} in_vault={}",
+                pages_read(&pdf),
+                links_read(&app, &note, &said),
+                vault_pages(&app, &pdf.key())
+            );
+        };
+        let walk = async |action: &str, what: &str| {
+            let _ = WidgetExt::activate_action(&app.window, action, None);
+            written(&app).await;
+            step(what);
+        };
+        step("opened");
+        let window = app.window.clone().upcast::<gtk::Widget>();
+        let (dx, dy) = app.window.surface_transform();
+        let screen = |(x, y): (f32, f32)| format!("{} {}", f64::from(x) + dx, f64::from(y) + dy);
+        let row = |rel: &str| tree_row(&app, rel).map(screen).unwrap_or_default();
+        let gap = |gap| pdf.drop_point(gap, &window).map(screen).unwrap_or_default();
+
+        let lines = dragged(&pdf, &drag_steps(&row(&from), &gap(1))).await;
+        written(&app).await;
+        let left = pdf.drop_shown();
+        step(&format!("tree_pages lines={lines:?} left={left:?}"));
+        walk("win.pdf-undo", "tree_pages_undo").await;
+        walk("win.pdf-redo", "tree_pages_redo").await;
+        walk("win.pdf-undo", "tree_pages_undo_again").await;
+
+        // The source's bytes outside the vault, as a file manager would hold them.
+        let outside = std::env::temp_dir().join(&from);
+        if let Some(Err(e)) = app.vault().map(|v| v.download(&from, &outside)) {
+            println!("bench insert no_outside_copy {e}");
+        }
+        let view = pdf.key_target();
+        let at = pdf.drop_point(0, &view).unwrap_or_default();
+        let taken = file_drop(&view, &outside, at);
+        written(&app).await;
+        step(&format!("outside_pages taken={taken}"));
+        walk("win.pdf-undo", "outside_pages_undo").await;
+
+        super::git::xtest(&drag_steps(&row(&from), &row(&rel))).await;
+        written(&app).await;
+        step("tree_row");
+        walk("win.pdf-undo", "tree_row_undo").await;
+
+        let target = tree_row_widget(&app, &rel);
+        let taken = target.is_some_and(|row| file_drop(&row, &outside, (1.0, 1.0)));
+        written(&app).await;
+        step(&format!("outside_row taken={taken}"));
+        walk("win.pdf-undo", "outside_row_undo").await;
+
+        let lines = dragged(&pdf, &drag_steps(&row(&rel), &gap(1))).await;
+        written(&app).await;
+        step(&format!("own_row lines={lines:?}"));
+        bench_quit(&app);
+    });
+}
+
+/// A press on `from`, a drag in steps to `to` and a rest there before the release, as XTEST
+/// steps: the rest is what the line is watched in.
+fn drag_steps(from: &str, to: &str) -> String {
+    let point = |at: &str| -> (f64, f64) {
+        let mut xy = at.split(' ').filter_map(|v| v.parse().ok());
+        (xy.next().unwrap_or(0.0), xy.next().unwrap_or(0.0))
+    };
+    let ((x0, y0), (x1, y1)) = (point(from), point(to));
+    let moves: Vec<String> = (1..=12)
+        .map(|i| {
+            let t = f64::from(i) / 12.0;
+            let (x, y) = (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
+            format!("move {x} {y}; sleep 0.03")
+        })
+        .collect();
+    format!(
+        "move {x0} {y0}; sleep 0.2; down; sleep 0.1; {}; sleep 0.8; up",
+        moves.join("; ")
+    )
+}
+
+/// Run `steps` through XTEST, and say which gaps of `pdf` showed the drop line meanwhile.
+async fn dragged(pdf: &Rc<pdftab::PdfTab>, steps: &str) -> Vec<usize> {
+    let seen = Rc::new(RefCell::new(std::collections::BTreeSet::new()));
+    let watching = Rc::new(Cell::new(true));
+    glib::timeout_add_local(Duration::from_millis(30), {
+        let (pdf, seen, watching) = (pdf.clone(), seen.clone(), watching.clone());
+        move || {
+            if let Some(gap) = pdf.drop_shown() {
+                seen.borrow_mut().insert(gap);
+            }
+            match watching.get() {
+                true => glib::ControlFlow::Continue,
+                false => glib::ControlFlow::Break,
+            }
+        }
+    });
+    super::git::xtest(steps).await;
+    watching.set(false);
+    seen.take().into_iter().collect()
+}
+
+/// The Files tree's row for `rel`, while it is on screen.
+fn tree_row_widget(app: &Rc<App>, rel: &str) -> Option<gtk::Widget> {
+    let tree = app.tree.get()?;
+    let row = tree::expanders(tree.view()).into_iter().find(|e| {
+        let item = e.list_row().and_then(|r| r.item());
+        item.as_ref()
+            .and_then(tree::decode)
+            .is_some_and(|r| r.rel == rel)
+    })?;
+    Some(row.upcast())
+}
+
+/// Where on `rel`'s row in the Files tree to press, in the window: on its name.
+fn tree_row(app: &Rc<App>, rel: &str) -> Option<(f32, f32)> {
+    let row = tree_row_widget(app, rel)?;
+    let at = graphene::Point::new(40.0, row.height() as f32 / 2.0);
+    let at = row.compute_point(&app.window, &at)?;
+    Some((at.x(), at.y()))
+}
+
+/// A drop of `file` from another application at `(x, y)` of `widget`, through its own file drop
+/// target: Xvfb carries a drag inside one process and not between two.
+fn file_drop(widget: &gtk::Widget, file: &std::path::Path, (x, y): (f32, f32)) -> bool {
+    let target = widget
+        .observe_controllers()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.downcast::<gtk::DropTarget>().ok())
+        .find(|t| {
+            t.formats()
+                .is_some_and(|f| f.contains_type(gdk::FileList::static_type()))
+        });
+    let Some(target) = target else {
+        return false;
+    };
+    let list = gdk::FileList::from_array(&[gio::File::for_path(file)]);
+    let value = glib::BoxedValue(list.to_value());
+    target.emit_by_name::<bool>("drop", &[&value, &f64::from(x), &f64::from(y)])
 }
 
 /// The thumbnail strip held on screen for XTEST to hover and drag along: the Outline pane up, and

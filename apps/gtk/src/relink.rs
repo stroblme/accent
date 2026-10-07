@@ -78,7 +78,7 @@ impl App {
             // An insert that puts back the page a delete took out keeps the links that delete
             // left naming it; a new blank page has none.
             let keep = match edit {
-                PageEdit::Insert(_) => relinks.left.remove(&step).unwrap_or_default(),
+                PageEdit::Insert { .. } => relinks.left.remove(&step).unwrap_or_default(),
                 _ => Vec::new(),
             };
             (edit, step, keep)
@@ -95,7 +95,7 @@ impl App {
                     .await;
             match done {
                 Some(Ok(report)) => {
-                    if let PageEdit::Delete(_) = edit {
+                    if let PageEdit::Delete { .. } = edit {
                         pdf.relinks
                             .borrow_mut()
                             .left
@@ -110,7 +110,7 @@ impl App {
                     let mut relinks = pdf.relinks.borrow_mut();
                     relinks.running = false;
                     relinks.queue.push_front((edit, step));
-                    if let PageEdit::Insert(_) = edit {
+                    if let PageEdit::Insert { .. } = edit {
                         relinks.left.insert(step, keep);
                     }
                     return;

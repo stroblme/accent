@@ -60,6 +60,12 @@ pub enum Reply {
         edit: pdf::PageEdit,
         step: u32,
     },
+    /// The pages of the PDF called `name` went in, this many of them, or why they could not.
+    /// [`Reply::Repaged`] has come first, for the edit they made.
+    Imported {
+        name: String,
+        pages: Result<usize, String>,
+    },
     /// Where every note link that highlights this document lands on the page today, and which
     /// link each one is. The whole map every time, so a stale page cannot survive underneath.
     Highlights(Highlights),
@@ -189,6 +195,13 @@ pub enum Request {
     },
     /// Put a blank page in, take one out, or move one.
     Pages(pdf::PageEdit),
+    /// Put every page of the PDF at `source`, called `name`, in at page `at`, after the last
+    /// page for `None`: a PDF dropped onto this one.
+    Import {
+        at: Option<usize>,
+        source: PathBuf,
+        name: String,
+    },
     /// Take back the last step drawn, erased or moved, or the last page edit, in this session.
     Undo,
     /// Make the last step Undo took back again.

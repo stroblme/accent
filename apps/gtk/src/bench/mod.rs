@@ -76,8 +76,9 @@ use panes::{
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_closed,
-    bench_pdf_comments, bench_pdf_deep, bench_pdf_dropped, bench_pdf_failed, bench_pdf_pages,
-    bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip, bench_sketch,
+    bench_pdf_comments, bench_pdf_deep, bench_pdf_dropped, bench_pdf_failed, bench_pdf_insert,
+    bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip,
+    bench_sketch,
 };
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -297,6 +298,12 @@ use tags::bench_tags;
 /// items of the page's own menu without and with a selection, and of the status bar's page
 /// count's menu.
 /// Point it at a scratch copy of the generated vault's `Attachments/pages.pdf`.
+/// `=insert:<rel_path>,<source>` drops the PDF `source` onto `rel_path` every way there is: its
+/// row from the Files tree onto the pages through XTEST, the line watched, as a file from another
+/// application onto the pages, and both onto `rel_path`'s row, each undone, printing the pages on
+/// disk, the links of a note into it and the toasts after each (`pdf::bench_pdf_insert`). Both at
+/// the root of a scratch vault, copies of the generated vault's `Attachments/pages.pdf` and
+/// `Attachments/comments.pdf`, whose pop-up pdfium's copy left pointing into it.
 /// `=strip:<rel_path>` is the pointer's half, held for XTEST: it opens the document with the
 /// Outline pane up and prints the same every two seconds for 40 s, so a hover and a drag along the
 /// thumbnail strip (`build-aux/xtest.py :N "drag X0 Y0 X1 Y1"`) can be watched landing in the
@@ -739,6 +746,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = pdf {
             if let Some(rel) = rel.strip_prefix("pages:") {
                 return bench_pdf_pages(&app, rel);
+            }
+            if let Some(arg) = rel.strip_prefix("insert:") {
+                return bench_pdf_insert(&app, arg);
             }
             if let Some(arg) = rel.strip_prefix("bookmarks:") {
                 return bench_pdf_bookmarks(&app, arg);

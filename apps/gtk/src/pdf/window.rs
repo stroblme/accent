@@ -118,6 +118,20 @@ impl App {
                 app.repaged(pdf, edit, step);
             }
         ));
+        pdf.connect_imported(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf, name, pages| {
+                let what = match pages {
+                    Ok(1) => format!("Inserted 1 page from {name}"),
+                    Ok(n) => format!("Inserted {n} pages from {name}"),
+                    Err(why) => return app.cannot(&format!("insert the pages of {name}"), why),
+                };
+                // A drop keeps the tab it went into, as an edit keeps a note's.
+                app.promote(&pdf.page);
+                app.toast(&what);
+            }
+        ));
         pdf.connect_choice(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -161,6 +175,76 @@ impl App {
                 Err(e) => app.gone(pdf.key(), &pdf.page, e),
             }
         });
+    }
+
+    /// Put the pages of the PDF `from`, a vault path or the absolute path of a file from outside,
+    /// into `into` at page `at`, after its last page for `None`. A remote vault's file is fetched
+    /// first, as one opened is.
+    pub(crate) fn import_pdf(
+        self: &Rc<Self>,
+        into: &Rc<pdftab::PdfTab>,
+        at: Option<usize>,
+        from: &str,
+    ) {
+        let name = doc::file_name(from).to_string();
+        let Some((key, path)) = self.locate(from) else {
+            return self.cannot(&format!("insert the pages of {name}"), "not in this vault");
+        };
+        if key == into.key() {
+            return;
+        }
+        let into = Rc::downgrade(into);
+        self.local_copy(&key, &path, move |app, copy| {
+            let Some(into) = into.upgrade() else { return };
+            match copy {
+                Ok(copy) => into.import_pages(at, copy, name),
+                Err(e) => app.cannot(&format!("insert the pages of {name}"), e),
+            }
+        });
+    }
+
+    /// A PDF dropped onto another's row in the Files tree: its pages go after the other's last,
+    /// in the other's tab, opened for it if it is not open, whose Undo takes them out again.
+    pub(crate) fn append_pdf(self: &Rc<Self>, from: &str, onto: &str) {
+        self.open_path(onto);
+        if let Some(pdf) = self.doc_for(onto).and_then(|doc| doc.pdf().cloned()) {
+            self.import_pdf(&pdf, None, from);
+        }
+    }
+
+    /// A row dragged from the tree over `pane` at `(x, y)` of `target`'s sheet: the PDF in front
+    /// there, the dragged PDF's path and the gap between pages a drop puts its pages into, when
+    /// the row is another PDF. `value` is the drop's, once it has landed; until then the path is
+    /// read off the drag.
+    pub(crate) fn pdf_drop(
+        &self,
+        pane: &Pane,
+        target: &gtk::DropTarget,
+        value: Option<&glib::Value>,
+        (x, y): (f64, f64),
+    ) -> Option<(Rc<pdftab::PdfTab>, String, usize)> {
+        let pdf = self.pdf_of(pane)?;
+        let carried = match value {
+            Some(value) => value.clone(),
+            None => {
+                let content = target.current_drop()?.drag()?.content();
+                content.value(String::static_type()).ok()?
+            }
+        };
+        let from = carried.get::<String>().ok()?;
+        if doc::kind_of(&from) != Kind::Pdf || from == pdf.key() {
+            return None;
+        }
+        let gap = pdf.drop_gap(&target.widget()?, x, y)?;
+        Some((pdf, from, gap))
+    }
+
+    /// Show the line a dropped PDF's pages would go in at on the PDF in front of `pane`, or take
+    /// it away.
+    pub(crate) fn show_pdf_drop(&self, pane: &Pane, gap: Option<usize>) {
+        if let Some(pdf) = self.pdf_of(pane) {
+            pdf.show_drop(gap);
+        }
     }
 
     /// The PDF in the active tab, for the actions that only mean something in one.
@@ -393,7 +477,7 @@ impl App {
         if pdf.page_count() < 2 {
             return self.cannot("delete the page", "a PDF keeps at least one page");
         }
-        pdf.edit_pages(PageEdit::Delete(page));
+        pdf.edit_pages(PageEdit::delete(page));
     }
 
     /// Move the page being read one place towards the end (`down`) or the start of the document.

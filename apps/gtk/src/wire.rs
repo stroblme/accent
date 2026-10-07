@@ -302,12 +302,22 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
 fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
     pane.drop.connect_motion(glib::clone!(
         #[weak]
+        app,
+        #[weak]
         pane,
         #[upgrade_or]
         gdk::DragAction::empty(),
         move |target, x, y| {
             let (w, h) = pane.size();
-            pane.show_zone(Some(panes::zone(x, y, w, h)));
+            let zone = panes::zone(x, y, w, h);
+            // A PDF from the tree over the middle of another PDF goes in between its pages: a
+            // line there says where, in place of the shade.
+            let gap = (zone == Zone::Here)
+                .then(|| app.pdf_drop(&pane, target, None, (x, y)))
+                .flatten()
+                .map(|(_, _, gap)| gap);
+            app.show_pdf_drop(&pane, gap);
+            pane.show_zone(gap.is_none().then_some(zone));
             // A tab moves, a path from the tree is only read; offer whichever the drag allows.
             let offered = target
                 .current_drop()
@@ -321,8 +331,13 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
     ));
     pane.drop.connect_leave(glib::clone!(
         #[weak]
+        app,
+        #[weak]
         pane,
-        move |_| pane.show_zone(None)
+        move |_| {
+            pane.show_zone(None);
+            app.show_pdf_drop(&pane, None);
+        }
     ));
     // A tree row let go on the bar itself opens in that pane, which is the shortest way to say
     // "over there" and the one libadwaita already draws an insertion point for.
@@ -351,12 +366,20 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         pane,
         #[upgrade_or]
         false,
-        move |_, value, x, y| {
+        move |target, value, x, y| {
             let (w, h) = pane.size();
             let zone = panes::zone(x, y, w, h);
             // Belt and braces: the drag is over whatever the source has to say about it, and a
             // sheet left up would swallow every click meant for the editor under it.
             app.set_drop_active(false);
+            app.show_pdf_drop(&pane, None);
+            let into = (zone == Zone::Here)
+                .then(|| app.pdf_drop(&pane, target, Some(value), (x, y)))
+                .flatten();
+            if let Some((pdf, from, gap)) = into {
+                app.import_pdf(&pdf, Some(gap), &from);
+                return true;
+            }
             app.dropped(&pane, zone, value)
         }
     ));

@@ -1,5 +1,6 @@
-//! Which pages a document has and in what order: a blank page put in, a page taken out, a page
-//! moved somewhere else, and the whole document kept for a page taken out to come back.
+//! Which pages a document has and in what order: a blank page put in, another document's pages
+//! put in, a page taken out, a page moved somewhere else, and the whole document kept for a page
+//! taken out to come back.
 
 use std::io::Write;
 use std::os::raw::{c_int, c_ulong};
@@ -68,6 +69,40 @@ impl PdfDoc {
         PdfDoc::from_file(file.with_context(|| format!("snapshot into {}", dir.display()))?)
     }
 
+    /// Every page of `source` in at `at`, in order, each with its text, its annotations and its
+    /// resources. pdfium's copy of a page drops its links to other pages, as for any copy, and
+    /// `source`'s bookmarks stay behind. `at` may be the page count, which appends. How many
+    /// pages went in.
+    ///
+    /// The copy also keeps every annotation's `/Parent` as it was — a pop-up's markup, a widget's
+    /// form field — naming an object of `source`, which a save follows into freed memory once
+    /// `source` has closed, and writes as whichever object of this document has its number while
+    /// it is open. Each is cut loose here, while `source` is still open: a pop-up opens with its
+    /// markup, and no form field comes along.
+    pub fn import_pages(&mut self, source: &PdfDoc, at: usize) -> Result<usize> {
+        let _guard = lock();
+        let count = self.doc().pages().len() as usize;
+        if at > count {
+            return Err(anyhow!("cannot import pages at {at} of {count}"));
+        }
+        let pages = source.doc().pages();
+        let added = pages.len() as usize;
+        self.doc_mut()
+            .pages_mut()
+            .copy_page_range_from_document(
+                source.doc(),
+                pages.as_range_inclusive(),
+                at as PdfPageIndex,
+            )
+            .map_err(|e| anyhow!("import {added} pages at {at}: {e:?}"))?;
+        for page in at..at + added {
+            let mut p = self.page(page)?;
+            p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+            cut_parents(&p);
+        }
+        Ok(added)
+    }
+
     /// Move the page at `from` so that it ends up at `to`.
     ///
     /// The page itself moves — the page tree is reordered and nothing is copied — so a bookmark or
@@ -100,6 +135,27 @@ impl PdfDoc {
         match bindings.is_true(moved) {
             true => Ok(()),
             false => Err(anyhow!("pdfium would not move page {from} to {to}")),
+        }
+    }
+}
+
+/// Replace every annotation's `/Parent` on a loaded page with an empty string, which names
+/// nothing: pdfium has no call that takes a key out. The caller holds the lock.
+fn cut_parents(p: &PdfPage<'_>) {
+    let bindings = p.bindings();
+    // SAFETY: the page handle is `p`'s own and alive while it is borrowed; the lock is held, so no
+    // other thread is inside pdfium; each annotation handle is closed before the next is taken.
+    unsafe {
+        let page = bindings.get_handle_from_page(p);
+        for index in 0..bindings.FPDFPage_GetAnnotCount(page) {
+            let annot = bindings.FPDFPage_GetAnnot(page, index);
+            if annot.is_null() {
+                continue;
+            }
+            if bindings.is_true(bindings.FPDFAnnot_HasKey(annot, "Parent")) {
+                bindings.FPDFAnnot_SetStringValue_str(annot, "Parent", "");
+            }
+            bindings.FPDFPage_CloseAnnot(annot);
         }
     }
 }

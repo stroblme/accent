@@ -117,7 +117,7 @@ async fn accent_writes(app: &Rc<App>, rel: &str) {
         return println!("bench synctex no_pdf");
     };
     offer("inked_reopened");
-    pdf.edit_pages(accent_core::pdf::PageEdit::Insert(pdf.page_count()));
+    pdf.edit_pages(accent_core::pdf::PageEdit::insert(pdf.page_count()));
     // Before the save lands, which is when the page is in the file.
     glib::timeout_future(Duration::from_millis(300)).await;
     offer("added");

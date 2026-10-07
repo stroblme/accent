@@ -475,6 +475,12 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }
         ),
+        // A PDF dropped onto another PDF's row puts its pages after the other's, in its tab.
+        glib::clone!(
+            #[weak]
+            app,
+            move |from: String, onto: String| app.append_pdf(&from, &onto)
+        ),
     );
     // The tree owns its scroller now, wrapped in a box the context menu can parent itself to.
     let files = tree.widget().clone();
