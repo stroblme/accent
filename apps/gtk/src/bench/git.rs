@@ -88,7 +88,8 @@ pub(super) fn bench_git_init(app: &Rc<App>) {
 ///
 /// Then it picks every repository twice over, the second round all seen before, and prints what
 /// each pick drew at once — history rows and the branch button — how long until the history was
-/// on screen, the longest the main loop went without turning until its lists were full
+/// on screen, how long the pick itself held the main loop (`pick_ms`: the rows that go are taken
+/// apart there), the longest the main loop went without turning until its lists were full
 /// (`stall_ms`), and the toasts a click on its first row at once raised: a repository seen before
 /// is drawn from what the pane held about it, and its rows are its own.
 pub(super) fn bench_git_switch(app: &Rc<App>) {
@@ -131,6 +132,7 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
             });
             let (t, said) = (Instant::now(), app.toasted.get());
             git.select_repo(at as u32);
+            let pick = t.elapsed().as_secs_f64() * 1000.0;
             let (rows, branch) = (git.log_rows(), git.shown_branch());
             git.activate_log_row(0);
             wait_for(|| git.log_rows() > 0, 10000).await;
@@ -139,7 +141,7 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
             beat.remove();
             println!(
                 "bench git_switch repo={name} rows={rows} branch={branch} shown_ms={shown} \
-                 stall_ms={:.1} toasts={}",
+                 pick_ms={pick:.1} stall_ms={:.1} toasts={}",
                 worst.get(),
                 app.toasted.get() - said
             );

@@ -151,8 +151,10 @@ pub(super) async fn settled(compare: &diff::Compare) {
     clock.disconnect(id);
 }
 
-/// The view of one pane of a comparison: the left one, or the right with `end`.
-pub(super) fn pane_view(paned: &gtk::Widget, end: bool) -> Option<gtk::TextView> {
+/// The view of one pane of a comparison, `widget`: the left one, or the right with `end`.
+pub(super) fn pane_view(widget: &gtk::Widget, end: bool) -> Option<gtk::TextView> {
+    // The columns are under the strips' overlay.
+    let paned = widget.downcast_ref::<gtk::Overlay>()?.child()?;
     let paned = paned.downcast_ref::<gtk::Paned>()?;
     let pane = match end {
         true => paned.end_child(),

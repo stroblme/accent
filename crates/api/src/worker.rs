@@ -225,6 +225,7 @@ impl Worker {
         if !git.is_empty() {
             self.emit(Event::GitChanged);
         }
+        let mut rewatch = self.ref_dirs_moved(&git);
         for msg in &batch {
             if let Msg::WatchGit(dirs) = msg
                 && *dirs != self.git_dirs
@@ -233,7 +234,6 @@ impl Worker {
                 self.rebuild_watcher();
             }
         }
-        let mut rewatch = false;
         for msg in &batch {
             if let Msg::WatchUnindexed(dirs, on) = msg {
                 for dir in dirs {
@@ -550,6 +550,32 @@ impl Worker {
         }
     }
 
+    /// Whether the git news in `git` made a folder of branch refs, which then wants watching as
+    /// the others are ([`watch`]): a remote's first fetch or push, a first `feature/…` branch.
+    /// One that went, as `git pack-refs` prunes an emptied one, took its watch with it, so the set
+    /// forgets it and watches it afresh when it is made again.
+    fn ref_dirs_moved(&mut self, git: &[Msg]) -> bool {
+        let mut made = false;
+        for msg in git {
+            let Msg::Fs(VaultEvent::Git(path)) = msg else {
+                continue;
+            };
+            if !self
+                .git_dirs
+                .iter()
+                .any(|g| path.starts_with(g.join("refs")))
+            {
+                continue;
+            }
+            if path.is_dir() {
+                made = true;
+            } else if let Some(watcher) = &mut self.watcher {
+                watcher.forget(path);
+            }
+        }
+        made
+    }
+
     /// Whether `msg` is news from directly inside the unindexed folders alone, adding each folder
     /// whose listing it changed to `listed`.
     ///
@@ -754,18 +780,18 @@ fn watch(
         tracing::warn!("listing the directories to watch: {e:#}");
         Vec::new()
     });
-    // A repository's own directory and the branch tips inside it. Two watches per repo is
-    // what tells the git pane a commit happened in a terminal; `notify` refuses a path that
-    // does not exist, so a repository removed under us costs a warning, not the watch set.
-    // And each remote's tracking refs, which are all a push moves: one made in a terminal, or
-    // one a host finished after the link to it dropped.
+    // A repository's own directory (`packed-refs` among what is in it) and the branch tips
+    // inside it, which is what tells the git pane a commit happened in a terminal; `notify`
+    // refuses a path that does not exist, so a repository removed under us costs a warning, not
+    // the watch set. And each remote's tracking refs, which are all a push moves: one made in a
+    // terminal, or one a host finished after the link to it dropped. Every folder of them, a
+    // `feature/x` being a file a level down, and `refs` itself, where a first remote's
+    // `refs/remotes` is made ([`Worker::ref_dirs_moved`]).
     for git_dir in git_dirs {
         dirs.push(git_dir.clone());
-        dirs.push(git_dir.join("refs/heads"));
-        let remotes = std::fs::read_dir(git_dir.join("refs/remotes"))
-            .into_iter()
-            .flatten();
-        dirs.extend(remotes.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+        dirs.push(git_dir.join("refs"));
+        ref_dirs(&git_dir.join("refs/heads"), &mut dirs);
+        ref_dirs(&git_dir.join("refs/remotes"), &mut dirs);
     }
     // One level each, as every other directory here: never the tree under one.
     dirs.extend(unindexed.iter().map(|rel| root.join(rel)));
@@ -781,6 +807,20 @@ fn watch(
         let _ = tx.send(Msg::Fs(e));
     })?);
     Ok(())
+}
+
+/// `dir` and every folder under it, where it exists: the folders of a repository's branch refs,
+/// a handful in all but a repository fetched from a remote with many branch namespaces.
+fn ref_dirs(dir: &Path, dirs: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    dirs.push(dir.to_path_buf());
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            ref_dirs(&entry.path(), dirs);
+        }
+    }
 }
 
 /// A directory with something in it, which is what a moved-in tree looks like.

@@ -42,6 +42,9 @@ const CURRENT: &str = "accent-current-layer";
 
 struct Row {
     row: adw::EntryRow,
+    /// The layer's name as last filled or renamed here: what Escape puts back, and what a focus
+    /// leaving a changed name renames from.
+    name: Rc<RefCell<String>>,
     /// Whether the layer shows and whether it is locked, as last filled: what a press flips.
     visible: Rc<Cell<bool>>,
     locked: Rc<Cell<bool>>,
@@ -108,6 +111,7 @@ impl Layers {
             if !typing && row.row.text() != layer.name {
                 row.row.set_text(&layer.name);
             }
+            row.name.replace(layer.name.clone());
             row.visible.set(layer.visible);
             row.locked.set(layer.locked);
             match layer.visible {
@@ -129,11 +133,11 @@ impl Layers {
         }
     }
 
-    /// A row for layer `id`: its name to edit, Move Up, Move Down and Delete sliding out while the
-    /// pointer or the keyboard is on it, and whether it shows and is locked always there.
+    /// A row for layer `id`: its name, edited after a double click, Move Up, Move Down and Delete
+    /// sliding out while the pointer or the keyboard is on it, and whether it shows and is locked
+    /// always there.
     fn row(&self, id: &CellId) -> Row {
-        let row = adw::EntryRow::builder().show_apply_button(true).build();
-        hide_edit_icon(&row);
+        let row = super::props::entry_row("");
         let send = |change: fn(CellId) -> LayerChange| {
             let (send, id) = (self.send.clone(), id.clone());
             move |_: &gtk::Button| send(change(id.clone()))
@@ -167,28 +171,81 @@ impl Layers {
             row.add_suffix(button);
         }
         reveal_on_hover(&row);
-        let (send, layer) = (self.send.clone(), id.clone());
-        row.connect_apply(move |row| send(LayerChange::Rename(layer.clone(), row.text().into())));
+        // Enter, the apply button or the keyboard leaving the name renames the layer, and Escape
+        // puts the name back; each ends the edit. Enter on a name left as it was is
+        // `entry-activated` rather than `apply`.
+        let name = Rc::new(RefCell::new(String::new()));
+        let rename = {
+            let (send, layer, name) = (self.send.clone(), id.clone(), name.clone());
+            move |row: &adw::EntryRow| {
+                let text = row.text().to_string();
+                if *name.borrow() != text {
+                    name.replace(text.clone());
+                    send(LayerChange::Rename(layer.clone(), text));
+                }
+            }
+        };
+        let renamed = rename.clone();
+        row.connect_apply(move |row| {
+            renamed(row);
+            end_edit(row);
+        });
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave(move |focus| {
+            if let Some(row) = focus.widget().and_downcast::<adw::EntryRow>() {
+                rename(&row);
+            }
+        });
+        row.add_controller(focus);
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let named = name.clone();
+        keys.connect_key_pressed(move |keys, key, _, _| {
+            let row = keys.widget().and_downcast::<adw::EntryRow>();
+            match row.filter(|_| key == gtk::gdk::Key::Escape) {
+                Some(row) => {
+                    row.set_text(&named.borrow());
+                    end_edit(&row);
+                    gtk::glib::Propagation::Stop
+                }
+                None => gtk::glib::Propagation::Proceed,
+            }
+        });
+        row.add_controller(keys);
         // A press anywhere on the row but its buttons picks the layer, as a click on a row of
-        // draw.io's Layers dialog does; Return in its name does too, for the keyboard.
+        // draw.io's Layers dialog does; Return in its name does too, for the keyboard. Only a
+        // double click edits the name, as there: AdwEntryRow edits on any press, so the first
+        // press of a row not being edited goes no further, and the second is let through. A
+        // press in a name being edited moves its caret as ever.
         let press = gtk::GestureClick::new();
         press.set_propagation_phase(gtk::PropagationPhase::Capture);
         let (send, layer) = (self.send.clone(), id.clone());
-        press.connect_pressed(move |gesture, _, x, y| {
+        press.connect_pressed(move |gesture, n_press, x, y| {
             let Some(row) = gesture.widget() else { return };
             let on = row.pick(x, y, gtk::PickFlags::DEFAULT);
             if on
                 .and_then(|w| w.ancestor(gtk::Button::static_type()))
-                .is_none()
+                .is_some()
             {
-                send(LayerChange::Pick(layer.clone()));
+                return;
+            }
+            send(LayerChange::Pick(layer.clone()));
+            let editing = row.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN);
+            if n_press == 1 && !editing {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                // Which ends an edit of another name, the focus no longer moving to this one.
+                end_edit(&row);
             }
         });
         row.add_controller(press);
         let (send, layer) = (self.send.clone(), id.clone());
-        row.connect_entry_activated(move |_| send(LayerChange::Pick(layer.clone())));
+        row.connect_entry_activated(move |row| {
+            send(LayerChange::Pick(layer.clone()));
+            end_edit(row);
+        });
         Row {
             row,
+            name,
             visible,
             locked,
             eye,
@@ -229,21 +286,11 @@ impl Layers {
     }
 }
 
-/// Hide the pencil `AdwEntryRow` shows while its name is not being edited: a press on a layer's row
-/// edits the name already. libadwaita shows and hides the pencil by its child visibility, never by
-/// `visible`, so this sticks.
-fn hide_edit_icon(row: &adw::EntryRow) {
-    let mut todo = vec![row.clone().upcast::<gtk::Widget>()];
-    while let Some(widget) = todo.pop() {
-        if widget.has_css_class("edit-icon") {
-            widget.set_visible(false);
-            return;
-        }
-        let mut child = widget.first_child();
-        while let Some(c) = child {
-            child = c.next_sibling();
-            todo.push(c);
-        }
+/// End whatever edit the window's keyboard is in, by taking the keyboard off it: a name being
+/// edited is renamed as its focus leaves.
+fn end_edit(widget: &impl IsA<gtk::Widget>) {
+    if let Some(root) = widget.root() {
+        root.set_focus(None::<&gtk::Widget>);
     }
 }
 

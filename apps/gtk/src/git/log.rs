@@ -333,7 +333,8 @@ impl Panel {
 
 /// A commit, the first of the three layouts a history row's stack can show — a commit, a file of
 /// the expanded one or Load More, as the item bound to it is ([`layout`]): the graph on the left,
-/// the summary and its author on the right.
+/// the summary and its author on the right. What most commits leave out — the decorations, the
+/// not-pulled arrow, "side branched here" — the row makes when a commit first needs it ([`part`]).
 fn commit_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     let area = gtk::DrawingArea::new();
     // The draw reads the bound row straight off the list item, so a recycled row cannot draw the
@@ -348,34 +349,12 @@ fn commit_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
         }
     ));
 
-    // A label per decoration, the first [`SHOWN_REFS`] and then a count of the rest, because a
-    // release commit can carry a handful of tags and the summary beside them still has to be
-    // read. Each is ellipsized like every other name in the pane — a decoration is as long as the
-    // branch it names, and without this a long branch is the sidebar's floor — and capped, the
-    // tooltip having every name whole.
-    let refs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    for _ in 0..=SHOWN_REFS {
-        refs.append(
-            &gtk::Label::builder()
-                .ellipsize(pango::EllipsizeMode::End)
-                .max_width_chars(16)
-                .build(),
-        );
-    }
     let summary = gtk::Label::builder()
         .xalign(0.0)
         .hexpand(true)
         .ellipsize(pango::EllipsizeMode::End)
         .build();
-    // The same arrow the branch readout's `↓2` uses, so one symbol means "the remote has this and
-    // we do not" in both places. Leading, where a dirty tab and the status bar put their dot.
-    let not_pulled = gtk::Label::new(Some("↓"));
-    for class in ["caption", "dim-label", "numeric"] {
-        not_pulled.add_css_class(class);
-    }
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    line.append(&not_pulled);
-    line.append(&refs);
     line.append(&summary);
 
     let meta = gtk::Label::builder()
@@ -385,13 +364,6 @@ fn commit_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     for class in ["caption", "dim-label"] {
         meta.add_css_class(class);
     }
-    // "side branched here", on the commit where the lanes beside this one end. Not dimmed, so it
-    // does not read as more of the author line above it.
-    let forked = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
-    forked.add_css_class("caption");
 
     // The row's own vertical margin is off, so the breathing room lives here (see the `.git-log`
     // rule): the drawing area has to reach the row's edges for the lanes to join.
@@ -402,13 +374,51 @@ fn commit_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
         .build();
     text.append(&line);
     text.append(&meta);
-    text.append(&forked);
 
     let commit = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     commit.append(&area);
     commit.append(&text);
     commit.append(&commit_actions(item, panel));
     commit
+}
+
+/// A label per decoration, the first [`SHOWN_REFS`] and then a count of the rest, because a release
+/// commit can carry a handful of tags and the summary beside them still has to be read. Each is
+/// ellipsized like every other name in the pane — a decoration is as long as the branch it names,
+/// and without this a long branch is the sidebar's floor — and capped, the tooltip having every
+/// name whole.
+fn refs_layout() -> gtk::Box {
+    let refs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    for _ in 0..=SHOWN_REFS {
+        refs.append(
+            &gtk::Label::builder()
+                .ellipsize(pango::EllipsizeMode::End)
+                .max_width_chars(16)
+                .build(),
+        );
+    }
+    refs
+}
+
+/// The same arrow the branch readout's `↓2` uses, so one symbol means "the remote has this and we
+/// do not" in both places. Leading, where a dirty tab and the status bar put their dot.
+fn not_pulled_layout() -> gtk::Label {
+    let not_pulled = gtk::Label::new(Some("↓"));
+    for class in ["caption", "dim-label", "numeric"] {
+        not_pulled.add_css_class(class);
+    }
+    not_pulled
+}
+
+/// "side branched here", on the commit where the lanes beside this one end. Not dimmed, so it does
+/// not read as more of the author line above it.
+fn forked_layout() -> gtk::Label {
+    let forked = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
+    forked.add_css_class("caption");
+    forked
 }
 
 /// A file of the expanded commit, indented past the graph so it reads as belonging above it.
@@ -516,41 +526,55 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     let Some(line) = text.first_child().and_downcast::<gtk::Box>() else {
         return;
     };
-    let (Some(meta), Some(forked)) = (
+    let (Some(meta), Some(summary)) = (
         line.next_sibling().and_downcast::<gtk::Label>(),
-        text.last_child().and_downcast::<gtk::Label>(),
-    ) else {
-        return;
-    };
-    let (Some(not_pulled), Some(summary)) = (
-        line.first_child().and_downcast::<gtk::Label>(),
         line.last_child().and_downcast::<gtk::Label>(),
     ) else {
         return;
     };
-    let Some(refs) = not_pulled.next_sibling().and_downcast::<gtk::Box>() else {
-        return;
-    };
+    // The parts [`commit_layout`] leaves to [`part`]: the arrow leads the line and the
+    // decorations sit before the summary, "side branched here" under the author line.
+    let not_pulled = line
+        .first_child()
+        .filter(|first| first != summary.upcast_ref::<gtk::Widget>())
+        .and_downcast::<gtk::Label>();
+    let refs = summary.prev_sibling().and_downcast::<gtk::Box>();
+    let forked = meta.next_sibling().and_downcast::<gtk::Label>();
 
     area.set_content_width(lane_width(&row));
     area.queue_draw();
-    refs.set_visible(!row.commit.refs.is_empty());
-    bind_refs(&refs, &row.commit.refs);
+    let decorated = !row.commit.refs.is_empty();
+    if let Some(refs) = part(refs, decorated, || {
+        let refs = refs_layout();
+        refs.insert_before(&line, Some(&summary));
+        refs
+    }) {
+        bind_refs(&refs, &row.commit.refs);
+    }
     summary.set_text(&row.commit.summary);
     meta.set_text(&format!(
         "{} · {}",
         row.commit.author,
         ago(now(), row.commit.time)
     ));
-    forked.set_visible(!row.forks.is_empty());
-    forked.set_text(&format!("{} branched here", row.forks.join(", ")));
+    if let Some(forked) = part(forked, !row.forks.is_empty(), || {
+        let forked = forked_layout();
+        text.append(&forked);
+        forked
+    }) {
+        forked.set_text(&format!("{} branched here", row.forks.join(", ")));
+    }
     // Read off the last refresh's answer rather than stored on the row: `git rev-list HEAD..@{u}`
     // is what decides this, and a row that has since been pulled is marked by the refresh that
     // noticed, not by whatever was true when it was spliced in.
     let waiting = panel
         .upgrade()
         .is_some_and(|panel| panel.state.borrow().incoming.contains(&row.commit.id));
-    not_pulled.set_visible(waiting);
+    part(not_pulled, waiting, || {
+        let not_pulled = not_pulled_layout();
+        line.prepend(&not_pulled);
+        not_pulled
+    });
     // The text alone, so the graph the drawing area beside it paints stays at full strength and a
     // lane still joins the rows above and below.
     text.set_opacity(match waiting {
@@ -563,7 +587,7 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     }));
 }
 
-/// Put a commit's decorations on the labels [`commit_layout`] made: the first [`SHOWN_REFS`] as names,
+/// Put a commit's decorations on the labels [`refs_layout`] made: the first [`SHOWN_REFS`] as names,
 /// then `+N` for the rest on the last one, and any label left over hidden.
 ///
 /// The classes are the `.git-ref` rules in `install_chrome_css`: HEAD's branch in the accent

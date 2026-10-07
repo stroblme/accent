@@ -852,9 +852,10 @@ fn short(oid: &str) -> String {
 
 /// The line one changed file is shown on — icon, status letter, name, directory — in the changes
 /// list and under an expanded history row alike. Whatever comes after the directory, the changes
-/// list's action buttons, is appended by the caller, and the binders find all five by sibling
-/// order. The icon leads so that under a folder row it lands in the column a sibling folder
-/// draws its own icon in (`changes::FILE_INSET`).
+/// list's action buttons, is appended by the caller, and the binders find them by sibling order.
+/// The icon leads so that under a folder row it lands in the column a sibling folder draws its
+/// own icon in (`changes::FILE_INSET`). The directory is made by the first file bound to the line
+/// that has one to show ([`dir_label`]).
 fn file_line() -> gtk::Box {
     let icon = gtk::Image::new();
     let letter = gtk::Label::builder().width_chars(1).build();
@@ -865,24 +866,29 @@ fn file_line() -> gtk::Box {
         .xalign(0.0)
         .ellipsize(pango::EllipsizeMode::End)
         .build();
-    // Ellipsized at the start: what tells two `notes/…/index.md` apart is the end of the path.
-    let dir = gtk::Label::builder()
-        .xalign(0.0)
-        .hexpand(true)
-        .ellipsize(pango::EllipsizeMode::Start)
-        .build();
-    dir.add_css_class("dim-label");
 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     for child in [
         icon.upcast_ref::<gtk::Widget>(),
         letter.upcast_ref(),
         name.upcast_ref(),
-        dir.upcast_ref(),
     ] {
         row.append(child);
     }
     row
+}
+
+/// A [`file_line`]'s directory, dimmed. Ellipsized at the start: what tells two `notes/…/index.md`
+/// apart is the end of the path. Grouped by folder, the changes list shows none, so its rows are
+/// a label lighter for it ([`part`]).
+fn dir_label() -> gtk::Label {
+    let dir = gtk::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(pango::EllipsizeMode::Start)
+        .build();
+    dir.add_css_class("dim-label");
+    dir
 }
 
 /// Put one changed file on a [`file_line`]: its icon, its status letter, its name, and the
@@ -890,7 +896,9 @@ fn file_line() -> gtk::Box {
 /// bind their row through here, so the two read the same way.
 ///
 /// `dir` is what the directory label shows rather than where the file is: a row under a folder
-/// leaves it empty, the path being on screen above it already.
+/// leaves it empty, the path being on screen above it already. Without one the name takes the
+/// directory's place: its width, which keeps what follows at the row's end, and the row's spacing
+/// before it, so a long name is cut short at the same width either way.
 fn bind_file_line(row: &gtk::Box, icon: &str, letter: char, path: &str, dir: &str) {
     let Some(image) = row.first_child().and_downcast::<gtk::Image>() else {
         return;
@@ -899,17 +907,24 @@ fn bind_file_line(row: &gtk::Box, icon: &str, letter: char, path: &str, dir: &st
         return;
     };
     image.set_icon_name(Some(icon));
-    let (Some(name), Some(directory)) = (
-        mark.next_sibling().and_downcast::<gtk::Label>(),
-        mark.next_sibling()
-            .and_then(|n| n.next_sibling())
-            .and_downcast::<gtk::Label>(),
-    ) else {
+    let Some(name) = mark.next_sibling().and_downcast::<gtk::Label>() else {
         return;
     };
     mark.set_text(&letter.to_string());
     name.set_text(split_name(path).1);
-    directory.set_text(dir);
+    name.set_hexpand(dir.is_empty());
+    name.set_margin_end(match dir.is_empty() {
+        true => row.spacing(),
+        false => 0,
+    });
+    let directory = name.next_sibling().and_downcast::<gtk::Label>();
+    if let Some(directory) = part(directory, !dir.is_empty(), || {
+        let directory = dir_label();
+        directory.insert_after(row, Some(&name));
+        directory
+    }) {
+        directory.set_text(dir);
+    }
 }
 
 /// The branch row's widgets: the row the panel appends to its column, everything on it the panel
@@ -1317,6 +1332,18 @@ fn layout<W: IsA<gtk::Widget>>(stack: &gtk::Stack, name: &str, build: impl FnOnc
     };
     stack.set_visible_child(&child);
     child
+}
+
+/// A part of a list row that most of the items bound to it leave out, `found` where the row has
+/// one: made with `make` the first time an item bound to the row shows it, and only hidden after.
+/// Handed back to be filled where it is shown. A list makes rows for its first 200 items and a
+/// pick of another repository has GTK take them apart again, a hidden widget costing that as much
+/// as a shown one: a commit row with every part made up front is twice the widgets it shows.
+fn part<W: IsA<gtk::Widget>>(found: Option<W>, shown: bool, make: impl FnOnce() -> W) -> Option<W> {
+    if let Some(found) = &found {
+        found.set_visible(shown);
+    }
+    shown.then(|| found.unwrap_or_else(make))
 }
 
 /// What a list row carries. Every store in this pane holds [`glib::BoxedAnyObject`]s, and every
