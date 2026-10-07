@@ -198,6 +198,8 @@ pub(super) fn bench_pdf_insert(app: &Rc<App>, arg: &str) {
     };
     let (app, rel, from) = (app.clone(), rel.to_string(), from.to_string());
     glib::spawn_future_local(async move {
+        // A remote vault's note is written once the host answers.
+        online(&app).await;
         let note = linked_note(&app, &rel).await;
         let Some(pdf) = opened(&app, &rel).await else {
             println!("bench insert no_tab");
