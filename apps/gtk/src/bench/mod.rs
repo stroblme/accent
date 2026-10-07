@@ -72,6 +72,7 @@ use outline::bench_outline;
 use panes::{
     bench_apart, bench_back, bench_collapse, bench_cycle, bench_layout, bench_layout_pick,
     bench_panes, bench_pin, bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
+    bench_tree,
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_closed,
@@ -348,6 +349,10 @@ use tags::bench_tags;
 /// Reload Window, then prints the panes, the size and whether the typing was written, before and
 /// in the window that comes back (see `panes::bench_reload`); any window will do: a vault's, one
 /// opened on a file, `--terminal` or `terminal://<name>`.
+/// `=tree:<a>,<b>,<c>` clicks `a` and then `b` in the Files tree, double-clicks `c` and then
+/// `a`, drags `b` onto the right edge of the pane, then fires Close Tabs in Pane over the left
+/// pane, all through XTEST, and prints each pane's tabs after every step: the vault root has to
+/// list the three, as a scratch vault of three notes does.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
@@ -866,6 +871,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rels) = rels.strip_prefix("back:") {
                 return bench_back(&app, rels);
+            }
+            if let Some(rels) = rels.strip_prefix("tree:") {
+                return bench_tree(&app, rels);
             }
             if let Some(pdf) = rels.strip_prefix("loose:") {
                 return loose::bench_loose(&app, pdf);

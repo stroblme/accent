@@ -1107,3 +1107,98 @@ fn apart_said(app: &Rc<App>) -> Option<String> {
     })?;
     Some(label.downcast::<gtk::Label>().ok()?.label().to_string())
 }
+
+/// See `ACCENT_BENCH_TABS=tree:` above. Real presses through XTEST, each step printed once
+/// `xtest` has let the window settle.
+pub(super) fn bench_tree(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    let [a, b, c] = &rels[..] else {
+        return bench_quit(app);
+    };
+    let (a, b, c) = (a.clone(), b.clone(), c.clone());
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        // The tree's first listing of the vault root.
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        let (dx, dy) = app.window.surface_transform();
+        let at = |w: &gtk::Widget, x: f32, y: f32| {
+            w.compute_point(&app.window, &graphene::Point::new(x, y))
+                .map(|p| format!("{} {}", p.x() as f64 + dx, p.y() as f64 + dy))
+                .unwrap_or_default()
+        };
+        // Screen coordinates on a row's name: no window manager places the window.
+        let row = |rel: &str| {
+            let tree = app.tree.get().expect("a tree");
+            tree::expanders(tree.view())
+                .into_iter()
+                .find(|e| {
+                    let row = e.list_row().and_then(|r| r.item());
+                    row.as_ref()
+                        .and_then(tree::decode)
+                        .is_some_and(|r| r.rel == rel)
+                })
+                .map(|e| at(e.upcast_ref(), 40.0, e.height() as f32 / 2.0))
+                .unwrap_or_default()
+        };
+        let click = |rel: &str| format!("move {}; sleep 0.2; down; up", row(rel));
+        let double = |rel: &str| {
+            format!(
+                "move {}; sleep 0.2; down; up; sleep 0.15; down; up",
+                row(rel)
+            )
+        };
+        super::git::xtest(&click(&a)).await;
+        println!("bench tree click_a {}", bench_tree_line(&app));
+        super::git::xtest(&click(&b)).await;
+        println!("bench tree click_b {}", bench_tree_line(&app));
+        super::git::xtest(&double(&c)).await;
+        println!("bench tree double_c {}", bench_tree_line(&app));
+        super::git::xtest(&double(&a)).await;
+        println!("bench tree double_a {}", bench_tree_line(&app));
+        // Onto the pane's right edge, inside the zone that splits (`panes::zone`).
+        let pane = app.pane().widget().clone();
+        let (w, h) = (pane.width() as f32, pane.height() as f32);
+        let edge = at(&pane, w - 30.0, h / 2.0);
+        super::git::xtest(&format!("drag {} {edge}", row(&b))).await;
+        println!("bench tree drop_b_right {}", bench_tree_line(&app));
+        let root = app.window.clone().upcast::<gtk::Widget>();
+        let panes = app.panes.borrow().clone();
+        let left = panes
+            .iter()
+            .min_by(|p, q| pane_rect(p, &root).x().total_cmp(&pane_rect(q, &root).x()));
+        if let Some(left) = left {
+            app.set_active_pane(left);
+        }
+        let _ = WidgetExt::activate_action(&app.window, "win.close-pane-tabs", None);
+        glib::timeout_future(Duration::from_millis(400)).await;
+        println!("bench tree close_left {}", bench_tree_line(&app));
+        bench_quit(&app);
+    });
+}
+
+/// Every pane's tabs in bar order, panes left to right: the preview marked `~`, the tab in front
+/// `*`.
+fn bench_tree_line(app: &Rc<App>) -> String {
+    let root = app.window.clone().upcast::<gtk::Widget>();
+    let mut panes = app.panes.borrow().clone();
+    panes.sort_by(|p, q| pane_rect(p, &root).x().total_cmp(&pane_rect(q, &root).x()));
+    let panes: Vec<String> = panes
+        .iter()
+        .map(|pane| {
+            let tabs: Vec<String> = pane
+                .pages()
+                .iter()
+                .map(|page| {
+                    let key = app.doc_for_page(page).map(|d| d.key()).unwrap_or_default();
+                    let preview = pane.preview().as_ref() == Some(page);
+                    let front = pane.tabs.selected_page().as_ref() == Some(page);
+                    let (preview, front) =
+                        (if preview { "~" } else { "" }, if front { "*" } else { "" });
+                    format!("{preview}{key}{front}")
+                })
+                .collect();
+            format!("[{}]", tabs.join(" "))
+        })
+        .collect();
+    format!("panes={} {}", panes.len(), panes.join(" "))
+}
