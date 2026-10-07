@@ -29,17 +29,20 @@ pub fn fuzzy_rank(query: String, haystacks: Vec<String>, recent: Vec<Option<u32>
 mod tests {
     use super::*;
 
-    /// The order is the core's and tested there; what is tested here is that the switcher gets it
-    /// through the ffi's own types.
+    /// The order is the core's and tested there; what is tested here is what this adds: the cap,
+    /// and recency crossing in the ffi's own types.
     #[test]
-    fn a_name_leads_a_folder_and_recency_orders_the_names() {
-        let paths: Vec<String> = ["tes/t.md", "test.md", "Daily/2026-09-12.md"]
-            .iter()
-            .map(|s| s.to_string())
+    fn a_ranking_stops_at_the_cap_and_recency_crosses() {
+        let paths: Vec<String> = (0..MAX_RESULTS + 5)
+            .map(|n| format!("note{n}.md"))
             .collect();
-        assert_eq!(fuzzy_rank("tes".into(), paths.clone(), vec![]), vec![1, 0]);
-        // Recency does not promote a folder match over a name match.
-        let recent = vec![Some(0), None, None];
-        assert_eq!(fuzzy_rank("tes".into(), paths, recent), vec![1, 0]);
+        assert_eq!(
+            fuzzy_rank("note".into(), paths.clone(), vec![]).len(),
+            MAX_RESULTS
+        );
+        let last = paths.len() - 1;
+        let mut recent = vec![None; paths.len()];
+        recent[last] = Some(0);
+        assert_eq!(fuzzy_rank("note".into(), paths, recent)[0], last as u32);
     }
 }
