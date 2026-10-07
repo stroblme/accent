@@ -1169,6 +1169,10 @@ pub(super) fn bench_tree(app: &Rc<App>, rels: &str) {
         if let Some(left) = left {
             app.set_active_pane(left);
         }
+        if let Some(tab) = app.tab_for(&c) {
+            app.set_pinned(&tab.page, true);
+        }
+        println!("bench tree pin_c {}", bench_tree_line(&app));
         let _ = WidgetExt::activate_action(&app.window, "win.close-pane-tabs", None);
         glib::timeout_future(Duration::from_millis(400)).await;
         println!("bench tree close_left {}", bench_tree_line(&app));
@@ -1176,8 +1180,8 @@ pub(super) fn bench_tree(app: &Rc<App>, rels: &str) {
     });
 }
 
-/// Every pane's tabs in bar order, panes left to right: the preview marked `~`, the tab in front
-/// `*`.
+/// Every pane's tabs in bar order, panes left to right: the preview marked `~`, a pinned tab `^`,
+/// the tab in front `*`.
 fn bench_tree_line(app: &Rc<App>) -> String {
     let root = app.window.clone().upcast::<gtk::Widget>();
     let mut panes = app.panes.borrow().clone();
@@ -1192,9 +1196,10 @@ fn bench_tree_line(app: &Rc<App>) -> String {
                     let key = app.doc_for_page(page).map(|d| d.key()).unwrap_or_default();
                     let preview = pane.preview().as_ref() == Some(page);
                     let front = pane.tabs.selected_page().as_ref() == Some(page);
+                    let pinned = if app.is_pinned(page) { "^" } else { "" };
                     let (preview, front) =
                         (if preview { "~" } else { "" }, if front { "*" } else { "" });
-                    format!("{preview}{key}{front}")
+                    format!("{preview}{pinned}{key}{front}")
                 })
                 .collect();
             format!("[{}]", tabs.join(" "))

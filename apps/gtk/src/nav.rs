@@ -53,13 +53,16 @@ impl App {
         }
     }
 
-    /// Close Tabs in Pane: every tab of the active pane, each as Close Tab closes it, so one whose
-    /// edits cannot be written is asked about and may stay. The least recently used first, so the
-    /// tab in front stays there until it goes itself.
+    /// Close Tabs in Pane: every tab of the active pane but the pinned ones, which VS Code spares
+    /// too, each as Close Tab closes it, so one whose edits cannot be written is asked about and
+    /// may stay. The least recently used first, so the tab in front stays there until it goes
+    /// itself.
     pub fn close_pane_tabs(&self) {
         let pane = self.pane();
         for page in pane.recent().iter().rev() {
-            pane.tabs.close_page(page);
+            if !self.is_pinned(page) {
+                pane.tabs.close_page(page);
+            }
         }
     }
 

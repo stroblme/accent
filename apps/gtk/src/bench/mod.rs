@@ -350,9 +350,9 @@ use tags::bench_tags;
 /// in the window that comes back (see `panes::bench_reload`); any window will do: a vault's, one
 /// opened on a file, `--terminal` or `terminal://<name>`.
 /// `=tree:<a>,<b>,<c>` clicks `a` and then `b` in the Files tree, double-clicks `c` and then
-/// `a`, drags `b` onto the right edge of the pane, then fires Close Tabs in Pane over the left
-/// pane, all through XTEST, and prints each pane's tabs after every step: the vault root has to
-/// list the three, as a scratch vault of three notes does.
+/// `a`, drags `b` onto the right edge of the pane, all through XTEST, then pins `c` and fires
+/// Close Tabs in Pane over the left pane, and prints each pane's tabs after every step: the vault
+/// root has to list the three, as a scratch vault of three notes does.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
