@@ -118,40 +118,21 @@ const CONSOLE_SCRIPT: &str = r#"
 /// that is not `accent:`, and a diagram must render with no network at all. Mermaid asks for
 /// nothing at runtime, so nothing else in the hardening moves.
 ///
-/// The bootstrap rebuilds each fence as a `<pre class="mermaid">` from the code element's
-/// `textContent`, which undoes pulldown-cmark's HTML escaping and hands mermaid the source exactly
-/// as the author typed it, and puts that source back for any fence mermaid could not draw — the
-/// same contract the math fallback has, so a typo never blanks a block.
+/// The bootstrap is Android's too (`vendor/mermaid/bootstrap.js`); what is the desktop's alone is
+/// the theme by the page's lightness and the scroll-sync marker each fence carries.
 const MERMAID: &str = concat!(
     include_str!("../../../vendor/mermaid/mermaid.min.js"),
     "\n",
+    include_str!("../../../vendor/mermaid/bootstrap.js"),
     r#"
 (function () {
-  var blocks = document.querySelectorAll('pre > code.language-mermaid');
-  if (!blocks.length) { return; }
-  var nodes = [];
-  for (var i = 0; i < blocks.length; i++) {
-    var fence = blocks[i].parentElement;
-    var pre = document.createElement('pre');
-    pre.className = 'mermaid';
-    pre.textContent = blocks[i].textContent;
+  var rgb = getComputedStyle(document.documentElement).backgroundColor.match(/\d+/g) || [255, 255, 255];
+  var luma = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
+  // Kept where a print or an export can wait for the diagrams before taking the page.
+  window.__accentDrawn = accentDiagrams(luma < 0.5 ? 'dark' : 'neutral', function (fence) {
     // The block's scroll-sync marker sits inside the fence and has to outlive it.
     var mark = fence.querySelector('[data-line]');
     if (mark) { fence.parentElement.insertBefore(mark, fence); }
-    fence.parentElement.replaceChild(pre, fence);
-    nodes.push(pre);
-  }
-  var sources = nodes.map(function (n) { return n.textContent; });
-  var rgb = getComputedStyle(document.documentElement).backgroundColor.match(/\d+/g) || [255, 255, 255];
-  var luma = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
-  mermaid.initialize({ startOnLoad: false, theme: luma < 0.5 ? 'dark' : 'neutral', suppressErrorRendering: true });
-  // Kept where a print or an export can wait for the diagrams before taking the page.
-  window.__accentDrawn = mermaid.run({ nodes: nodes }).catch(function () {}).then(function () {
-    // suppressErrorRendering empties a fence it cannot parse rather than drawing an error graphic,
-    // so its source goes back in and a broken diagram stays readable, as a rejected formula does.
-    for (var j = 0; j < nodes.length; j++) {
-      if (!nodes[j].querySelector('svg')) { nodes[j].textContent = sources[j]; }
-    }
   });
 })();
 "#

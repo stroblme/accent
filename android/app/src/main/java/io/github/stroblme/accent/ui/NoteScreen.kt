@@ -281,11 +281,11 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
                         ): WebResourceResponse? {
                             if (request.isForMainFrame) return null
                             val url = request.url.toString()
-                            if (url == MERMAID) {
+                            if (url in SCRIPTS) {
                                 return WebResourceResponse(
                                     "text/javascript",
                                     "utf-8",
-                                    view.context.assets.open("mermaid.min.js"),
+                                    view.context.assets.open(url.substringAfterLast('/')),
                                 )
                             }
                             if (!url.startsWith("accent://file/")) return blocked()
@@ -425,47 +425,31 @@ internal fun Color.rgba(): String = String.format(
 /** Whether rendered HTML holds a mermaid fence: pulldown-cmark's class on a fence's code. */
 internal fun diagrams(html: String): Boolean = "<code class=\"language-mermaid\">" in html
 
-/** Where a page asks for mermaid, which the view answers from the APK's assets. */
+/** Where a page asks for mermaid and its bootstrap, answered from the APK's assets. */
 private const val MERMAID = "accent://app/mermaid.min.js"
+private const val BOOTSTRAP = "accent://app/bootstrap.js"
+private val SCRIPTS = setOf(MERMAID, BOOTSTRAP)
 
 /**
- * Mermaid, and the bootstrap that draws a note's diagrams with it: the desktop's (`preview.rs`),
- * in the [theme] it picks by the page's lightness, less the scroll-sync marker a phone has no use
- * for. Each fence becomes a `<pre class="mermaid">` holding its source as typed, and a fence
- * mermaid cannot draw gets that source back, so a typo never blanks a block.
+ * Mermaid, and the bootstrap that draws a note's diagrams with it, the one the desktop runs
+ * (`vendor/mermaid/bootstrap.js`): in the [theme] picked by the page's lightness, and without the
+ * scroll-sync marker a phone has no use for.
  *
  * The only scripts a page ever runs. The policy admits a script only with the nonce drawn here,
  * fresh for every page and unknowable to a note, so the note's own `<script>`, `onerror` or
- * `javascript:` link stays as dead as on a page with scripting off. Both sit in the head, ahead of
- * the note, where nothing it leaves unclosed can take them in; the library is deferred, so the note
- * is drawn before 3.4 MB of it is parsed. MOBILE_DESIGN.md says why the rest of the view's
- * lockdown makes this enough.
+ * `javascript:` link stays as dead as on a page with scripting off. All sit in the head, ahead of
+ * the note, where nothing it leaves unclosed can take them in; the library and the bootstrap are
+ * deferred, so the note is drawn before 3.4 MB of it is parsed. MOBILE_DESIGN.md says why the rest
+ * of the view's lockdown makes this enough.
  */
 private fun mermaid(theme: String): String {
     val nonce = UUID.randomUUID()
     return """
 <meta http-equiv="Content-Security-Policy" content="script-src 'nonce-$nonce'">
 <script nonce="$nonce" defer src="$MERMAID"></script>
+<script nonce="$nonce" defer src="$BOOTSTRAP"></script>
 <script nonce="$nonce">
-document.addEventListener('DOMContentLoaded', function () {
-  var blocks = document.querySelectorAll('pre > code.language-mermaid');
-  var nodes = [];
-  for (var i = 0; i < blocks.length; i++) {
-    var fence = blocks[i].parentElement;
-    var pre = document.createElement('pre');
-    pre.className = 'mermaid';
-    pre.textContent = blocks[i].textContent;
-    fence.parentElement.replaceChild(pre, fence);
-    nodes.push(pre);
-  }
-  var sources = nodes.map(function (n) { return n.textContent; });
-  mermaid.initialize({ startOnLoad: false, theme: '$theme', suppressErrorRendering: true });
-  mermaid.run({ nodes: nodes }).catch(function () {}).then(function () {
-    for (var j = 0; j < nodes.length; j++) {
-      if (!nodes[j].querySelector('svg')) { nodes[j].textContent = sources[j]; }
-    }
-  });
-});
+document.addEventListener('DOMContentLoaded', function () { accentDiagrams('$theme'); });
 </script>"""
 }
 
