@@ -11,6 +11,7 @@ import io.github.stroblme.accent.ffi.Backlink
 import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.Event
 import io.github.stroblme.accent.ffi.FileRow
+import io.github.stroblme.accent.ffi.Note
 import io.github.stroblme.accent.ffi.NoteAlias
 import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.Phase
@@ -230,6 +231,20 @@ class Corpus(
  * to it three times is one backlink, as it is on the desktop.
  */
 fun linkingNotes(links: List<Backlink>): List<String> = links.map { it.srcRelPath }.distinct()
+
+/**
+ * [save] against [expected], and when the etag gate refuses, the file as it is now if it still
+ * holds [last] — what was last read or written: Syncthing setting an mtime or writing the same
+ * bytes again moves the etag alone. Anything else there stays a refusal. The desktop's
+ * `unchanged` (`save.rs`).
+ */
+fun saveOver(expected: Etag?, last: String, read: () -> Note, save: (Etag?) -> Etag): Etag =
+    try {
+        save(expected)
+    } catch (e: AccentException.ChangedOnDisk) {
+        val now = runCatching(read).getOrNull()?.takeIf { it.text == last } ?: throw e
+        save(now.etag)
+    }
 
 /**
  * The vault, its events, and the one note in front of the reader.
@@ -642,7 +657,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Write the note back, refusing rather than resolving when the file has moved under it.
+     * Write the note back, refusing rather than resolving when the file has moved under it — its
+     * text, not its etag alone ([saveOver]).
      *
      * A refusal leaves the buffer alone and raises the banner: that buffer holds the only copy of
      * both the edits and the answer nobody has given yet. Same rule as the desktop. [force] is
@@ -654,7 +670,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val open = _state.value.open ?: return
         if (open.changedOnDisk && !force) return
         val written = withContext(Dispatchers.IO) {
-            runCatching { v.save(open.rel, text, if (force) null else open.etag) }
+            runCatching {
+                saveOver(if (force) null else open.etag, open.text, { v.read(open.rel) }) {
+                    v.save(open.rel, text, it)
+                }
+            }
         }
         written.onSuccess { etag ->
             // What was just written is what is on disk, so there is nothing left to choose between.
