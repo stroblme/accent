@@ -213,9 +213,10 @@ use tags::bench_tags;
 /// companion shares with the editor, across a zoom and a new Indent Width
 /// (`compare::bench_compare_page`). `=press:<rel>` prints where to press the overlaid buttons with
 /// XTEST and where the carets are after each press (`compare::bench_compare_press`).
-/// `=reader:<rel>` prints where to turn the wheel, press Page Down and drag a scrollbar with XTEST
-/// while the comparison is still on its way to its first hunk, and whether it took the scroll
-/// back (`compare::bench_compare_reader`).
+/// `=reader:<rel>` prints where to turn the wheel, press Page Down or Ctrl+End and drag a scrollbar
+/// or the minimap with XTEST while the comparison is still on its way to its first hunk, and
+/// whether it took the scroll back or held the line it left at the top
+/// (`compare::bench_compare_reader`).
 /// `=merge:<rel>` merges two branches that conflict over `<rel>` in a repository it makes, opens
 /// the merge view from the Merge Conflicts row and takes each block's sides
 /// (`compare::bench_compare_merge`).

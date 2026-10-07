@@ -1141,18 +1141,21 @@ pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
 /// A scroll made while a comparison still keeps its view: a note of 400 lines changed at every
 /// fortieth, compared with its disk copy from the top, opens on its first hunk, and each round
 /// scrolls before it has got there. `drill` moves the scroll half a page down itself, as the
-/// comparison's own scrolls do; `wheel`, `page` and `bar` print `bench compare_reader <what> aim
-/// <x> <y>` as soon as the comparison is up, over the editor's column or, for `bar`, the other
-/// column's scrollbar, for `build-aux/xtest.py :N "move <x> <y>; focus; scroll -3"`,
-/// `"move <x> <y>; focus; down; up; key Page_Down"` (a click first, Page Down starting from the
-/// caret, which the opening put on the first hunk) and `"move <x> <y>; sleep 0.1; down; move <x>
-/// <y+300>; up"`. Each prints whether the comparison still kept its view when the scroll came
-/// (`kept=true`, the case this is about), where the scroll went and the line at the top of the
-/// editor's column then (`asked`), the same once the comparison has settled (`got`), and whether
-/// that is where the drill's own scroll ended, on the first hunk (`back`). The claim is
-/// `back=false` for the reader's three: the view stays where the reader put it, but for what GTK
-/// moves it by as it lays out the lines above. Animations are off, so a page key scrolls at once.
-/// Waits ten seconds for each. Writes the note, so point it at a scratch vault.
+/// comparison's own scrolls do; the others print `bench compare_reader <what> aim <x> <y>` as soon
+/// as the comparison is up, over the editor's column or, for `bar`, the other column's scrollbar
+/// and, for `map`, the minimap, switched on for that round, for `build-aux/xtest.py :N`:
+/// `wheel` `"move <x> <y>; focus; scroll -3"`, `page` `"move <x> <y>; focus; down; up; key
+/// Page_Down"` (a click first, Page Down starting from the caret, which the opening put on the
+/// first hunk), `bar` and `map` `"move <x> <y>; sleep 0.1; down; move <x> <y+100>; up"` and `end`
+/// `"move <x> <y>; focus; key ctrl+End"`. Each prints whether the comparison still kept its view
+/// when the scroll came (`kept=true`, the case this is about); where the input left the scroll and
+/// the line at the top of the editor's column, by where its text starts (`asked`, after a key once
+/// GTK has laid out the lines it scrolls to, which is where Ctrl+End scrolls); the same once the
+/// comparison has settled (`got`); and whether that is the line the drill's own scroll ended on,
+/// the first hunk's (`back`). The claim is `back=false` and `got` the line `asked` for the
+/// reader's: the line the input left at the top is held there until the rows are laid. Animations
+/// are off, so a key scrolls at once. Waits ten seconds for each. Writes the note, so point it at
+/// a scratch vault.
 pub(in crate::bench) fn bench_compare_reader(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1182,8 +1185,9 @@ pub(in crate::bench) fn bench_compare_reader(app: &Rc<App>, rel: &str) {
         }
         // Where the comparison ends up when only its own scrolls move it: the drill's round.
         let mut opens = None;
-        for what in ["drill", "wheel", "page", "bar"] {
+        for what in ["drill", "wheel", "page", "bar", "map", "end"] {
             tab.leave_compare();
+            tab.set_minimap(what == "map");
             if let Some(adj) = tab.view.vadjustment() {
                 adj.set_value(0.0);
             }
@@ -1202,29 +1206,31 @@ pub(in crate::bench) fn bench_compare_reader(app: &Rc<App>, rel: &str) {
                 continue;
             };
             let (said, got) = reader(&app, &tab, &compare, what).await;
-            let opens = *opens.get_or_insert(got);
+            // By the line, which a narrower column wraps lower down.
+            let line = |top: &str| top.split('@').next().map(str::to_string);
+            let opens = opens.get_or_insert_with(|| line(&got));
             println!(
                 "bench compare_reader {what} {said} back={}",
-                (got - opens).abs() < 1.0
+                line(&got) == *opens
             );
         }
         bench_quit(&app);
     });
 }
 
-/// One round of [`bench_compare_reader`] over `compare`, just up: what it says, and where the
-/// scroll ended.
+/// One round of [`bench_compare_reader`] over `compare`, just up: what it says, and the line at the
+/// top of the editor's column where the scroll ended.
 async fn reader(
     app: &Rc<App>,
     tab: &Rc<Tab>,
     compare: &Rc<diff::Compare>,
     what: &str,
-) -> (String, f64) {
+) -> (String, String) {
     let adj = compare.vadjustment();
     let view: gtk::TextView = tab.view.clone().upcast();
     // Once the columns have a width, so the aim is where they are drawn.
     let Some(theirs) = pane_view(compare.widget(), true) else {
-        return ("columns=none".to_string(), f64::NAN);
+        return ("columns=none".to_string(), String::new());
     };
     for _ in 0..100 {
         if theirs.width() > 0 {
@@ -1237,20 +1243,25 @@ async fn reader(
     if what == "drill" {
         kept.set(Some(!compare.settled()));
         adj.set_value(adj.value() + adj.page_size() / 2.0);
-        asked.replace(Some((adj.value(), top(&view))));
+        asked.replace(Some((adj.value(), text_top(&view))));
     } else {
-        // Over the editor's column, or at the right edge of the other column, where its
-        // scrollbar is.
-        let (target, x, y) = match theirs.parent() {
-            Some(scroller) if what == "bar" => {
+        // Over the editor's column, at the right edge of the other column, where its scrollbar
+        // is, or over the minimap.
+        let map = || find_widget(compare.widget(), &|w| w.is::<sourceview5::Map>());
+        let (target, x, y) = match (what, theirs.parent(), map()) {
+            ("bar", Some(scroller), _) => {
                 let (w, h) = (scroller.width(), scroller.height());
                 (scroller, w - 4, h * 3 / 10)
+            }
+            ("map", _, Some(map)) => {
+                let (w, h) = (map.width(), map.height());
+                (map, w / 2, h * 3 / 10)
             }
             _ => (view.clone().upcast(), view.width() / 2, view.height() / 2),
         };
         let point = gtk::graphene::Point::new(x as f32, y as f32);
         let Some(aim) = target.compute_point(&app.window, &point) else {
-            return ("aim=none".to_string(), f64::NAN);
+            return ("aim=none".to_string(), String::new());
         };
         // Whether the comparison still kept its view when the input came, and where the input
         // left the scroll, heard on the window ahead of everything in it.
@@ -1284,10 +1295,15 @@ async fn reader(
                         kept.set(weak.upgrade().map(|c| !c.settled()));
                     }
                     last.set(Some(std::time::Instant::now()));
-                    // Once GTK has made the scroll the event asks for.
+                    // Once GTK has made the scroll the event asks for: a key's once GTK has laid
+                    // out the lines it scrolls to.
+                    let after = match event.event_type() {
+                        KeyPress => glib::Priority::from(gtk::PRIORITY_RESIZE as i32),
+                        _ => glib::Priority::HIGH,
+                    };
                     let (asked, adj, view) = (asked.clone(), adj.clone(), view.clone());
-                    glib::idle_add_local_full(glib::Priority::HIGH, move || {
-                        asked.replace(Some((adj.value(), top(&view))));
+                    glib::idle_add_local_full(after, move || {
+                        asked.replace(Some((adj.value(), text_top(&view))));
                         glib::ControlFlow::Break
                     });
                 }
@@ -1315,15 +1331,27 @@ async fn reader(
     settled(compare).await;
     glib::timeout_future(Duration::from_millis(300)).await;
     let Some((value, at)) = asked.take() else {
-        return ("input=none".to_string(), f64::NAN);
+        return ("input=none".to_string(), String::new());
     };
     let said = format!(
         "kept={} asked={value}/{at} got={}/{}",
         kept.get().unwrap_or(false),
         adj.value(),
-        top(&view)
+        text_top(&view)
     );
-    (said, adj.value())
+    (said, text_top(&view))
+}
+
+/// The line at the top of `view`, its first eight characters, and how far below the top of the
+/// view its text starts: what the reader sees there, however the blank above it is laid.
+fn text_top(view: &gtk::TextView) -> String {
+    let seen = view.visible_rect().y();
+    let line = view.line_at_y(seen).0;
+    let mut end = line;
+    end.forward_to_line_end();
+    let text = view.buffer().text(&line, &end, true);
+    let text: String = text.chars().take(8).collect();
+    format!("{text:?}@{}", view.iter_location(&line).y() - seen)
 }
 
 /// A note with its first section folded, compared with its disk copy, which differs only at the
