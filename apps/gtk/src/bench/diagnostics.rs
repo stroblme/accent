@@ -56,6 +56,7 @@ pub(super) fn bench_diagnostics(app: &Rc<App>, rel: &str) {
         }
         bench_gutter(&tab);
         bench_refit(&tab);
+        bench_moved(&tab);
         bench_quit(&app);
     });
 }
@@ -122,6 +123,34 @@ fn bench_refit(tab: &Rc<Tab>) {
         tab.buffer.insert_at_cursor(" typed");
     }
     says("typed");
+    bench_frame();
+    says("settled");
+    tab.set_text(&own);
+}
+
+/// An error on line 2, then a line typed in above it with no publish after: the lines its
+/// underline, gutter mark and end-of-line message are on, as published, as typed, and once the
+/// width refit's 150 ms debounce has passed. All three must say 3 from the typing on. The message
+/// said 2 throughout, GtkSourceView pinning it to a line number, and once settled the other two
+/// did as well: the view notifies its width on every layout, and the refit laid the publish again
+/// at its old positions.
+fn bench_moved(tab: &Rc<Tab>) {
+    let own = tab.text();
+    tab.set_diagnostics(vec![diagnostic(Severity::Error, 2, 0, 4)]);
+    bench_frame();
+    let says = |case: &str| {
+        let (underline, mark) = crate::diagnostics::error_lines(&tab.buffer);
+        println!(
+            "bench diag moved case={case} underline={underline:?} mark={mark:?} message={:?}",
+            tab.message_lines()
+        );
+    };
+    says("published");
+    tab.buffer
+        .insert(&mut tab.buffer.start_iter(), "typed above\n");
+    says("typed");
+    // Two frames' waits: past the refit's debounce.
+    bench_frame();
     bench_frame();
     says("settled");
     tab.set_text(&own);

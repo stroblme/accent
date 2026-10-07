@@ -281,6 +281,7 @@ pub fn open(
         annotations,
         diagnostics_hidden: Cell::new(false),
         annotated: RefCell::default(),
+        relay: RefCell::new(None),
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
         font: RefCell::new(None),
@@ -350,14 +351,18 @@ pub fn open(
 
     // An end-of-line message is cut to the column it was laid in (`diagnostics::fit`), so a new
     // column width lays them again. The adjustment's page size is that width, the view being the
-    // scrollable child.
+    // scrollable child. It is notified on every layout the view makes, a keystroke's included,
+    // whatever the width did.
+    let width = Cell::new(scroller.hadjustment().page_size());
     scroller
         .hadjustment()
         .connect_page_size_notify(glib::clone!(
             #[weak(rename_to = tab)]
             tab,
-            move |_| {
-                if !tab.annotated.borrow().is_empty() {
+            move |adjustment| {
+                if width.replace(adjustment.page_size()) != adjustment.page_size()
+                    && !tab.annotated.borrow().is_empty()
+                {
                     let weak = Rc::downgrade(&tab);
                     tab.refit.call(move || {
                         if let Some(tab) = weak.upgrade() {
@@ -413,6 +418,17 @@ pub fn open(
         #[weak(rename_to = tab)]
         tab,
         move |_| tab.on_changed()
+    ));
+    // Ahead of the edit, while the iters still say where the text it replaces was.
+    buffer.connect_insert_text(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_, at, text| tab.shift_diagnostics(at, at, text)
+    ));
+    buffer.connect_delete_range(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_, from, to| tab.shift_diagnostics(from, to, "")
     ));
     buffer.connect_cursor_position_notify(glib::clone!(
         #[weak(rename_to = tab)]

@@ -363,6 +363,9 @@ pub struct Tab {
     /// whenever a comparison has collapsed some of them, with the whole text each was cut from:
     /// the provider cannot be read back.
     annotated: RefCell<diagnostics::Shown>,
+    /// The end-of-line messages an edit is moving a diagnostic to another line under, by the line
+    /// each is going to: laid again once the edit is in. See [`Tab::shift_diagnostics`].
+    relay: RefCell<Option<diagnostics::Shown>>,
     /// The blocks the server says can be hidden, and the chevrons beside their headers. What is
     /// hidden right now lives in the buffer's own tag, not here.
     folds: RefCell<Vec<Fold>>,
@@ -734,13 +737,32 @@ impl Tab {
     /// same pass, so hiding and showing go through the code a publish does rather than a second
     /// way of lifting the same tags.
     pub(super) fn paint_diagnostics(&self) {
+        self.lay_diagnostics(diagnostics::Shown::new());
+    }
+
+    /// [`Tab::paint_diagnostics`], keeping the cut of each message in `kept` still on its line.
+    fn lay_diagnostics(&self, kept: diagnostics::Shown) {
         let items = self.diagnostics.borrow();
         let painted: &[Diagnostic] = match self.diagnostics_hidden.get() {
             true => &[],
             false => &items,
         };
         *self.annotated.borrow_mut() =
-            diagnostics::render(&self.view, &self.buffer, &self.annotations, painted);
+            diagnostics::render(&self.view, &self.buffer, &self.annotations, painted, kept);
+    }
+
+    /// Move the stored answer with an edit about to replace `from..to` with `text`
+    /// ([`diagnostics::Edit`]), so whatever lays it again before the next publish — a fold, the
+    /// count's press, a new width — lays it where the text now is, and the hover finds it there.
+    /// Not for a whole new text, which the server answers for afresh.
+    fn shift_diagnostics(&self, from: &gtk::TextIter, to: &gtk::TextIter, text: &str) {
+        if self.loading.get() {
+            return;
+        }
+        let edit = diagnostics::Edit::new(lang::pos_of(from), lang::pos_of(to), text);
+        if edit.shift(&mut self.diagnostics.borrow_mut()) {
+            *self.relay.borrow_mut() = Some(edit.reline(self.annotated.take()));
+        }
     }
 
     /// How many end-of-line messages the last paint put up. `ACCENT_BENCH_COMPARE=diag:` only.
@@ -754,6 +776,16 @@ impl Tab {
     #[cfg(feature = "bench")]
     pub fn cuts(&self) -> Vec<(usize, usize)> {
         diagnostics::cuts(&self.view, &self.annotated.borrow())
+    }
+
+    /// The lines the end-of-line messages are drawn on. `ACCENT_BENCH_DIAG` only.
+    #[cfg(feature = "bench")]
+    pub fn message_lines(&self) -> Vec<i32> {
+        let shown = self.annotated.borrow();
+        shown
+            .values()
+            .map(|(annotation, _)| annotation.line())
+            .collect()
     }
 
     /// What the server said, painted or not: what the status bar counts and the hover reads back.
@@ -1180,6 +1212,11 @@ impl Tab {
             // and everything else waits: what a typist watches change is the line they are typing.
             let line = caret(&self.buffer).line();
             highlight::apply_line(&self.buffer, line);
+        }
+        // GtkSourceView pins a message to its line number, where the underline and the gutter mark
+        // ride along with the text: one the edit moved to another line is laid again there.
+        if let Some(kept) = self.relay.take() {
+            self.lay_diagnostics(kept);
         }
         // An end-of-line message is cut to the room its line leaves (`diagnostics::fit`), and
         // typing on that line takes some of it: the caret's line is measured again now, styled,
