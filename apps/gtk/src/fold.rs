@@ -138,11 +138,7 @@ pub fn line_by(at: &gtk::TextIter, count: i32) -> (i32, bool) {
     let mut line = *at;
     for _ in 0..count.abs() {
         let mut next = line;
-        let stepped = match count > 0 {
-            true => next.forward_visible_line(),
-            false => next.backward_visible_line(),
-        };
-        if !stepped {
+        if !visible_line(&mut next, count > 0) {
             return (line.line(), false);
         }
         line = next;
@@ -160,11 +156,43 @@ pub fn shown(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> Option<gtk::TextIt
         return None;
     }
     let mut above = start;
-    if above.backward_visible_line() {
+    if visible_line(&mut above, false) {
         return Some(crate::editor::line_end(buffer, above.line()));
     }
     let mut below = start;
-    below.forward_visible_line().then_some(below)
+    visible_line(&mut below, true).then_some(below)
+}
+
+/// `gtk_text_iter_forward_visible_line`, or its backward twin where `forward` is false. GTK walks
+/// hidden text a character at a time, 15 ms Down over a shut block of 20 000 lines; this jumps a
+/// hidden run by its tag's toggle.
+pub fn visible_line(at: &mut gtk::TextIter, forward: bool) -> bool {
+    let buffer = at.buffer();
+    let moved = match forward {
+        true => at.forward_line(),
+        false => at.backward_line(),
+    };
+    if !moved {
+        return false;
+    }
+    while let Some(tag) = hiders(&buffer).find(|tag| at.has_tag(tag)) {
+        let more = match forward {
+            // To the end of the run, the first character it does not hide.
+            true => at.forward_to_tag_toggle(Some(&tag)) && !at.is_end(),
+            // To the start of the run, where `backward_to_tag_toggle` would look past the toggle
+            // it is on, and onto the character before it.
+            false => {
+                if !at.starts_tag(Some(&tag)) {
+                    at.backward_to_tag_toggle(Some(&tag));
+                }
+                at.backward_char()
+            }
+        };
+        if !more {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether GTK 4.22 aborts when asked for the iter at buffer `y` of `view` (see
