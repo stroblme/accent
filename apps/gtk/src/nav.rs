@@ -53,6 +53,16 @@ impl App {
         }
     }
 
+    /// Close Tabs in Pane: every tab of the active pane, each as Close Tab closes it, so one whose
+    /// edits cannot be written is asked about and may stay. The least recently used first, so the
+    /// tab in front stays there until it goes itself.
+    pub fn close_pane_tabs(&self) {
+        let pane = self.pane();
+        for page in pane.recent().iter().rev() {
+            pane.tabs.close_page(page);
+        }
+    }
+
     /// `Ctrl+Tab` and `Ctrl+Shift+Tab`: one step through the active pane's tabs in the order they
     /// were last used. Per pane, because a pane owns its tab view and its bar is what says which
     /// notes are in it; a window-wide order would have to move the keyboard across a split, which

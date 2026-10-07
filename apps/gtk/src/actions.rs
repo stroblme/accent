@@ -25,6 +25,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.export-png", "Export as PNG…", &[]),
     ("win.export-svg", "Export as SVG…", &[]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
+    ("win.close-pane-tabs", "Close Tabs in Pane", &[]),
     // Most-recently-used order, so one press is the note before this one. Both spellings of the
     // backwards chord, because X11 delivers Shift+Tab as `ISO_Left_Tab` and which of the two a
     // GTK trigger matches is a question of the keymap rather than of the table.
@@ -398,6 +399,7 @@ impl App {
                     self.tabs().close_page(&page);
                 }
             }
+            "close-pane-tabs" => self.close_pane_tabs(),
             "next-tab" => self.cycle_tab(true),
             "previous-tab" => self.cycle_tab(false),
             "split-left" => self.split_active(Side::Left),
