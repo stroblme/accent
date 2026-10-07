@@ -459,17 +459,18 @@ impl App {
     /// A note from the tree, opened in a pane of its own beside `at`. Unlike [`Self::split_page`]
     /// this always splits: the note may not be open at all, so there is something new to show.
     pub fn open_beside(self: &Rc<Self>, at: &Rc<Pane>, side: Side, rel: &str) {
+        // Not open yet: it opens into `at` and is split off once it lands ([`Opened::Beside`]),
+        // since a text tab exists only once the worker's read is back. A pane split off ahead of
+        // it would stand empty and close itself before the tab arrived.
+        let Some(page) = self.doc_for(rel).map(|doc| doc.page().clone()) else {
+            self.set_active_pane(at);
+            return self.open_as(rel, Opened::Beside(side));
+        };
         let pane = self.split_beside(at, side);
-        match self.tab_for(rel).map(|tab| tab.page.clone()) {
-            Some(page) => {
-                if let Some(from) = self.pane_of(&page) {
-                    from.tabs.transfer_page(&page, &pane.tabs, 0);
-                }
-            }
-            None => self.open_path(rel),
+        if let Some(from) = self.pane_of(&page) {
+            from.tabs.transfer_page(&page, &pane.tabs, 0);
         }
-        // Nothing arrived: the path was unopenable, or it was the only note in the pane it came
-        // from, which has closed itself and left this one holding the same note it already had.
+        // Nothing arrived: the tab was in no pane to move it from.
         if pane.tabs.n_pages() == 0 {
             self.close_pane(&pane);
         }

@@ -26,6 +26,9 @@ pub enum Opened {
     /// Kept, and the `n`th of the files a launch named together, which keep the order they were
     /// named in, the last one in front, whichever tab lands first (see [`App::land_in_order`]).
     Launched(usize),
+    /// Kept, and split off its pane on that side once it lands: a tree row dropped on a pane's
+    /// edge (see [`App::open_beside`]).
+    Beside(Side),
 }
 
 impl App {
@@ -91,6 +94,11 @@ impl App {
         }
         if let Opened::Launched(at) = how {
             return self.land_in_order(page, at);
+        }
+        // What its pane showed before it landed stays in front there.
+        if let (Opened::Beside(side), Some(pane)) = (how, self.pane_of(page)) {
+            self.select_survivor(page);
+            return self.split_page(&pane, side, page);
         }
         if how != Opened::Preview {
             return;
