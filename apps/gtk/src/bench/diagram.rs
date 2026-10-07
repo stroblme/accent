@@ -678,12 +678,32 @@ fn props(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// How many of the entry rows under `pane` show AdwEntryRow's pencil, of how many there are:
+/// none should, a press on the row editing it already.
+fn pencils(pane: &gtk::Widget) -> String {
+    let (mut rows, mut shown) = (0, 0);
+    let mut todo = vec![pane.clone()];
+    while let Some(w) = todo.pop() {
+        rows += usize::from(w.is::<adw::EntryRow>());
+        let pencil = w.has_css_class("edit-icon") && w.is_visible() && w.is_child_visible();
+        shown += usize::from(pencil);
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    format!("{shown}/{rows}")
+}
+
 /// The Properties pane's Layers group over a slide template (written to `rel` when there is
 /// none): the template's shape not picked on its locked layer and picked once it is unlocked,
 /// let go of when it is locked again; the Content layer hidden, its shape and edge undrawn; a
 /// layer added on top and current, a paste landing in it, Content picked and a paste landing
 /// there; the new layer moved down, Content renamed, and the template's layer deleted with its
 /// shape and the edge from it, as one step; then the lock and the hiding written to the file.
+/// Every entry row of the pane is counted for a pencil showing. Then, through XTEST, a click on
+/// the layer that is not current, a double click on it, and a name typed and entered, undone.
 fn layers(app: &Rc<App>, rel: &str) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -722,17 +742,11 @@ fn layers(app: &Rc<App>, rel: &str) {
             let ids = file.pages[0].cells.iter().map(|c| c.id.clone());
             ids.collect::<Vec<_>>()
         };
-        // AdwEntryRow's pencil, which a layer's row hides: a press on the row edits its name.
-        let pencil = tab.layer_row("2").and_then(|row| {
-            find_widget(row.upcast_ref(), &|w| {
-                w.has_css_class("edit-icon") && w.is_visible() && w.is_child_visible()
-            })
-        });
         println!(
-            "bench diagram layers open rows={:?} pick_bg={:?} pencil={}",
+            "bench diagram layers open rows={:?} pick_bg={:?} pencils={}",
             rows(),
             tab.pick("bg"),
-            pencil.is_some()
+            pencils(&tab.properties())
         );
         // Every revealer in a row, its Move and Delete buttons' and libadwaita's own, before and
         // while the pointer is on it (PRELIGHT by hand, Xvfb having no pointer).
@@ -859,6 +873,74 @@ fn layers(app: &Rc<App>, rel: &str) {
             "bench diagram layers flush {:?} written={written:?}",
             flushed.map_err(|e| e.to_string())
         );
+        // The pointer's half, through XTEST: a click on the layer that is not current makes it
+        // current and leaves its name alone, and a double click edits the name. A name typed
+        // and entered renames the layer, one step Undo takes back; Escape puts it back; a click
+        // on another layer renames it too, as the edit ends.
+        if let Some(row) = tab.layer_row(&added) {
+            let scroller = row.ancestor(gtk::ScrolledWindow::static_type());
+            if let Some(scroller) = scroller.and_downcast::<gtk::ScrolledWindow>()
+                && let Some(at) = scroller
+                    .child()
+                    .and_then(|c| row.compute_point(&c, &graphene::Point::zero()))
+            {
+                scroller.vadjustment().set_value(f64::from(at.y()) - 100.0);
+            }
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let (dx, dy) = app.window.surface_transform();
+        // Just inside the name's left edge: the hover buttons slide in from the right.
+        let on_name = |id: &str| {
+            let row = tab.layer_row(id)?;
+            let name = find_widget(row.upcast_ref(), &|w| w.has_css_class("editable-area"))?;
+            let left = graphene::Point::new(8.0, name.height() as f32 / 2.0);
+            let at = name.compute_point(&app.window, &left)?;
+            let (x, y) = (f64::from(at.x()) + dx, f64::from(at.y()) + dy);
+            Some(format!("{x} {y}"))
+        };
+        let (on_added, on_slide) = (on_name(&added).unwrap_or_default(), on_name("2"));
+        let editing = || {
+            let row = tab.layer_row(&added);
+            row.is_some_and(|r| r.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN))
+        };
+        let double = format!("move {on_added}; down; up; sleep 0.1; down; up; sleep 0.3");
+        // Long enough between steps that no click is part of a double click.
+        let pause = || glib::timeout_future(Duration::from_millis(600));
+        super::git::xtest(&format!("move {on_added}; focus; sleep 0.2; down; up")).await;
+        println!(
+            "bench diagram layers clicked rows={:?} editing={}",
+            rows(),
+            editing()
+        );
+        pause().await;
+        super::git::xtest(&double).await;
+        println!("bench diagram layers double_clicked editing={}", editing());
+        super::git::xtest("key ctrl+a; type Notes; key Return").await;
+        println!(
+            "bench diagram layers entered rows={:?} editing={}",
+            rows(),
+            editing()
+        );
+        tab.undo();
+        println!("bench diagram layers entered_undo rows={:?}", rows());
+        pause().await;
+        super::git::xtest(&format!("{double}; key ctrl+a; type Gone; key Escape")).await;
+        println!(
+            "bench diagram layers escaped rows={:?} editing={}",
+            rows(),
+            editing()
+        );
+        pause().await;
+        let on_slide = on_slide.unwrap_or_default();
+        let away = format!("{double}; key ctrl+a; type Away; sleep 0.2; move {on_slide}; down; up");
+        super::git::xtest(&away).await;
+        println!(
+            "bench diagram layers left rows={:?} editing={}",
+            rows(),
+            editing()
+        );
+        tab.undo();
+        println!("bench diagram layers left_undo rows={:?}", rows());
         // A picture of the group, for looking at rather than asserting on.
         if let Ok(path) = std::env::var("ACCENT_BENCH_SHOT") {
             tab.undo();

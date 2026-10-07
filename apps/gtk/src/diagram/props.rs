@@ -211,6 +211,34 @@ pub struct Props {
     debounce: Debounce,
 }
 
+/// An entry row of the pane, set by Return or its apply button. Without the pencil `AdwEntryRow`
+/// shows while it is not being edited: a press on the row edits it already.
+pub(super) fn entry_row(title: &str) -> adw::EntryRow {
+    let row = adw::EntryRow::builder()
+        .title(title)
+        .show_apply_button(true)
+        .build();
+    hide_edit_icon(&row);
+    row
+}
+
+/// libadwaita shows and hides the pencil by its child visibility, never by `visible`, so hiding
+/// it once sticks.
+fn hide_edit_icon(row: &adw::EntryRow) {
+    let mut todo = vec![row.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = todo.pop() {
+        if widget.has_css_class("edit-icon") {
+            widget.set_visible(false);
+            return;
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+}
+
 fn combo(title: &str, labels: &[&str]) -> adw::ComboRow {
     adw::ComboRow::builder()
         .title(title)
@@ -349,10 +377,7 @@ impl Props {
         line.add(&start);
         line.add(&end);
 
-        let raw = adw::EntryRow::builder()
-            .title("Style")
-            .show_apply_button(true)
-            .build();
+        let raw = entry_row("Style");
         raw.add_css_class("monospace");
         raw_group.add(&raw);
         let clips = [
@@ -366,10 +391,7 @@ impl Props {
         })
         .to_vec();
 
-        let page_name = adw::EntryRow::builder()
-            .title("Name")
-            .show_apply_button(true)
-            .build();
+        let page_name = entry_row("Name");
         let background = Rc::new(ColourRow::new("Background"));
         let page_width = spin("Width", (100.0, 10000.0, 10.0));
         let page_height = spin("Height", (100.0, 10000.0, 10.0));
