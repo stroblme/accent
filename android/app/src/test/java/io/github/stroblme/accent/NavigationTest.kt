@@ -1,6 +1,7 @@
 package io.github.stroblme.accent
 
 import androidx.compose.ui.unit.IntSize
+import io.github.stroblme.accent.ffi.Comment
 import io.github.stroblme.accent.ffi.LinkTarget
 import io.github.stroblme.accent.ffi.PageSize
 import io.github.stroblme.accent.ffi.PdfLink
@@ -9,6 +10,7 @@ import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
 import io.github.stroblme.accent.ui.Mark
 import io.github.stroblme.accent.ui.Pagination
+import io.github.stroblme.accent.ui.commentsAt
 import io.github.stroblme.accent.ui.hit
 import io.github.stroblme.accent.ui.markAt
 import org.junit.Assert.assertEquals
@@ -204,5 +206,17 @@ class NavigationTest {
         assertEquals(a, markAt(listOf(a, b), Point(120f, 220f), slop = 0f))
         assertEquals(b, markAt(listOf(b, a), Point(200f, 205f), slop = 0f))
         assertNull(markAt(listOf(a, b), Point(200f, 240f), slop = 8f))
+    }
+
+    /** Every comment under the finger shows, in the page's order, as on the desktop. */
+    @Test
+    fun `a tap on comments finds every one under it`() {
+        val note = Comment(listOf(Rect(150f, 60f, 170f, 80f)), "Is this right?", "Grace")
+        val marked = Comment(listOf(Rect(100f, 64f, 300f, 76f)), "check this", null)
+        val both = listOf(note, marked)
+        assertEquals(both, commentsAt(both, Point(160f, 70f), slop = 0f))
+        assertEquals(listOf(marked), commentsAt(both, Point(250f, 70f), slop = 0f))
+        assertEquals(listOf(marked), commentsAt(both, Point(250f, 80f), slop = 8f))
+        assertEquals(emptyList<Comment>(), commentsAt(both, Point(250f, 120f), slop = 8f))
     }
 }
