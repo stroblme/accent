@@ -133,6 +133,7 @@ impl Layers {
     /// pointer or the keyboard is on it, and whether it shows and is locked always there.
     fn row(&self, id: &CellId) -> Row {
         let row = adw::EntryRow::builder().show_apply_button(true).build();
+        hide_edit_icon(&row);
         let send = |change: fn(CellId) -> LayerChange| {
             let (send, id) = (self.send.clone(), id.clone());
             move |_: &gtk::Button| send(change(id.clone()))
@@ -225,6 +226,24 @@ impl Layers {
         rows.iter()
             .find(|(l, _)| l == id)
             .map(|(_, r)| r.row.clone())
+    }
+}
+
+/// Hide the pencil `AdwEntryRow` shows while its name is not being edited: a press on a layer's row
+/// edits the name already. libadwaita shows and hides the pencil by its child visibility, never by
+/// `visible`, so this sticks.
+fn hide_edit_icon(row: &adw::EntryRow) {
+    let mut todo = vec![row.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = todo.pop() {
+        if widget.has_css_class("edit-icon") {
+            widget.set_visible(false);
+            return;
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
     }
 }
 
