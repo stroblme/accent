@@ -15,7 +15,7 @@
 use accent_core::fs::Etag;
 use accent_core::index::{self, Backlink, FileRow, Phase};
 use accent_core::markdown::{LinkKind, Style};
-use accent_core::pdf::{self, Rect, SelectionLink};
+use accent_core::pdf::{self, Comment, Rect, SelectionLink};
 use accent_core::walk::FileKind;
 
 // ------------------------------------------------------------------ what already crosses as is
@@ -74,6 +74,13 @@ pub struct SelectionLink {
     pub link: String,
     pub quads: Vec<pdf::Rect>,
     pub text: String,
+}
+
+#[uniffi::remote(Record)]
+pub struct Comment {
+    pub areas: Vec<pdf::Rect>,
+    pub text: String,
+    pub author: Option<String>,
 }
 
 #[uniffi::remote(Enum)]

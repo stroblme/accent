@@ -237,6 +237,12 @@ impl PdfSession {
         })
     }
 
+    /// What other readers wrote on one page ([`PdfDoc::comments`]), each over its areas in page
+    /// points. Read, never written, as on the desktop.
+    pub fn comments(&self, page: u32) -> Answer<Vec<pdf::Comment>> {
+        self.with(|s| Ok(s.doc.comments(page as usize)?))
+    }
+
     /// The `/Highlight` annotations the file itself carries, which are the exported ones.
     pub fn highlights(&self, page: u32) -> Answer<Vec<Highlight>> {
         self.with(|s| Ok(convert::all(s.doc.highlights_on(page as usize)?)))
