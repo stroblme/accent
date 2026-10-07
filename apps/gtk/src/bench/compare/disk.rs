@@ -1138,6 +1138,194 @@ pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// A scroll made while a comparison still keeps its view: a note of 400 lines changed at every
+/// fortieth, compared with its disk copy from the top, opens on its first hunk, and each round
+/// scrolls before it has got there. `drill` moves the scroll half a page down itself, as the
+/// comparison's own scrolls do; `wheel`, `page` and `bar` print `bench compare_reader <what> aim
+/// <x> <y>` as soon as the comparison is up, over the editor's column or, for `bar`, the other
+/// column's scrollbar, for `build-aux/xtest.py :N "move <x> <y>; focus; scroll -3"`,
+/// `"move <x> <y>; focus; down; up; key Page_Down"` (a click first, Page Down starting from the
+/// caret, which the opening put on the first hunk) and `"move <x> <y>; sleep 0.1; down; move <x>
+/// <y+300>; up"`. Each prints whether the comparison still kept its view when the scroll came
+/// (`kept=true`, the case this is about), where the scroll went and the line at the top of the
+/// editor's column then (`asked`), the same once the comparison has settled (`got`), and whether
+/// that is where the drill's own scroll ended, on the first hunk (`back`). The claim is
+/// `back=false` for the reader's three: the view stays where the reader put it, but for what GTK
+/// moves it by as it lays out the lines above. Animations are off, so a page key scrolls at once.
+/// Waits ten seconds for each. Writes the note, so point it at a scratch vault.
+pub(in crate::bench) fn bench_compare_reader(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
+            return bench_quit(&app);
+        };
+        let text = |changed: bool| -> String {
+            (1..=400)
+                .map(|i| match changed && i % 40 == 20 {
+                    true => format!("line {i} changed\n"),
+                    false => format!("line {i} {}\n", "wrapping words ".repeat(i % 7 * 5)),
+                })
+                .collect()
+        };
+        tab.set_text(&text(false));
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_reader write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.set_text(&text(true));
+        // A page key's scroll made at once rather than over the frames after it.
+        if let Some(settings) = gtk::Settings::default() {
+            settings.set_gtk_enable_animations(false);
+        }
+        // Where the comparison ends up when only its own scrolls move it: the drill's round.
+        let mut opens = None;
+        for what in ["drill", "wheel", "page", "bar"] {
+            tab.leave_compare();
+            if let Some(adj) = tab.view.vadjustment() {
+                adj.set_value(0.0);
+            }
+            wait(300).await;
+            app.compare_with_disk(&tab);
+            let mut compare = None;
+            for _ in 0..500 {
+                compare = tab.comparison();
+                if compare.is_some() {
+                    break;
+                }
+                wait(10).await;
+            }
+            let Some(compare) = compare else {
+                println!("bench compare_reader {what} none");
+                continue;
+            };
+            let (said, got) = reader(&app, &tab, &compare, what).await;
+            let opens = *opens.get_or_insert(got);
+            println!(
+                "bench compare_reader {what} {said} back={}",
+                (got - opens).abs() < 1.0
+            );
+        }
+        bench_quit(&app);
+    });
+}
+
+/// One round of [`bench_compare_reader`] over `compare`, just up: what it says, and where the
+/// scroll ended.
+async fn reader(
+    app: &Rc<App>,
+    tab: &Rc<Tab>,
+    compare: &Rc<diff::Compare>,
+    what: &str,
+) -> (String, f64) {
+    let adj = compare.vadjustment();
+    let view: gtk::TextView = tab.view.clone().upcast();
+    // Once the columns have a width, so the aim is where they are drawn.
+    let Some(theirs) = pane_view(compare.widget(), true) else {
+        return ("columns=none".to_string(), f64::NAN);
+    };
+    for _ in 0..100 {
+        if theirs.width() > 0 {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(5)).await;
+    }
+    let kept = Rc::new(Cell::new(None));
+    let asked = Rc::new(RefCell::new(None));
+    if what == "drill" {
+        kept.set(Some(!compare.settled()));
+        adj.set_value(adj.value() + adj.page_size() / 2.0);
+        asked.replace(Some((adj.value(), top(&view))));
+    } else {
+        // Over the editor's column, or at the right edge of the other column, where its
+        // scrollbar is.
+        let (target, x, y) = match theirs.parent() {
+            Some(scroller) if what == "bar" => {
+                let (w, h) = (scroller.width(), scroller.height());
+                (scroller, w - 4, h * 3 / 10)
+            }
+            _ => (view.clone().upcast(), view.width() / 2, view.height() / 2),
+        };
+        let point = gtk::graphene::Point::new(x as f32, y as f32);
+        let Some(aim) = target.compute_point(&app.window, &point) else {
+            return ("aim=none".to_string(), f64::NAN);
+        };
+        // Whether the comparison still kept its view when the input came, and where the input
+        // left the scroll, heard on the window ahead of everything in it.
+        let last = Rc::new(Cell::new(None));
+        let input = gtk::EventControllerLegacy::new();
+        input.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(compare);
+        input.connect_event(glib::clone!(
+            #[strong]
+            kept,
+            #[strong]
+            asked,
+            #[strong]
+            last,
+            #[strong]
+            adj,
+            #[strong]
+            view,
+            move |_, event| {
+                use gdk::EventType::*;
+                let held = event
+                    .modifier_state()
+                    .contains(gdk::ModifierType::BUTTON1_MASK);
+                let reader = match event.event_type() {
+                    Scroll | KeyPress | ButtonPress | ButtonRelease => true,
+                    MotionNotify => held,
+                    _ => false,
+                };
+                if reader {
+                    if kept.get().is_none() {
+                        kept.set(weak.upgrade().map(|c| !c.settled()));
+                    }
+                    last.set(Some(std::time::Instant::now()));
+                    // Once GTK has made the scroll the event asks for.
+                    let (asked, adj, view) = (asked.clone(), adj.clone(), view.clone());
+                    glib::idle_add_local_full(glib::Priority::HIGH, move || {
+                        asked.replace(Some((adj.value(), top(&view))));
+                        glib::ControlFlow::Break
+                    });
+                }
+                glib::Propagation::Proceed
+            }
+        ));
+        app.window.add_controller(input.clone());
+        tab.view.grab_focus();
+        let (sx, sy) = app.window.surface_transform();
+        println!(
+            "bench compare_reader {what} aim {:.0} {:.0}",
+            f64::from(aim.x()) + sx,
+            f64::from(aim.y()) + sy
+        );
+        // Until the input has come and been quiet for 400 ms, or ten seconds.
+        let quiet = |t: std::time::Instant| t.elapsed() > Duration::from_millis(400);
+        for _ in 0..200 {
+            glib::timeout_future(Duration::from_millis(50)).await;
+            if last.get().is_some_and(quiet) {
+                break;
+            }
+        }
+        app.window.remove_controller(&input);
+    }
+    settled(compare).await;
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let Some((value, at)) = asked.take() else {
+        return ("input=none".to_string(), f64::NAN);
+    };
+    let said = format!(
+        "kept={} asked={value}/{at} got={}/{}",
+        kept.get().unwrap_or(false),
+        adj.value(),
+        top(&view)
+    );
+    (said, adj.value())
+}
+
 /// A note with its first section folded, compared with its disk copy, which differs only at the
 /// end: the run the comparison collapses reaches over the fold's end. It asks for the iter at every
 /// pixel row of the editor, as GtkSourceView asks at the top and bottom of the screen on every
