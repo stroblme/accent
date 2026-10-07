@@ -611,18 +611,23 @@ fn a_commit_outside_the_app_reports_as_a_git_change() {
     );
 
     // A push moves its remote-tracking ref and nothing else the watcher saw: one made in a
-    // shell, or one a host finished after the link dropped, has to reach the pane too.
+    // shell, or one a host finished after the link dropped, has to reach the pane too. Here to
+    // a remote added after the watch set was made, of a branch whose ref is a level down.
+    let bare = tempfile::tempdir().unwrap();
+    git(&["init", "-q", "--bare", &bare.path().to_string_lossy()]);
+    git(&["remote", "add", "origin", &bare.path().to_string_lossy()]);
+    git(&["switch", "-q", "-c", "feature/x"]);
+    git(&["push", "-q", "-u", "origin", "feature/x"]);
     git(&["commit", "-q", "--allow-empty", "-m", "two"]);
-    git(&["update-ref", "refs/remotes/origin/main", "HEAD~1"]);
-    // A rescan puts the remote, which did not exist before, in the watch set.
-    f.vault.rescan().unwrap();
-    assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
-    let _ = crate::tests::wait_for(&f.events, |_| false, Duration::from_millis(1500));
-    git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let _ = wait_for(&f.events, |_| false, Duration::from_millis(1500));
+    let repo = &f.vault.repos().unwrap()[0];
+    assert_eq!(crate::git::status(repo).unwrap().branch.ahead, 1);
+    git(&["push", "-q"]);
     assert!(
         f.wait(|e| matches!(e, Event::GitChanged)).is_some(),
         "a push has to reach the pane"
     );
+    assert_eq!(crate::git::status(repo).unwrap().branch.ahead, 0);
 }
 
 /// A `.gitignore` decides which directories the walk enters, so editing one has to walk the
