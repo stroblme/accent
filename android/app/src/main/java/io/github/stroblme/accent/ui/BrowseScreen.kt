@@ -220,14 +220,20 @@ fun BrowseScreen(
                                 Text(row.rel, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
                             },
                             // At the row's end, what the note is not: the name alone reads as a
-                            // file that is there.
-                            trailingContent = if (!row.unwritten) null else ({
-                                Text(
-                                    "Not created",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }),
+                            // file that is there, in the index.
+                            trailingContent = when {
+                                row.unwritten -> "Not created"
+                                row.ignored -> "Ignored"
+                                else -> null
+                            }?.let { label ->
+                                {
+                                    Text(
+                                        label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            },
                             colors = flatRow(),
                             modifier = Modifier.row {
                                 if (row.unwritten) {

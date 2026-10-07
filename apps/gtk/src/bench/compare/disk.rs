@@ -734,7 +734,12 @@ pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
         }
         tab.set_text(&edited);
         app.compare_with_disk(&tab);
-        wait(1200).await;
+        for _ in 0..100 {
+            if tab.comparison().is_some() {
+                break;
+            }
+            wait(50).await;
+        }
         let Some(compare) = tab.comparison() else {
             println!("bench compare_unfold none");
             return bench_quit(&app);
@@ -744,6 +749,7 @@ pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
             println!("bench compare_unfold columns none");
             return bench_quit(&app);
         };
+        settled(&compare).await;
         let buttons = overlaid(view, "⋯");
         if let Some((y, button)) = buttons.get(buttons.len() / 2).cloned() {
             centre(&compare, view, y).await;
@@ -809,12 +815,7 @@ pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
         let compare = diff.comparison();
         // Until it has gone to its first change: a press before that is kept from moving the
         // view, and the opening's own move lands in the middle of it.
-        for _ in 0..200 {
-            if compare.settled() {
-                break;
-            }
-            wait(50).await;
-        }
+        settled(compare).await;
         let Some(views) = pane_view(compare.widget(), true).and_then(|v| both_columns(compare, &v))
         else {
             println!("bench compare_unfold blobs none");
@@ -1074,7 +1075,12 @@ pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
         }
         tab.set_text(&text(true));
         app.compare_with_disk(&tab);
-        wait(1200).await;
+        for _ in 0..100 {
+            if tab.comparison().is_some() {
+                break;
+            }
+            wait(50).await;
+        }
         let (Some(compare), Some(theirs)) = (
             tab.comparison(),
             tab.comparison().and_then(|c| pane_view(c.widget(), true)),
@@ -1097,6 +1103,8 @@ pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
             );
         };
         for (what, view, label) in [("gap", mine, "⋯"), ("take", &theirs, "Take")] {
+            // The opening, and then the run the first press opened, let go of the view first.
+            settled(&compare).await;
             let buttons = overlaid(view, label);
             let Some((top, button)) = buttons.get(buttons.len() / 2).cloned() else {
                 println!("bench compare_press {what} none");

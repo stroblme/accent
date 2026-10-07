@@ -293,16 +293,17 @@ The decisions under the Android app, each with its reason; the shared ones are i
   `accent://` scheme and generated CSS — it is the only thing on the platform that draws MathML.
 - **Mermaid draws a note's diagrams, and is the only script a page runs** (`NoteScreen.mermaid`):
   the desktop's vendored library, packed as an asset (about 1 MB of the APK) and served at
-  `accent://app/`, with the desktop's bootstrap in mermaid's dark or neutral theme by the page's
-  lightness. Scripting is on only for a note with a mermaid fence, and even there a note's own
-  script stays dead: the page's Content-Security-Policy admits a script only with a nonce drawn
-  fresh for that page, which the note cannot know, so its `<script>`, an `onerror` or a
-  `javascript:` link does nothing, as with scripting off; both of ours sit in the head, ahead of
-  anything the note leaves unclosed. The rest of the lockdown is unchanged and is what makes that
-  enough: no JavaScript interface, no file or content access, every request but the vault's images
-  and the library refused, every navigation handed to the app — and no `INTERNET` permission, so
-  nothing a page runs can reach the network. Mermaid runs at its default strict level, which
-  sanitises a diagram's labels and drops its click handlers.
+  `accent://app/`, with the bootstrap the desktop runs (`vendor/mermaid/bootstrap.js`, one file so
+  the two cannot drift) in mermaid's dark or neutral theme by the page's lightness. Scripting is on
+  only for a note with a mermaid fence, and even there a note's own script stays dead: the page's
+  Content-Security-Policy admits a script only with a nonce drawn fresh for that page, which the
+  note cannot know, so its `<script>`, an `onerror` or a `javascript:` link does nothing, as with
+  scripting off; ours all sit in the head, ahead of anything the note leaves unclosed. The rest of
+  the lockdown is unchanged and is what makes that enough: no JavaScript interface, no file or
+  content access, every request but the vault's images, the library and its bootstrap refused,
+  every navigation handed to the app — and no `INTERNET` permission, so nothing a page runs can
+  reach the network. Mermaid runs at its default strict level, which sanitises a diagram's labels
+  and drops its click handlers.
 - **Images are recoloured on their way into a WebView** (`ui/Images.kt`): the note's page and the
   image screen both take them from `served`, which classifies a raster from a copy decoded to a
   512 px long side (`looksLikeDocument` samples 65 k pixels whatever it is given; the verdict is

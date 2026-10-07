@@ -11,6 +11,7 @@ import io.github.stroblme.accent.ffi.Backlink
 import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.Event
 import io.github.stroblme.accent.ffi.FileRow
+import io.github.stroblme.accent.ffi.Note
 import io.github.stroblme.accent.ffi.NoteAlias
 import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.Phase
@@ -188,28 +189,36 @@ data class VaultState(
 }
 
 /**
- * What the switcher ranks: every file, then every note a link names that is not there yet, by the
- * path creating it would give it, then every front matter alias, by the alias.
+ * What the switcher ranks: every file the index holds, then every note in a folder git ignores
+ * that it does not, then every note a link names that is not there yet, by the path creating it
+ * would give it, then every front matter alias, by the alias.
  *
- * One list, so they rank together, in that order: the ranking is stable, so at the same score a
- * file that is there leads a note only linked to, and a path leads an alias. A row is a place in
- * [names] rather than the string there, because one alias can name two notes.
+ * One list, so they rank together, in that order: the ranking is stable, so at the same score an
+ * indexed file leads an ignored one, a file that is there leads a note only linked to, and a path
+ * leads an alias. A row is a place in [names] rather than the string there, because one alias can
+ * name two notes.
  */
 class Corpus(
     files: List<String> = emptyList(),
+    ignored: List<String> = emptyList(),
     missing: List<String> = emptyList(),
     aliases: List<NoteAlias> = emptyList(),
 ) {
-    /** What the ranking reads. */
-    val names = files + missing + aliases.map { it.name }
+    /** The ignored notes the index does not hold already, as the desktop joins them: once. */
+    private val unindexed = ignored - files.toSet()
 
-    private val written = files.size
+    /** What the ranking reads. */
+    val names = files + unindexed + missing + aliases.map { it.name }
+
+    private val indexed = files.size
+    private val written = indexed + unindexed.size
     private val paths = written + missing.size
     private val notes = aliases.map { it.relPath }
 
     /** The row the [i]th of [names] stands for. */
     fun row(i: Int): Row = when {
-        i < written -> Row(names[i].substringAfterLast('/'), names[i])
+        i < indexed -> Row(names[i].substringAfterLast('/'), names[i])
+        i < written -> Row(names[i].substringAfterLast('/'), names[i], ignored = true)
         i < paths -> Row(names[i].substringAfterLast('/'), names[i], unwritten = true)
         else -> Row(names[i], notes[i - paths])
     }
@@ -221,8 +230,14 @@ class Corpus(
      * What a row reads and what picking it does: [name] over [rel], and a pick opens [rel], or
      * writes it first when it is [unwritten]. A path's name is its file's; an alias is its own,
      * with the whole path of its note under it, since the alias says nothing of where that is.
+     * An [ignored] note is in a folder git ignores, which the row says, as the desktop's does.
      */
-    data class Row(val name: String, val rel: String, val unwritten: Boolean = false)
+    data class Row(
+        val name: String,
+        val rel: String,
+        val unwritten: Boolean = false,
+        val ignored: Boolean = false,
+    )
 }
 
 /**
@@ -230,6 +245,20 @@ class Corpus(
  * to it three times is one backlink, as it is on the desktop.
  */
 fun linkingNotes(links: List<Backlink>): List<String> = links.map { it.srcRelPath }.distinct()
+
+/**
+ * [save] against [expected], and when the etag gate refuses, the file as it is now if it still
+ * holds [last] — what was last read or written: Syncthing setting an mtime or writing the same
+ * bytes again moves the etag alone. Anything else there stays a refusal. The desktop's
+ * `unchanged` (`save.rs`).
+ */
+fun saveOver(expected: Etag?, last: String, read: () -> Note, save: (Etag?) -> Etag): Etag =
+    try {
+        save(expected)
+    } catch (e: AccentException.ChangedOnDisk) {
+        val now = runCatching(read).getOrNull()?.takeIf { it.text == last } ?: throw e
+        save(now.etag)
+    }
 
 /**
  * The vault, its events, and the one note in front of the reader.
@@ -412,6 +441,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val read = withContext(Dispatchers.IO) {
             Corpus(
                 runCatching { v.filePaths(false) }.getOrDefault(emptyList()),
+                // Walked again here, as the desktop's Go to File walks them as it opens: nothing
+                // else on a phone asks for a fresh walk of the folders the index leaves out.
+                runCatching { v.ignoredNotes(true) }.getOrDefault(emptyList()),
                 runCatching { v.missingNotes() }.getOrDefault(emptyList()),
                 runCatching { v.noteAliases() }.getOrDefault(emptyList()),
             )
@@ -642,7 +674,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Write the note back, refusing rather than resolving when the file has moved under it.
+     * Write the note back, refusing rather than resolving when the file has moved under it — its
+     * text, not its etag alone ([saveOver]).
      *
      * A refusal leaves the buffer alone and raises the banner: that buffer holds the only copy of
      * both the edits and the answer nobody has given yet. Same rule as the desktop. [force] is
@@ -654,7 +687,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val open = _state.value.open ?: return
         if (open.changedOnDisk && !force) return
         val written = withContext(Dispatchers.IO) {
-            runCatching { v.save(open.rel, text, if (force) null else open.etag) }
+            runCatching {
+                saveOver(if (force) null else open.etag, open.text, { v.read(open.rel) }) {
+                    v.save(open.rel, text, it)
+                }
+            }
         }
         written.onSuccess { etag ->
             // What was just written is what is on disk, so there is nothing left to choose between.

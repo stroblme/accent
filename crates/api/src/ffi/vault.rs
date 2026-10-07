@@ -193,6 +193,13 @@ impl Vault {
         Ok(self.inner.missing_notes()?)
     }
 
+    /// The notes in the folders git ignores, which the index never walks: what the switcher lists
+    /// behind the files it holds. `fresh` walks those folders again; otherwise they are the last
+    /// walk's.
+    pub fn ignored_notes(&self, fresh: bool) -> Answer<Vec<String>> {
+        Ok(self.inner.ignored_notes(fresh)?)
+    }
+
     /// Every front matter alias with the note that carries it, by alias: the names the switcher
     /// also finds a note by. A link still resolves by the file's name alone.
     pub fn note_aliases(&self) -> Answer<Vec<NoteAlias>> {

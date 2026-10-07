@@ -31,8 +31,8 @@ class DiagramsTest {
         val html = page(fence + "<script>alert(1)</script>", Color.Black, Color.White, Color.Blue)
         val nonce = Regex("script-src 'nonce-([^']+)'").find(html)!!.groupValues[1]
         val head = html.substringBefore("<body>")
-        assertEquals(2, Regex("<script nonce=\"$nonce\"").findAll(head).count())
-        assertEquals(2, Regex("<script").findAll(head).count())
+        assertEquals(3, Regex("<script nonce=\"$nonce\"").findAll(head).count())
+        assertEquals(3, Regex("<script").findAll(head).count())
         assertTrue("a fresh nonce per page", nonce !in page(fence, Color.Black, Color.White, Color.Blue))
 
         assertFalse(page("<p>text</p>", Color.Black, Color.White, Color.Blue).contains("<script"))
