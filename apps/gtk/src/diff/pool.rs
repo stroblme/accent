@@ -2,14 +2,11 @@
 
 use adw::prelude::*;
 use std::cell::{Cell, RefCell};
-use std::ops::Range;
 use std::rc::Rc;
 
 /// What one overlaid button is for right now.
 #[derive(Clone)]
 pub(super) enum Role {
-    /// The Take / Keep Both pair of the hunk over these rows.
-    Hunk(Range<usize>),
     /// Opens the hidden run keyed `key`, `rows` long.
     Gap { key: usize, rows: usize },
     /// Takes a side of the `i`th conflict block in a merge.
@@ -24,8 +21,8 @@ struct Slot {
     widget: gtk::Widget,
     /// The gap button itself, to relabel.
     label: Option<gtk::Button>,
-    /// A hunk's or a block's buttons. A block's are dressed again at each claim: the arrow on a
-    /// merge's column takes the side the column shows.
+    /// A block's buttons, dressed again at each claim: the arrow on a merge's column takes the
+    /// side the column shows.
     buttons: Vec<gtk::Button>,
     role: Rc<RefCell<Role>>,
     /// Whether the refresh under way has handed this slot out.
@@ -41,15 +38,15 @@ struct Slot {
 /// comparison it hosts and the buttons parented to it have to as well.
 ///
 /// A refresh hands the buttons out again in order, [`Pool::unclaim`] to [`Pool::hide_unclaimed`],
-/// so the button a hunk or a run had is the one it gets back, and one still wanted is never
+/// so the button a block or a run had is the one it gets back, and one still wanted is never
 /// hidden in between: a keystroke re-diffs, and must not take every button off and put it back.
 #[derive(Default)]
 pub struct Pool {
     /// What the comparison laid over the view right now does with a press, asked at the press:
     /// the buttons outlive the comparison that made them.
     pub(super) act: RefCell<Option<Act>>,
-    /// The labels or icon names, and the tooltips, of a hunk's or a block's buttons: whichever
-    /// this view's comparison asks for, which a row is made with and dressed in at every claim.
+    /// The labels or icon names, and the tooltips, of a block's buttons: whichever this view's
+    /// merge asks for, which a row is made with and dressed in at every claim.
     pub(super) buttons: RefCell<Vec<(&'static str, &'static str)>>,
     slots: RefCell<Vec<Slot>>,
 }
@@ -61,9 +58,7 @@ impl Pool {
         let same_kind = |slot: &Slot| {
             matches!(
                 (&*slot.role.borrow(), &role),
-                (Role::Hunk(_), Role::Hunk(_))
-                    | (Role::Gap { .. }, Role::Gap { .. })
-                    | (Role::Block(_), Role::Block(_))
+                (Role::Gap { .. }, Role::Gap { .. }) | (Role::Block(_), Role::Block(_))
             )
         };
         let mut slots = self.slots.borrow_mut();
@@ -120,10 +115,9 @@ impl Pool {
                 button.connect_clicked(self.act(&role, 0));
                 (button.clone().upcast(), Some(button), Vec::new())
             }
-            // The comparison's buttons as they are now, which is once and for all: a hunk is only
-            // ever claimed on the pane beside the editor, a companion that goes with its
-            // comparison, and a block's buttons on a merge's column are those of the column.
-            Role::Hunk(_) | Role::Block(_) => {
+            // The merge's buttons as they are now, which is once and for all: a block's buttons
+            // on a merge's column are those of the column.
+            Role::Block(_) => {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
                 row.add_css_class("linked");
                 row.add_css_class("osd");

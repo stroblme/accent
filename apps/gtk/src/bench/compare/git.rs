@@ -1,6 +1,6 @@
 //! Drills over the comparisons the Git pane's rows open: the working tree, the index, a commit.
 
-use super::disk::{centre, overlaid};
+use super::disk::centre;
 use super::*;
 
 /// A file opened the way the Git pane opens one: its Changes row activated, with no tab holding
@@ -259,11 +259,14 @@ fn bench_compare_binary(app: &Rc<App>, then: impl FnOnce() + 'static) {
 /// the buffer, the index untouched, and an undo puts it back (`reverted gone=true … undone=true`).
 /// Then it leaves line 3 selected in the working-tree comparison for eight seconds, for
 /// `build-aux/xtest.py` to open the menu on with a secondary click (`hold` says when). Last the
-/// same from the buttons on each hunk of the Index pane: Revert on the second takes line 9b out
-/// of the buffer and an undo puts it back (`hunk_reverted gone=true`, `hunk_undone=true`), Stage
-/// on the first stages line 3 alone, and `aim <x> <y>` is the middle of the Stage left on line
-/// 9b's hunk, for `build-aux/xtest.py :N "move <x> <y>; focus; down; up"` within ten seconds
-/// (`clicked index=…` holding line 9b).
+/// same from the buttons on each hunk's band in the strip between the columns, after the strip as
+/// laid (`strip`: the buttons on screen against the columns, `over=0` and `links_off=0` the claim,
+/// see `Compare::strip`): Revert on the second takes line 9b out of the buffer and an undo puts it
+/// back (`hunk_reverted gone=true`, `hunk_undone=true`), as Revert Hunk from the palette does with
+/// the caret on it (`palette_reverted gone=true`), Stage on the first stages line 3 alone, and the
+/// Stage left on line 9b's hunk stages it (`clicked index=…` holding line 9b). Revert and the last
+/// Stage are pressed through the real pointer: `aim <x> <y>` is the middle of each, for
+/// `build-aux/xtest.py :N "move <x> <y>; focus; down; up"` within ten seconds.
 pub(in crate::bench) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -376,39 +379,21 @@ pub(in crate::bench) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
         println!("bench compare_lines hold");
         wait(8000).await;
 
-        // The same two from the buttons on each hunk, on the Index pane beside the editor.
+        // The same two from the buttons on each hunk's band.
         let Some(index_view) = pane_view(compare.widget(), false) else {
             return bench_quit(&app);
         };
+        println!("bench compare_lines strip {}", compare.strip());
         let pressed = |label: &str, hunk: usize| {
-            let buttons = overlaid(&index_view, label);
+            let buttons = compare.strip_buttons(label);
             let tip = buttons.get(hunk).and_then(|(_, b)| b.tooltip_text());
             if let Some((_, button)) = buttons.get(hunk) {
                 button.emit_clicked();
             }
             (buttons.len(), tip)
         };
-        println!(
-            "bench compare_lines hunk_reverted buttons={:?} gone={} index={:?} {}",
-            pressed("Revert", 1),
-            !has_9b(&tab),
-            git(&["show", &index]),
-            bench_compare_line(&compare)
-        );
-        tab.buffer.undo();
-        wait(300).await;
-        println!("bench compare_lines hunk_undone={}", has_9b(&tab));
-        let buttons = pressed("Stage", 0);
-        wait(1500).await;
-        println!(
-            "bench compare_lines hunk_staged buttons={buttons:?} index={:?} {}",
-            git(&["show", &index]),
-            bench_compare_line(&compare)
-        );
-
-        // And the Stage left, on the hunk adding line 9b, pressed through the real pointer.
-        let staged = git(&["show", &index]);
-        if let Some((top, button)) = overlaid(&index_view, "Stage").first().cloned() {
+        // Scrolled to the middle of the view, and its middle printed for XTEST.
+        let aim = async |top: i32, button: &gtk::Button| {
             centre(&compare, &index_view, top).await;
             let middle = gtk::graphene::Point::new(
                 button.width() as f32 / 2.0,
@@ -425,6 +410,52 @@ pub(in crate::bench) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
                     f64::from(p.y()) + sy
                 );
             }
+        };
+        let reverts = compare.strip_buttons("Revert");
+        let tip = reverts.get(1).and_then(|(_, b)| b.tooltip_text());
+        if let Some((top, button)) = reverts.get(1) {
+            aim(*top, button).await;
+            for _ in 0..100 {
+                wait(100).await;
+                if !has_9b(&tab) {
+                    break;
+                }
+            }
+        }
+        println!(
+            "bench compare_lines hunk_reverted buttons={:?} gone={} index={:?} {}",
+            (reverts.len(), tip),
+            !has_9b(&tab),
+            git(&["show", &index]),
+            bench_compare_line(&compare)
+        );
+        tab.buffer.undo();
+        wait(300).await;
+        println!("bench compare_lines hunk_undone={}", has_9b(&tab));
+        // Revert Hunk from the palette, with the caret on line 9b.
+        if let Some(at) = tab.buffer.iter_at_line(9) {
+            tab.buffer.place_cursor(&at);
+        }
+        let _ = WidgetExt::activate_action(&app.window, "win.hunk-revert", None);
+        wait(300).await;
+        println!(
+            "bench compare_lines palette_reverted gone={}",
+            !has_9b(&tab)
+        );
+        tab.buffer.undo();
+        wait(300).await;
+        let buttons = pressed("Stage", 0);
+        wait(1500).await;
+        println!(
+            "bench compare_lines hunk_staged buttons={buttons:?} index={:?} {}",
+            git(&["show", &index]),
+            bench_compare_line(&compare)
+        );
+
+        // And the Stage left, on the hunk adding line 9b, pressed through the real pointer.
+        let staged = git(&["show", &index]);
+        if let Some((top, button)) = compare.strip_buttons("Stage").first() {
+            aim(*top, button).await;
             for _ in 0..100 {
                 wait(100).await;
                 if git(&["show", &index]) != staged {
@@ -1138,7 +1169,7 @@ fn columns(app: &Rc<App>, rel: &str, expect: &(String, String)) -> String {
             bench_toast(app)
         );
     };
-    let paned = compare.widget().downcast_ref::<gtk::Paned>().cloned();
+    let paned = compare.paned();
     let mut bad = Vec::new();
     let mut widths = [0; 2];
     let mut side = |end: bool| {
@@ -1149,10 +1180,11 @@ fn columns(app: &Rc<App>, rel: &str, expect: &(String, String)) -> String {
         let (s, e) = buffer.bounds();
         let text = buffer.text(&s, &e, true);
         let want = if end { &expect.1 } else { &expect.0 };
-        let width = paned
-            .as_ref()
-            .and_then(|p| if end { p.end_child() } else { p.start_child() })
-            .map_or(0, |w| w.width());
+        let width = match end {
+            true => paned.end_child(),
+            false => paned.start_child(),
+        };
+        let width = width.map_or(0, |w| w.width());
         widths[usize::from(end)] = width;
         let (ok, seen) = (text.as_str() == diff::normalise(want), seen(&view));
         if !ok || (seen == 0 && !want.is_empty()) {

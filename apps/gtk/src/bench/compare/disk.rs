@@ -891,9 +891,7 @@ async fn bench_unfold(compare: &diff::Compare, views: &[gtk::TextView; 2], on: b
 /// which rewraps both, and the lines at the top of `views` (see [`painted`]): the narrower column
 /// has the taller line of each row, so the line at its top is the row's.
 async fn bench_resize(compare: &diff::Compare, views: &[gtk::TextView; 2]) -> String {
-    let Some(paned) = compare.widget().downcast_ref::<gtk::Paned>() else {
-        return "paned=none".to_string();
-    };
+    let paned = compare.paned();
     let by = match pane_view(compare.widget(), false).as_ref() == Some(&views[0]) {
         true => -200,
         false => 200,
@@ -1041,16 +1039,17 @@ pub(super) async fn centre(compare: &diff::Compare, view: &gtk::TextView, y: i32
     glib::timeout_future(Duration::from_millis(500)).await;
 }
 
-/// The overlaid buttons pressed through the real pointer, which a drill's `clicked` is not: a note
-/// of 400 lines changed at every fortieth, compared with its disk copy, the editor's caret at its
-/// start. Prints `bench compare_press aim <x> <y>` over the middle "⋯" button of the editor's
+/// The comparison's buttons pressed through the real pointer, which a drill's `clicked` is not: a
+/// note of 400 lines changed at every fortieth, compared with its disk copy, the editor's caret at
+/// its start. Prints `bench compare_press aim <x> <y>` over the middle "⋯" button of the editor's
 /// column, for `build-aux/xtest.py :N "move <x> <y>; focus; down; up"`, and once the run has
 /// opened (`acted=true`), the editor's caret line and the widget with the keyboard; then the same
-/// over the middle Take button on the other column, with that column's caret offset. The claim is
-/// `caret_line=0` and `theirs_caret=0` throughout, the keyboard staying where it was: the press
-/// reached the text view under the button too, which put that column's caret under the pointer
-/// and gave it the keyboard. Waits
-/// ten seconds for each press. Writes the note, so point it at a scratch vault.
+/// over the middle hunk's Take and then its Keep Both, in the strip between the columns, with the
+/// other column's caret offset, and the strip as laid when each is aimed at (`strip`, see
+/// `Compare::strip`). The claim is `caret_line=0` and `theirs_caret=0` throughout, the keyboard
+/// staying where it was: the press reached the text view under the button too, which put that
+/// column's caret under the pointer and gave it the keyboard. Waits ten seconds for each press.
+/// Writes the note, so point it at a scratch vault.
 pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1102,15 +1101,21 @@ pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
                 caret(&theirs).offset()
             );
         };
-        for (what, view, label) in [("gap", mine, "⋯"), ("take", &theirs, "Take")] {
+        for (what, label) in [("gap", "⋯"), ("take", "Take"), ("both", "Keep Both")] {
             // The opening, and then the run the first press opened, let go of the view first.
             settled(&compare).await;
-            let buttons = overlaid(view, label);
+            let buttons = match what {
+                "gap" => overlaid(mine, label),
+                _ => compare.strip_buttons(label),
+            };
             let Some((top, button)) = buttons.get(buttons.len() / 2).cloned() else {
                 println!("bench compare_press {what} none");
                 continue;
             };
-            centre(&compare, view, top).await;
+            centre(&compare, mine, top).await;
+            if what != "gap" {
+                println!("bench compare_press strip {}", compare.strip());
+            }
             let Some(root) = button.root() else { continue };
             let middle = gtk::graphene::Point::new(
                 button.width() as f32 / 2.0,

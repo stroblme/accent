@@ -3,8 +3,6 @@
 
 use adw::prelude::*;
 
-use super::Band;
-
 /// The blank space above a paragraph, and below the last, that keeps the two columns level: one
 /// tag per pixel count, named this plus the count, so a paragraph's padding can be read back off
 /// the buffer. See [`carried`].
@@ -77,41 +75,6 @@ pub(super) fn padding(
         }
     }
     (pads, tops)
-}
-
-/// Where `column` has no line in a hunk at all — another column only adds, or only deletes — the
-/// blank that levels it, as `(y, height, hue)` rows for `multicaret::View::set_bands`, in `hue`,
-/// the hue of the lines it faces. A run of rows it has no line in that touches a changed line of
-/// its own is part of a change already, and that line's tint covers it (see [`padding`]).
-pub(super) fn bands(
-    heights: &[Vec<Option<i32>>],
-    extra: &[i32],
-    changed: &[bool],
-    tops: &[i32],
-    column: usize,
-    hue: (f32, f32, f32),
-) -> Vec<Band> {
-    let (n, own) = (changed.len(), &heights[column]);
-    let bottom = |r: usize| {
-        tops[r] + heights.iter().map(|h| h[r].unwrap_or(0)).max().unwrap_or(0) + extra[r]
-    };
-    let lacks = |r: usize| changed[r] && own[r].is_none();
-    let mut out = Vec::new();
-    let mut r = 0;
-    while r < n {
-        if !lacks(r) {
-            r += 1;
-            continue;
-        }
-        let start = r;
-        while r < n && lacks(r) {
-            r += 1;
-        }
-        if (start == 0 || !changed[start - 1]) && (r == n || !changed[r]) {
-            out.push((tops[start], bottom(r - 1) - tops[start], hue));
-        }
-    }
-    out
 }
 
 /// The natural height of one line of `buffer` as `view` lays it out, wrapping and all, with
@@ -336,7 +299,6 @@ fn pad_tag(buffer: &sourceview5::Buffer, prefix: &str, px: i32) -> gtk::TextTag 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::{ADDED_HUE, REMOVED_HUE};
 
     #[test]
     fn padding_keeps_every_row_level_and_hands_a_fillers_share_on() {
@@ -373,35 +335,6 @@ mod tests {
         assert_eq!(
             (pads[1].above.clone(), pads[1].below.clone()),
             (vec![0, 0, 10], vec![0; 3])
-        );
-    }
-
-    #[test]
-    fn a_hunk_with_no_line_on_one_side_leaves_a_band_there_in_the_other_sides_hue() {
-        // Rows 1 and 2 only delete; the new side has nothing there.
-        let heights = [
-            vec![Some(10), Some(20), Some(10), Some(10)],
-            vec![Some(10), None, None, Some(10)],
-        ];
-        let (extra, changed) = ([0; 4], [false, true, true, false]);
-        let tops = [0, 10, 30, 40];
-        assert_eq!(
-            bands(&heights, &extra, &changed, &tops, 1, REMOVED_HUE),
-            vec![(10, 30, REMOVED_HUE)]
-        );
-        assert_eq!(
-            bands(&heights, &extra, &changed, &tops, 0, ADDED_HUE),
-            vec![]
-        );
-
-        // A deletion under a changed pair is that change's blank, which its own tint covers.
-        let heights = [
-            vec![Some(10), Some(20), Some(10), Some(10)],
-            vec![Some(10), Some(10), None, Some(10)],
-        ];
-        assert_eq!(
-            bands(&heights, &extra, &changed, &tops, 1, REMOVED_HUE),
-            vec![]
         );
     }
 

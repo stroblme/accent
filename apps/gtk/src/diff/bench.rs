@@ -4,6 +4,7 @@ use accent_core::diff;
 use adw::prelude::*;
 
 use super::columns::Columns;
+use super::links::Ends;
 use super::{Compare, Side, first_change};
 
 impl Compare {
@@ -70,6 +71,11 @@ impl Compare {
         (hunk.start..end)
             .map(|r| (r, top(r, Side::Old), top(r, Side::New)))
             .collect()
+    }
+
+    /// The divider between the columns.
+    pub fn paned(&self) -> &gtk::Paned {
+        &self.columns.paned
     }
 
     /// The shared vertical scrollbar, for the bench to read and to move as a reader would.
@@ -171,6 +177,38 @@ impl Compare {
         }
     }
 
+    /// The shown strip buttons named `label`, top to bottom, each with the `y` its hunk starts at
+    /// in buffer coordinates.
+    pub fn strip_buttons(&self, label: &str) -> Vec<(i32, gtk::Button)> {
+        let hunks = {
+            let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
+            diff::hunks(&lines, &rows)
+        };
+        let grid = self.columns.grid.borrow();
+        let mut buttons: Vec<(i32, gtk::Button)> = (self.columns.links.buttons().into_iter())
+            .filter(|(_, name, _)| *name == label)
+            .filter_map(|((_, run, _), _, button)| {
+                Some((*grid.tops.get(hunks.get(run)?.start)?, button))
+            })
+            .collect();
+        buttons.sort_by_key(|(y, _)| *y);
+        buttons
+    }
+
+    /// The strip as laid now: how wide the columns and the strip are, where the buttons on screen
+    /// are against the columns (`over=0`, none on a column, is the claim), how many of them are
+    /// not at the top of their bands (`stale=0`), and how many connector ends are off the rows
+    /// they stand on (`links_off=0`).
+    pub fn strip(&self) -> String {
+        let (columns, strips) = self.columns.links.widths();
+        let (buttons, rects, over, stale) = self.columns.links.rects(&self.columns);
+        let (_, off) = self.columns.links_check();
+        format!(
+            "widths={columns:?}/{strips:?} buttons={buttons:?} columns={rects:?} over={over} \
+             stale={stale} links_off={off}"
+        )
+    }
+
     /// What the button on the `i`th hidden run does.
     pub fn open_gap(&self, i: usize) {
         let key = self.hidden.borrow().get(i).map(|(_, key)| *key);
@@ -220,5 +258,44 @@ impl Columns {
     /// Whether the rows are laid and the view is where it was being kept: what a drill waits for.
     pub(super) fn settled(&self) -> bool {
         self.keep.get().is_none() && self.pending.borrow().is_none()
+    }
+
+    /// Each connector's ends, as `(top, bottom)` on its strip's left and on its right, by strip,
+    /// in the drawing's pixels, and how many of those ends are not where GTK draws the line of the
+    /// row they stand on: 0 is the claim, what [`Columns::misaligned`] is to the rows.
+    pub(super) fn links_check(&self) -> (Vec<Vec<Ends>>, usize) {
+        let ends: Vec<Vec<Ends>> = (0..self.panes.len() - 1)
+            .map(|i| self.links.ends(i, self))
+            .collect();
+        let rows = self.rows.borrow();
+        // Where GTK draws row `r`, in the drawing's pixels: in the first column with a line there.
+        let drawn = |r: usize| -> Option<i32> {
+            if rows.hidden.iter().any(|gap| gap.contains(&r)) {
+                return None;
+            }
+            (0..self.panes.len()).find_map(|c| {
+                let n = rows.lines[c].get(r).copied().flatten()?;
+                let view = &self.panes[c].view;
+                let at = self.panes[c].buffer.iter_at_offset(rows.starts[c][n - 1]);
+                let y = view.iter_location(&at).y() - view.pixels_above_lines();
+                let (_, y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, 0, y);
+                let point = gtk::graphene::Point::new(0.0, y as f32);
+                let at = view.compute_point(self.links.area(), &point)?;
+                Some(at.y().round() as i32)
+            })
+        };
+        let mut off = 0;
+        for (i, ends) in ends.iter().enumerate() {
+            let runs = self.links.runs(i);
+            off += runs.len().abs_diff(ends.len());
+            for (run, end) in runs.iter().zip(ends) {
+                for (span, (top, bottom)) in run.iter().zip(end) {
+                    for (r, y) in [(span.start, *top), (span.end, *bottom)] {
+                        off += usize::from(drawn(r).is_some_and(|at| at != y));
+                    }
+                }
+            }
+        }
+        (ends, off)
     }
 }

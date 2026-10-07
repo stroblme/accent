@@ -5,7 +5,8 @@
 //! both sides — a pane that is typed into is never rewritten, only re-tagged — and everything
 //! the comparison shows is a tag or an overlay: the row tints and word emphasis, the unchanged
 //! runs hidden behind a "⋯ N lines" button, the blank space that keeps row `i` beside row `i`
-//! once one side has grown, and the buttons that take a hunk across.
+//! once one side has grown, and the connectors between the columns with the buttons that take a
+//! hunk across.
 //!
 //! Alignment used to be empty filler lines in the text, which had to be stripped back out of an
 //! edited pane and meant rewriting the buffer under the caret whenever the columns drifted. It is
@@ -31,6 +32,7 @@ mod pad;
 mod pool;
 
 use columns::{Anchor, Columns, Rows};
+use links::{Dress, run_of};
 pub use merge::Merge;
 use pad::UNMEASURED;
 pub use pool::Pool;
@@ -66,9 +68,6 @@ const CHANGE_ALPHA: f32 = 0.16;
 /// The words that actually differ, in the same hue over the row's own background. Emphasis is
 /// colour only: bold would change advance widths and pull the two panes out of alignment.
 const EMPH_ALPHA: f32 = 0.35;
-/// The blank a hunk that only adds or only deletes leaves on the other side, in the hue of the
-/// lines it faces: half a row's tint, so it reads as the same block without passing for lines.
-const BAND_ALPHA: f32 = 0.08;
 
 /// Which of the two texts a pane shows: `Old` is the left column.
 pub use accent_core::diff::Side;
@@ -277,16 +276,6 @@ pub(crate) fn tint(hue: (f32, f32, f32), fg: gdk::RGBA, alpha: f32) -> gdk::RGBA
     )
 }
 
-/// A run of blank rows a comparison fills under the text: `y` and height in buffer coordinates,
-/// and the hue of the lines it faces. See [`bands`].
-pub(crate) type Band = (i32, i32, (f32, f32, f32));
-
-/// The colour of a band of blank facing lines of `hue`, over a view whose text is `fg`: what
-/// `multicaret::View` fills [`Compare`]'s bands with.
-pub(crate) fn band(hue: (f32, f32, f32), fg: gdk::RGBA) -> gdk::RGBA {
-    tint(hue, fg, BAND_ALPHA)
-}
-
 /// Re-derive the row backgrounds from the resolved theme foreground. Once the view is mapped
 /// and again on every `notify::dark`, exactly as `highlight::restyle` does for the editor.
 fn restyle_tags(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
@@ -319,9 +308,9 @@ pub struct Compare {
     /// Which side is the user's own editor, if either. Its text is read, never set, and the hunk
     /// buttons write into it.
     editable: Option<Side>,
-    /// The buttons each hunk carries on the pane beside the editor: a label, a tooltip, and what
-    /// the button does.
-    hunk_buttons: RefCell<Vec<(&'static str, &'static str, OnHunk)>>,
+    /// The buttons each hunk carries at the top of its band, in the strip's left half and its
+    /// right, and what each does.
+    hunk_buttons: RefCell<Vec<(Dress, OnHunk)>>,
     lines: RefCell<Vec<DiffLine>>,
     rows: RefCell<Vec<Row>>,
     /// [`line_starts`] of each side's text.
@@ -347,16 +336,28 @@ pub struct Compare {
 
 impl Compare {
     /// `editable` names the pane whose buffer is the user's; `hunk_buttons` puts Take / Keep Both
-    /// on the other pane, which only means something when there is an editable side.
+    /// on each hunk, which only means something when there is an editable side.
     pub fn new(old: Pane, new: Pane, editable: Option<Side>, hunk_buttons: bool) -> Rc<Self> {
         let take =
             |keep_own| -> OnHunk { Rc::new(move |c: &Compare, hunk| c.take(hunk, keep_own)) };
-        let takes = match hunk_buttons && editable.is_some() {
-            true => vec![
-                ("Take", "Replace this hunk in Mine with Theirs", take(false)),
-                ("Both", "Keep both versions of this hunk", take(true)),
-            ],
-            false => Vec::new(),
+        // Take's arrow points at the editor from the other side's half, Keep Both is in the
+        // editor's.
+        let both = (
+            (
+                "list-add-symbolic",
+                "Keep Both",
+                "Keep both versions of this hunk",
+            ),
+            take(true),
+        );
+        let take = |arrow| {
+            let tip = "Replace this hunk in Mine with Theirs";
+            ((arrow, "Take", tip), take(false))
+        };
+        let takes = match editable.filter(|_| hunk_buttons) {
+            Some(Side::Old) => vec![both, take("go-previous-symbolic")],
+            Some(Side::New) => vec![take("go-next-symbolic"), both],
+            None => Vec::new(),
         };
         for pane in [&old, &new] {
             install_tags(&pane.buffer);
@@ -448,26 +449,24 @@ impl Compare {
 
         for pane in &this.columns.panes {
             let w = this.weak.clone();
-            *pane.pool.act.borrow_mut() = Some(Rc::new(move |role, i| {
-                let Some(c) = w.upgrade() else { return };
-                match role {
-                    Role::Gap { key, .. } => c.open_run(key),
-                    Role::Hunk(hunk) => {
-                        let on = c.hunk_buttons.borrow().get(i).map(|(.., on)| on.clone());
-                        if let Some(on) = on {
-                            on(&c, hunk);
-                        }
-                    }
-                    Role::Block(_) => {}
+            *pane.pool.act.borrow_mut() = Some(Rc::new(move |role, _| {
+                if let (Some(c), Role::Gap { key, .. }) = (w.upgrade(), role) {
+                    c.open_run(key);
                 }
             }));
         }
+        let w = this.weak.clone();
+        this.columns.links.set_act(Rc::new(move |_, run, half| {
+            if let Some(c) = w.upgrade() {
+                c.press(run, half);
+            }
+        }));
         this.lay(true);
         this
     }
 
     pub fn widget(&self) -> &gtk::Widget {
-        self.columns.paned.upcast_ref()
+        self.columns.widget()
     }
 
     fn pane(&self, side: Side) -> &Pane {
@@ -590,18 +589,70 @@ impl Compare {
         }
     }
 
-    /// Put `buttons` on each hunk, on the pane beside the editor: each a label, its tooltip, and
-    /// what it does, which is handed the hunk's lines as [`Compare::offer`]'s entries are handed a
-    /// selection's. Asked once, before a hunk has had buttons: a hunk's are made with its first.
-    pub fn offer_hunks(&self, buttons: Vec<(&'static str, &'static str, OnLines)>) {
+    /// Put `buttons` on each hunk, in the strip's left half and its right: each an icon, its
+    /// accessible name, its tooltip, and what it does, which is handed the hunk's lines as
+    /// [`Compare::offer`]'s entries are handed a selection's.
+    pub fn offer_hunks(&self, buttons: Vec<(&'static str, &'static str, &'static str, OnLines)>) {
         *self.hunk_buttons.borrow_mut() = buttons
             .into_iter()
-            .map(|(label, tip, act)| {
+            .map(|(icon, label, tip, act)| {
                 let on: OnHunk = Rc::new(move |c: &Compare, hunk| c.act_on_hunk(&hunk, &act));
-                (label, tip, on)
+                ((icon, label, tip), on)
             })
             .collect();
         self.refresh();
+    }
+
+    /// What the button in `half` of the strip does on hunk `run`.
+    fn press(&self, run: usize, half: usize) {
+        let hunk = {
+            let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
+            diff::hunks(&lines, &rows).get(run).cloned()
+        };
+        // Out of the borrow: taking a hunk edits the editor, which lays the comparison again.
+        let on = self
+            .hunk_buttons
+            .borrow()
+            .get(half)
+            .map(|(_, on)| on.clone());
+        if let (Some(hunk), Some(on)) = (hunk, on) {
+            on(self, hunk);
+        }
+    }
+
+    /// Run the button named `label` on the hunk holding the editor's caret, or ending at the
+    /// caret's line, as a deletion just above it does: the palette's way to a hunk's buttons.
+    /// `false` where there is no such hunk or button.
+    pub fn act_at_caret(&self, label: &str) -> bool {
+        let Some(mine) = self.editable else {
+            return false;
+        };
+        let hunk = {
+            let (lines, rows, starts) = (
+                self.lines.borrow(),
+                self.rows.borrow(),
+                self.starts.borrow(),
+            );
+            let buffer = &self.pane(mine).buffer;
+            let at = buffer.iter_at_mark(&buffer.get_insert()).offset();
+            let st = &starts[mine.idx()];
+            let n = st[..st.len() - 1].partition_point(|&s| s <= at);
+            let row = (rows.iter())
+                .position(|r| mine.of(r).and_then(|i| mine.number(&lines[i])) == Some(n));
+            row.and_then(|row| {
+                (diff::hunks(&lines, &rows).into_iter())
+                    .find(|hunk| hunk.contains(&row) || hunk.end == row)
+            })
+        };
+        let buttons = self.hunk_buttons.borrow();
+        let on =
+            (buttons.iter().find(|((_, name, _), _)| *name == label)).map(|(_, on)| on.clone());
+        drop(buttons);
+        let (Some(hunk), Some(on)) = (hunk, on) else {
+            return false;
+        };
+        on(self, hunk);
+        true
     }
 
     /// Run `act` over the lines of `hunk`, as over a selection of exactly them.
@@ -726,19 +777,6 @@ impl Compare {
             pane.pool.unclaim();
         }
         let mut overlays = Vec::new();
-        if !self.hunk_buttons.borrow().is_empty()
-            && let Some(mine) = self.editable
-        {
-            let (theirs, pane) = (mine.other(), self.pane(mine.other()));
-            *pane.pool.buttons.borrow_mut() = (self.hunk_buttons.borrow().iter())
-                .map(|(label, tip, _)| (*label, *tip))
-                .collect();
-            for hunk in diff::hunks(&lines, &rows) {
-                let row = hunk.start;
-                let widget = pane.pool.claim(&pane.view, Role::Hunk(hunk));
-                overlays.push((theirs.idx(), widget, Anchor::Hunk(row)));
-            }
-        }
         for (gap, key) in &hidden {
             for side in [Side::Old, Side::New] {
                 let pane = self.pane(side);
@@ -753,6 +791,16 @@ impl Compare {
         for pane in &self.columns.panes {
             pane.pool.hide_unclaimed();
         }
+
+        // Each connector joins a hunk's lines on the left to its lines on the right.
+        let hunks = diff::hunks(&lines, &rows);
+        let has = |k: usize, r: usize| [Side::Old, Side::New][k].of(&rows[r]).is_some();
+        let runs = hunks.iter().map(|hunk| run_of(hunk, has)).collect();
+        let buttons = self.hunk_buttons.borrow();
+        let dress = [0, 1].map(|half| buttons.get(half).map(|(dress, _)| *dress));
+        drop(buttons);
+        self.columns.links.set_buttons(0, dress);
+        self.columns.links.set_runs(vec![runs]);
 
         let number = |side: Side, row: &Row| side.of(row).and_then(|i| side.number(&lines[i]));
         let laid = Rows {
@@ -772,10 +820,7 @@ impl Compare {
                 .collect(),
             hidden: hidden.iter().map(|(gap, _)| gap.clone()).collect(),
             extra: vec![0; rows.len()],
-            // The blank of a hunk that only adds or only deletes, in the hue of the lines it
-            // faces: green on the left facing an addition, red on the right facing a deletion.
-            hues: vec![ADDED_HUE, REMOVED_HUE],
-            first: diff::hunks(&lines, &rows).first().map(|hunk| hunk.start),
+            first: hunks.first().map(|hunk| hunk.start),
             overlays,
         };
         *self.lines.borrow_mut() = lines;
@@ -906,6 +951,14 @@ impl Compare {
             }
             restyle_tags(&pane.buffer, &pane.view);
         }
+        // The connectors shade from the removed lines' tint on the left to the added ones'.
+        let fg = self.pane(Side::Old).view.color();
+        let hues = [REMOVED_HUE, ADDED_HUE];
+        let (fill, outline) = (
+            hues.map(|hue| tint(hue, fg, CHANGE_ALPHA)),
+            hues.map(|hue| tint(hue, fg, EMPH_ALPHA)),
+        );
+        self.columns.links.set_tints(0, fill, outline);
     }
 
     /// Put the editor's page on the companion beside it: see [`Columns::follow_editor`].
@@ -922,7 +975,7 @@ impl Compare {
             rows.len(),
             diff::hunks(&lines, &rows).len(),
             self.hidden.borrow().len(),
-            self.columns.rows.borrow().overlays.len(),
+            self.columns.rows.borrow().overlays.len() + self.columns.links.shown(),
         )
     }
 

@@ -302,9 +302,15 @@ impl Panel {
                 compare.rewrite_mine(&text);
             });
             entries.push(("revert", "Revert Selected Lines", revert.clone()));
+            // Each arrow points where the lines go, from the half they come from.
             compare.offer_hunks(vec![
-                ("Stage", "Stage this hunk", stage),
-                ("Revert", "Revert this hunk to the index", revert),
+                (
+                    "go-next-symbolic",
+                    "Revert",
+                    "Revert this hunk to the index",
+                    revert,
+                ),
+                ("go-previous-symbolic", "Stage", "Stage this hunk", stage),
             ]);
         }
         compare.offer(entries);

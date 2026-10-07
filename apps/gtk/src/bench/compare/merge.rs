@@ -147,8 +147,8 @@ pub(in crate::bench) fn bench_compare_merge(app: &Rc<App>, rel: &str) {
         let (columns, strips) = merge.widths();
         println!("bench compare_merge widths columns={columns:?} strips={strips:?}");
         let links = || {
-            let ([left, right], off) = merge.links();
-            format!("left={left:?} right={right:?} off={off}")
+            let (ends, off) = merge.links();
+            format!("left={:?} right={:?} off={off}", ends[0], ends[1])
         };
         println!("bench compare_merge links {}", links());
         // For a screenshot.

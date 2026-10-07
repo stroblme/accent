@@ -1164,6 +1164,8 @@ fn install_chrome_css() {
                background-color: transparent; \
                box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 25%, transparent); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
+             .accent-strip-button {{ min-width: 0; min-height: 0; padding: 2px; \
+               border-radius: 4px; }} \
              box.linked.osd {{ border-radius: 6px; }} \
              .accent-switcher {{ background-color: var(--popover-bg-color); \
                color: var(--popover-fg-color); border-radius: 12px; \

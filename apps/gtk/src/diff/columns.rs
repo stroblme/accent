@@ -1,6 +1,7 @@
 //! What a comparison of any number of columns stands on: one vertical scroll they share, the
-//! padding that keeps row `i` level in every column, the buttons laid over the rows, and the line
-//! the reader is on kept where it is while the rows are laid again.
+//! padding that keeps row `i` level in every column, the strips between the columns, the buttons
+//! laid over the rows, and the line the reader is on kept where it is while the rows are laid
+//! again.
 //!
 //! Knows nothing about diffs. The host — [`super::Compare`] — works out what each row shows in
 //! each column and hands it over as [`Rows`]; everything here is measured from the views.
@@ -13,7 +14,8 @@ use std::ops::Range;
 use std::rc::{Rc, Weak};
 
 use super::Pane;
-use super::pad::{UNMEASURED, bands, carried, is_pad, measure, pad, padding, reclaim, unmeasured};
+use super::links::Links;
+use super::pad::{UNMEASURED, carried, is_pad, measure, pad, padding, reclaim, unmeasured};
 use crate::editor;
 
 /// Where the first hunk lands when a comparison opens, as a fraction of the view's height. A
@@ -22,7 +24,7 @@ const FIRST_HUNK_AT: f64 = 0.25;
 
 /// Blank space a hidden run leaves behind, for the button that opens it to sit in.
 pub(super) const GAP_PX: i32 = 28;
-/// Inset of the hunk buttons from the pane's right edge.
+/// Inset of the buttons in the room a host leaves from the pane's edges.
 const INSET: i32 = 8;
 /// How often a relayout asks again for the heights GTK had not validated yet, and how long it
 /// waits between asking: GTK validates a screenful per idle, so a few are enough for any note.
@@ -32,8 +34,6 @@ const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_millis(100);
 /// Where the overlaid buttons sit, in rows.
 #[derive(Clone, Copy)]
 pub(super) enum Anchor {
-    /// At the right end of the row's top: the Take / Keep Both pair of the hunk starting there.
-    Hunk(usize),
     /// Centred in the blank space a hidden run left at this row.
     Gap(usize),
     /// In the blank space the host left at this row on purpose ([`Rows::extra`]), at its start,
@@ -71,8 +71,6 @@ pub(super) struct Rows {
     pub(super) hidden: Vec<Range<usize>>,
     /// Per row, the blank space every column leaves there on purpose, for buttons to sit in.
     pub(super) extra: Vec<i32>,
-    /// Per column, the hue of the blank it leaves where it has no line in a change.
-    pub(super) hues: Vec<(f32, f32, f32)>,
     /// The first hunk's first row, where a comparison opens.
     pub(super) first: Option<usize>,
     /// The buttons laid over the rows, by column.
@@ -99,6 +97,8 @@ pub(super) struct Columns {
     /// Which column is the user's own editor, if any. Its text is read, never set.
     pub(super) editable: Option<usize>,
     pub(super) paned: gtk::Paned,
+    /// The strips between the columns, over the paned.
+    pub(super) links: Links,
     /// What the host laid last.
     pub(super) rows: RefCell<Rows>,
     /// The grid the last relayout laid down, kept for the bench's checks.
@@ -114,8 +114,6 @@ pub(super) struct Columns {
     /// The bottom margin each view was last given here, and how much of it is the blank under a
     /// column with no line: see [`Columns::page_bottom`].
     bottoms: Vec<Cell<(i32, i32)>>,
-    /// What the host wants done once a relayout has laid the grid: see [`super::links`].
-    pub(super) relaid: RefCell<Option<Box<dyn Fn()>>>,
     /// Where the view is kept until a relayout has laid every row, which clears it, or the reader
     /// scrolls ([`let_go_on_input`]). The first hunk, as the comparison is built: a diff opens on
     /// what changed rather than on the top of a file whose first difference is four hundred lines
@@ -257,7 +255,9 @@ fn scrolls(key: gdk::Key, state: gdk::ModifierType) -> bool {
 impl Columns {
     /// `panes` side by side, the first on the left; `editable` names the one whose buffer is the
     /// user's.
-    pub(super) fn new(panes: Vec<Pane>, editable: Option<usize>) -> Rc<Self> {
+    pub(super) fn new(mut panes: Vec<Pane>, editable: Option<usize>) -> Rc<Self> {
+        // First, so the roots below are the columns with their room for the strips.
+        let links = Links::new(&mut panes);
         // Vertical is shared, so views of the same rows cannot drift apart. Horizontal stays per
         // pane: everything wraps, so there is nothing to scroll sideways anyway.
         let own: Vec<gtk::Adjustment> = panes.iter().map(|p| p.scroller.vadjustment()).collect();
@@ -287,13 +287,13 @@ impl Columns {
             panes,
             editable,
             paned,
+            links,
             rows: RefCell::new(Rows::default()),
             grid: RefCell::new(Grid::default()),
             pending: RefCell::new(None),
             settling: Cell::new(0),
             own,
             bottoms: (0..n).map(|_| Cell::default()).collect(),
-            relaid: RefCell::default(),
             keep: Cell::new(Some(Keep::FirstHunk)),
             ticking: Cell::new(false),
             stepped: Cell::new(false),
@@ -307,6 +307,8 @@ impl Columns {
         let connect = |object: glib::Object, id: glib::SignalHandlerId| {
             this.handlers.borrow_mut().push((object, id));
         };
+        this.links.overlay.set_child(Some(&this.paned));
+        this.links.follow(weak.clone());
         for pane in &this.panes {
             // Everything wraps, so a pane's width is its horizontal page size: a paned drag or a
             // window resize lands here and re-measures the rows, the line at the top staying.
@@ -331,6 +333,14 @@ impl Columns {
         let id = vadj.connect_upper_notify(move |_| {
             if let Some(c) = w.upgrade() {
                 c.schedule_relayout();
+            }
+        });
+        connect(vadj.clone().upcast(), id);
+        // The strips follow the rows on screen.
+        let w = weak.clone();
+        let id = vadj.connect_value_changed(move |_| {
+            if let Some(c) = w.upgrade() {
+                c.links.relaid();
             }
         });
         connect(vadj.clone().upcast(), id);
@@ -365,6 +375,11 @@ impl Columns {
             connect(buffer.upcast(), id);
         }
         this
+    }
+
+    /// The columns side by side with the strips between them, which is what the host shows.
+    pub(super) fn widget(&self) -> &gtk::Widget {
+        self.links.overlay.upcast_ref()
     }
 
     /// Lay the columns out from `rows`: the host's every refresh.
@@ -604,9 +619,6 @@ impl Columns {
             }
             pane.pool.unclaim();
             pane.pool.hide_unclaimed();
-            if let Some(view) = pane.view.downcast_ref::<crate::multicaret::View>() {
-                view.set_bands(Vec::new());
-            }
         }
         self.rows.borrow_mut().overlays.clear();
         if let Some(id) = self.pending.borrow_mut().take() {
@@ -747,12 +759,6 @@ impl Columns {
             };
             self.set_bottom(c, pages[c], blank.max(0));
         }
-        for (c, pane) in self.panes.iter().enumerate() {
-            if let Some(view) = pane.view.downcast_ref::<crate::multicaret::View>() {
-                let hue = rows.hues[c];
-                view.set_bands(bands(&heights, &extra, &rows.changed, &tops, c, hue));
-            }
-        }
 
         let mut repadded = false;
         for (c, pane) in self.panes.iter().enumerate() {
@@ -783,7 +789,6 @@ impl Columns {
             let (_, wanted, _, _) = widget.measure(gtk::Orientation::Horizontal, -1);
             let (_, height, _, _) = widget.measure(gtk::Orientation::Vertical, -1);
             let (x, y) = match *anchor {
-                Anchor::Hunk(row) => (width - wanted - INSET, tops[row]),
                 Anchor::Gap(row) => ((width - wanted) / 2, tops[row] + (GAP_PX - height) / 2),
                 Anchor::Room(row, align) => {
                     let x = match align {
@@ -800,6 +805,10 @@ impl Columns {
             let last = |c: &Vec<Option<i32>>| c[count - 1].unwrap_or(0);
             top + heights.iter().map(last).max().unwrap_or(0) + extra[count - 1]
         });
+        let moved = {
+            let grid = self.grid.borrow();
+            grid.tops != tops || grid.end != end
+        };
         *self.grid.borrow_mut() = Grid {
             #[cfg(feature = "bench")]
             heights,
@@ -808,8 +817,10 @@ impl Columns {
             tops,
             end,
         };
-        if let Some(relaid) = self.relaid.borrow().as_ref() {
-            relaid();
+        // The strips follow the rows, and a pass that moved none leaves them be, as it leaves
+        // the rows.
+        if moved {
+            self.links.relaid();
         }
         // Every view laid out again in the next frame, ahead of painting any. GTK lays a view out
         // from an idle of its own and repaints it once it has, so one column could reach the

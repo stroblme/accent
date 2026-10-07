@@ -196,6 +196,12 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         &[],
     ),
     ("win.merge-resolved", "Mark Resolved", &[]),
+    // The hunk holding the caret in a comparison, as unbound: the buttons on each hunk's band
+    // are the pointer's way.
+    ("win.hunk-stage", "Stage Hunk", &[]),
+    ("win.hunk-revert", "Revert Hunk", &[]),
+    ("win.hunk-take", "Take Hunk", &[]),
+    ("win.hunk-both", "Keep Both Versions", &[]),
     ("win.conflict-next", "Next Conflict", &[]),
     ("win.conflict-previous", "Previous Conflict", &[]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>w"]),
@@ -653,6 +659,18 @@ impl App {
                     .is_some_and(|tab| tab.conflicts().accept_all(take))
                 {
                     self.toast("No conflicts in this file");
+                }
+            }
+            "hunk-stage" | "hunk-revert" | "hunk-take" | "hunk-both" => {
+                let label = match name {
+                    "hunk-stage" => "Stage",
+                    "hunk-revert" => "Revert",
+                    "hunk-take" => "Take",
+                    _ => "Keep Both",
+                };
+                let compare = self.active().and_then(|tab| tab.comparison());
+                if !compare.is_some_and(|c| c.act_at_caret(label)) {
+                    self.toast("No hunk at the caret");
                 }
             }
             "merge-resolved" => match self.active().filter(|tab| tab.merging().is_some()) {

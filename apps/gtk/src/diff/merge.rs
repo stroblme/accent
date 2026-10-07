@@ -19,11 +19,9 @@ use std::ops::Range;
 use std::rc::{Rc, Weak};
 
 use super::columns::{Anchor, Columns, GAP_PX, Rows};
-use super::links::Links;
+use super::links::run_of;
 use super::pool::Role;
-use super::{
-    ADDED_HUE, CONTEXT, INCOMING_HUE, Pane, TAG_GAP, install_tags, line_starts, normalise,
-};
+use super::{CONTEXT, Pane, TAG_GAP, install_tags, line_starts, normalise};
 use crate::conflict::Conflicts;
 use crate::editor;
 
@@ -63,8 +61,6 @@ pub struct Merge {
     resolved: gtk::Button,
     /// The tab's conflict blocks, which the arrows resolve.
     conflicts: Rc<Conflicts>,
-    /// The connectors between the columns.
-    links: Links,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
     laid: RefCell<Option<Box<dyn Fn()>>>,
 }
@@ -119,10 +115,7 @@ impl Merge {
         mid.header
             .insert_child_after(&resolved, mid.header.first_child().as_ref());
 
-        let mut panes = [left, mid, right];
-        let links = Links::new(&mut panes);
-        let columns = Columns::new(panes.into(), Some(MID));
-        links.overlay.set_child(Some(&columns.paned));
+        let columns = Columns::new(vec![left, mid, right], Some(MID));
         let this = Rc::new_cyclic(|weak| Merge {
             weak: weak.clone(),
             columns,
@@ -136,7 +129,6 @@ impl Merge {
             unfold,
             resolved,
             conflicts,
-            links,
             handlers: RefCell::default(),
             laid: RefCell::default(),
         });
@@ -160,32 +152,9 @@ impl Merge {
                 match role {
                     Role::Gap { key, .. } => m.open_run(key),
                     Role::Block(i) => m.accept(i, column),
-                    Role::Hunk(_) => {}
                 }
             }));
         }
-        // The connectors follow the rows: drawn again on every scroll and every relayout, a new
-        // width included.
-        let w = weak.clone();
-        this.links.area.set_draw_func(move |_, cr, _, height| {
-            if let Some(m) = w.upgrade() {
-                m.links.draw(&m.columns, cr, height);
-            }
-        });
-        let w = weak.clone();
-        *this.columns.relaid.borrow_mut() = Some(Box::new(move || {
-            if let Some(m) = w.upgrade() {
-                m.links.queue_draw();
-            }
-        }));
-        let w = weak.clone();
-        let scroll = this.pane(0).scroller.vadjustment();
-        let id = scroll.connect_value_changed(move |_| {
-            if let Some(m) = w.upgrade() {
-                m.links.queue_draw();
-            }
-        });
-        connect(scroll.upcast(), id);
         let w = weak.clone();
         let style = adw::StyleManager::default();
         let id = style.connect_dark_notify(move |_| {
@@ -214,7 +183,7 @@ impl Merge {
     }
 
     pub fn widget(&self) -> &gtk::Widget {
-        self.links.overlay.upcast_ref()
+        self.columns.widget()
     }
 
     fn pane(&self, column: usize) -> &Pane {
@@ -521,22 +490,12 @@ impl Merge {
 
         // Each connector joins the rows of its run the side has lines in to those the file has.
         let runs = [0, 1].map(|s| {
-            let extent = |run: &Range<usize>, c: usize| {
-                let has = |r: &usize| lines[*r][c].is_some();
-                match (run.clone().find(has), run.clone().rev().find(has)) {
-                    (Some(first), Some(last)) => first..last + 1,
-                    _ => run.start..run.start,
-                }
-            };
-            diff::hunks_of(&differ[s])
-                .iter()
-                .map(|run| match s {
-                    0 => [extent(run, 0), extent(run, MID)],
-                    _ => [extent(run, MID), extent(run, 2)],
-                })
+            let has = |k: usize, r: usize| lines[r][s + k].is_some();
+            (diff::hunks_of(&differ[s]).iter())
+                .map(|run| run_of(run, has))
                 .collect()
         });
-        self.links.set_runs(runs);
+        self.columns.links.set_runs(runs.to_vec());
 
         let mut extra = vec![0; lines.len()];
         for &room in &rooms {
@@ -551,9 +510,6 @@ impl Merge {
             changed,
             hidden: hidden.iter().map(|(gap, _)| gap.clone()).collect(),
             extra,
-            // The blank of a run a column has no line in: in the green of the current side on
-            // the left and in the middle, in the incoming side's blue on the right.
-            hues: vec![ADDED_HUE, ADDED_HUE, INCOMING_HUE],
             overlays,
         };
         *self.lines.borrow_mut() = lines;
@@ -581,7 +537,7 @@ impl Merge {
             if let Some(tag) = pane.buffer.tag_table().lookup(TAG_SIDE) {
                 tag.set_paragraph_background_rgba(Some(&tint));
             }
-            self.links.set_tints(side, tint, marker);
+            self.columns.links.set_tints(side, [tint; 2], [marker; 2]);
         }
     }
 
@@ -651,43 +607,13 @@ impl Merge {
     /// Each connector's ends, as `(top, bottom)` on its strip's left and on its right, by strip,
     /// in the drawing's pixels, and how many of those ends are not where GTK draws the line of the
     /// row they stand on: 0 is the claim, what [`Merge::misaligned`] is to the rows.
-    pub fn links(&self) -> ([Vec<super::links::Ends>; 2], usize) {
-        let ends = [0, 1].map(|i| self.links.ends(i, &self.columns));
-        let rows = self.columns.rows.borrow();
-        // Where GTK draws row `r`, in the drawing's pixels: in the first column with a line there.
-        let drawn = |r: usize| -> Option<i32> {
-            if rows.hidden.iter().any(|gap| gap.contains(&r)) {
-                return None;
-            }
-            (0..3).find_map(|c| {
-                let n = rows.lines[c].get(r).copied().flatten()?;
-                let view = &self.pane(c).view;
-                let at = self.pane(c).buffer.iter_at_offset(rows.starts[c][n - 1]);
-                let y = view.iter_location(&at).y() - view.pixels_above_lines();
-                let (_, y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, 0, y);
-                let point = gtk::graphene::Point::new(0.0, y as f32);
-                let at = view.compute_point(&self.links.area, &point)?;
-                Some(at.y().round() as i32)
-            })
-        };
-        let mut off = 0;
-        for (i, ends) in ends.iter().enumerate() {
-            let runs = self.links.runs(i);
-            off += runs.len().abs_diff(ends.len());
-            for (run, end) in runs.iter().zip(ends) {
-                for (span, (top, bottom)) in run.iter().zip(end) {
-                    for (r, y) in [(span.start, *top), (span.end, *bottom)] {
-                        off += usize::from(drawn(r).is_some_and(|at| at != y));
-                    }
-                }
-            }
-        }
-        (ends, off)
+    pub fn links(&self) -> (Vec<Vec<super::links::Ends>>, usize) {
+        self.columns.links_check()
     }
 
     /// How wide each column and each strip between them is.
-    pub fn widths(&self) -> ([i32; 3], [i32; 2]) {
-        self.links.widths()
+    pub fn widths(&self) -> (Vec<i32>, Vec<i32>) {
+        self.columns.links.widths()
     }
 
     /// How many lines of each side column carry its tint.
