@@ -81,6 +81,11 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   Back from that note returns to the page, the zoom and the pan it was left at.
 - Following such a link from a note opens the PDF on its page with the passage selected and brought
   to the middle of the screen; numbers that fit no line of the page open the page.
+- Other readers' comments — what a mark in the file says (`/Contents`) — are read, never written,
+  as on the desktop: pdfium paints their marks, and a tap on one that no link and no note's
+  highlight takes shows every comment under the finger in an `AlertDialog`, titled by its author
+  ("Comment" with none; "Comments" over several, each under its author), the text selectable to
+  copy. Close, Back or a tap outside puts it away: a comment is text asked for, read and let go.
 - A long press selects the word under the finger and the drag after it grows the selection; two
   accent handles then move either end, across a page break as readily as within a page — the
   desktop's drag in the platform's shape. The platform's floating toolbar offers Copy and Copy link.
@@ -141,6 +146,7 @@ exist as a visible control.
 | Pinch on a page | Zooms a PDF, 1× to 8× (less on a viewport wider than 4095 px), around the point between the fingers | — |
 | Drag on a zoomed page | Pans it, both axes at once | — |
 | Tap a highlight on a page | Opens the note whose link makes it; Back returns to the page | The highlight |
+| Tap another reader's comment on a page | Shows it with its author in a dialog | The mark pdfium paints |
 | Back on a tag's notes | Returns to the tags | The tag's heading |
 | Long press on a PDF page | Selects the word under the finger; a drag grows it, and the handles move either end | The handles and the floating toolbar it raises |
 | Long press on a note | Selects the text under the finger with the WebView's own handles, as a page of prose does everywhere else on the platform | The handles it raises |

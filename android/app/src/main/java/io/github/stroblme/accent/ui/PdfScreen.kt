@@ -26,6 +26,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import androidx.compose.material3.*
@@ -66,6 +69,7 @@ import io.github.stroblme.accent.OpenPdf
 import io.github.stroblme.accent.PdfModel
 import io.github.stroblme.accent.PdfPlace
 import io.github.stroblme.accent.VaultModel
+import io.github.stroblme.accent.ffi.Comment
 import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.InkStyle
 import io.github.stroblme.accent.ffi.LinkTarget
@@ -425,6 +429,10 @@ private fun Pages(
     val links = remember(doc) { mutableStateMapOf<Int, List<PdfLinkBox>>() }
     /** The highlights a note's links paint on the composed pages, left here as [links] are. */
     val marks = remember(doc) { mutableStateMapOf<Int, List<Mark>>() }
+    /** Other readers' comments on the composed pages, left here as [links] are. */
+    val comments = remember(doc) { mutableStateMapOf<Int, List<Comment>>() }
+    /** The comments a tap opened, while their dialog is up. */
+    var shown by remember(doc) { mutableStateOf<List<Comment>?>(null) }
     val notesOn = remember(notes) { notes.groupBy { it.page.toInt() } }
     val openNote by rememberUpdatedState(onNote)
     /** The glyphs of the pages a selection has needed, read once each. */
@@ -655,7 +663,8 @@ private fun Pages(
      *
      * A highlight is asked after the links, as on the desktop: a link inside one is still a link.
      * It opens the note it comes from, and hands over where the reader is, for Back from that note
-     * to come back to.
+     * to come back to. Another reader's comment is asked last, and shows every comment under the
+     * finger in a dialog.
      *
      * While there is a selection a tap only lets it go, wherever it lands — but for a tap on one
      * of its handles, which leaves it be.
@@ -673,9 +682,14 @@ private fun Pages(
             follow(it.target)
             return true
         }
-        val mark = markAt(marks[land.page].orEmpty(), land.point, slop) ?: return false
-        val (page, top) = pages.place(scrolled, viewport.width, zoom)
-        openNote(mark.link, PdfPlace(page, top, zoom, panX))
+        markAt(marks[land.page].orEmpty(), land.point, slop)?.let {
+            val (page, top) = pages.place(scrolled, viewport.width, zoom)
+            openNote(it.link, PdfPlace(page, top, zoom, panX))
+            return true
+        }
+        val under = commentsAt(comments[land.page].orEmpty(), land.point, slop)
+        if (under.isEmpty()) return false
+        shown = under
         return true
     }
 
@@ -893,6 +907,7 @@ private fun Pages(
                             theme = theme,
                             tool = tool,
                             links = links,
+                            comments = comments,
                             notes = notesOn[index].orEmpty(),
                             marks = marks,
                             chosen = chosen.firstOrNull { it.page == index }?.boxes.orEmpty(),
@@ -915,6 +930,7 @@ private fun Pages(
             around = { if (selection != null && menu && !dragging) menuAround() else null },
             actions = listOf("Copy" to ::copy, "Copy link" to ::copyLink),
         )
+        shown?.let { Comments(it) { shown = null } }
         // Below the pages rather than over them, as a note's is: a bar over the foot of the screen
         // would cover the match it had just found.
         if (finding) {
@@ -1181,6 +1197,8 @@ private fun Page(
     tool: Tool,
     /** Where this page leaves its `/Link` boxes for the box above to hit-test against. */
     links: MutableMap<Int, List<PdfLinkBox>>,
+    /** Where it leaves other readers' comments, as it leaves [links]. */
+    comments: MutableMap<Int, List<Comment>>,
     /** The note links into this page. */
     notes: List<PdfLink>,
     /** Where this page leaves the highlights they paint, as it leaves [links]. */
@@ -1217,7 +1235,13 @@ private fun Page(
     // Read here, where the page number is, and left where the box above can reach it. Only while
     // a finger is a pointer: with a tool in hand the page is a canvas and a tap on it is a stroke.
     LaunchedEffect(index, tool) {
-        if (tool == Tool.Read) links[index] = doc.links(index) else links.remove(index)
+        if (tool == Tool.Read) {
+            links[index] = doc.links(index)
+            comments[index] = doc.comments(index)
+        } else {
+            links.remove(index)
+            comments.remove(index)
+        }
     }
     // Where the note links land on the page today, which is the core's to say: by their numbers,
     // then by the text they quote, and not at all once exported into the file.
@@ -1228,6 +1252,7 @@ private fun Page(
     DisposableEffect(index) {
         onDispose {
             links.remove(index)
+            comments.remove(index)
             marks.remove(index)
         }
     }
@@ -1410,6 +1435,46 @@ internal data class Mark(val quads: List<Rect>, val link: PdfLink)
  */
 internal fun markAt(marks: List<Mark>, at: Point, slop: Float): Mark? =
     marks.firstOrNull { mark -> mark.quads.any { it.near(at, slop) } }
+
+/** Every comment a tap landed on, in the page's order: all of them show, as on the desktop. */
+internal fun commentsAt(comments: List<Comment>, at: Point, slop: Float): List<Comment> =
+    comments.filter { comment -> comment.areas.any { it.near(at, slop) } }
+
+/**
+ * Other readers' comments, read and never written: under the author as the title, or "Comment"
+ * with none, the text selectable to copy as the desktop's popover's is. Several under one finger
+ * stack under "Comments", each under its author. Close, Back and a tap outside all put it away.
+ */
+@Composable
+private fun Comments(comments: List<Comment>, onClose: () -> Unit) {
+    val one = comments.singleOrNull()
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text(if (one == null) "Comments" else one.author ?: "Comment") },
+        text = {
+            SelectionContainer {
+                Column(
+                    Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    for (comment in comments) {
+                        Column {
+                            if (one == null) comment.author?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(comment.text)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("Close") } },
+    )
+}
 
 /** Whether [at] is on this box or within [slop] of it, all in page points. */
 private fun Rect.near(at: Point, slop: Float): Boolean =

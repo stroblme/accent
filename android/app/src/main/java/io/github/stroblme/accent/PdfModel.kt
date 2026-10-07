@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import io.github.stroblme.accent.ffi.Comment
 import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.InkStyle
 import io.github.stroblme.accent.ffi.LinkHighlight
@@ -116,6 +117,11 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     /** The `/Link` boxes on a page, in page points. Uncached: a read is cheap beside a render. */
     suspend fun links(index: Int): List<PdfLinkBox> = on {
         runCatching { session.links(index.toUInt()) }.getOrDefault(emptyList())
+    }
+
+    /** What other readers wrote on a page, each over its areas in page points. Never written. */
+    suspend fun comments(index: Int): List<Comment> = on {
+        runCatching { session.comments(index.toUInt()) }.getOrDefault(emptyList())
     }
 
     /** Every character of a page with its box, in reading order: what a selection is made of. */

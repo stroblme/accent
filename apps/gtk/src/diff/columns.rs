@@ -6,7 +6,7 @@
 //! each column and hands it over as [`Rows`]; everything here is measured from the views.
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gdk, glib};
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -111,10 +111,11 @@ pub(super) struct Columns {
     bottoms: Vec<Cell<(i32, i32)>>,
     /// What the host wants done once a relayout has laid the grid: see [`super::links`].
     pub(super) relaid: RefCell<Option<Box<dyn Fn()>>>,
-    /// Where the view is kept until a relayout has laid every row, which clears it. The first
-    /// hunk, as the comparison is built: a diff opens on what changed rather than on the top of a
-    /// file whose first difference is four hundred lines down. The scroll a run was opened at (see
-    /// [`Columns::hold_scroll`]). After that where the view sits is the reader's business.
+    /// Where the view is kept until a relayout has laid every row, which clears it, or the reader
+    /// scrolls ([`let_go_on_input`]). The first hunk, as the comparison is built: a diff opens on
+    /// what changed rather than on the top of a file whose first difference is four hundred lines
+    /// down. The scroll a run was opened at (see [`Columns::hold_scroll`]). After that where the
+    /// view sits is the reader's business.
     pub(super) keep: Cell<Option<Keep>>,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
 }
@@ -157,6 +158,66 @@ fn split(roots: &[&gtk::Widget]) -> gtk::Paned {
     paned.set_resize_end_child(true);
     paned.set_shrink_end_child(false);
     paned
+}
+
+/// The reader scrolling anywhere in `root` — a wheel turn, a press on a scrollbar, a page key —
+/// ends whatever [`Columns::keep`] holds, which would otherwise take the scroll back once the rows
+/// are laid. Heard in the capture phase, ahead of the scroll it makes; the comparison's own
+/// scrolls set the adjustment and pass none of these. The root is the comparison's own, so the
+/// controllers go with it.
+fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
+    let let_go = || {
+        let columns = columns.clone();
+        move || {
+            if let Some(c) = columns.upgrade() {
+                c.keep.set(None);
+            }
+        }
+    };
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let go = let_go();
+    wheel.connect_scroll(move |wheel, _, _| {
+        // With Control the wheel zooms: see `zoom::zoom_on_wheel`.
+        let state = wheel.current_event_state();
+        if !state.contains(gdk::ModifierType::CONTROL_MASK) {
+            go();
+        }
+        glib::Propagation::Proceed
+    });
+    root.add_controller(wheel);
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let go = let_go();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if pages(key, state) {
+            go();
+        }
+        glib::Propagation::Proceed
+    });
+    root.add_controller(keys);
+    let press = gtk::GestureClick::new();
+    press.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let go = let_go();
+    press.connect_pressed(move |press, _, x, y| {
+        let picked = press
+            .widget()
+            .and_then(|w| w.pick(x, y, gtk::PickFlags::DEFAULT));
+        if picked.is_some_and(|w| w.ancestor(gtk::Scrollbar::static_type()).is_some()) {
+            go();
+        }
+    });
+    root.add_controller(press);
+}
+
+/// Whether `key` scrolls the view a page: Page Up or Down, but not with Control, which switches
+/// tabs.
+fn pages(key: gdk::Key, state: gdk::ModifierType) -> bool {
+    let page = matches!(
+        key,
+        gdk::Key::Page_Up | gdk::Key::Page_Down | gdk::Key::KP_Page_Up | gdk::Key::KP_Page_Down
+    );
+    page && !state.contains(gdk::ModifierType::CONTROL_MASK)
 }
 
 impl Columns {
@@ -224,6 +285,7 @@ impl Columns {
                 c.schedule_relayout();
             });
             connect(hadj.upcast(), id);
+            let_go_on_input(&pane.root, &weak);
         }
         // GTK lays lines out lazily and the total height moves as it reaches them, as it does
         // on a font change; the rows are re-measured each time it settles.
@@ -666,5 +728,19 @@ impl Columns {
             }
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_key_ends_the_keep_but_not_as_a_tab_switch() {
+        let plain = gdk::ModifierType::empty();
+        assert!(pages(gdk::Key::Page_Down, plain));
+        assert!(pages(gdk::Key::KP_Page_Up, gdk::ModifierType::SHIFT_MASK));
+        assert!(!pages(gdk::Key::Page_Up, gdk::ModifierType::CONTROL_MASK));
+        assert!(!pages(gdk::Key::Down, plain));
     }
 }

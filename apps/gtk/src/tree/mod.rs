@@ -656,16 +656,17 @@ fn root_row(label: &str) -> gtk::Box {
 }
 
 /// Build the tree. `show_hidden` is Show Hidden Files as the window opens. `on_activate` is called
-/// with the rel_path of an activated non-directory row, `on_drag` with `true` while a row is being
-/// dragged out of the tree and `false` when it is over, so the panes can put their drop zones up
-/// for the duration, `on_move` with each path a drag carried and the path it was dropped onto, and
-/// `on_import` with the files another application dropped in, the folder they go into and whether
-/// the drag was a move.
+/// with the rel_path of an activated non-directory row and `false`, and again with `true` when the
+/// click turns out to be a double click, `on_drag` with `true` while a row is being dragged out of
+/// the tree and `false` when it is over, so the panes can put their drop zones up for the duration,
+/// `on_move` with each path a drag carried and the path it was dropped onto, and `on_import` with
+/// the files another application dropped in, the folder they go into and whether the drag was a
+/// move.
 pub fn build(
     vault: Arc<Vault>,
     root: &gio::ListStore,
     show_hidden: bool,
-    on_activate: impl Fn(char, &str) + 'static,
+    on_activate: impl Fn(char, &str, bool) + 'static,
     on_drag: impl Fn(bool) + 'static,
     on_move: impl Fn(Vec<(String, String)>) + 'static,
     on_import: impl Fn(Vec<PathBuf>, String, bool) + 'static,
@@ -922,22 +923,33 @@ pub fn build(
     // Where a Shift+click's range starts: the last row clicked without Shift.
     let anchor = Rc::new(RefCell::new(None::<String>));
     let active = Rc::new(RefCell::new(None::<String>));
+    let on_activate = Rc::new(on_activate);
     marking.connect_pressed({
-        let (marked, start, anchor, active, cache, model) = (
+        let (marked, start, anchor, active, cache, model, on_activate) = (
             marked.clone(),
             start.clone(),
             anchor.clone(),
             active.clone(),
             cache.clone(),
             model.clone(),
+            on_activate.clone(),
         );
-        move |gesture, _, x, y| {
+        move |gesture, presses, x, y| {
             let Some(view) = gesture.widget().and_downcast::<gtk::ListView>() else {
                 return;
             };
             let held = gesture.current_event_state();
             let ctrl = held.contains(gdk::ModifierType::CONTROL_MASK);
             let shift = held.contains(gdk::ModifierType::SHIFT_MASK);
+            // The second press of a double click on a file, which the list does not activate
+            // again: the first one opened it as a preview, and this keeps it.
+            if presses == 2
+                && !ctrl
+                && !shift
+                && let Some(row) = row_at(&view, x, y).filter(|row| !row.is_dir())
+            {
+                return on_activate(row.kind, &row.rel, true);
+            }
             let row = row_at(&view, x, y).filter(|row| !row.dependency);
             let mut marks = marked.borrow_mut();
             match row {
@@ -996,7 +1008,7 @@ pub fn build(
         if item.is_dir() {
             row.set_expanded(!row.is_expanded());
         } else {
-            on_activate(item.kind, &item.rel);
+            on_activate(item.kind, &item.rel, false);
         }
     });
     // `single-click-activate` is GTK's "activated on single click **and selected on hover**", so
