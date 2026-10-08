@@ -37,6 +37,15 @@ pulldown-cmark = { version = "0.13", default-features = false }
 lto = "thin"
 codegen-units = 1
 
+# accent-cli is also the server a remote vault uploads, so it is built for size: `mcp` (rmcp and
+# the serde code it instantiates here) took the x86_64 musl binary from 9.0 to 11.2 MB at -O3, to
+# 10.0 MB like this. `serve`'s list_dir, read_text and search, and `hold`'s streaming and replay,
+# timed the same within noise (2026-10-08). The core and the façade it links stay at -O3.
+[profile.release.package.accent-cli]
+opt-level = "s"
+[profile.release.package.rmcp]
+opt-level = "s"
+
 # The Android core, built for size rather than speed: the `.so` is the download, and the desktop
 # app shares `release` above and wants the other trade. `make android` and the cross build Gradle
 # runs itself both name this profile; nothing else does. Measured on the arm64 library, 8.7 MB
