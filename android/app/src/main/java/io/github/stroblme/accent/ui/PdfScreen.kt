@@ -111,6 +111,21 @@ fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome
     // Asked again whenever a walk ends, which is when a link written elsewhere reaches the index.
     var notes by remember(pdf.rel) { mutableStateOf(emptyList<PdfLink>()) }
     LaunchedEffect(pdf.rel, indexing) { if (!indexing) notes = model.pdfLinks(pdf.rel) }
+    // Print… from the palette, once the document is open: a copy with those links' highlights.
+    // The request is taken back once the print system has it, as a note's is.
+    val context = LocalContext.current
+    val accent = paperAccent(MaterialTheme.colorScheme)
+    LaunchedEffect(pdf.printing, doc) {
+        val open = doc ?: return@LaunchedEffect
+        if (!pdf.printing) return@LaunchedEffect
+        try {
+            open.printCopy(notes, (accent.rgb() shl 8) or 0xFFu)
+                .onSuccess { printPdf(context, File(path).name.removeSuffix(".pdf"), it, open.pageCount) }
+                .onFailure { model.said("This PDF could not be printed") }
+        } finally {
+            model.printing(false)
+        }
+    }
     Reader(
         doc,
         failed,

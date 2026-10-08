@@ -79,16 +79,19 @@ fun BrowseScreen(
     results: List<SearchHit>,
     front: String?,
     openTag: String?,
+    /** Whether a note or a PDF is in front, which is what Print… acts on. */
+    printable: Boolean,
     onOpen: (rel: String, find: String?) -> Unit,
     onClose: () -> Unit,
 ) {
+    val palette = if (printable) Commands + Print else Commands
     val pager = rememberPagerState(if (openTag != null) Mode.Tags.ordinal else 0) { Mode.entries.size }
     val scope = rememberCoroutineScope()
     // Which page the pager is nearest, which is what the field means and which chip is lit: both
     // follow the surface across, rather than waiting for it to land.
     val mode = Mode.entries[pager.currentPage]
     var query by remember { mutableStateOf("") }
-    // The ranking and the page it was ranked for, as places in [Commands] or in [files]. Two pages
+    // The ranking and the page it was ranked for, as places in [palette] or in [files]. Two pages
     // are composed at once while one is being dragged in, and a file row drawn from a command's
     // place is a row that says the wrong thing.
     var ranked by remember { mutableStateOf(Mode.Search to emptyList<Int>()) }
@@ -136,7 +139,7 @@ fun BrowseScreen(
         // The note corpus is fetched on demand rather than kept in step with the index, so the
         // first query in a session waits for it once.
         val read = if (commands) null else model.corpus()
-        val corpus = read?.names ?: Commands.map { it.label }
+        val corpus = read?.names ?: palette.map { it.label }
         ranked = mode to withContext(Dispatchers.Default) {
             if (read != null && query.isBlank()) {
                 model.recents.list(Recents.Kind.Notes).mapNotNull { read.find(it) }.take(50)
@@ -207,7 +210,7 @@ fun BrowseScreen(
             LazyColumn(Modifier.fillMaxSize(), reverseLayout = tab != Mode.Search) {
                 when {
                     tab == Mode.Command -> items(rows, key = { it }) { i ->
-                        val command = Commands[i]
+                        val command = palette[i]
                         ListItem(
                             headlineContent = {
                                 Text(command.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -476,6 +479,12 @@ val Commands = listOf(
     Command("Close Note") { it.close() },
     Command("Close Vault") { it.closeVault() },
 )
+
+/**
+ * Print… of the note or the PDF in front, listed only while there is one: the system's print UI,
+ * which offers Save as PDF too, so there is no Export beside it.
+ */
+val Print = Command("Print…") { it.printing(true) }
 
 private fun newName(): String {
     val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HHmm", java.util.Locale.US)

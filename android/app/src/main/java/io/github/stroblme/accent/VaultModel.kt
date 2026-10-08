@@ -79,6 +79,8 @@ data class Open(
      * types into. It belongs to the note in front, so opening another puts it away.
      */
     val finding: Boolean = false,
+    /** Print… was picked for the note, and its screen has yet to hand it to the print system. */
+    val printing: Boolean = false,
     /**
      * The reader is on the way out of the note — closing it, closing the vault, opening another —
      * over edits saving was paused on, and has been asked which version to keep
@@ -104,13 +106,15 @@ data class Open(
 
 /**
  * The PDF in front of the reader: where it is in the vault, where on disk, and where it opens —
- * and whether its find is open ([VaultModel.finding]), as a note's is ([Open.finding]).
+ * and whether its find is open ([VaultModel.finding]) and Print… waits on it, as a note's do
+ * ([Open.finding], [Open.printing]).
  */
 data class OpenPdf(
     val rel: String,
     val path: String,
     val at: PdfPlace? = null,
     val finding: Boolean = false,
+    val printing: Boolean = false,
 )
 
 /**
@@ -916,6 +920,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun finding(on: Boolean) = _state.update {
         it.copy(open = it.open?.copy(finding = on), pdf = it.pdf?.copy(finding = on))
+    }
+
+    /**
+     * Ask for, or take back once it is under way, Print… of whatever is in front, a note or a
+     * PDF: the screen showing it does the printing, since that wants the page and the document
+     * it holds. With neither in front it does nothing, as [finding] does.
+     */
+    fun printing(on: Boolean) = _state.update {
+        it.copy(open = it.open?.copy(printing = on), pdf = it.pdf?.copy(printing = on))
     }
 
     fun said(message: String?) = _state.update { it.copy(message = message) }

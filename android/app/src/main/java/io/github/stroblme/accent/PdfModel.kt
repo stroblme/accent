@@ -200,6 +200,14 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
 
     suspend fun bytes(): ByteArray? = on { runCatching { session.saveBytes() }.getOrNull() }
 
+    /**
+     * What Print… hands on: the document as it stands with the note [links] that land written in
+     * as highlights in [rgba] (`0xRRGGBBAA`). The document itself gains nothing.
+     */
+    suspend fun printCopy(links: List<PdfLink>, rgba: UInt): Result<ByteArray> = on {
+        runCatching { session.copyWithHighlights(links, rgba) }
+    }
+
     private fun readHistory() {
         val history = session.history()
         canUndo = history.undo

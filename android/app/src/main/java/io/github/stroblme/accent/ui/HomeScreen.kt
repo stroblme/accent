@@ -137,6 +137,7 @@ fun HomeScreen(model: VaultModel) {
                     results = state.results,
                     front = open?.rel ?: pdf?.rel ?: image?.rel,
                     openTag = browseTag,
+                    printable = open != null || pdf != null,
                     onOpen = { rel, find ->
                         model.openFile(rel, find)
                         screen = Screen.Home

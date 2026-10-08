@@ -220,6 +220,32 @@ impl PdfSession {
             .collect()
     }
 
+    /// What Print hands on, as the desktop's does: the document as it now stands, its ink
+    /// included, with the note links that land written in as `/Highlight` annotations in `rgba`
+    /// (`0xRRGGBBAA`), each carrying the text its link quotes. The bytes of a file of its own;
+    /// this document gains nothing and stays as dirty as it was.
+    pub fn copy_with_highlights(&self, links: Vec<PdfLink>, rgba: u32) -> Answer<Vec<u8>> {
+        self.with(|s| {
+            let links: Vec<_> = links
+                .into_iter()
+                .filter_map(|l| l.try_into().ok())
+                .collect();
+            let color = rgba.to_be_bytes();
+            let highlights: Vec<pdf::Highlight> =
+                pdf::highlight_quads(&s.doc, &mut s.glyphs, &links)
+                    .into_iter()
+                    .flat_map(|(page, found)| found.into_iter().map(move |q| (page, q)))
+                    .map(|(page, (quads, at))| pdf::Highlight {
+                        page,
+                        quads,
+                        color,
+                        contents: links[at].alias.clone(),
+                    })
+                    .collect();
+            Ok(s.doc.copy_with_highlights(&highlights)?)
+        })
+    }
+
     pub fn links(&self, page: u32) -> Answer<Vec<PdfLinkBox>> {
         self.with(|s| Ok(convert::all(s.doc.links(page as usize)?)))
     }
@@ -569,6 +595,35 @@ mod tests {
         );
         assert!(s.locate(0, vec![9, 0, 9, 1]).unwrap().is_none());
         assert!(s.locate(0, vec![1, 2]).is_err());
+    }
+
+    /// What Print hands on: the document as it stands, its unsaved ink in, with each note link
+    /// that lands written in as a highlight quoting it, while the open document gains nothing.
+    #[test]
+    fn a_print_copy_carries_the_ink_and_the_note_highlights() {
+        if !pdf::available() {
+            eprintln!("skipping: no libpdfium");
+            return;
+        }
+        let s = PdfSession::open_bytes(text_pdf()).unwrap();
+        s.add_stroke(0, line(), pen()).unwrap();
+        let link = |selection: Vec<u32>| PdfLink {
+            src_rel_path: "Note.md".to_string(),
+            byte_start: 0,
+            page: 0,
+            selection,
+            alias: Some("Hello".to_string()),
+        };
+        let bytes = s
+            .copy_with_highlights(vec![link(vec![0, 0, 0, 5]), link(vec![1, 2])], 0x3584_e4ff)
+            .unwrap();
+        let copy = PdfSession::open_bytes(bytes).unwrap();
+        let marks = copy.highlights(0).unwrap();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].contents.as_deref(), Some("Hello"));
+        assert_eq!(copy.0.lock().unwrap().doc.inks(0).unwrap().len(), 1);
+        assert!(s.highlights(0).unwrap().is_empty());
+        assert!(s.dirty(), "the copy is not a save");
     }
 
     /// A document with no file behind it draws and hands its bytes back, and never writes.

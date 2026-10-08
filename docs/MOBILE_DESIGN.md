@@ -115,6 +115,20 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   the WebView reads one, so it opens as any other file, and an embed of one in a note, which the
   shared markdown makes an image, shows as one that did not load.
 
+### Print
+
+- Print… is a palette command, listed while a note or a PDF is in front. It opens the system's
+  print UI, which paginates, picks the printer and offers Save as PDF, so there is no Export as…
+  beside it.
+- A note goes out as the desktop prints one: the text as typed, on the light page whatever the
+  theme, links in the light theme's accent, images as their files are (no recolouring, no
+  inversion), diagrams in mermaid's light theme. A WebView of its own that is never shown lays it
+  out (`WebView.createPrintDocumentAdapter`), once its images are in and its diagrams drawn, so the
+  page being read keeps its place and its marks.
+- A PDF goes out as a copy of the document as it stands, its ink in and the notes' highlights
+  written in as `/Highlight` annotations in that accent, each carrying the text it quotes
+  (`PdfSession::copy_with_highlights`): the desktop's copy. The file itself gains nothing.
+
 ### Message
 
 - A `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog —
@@ -346,5 +360,4 @@ The decisions under the Android app, each with its reason; the shared ones are i
   this one. The test for any feature: does it help someone read their vault, make a small edit, or
   read and mark up a PDF.
 - Deferred rather than refused: templates and the daily note, a native Compose renderer in place
-  of the WebView, exporting highlights, the PDF shapes and Adjust tool, and printing or exporting
-  a note or a PDF (the desktop's Print… and Export as…; NOTEPAD says what it would take).
+  of the WebView, exporting highlights, and the PDF shapes and Adjust tool.
