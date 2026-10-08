@@ -23,7 +23,9 @@ impl Compare {
     /// Whether the rows are laid and the view is where the comparison was keeping it: what a drill
     /// waits for before it acts on a comparison just opened.
     pub fn settled(&self) -> bool {
-        self.columns.keep.get().is_none() && self.columns.pending.borrow().is_none()
+        self.asked.get().is_none()
+            && self.columns.keep.get().is_none()
+            && self.columns.pending.borrow().is_none()
     }
 
     /// Whether the first hunk's first line is inside its view right now, on the first side that

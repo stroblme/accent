@@ -16,7 +16,7 @@
 use accent_core::diff::{self, DiffLine, Op, Row};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::ops::{Range, RangeInclusive};
 use std::rc::{Rc, Weak};
@@ -46,6 +46,11 @@ const TAG_REMOVED_EMPH: &str = "diff-removed-emph";
 pub(crate) const TAG_GAP: &str = "diff-gap";
 /// Unchanged lines kept on each side of a change, as `git diff` keeps them.
 const CONTEXT: usize = 3;
+/// Bytes of the two texts together up to which a lay diffs them where it is rather than on a
+/// worker, which answers a frame late at best: about a millisecond's diff with half of the lines
+/// changed (2026-10-08), and room for both sides of a note the editor lays again on every
+/// keystroke (16 KB, `editor::INSTANT`).
+const ON_THE_SPOT: usize = 64 * 1024;
 
 /// Row backgrounds. This is the one place DESIGN.md's "only accent, foreground and is_dark" rule
 /// bends: a diff has to read as green and red, and libadwaita publishes its success/error colours
@@ -235,6 +240,25 @@ fn hunk_lines(
     })
 }
 
+/// The diff of two texts, as a lay reads it: see [`Compare::lay`].
+struct Diffed {
+    lines: Vec<DiffLine>,
+    rows: Vec<Row>,
+    /// [`line_starts`] of each text.
+    starts: [Vec<i32>; 2],
+}
+
+impl Diffed {
+    fn of(old: &str, new: &str) -> Diffed {
+        let lines = diff::lines(old, new);
+        Diffed {
+            rows: diff::align(&lines),
+            lines,
+            starts: [line_starts(old), line_starts(new)],
+        }
+    }
+}
+
 /// What an entry [`Compare::offer`] puts on the panes' menus does with a selection, and what a
 /// button [`Compare::offer_hunks`] puts on each hunk does with that hunk's lines.
 pub type OnLines = Rc<dyn Fn(Side, RangeInclusive<usize>, &str, &str)>;
@@ -314,6 +338,12 @@ pub struct Compare {
     rows: RefCell<Vec<Row>>,
     /// [`line_starts`] of each side's text.
     starts: RefCell<[Vec<i32>; 2]>,
+    /// Edits made to either buffer, counted before they land: whether the diff kept above is
+    /// still the texts' is told by the count it was made at (`diffed`), and a worker's diff is
+    /// out for the count in `asked`.
+    edits: Cell<u64>,
+    diffed: Cell<Option<u64>>,
+    asked: Cell<Option<u64>>,
     /// The row ranges hidden right now, each with the key it can be opened by.
     hidden: RefCell<Vec<(Range<usize>, usize)>>,
     /// Lines the user asked to see, every line of each run they opened, by their number on the
@@ -384,6 +414,9 @@ impl Compare {
             lines: RefCell::new(Vec::new()),
             rows: RefCell::new(Vec::new()),
             starts: RefCell::new([Vec::new(), Vec::new()]),
+            edits: Cell::new(0),
+            diffed: Cell::new(None),
+            asked: Cell::new(None),
             hidden: RefCell::new(Vec::new()),
             opened: RefCell::new(HashSet::new()),
             unfold,
@@ -417,6 +450,24 @@ impl Compare {
             }
         });
         connect(style.upcast(), id);
+        // Every edit counted as it goes in, ahead of the buffer's `changed`: the editor lays the
+        // comparison again from its own handler of that, connected first.
+        for pane in &this.columns.panes {
+            let w = weak.clone();
+            let id = pane.buffer.connect_insert_text(move |_, _, _| {
+                if let Some(c) = w.upgrade() {
+                    c.edits.set(c.edits.get() + 1);
+                }
+            });
+            connect(pane.buffer.clone().upcast(), id);
+            let w = weak.clone();
+            let id = pane.buffer.connect_delete_range(move |_, _, _| {
+                if let Some(c) = w.upgrade() {
+                    c.edits.set(c.edits.get() + 1);
+                }
+            });
+            connect(pane.buffer.clone().upcast(), id);
+        }
         // Focus mode's line fade on the other column is measured from the lines facing the
         // editor's carets, so stepping through the changes keeps the two columns' focus level,
         // and drawn again as those carets move: its own caret nobody moves.
@@ -499,6 +550,10 @@ impl Compare {
         let pane = self.pane(side);
         pane.buffer.set_text(&text);
         editor::style_companion(pane.flavour, &pane.buffer, &pane.view);
+        // Diffed here, not on a worker however long the texts: the next re-read keeps its line by
+        // these rows, the Git pane reading both sides of a staged change one after the other.
+        let (old, new) = (self.text(Side::Old), self.text(Side::New));
+        self.store(Diffed::of(&old, &new), self.edits.get());
         self.refresh();
     }
 
@@ -602,8 +657,12 @@ impl Compare {
         self.refresh();
     }
 
-    /// What the button in `half` of the strip does on hunk `i`.
+    /// What the button in `half` of the strip does on hunk `i`. Nothing while the texts have
+    /// changed since the last diff: its hunks are where the lines were.
     fn press(&self, i: usize, half: usize) {
+        if !self.current() {
+            return;
+        }
         let hunk = {
             let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
             diff::hunks(&lines, &rows).get(i).cloned()
@@ -621,9 +680,10 @@ impl Compare {
 
     /// Run the button named `label` on the hunk holding the editor's caret, or ending at the
     /// caret's line, as a deletion just above it does: the palette's way to a hunk's buttons.
-    /// `false` where there is no such hunk or button.
+    /// `false` where there is no such hunk or button, or as [`Compare::press`], no diff yet of
+    /// the texts as they stand.
     pub fn act_at_caret(&self, label: &str) -> bool {
-        let Some(mine) = self.editable else {
+        let Some(mine) = self.editable.filter(|_| self.current()) else {
             return false;
         };
         let hunk = {
@@ -668,11 +728,65 @@ impl Compare {
     /// [`Compare::refresh`], and with `opening`, the one [`Compare::new`] makes: that one also
     /// puts the editor's caret on the first change, so the comparison opens on what changed
     /// with every unchanged run folded, the one the caret was in included.
+    ///
+    /// The texts are diffed again only once either has changed since the last diff. After an
+    /// edit, where they are longer than [`ON_THE_SPOT`] together, that is done on a worker: the
+    /// columns lay nothing until it answers, the rows staying as they were laid, and are laid
+    /// then; an answer for texts that changed while it was out is dropped, the lay that change
+    /// asks for diffing them again. The first lay diffs here, before the columns are shown: over
+    /// shown columns, the thousands of buttons a long file's hidden runs and hunks carry held the
+    /// main loop for 8.3 s, where the whole first lay takes 1.5 s (120,000 rows of CSV,
+    /// 2026-10-08). So does a side read again ([`Compare::set_side`]).
     fn lay(&self, opening: bool) {
-        let (old, new) = (self.text(Side::Old), self.text(Side::New));
-        let lines = diff::lines(&old, &new);
-        let rows = diff::align(&lines);
-        let starts = [line_starts(&old), line_starts(&new)];
+        let edits = self.edits.get();
+        if !self.current() {
+            if self.asked.get() == Some(edits) {
+                return;
+            }
+            let (old, new) = (self.text(Side::Old), self.text(Side::New));
+            if !opening && old.len() + new.len() > ON_THE_SPOT {
+                self.asked.set(Some(edits));
+                self.columns.wait();
+                let weak = self.weak.clone();
+                glib::spawn_future_local(async move {
+                    let diffed =
+                        crate::work::off_thread("diff", move || Diffed::of(&old, &new)).await;
+                    let Some(c) = weak.upgrade().filter(|c| c.asked.get() == Some(edits)) else {
+                        return;
+                    };
+                    c.asked.set(None);
+                    if let Some(diffed) = diffed.filter(|_| c.edits.get() == edits) {
+                        c.store(diffed, edits);
+                        c.lay(false);
+                    }
+                });
+                return;
+            }
+            self.store(Diffed::of(&old, &new), edits);
+        }
+        self.apply(opening);
+    }
+
+    /// Whether the diff kept is the texts' as they stand.
+    fn current(&self) -> bool {
+        self.diffed.get() == Some(self.edits.get())
+    }
+
+    /// Keep `diffed`, made of the texts as they were after `edits` edits.
+    fn store(&self, diffed: Diffed, edits: u64) {
+        *self.lines.borrow_mut() = diffed.lines;
+        *self.rows.borrow_mut() = diffed.rows;
+        *self.starts.borrow_mut() = diffed.starts;
+        self.diffed.set(Some(edits));
+    }
+
+    /// Lay the diff kept over both panes, see [`Compare::lay`].
+    fn apply(&self, opening: bool) {
+        let (lines, rows, starts) = (
+            self.lines.borrow(),
+            self.rows.borrow(),
+            self.starts.borrow(),
+        );
         for side in [Side::Old, Side::New] {
             self.clear_marks(side);
         }
@@ -680,7 +794,7 @@ impl Compare {
         for side in [Side::Old, Side::New] {
             let buffer = &self.pane(side).buffer;
             let st = &starts[side.idx()];
-            for row in &rows {
+            for row in rows.iter() {
                 let Some(line) = side.of(row).map(|i| &lines[i]) else {
                     continue;
                 };
@@ -820,9 +934,8 @@ impl Compare {
             first: hunks.first().map(|hunk| hunk.start),
             overlays,
         };
-        *self.lines.borrow_mut() = lines;
-        *self.rows.borrow_mut() = rows;
-        *self.starts.borrow_mut() = starts;
+        // Let go before the columns are laid and `laid` runs, either of which may lay again.
+        drop((lines, rows, starts));
         *self.hidden.borrow_mut() = hidden;
         self.columns.lay(laid);
         if let Some(laid) = self.laid.borrow().as_ref() {
@@ -920,8 +1033,10 @@ impl Compare {
         }
     }
 
-    /// Everything off both panes: what leaving a comparison does before the panes part.
+    /// Everything off both panes: what leaving a comparison does before the panes part. A diff
+    /// still out is dropped when it answers.
     pub fn leave(&self) {
+        self.asked.set(None);
         for side in [Side::Old, Side::New] {
             self.clear_marks(side);
         }

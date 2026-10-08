@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 use std::ops::{Range, RangeInclusive};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
@@ -38,17 +39,23 @@ pub struct DiffLine {
     pub emphasis: Vec<Range<usize>>,
 }
 
+/// How long [`lines`] may spend refining changed lines word by word, all hunks together. A long
+/// file rewritten throughout took 475 ms to refine as one hunk (120,000 CSV rows, a character
+/// added to each); past the budget, what is left comes back unrefined, the lines whole.
+const REFINE: Duration = Duration::from_millis(100);
+
 /// Line diff of two texts, oldest-first, suitable for a side-by-side view.
 ///
-/// ponytail: the word-level refinement runs on `similar`'s defaults — a 0.5 similarity floor,
-/// below which a paired line is left unrefined, and a 500 ms deadline per hunk. Both are the
-/// library's choices, not measurements of ours; `iter_inline_changes_with_options` (and the
-/// `unicode` feature, for grapheme-accurate tokens) is the upgrade path if either shows.
+/// ponytail: the word-level refinement runs on `similar`'s 0.5 similarity floor, below which a
+/// paired line is left unrefined: the library's choice, not a measurement of ours;
+/// `iter_inline_changes_with_options` (and the `unicode` feature, for grapheme-accurate tokens)
+/// is the upgrade path if it shows.
 pub fn lines(old: &str, new: &str) -> Vec<DiffLine> {
     let diff = TextDiff::from_lines(old, new);
+    let deadline = Instant::now() + REFINE;
     diff.ops()
         .iter()
-        .flat_map(|op| diff.iter_inline_changes(op))
+        .flat_map(|op| diff.iter_inline_changes_deadline(op, Some(deadline)))
         .map(|c| {
             let (mut text, mut emphasis) = (String::new(), Vec::new());
             for (emphasized, value) in c.iter_strings_lossy() {
@@ -76,7 +83,7 @@ pub fn lines(old: &str, new: &str) -> Vec<DiffLine> {
 /// same order, every `emphasis` empty.
 ///
 /// What a gutter needs — which lines changed, and how — for a fraction of the cost:
-/// `iter_inline_changes` re-diffs each hunk word by word under a 500 ms budget, and a change bar
+/// [`lines`] re-diffs each hunk word by word under a budget of [`REFINE`], and a change bar
 /// three pixels wide has nowhere to put the answer.
 pub fn line_ops(old: &str, new: &str) -> Vec<DiffLine> {
     let mut lines = changes(old, new);

@@ -95,6 +95,9 @@ pub(super) struct Columns {
     /// by every refresh; a bound, because a line GTK never validates would otherwise be asked
     /// about forever.
     settling: Cell<u8>,
+    /// Whether the host's rows are waiting for a diff of texts changed since: see
+    /// [`Columns::wait`].
+    waiting: Cell<bool>,
     /// Each column's own vertical adjustment, given up for the first column's while the
     /// comparison lasts and handed back by [`Columns::leave`].
     own: Vec<gtk::Adjustment>,
@@ -279,6 +282,7 @@ impl Columns {
             grid: RefCell::new(Grid::default()),
             pending: RefCell::new(None),
             settling: Cell::new(0),
+            waiting: Cell::new(false),
             own,
             bottoms: (0..n).map(|_| Cell::default()).collect(),
             keep: Cell::new(Some(Keep::FirstHunk)),
@@ -371,9 +375,17 @@ impl Columns {
 
     /// Lay the columns out from `rows`: the host's every refresh.
     pub(super) fn lay(&self, rows: Rows) {
+        self.waiting.set(false);
         *self.rows.borrow_mut() = rows;
         self.settling.set(SETTLE);
         self.relayout();
+    }
+
+    /// Lay nothing until the host lays its rows again: they are for texts that have changed, and
+    /// laid over the new ones they would pad lines that have moved, and settle where the view is
+    /// kept before the rows that keeping is for have come.
+    pub(super) fn wait(&self) {
+        self.waiting.set(true);
     }
 
     /// Whether the view is still waiting to go to the first hunk, which nothing else may move.
@@ -693,7 +705,7 @@ impl Columns {
     /// paragraph — fine at the few hundred rows a note has, and debounced by the editor above
     /// that. Measuring only the rows an edit touched is the upgrade if a long note shows it.
     fn relayout(&self) {
-        if !self.panes.iter().all(|p| p.view.is_mapped()) {
+        if self.waiting.get() || !self.panes.iter().all(|p| p.view.is_mapped()) {
             return;
         }
         // Before anything is measured: a keystroke's refresh gets here ahead of the buffer's own
@@ -708,7 +720,11 @@ impl Columns {
             return;
         }
         let count = rows.changed.len();
-        let is_hidden = |r: usize| rows.hidden.iter().any(|gap| gap.contains(&r));
+        let mut hidden = vec![false; count];
+        for gap in &rows.hidden {
+            hidden[gap.clone()].fill(true);
+        }
+        let is_hidden = |r: usize| hidden[r];
         let estimated = Cell::new(false);
         let heights: Vec<Vec<Option<i32>>> = (self.panes.iter().enumerate())
             .map(|(c, pane)| {
