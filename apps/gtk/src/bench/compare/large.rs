@@ -91,6 +91,19 @@ fn csv_tagged(buffer: &sourceview5::Buffer) -> bool {
     })
 }
 
+/// How many stretches of `buffer` carry the tag named `name`.
+fn tagged(buffer: &sourceview5::Buffer, name: &str) -> usize {
+    let Some(tag) = buffer.tag_table().lookup(name) else {
+        return 0;
+    };
+    let (mut n, mut at) = (0, buffer.start_iter());
+    while at.has_tag(&tag) || at.forward_to_tag_toggle(Some(&tag)) {
+        n += 1;
+        at.forward_to_tag_toggle(Some(&tag));
+    }
+    n
+}
+
 /// The median and the largest of `values`.
 fn spread(values: &mut [f64]) -> (f64, f64) {
     values.sort_by(f64::total_cmp);
@@ -103,7 +116,8 @@ fn spread(values: &mut [f64]) -> (f64, f64) {
 /// three characters into a changed line and takes them out again, and re-reads the other side
 /// twice. Each step prints how long its own call held the main loop (`call_ms`), how long until
 /// the rows were laid (`settle_ms`) and the longest the main loop went without turning meanwhile
-/// (`held_ms`); the last line, the median and the worst of `held_ms` per kind of step, and for a
+/// (`held_ms`), and once open how many stretches of the editor's text are emphasised; the last
+/// line, the median and the worst of `held_ms` per kind of step, and for a
 /// CSV whether its cells carry the column tags a pass over all of it gives them. The file is
 /// saved after the typing, as it was, so point it at a scratch copy.
 pub(in crate::bench) fn bench_compare_large(app: &Rc<App>, rel: &str) {
@@ -144,8 +158,9 @@ pub(in crate::bench) fn bench_compare_large(app: &Rc<App>, rel: &str) {
         let (_, settle, worst) = held(&compare, || {}).await;
         let (settle, worst) = (settle + call, worst.max(call));
         println!(
-            "bench compare_large open lines={lines} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} {}",
-            bench_compare_line(&compare)
+            "bench compare_large open lines={lines} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} {} emphasised={}",
+            bench_compare_line(&compare),
+            tagged(&tab.buffer, "diff-added-emph")
         );
         let mut kinds: Vec<(&str, Vec<f64>)> = vec![("open", vec![worst])];
         let mut relay = Vec::new();
