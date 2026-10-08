@@ -158,6 +158,8 @@ pub struct PdfTab {
     /// Whether Undo, and then Redo, has anything to walk: what the header's two buttons show.
     pub(super) history: Cell<(bool, bool)>,
     pub(super) outline: RefCell<Vec<pdf::Outline>>,
+    /// What the document says about itself, which comes with the bookmarks.
+    pub(super) info: RefCell<pdf::Info>,
     /// The link preview on screen, if the pointer is on a link with Ctrl held.
     pub(super) preview: RefCell<Option<super::preview::Preview>>,
     /// A drag that arrived before the glyphs of every page it covers did, to answer when the
@@ -304,6 +306,7 @@ pub fn open(
         saved: Cell::new(None),
         history: Cell::new((false, false)),
         outline: RefCell::new(Vec::new()),
+        info: RefCell::default(),
         preview: RefCell::new(None),
         query: Cell::new(0),
         searched: RefCell::default(),
@@ -413,6 +416,11 @@ impl PdfTab {
 
     pub fn page_count(&self) -> usize {
         self.view.page_count()
+    }
+
+    /// One page's size in points.
+    pub fn page_size(&self, page: usize) -> Option<(f32, f32)> {
+        self.view.page_size(page)
     }
 
     /// The page being read: the one under the middle of the reading view.
@@ -837,6 +845,11 @@ impl PdfTab {
     /// The bookmarks, for the Outline pane.
     pub fn outline(&self) -> Vec<pdf::Outline> {
         self.outline.borrow().clone()
+    }
+
+    /// What the document says about itself, for the Info pane's Details.
+    pub fn info(&self) -> pdf::Info {
+        self.info.borrow().clone()
     }
 
     /// The bookmark the page being read is under, as its row in [`PdfTab::outline`].

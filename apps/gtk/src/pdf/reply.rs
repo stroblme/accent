@@ -43,8 +43,9 @@ impl PdfTab {
                 }
             }
             Reply::Text(page, glyphs) => self.text_landed(page, glyphs),
-            Reply::Outline(outline) => {
+            Reply::Outline(outline, info) => {
                 *self.outline.borrow_mut() = outline;
+                *self.info.borrow_mut() = info;
                 self.on_outline.emit(self);
             }
             Reply::Found { query, page, hits } => self.found(query, page, hits),

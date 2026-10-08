@@ -138,6 +138,29 @@ pub(super) fn heading_named(texts: &[&str], anchor: &str) -> Option<usize> {
         })
 }
 
+/// The section an anchor names, its heading found as [`heading_for`] finds it: from the line after
+/// the heading down to the next heading that is not below it, or to the end of the note. What an
+/// edit scoped to a heading replaces, appends to or prepends to.
+pub fn section(text: &str, anchor: &str) -> Option<Range<usize>> {
+    let headings = analyze(text).headings;
+    let texts: Vec<&str> = headings.iter().map(|h| h.text.as_str()).collect();
+    let i = heading_named(&texts, anchor)?;
+    let line_end = headings[i].range.end;
+    let start = text[line_end..]
+        .find('\n')
+        .map_or(text.len(), |n| line_end + n + 1);
+    Some(start..section_end(&headings, i, text.len()))
+}
+
+/// Where the section `headings[i]` opens ends: at the next heading that is not below it, or at
+/// `len`, the end of the note.
+pub fn section_end(headings: &[Heading], i: usize, len: usize) -> usize {
+    headings[i + 1..]
+        .iter()
+        .find(|next| next.level <= headings[i].level)
+        .map_or(len, |next| next.range.start)
+}
+
 /// Where an anchor lands in a note: from the block a `^id` marks through its id, or else the
 /// heading [`heading_for`] finds. Go to Definition and a click in the preview both land here.
 pub fn anchor_range(text: &str, anchor: &str) -> Option<Range<usize>> {
@@ -896,6 +919,37 @@ mod tests {
         assert_eq!(at("intro"), Some("# Intro"));
         assert_eq!(at("^gone"), None);
         assert_eq!(at("Para-1"), None, "an id is only named with its caret");
+    }
+
+    /// A section is what follows its heading's line, its subsections included, down to the next
+    /// heading that is not below it — whichever way the heading is written and wherever it sits.
+    #[test]
+    fn a_section_runs_to_the_next_heading_not_below_it() {
+        let text =
+            "---\ntags: [x]\n---\n# One\nintro\n## Sub\nsub text\n\n# Two\nsetext\n=====\nlast";
+        let at = |anchor: &str| section(text, anchor).map(|r| &text[r]);
+        assert_eq!(at("One"), Some("intro\n## Sub\nsub text\n\n"));
+        assert_eq!(at("sub"), Some("sub text\n\n"));
+        assert_eq!(
+            at("two"),
+            Some(""),
+            "a section with nothing before the next heading"
+        );
+        assert_eq!(
+            at("setext"),
+            Some("last"),
+            "a setext heading, the note ending unterminated"
+        );
+        assert_eq!(at("tags"), None, "frontmatter is not a heading");
+        assert_eq!(at("nowhere"), None);
+
+        let twice = "# Notes\na\n# Notes\nb\n";
+        assert_eq!(section(twice, "notes-1").map(|r| &twice[r]), Some("b\n"));
+        assert_eq!(
+            section("# Bare", "bare"),
+            Some(6..6),
+            "a heading on the last line"
+        );
     }
 
     #[test]

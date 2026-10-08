@@ -399,6 +399,9 @@ impl App {
                     // old percentage. Asked again of this one, so the zoom means the same thing
                     // either side of a reload.
                     zoom::set_image_zoom(&picture, image.zoom.get());
+                    let own = (shown.original.width(), shown.original.height());
+                    image.size.set(Some(shown.size.unwrap_or(own)));
+                    app.sync_details();
                     *image.image.borrow_mut() = Some((path, shown.original));
                     app.show_image(&image, None);
                 }
@@ -923,14 +926,15 @@ impl App {
                     app.follow_outline();
                 }
                 // A code tab's references are about the symbol under the caret, so they follow
-                // it — but only while the pane is on screen, since nobody is reading it otherwise.
+                // it — but only while the section is on screen, since nobody is reading it
+                // otherwise.
                 if !tab.flavour().is_note()
                     && app.is_active(tab)
                     && app.sidebar_column.is_visible()
                     && app
                         .sidebar
                         .get()
-                        .is_some_and(|s| s.is_showing("references"))
+                        .is_some_and(|s| s.section_live("references"))
                 {
                     app.refresh_references();
                 }

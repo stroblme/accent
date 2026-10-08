@@ -39,7 +39,9 @@ pub enum Reply {
     Comments(usize, Vec<pdf::Comment>),
     /// One page's glyphs and their boxes, for selecting text on it.
     Text(usize, Vec<accent_core::pdf::Glyph>),
-    Outline(Vec<accent_core::pdf::Outline>),
+    /// The bookmarks, and what the document says about itself, which changes with them: on
+    /// opening, a read and a page edit.
+    Outline(Vec<accent_core::pdf::Outline>, accent_core::pdf::Info),
     /// One page's matches for the query identified by `query`; a later one abandons it.
     Found {
         query: u64,

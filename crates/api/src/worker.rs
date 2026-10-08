@@ -4,7 +4,7 @@
 //! one. The inbox is drained in bursts rather than one message at a time: a Syncthing pull of
 //! 500 files is one batch, and therefore one [`Event`] for the window.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -19,8 +19,8 @@ use accent_core::path::parent_dir;
 use accent_core::walk::{self, FileKind, ScanOptions};
 use accent_core::watch::{VaultEvent, Watcher};
 
-use crate::Event;
 use crate::paths::{conflict_original_rel, conflict_pairs};
+use crate::{Etag, Event};
 
 /// Start the worker for a vault, and hand back the handle its `Drop` joins.
 ///
@@ -52,6 +52,7 @@ pub(crate) fn spawn(
         git_dirs: Vec::new(),
         unindexed: BTreeSet::new(),
         held: Vec::new(),
+        own: HashMap::new(),
         stop,
         paused: false,
         next_walk: Instant::now(),
@@ -129,6 +130,10 @@ struct Worker {
     /// What the inbox held that a walk read between its batches and could not answer there. See
     /// [`Worker::reconcile`].
     held: Vec<Msg>,
+    /// The etag each file this vault wrote was left at, so the watcher's echo of the write can
+    /// be told from a change another process sharing the index took in first: both find the row
+    /// up to date. See [`Worker::unchanged`].
+    own: HashMap<String, Etag>,
     /// Set by [`Local::stop_indexing`](crate::local::Local::stop_indexing) and by the vault's
     /// `Drop` from another thread, and read inside the walk: the inbox cannot be reached from there.
     stop: Arc<AtomicU8>,
@@ -506,7 +511,8 @@ impl Worker {
         match stats {
             Ok(mut stats) => {
                 // What the walk took in before the watcher's news of it could arrive, which then
-                // reads as no change (`Worker::update`): an open tab hears of it here or never.
+                // reads as no change (`Worker::unchanged`): in an unwatched vault, an open tab
+                // hears of it here or never.
                 for rel in std::mem::take(&mut stats.changed) {
                     self.emit(Event::FileChanged(rel));
                 }
@@ -692,7 +698,15 @@ impl Worker {
         }
         // The links the file holds and the ones its names answer to are resolved as it goes, in a
         // few index lookups: a pass over every link is 0.1–0.35 s a batch at `make vault`.
-        match self.index.update_file(&self.root, rel) {
+        let change = self.index.update_file(&self.root, rel);
+        // Only a watched vault hears its writes again.
+        if own && self.watch {
+            match Etag::of(&self.root.join(rel)) {
+                Ok(etag) => self.own.insert(rel.to_string(), etag),
+                Err(_) => self.own.remove(rel),
+            };
+        }
+        match change {
             Ok(Change::Added(kind)) => {
                 b.dirs.insert(parent_dir(rel).to_string());
                 if kind == FileKind::Dir {
@@ -716,8 +730,7 @@ impl Worker {
                     self.emit(Event::FileChanged(rel.to_string()));
                 }
             }
-            // `Unchanged` is the watcher echoing our own save back at us, or a change a walk took
-            // in first and reported itself (`ReconcileStats::changed`).
+            Ok(Change::Unchanged) if !own => self.unchanged(rel, b),
             Ok(Change::Unchanged) => {}
             // Out of the index, but not out of the tree, which lists a gitignored folder or a
             // `node_modules` beside the notes: its folder's listing changed all the same.
@@ -725,6 +738,28 @@ impl Worker {
                 b.dirs.insert(parent_dir(rel).to_string());
             }
             Err(e) => self.fail(&format!("indexing {rel}"), e),
+        }
+    }
+
+    /// The watcher's news of a path the index already holds as it is on disk: the echo of this
+    /// vault's own write, a change a walk here took in first and reported itself
+    /// (`ReconcileStats::changed`), or one another process sharing the index (`accent-cli mcp`
+    /// beside the app) took in first, which reaches the window here or never. The index cannot
+    /// tell them apart, so the etag of the vault's own write is what does; a walk's is said
+    /// twice. New or edited is unknowable too, so the folder's listing is news either way.
+    fn unchanged(&mut self, rel: &str, b: &mut Batch) {
+        let path = self.root.join(rel);
+        let Ok(etag) = Etag::of(&path) else {
+            return;
+        };
+        if self.own.get(rel) == Some(&etag) {
+            return;
+        }
+        b.dirs.insert(parent_dir(rel).to_string());
+        match path.is_dir() {
+            // Watched from now on, as a directory this vault added would be.
+            true => b.rewatch = true,
+            false => self.emit(Event::FileChanged(rel.to_string())),
         }
     }
 

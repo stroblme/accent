@@ -334,3 +334,73 @@ pub struct Outline {
     pub title: String,
     pub page: Option<usize>,
 }
+
+/// What a document says about itself: its information dictionary, each entry `None` where it
+/// says nothing, and the PDF version its header declares.
+///
+/// No modification date: pdfium-render 0.9.3 asks pdfium for `ModificationDate` where the
+/// dictionary's key is `ModDate`, so it never reads (ISSUES.md).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Info {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub subject: Option<String>,
+    pub keywords: Option<String>,
+    /// The application that made the document; `producer` is what turned it into a PDF.
+    pub creator: Option<String>,
+    pub producer: Option<String>,
+    /// When the document was made, in seconds since the epoch.
+    pub created: Option<i64>,
+    pub version: Option<String>,
+}
+
+/// A PDF date, `D:YYYYMMDDHHmmSSOHH'mm'` with everything after the year optional (PDF 32000-1,
+/// 7.9.4), as seconds since the epoch; `None` where it does not read as one. Lenient as readers
+/// are: the `D:` may be missing and the zone's apostrophes too, and no zone is UTC.
+pub fn parse_date(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let text = text.strip_prefix("D:").unwrap_or(text);
+    let digits = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (stamp, zone) = text.split_at(digits);
+    if !(4..=14).contains(&stamp.len()) || stamp.len() % 2 != 0 {
+        return None;
+    }
+    let field = |at: usize, unset: i64| -> Option<i64> {
+        stamp
+            .get(at..at + 2)
+            .map_or(Some(unset), |f| f.parse().ok())
+    };
+    let year: i64 = stamp[..4].parse().ok()?;
+    let (month, day) = (field(4, 1)?, field(6, 1)?);
+    let (hour, minute, second) = (field(8, 0)?, field(10, 0)?, field(12, 0)?);
+    let clock = hour <= 23 && minute <= 59 && second <= 59;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || !clock {
+        return None;
+    }
+    let offset = match zone.chars().next() {
+        None | Some('Z') => 0,
+        Some(sign @ ('+' | '-')) => {
+            let hm: String = zone[1..].chars().filter(|c| *c != '\'').collect();
+            let hours: i64 = hm.get(..2)?.parse().ok()?;
+            let minutes: i64 = hm.get(2..4).map_or(Some(0), |m| m.parse().ok())?;
+            let east = hours * 3600 + minutes * 60;
+            if sign == '+' { east } else { -east }
+        }
+        _ => return None,
+    };
+    let days = days_from_civil(year, month, day);
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+/// Days from 1970-01-01 to a date of the proleptic Gregorian calendar: Howard Hinnant's
+/// `days_from_civil` (<https://howardhinnant.github.io/date_algorithms.html>).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let of_era = year - era * 400;
+    let of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    era * 146_097 + of_cycle - 719_468
+}

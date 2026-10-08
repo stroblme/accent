@@ -69,8 +69,8 @@ pub(super) fn matched(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
 /// `None` for a tag the note does not carry. The note is parsed rather than searched, so a `#tag`
 /// inside a code span or a URL is not one, and a tag listed in the frontmatter is.
 ///
-/// Matched exactly, because that is how the index groups the names the Tags pane lists: a note
-/// writing both `#Rust` and `#rust` offers the pane two rows, and each opens onto its own.
+/// Matched exactly, because that is how the index groups the names the Tags section lists: a
+/// note writing both `#Rust` and `#rust` offers the section two rows, and each opens onto its own.
 fn tag_range(text: &str, name: &str) -> Option<Range<usize>> {
     let found = markdown::analyze(text)
         .tags
@@ -628,7 +628,7 @@ impl Tab {
     }
 
     /// Put the caret on the first place the note writes `#name` and reveal it: what a row under a
-    /// tag in the Tags pane opens onto, the way a search result opens onto its match. A note that
+    /// tag in the Tags section opens onto, the way a search result opens onto its match. A note that
     /// no longer carries the tag leaves the caret where it was.
     pub fn goto_tag(&self, name: &str) {
         let text = self.text();

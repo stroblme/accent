@@ -19,6 +19,7 @@ mod folders;
 mod git;
 mod ignored;
 mod image;
+mod info;
 mod keys;
 mod loose;
 mod memory;
@@ -64,6 +65,7 @@ use git::{
     bench_git_switch, bench_git_sync_all, bench_git_sync_over_fetch,
 };
 use image::{bench_image, bench_image_look, bench_preview_look};
+use info::bench_info;
 use keys::{
     bench_box_drag, bench_hold, bench_keys, bench_list, bench_menu_caret, bench_occurrence_keys,
     bench_shell_keys, bench_term,
@@ -470,7 +472,10 @@ use tags::bench_tags;
 /// the modifier half is driven at all.
 ///
 /// `ACCENT_BENCH_TAGS=<rel_note>` writes a marker tag into a note and takes it away again with
-/// the Tags pane on screen, printing whether the pane's list holds the marker at each step.
+/// the Tags section on screen, printing whether its list holds the marker at each step.
+///
+/// `ACCENT_BENCH_INFO=<rel>[,<rel>…]` opens each file with the Info pane on screen and prints
+/// which sections it shows, open or shut, and what they say (`info::bench_info`).
 ///
 /// `ACCENT_BENCH_REPLACE=1` writes a note holding one unique word, presses the Search pane's
 /// Replace All on it and prints what the pane lists before and after the rewrite.
@@ -587,6 +592,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let watch = std::env::var("ACCENT_BENCH_WATCH").ok();
     let tags = std::env::var("ACCENT_BENCH_TAGS").ok();
     let replace = std::env::var("ACCENT_BENCH_REPLACE").is_ok();
+    let info = std::env::var("ACCENT_BENCH_INFO").ok();
     let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
@@ -609,6 +615,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && diag.is_none()
         && tags.is_none()
         && !replace
+        && info.is_none()
         && search.is_none()
         && clip.is_none()
         && transfer.is_none()
@@ -826,6 +833,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_tags(&app, &rel);
         }
         if replace {
+        if let Some(rels) = info {
+            return bench_info(&app, &rels);
+        }
             return bench_replace(&app);
         }
         if let Some(query) = search {

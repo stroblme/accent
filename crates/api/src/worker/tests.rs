@@ -353,6 +353,61 @@ fn own_save_updates_the_index_without_a_file_changed_event() {
     );
 }
 
+/// Two vaults on one index, as the app and `accent-cli mcp` are: a write through one is taken
+/// into the index by its own worker, so the other's watcher finds the row already up to date and
+/// must still tell its window — the edited note to its tab, the new one to the tree — while each
+/// one's own saves stay quiet in it. Depends on real inotify events.
+#[test]
+fn a_write_through_another_vault_on_the_same_index_reaches_this_one() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("Note.md"), "old\n").unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let db = cache.path().join("index.db");
+    let open = || {
+        let (vault, events) =
+            crate::Vault::open_at(root.path(), &db, VaultConfig::default()).unwrap();
+        assert!(wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+        (vault, events)
+    };
+    let (app, events) = open();
+    let (mcp, mcp_events) = open();
+
+    let (_, etag) = mcp.read("Note.md").unwrap();
+    mcp.save("Note.md", "new\n", Some(etag)).unwrap();
+    mcp.create_note("New.md", None).unwrap();
+    assert!(
+        wait_for(
+            &events,
+            |e| matches!(e, Event::FileChanged(p) if p == "Note.md"),
+            BUDGET
+        )
+        .is_some(),
+        "the edit never reached the other vault"
+    );
+    assert!(
+        wait_for(
+            &events,
+            |e| matches!(e, Event::DirsChanged(d) if d.iter().any(|d| d.is_empty())),
+            BUDGET
+        )
+        .is_some(),
+        "the new note never reached the other vault's tree"
+    );
+    let own = |e: &Event| matches!(e, Event::FileChanged(p) if p == "Note.md");
+    assert!(
+        wait_for(&mcp_events, own, Duration::from_secs(1)).is_none(),
+        "a save came back to the vault that made it"
+    );
+
+    let (_, etag) = app.read("Note.md").unwrap();
+    app.save("Note.md", "newer\n", Some(etag)).unwrap();
+    assert!(wait_for(&mcp_events, own, BUDGET).is_some());
+    assert!(
+        wait_for(&events, own, Duration::from_secs(1)).is_none(),
+        "a save came back to the vault that made it"
+    );
+}
+
 /// Depends on real inotify events.
 #[test]
 fn a_new_file_in_a_subdirectory_reports_its_parent_dir() {

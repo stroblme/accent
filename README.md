@@ -21,12 +21,20 @@ Accent is an opinionated text editor for code, markdown notes, and PDFs with an 
 
 Some other cool featurs involve (but are not limited to):
 - Focus mode, which fades out everything that is not around the caret
-- Persistent terminal sessions; no panic when closing a window with an actively running shell
+- Persistent terminal sessions a la `tmux`; no panic when closing a window with an actively running shell
 - Automatic light and dark theme with a solarized option for both
 - Presentation mode to show off whatever you're working on
-- Early version of a draw.io editor
+- Early version of a draw.io editor (not just embedded; an actual native rust version!)
 
 Accent is open source under GPL-3.0-or-later and still evolving.
+
+## Screenshots
+
+![Screenshot 1](docs/screenshot-1.png)
+
+![Screenshot 1](docs/screenshot-2.png)
+
+![Screenshot 3](docs/screenshot-3.png)
 
 ## Get started
 

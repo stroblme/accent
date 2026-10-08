@@ -290,6 +290,7 @@ pub fn build_window(
         git: OnceCell::new(),
         excluded: RefCell::new(None),
         references: RefCell::new(None),
+        details_stat: RefCell::new(None),
         ops: OnceCell::new(),
         preferences: OnceCell::new(),
         preview: RefCell::new(None),
@@ -579,7 +580,7 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
     }
 }
 
-/// What the Tags pane asks of the index.
+/// What the Tags section asks of the index.
 fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
     sidebar::TagsData {
         tags: Arc::new({
@@ -785,12 +786,33 @@ fn adopt_sidebar(
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
     // The panes fade while the user types, on the same transition as the bars.
     pane.widget().add_css_class("chrome-fade");
-    // The Outline pane does nothing while it is out of sight, so it catches up with the caret
-    // when it comes to the front.
+    // The Outline pane and the Details section do nothing while they are out of sight, so they
+    // catch up when they come to the front.
     pane.connect_pane_shown(glib::clone!(
         #[weak]
         app,
-        move || app.follow_outline()
+        move || {
+            app.follow_outline();
+            app.stat_details();
+            app.sync_details();
+        }
+    ));
+    // Which sections are open is session state; and the References section, which follows a
+    // code tab's caret only while it is on screen, catches up as it opens, as Details does.
+    pane.connect_section_toggled(glib::clone!(
+        #[weak]
+        app,
+        move |name, open| {
+            app.save_session_soon();
+            match (name, open) {
+                ("references", true) => app.refresh_references(),
+                ("details", true) => {
+                    app.stat_details();
+                    app.sync_details();
+                }
+                _ => {}
+            }
+        }
     ));
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
@@ -1033,6 +1055,7 @@ thread_local! {
 /// row's disclosure and a dropdown's arrow, drawn from the `go-*` names instead: themes redraw
 /// `pan-*` (WhiteSur's use a single-quoted `fill` GTK cannot recolour, and drew nothing), and the
 /// Git pane's own disclosures are `go-*` already (DESIGN.md, Iconography).
+/// `.accent-section` is an Info pane section's header, inset as the pane's rows are.
 /// `.accent-lone-header` drops the bottom padding of the sidebar header, the one header in the
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
 /// bottom and its bar area another 3, so with 6 above and none below both headers hold their
@@ -1181,6 +1204,7 @@ fn install_chrome_css() {
              .accent-label-editor {{ box-shadow: 0 0 0 1px var(--accent-bg-color), \
                0 1px 4px var(--shade-color); }} \
              .accent-current-layer {{ box-shadow: inset 3px 0 var(--accent-bg-color); }} \
+             .accent-section > box > title {{ padding: 6px 12px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \

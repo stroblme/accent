@@ -1,4 +1,4 @@
-//! The Tags pane: every tag in the vault over the files carrying the selected one.
+//! The Info pane's Tags section: every tag in the vault over the files carrying the selected one.
 
 use super::widgets::path_list;
 use super::{OnOpen, Target};
@@ -9,17 +9,17 @@ use std::cell::{Cell, Ref, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// What the Tags pane asks of the index.
+/// What the Tags section asks of the index.
 ///
 /// Both run on a worker thread, so they may touch nothing the main loop owns: on a remote vault
-/// each is a round trip, and the pane must not hold the window while the host answers.
+/// each is a round trip, and the section must not hold the window while the host answers.
 #[allow(clippy::type_complexity)]
 pub struct Data {
     pub tags: Arc<dyn Fn() -> Vec<(String, i64)> + Send + Sync>,
     pub files_with_tag: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>,
 }
 
-/// Case-insensitive substring filtering for the Tags pane. An empty needle keeps everything, so
+/// Case-insensitive substring filtering for the Tags section. An empty needle keeps everything, so
 /// the filter costs nothing until it is typed in.
 fn filtered(all: &[(String, i64)], needle: &str) -> Vec<(String, i64)> {
     let needle = needle.trim().to_lowercase();
@@ -29,14 +29,14 @@ fn filtered(all: &[(String, i64)], needle: &str) -> Vec<(String, i64)> {
         .collect()
 }
 
-/// The tag list gets two thirds of the pane, the files under the selected tag the lower third.
+/// The tag list gets two thirds of the section, the files under the selected tag the lower third.
 pub(super) const SHARE: (i32, i32) = (2, 3);
 
 pub(super) struct Pane {
     pub(super) widget: gtk::Widget,
     /// Kept so a double-click on it can be reset to [`SHARE`].
     pub(super) divider: gtk::Paned,
-    /// Set by `mark_tags_dirty`, cleared by the refill the next time the pane is shown.
+    /// Set by `mark_tags_dirty`, cleared by the refill the next time the list is shown.
     pub(super) dirty: Rc<Cell<bool>>,
     pub(super) select: Rc<dyn Fn(&str)>,
     pub(super) refill: Rc<dyn Fn()>,
@@ -46,6 +46,8 @@ pub(super) struct Pane {
     pub(super) names: Rc<dyn Fn() -> Vec<String>>,
     #[cfg(feature = "bench")]
     pub(super) picked: Rc<dyn Fn() -> Option<String>>,
+    #[cfg(feature = "bench")]
+    pub(super) view: gtk::ListView,
 }
 
 /// The name of the tag in row `i`, or `None` past the end of the list.
@@ -288,7 +290,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     Pane {
         divider: paned.clone(),
         widget: column.upcast(),
-        // The first time the pane is shown there is nothing in it yet.
+        // The first time the list is shown there is nothing in it yet.
         dirty: Rc::new(Cell::new(true)),
         select,
         refill,
@@ -296,6 +298,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         names,
         #[cfg(feature = "bench")]
         picked,
+        #[cfg(feature = "bench")]
+        view,
     }
 }
 

@@ -16,6 +16,7 @@ mod comment;
 mod completion;
 mod conflict;
 mod connect;
+mod details;
 mod diagnostics;
 mod diagram;
 mod dialogs;
@@ -298,6 +299,9 @@ struct App {
     /// The References request in flight. Replaced rather than queued: the caret moves faster
     /// than a server answers.
     references: RefCell<Option<glib::JoinHandle<()>>>,
+    /// The file whose size and time the Details section last asked the disk for, and the answer:
+    /// `None` while it is coming, or for a file that is gone (`App::stat_details`).
+    details_stat: RefCell<Option<(String, Option<Etag>)>>,
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on idle once the window is up, so the first open of Preferences is quick too.
     preferences: OnceCell<settings::Preferences>,
@@ -635,7 +639,7 @@ impl App {
             .collect()
     }
 
-    /// Keep the window subtitle, the References pane and the preview in step with the active tab.
+    /// Keep the window subtitle, the Info pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.retarget_find(&self.pane());
         // F5 presents whatever comes to the front as it presented the tab it began on: a held
@@ -657,6 +661,7 @@ impl App {
                 .map(|doc| doc.key());
             tree.set_active(open.as_deref());
         }
+        self.sync_info();
         let Some(doc) = self.active_doc() else {
             self.title.set_subtitle(&self.host());
             self.refresh_references();
@@ -676,6 +681,7 @@ impl App {
             self.clear_preview();
             return;
         };
+        self.stat_details();
         let key = doc.key();
         // A diff is not a file: it is no note anyone opened, and its key names a comparison
         // rather than a path, so the subtitle says what the tab is called instead. A shell says
@@ -717,6 +723,22 @@ impl App {
             // it happened to be given.
             None => self.clear_preview(),
         }
+    }
+
+    /// Fit the Info pane to the tab in front: its sections for a file, Tags only over a markdown
+    /// note, and a status page for a shell, a comparison or no tab at all.
+    fn sync_info(&self) {
+        let Some(sidebar) = self.sidebar.get() else {
+            return;
+        };
+        let doc = self.active_doc();
+        let key = doc.as_ref().map(Doc::key).unwrap_or_default();
+        let file = doc.as_ref().is_some_and(|doc| !doc.is_transient());
+        let note = doc
+            .as_ref()
+            .and_then(Doc::tab)
+            .is_some_and(|tab| tab.flavour().is_note());
+        sidebar.sync_info(&key, file, note);
     }
 
     fn clear_preview(&self) {
@@ -793,7 +815,14 @@ impl App {
             return self.follow_outline();
         }
         let Some(tab) = doc.tab() else {
-            return sidebar.set_outline(None);
+            // A shell and a comparison are no file, and take the pane's own "Open a file…".
+            let none = match doc {
+                Doc::Image(_) => Some("An image has no headings or bookmarks."),
+                Doc::Status(_) => Some("This file has nothing to outline."),
+                _ => None,
+            };
+            let note = none.map(|body| sidebar::outline_note("No Outline", body));
+            return sidebar.set_outline(note.as_ref());
         };
         // The same list whatever the tab holds: a note's headings and a source file's functions
         // are both what the language layer calls symbols.
@@ -944,6 +973,7 @@ impl App {
         });
         self.sync_selection();
         self.sync_branch();
+        self.sync_details();
     }
 
     /// The status bar's count of what is selected in the text tab in front, or nothing where
@@ -1404,14 +1434,25 @@ impl App {
     }
 
     fn show_pane(&self, name: &str) {
-        // A window with no vault has only the outline, and asking for a pane it does not have
-        // must not open an empty column.
+        // A window with no vault has only Info and the outline, and asking for a pane it does
+        // not have must not open an empty column.
         if !self.sidebar.get().is_some_and(|s| s.has_pane(name)) {
             return;
         }
         self.sidebar_column.set_visible(true);
         if let Some(sidebar) = self.sidebar.get() {
             sidebar.show_pane(name);
+        }
+    }
+
+    /// The Info pane with its section `name` open, the keyboard left where it is.
+    fn show_section(&self, name: &str) {
+        if !self.sidebar.get().is_some_and(|s| s.has_pane("info")) {
+            return;
+        }
+        self.sidebar_column.set_visible(true);
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.show_section(name);
         }
     }
 

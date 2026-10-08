@@ -279,6 +279,11 @@ impl App {
             // hid is saved as it was.
             sidebar,
             sidebar_width: sidebar_width(width),
+            info: self
+                .sidebar
+                .get()
+                .map(|sidebar| sidebar.info_saved())
+                .unwrap_or_default(),
             view: self.mode.get().name().to_string(),
             zoom: self.zoom.get(),
             recent_files: self.recent_files.borrow().clone(),
@@ -648,6 +653,9 @@ impl App {
         // every time. A window that came back on Search or Git left the reader looking at the
         // answer to a question they asked in another sitting.
         self.restore_sidebar(session.sidebar, sidebar_width(session.sidebar_width));
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.restore_info(&session.info);
+        }
         self.set_mode(Mode::from_name(&session.view));
         // Last, and merged rather than assigned: opening the tabs above ran `file_used` for each
         // of them, and the order they happened to restore in says nothing about how they were

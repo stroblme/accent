@@ -238,7 +238,7 @@ fn render_loop(
                 }
                 Request::Outline => {
                     if let Ok(outline) = doc.outline() {
-                        send(view, Reply::Outline(outline));
+                        send(view, Reply::Outline(outline, doc.info()));
                     }
                 }
                 Request::Search {
