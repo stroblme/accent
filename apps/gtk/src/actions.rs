@@ -117,6 +117,9 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         "Run a Command…",
         &["<Control>p", "<Control><Shift>p"],
     ),
+    // The palette's `@` and `#` modes, for a reader who would rather bind them than type them.
+    ("win.palette-symbols", "Go to Symbol…", &[]),
+    ("win.palette-tags", "Filter by Tag…", &[]),
     ("win.find", "Find", &["<Control>f"]),
     ("win.replace", "Replace", &["<Control>h"]),
     (
@@ -432,6 +435,8 @@ impl App {
             "divider-down" => self.move_divider(Side::Down),
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
+            "palette-symbols" => self.palette(palette::Mode::Symbols),
+            "palette-tags" => self.palette(palette::Mode::Tags),
             "open-recent" => self.palette(palette::Mode::Vaults),
             "find" => self.open_find(find::Mode::Find),
             "replace" => self.open_find(find::Mode::Replace),
