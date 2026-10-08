@@ -7,6 +7,7 @@ use super::options;
 use crate::conflict::{self, Block};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
 use pulldown_latex::{Event as LatexEvent, ParserError, Storage};
+use std::collections::HashMap;
 use std::error::Error;
 use std::ops::Range;
 
@@ -196,6 +197,16 @@ impl<'a> Page<'a> {
             opts.remove(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
         }
         let blocks = block_ids(src);
+        // Asked of every event, so indexed once: a block start's id (the first, if two name it),
+        // and the marker inside a text, found by halving, as `block_ids` gives them in order.
+        let mut ids = HashMap::new();
+        for b in &blocks {
+            ids.entry(b.start).or_insert(b.id.as_str());
+        }
+        let marker_in = |r: &Range<usize>| {
+            let at = blocks.partition_point(|b| b.marker.start < r.start);
+            blocks.get(at).filter(|b| r.contains(&b.marker.start))
+        };
         let mut link_wiki: Vec<bool> = Vec::new();
         let mut image_wiki: Vec<bool> = Vec::new();
         let mut skip = 0usize;
@@ -239,14 +250,13 @@ impl<'a> Page<'a> {
             }
             let marker = is_block_start(&ev).then(|| {
                 let line = self.line_at(text, part.start + r.start);
-                let id = blocks
-                    .iter()
-                    .find(|b| b.start == r.start)
-                    .map_or(String::new(), |b| format!(" id=\"^{}\"", b.id));
+                let id = ids
+                    .get(&r.start)
+                    .map_or(String::new(), |id| format!(" id=\"^{id}\""));
                 Event::Html(format!("<span data-line=\"{line}\"{id}></span>").into())
             });
             // The text a block's id ends goes on without it.
-            let ev = match (ev, blocks.iter().find(|b| r.contains(&b.marker.start))) {
+            let ev = match (ev, marker_in(&r)) {
                 (Event::Text(t), Some(b)) => {
                     let shown = t.strip_suffix(&src[b.marker.clone()]).unwrap_or(&t);
                     Event::Text(shown.trim_end().to_string().into())
@@ -681,5 +691,26 @@ mod tests {
             h.contains("<p><span data-line=\"5\"></span>Second para.</p>"),
             "{h}"
         );
+    }
+
+    /// A note of block ids renders in time linear in its length: four times the paragraphs take
+    /// about four times as long, where looking every id up afresh per parser event took sixteen.
+    #[test]
+    #[ignore = "timing-sensitive; run with --release"]
+    fn html_of_block_ids_scales_linearly() {
+        let ms = |paragraphs: usize| {
+            let note: String = (0..paragraphs)
+                .map(|i| format!("Paragraph {i} with some prose in it. ^block-{i}\n\n"))
+                .collect();
+            (0..3)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    to_html(&note);
+                    t.elapsed().as_secs_f64() * 1000.0
+                })
+                .fold(f64::MAX, f64::min)
+        };
+        let (small, large) = (ms(6_000), ms(24_000));
+        assert!(large < 8.0 * small, "6k: {small:.1} ms, 24k: {large:.1} ms");
     }
 }
