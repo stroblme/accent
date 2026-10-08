@@ -15,7 +15,7 @@ use std::rc::{Rc, Weak};
 
 use super::Pane;
 use super::links::Links;
-use super::pad::{UNMEASURED, carried, is_pad, measure, pad, padding, reclaim, unmeasured};
+use super::pad::{UNMEASURED, carried_all, is_pad, measure, pad, padding, reclaim, unmeasured};
 use crate::editor;
 
 /// Where the first hunk lands when a comparison opens, as a fraction of the view's height. A
@@ -725,6 +725,19 @@ impl Columns {
             hidden[gap.clone()].fill(true);
         }
         let is_hidden = |r: usize| hidden[r];
+        // What each column's lines carry now, per row, read once for the measuring and the padding
+        // below and ahead of any change: padding a line touches none of the others.
+        let had: Vec<Vec<Option<(i32, i32)>>> = (self.panes.iter().enumerate())
+            .map(|(c, pane)| {
+                let st = &rows.starts[c];
+                let at: Vec<i32> = rows.lines[c].iter().flatten().map(|&n| st[n - 1]).collect();
+                let mut had = carried_all(&pane.view, &pane.buffer, &at).into_iter();
+                rows.lines[c]
+                    .iter()
+                    .map(|line| line.and_then(|_| had.next()))
+                    .collect()
+            })
+            .collect();
         let estimated = Cell::new(false);
         let heights: Vec<Vec<Option<i32>>> = (self.panes.iter().enumerate())
             .map(|(c, pane)| {
@@ -735,8 +748,7 @@ impl Columns {
                             return None;
                         }
                         let n = rows.lines[c][r]?;
-                        let (above, below) =
-                            carried(&pane.view, &pane.buffer.iter_at_offset(st[n - 1]));
+                        let (above, below) = had[c][r]?;
                         let (height, estimate) =
                             measure(&pane.view, &pane.buffer, st[n - 1], st[n], above + below);
                         estimated.set(estimated.get() || estimate);
@@ -773,6 +785,10 @@ impl Columns {
                 let Some(n) = *line else {
                     continue;
                 };
+                // Read ahead of any change, so only a line whose padding moves is touched.
+                if had[c][r] == Some((now.above[r], now.below[r])) {
+                    continue;
+                }
                 repadded |= pad(
                     &pane.view,
                     &pane.buffer,
