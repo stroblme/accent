@@ -833,13 +833,13 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = answer {
             return bench_answer(&app, &rel);
         }
+        if let Some(rels) = info {
+            return bench_info(&app, &rels);
+        }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);
         }
         if replace {
-        if let Some(rels) = info {
-            return bench_info(&app, &rels);
-        }
             return bench_replace(&app);
         }
         if let Some(query) = search {
