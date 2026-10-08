@@ -17,12 +17,6 @@ use std::time::{Duration, Instant};
 /// moving, and past the whole scan of a desktop vault, which then reports nothing extra.
 const SCAN_TICK: Duration = Duration::from_millis(250);
 
-/// What the diff decided to do with one scanned entry.
-struct Job {
-    idx: usize,
-    existing_id: Option<i64>,
-}
-
 impl Index {
     /// Walk `root` and bring the index in line with it. Returns what changed.
     pub fn reconcile(
@@ -183,24 +177,17 @@ impl Index {
         // being resolved already.
         let cold = dir.is_empty() && existing.is_empty();
 
-        let mut jobs: Vec<Job> = Vec::new();
+        // The scanned entries to write, by index.
+        let mut jobs: Vec<usize> = Vec::new();
         for (idx, f) in scan.files.iter().enumerate() {
             match existing.remove(&f.rel_path) {
                 // `remove` doubles as the "seen" marker: leftovers are deletions.
-                Some((id, mtime_ns, size, ino)) => {
-                    if mtime_ns == f.mtime_ns && size == f.size as i64 && ino == f.ino as i64 {
-                        stats.unchanged += 1;
-                    } else {
-                        jobs.push(Job {
-                            idx,
-                            existing_id: Some(id),
-                        });
-                    }
+                Some((_, mtime_ns, size, ino))
+                    if mtime_ns == f.mtime_ns && size == f.size as i64 && ino == f.ino as i64 =>
+                {
+                    stats.unchanged += 1;
                 }
-                None => jobs.push(Job {
-                    idx,
-                    existing_id: None,
-                }),
+                _ => jobs.push(idx),
             }
         }
         let removed: Vec<i64> = existing.values().map(|(id, ..)| *id).collect();
@@ -223,7 +210,7 @@ impl Index {
             let tx = self.write_tx()?;
             // The files whose content really changed: a touched one kept its links and its keys.
             let mut changed = Vec::new();
-            for job in chunk {
+            for &job in chunk {
                 // Per file rather than per batch: a batch is 500 files, and one of 500 large ones
                 // measured 2.5 s on the bench vault — a Stop that waits that long is not a Stop.
                 // The transaction still commits: every file in it is a whole row either way.
@@ -232,8 +219,8 @@ impl Index {
                     break;
                 }
                 let touched = stats.touched;
-                let f = &scan.files[job.idx];
-                upsert(&tx, f, job.existing_id, &mut stats)?;
+                let f = &scan.files[job];
+                upsert(&tx, f, &mut stats)?;
                 if stats.touched == touched {
                     changed.push(&f.rel_path);
                 }
@@ -399,7 +386,7 @@ impl Index {
 
         let existing_id = existing.map(|(id, ..)| id);
         let tx = self.write_tx()?;
-        upsert(&tx, &meta, existing_id, &mut ReconcileStats::default())?;
+        upsert(&tx, &meta, &mut ReconcileStats::default())?;
         write_bodies(&tx)?;
         // The file's own links were just written unresolved, and a new note can be what a link
         // written long before it existed was waiting for — or a shorter path for one that
@@ -447,16 +434,22 @@ impl Index {
 }
 
 /// Index one scanned entry: read and hash markdown, then replace its file row and everything
-/// derived from it. `existing_id` is the row it replaces, if any. Returns the file id.
+/// derived from it. Returns the file id.
 ///
 /// The one place a file becomes index rows, shared by the full reconcile and the watcher's
 /// [`Index::update_file`] so the two can never drift apart.
 fn upsert(
     tx: &rusqlite::Transaction<'_>,
     f: &walk::FileMeta,
-    existing_id: Option<i64>,
     stats: &mut ReconcileStats,
 ) -> Result<i64> {
+    // The row it replaces, as this transaction sees it rather than as the caller's diff did:
+    // another process sharing the index (`accent-cli mcp` beside the app) may have written it
+    // since, and a row taken for new would keep the links and tags it already had twice over.
+    let existing_id: Option<i64> = tx
+        .prepare_cached("SELECT id FROM files WHERE rel_path = ?1")?
+        .query_row([&f.rel_path], |r| r.get(0))
+        .optional()?;
     // Everything is read through `fs::read_text`, the same call the editor opens a tab with, so
     // that every byte offset the index hands out — a search hit, a backlink, a heading — lands on
     // the buffer it is applied to. That is what makes a CRLF note work: the buffer holds `\n`,
@@ -785,6 +778,48 @@ mod tests {
             "what was written is not written again"
         );
         assert_eq!(ix.file_paths(false).unwrap().len(), notes);
+    }
+
+    /// Two processes share one index (the app and `accent-cli mcp`), so a row this walk found
+    /// missing may be written by the other before this walk's batch reaches it. It is then
+    /// rewritten whole, never added a second time over what is there.
+    #[test]
+    fn a_row_another_connection_wrote_mid_walk_is_not_written_twice() {
+        let vault = tempfile::tempdir().unwrap();
+        let notes = BATCH + 10;
+        for i in 0..notes {
+            fs::write(
+                vault.path().join(format!("n{i}.md")),
+                format!("# Note {i}\nsee [[Target]] #tag\n"),
+            )
+            .unwrap();
+        }
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        let mut other = Some(open(&db));
+        ix.reconcile_with(
+            vault.path(),
+            "",
+            &ScanOptions::default(),
+            &|| false,
+            |_, p| {
+                // Between the first batch and the second: the other connection indexes it all.
+                if p.phase == Phase::Index
+                    && let Some(mut other) = other.take()
+                {
+                    other.reconcile(vault.path(), |_| {}).unwrap();
+                }
+            },
+        )
+        .unwrap();
+        let stats = ix.stats().unwrap();
+        assert_eq!(stats.notes, notes as i64);
+        assert_eq!(stats.links, notes as i64, "one link per note, not two");
+        let tagged: i64 = ix
+            .conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tagged, notes as i64);
     }
 
     /// A walk of one folder brings that folder in line with the disk and leaves the rest of the

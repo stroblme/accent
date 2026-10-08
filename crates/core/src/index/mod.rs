@@ -203,7 +203,7 @@ impl Index {
         self.conn.get_interrupt_handle()
     }
 
-    fn from_conn(conn: Connection) -> Result<Self> {
+    fn from_conn(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
@@ -248,20 +248,17 @@ impl Index {
             },
         )?;
 
-        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        let has_files: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'",
-                [],
-                |_| Ok(true),
-            )
-            .optional()?
-            .unwrap_or(false);
-        if version != SCHEMA_VERSION || !has_files {
-            // It's a cache: rebuilding is cheaper than writing migrations.
-            conn.execute_batch(DROP_ALL)?;
-            conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // It's a cache: rebuilding is cheaper than writing migrations. Asked once outside a
+        // transaction, so an open never queues behind another process's walk, and again inside
+        // the one that rebuilds, which a second build opening the same stale index waits for.
+        if !current(&conn)? {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if !current(&tx)? {
+                tx.execute_batch(DROP_ALL)?;
+                tx.execute_batch(SCHEMA)?;
+                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            }
+            tx.commit()?;
         }
         conn.execute_batch(BODIES)?;
         Ok(Index { conn })
@@ -286,11 +283,47 @@ impl Index {
     /// straight away and never calls the busy handler. That is the "database is locked" the
     /// indexer reported on every save while the git refresh wrote the ignore set on another
     /// thread. Taking the lock up front makes the same collision a wait of a few microseconds.
+    ///
+    /// The schema is asked again here: another build sharing the index (the app, `accent-cli mcp`)
+    /// may have rebuilt it since this connection opened it, and rows written now would be this
+    /// build's idea of them under that build's number.
     fn write_tx(&mut self) -> Result<rusqlite::Transaction<'_>> {
-        Ok(self
+        let tx = self
             .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?)
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let version = schema_version(&tx)?;
+        anyhow::ensure!(
+            version == SCHEMA_VERSION,
+            "the index was rebuilt by another accent build (schema {version}, this one writes \
+             {SCHEMA_VERSION}): restart this one"
+        );
+        Ok(tx)
     }
+}
+
+fn schema_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+}
+
+/// Whether the index holds this build's schema, or is to be rebuilt. One a newer build wrote is
+/// neither: it is that build's cache, maybe open in it right now, and is refused rather than
+/// dropped under it.
+fn current(conn: &Connection) -> Result<bool> {
+    let version = schema_version(conn)?;
+    anyhow::ensure!(
+        version <= SCHEMA_VERSION,
+        "the index was built by a newer accent (schema {version}, this one reads \
+         {SCHEMA_VERSION}): update this one"
+    );
+    let has_files: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    Ok(version == SCHEMA_VERSION && has_files)
 }
 
 /// The vault every submodule's tests start from, and the index over it.
@@ -407,20 +440,33 @@ mod tests {
         );
     }
 
+    /// Two builds can share one index, the app and an `accent-cli mcp` from another build, so an
+    /// index a newer one wrote is refused rather than dropped under it, and a connection whose
+    /// index another build has rebuilt since writes nothing more into it.
     #[test]
-    fn schema_mismatch_drops_and_rebuilds() {
+    fn an_index_another_build_owns_is_never_written() {
         let (vault, db) = fixture();
         let path = db.path().join("i.db");
-        {
-            let mut ix = Index::open(&path).unwrap();
-            ix.reconcile(vault.path(), |_| {}).unwrap();
-            assert!(ix.stats().unwrap().files > 0);
-        }
-        {
-            let c = Connection::open(&path).unwrap();
-            c.pragma_update(None, "user_version", 999i64).unwrap();
-        }
-        let ix = Index::open(&path).unwrap();
-        assert_eq!(ix.stats().unwrap().files, 0, "stale cache must be dropped");
+        let mut ix = Index::open(&path).unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        let files = ix.stats().unwrap().files;
+        // A newer build's rebuild, as far as this one can tell.
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+
+        let refused = Index::open(&path).err().expect("a newer index was opened");
+        assert!(format!("{refused:#}").contains("newer"), "{refused:#}");
+        fs::write(vault.path().join("new.md"), "# New\n").unwrap();
+        assert!(
+            ix.update_file(vault.path(), "new.md").is_err(),
+            "an older build wrote into a newer index"
+        );
+        assert_eq!(
+            ix.stats().unwrap().files,
+            files,
+            "nothing dropped, nothing added"
+        );
     }
 }
