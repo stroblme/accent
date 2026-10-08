@@ -21,6 +21,7 @@ use serde_json::Value;
 
 mod explore;
 mod graph;
+mod precise;
 mod tools;
 
 /// Most a read hands back: a note past it is read a section at a time, an image past it not at
@@ -56,22 +57,27 @@ pub fn run(root: &Path, db: &Path, read_only: bool) -> Result<()> {
             tool_router.remove_route(tool);
         }
     }
+    let shared = Arc::new(Shared {
+        vault,
+        ready,
+        search: Mutex::new(()),
+    });
     let server = Server {
-        shared: Arc::new(Shared {
-            vault,
-            ready,
-            search: Mutex::new(()),
-        }),
+        shared: shared.clone(),
         tool_router,
     };
-    accent_lsp::runtime().block_on(async move {
+    let served = accent_lsp::runtime().block_on(async move {
         server
             .serve(rmcp::transport::stdio())
             .await?
             .waiting()
             .await?;
         Ok(())
-    })
+    });
+    // The vault last, here: closing it stops the language servers `precise` started, which
+    // blocks on the runtime and so must not happen on one of its threads.
+    drop(shared);
+    served
 }
 
 /// Whether the index has been brought up to date since the vault was opened.

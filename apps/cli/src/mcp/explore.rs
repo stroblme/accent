@@ -76,6 +76,11 @@ pub(super) struct ExploreArgs {
     query: String,
     /// Most characters to answer with: 16000 when left out, 4000 to 24000.
     max_chars: Option<usize>,
+    /// Find the callers and callees of the declarations named by the language server's call
+    /// hierarchy (rust-analyzer, pyright, …) instead of by name: exact where several
+    /// declarations share a name, but slower, and the first such call for a language starts its
+    /// server, falling back to names if it is not ready within 10 s. False when left out.
+    precise: Option<bool>,
 }
 
 /// The question taken apart.
@@ -146,7 +151,7 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
     // The callers and callees of what the question names, shown in the files likeliest to get
     // a card.
     let carded: Vec<String> = found.iter().take(CARDED).map(|(r, _)| r.clone()).collect();
-    let graph = graph::graph(s, &seeds, &carded)?;
+    let graph = graph::graph(s, &seeds, &carded, a.precise.unwrap_or(false))?;
     for sym in graph.glue {
         if let Some((_, f)) = found.iter_mut().find(|(r, _)| *r == sym.rel_path) {
             f.symbols.push(sym);

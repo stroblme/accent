@@ -113,6 +113,7 @@ pub struct ServerCapabilities {
     pub document_symbol_provider: Option<Value>,
     pub folding_range_provider: Option<Value>,
     pub inline_completion_provider: Option<Value>,
+    pub call_hierarchy_provider: Option<Value>,
     pub workspace: Option<WorkspaceServerCapabilities>,
 }
 
@@ -364,6 +365,43 @@ pub struct FoldingRange {
     pub kind: Option<String>,
 }
 
+/// A declaration in a call hierarchy. Every field the specification lists, so that the item a
+/// server answered `prepareCallHierarchy` with goes back to it whole when its calls are asked
+/// for: `data` is how a server finds it again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallHierarchyItem {
+    pub name: String,
+    pub kind: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub uri: String,
+    /// The whole declaration, body included.
+    pub range: Range,
+    /// Just its name.
+    pub selection_range: Range,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+/// A caller of the item asked about, and where in the caller the calls are.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallHierarchyIncomingCall {
+    pub from: CallHierarchyItem,
+    pub from_ranges: Vec<Range>,
+}
+
+/// Something the item asked about calls, and where in the item the calls are.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallHierarchyOutgoingCall {
+    pub to: CallHierarchyItem,
+    pub from_ranges: Vec<Range>,
+}
+
 // ------------------------------------------------------------------- edits
 
 /// Edits to other files, in the two shapes a server may send them: `changes`, keyed by URI, and
@@ -571,6 +609,24 @@ mod tests {
             assert_eq!(edits[0].0, "file:///a.rs");
             assert_eq!(edits[0].1[0].new_text, "bar");
         }
+    }
+
+    /// An item goes back to the server as it came, `data` included: rust-analyzer finds the
+    /// declaration again by it.
+    #[test]
+    fn a_call_hierarchy_item_goes_back_whole() {
+        let item = json!({
+            "name": "backlinks", "kind": 6, "detail": "pub fn backlinks(&self)",
+            "uri": "file:///v/links.rs", "range": range(4, 0, 9, 1),
+            "selectionRange": range(4, 11, 4, 20), "data": {"position": 7}
+        });
+        let calls: Vec<CallHierarchyIncomingCall> = serde_json::from_value(json!([{
+            "from": item, "fromRanges": [range(12, 8, 12, 17)]
+        }]))
+        .unwrap();
+        assert_eq!(calls[0].from.selection_range.start.character, 11);
+        assert_eq!(calls[0].from_ranges[0].start.line, 12);
+        assert_eq!(serde_json::to_value(&calls[0].from).unwrap(), item);
     }
 
     fn range(l0: u32, c0: u32, l1: u32, c1: u32) -> Value {

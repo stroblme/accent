@@ -376,6 +376,81 @@ fn explore_follows_code_by_name() {
     c.close();
 }
 
+/// `explore`'s `precise` callers come from the language server configured for the file's
+/// language — here `build-aux/fake-lsp.py`, refusing twice as a server loading its project does —
+/// where by name they would be every `backlinks`'s; a language whose server is not installed goes
+/// by name and says why.
+#[test]
+fn explore_asks_the_language_server_when_precise() {
+    let scratch = Scratch::new("precise");
+    let write = |rel: &str, text: &str| std::fs::write(scratch.dir.join(rel), text).unwrap();
+    write(
+        "vault/lib.rs",
+        "pub struct Index;\n\nimpl Index {\n    pub fn backlinks(&self) -> usize {\n        \
+         helper()\n    }\n}\n\nfn helper() -> usize {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    \
+         #[test]\n    fn counts() {\n        assert_eq!(super::Index.backlinks(), 1);\n    }\n}\n",
+    );
+    write(
+        "vault/other.rs",
+        "pub struct Other;\n\nimpl Other {\n    pub fn backlinks(&self) -> usize {\n        0\n    \
+         }\n}\n\nfn caller(o: &Other) -> usize {\n    o.backlinks()\n}\n",
+    );
+    write(
+        "vault/tool.py",
+        "def tally():\n    return 0\n\ndef use():\n    return tally()\n",
+    );
+    // 0-based lines: `backlinks` is called by `counts` and calls `helper`.
+    write(
+        "calls.json",
+        r#"{"lib.rs:3": {"incoming": [["lib.rs", 15, "counts", [16]]],
+                         "outgoing": [["lib.rs", 8, "helper", [4]]]},
+            "lib.rs:8": {"incoming": [["lib.rs", 3, "backlinks", [4]]]},
+            "lib.rs:15": {"outgoing": [["lib.rs", 3, "backlinks", [16]]]}}"#,
+    );
+    let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/fake-lsp.py");
+    let calls = scratch.dir.join("calls.json");
+    std::fs::create_dir_all(scratch.dir.join("config/accent")).unwrap();
+    write(
+        "config/accent/config.toml",
+        &format!(
+            "[vaults.{:?}.lsp.servers]\nrust = [\"python3\", {fake:?}, \"--calls\", {:?}, \
+             \"--loading\", \"2\"]\npython3 = [\"accent-no-such-server\"]\n",
+            scratch.dir.join("vault"),
+            calls,
+        ),
+    );
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+
+    let query = "Index::backlinks helper";
+    let (said, _) = c.call("explore", json!({"query": query}));
+    let by_name = "- `Index::backlinks` method (lib.rs:4) — 2 calls in `lib.rs`, `other.rs`; \
+                   tested by `counts` (lib.rs); 2 declarations share this name";
+    assert!(said[0].contains(by_name), "{}", said[0]);
+
+    let (said, error) = c.call("explore", json!({"query": query, "precise": true}));
+    assert!(!error, "{said:?}");
+    for row in [
+        "**Blast radius** (precise: by the language servers' call hierarchy)\n",
+        "- `Index::backlinks` method (lib.rs:4) — 1 call in `lib.rs`; tested by `counts` \
+         (lib.rs)\n  calls `helper`\n",
+        "- `helper` fn (lib.rs:9) — 1 call in `lib.rs`; tested via `backlinks` (lib.rs)\n",
+        "**Call paths**\n- `backlinks` → `helper`",
+    ] {
+        assert!(said[0].contains(row), "{row:?} not in {}", said[0]);
+    }
+
+    let (said, _) = c.call("explore", json!({"query": "tally", "precise": true}));
+    for row in [
+        "precise: accent-no-such-server is not installed, name-based callers shown\n",
+        "- `tally` fn (tool.py:1) — 1 call in `tool.py`; no tests found within 3 caller hops; \
+         by name",
+    ] {
+        assert!(said[0].contains(row), "{row:?} not in {}", said[0]);
+    }
+    c.close();
+}
+
 /// The listings beside `explore`: a folder, the files changed last, and the notes links wait for.
 #[test]
 fn mcp_lists_folders_recent_files_and_missing_notes() {

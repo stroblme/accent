@@ -1,7 +1,8 @@
 //! explore's code: the declarations a question names, what calls them and what they call, and
-//! the calls leading from one to another — all by name, from the index's declarations and the
-//! code's own text, as codegraph's are (`resolvedBy: exact-match`). A call is not resolved to the
-//! one declaration it reaches: a name several declarations share says so.
+//! the calls leading from one to another — by name, from the index's declarations and the code's
+//! own text, as codegraph's are (`resolvedBy: exact-match`), or `precise`ly, by the language
+//! servers' call hierarchy (`precise.rs`). A call found by name is not resolved to the one
+//! declaration it reaches: a name several declarations share says so.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -9,6 +10,7 @@ use accent_api::{CodeSymbol, Mention, Read};
 use accent_core::code;
 
 use super::explore::count;
+use super::precise::Precise;
 use super::{Shared, fail};
 
 /// Declarations one name stands for, at most, and the names followed.
@@ -71,20 +73,34 @@ pub(super) struct Graph {
 }
 
 /// The seeds' callers by file, whether a test reaches them, what they call, and the call paths
-/// among them; `shown` the files that get cards, whose callers and callees join the seeds there.
-pub(super) fn graph(s: &Shared, seeds: &[Seed], shown: &[String]) -> Result<Graph, String> {
+/// among them; `shown` the files that get cards, whose callers and callees join the seeds there;
+/// `precise` to ask the language servers rather than go by name.
+pub(super) fn graph(
+    s: &Shared,
+    seeds: &[Seed],
+    shown: &[String],
+    precise: bool,
+) -> Result<Graph, String> {
     let mut g = Graph::default();
     if seeds.is_empty() {
         return Ok(g);
     }
-    let mut code = Reader::new(s);
+    let mut edges = Edges {
+        s,
+        code: Reader::new(s),
+        mentioned: HashMap::new(),
+        precise: precise.then(|| Precise::new(s)),
+    };
     let mut lines = vec![
-        "**Blast radius** (by name: a call counts for every declaration of its name)".to_string(),
+        match precise {
+            true => "**Blast radius** (precise: by the language servers' call hierarchy)",
+            false => "**Blast radius** (by name: a call counts for every declaration of its name)",
+        }
+        .to_string(),
     ];
-    let mut mentioned: HashMap<String, Vec<Mention>> = HashMap::new();
     for seed in seeds {
         let sym = &seed.sym;
-        let callers = callers(s, &mut mentioned, &sym.name)?.clone();
+        let (callers, by_name) = edges.callers(sym)?;
         let mut by_file: BTreeMap<&str, usize> = BTreeMap::new();
         for m in &callers {
             *by_file.entry(m.rel_path.as_str()).or_default() += 1;
@@ -110,12 +126,15 @@ pub(super) fn graph(s: &Shared, seeds: &[Seed], shown: &[String]) -> Result<Grap
                 }
             ),
         });
-        line.push_str(&format!("; {}", tested(s, &mut mentioned, sym, &callers)?));
-        if seed.defs > 1 {
+        line.push_str(&format!("; {}", tested(&mut edges, sym, &callers)?));
+        if by_name && precise {
+            line.push_str("; by name");
+        }
+        if by_name && seed.defs > 1 {
             line.push_str(&format!("; {} declarations share this name", seed.defs));
         }
         lines.push(line);
-        let callees = code.callees(sym)?;
+        let callees = edges.callees(sym)?;
         let mut called: Vec<String> = Vec::new();
         for c in &callees {
             if !called.contains(&c.name) {
@@ -144,14 +163,57 @@ pub(super) fn graph(s: &Shared, seeds: &[Seed], shown: &[String]) -> Result<Grap
             }
         }
     }
-    let paths = call_paths(&mut code, seeds)?;
+    let paths = call_paths(&mut edges, seeds)?;
     if !paths.is_empty() {
         lines.push(String::new());
         lines.push("**Call paths**".to_string());
         lines.extend(paths.into_iter().map(|p| format!("- {p}")));
     }
+    let failed = edges.precise.map(|p| p.failures()).unwrap_or_default();
+    for (i, why) in failed.into_iter().enumerate() {
+        lines.insert(1 + i, format!("precise: {why}, name-based callers shown"));
+    }
     g.summary = lines.join("\n") + "\n\n";
     Ok(g)
+}
+
+/// Where callers and callees come from: the language servers when `precise` is there and one
+/// answers for the declaration, else its name.
+struct Edges<'a> {
+    s: &'a Shared,
+    code: Reader<'a>,
+    mentioned: HashMap<String, Vec<Mention>>,
+    precise: Option<Precise<'a>>,
+}
+
+impl Edges<'_> {
+    /// The places calling `sym`, each with the declaration it is in, and whether they were
+    /// found by name.
+    fn callers(&mut self, sym: &CodeSymbol) -> Result<(Vec<Mention>, bool), String> {
+        if let Some(found) = self.precise.as_mut().and_then(|p| p.callers(sym)) {
+            return Ok((found, false));
+        }
+        Ok((
+            callers(self.s, &mut self.mentioned, &sym.name)?.clone(),
+            true,
+        ))
+    }
+
+    fn callees(&mut self, sym: &CodeSymbol) -> Result<Vec<CodeSymbol>, String> {
+        if let Some(found) = self.precise.as_mut().and_then(|p| p.callees(sym)) {
+            return Ok(found);
+        }
+        self.code.callees(sym)
+    }
+
+    /// What one asked declaration is told apart by: a name answers the same for each of its
+    /// declarations, a language server does not.
+    fn key(&self, sym: &CodeSymbol) -> String {
+        match self.precise {
+            Some(_) => format!("{}:{}", sym.rel_path, sym.byte_start),
+            None => sym.name.clone(),
+        }
+    }
 }
 
 /// `Container::name`, as explore names a declaration.
@@ -186,38 +248,28 @@ fn callers<'a>(
 }
 
 /// Whether a test calls `sym`, or a caller of it does, within [`HOPS`] callers.
-fn tested(
-    s: &Shared,
-    mentioned: &mut HashMap<String, Vec<Mention>>,
-    sym: &CodeSymbol,
-    callers_of: &[Mention],
-) -> Result<String, String> {
+fn tested(edges: &mut Edges, sym: &CodeSymbol, callers_of: &[Mention]) -> Result<String, String> {
     let is_test = |m: &Mention| m.symbol.as_ref().is_some_and(|c| c.test);
     if let Some(t) = callers_of.iter().find(|m| is_test(m)) {
         let name = t.symbol.as_ref().map_or("", |c| c.name.as_str());
         return Ok(format!("tested by `{name}` ({})", t.rel_path));
     }
-    let mut asked: HashSet<String> = HashSet::from([sym.name.clone()]);
-    let mut frontier: Vec<String> = callers_of
-        .iter()
-        .filter_map(|m| m.symbol.as_ref().map(|c| c.name.clone()))
-        .collect();
+    let mut asked: HashSet<String> = HashSet::from([edges.key(sym)]);
+    let mut frontier: Vec<CodeSymbol> =
+        callers_of.iter().filter_map(|m| m.symbol.clone()).collect();
     for _ in 1..HOPS {
         let mut next = Vec::new();
-        for name in frontier
+        let ask: Vec<CodeSymbol> = frontier
             .into_iter()
-            .filter(|n| asked.insert(n.clone()))
+            .filter(|c| asked.insert(edges.key(c)))
             .take(PER_HOP)
-        {
-            let found = callers(s, mentioned, &name)?;
+            .collect();
+        for c in ask {
+            let (found, _) = edges.callers(&c)?;
             if let Some(t) = found.iter().find(|m| is_test(m)) {
-                return Ok(format!("tested via `{name}` ({})", t.rel_path));
+                return Ok(format!("tested via `{}` ({})", c.name, t.rel_path));
             }
-            next.extend(
-                found
-                    .iter()
-                    .filter_map(|m| m.symbol.as_ref().map(|c| c.name.clone())),
-            );
+            next.extend(found.into_iter().filter_map(|m| m.symbol));
         }
         frontier = next;
     }
@@ -225,7 +277,7 @@ fn tested(
 }
 
 /// `a → b → c` for each seed another seed is reached from by calls, within [`PATH_HOPS`].
-fn call_paths(code: &mut Reader, seeds: &[Seed]) -> Result<Vec<String>, String> {
+fn call_paths(edges: &mut Edges, seeds: &[Seed]) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for from in seeds {
         let mut parent: HashMap<(String, i64), Option<CodeSymbol>> = HashMap::new();
@@ -236,7 +288,7 @@ fn call_paths(code: &mut Reader, seeds: &[Seed]) -> Result<Vec<String>, String> 
             if depth == PATH_HOPS || parent.len() > PATH_NODES {
                 continue;
             }
-            for next in code.callees(&at)? {
+            for next in edges.callees(&at)? {
                 if parent.contains_key(&key(&next)) {
                     continue;
                 }

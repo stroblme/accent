@@ -231,6 +231,7 @@ impl Client {
                     "references": {},
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                     "foldingRange": {"lineFoldingOnly": true},
+                    "callHierarchy": {},
                     "publishDiagnostics": {}
                 },
                 // `willRename` alone: asked before a move, answered with the imports it breaks.
@@ -571,16 +572,16 @@ mod tests {
             let server = tokio::spawn(async move {
                 let ask = recv(&mut theirs).await;
                 assert_eq!(ask["method"], "initialize");
-                assert_eq!(
-                    ask["params"]["capabilities"]["workspace"]["fileOperations"]["willRename"],
-                    true
-                );
+                let caps = &ask["params"]["capabilities"];
+                assert_eq!(caps["workspace"]["fileOperations"]["willRename"], true);
+                assert!(caps["textDocument"]["callHierarchy"].is_object());
                 send(
                     &mut their_write,
                     json!({"jsonrpc": "2.0", "id": ask["id"], "result": {"capabilities": {
                         "positionEncoding": "utf-8",
                         "completionProvider": {"triggerCharacters": [".", ":"]},
-                        "hoverProvider": true
+                        "hoverProvider": true,
+                        "callHierarchyProvider": true
                     }}}),
                 )
                 .await;
@@ -594,6 +595,7 @@ mod tests {
                 Some(vec![".".to_string(), ":".to_string()])
             );
             assert!(crate::types::on(&caps.hover_provider));
+            assert!(crate::types::on(&caps.call_hierarchy_provider));
             assert_eq!(server.await.unwrap()["method"], "initialized");
         });
     }

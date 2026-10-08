@@ -174,6 +174,17 @@ pub fn calls(masked: &str) -> Vec<&str> {
     out
 }
 
+/// Where `name` is first written as a whole word in `text[decl]`, a declaration's span: the byte
+/// a language server is asked about it at, its name rather than its attributes or its `pub`.
+pub fn name_at(text: &str, decl: Range<usize>, name: &str) -> Option<usize> {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let span = text.get(decl.clone())?;
+    let (i, _) = span.match_indices(name).find(|(i, _)| {
+        !word(span[..*i].chars().next_back()) && !word(span[i + name.len()..].chars().next())
+    })?;
+    Some(decl.start + i)
+}
+
 fn line_starts(text: &str) -> Vec<usize> {
     std::iter::once(0)
         .chain(text.match_indices('\n').map(|(i, _)| i + 1))
@@ -1655,6 +1666,26 @@ double geo::Shape::half() const {
             "{ let x = foo(1); bar::<u8>(x); vec![]; println!(\"baz(\"); foo(2) }",
         );
         assert_eq!(calls(&body), ["foo", "bar", "println"]);
+    }
+
+    #[test]
+    fn a_name_is_found_as_a_word_in_its_declaration() {
+        let text = "impl A {\n    #[inline]\n    pub fn renew(&self) -> New { new() }\n    fn new() {}\n}\n";
+        let decl = |line: &str| {
+            let start = text.find(line).unwrap();
+            start..start + line.len()
+        };
+        let at = name_at(
+            text,
+            decl("    pub fn renew(&self) -> New { new() }"),
+            "new",
+        );
+        assert_eq!(at, Some(text.find("new()").unwrap()));
+        assert_eq!(
+            name_at(text, decl("    fn new() {}"), "new"),
+            Some(text.find("fn new").unwrap() + 3)
+        );
+        assert_eq!(name_at(text, decl("    #[inline]"), "new"), None);
     }
 
     #[test]

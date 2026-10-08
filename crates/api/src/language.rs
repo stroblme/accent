@@ -226,6 +226,17 @@ pub struct Diagnostic {
     pub source: Option<String>,
 }
 
+/// A call a language server's call hierarchy found, seen from the declaration asked about.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Call {
+    /// The declaration at the other end — the caller of an incoming call, the callee of an
+    /// outgoing one — by its name's range, inside the vault.
+    pub decl: Location,
+    pub name: String,
+    /// The lines the calls are written on, in the caller's file, 0-based.
+    pub lines: Vec<u32>,
+}
+
 /// Lines that can be hidden behind their first one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fold {
@@ -371,6 +382,18 @@ pub(crate) trait Language: Send + Sync {
     /// a moved module. Asked before they move, because a server may look at the disk to answer.
     fn will_rename(&self, _moves: Vec<(String, String)>) -> Fut<'_, Vec<FileEdits>> {
         Box::pin(async { Ok(Vec::new()) })
+    }
+    /// The calls into the declaration whose name is at `pos` (`incoming`), or out of it, as the
+    /// file is on disk unless it is open; `None` where the provider knows no declaration, and
+    /// [`NotYet`] where it cannot tell yet.
+    fn calls(
+        &self,
+        _rel: &str,
+        _language_id: &str,
+        _pos: Pos,
+        _incoming: bool,
+    ) -> Fut<'_, Option<Vec<Call>>> {
+        Box::pin(async { Ok(None) })
     }
     /// The provider stopped answering (the server exited); the registry starts a fresh one.
     fn is_dead(&self) -> bool {
@@ -688,6 +711,68 @@ impl Languages {
         (edits, asked)
     }
 
+    /// [`Language::calls`] from the language server for `rel`'s language, as the app would run
+    /// it, started for this when it is not running and kept until the vault closes: no document
+    /// is open to end it. Waits up to `wait` for a server that is starting or loading its
+    /// project; an error says why there is no answer ("rust-analyzer not ready").
+    pub(crate) fn calls(
+        self: &Arc<Self>,
+        rel: String,
+        pos: Pos,
+        incoming: bool,
+        cfg: &LspConfig,
+        wait: Duration,
+    ) -> Task<Option<Vec<Call>>> {
+        let me = self.clone();
+        let which = language_of(&rel).and_then(|language| server(cfg, language));
+        Task::spawn(async move {
+            let (language_id, argv) = match which {
+                Some(Server::External { language_id, argv }) => (language_id, argv),
+                Some(Server::Missing(name)) => anyhow::bail!("{name} is not installed"),
+                _ => anyhow::bail!("no language server for {rel}"),
+            };
+            let name = Path::new(&argv[0])
+                .file_name()
+                .map_or_else(|| argv[0].clone(), |n| n.to_string_lossy().into_owned());
+            let deadline = tokio::time::Instant::now() + wait;
+            let root = session_root(&me.root, &Local::join(&me.root, &rel)?);
+            let key = (argv[0].clone(), root.clone());
+            let start = external::start(argv, root, me.root.clone(), me.events.clone(), None);
+            // A task of its own, so a call that stops waiting leaves the server starting.
+            let starting = accent_lsp::runtime().spawn({
+                let me = me.clone();
+                async move { me.session(key, start).await }
+            });
+            let Ok(session) = tokio::time::timeout_at(deadline, starting).await else {
+                anyhow::bail!("{name} not ready");
+            };
+            let session = session??;
+            // Whether it said it cannot tell yet, which a wait that runs out is then put down to.
+            let mut loading = false;
+            loop {
+                let asked = session.calls(&rel, &language_id, pos, incoming);
+                match tokio::time::timeout_at(deadline, asked).await {
+                    Ok(Ok(found)) => return Ok(found),
+                    Ok(Err(e)) if e.downcast_ref::<NotYet>().is_none() => {
+                        anyhow::bail!("{name}: {e:#}")
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!("{name} is not ready for {rel}: {e}");
+                        loading = true;
+                    }
+                    Err(_) => {}
+                }
+                if tokio::time::Instant::now() + AGAIN >= deadline {
+                    match loading {
+                        true => anyhow::bail!("{name} not ready"),
+                        false => anyhow::bail!("{name} did not answer within {}s", wait.as_secs()),
+                    }
+                }
+                tokio::time::sleep(AGAIN).await;
+            }
+        })
+    }
+
     pub(crate) fn open_document(
         self: &Arc<Self>,
         rel: String,
@@ -810,6 +895,22 @@ impl Languages {
 /// own provider rather than instead of one.
 const GHOST: &str = "merl-rt";
 
+/// How long a server still loading its project is left before it is asked again.
+const AGAIN: Duration = Duration::from_millis(250);
+
+/// A server's answer that it cannot answer yet, still loading its project: what
+/// [`Languages::calls`] asks again past.
+#[derive(Debug)]
+pub(crate) struct NotYet(pub(crate) String);
+
+impl std::fmt::Display for NotYet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotYet {}
+
 /// Starts of the ghost session a vault allows within [`GHOST_WINDOW`]: the first, and two more
 /// after it exits.
 const GHOST_STARTS: usize = 3;
@@ -878,6 +979,26 @@ pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
     }
 }
 
+/// The GtkSourceView language id the app gives a code file, which a server is chosen by: the
+/// languages the index reads declarations in.
+fn language_of(rel: &str) -> Option<&'static str> {
+    let ext = rel.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "rs" => "rust",
+        "py" | "pyi" => "python3",
+        "js" | "mjs" | "cjs" => "js",
+        "ts" => "typescript",
+        "go" => "go",
+        "c" => "c",
+        "h" => "chdr",
+        "cc" | "cpp" | "cxx" | "c++" => "cpp",
+        "hh" | "hpp" | "h++" => "cpphdr",
+        "kt" | "kts" => "kotlin",
+        "java" => "java",
+        _ => return None,
+    })
+}
+
 /// Whether an executable can be started: an absolute name is the file itself, a bare one is
 /// looked for the way a shell would.
 fn in_path(exe: &str) -> bool {
@@ -934,6 +1055,28 @@ impl Vault {
         match &self.backend {
             Backend::Local(v) => v.close_document(rel),
             Backend::Remote(r) => remote_task(r.clone(), "close_document", json!([rel])),
+        }
+    }
+
+    /// The calls into the declaration whose name is at `pos` in `rel` (`incoming`), or out of
+    /// it, by the call hierarchy of the language server the app runs for the file — which needs
+    /// no tab open: the server reads the file from disk. `None` where it knows no declaration.
+    /// Waits up to `wait` for a server that is starting or loading its project, and keeps it
+    /// running until the vault closes. A local vault's only: `accent-cli mcp`, which asks this,
+    /// runs where the files are.
+    pub fn calls(
+        &self,
+        rel: &str,
+        pos: Pos,
+        incoming: bool,
+        wait: Duration,
+    ) -> Task<Option<Vec<Call>>> {
+        match &self.backend {
+            Backend::Local(v) => {
+                v.lang
+                    .calls(rel.to_string(), pos, incoming, &v.config().lsp, wait)
+            }
+            Backend::Remote(_) => Task::spawn(async { anyhow::bail!("not on a remote vault") }),
         }
     }
 }

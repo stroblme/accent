@@ -12,6 +12,7 @@ pub(super) mod map;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -19,13 +20,14 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use accent_lsp::types::{
-    self, CompletionItem, DocumentSymbolResponse, PublishDiagnosticsParams, ServerCapabilities,
-    SignatureHelp, on,
+    self, CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, CompletionItem,
+    DocumentSymbolResponse, PublishDiagnosticsParams, ServerCapabilities, SignatureHelp, on,
 };
 use accent_lsp::{Client, Notifications, from_uri, to_uri};
 
 use super::{
-    Completion, Completions, Fold, Fut, Hover, Language, Location, Pos, Signature, Support, Symbol,
+    Call, Completion, Completions, Fold, Fut, Hover, Language, Location, NotYet, Pos, Signature,
+    Support, Symbol,
 };
 use crate::{Event, FileEdits, Local, locked};
 use map::{
@@ -37,6 +39,10 @@ use map::{
 /// A server that answered `-32801` was asked about a document it has already seen change. It is
 /// the ordinary state of a fast typist, not a failure.
 const CONTENT_MODIFIED: i64 = -32801;
+
+/// What a server answers a question it calls malformed with: clangd, a question about a document
+/// it has not been told is open.
+const INVALID_PARAMS: i64 = -32602;
 
 // ------------------------------------------------------------------ the provider
 
@@ -60,6 +66,9 @@ pub(crate) struct External {
     texlab: bool,
     /// The builds' tables of contents that number texlab's outline.
     tocs: super::latex::Tocs,
+    /// Whether the server has found a declaration to answer calls about: until then, finding
+    /// none may be a project still loading, which rust-analyzer answers the same way.
+    found_one: AtomicBool,
 }
 
 /// Start a language server for `root` and hand back what answers with it.
@@ -109,6 +118,7 @@ pub(crate) async fn start(
             .file_stem()
             .is_some_and(|stem| stem == "texlab"),
         tocs: Default::default(),
+        found_one: AtomicBool::new(false),
     }))
 }
 
@@ -193,6 +203,42 @@ async fn forward_notifications(
             rel,
             items: Vec::new(),
         });
+    }
+}
+
+/// A file opened at a server for one question about it, and closed again once it is answered
+/// or given up on.
+struct Shown<'a> {
+    client: &'a Client,
+    uri: String,
+}
+
+impl<'a> Shown<'a> {
+    fn open(client: &'a Client, uri: String, language_id: &str, text: &str) -> Result<Self> {
+        client.notify(
+            "textDocument/didOpen",
+            json!({"textDocument": {
+                "uri": uri, "languageId": language_id, "version": 1, "text": text,
+            }}),
+        )?;
+        Ok(Shown { client, uri })
+    }
+}
+
+impl Drop for Shown<'_> {
+    fn drop(&mut self) {
+        let _ = self.client.notify(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": self.uri}}),
+        );
+    }
+}
+
+/// A server's refusal as [`NotYet`], to be asked again; anything else as it is.
+fn not_yet(e: accent_lsp::Error) -> anyhow::Error {
+    match e {
+        accent_lsp::Error::Response { message, .. } => NotYet(message).into(),
+        e => e.into(),
     }
 }
 
@@ -298,6 +344,61 @@ impl External {
             missing: None,
             inline: on(&self.caps.inline_completion_provider),
         }
+    }
+
+    /// The declarations at the far end of the calls into or out of the one at `pos`, with the
+    /// ranges of those calls; `None` where the server finds no declaration there.
+    async fn hierarchy(
+        &self,
+        uri: &str,
+        text: &str,
+        pos: Pos,
+        incoming: bool,
+    ) -> Result<Option<Vec<(CallHierarchyItem, Vec<types::Range>)>>, accent_lsp::Error> {
+        let p = self.encoding.lsp_pos(text, pos);
+        let params = json!({
+            "textDocument": {"uri": uri},
+            "position": {"line": p.line, "character": p.character},
+        });
+        let items: Option<Vec<CallHierarchyItem>> = self
+            .client
+            .request("textDocument/prepareCallHierarchy", params)
+            .await?;
+        let items = items.unwrap_or_default();
+        if items.is_empty() {
+            return Ok(None);
+        }
+        // Each item there: a name in a macro's arguments is every function the macro writes
+        // with it.
+        let mut far = Vec::new();
+        for item in items {
+            let item = json!({"item": item});
+            match incoming {
+                true => far.extend(
+                    self.client
+                        .request::<Option<Vec<CallHierarchyIncomingCall>>>(
+                            "callHierarchy/incomingCalls",
+                            item,
+                        )
+                        .await?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|c| (c.from, c.from_ranges)),
+                ),
+                false => far.extend(
+                    self.client
+                        .request::<Option<Vec<CallHierarchyOutgoingCall>>>(
+                            "callHierarchy/outgoingCalls",
+                            item,
+                        )
+                        .await?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|c| (c.to, c.from_ranges)),
+                ),
+            }
+        }
+        Ok(Some(far))
     }
 
     async fn ask<R: serde::de::DeserializeOwned + Default>(
@@ -546,6 +647,61 @@ impl Language for External {
                     end_line: r.end_line,
                 })
                 .collect())
+        })
+    }
+
+    /// A file no tab holds is asked about as it is on disk, which the server reads for itself,
+    /// and asked again opened for the question if the server calls that invalid: clangd answers
+    /// about open documents only. An error the server answers with is [`NotYet`]: rust-analyzer
+    /// answers "file not found" and "content modified" while it loads the project, and opening
+    /// the file for each of those questions would only slow it down.
+    fn calls(
+        &self,
+        rel: &str,
+        language_id: &str,
+        pos: Pos,
+        incoming: bool,
+    ) -> Fut<'_, Option<Vec<Call>>> {
+        let (rel, language_id) = (rel.to_string(), language_id.to_string());
+        Box::pin(async move {
+            anyhow::ensure!(on(&self.caps.call_hierarchy_provider), "no call hierarchy");
+            let open = self.text_of(&rel).ok();
+            let text = match &open {
+                Some(text) => text.clone(),
+                None => std::fs::read_to_string(Local::join(&self.root, &rel)?)?,
+            };
+            let uri = self.uri(&rel)?;
+            let far = match self.hierarchy(&uri, &text, pos, incoming).await {
+                Err(accent_lsp::Error::Response { code, .. })
+                    if code == INVALID_PARAMS && open.is_none() =>
+                {
+                    let _shown = Shown::open(&self.client, uri.clone(), &language_id, &text)?;
+                    self.hierarchy(&uri, &text, pos, incoming).await
+                }
+                answer => answer,
+            };
+            let Some(far) = far.map_err(not_yet)? else {
+                return match self.found_one.load(Ordering::Relaxed) {
+                    true => Ok(None),
+                    false => Err(NotYet("no declaration found yet".to_string()).into()),
+                };
+            };
+            self.found_one.store(true, Ordering::Relaxed);
+            // Inside the vault only: a call into the standard library has nothing to show.
+            let inside =
+                |uri: &str| rel_of(uri, &self.root).is_some_and(|r| Path::new(&r).is_relative());
+            Ok(Some(
+                far.into_iter()
+                    .filter(|(item, _)| inside(&item.uri))
+                    .filter_map(|(item, ranges)| {
+                        Some(Call {
+                            decl: self.location(&item.uri, item.selection_range)?,
+                            name: item.name,
+                            lines: ranges.iter().map(|r| r.start.line).collect(),
+                        })
+                    })
+                    .collect(),
+            ))
         })
     }
 
