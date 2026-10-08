@@ -75,8 +75,9 @@ impl App {
         }
     }
 
-    /// A preview tab has arrived: it replaces whichever tab this pane was previewing before. A
-    /// pinned one is pinned here, and a launch's is put among the others it named.
+    /// A preview tab has arrived: it replaces whichever tab this pane was previewing before, and is
+    /// kept at once where its row in the Files tree was double-clicked before it came. A pinned
+    /// one is pinned here, and a launch's is put among the others it named.
     ///
     /// The old tab goes after the new one is in place, so the pane never stands empty and closes
     /// itself out from under the note arriving in it.
@@ -89,6 +90,10 @@ impl App {
                 reveal(self, tab);
             }
         }
+        // A double click in the Files tree whose second press came before the tab did.
+        let keep = self
+            .doc_for_page(page)
+            .is_some_and(|doc| self.keep_on_landing.borrow_mut().remove(&doc.key()));
         if how == Opened::Pinned {
             return self.set_pinned(page, true);
         }
@@ -108,6 +113,9 @@ impl App {
         };
         if let Some(old) = pane.set_preview(page) {
             pane.tabs.close_page(&old);
+        }
+        if keep {
+            pane.keep(page);
         }
     }
 
@@ -164,9 +172,19 @@ impl App {
         glib::spawn_future_local(async move {
             let read = crate::work::off_thread("reader", {
                 let key = key.clone();
-                move || match vault {
-                    Some(vault) => vault.read_text(&key),
-                    None => accent_core::fs::read_text(&path),
+                move || {
+                    // A slow host, for the double clicks of `ACCENT_BENCH_TABS=tree:`.
+                    #[cfg(feature = "bench")]
+                    if let Some(ms) = std::env::var("ACCENT_BENCH_SLOW_READ")
+                        .ok()
+                        .and_then(|ms| ms.parse().ok())
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                    }
+                    match vault {
+                        Some(vault) => vault.read_text(&key),
+                        None => accent_core::fs::read_text(&path),
+                    }
                 }
             })
             .await;
@@ -806,6 +824,7 @@ impl App {
     /// A file that would not open. One that is not there reads the same whoever found out: the
     /// session naming a note deleted since, or a link to one never written.
     pub(crate) fn cannot_open(&self, key: &str, e: std::io::Error) {
+        self.keep_on_landing.borrow_mut().remove(key);
         match e.kind() {
             std::io::ErrorKind::NotFound => {
                 self.cannot(&format!("open {key}"), "not in this vault")

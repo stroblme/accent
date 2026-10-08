@@ -367,7 +367,9 @@ use tags::bench_tags;
 /// `=tree:<a>,<b>,<c>` clicks `a` and then `b` in the Files tree, double-clicks `c` and then
 /// `a`, drags `b` onto the right edge of the pane, all through XTEST, then pins `c` and fires
 /// Close Tabs in Pane over the left pane, and prints each pane's tabs after every step: the vault
-/// root has to list the three, as a scratch vault of three notes does.
+/// root has to list the three, as a scratch vault of three notes does. Under
+/// `ACCENT_BENCH_SLOW_READ=<ms>`, which holds every text read that long on its worker as a slow
+/// host would, each double click's second press comes before its tab, which must land kept.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
