@@ -4,7 +4,7 @@
 //! views of Phase 4 are the same widget over the same rows.
 
 use serde::{Deserialize, Serialize};
-use similar::{ChangeTag, TextDiff};
+use similar::{ChangeTag, DiffTag, TextDiff};
 use std::ops::{Range, RangeInclusive};
 use std::time::{Duration, Instant};
 
@@ -39,51 +39,90 @@ pub struct DiffLine {
     pub emphasis: Vec<Range<usize>>,
 }
 
-/// How long [`lines`] may spend refining changed lines word by word, all hunks together. A long
-/// file rewritten throughout took 475 ms to refine as one hunk (120,000 CSV rows, a character
-/// added to each); past the budget, what is left comes back unrefined, the lines whole.
-const REFINE: Duration = Duration::from_millis(100);
+/// How long [`lines`] may spend refining changed lines word by word, all of them together: past
+/// it, the pairs left come back whole. A pair takes about 2 µs: the 120,000 of a long file
+/// rewritten throughout take 200 ms (CSV rows, a character added to each, 2026-10-08), which
+/// [`lines_within`] can be given room for off the main thread.
+pub const REFINE: Duration = Duration::from_millis(100);
 
 /// Line diff of two texts, oldest-first, suitable for a side-by-side view.
 ///
+/// A changed line's emphasis is what differs from the line it is paired with on its row
+/// ([`align`]), word by word, so a hunk of any length is refined at the cost of its pairs; a line
+/// the other side has none for is left whole.
+///
 /// ponytail: the word-level refinement runs on `similar`'s 0.5 similarity floor, below which a
-/// paired line is left unrefined: the library's choice, not a measurement of ours;
+/// pair is left unrefined: the library's choice, not a measurement of ours;
 /// `iter_inline_changes_with_options` (and the `unicode` feature, for grapheme-accurate tokens)
 /// is the upgrade path if it shows.
 pub fn lines(old: &str, new: &str) -> Vec<DiffLine> {
+    lines_within(old, new, REFINE).0
+}
+
+/// [`lines`] with `refine` for the word-level pass, and whether every pair had its turn in it.
+pub fn lines_within(old: &str, new: &str, refine: Duration) -> (Vec<DiffLine>, bool) {
     let diff = TextDiff::from_lines(old, new);
-    let deadline = Instant::now() + REFINE;
-    diff.ops()
-        .iter()
-        .flat_map(|op| diff.iter_inline_changes_deadline(op, Some(deadline)))
-        .map(|c| {
-            let (mut text, mut emphasis) = (String::new(), Vec::new());
-            for (emphasized, value) in c.iter_strings_lossy() {
-                let start = text.len();
-                text.push_str(&value);
-                if emphasized {
-                    emphasis.push(start..text.len());
-                }
-            }
-            // `similar` never emphasises a newline, so dropping the line ending afterwards cannot
-            // cut a range short.
-            text.truncate(text.trim_end_matches(['\r', '\n']).len());
+    let (deadline, mut whole) = (Instant::now() + refine, true);
+    let mut lines = Vec::new();
+    for op in diff.ops() {
+        let at = lines.len();
+        lines.extend(diff.iter_changes(op).map(|c| {
+            let text = c.value();
             DiffLine {
                 op: c.tag().into(),
                 old_line: c.old_index().map(|i| i + 1),
                 new_line: c.new_index().map(|i| i + 1),
-                text,
-                emphasis,
+                text: text.trim_end_matches(['\r', '\n']).to_string(),
+                emphasis: Vec::new(),
             }
-        })
-        .collect()
+        }));
+        // A replacement's deletions come first, then its insertions, paired in order as `align`
+        // pairs them.
+        let (old_len, new_len) = (op.old_range().len(), op.new_range().len());
+        if let DiffTag::Replace = op.tag() {
+            for i in 0..old_len.min(new_len) {
+                if Instant::now() > deadline {
+                    whole = false;
+                    break;
+                }
+                let (o, n) = (at + i, at + old_len + i);
+                [lines[o].emphasis, lines[n].emphasis] =
+                    emphasis(&lines[o].text, &lines[n].text, deadline);
+            }
+        }
+    }
+    (lines, whole)
+}
+
+/// Where `old` and `new`, a changed line and its partner, differ word by word: byte ranges into
+/// each, or none where they are too unlike for that to read.
+fn emphasis(old: &str, new: &str, deadline: Instant) -> [Vec<Range<usize>>; 2] {
+    let diff = TextDiff::from_lines(old, new);
+    let mut emphasis = [Vec::new(), Vec::new()];
+    for op in diff.ops() {
+        for change in diff.iter_inline_changes_deadline(op, Some(deadline)) {
+            let side = match change.tag() {
+                ChangeTag::Delete => 0,
+                ChangeTag::Insert => 1,
+                ChangeTag::Equal => continue,
+            };
+            let mut at = 0;
+            for (emphasized, value) in change.iter_strings_lossy() {
+                if emphasized {
+                    emphasis[side].push(at..at + value.len());
+                }
+                at += value.len();
+            }
+        }
+    }
+    emphasis
 }
 
 /// Line diff of two texts without the word-level refinement [`lines`] does: the same rows in the
 /// same order, every `emphasis` empty.
 ///
 /// What a gutter needs — which lines changed, and how — for a fraction of the cost:
-/// [`lines`] re-diffs each hunk word by word under a budget of [`REFINE`], and a change bar
+/// [`lines`] re-diffs each changed pair word by word under a budget of [`REFINE`], and a change bar
 /// three pixels wide has nowhere to put the answer.
 pub fn line_ops(old: &str, new: &str) -> Vec<DiffLine> {
     let mut lines = changes(old, new);
@@ -511,6 +550,30 @@ mod tests {
                     ..l
                 })
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_hunk_is_refined_pair_by_pair() {
+        let d = lines("a 1\nb 2\n", "a one\nb two\nc three\n");
+        let emphasis: Vec<(&str, Vec<(usize, usize)>)> = (d.iter())
+            .map(|l| {
+                (
+                    l.text.as_str(),
+                    l.emphasis.iter().map(|r| (r.start, r.end)).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            emphasis,
+            vec![
+                ("a 1", vec![(2, 3)]),
+                ("b 2", vec![(2, 3)]),
+                ("a one", vec![(2, 5)]),
+                ("b two", vec![(2, 5)]),
+                ("c three", vec![]),
+            ],
+            "each line against the one beside it; the line with no partner is left whole"
         );
     }
 

@@ -291,7 +291,7 @@ pub struct Tab {
     /// Whether ghost text is wanted here. Mirrored onto `lang.ghost` so the request path reads
     /// one cell, and kept here so a tab built while the preference was off can be turned on.
     ghost_text: Cell<bool>,
-    map: sourceview5::Map,
+    map: crate::minimap::Minimap,
     /// The optional line-number gutter; hidden unless the preference turns it on.
     numbers: sourceview5::GutterRenderer,
     /// The sticky block title over the top of the view, and the bar it sits on. Hidden until
@@ -701,6 +701,7 @@ impl Tab {
         diagnostics::restyle(&self.buffer, &self.view);
         self.fold_renderer.restyle(&self.view);
         self.conflicts.restyle();
+        self.map.restyle();
         if let Some(hosted) = self.hosted() {
             hosted.restyle();
         }
@@ -1071,15 +1072,9 @@ impl Tab {
         *self.snippet.borrow_mut() = Some(snippet.clone());
     }
 
-    /// Whether the completion popup is on screen, asked of the widgets on this very press.
-    ///
-    /// While the popup is up it owns the keyboard and nothing else in the view may answer a key,
-    /// so an answer that can go stale silences the lot: this used to be a cell mirroring the
-    /// completion's `show` and `hide`, and a `hide` that never arrived left every key — Return
-    /// and Tab with it — to the view for the rest of this tab's life. Derived, there is nothing
-    /// left to strand: see [`keys::popup_visible`] for what the widgets are asked.
+    /// Whether the completion popup is on screen: mapped, which nothing can leave behind.
     pub(crate) fn popup_shown(&self) -> bool {
-        keys::popup_visible(&self.view)
+        crate::completion::is_shown(self)
     }
 
     /// Whether a template's stops are still being walked. A snippet lets its buffer go when it
@@ -1409,8 +1404,8 @@ impl Saves for Tab {
 
 impl Drop for Tab {
     /// A closed tab takes its font provider and its document on the language layer with it; the
-    /// three `Debounce`s cancel whatever they are holding as they drop. The view is let go of by
-    /// the minimap and then freed ([`release`]).
+    /// three `Debounce`s cancel whatever they are holding as they drop. The view is freed
+    /// ([`release`]).
     fn drop(&mut self) {
         lang::detach(self);
         if let (Some(display), Some(provider)) =
@@ -1418,7 +1413,6 @@ impl Drop for Tab {
         {
             gtk::style_context_remove_provider_for_display(&display, &provider);
         }
-        self.map.set_property("view", None::<&sourceview5::View>);
         release(&self.view);
     }
 }

@@ -160,7 +160,10 @@ mod provider_imp {
             let tab = self.tab.borrow().upgrade();
             let (context, display) = (context.clone(), display.clone());
             Box::pin(async move {
-                let Some(tab) = tab else { return Ok(()) };
+                // The completion popup is about the same text and would sit under the hover.
+                let Some(tab) = tab.filter(|tab| !tab.popup_shown()) else {
+                    return Ok(());
+                };
                 let Some((start, _)) = context.bounds() else {
                     return Ok(());
                 };

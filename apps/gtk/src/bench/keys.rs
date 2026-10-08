@@ -2,6 +2,8 @@
 //! life beyond its window.
 
 use super::*;
+use crate::completion;
+use accent_api::{Completion, Kind, Pos, Range, TextEdit};
 use vte4::TerminalExt as _;
 
 /// Drive the key semantics [`multicaret::View`] corrects — the wordwise deletes, logical-line
@@ -140,6 +142,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
             bench_folds(&view).await;
             bench_table(&view);
             bench_whole_words(&view);
+            bench_popup_keys(&view).await;
             window.close();
             bench_quit(&app);
         });
@@ -510,6 +513,123 @@ fn bench_whole_words(view: &multicaret::View) {
     view.clear_carets();
 }
 
+/// The completion popup's keys, on a session of the drill's own answering with three fixed
+/// items wherever it is asked: what opens, what typing narrows to, the arrows and the page keys
+/// walking the rows, Tab accepting a snippet with an import as one undo step, Return with nothing
+/// selected left to the editor, Escape kept, a word nothing matches closing it, and a column of
+/// carets getting every key the popup does not take. Prints the rows, the selection, the text and
+/// what each press answered.
+async fn bench_popup_keys(view: &multicaret::View) {
+    let buffer = view.buffer();
+    let none = gdk::ModifierType::empty();
+    let at = Pos::default();
+    let item = |label: &str, insert: &str, snippet: bool| Completion {
+        label: label.to_string(),
+        kind: Kind::Function,
+        detail: None,
+        doc: None,
+        filter: None,
+        insert: insert.to_string(),
+        is_snippet: snippet,
+        replace: Range { start: at, end: at },
+        extra_edits: Vec::new(),
+        resolve: None,
+    };
+    let mut alpha = item("alpha", "alpha($1)", true);
+    alpha.extra_edits.push(TextEdit {
+        range: Range { start: at, end: at },
+        text: "use x;\n".to_string(),
+    });
+    let items = vec![
+        alpha,
+        item("alphabet", "alphabet", false),
+        item("beta", "beta", false),
+    ];
+    let session = completion::Session::new(view.upcast_ref(), Box::new(completion::Fixed(items)));
+    view.set_enable_snippets(true);
+    let text = || {
+        buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), true)
+            .to_string()
+    };
+    let settle = || glib::timeout_future(Duration::from_millis(100));
+    let open = |typed: &str| {
+        view.clear_carets();
+        buffer.set_text(typed);
+        buffer.place_cursor(&buffer.start_iter());
+        session.ask(None);
+    };
+
+    open("");
+    settle().await;
+    println!(
+        "bench popup_open {:?} shown={}",
+        session.rows().0,
+        session.is_shown()
+    );
+    buffer.insert_at_cursor("a");
+    buffer.insert_at_cursor("l");
+    settle().await;
+    println!("bench popup_filter {:?}", session.rows().0);
+    for (step, key) in [
+        ("down", gdk::Key::Down),
+        ("page_down", gdk::Key::Page_Down),
+        ("up", gdk::Key::Up),
+    ] {
+        let answer = session.press(key, none);
+        println!("bench popup_{step} {answer:?} {:?}", session.rows().1);
+    }
+    let answer = session.press(gdk::Key::Tab, none);
+    println!(
+        "bench popup_tab {answer:?} {:?} shown={}",
+        text(),
+        session.is_shown()
+    );
+    buffer.undo();
+    println!("bench popup_undo {:?}", text());
+    // The snippet's stops are not this drill's.
+    view.set_enable_snippets(false);
+    view.set_enable_snippets(true);
+
+    open("");
+    settle().await;
+    let answer = session.press(gdk::Key::Return, none);
+    println!(
+        "bench popup_return_unselected {answer:?} shown={}",
+        session.is_shown()
+    );
+    open("");
+    settle().await;
+    let answer = session.press(gdk::Key::Escape, none);
+    println!("bench popup_escape {answer:?} shown={}", session.is_shown());
+    open("");
+    settle().await;
+    buffer.insert_at_cursor("alz");
+    settle().await;
+    println!(
+        "bench popup_nomatch {:?} shown={}",
+        text(),
+        session.is_shown()
+    );
+
+    // Ctrl+Space over a column: what the popup does not take goes to GTK at the primary caret.
+    view.clear_carets();
+    buffer.set_text("a\nb");
+    buffer.place_cursor(&buffer.start_iter());
+    view.add_caret(true);
+    session.ask(None);
+    settle().await;
+    let answer = session.press(gdk::Key::x, none);
+    println!(
+        "bench popup_column {answer:?} shown={} carets={}",
+        session.is_shown(),
+        view.has_carets()
+    );
+    session.close();
+    view.clear_carets();
+    view.set_enable_snippets(false);
+}
+
 /// The iter at `column` of `line`, or the end of the buffer past its last line.
 fn at(buffer: &gtk::TextBuffer, line: i32, column: i32) -> gtk::TextIter {
     let mut at = buffer.iter_at_line(line).unwrap_or(buffer.end_iter());
@@ -855,120 +975,70 @@ fn bench_lines_of(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
     bench_quit(app);
 }
 
-/// "The completion popup is up" against the popup itself: an answer that no `hide` ever took back
-/// used to leave every key to the view for the rest of a tab's life.
-///
-/// A words provider gives the tab a popup of its own to raise, so what is read is a real
-/// `GtkSourceCompletion` popup and not a stand-in. Prints the view's children either side of it —
-/// the widgets the check reads, each `visible/mapped` — then Return at the end of a list item
-/// under it, once with no row selected, which is the list's and ends the popup, and once with a
-/// row selected, which is the popup's. Then it stages the two ways the old cell was stranded: the
-/// view taken off screen with the popup still up and no `hide` emitted, which is a tab switched
-/// away from, and the completion's own `show` forged with nothing on screen. Neither may say yes,
-/// and Return must still continue a list after both. On a scratch vault:
-/// `popup_up true … GtkSourceCompletionList=true/true`, `popup_return Stop "- " up=false`,
-/// `popup_selected_return Proceed "- comp" up=true`, `popup_unmapped false …=false/false`,
-/// `popup_stale false` and `popup_stale_return "- "`.
-///
-/// `GtkSourceCompletion` refuses to show while the view has no input focus, and under Xvfb no
-/// window manager hands it out: run `build-aux/xtest.py :<display> "move 700 500; focus"` in a
-/// loop beside the drill to get `focus=true`, and with it the popup. Without it the run still
-/// prints the stale-flag half, `up=false focus=false` naming why the other half is empty.
+/// The completion popup over a list item in a real tab, through the key chain a press takes
+/// (`editor::keys`): Return with no row selected continues the list and puts the popup away,
+/// Down and Return accept the row instead, and a view taken off screen takes the popup with it.
+/// On a scratch vault: `popup_up true`, `popup_return Stop "- " up=false`,
+/// `popup_selected_return Stop "- completion" up=false` and `popup_unmapped false`.
 fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
-    use sourceview5::prelude::CompletionWordsExt as _;
-
-    let completion = sourceview5::prelude::ViewExt::completion(&tab.view);
-    let words = sourceview5::CompletionWords::new(None);
-    words.register(&tab.buffer);
-    completion.add_provider(&words);
     // `set_text` is not an edit, so nothing here arms the autosave that would write it out.
     let staged = "completion\n- comp";
-    tab.set_text(staged);
-
+    let word = Completion {
+        label: "completion".to_string(),
+        kind: Kind::Text,
+        detail: None,
+        doc: None,
+        filter: None,
+        insert: "completion".to_string(),
+        is_snippet: false,
+        replace: Range {
+            start: Pos {
+                line: 1,
+                character: 2,
+            },
+            end: Pos {
+                line: 1,
+                character: 6,
+            },
+        },
+        extra_edits: Vec::new(),
+        resolve: None,
+    };
     let (app, tab) = (app.clone(), tab.clone());
     glib::timeout_add_local_once(Duration::from_millis(600), move || {
-        tab.view.grab_focus();
-        tab.buffer.place_cursor(&tab.buffer.end_iter());
-        completion.show();
-        // The proposals arrive from an idle, and the popup with them.
-        glib::timeout_add_local_once(Duration::from_millis(800), move || {
-            let none = gdk::ModifierType::empty();
-            println!(
-                "bench popup_up {} focus={} {:?}",
-                tab.popup_shown(),
-                tab.view.has_focus(),
-                children(&tab)
-            );
-            let answer = editor::press(&tab, gdk::Key::Return, none);
-            println!(
-                "bench popup_return {answer:?} {:?} up={}",
-                caret_prefix(&tab),
-                tab.popup_shown()
-            );
-
-            // The popup again, with its first row selected, as an arrow key would leave it. The
-            // list paints the row selected on the next frame, which the wait covers.
+        let Some(session) = completion::session(&tab) else {
+            println!("bench popup_up no_session");
+            return bench_lines_of(&app, &tab, original);
+        };
+        let none = gdk::ModifierType::empty();
+        let show = || {
             tab.set_text(staged);
             tab.buffer.place_cursor(&tab.buffer.end_iter());
-            completion.set_select_on_show(true);
-            completion.show();
-            glib::timeout_add_local_once(Duration::from_millis(800), move || {
-                let answer = editor::press(&tab, gdk::Key::Return, none);
-                println!(
-                    "bench popup_selected_return {answer:?} {:?} up={}",
-                    caret_prefix(&tab),
-                    tab.popup_shown()
-                );
-                completion.set_select_on_show(false);
-
-                // The popup still up and the view taken off screen under it: GTK takes the
-                // popover with it, but the completion's own `hide` is never emitted, so this is
-                // the shape that used to strand the cached answer.
-                tab.view.set_visible(false);
-                println!(
-                    "bench popup_unmapped {} {:?}",
-                    tab.popup_shown(),
-                    children(&tab)
-                );
-                tab.view.set_visible(true);
-
-                // The popup gone, and then its `show` forged as a missed `hide` would have left it.
-                completion.hide();
-                completion.remove_provider(&words);
-                words.unregister(&tab.buffer);
-                println!(
-                    "bench popup_down {} {:?}",
-                    tab.popup_shown(),
-                    children(&tab)
-                );
-                completion.emit_show();
-                println!("bench popup_stale {}", tab.popup_shown());
-                tab.buffer.place_cursor(&editor::line_end(&tab.buffer, 1));
-                editor::press(&tab, gdk::Key::Return, none);
-                println!("bench popup_stale_return {:?}", caret_prefix(&tab));
-
-                bench_lines_of(&app, &tab, original);
-            });
-        });
+            session.show_items(vec![word.clone()]);
+        };
+        tab.view.grab_focus();
+        show();
+        println!("bench popup_up {}", tab.popup_shown());
+        let answer = editor::press(&tab, gdk::Key::Return, none);
+        println!(
+            "bench popup_return {answer:?} {:?} up={}",
+            caret_prefix(&tab),
+            tab.popup_shown()
+        );
+        show();
+        editor::press(&tab, gdk::Key::Down, none);
+        let answer = editor::press(&tab, gdk::Key::Return, none);
+        println!(
+            "bench popup_selected_return {answer:?} {:?} up={}",
+            caret_prefix(&tab),
+            tab.popup_shown()
+        );
+        show();
+        tab.view.set_visible(false);
+        println!("bench popup_unmapped {}", tab.popup_shown());
+        tab.view.set_visible(true);
+        bench_lines_of(&app, &tab, original);
     });
-}
-
-/// The view's own children, each as `visible/mapped`: where the completion popup is, the hover
-/// assistant and the signature popover beside it. The two flags are printed apart because they
-/// disagree exactly where the old cached answer went stale.
-fn children(tab: &Rc<Tab>) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut child = tab.view.first_child();
-    while let Some(widget) = child {
-        out.push(format!(
-            "{}={}/{}",
-            widget.type_().name(),
-            widget.get_visible(),
-            widget.is_mapped()
-        ));
-        child = widget.next_sibling();
-    }
-    out
 }
 
 /// The whole line the caret is on.

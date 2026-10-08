@@ -66,6 +66,7 @@ dependencies = [
  "accent-lsp",
  "anyhow",
  "base64",
+ "chrono",
  "clap",
  "libc",
  "rmcp",

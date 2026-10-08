@@ -273,10 +273,16 @@ pub fn page(dark: bool) -> gdk::RGBA {
 /// theme. libadwaita darkens it for a light page and lightens it for a dark one before anybody
 /// writes text in it, which is what `to_standalone_rgba` hands back — the colour the platform's
 /// own links are written in. The link tags, a CSV's columns and the git history's lanes all take it.
-fn text_accent() -> gdk::RGBA {
+pub(crate) fn text_accent() -> gdk::RGBA {
     let style = adw::StyleManager::default();
     style.accent_color().to_standalone_rgba(style.is_dark())
 }
+
+/// The tags [`restyle`] writes in the accent, and the two sets it dims: what the minimap draws in
+/// its accent and in its dimmer tone.
+pub const ACCENT_TAGS: [&str; 4] = ["link", "wikilink", "tag", "image"];
+pub const MARKUP_TAGS: [&str; 3] = ["marker", "frontmatter", "listmarker"];
+pub const FADED_TAGS: [&str; 2] = ["quote", "taskdone"];
 
 /// Apply the standalone accent and the foreground-derived dim colours. Call once after the view is
 /// realised and again on every `notify::accent-color` / `notify::dark`.
@@ -291,13 +297,13 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
             f(&t);
         }
     };
-    for name in ["link", "wikilink", "tag", "image"] {
+    for name in ACCENT_TAGS {
         set(name, &|t| t.set_foreground_rgba(Some(&accent)));
     }
-    for name in ["marker", "frontmatter", "listmarker"] {
+    for name in MARKUP_TAGS {
         set(name, &|t| t.set_foreground_rgba(Some(&dim(fg, page, 0.4))));
     }
-    for name in ["quote", "taskdone"] {
+    for name in FADED_TAGS {
         set(name, &|t| t.set_foreground_rgba(Some(&dim(fg, page, 0.6))));
     }
     // A wash behind a run of code rather than ink on the page: it is meant to be barely there, so

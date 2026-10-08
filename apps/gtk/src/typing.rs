@@ -16,7 +16,6 @@ use crate::editor::{caret, line_end, line_prefix};
 use accent_core::markdown::{TableKey, table_key};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use sourceview5::prelude::*;
 
 /// Delimiters that close themselves when typed. Markdown emphasis is deliberately absent: a `*`
 /// that grew a second `*` under the caret would be in the way far more often than it helped.
@@ -459,13 +458,6 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
             let mut back = caret(&buffer);
             back.backward_char();
             buffer.place_cursor(&back);
-            // The pair lands as one two-character insert, and GtkSourceCompletion only asks
-            // `is_trigger` about single characters, so the second `[` of a wikilink has to open
-            // the note list by hand.
-            let mut before = back;
-            if open == '[' && before.backward_chars(2) && before.char() == '[' {
-                view.completion().show();
-            }
         }
         Pair::StepOver => {
             let mut at = at;

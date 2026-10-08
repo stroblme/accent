@@ -1,6 +1,6 @@
 //! Listing what the index holds: the lazy tree, the switcher's paths, tags, stats, exclusions.
 
-use super::{FileRow, Index, Stats};
+use super::{FileRow, HeadingHit, Index, Stats};
 use crate::path;
 use crate::walk::FileKind;
 use anyhow::Result;
@@ -196,6 +196,39 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The headings holding any of `words`, folded as search folds them, those holding the most
+    /// first, at most `limit`: the sections a question names in so many words.
+    ///
+    /// Every heading is read and compared here rather than matched in SQL, whose `LIKE` folds
+    /// ASCII alone: 25 000 rows on the generated vault.
+    pub fn headings_matching(&self, words: &[String], limit: usize) -> Result<Vec<HeadingHit>> {
+        let words: Vec<String> = words.iter().map(|w| super::search::fold(w)).collect();
+        let mut st = self.conn.prepare_cached(
+            "SELECT f.rel_path, h.level, h.text, h.byte_start FROM headings h
+             JOIN files f ON f.id = h.file_id ORDER BY f.rel_path, h.byte_start",
+        )?;
+        let mut hits = Vec::new();
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let text: String = r.get(2)?;
+            let folded = super::search::fold(&text);
+            let found = words.iter().filter(|w| folded.contains(w.as_str())).count();
+            if found > 0 {
+                hits.push(HeadingHit {
+                    rel_path: r.get(0)?,
+                    level: r.get(1)?,
+                    text,
+                    byte_start: r.get(3)?,
+                    words: found,
+                });
+            }
+        }
+        // Stable: the vault's order among equals.
+        hits.sort_by_key(|h| std::cmp::Reverse(h.words));
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     pub fn files_with_tag(&self, name: &str) -> Result<Vec<FileRow>> {
         let mut st = self.conn.prepare_cached(
             "SELECT DISTINCT f.id, f.rel_path, f.kind, f.title, f.size, f.mtime_ns
@@ -361,6 +394,34 @@ mod tests {
         sorted.sort();
         assert_eq!(sorted, ["a.md", "c.pdf", "sub/Beta.md", "tool.py"]);
         assert_eq!(ix.recent_files(1).unwrap().len(), 1, "limit is honoured");
+    }
+
+    /// A heading holding more of the words comes first, folded as search folds them.
+    #[test]
+    fn headings_matching_ranks_by_words_held() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("d.md"),
+            "# Café notes\n## Link Résolution\n## Other\n",
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let words = ["resolution".to_string(), "link".to_string()];
+        let hits: Vec<_> = ix
+            .headings_matching(&words, 10)
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.rel_path, h.level, h.text, h.byte_start, h.words))
+            .collect();
+        assert_eq!(hits, [("d.md".into(), 2, "Link Résolution".into(), 14, 2)]);
+        assert_eq!(ix.headings_matching(&["CAFE".into()], 10).unwrap().len(), 1);
+        assert!(
+            ix.headings_matching(&["nope".into()], 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// `[[` completes against notes and PDFs; a source file is `![[`'s and a markdown link's.

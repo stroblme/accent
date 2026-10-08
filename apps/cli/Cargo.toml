@@ -13,6 +13,8 @@ path = "src/main.rs"
 accent-core.workspace = true
 accent-api.workspace = true
 anyhow.workspace = true
+# The times `list_dir` and `recent_changes` answer with; core's own.
+chrono.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -635,6 +635,32 @@ fn upsert(
                 .execute(params![id, name])?;
         }
     }
+    // A code file's declarations, read from the text its body is.
+    let lang = (f.kind == FileKind::Other)
+        .then(|| crate::code::lang_of(&f.rel_path))
+        .flatten();
+    if let (Some(lang), Some(text)) = (lang, text.as_deref()) {
+        let test_file = crate::code::is_test_path(&f.rel_path);
+        for d in crate::code::symbols(lang, text) {
+            tx.prepare_cached(
+                "INSERT INTO symbols(file_id, kind, name, container, byte_start, byte_end, line,
+                                     end_line, signature, test)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            )?
+            .execute(params![
+                id,
+                d.kind.as_i64(),
+                d.name,
+                d.container,
+                d.range.start as i64,
+                d.range.end as i64,
+                d.line,
+                d.end_line,
+                d.signature,
+                d.test || test_file,
+            ])?;
+        }
+    }
     // Set aside for [`write_bodies`], which the caller runs before it commits.
     if let Some(body) = text.as_ref() {
         tx.prepare_cached(
@@ -692,6 +718,8 @@ fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
         .execute([id])?;
     tx.prepare_cached("DELETE FROM headings WHERE file_id = ?1")?
         .execute([id])?;
+    tx.prepare_cached("DELETE FROM symbols WHERE file_id = ?1")?
+        .execute([id])?;
     tx.prepare_cached("DELETE FROM note_aliases WHERE file_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("INSERT OR REPLACE INTO temp.bodies(file_id) VALUES(?1)")?
@@ -722,6 +750,16 @@ fn link_kind_i64(k: markdown::LinkKind) -> i64 {
         markdown::LinkKind::Embed => 1,
         markdown::LinkKind::Markdown => 2,
         markdown::LinkKind::External => 3,
+    }
+}
+
+/// [`link_kind_i64`] read back.
+pub(super) fn link_kind_of(k: i64) -> markdown::LinkKind {
+    match k {
+        0 => markdown::LinkKind::Wiki,
+        1 => markdown::LinkKind::Embed,
+        2 => markdown::LinkKind::Markdown,
+        _ => markdown::LinkKind::External,
     }
 }
 
@@ -1067,7 +1105,7 @@ mod tests {
         assert_eq!(from_beta("sub/Beta.md"), 1, "a plain name is a sibling");
         assert_eq!(
             ix.unresolved_links().unwrap(),
-            vec![("sub/Beta.md".to_string(), "sub/c.pdf".to_string())],
+            vec![("sub/Beta.md".to_string(), "sub/c.pdf".to_string(), 37)],
             "the dangling target is reported as the vault path it names"
         );
     }
@@ -1301,7 +1339,7 @@ mod tests {
         assert!(ix.search("ferris", 10, false).unwrap().is_empty());
         assert_eq!(
             ix.unresolved_links().unwrap(),
-            vec![("a.md".to_string(), "Beta".to_string())]
+            vec![("a.md".to_string(), "Beta".to_string(), 12)]
         );
         assert_eq!(
             ix.remove_file_batched("sub").unwrap(),

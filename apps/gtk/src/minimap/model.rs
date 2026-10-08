@@ -206,31 +206,171 @@ impl Model {
     }
 }
 
-/// Where the map's own scroll is, in rows, with the band's top at row `top` and `band` rows
-/// tall, over `total` rows on a map `height` rows tall.
-///
-/// The map scrolls itself only when the document outgrows it, and then in step with the band, as
-/// VS Code's minimap does: the band's top runs from the map's top down to `height − band` as the
-/// view goes from its first screen to its last, so the band never leaves the map.
-pub fn offset(top: f64, band: f64, total: f64, height: f64) -> f64 {
-    if total <= height || total <= band {
-        return 0.0;
-    }
-    (top / (total - band)).clamp(0.0, 1.0) * (total - height)
+/// How the map scrolls itself: over `total` rows on a map `height` rows tall, `usual` being the
+/// rows a screen of the document holds on average.
+#[derive(Clone, Copy, Debug)]
+pub struct Pace {
+    pub total: f64,
+    pub height: f64,
+    pub usual: f64,
 }
 
-/// How many rows of the document one row of pointer movement drags the band over: more than one
-/// once the map scrolls itself ([`offset`]), so the band stays under the pointer.
-pub fn drag_ratio(band: f64, total: f64, height: f64) -> f64 {
-    if total <= height || height <= band {
-        return 1.0;
+impl Pace {
+    /// The rows of the document per row of the map the band moves by: more than one once the map
+    /// scrolls itself. The band drawn `screen` rows down the map has its top on row
+    /// `screen × ratio`, which is how a drag keeps it under the pointer.
+    pub fn ratio(&self) -> f64 {
+        if self.total <= self.height || self.height <= self.usual {
+            return 1.0;
+        }
+        (self.total - self.usual) / (self.height - self.usual)
     }
-    (total - band) / (height - band)
+
+    /// Where the map's own scroll is, in rows, with the band's top at row `top` and `band` rows
+    /// tall.
+    ///
+    /// The map scrolls itself only when the document outgrows it, and then in step with the band,
+    /// as VS Code's minimap does: the band's top runs down the map as the view goes down the
+    /// document. At the pace of the usual band rather than this one, which grows and shrinks with
+    /// the lines on screen (a heading's label takes several rows), so a heading coming into view
+    /// does not jolt the map; at either end the band is kept on the map.
+    pub fn offset(&self, top: f64, band: f64) -> f64 {
+        if self.total <= self.height {
+            return 0.0;
+        }
+        let paced = top - top / self.ratio();
+        paced
+            .max(top + band - self.height)
+            .min(top)
+            .clamp(0.0, self.total - self.height)
+    }
+}
+
+/// A run of non-blank characters of one tone, as the map draws it: the row of its line it falls
+/// on, the column it starts at there and how many columns it takes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bar<T> {
+    pub row: u32,
+    pub col: u32,
+    pub len: u32,
+    pub tone: T,
+}
+
+/// The bars of a line, given its characters each with its tone: wrapped every `per_row` columns,
+/// a tab taking the columns to the next multiple of `tab`, and nothing past row `rows`. A word
+/// is cut at the wrap rather than carried to the next row, which a bar a pixel per character
+/// wide does not show.
+pub fn bars<T: Copy + PartialEq>(
+    chars: impl Iterator<Item = (char, T)>,
+    per_row: u32,
+    rows: u32,
+    tab: u32,
+) -> Vec<Bar<T>> {
+    let mut out = Vec::new();
+    let mut col = 0;
+    let mut run: Option<(u32, T)> = None;
+    for (c, tone) in chars {
+        if c.is_whitespace() {
+            if let Some((start, tone)) = run.take() {
+                split(&mut out, start..col, tone, per_row, rows);
+            }
+            col += if c == '\t' { tab - col % tab } else { 1 };
+            continue;
+        }
+        match run {
+            Some((_, current)) if current == tone => {}
+            Some((start, current)) => {
+                split(&mut out, start..col, current, per_row, rows);
+                run = Some((col, tone));
+            }
+            None => run = Some((col, tone)),
+        }
+        col += 1;
+    }
+    if let Some((start, tone)) = run {
+        split(&mut out, start..col, tone, per_row, rows);
+    }
+    out
+}
+
+/// The columns `cols` of a line as a bar on each row they cross.
+fn split<T: Copy>(out: &mut Vec<Bar<T>>, cols: Range<u32>, tone: T, per_row: u32, rows: u32) {
+    let mut from = cols.start;
+    while from < cols.end {
+        let row = from / per_row;
+        if row >= rows {
+            return;
+        }
+        let to = cols.end.min((row + 1).saturating_mul(per_row));
+        out.push(Bar {
+            row,
+            col: from - row * per_row,
+            len: to - from,
+            tone,
+        });
+        from = to;
+    }
+}
+
+/// What a heading's label on the map says: its text without the `#` markers, an ATX closing
+/// sequence's included, or `None` where nothing is left to read (a setext heading's underline).
+pub fn label(line: &str) -> Option<&str> {
+    let text = line.trim().trim_start_matches('#');
+    let closed = text.trim_end_matches('#');
+    let text = match closed.ends_with(char::is_whitespace) {
+        true => closed,
+        false => text,
+    }
+    .trim();
+    text.chars().any(char::is_alphanumeric).then_some(text)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_label_is_the_heading_without_its_markers() {
+        assert_eq!(label("## Section 2"), Some("Section 2"));
+        assert_eq!(label("# Closed #"), Some("Closed"));
+        assert_eq!(label("### C#"), Some("C#"), "a # in the text stays");
+        assert_eq!(label("Setext title"), Some("Setext title"));
+        assert_eq!(label("========"), None, "an underline has nothing to read");
+        assert_eq!(label("##"), None);
+    }
+
+    #[test]
+    fn a_bar_is_a_word_wrapped_at_the_column() {
+        let plain = |s: &'static str| s.chars().map(|c| (c, ()));
+        let spans = |bars: Vec<Bar<()>>| -> Vec<(u32, u32, u32)> {
+            bars.iter().map(|b| (b.row, b.col, b.len)).collect()
+        };
+        assert_eq!(
+            spans(bars(plain("ab  cde\tf"), 100, 1, 4)),
+            [(0, 0, 2), (0, 4, 3), (0, 8, 1)],
+            "a tab goes to the next stop"
+        );
+        assert_eq!(
+            spans(bars(plain("abcdefg hi"), 4, 9, 4)),
+            [(0, 0, 4), (1, 0, 3), (2, 0, 2)]
+        );
+        assert_eq!(
+            spans(bars(plain("abcdefg hi"), 4, 2, 4)),
+            [(0, 0, 4), (1, 0, 3)],
+            "no further than the line's rows"
+        );
+        assert_eq!(spans(bars(plain("abc"), u32::MAX, 1, 4)), [(0, 0, 3)]);
+        let toned = [('a', 1), ('b', 1), ('c', 2)].into_iter();
+        let toned = bars(toned, 100, 1, 4);
+        assert_eq!(
+            toned
+                .iter()
+                .map(|b| (b.col, b.len, b.tone))
+                .collect::<Vec<_>>(),
+            [(0, 2, 1), (2, 1, 2)],
+            "a new tone starts a new bar"
+        );
+    }
 
     fn line(chars: u32) -> Line {
         Line {
@@ -326,41 +466,56 @@ mod tests {
     }
 
     /// The map's scroll is a number in every case a document can be in: no lines, fewer rows than
-    /// the map, a band as tall as the document.
+    /// the map, a band as tall as the document or taller than the map.
     #[test]
     fn the_offset_is_always_finite() {
-        for (top, band, total, height) in [
-            (0.0, 0.0, 0.0, 0.0),
-            (0.0, 10.0, 5.0, 400.0),
-            (0.0, 50.0, 50.0, 10.0),
-            (3.0, 0.0, 1000.0, 0.0),
-            (2000.0, 40.0, 1000.0, 400.0),
+        for (top, band, usual, total, height) in [
+            (0.0, 0.0, 0.0, 0.0, 0.0),
+            (0.0, 10.0, 10.0, 5.0, 400.0),
+            (0.0, 50.0, 50.0, 50.0, 10.0),
+            (3.0, 0.0, 0.0, 1000.0, 0.0),
+            (2000.0, 40.0, 40.0, 1000.0, 400.0),
         ] {
-            let at = offset(top, band, total, height);
+            let pace = Pace {
+                total,
+                height,
+                usual,
+            };
+            let at = pace.offset(top, band);
             assert!(at.is_finite(), "{top} {band} {total} {height}");
             assert!((0.0..=total.max(0.0)).contains(&at));
-            assert!(drag_ratio(band, total, height).is_finite());
+            assert!(pace.ratio().is_finite());
         }
-        assert_eq!(offset(10.0, 40.0, 300.0, 400.0), 0.0, "fits: no scroll");
-        assert_eq!(
-            offset(960.0, 40.0, 1000.0, 400.0),
-            600.0,
-            "the end at the end"
-        );
+        let pace = Pace {
+            total: 1000.0,
+            height: 400.0,
+            usual: 40.0,
+        };
+        assert_eq!(pace.offset(960.0, 40.0), 600.0, "the end at the end");
+        assert_eq!(pace.offset(950.0, 50.0), 600.0, "with a taller band too");
+        let fits = Pace {
+            total: 300.0,
+            ..pace
+        };
+        assert_eq!(fits.offset(10.0, 40.0), 0.0, "fits: no scroll");
     }
 
-    /// Dragging the band by some rows moves it on screen by exactly those rows, so it stays
-    /// under the pointer, scrolled map or not.
+    /// A band drawn some rows down the map, its top put where [`Pace::ratio`] says, is drawn
+    /// exactly there again, scrolled map or not: a drag keeps it under the pointer. And however
+    /// tall the band is, away from the ends: a heading coming onto the screen does not move it.
     #[test]
     fn a_drag_keeps_the_band_under_the_pointer() {
-        for (total, height) in [(1000.0, 400.0), (300.0, 400.0)] {
-            let band = 40.0;
-            let screen = |top: f64| top - offset(top, band, total, height);
-            let ratio = drag_ratio(band, total, height);
-            for (top, dy) in [(0.0, 50.0), (200.0, -30.0), (100.0, 120.0)] {
-                let moved = (top + dy * ratio).clamp(0.0, total - band);
-                if moved == top + dy * ratio {
-                    assert!((screen(moved) - screen(top) - dy).abs() < 1e-9);
+        for total in [1000.0, 300.0] {
+            let pace = Pace {
+                total,
+                height: 400.0,
+                usual: 40.0,
+            };
+            for screen in [0.0, 50.0, 200.0, 300.0] {
+                let top = (screen * pace.ratio()).min(total - 40.0);
+                for band in [30.0, 40.0, 46.0] {
+                    let drawn = top - pace.offset(top, band);
+                    assert!((drawn - screen).abs() < 1e-9 || top == total - 40.0);
                 }
             }
         }

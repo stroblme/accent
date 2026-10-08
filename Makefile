@@ -307,11 +307,21 @@ smoke: gtk-bench vault xvfb
 #
 # `ACCENT_BENCH_CLOSE=1` exits 1 when a closed window leaves its vault referenced, which on a
 # remote vault keeps its `serve` and forwards up. One note in the vault, so a tab is open too.
+#
+# `ACCENT_BENCH_COMPLETE` types completions into a note and into a C file answered by
+# `build-aux/fake-lsp.py`, configured for the scratch vault, and is held against `complete.expected`.
 drills: gtk-bench xvfb
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
 	grep '^bench ' "$$xdg/keys" | diff -u apps/gtk/src/bench/keys.expected -
 	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && \
 		ACCENT_BENCH_CLOSE=1 exec timeout 60 $(TARGET_DIR)/accent "$$0"' "$$xdg/vault"
+	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && mkdir -p "$$XDG_CONFIG_HOME/accent" && \
+		printf "[vaults.\"%s\".lsp.servers]\nc = [\"python3\", \"%s\"]\n" "$$0" "$(CURDIR)/build-aux/fake-lsp.py" \
+			>"$$XDG_CONFIG_HOME/accent/config.toml" && \
+		ACCENT_BENCH_COMPLETE=note:note.md timeout 60 $(TARGET_DIR)/accent "$$0" && \
+		ACCENT_BENCH_COMPLETE=code:complete.c timeout 60 $(TARGET_DIR)/accent "$$0"' \
+		"$$xdg/vault" >"$$xdg/complete" && \
+	grep '^bench ' "$$xdg/complete" | diff -u apps/gtk/src/bench/complete.expected -
 
 ## server: build the static accent-cli that gets uploaded to a remote host, for x86_64 and aarch64
 #

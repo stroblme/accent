@@ -356,11 +356,14 @@ fn own_save_updates_the_index_without_a_file_changed_event() {
 /// Two vaults on one index, as the app and `accent-cli mcp` are: a write through one is taken
 /// into the index by its own worker, so the other's watcher finds the row already up to date and
 /// must still tell its window — the edited note to its tab, the new one to the tree — while each
-/// one's own saves stay quiet in it. Depends on real inotify events.
+/// one's own saves stay quiet in it. The two save different notes: the watcher may say a change
+/// twice, and a late repeat of the other's would read as an echo of one's own. Depends on real
+/// inotify events.
 #[test]
 fn a_write_through_another_vault_on_the_same_index_reaches_this_one() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("Note.md"), "old\n").unwrap();
+    std::fs::write(root.path().join("Other.md"), "old\n").unwrap();
     let cache = tempfile::tempdir().unwrap();
     let db = cache.path().join("index.db");
     let open = || {
@@ -393,19 +396,81 @@ fn a_write_through_another_vault_on_the_same_index_reaches_this_one() {
         .is_some(),
         "the new note never reached the other vault's tree"
     );
-    let own = |e: &Event| matches!(e, Event::FileChanged(p) if p == "Note.md");
+    let changed =
+        |rel: &'static str| move |e: &Event| matches!(e, Event::FileChanged(p) if p == rel);
     assert!(
-        wait_for(&mcp_events, own, Duration::from_secs(1)).is_none(),
+        wait_for(&mcp_events, changed("Note.md"), Duration::from_secs(1)).is_none(),
         "a save came back to the vault that made it"
     );
 
-    let (_, etag) = app.read("Note.md").unwrap();
-    app.save("Note.md", "newer\n", Some(etag)).unwrap();
-    assert!(wait_for(&mcp_events, own, BUDGET).is_some());
+    let (_, etag) = app.read("Other.md").unwrap();
+    app.save("Other.md", "newer\n", Some(etag)).unwrap();
+    assert!(wait_for(&mcp_events, changed("Other.md"), BUDGET).is_some());
     assert!(
-        wait_for(&events, own, Duration::from_secs(1)).is_none(),
+        wait_for(&events, changed("Other.md"), Duration::from_secs(1)).is_none(),
         "a save came back to the vault that made it"
     );
+}
+
+/// A late echo of another process's change can reach the worker in the same batch as this
+/// vault's own save of that file, the save already on disk: the save stays quiet, and the next
+/// change of the other process's is still news. Unwatched, the messages are the test's own; the
+/// walk of `sub` keeps the worker busy while the two are posted, so they arrive together.
+#[test]
+fn an_own_save_stays_quiet_behind_a_late_echo_of_another_change() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let note = root_path.join("Note.md");
+    std::fs::write(&note, "old\n").unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let db = cache.path().join("index.db");
+    let (tx, rx) = channel();
+    let (events, event_rx) = channel();
+    let worker = spawn(
+        root_path.clone(),
+        Index::open(&db).unwrap(),
+        rx,
+        tx.clone(),
+        events,
+        false,
+        Arc::new(AtomicU8::new(RUN)),
+    )
+    .unwrap();
+    assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+    std::fs::create_dir(root_path.join("sub")).unwrap();
+    for i in 0..600 {
+        std::fs::write(root_path.join(format!("sub/n{i}.md")), "body").unwrap();
+    }
+    // The other process writes the note and takes it into the index first.
+    let mut other = Index::open(&db).unwrap();
+    let mut theirs = |text: &str| {
+        fs::write_note(&note, text, None).unwrap();
+        other.update_file(&root_path, "Note.md").unwrap();
+    };
+    let changed = || {
+        let (reply, done) = channel();
+        tx.send(Msg::Settled(reply)).unwrap();
+        done.recv().unwrap();
+        event_rx
+            .try_iter()
+            .any(|e| matches!(e, Event::FileChanged(p) if p == "Note.md"))
+    };
+    theirs("theirs\n");
+    let etag = fs::write_note(&note, "mine\n", None).unwrap();
+    tx.send(Msg::Rescan("sub".to_string())).unwrap();
+    tx.send(Msg::Fs(VaultEvent::Changed(note.clone()))).unwrap();
+    tx.send(Msg::Saved {
+        rel: "Note.md".to_string(),
+        etag,
+    })
+    .unwrap();
+    assert!(!changed(), "an own save came back behind another's echo");
+
+    theirs("theirs again\n");
+    tx.send(Msg::Fs(VaultEvent::Changed(note.clone()))).unwrap();
+    assert!(changed(), "another's change after it was lost");
+    tx.send(Msg::Shutdown).unwrap();
+    worker.join().unwrap();
 }
 
 /// Depends on real inotify events.

@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-pub(super) const SCHEMA_VERSION: i64 = 12;
+pub(super) const SCHEMA_VERSION: i64 = 13;
 
 /// Biggest non-markdown file whose text goes into the index.
 ///
@@ -60,6 +60,21 @@ CREATE TABLE headings(file_id INTEGER NOT NULL, level INTEGER NOT NULL, text TEX
 -- `aliases` table above, which is the filesystem's: a second path to the same file.
 CREATE TABLE note_aliases(file_id INTEGER NOT NULL, name TEXT NOT NULL);
 CREATE TABLE notes(file_id INTEGER PRIMARY KEY, body TEXT NOT NULL, title TEXT NOT NULL);
+-- A code file's declarations as `code::symbols` finds them: what an outline, a caller and a
+-- callee are answered from without a language server. Only a file `code::lang_of` reads has any.
+-- Lines are kept beside the bytes so an outline needs no file read.
+CREATE TABLE symbols(
+    file_id    INTEGER NOT NULL,
+    kind       INTEGER NOT NULL,
+    name       TEXT NOT NULL,
+    container  TEXT,
+    byte_start INTEGER NOT NULL,
+    byte_end   INTEGER NOT NULL,
+    line       INTEGER NOT NULL,
+    end_line   INTEGER NOT NULL,
+    signature  TEXT NOT NULL,
+    test       INTEGER NOT NULL
+);
 
 -- `body` stays column 0 so `snippet(notes_fts, 0, ...)` keeps quoting the note text, and so the
 -- bm25 weights below read in the same order: body first, title second.
@@ -156,6 +171,8 @@ CREATE INDEX idx_note_aliases_file ON note_aliases(file_id);
 CREATE INDEX idx_files_devino   ON files(dev, ino);
 CREATE INDEX idx_files_parent   ON files(parent_dir);
 CREATE INDEX idx_files_kind_mt  ON files(kind, mtime_ns DESC);
+CREATE INDEX idx_symbols_name   ON symbols(name COLLATE NOCASE);
+CREATE INDEX idx_symbols_file   ON symbols(file_id);
 CREATE INDEX idx_aliases_file   ON aliases(file_id);
 "#;
 
@@ -174,6 +191,7 @@ DROP TABLE IF EXISTS notes_fts;
 DROP TABLE IF EXISTS notes_tri;
 DROP TABLE IF EXISTS notes;
 DROP TABLE IF EXISTS headings;
+DROP TABLE IF EXISTS symbols;
 DROP TABLE IF EXISTS note_aliases;
 DROP TABLE IF EXISTS tags;
 DROP TABLE IF EXISTS links;

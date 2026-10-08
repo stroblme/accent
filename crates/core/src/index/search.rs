@@ -84,6 +84,35 @@ impl Index {
         self.per_match(hits, &phrase, limit)
     }
 
+    /// The files holding any of `words`, each matched as the start of a word, best first by
+    /// `bm25` with the title weighted as [`search`](Self::search) weights it, at most `limit`:
+    /// one row per file, `(rel_path, title)`, for a question asked in words rather than as a
+    /// phrase. What git ignores is left out, a note never.
+    pub fn rank_files(
+        &self,
+        words: &[String],
+        limit: usize,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let q: Vec<String> = words
+            .iter()
+            .filter(|w| !w.trim().is_empty())
+            .map(|w| format!("\"{}\"*", w.replace('"', "\"\"")))
+            .collect();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare_cached(
+            "SELECT f.rel_path, f.title FROM notes_fts JOIN files f ON f.id = notes_fts.rowid
+             WHERE notes_fts MATCH ?1 AND (f.git_ignored = 0 OR f.kind = ?2)
+             ORDER BY bm25(notes_fts, 1.0, 10.0) LIMIT ?3",
+        )?;
+        let rows = st.query_map(
+            params![q.join(" OR "), FileKind::Markdown.as_i64(), limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// What the trigram index adds below a [`search`](Self::search) that found something: the
     /// files holding the query mid-word, in [`infix`](Self::infix)'s order, leaving out the
     /// `skip` files already listed, at most `limit` rows. `toggle` finds `retoggle.md` here.
@@ -580,7 +609,7 @@ fn fold_char(c: char) -> char {
     }
 }
 
-fn fold(s: &str) -> String {
+pub(super) fn fold(s: &str) -> String {
     s.chars().map(fold_char).collect()
 }
 
@@ -704,6 +733,27 @@ mod tests {
     use crate::index::Change;
     use crate::index::testing::{fixture, open};
     use std::fs;
+
+    /// Any of the words finds a file, each as the start of a word, and one row per file.
+    #[test]
+    fn rank_files_finds_any_word_once_per_file() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let words = |w: &[&str]| w.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            ix.rank_files(&words(&["ferr"]), 10).unwrap(),
+            [("sub/Beta.md".to_string(), Some("Beta".to_string()))]
+        );
+        let both = ix
+            .rank_files(&words(&["ferris", "alpha", "body"]), 10)
+            .unwrap();
+        let mut paths: Vec<&str> = both.iter().map(|(p, _)| p.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, ["a.md", "sub/Beta.md"]);
+        assert!(ix.rank_files(&words(&[" "]), 10).unwrap().is_empty());
+    }
 
     #[test]
     fn fts_search_finds_note_bodies() {

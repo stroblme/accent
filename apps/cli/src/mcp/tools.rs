@@ -1,8 +1,9 @@
 //! The tools, each a façade call or two run on the blocking pool, and the arguments they take.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
-use accent_api::{Etag, Read, SaveError, fs};
+use accent_api::{Etag, FileKind, Read, SaveError, fs};
 use accent_core::markdown;
 use accent_core::path::linked_path;
 use base64::Engine;
@@ -12,7 +13,7 @@ use rmcp::{schemars, tool, tool_router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{MAX_OUT, Server, answer, etag_string, fail, image_type, line_at, locked};
+use super::{MAX_OUT, Server, answer, etag_string, explore, fail, image_type, line_at, locked};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SearchArgs {
@@ -44,6 +45,18 @@ struct PathArgs {
 struct TagArgs {
     /// List the files holding this tag, without its `#`, instead of every tag.
     tag: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct DirArgs {
+    /// The folder, relative to the vault root; the root when left out.
+    path: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct LimitArgs {
+    /// Most rows to return, 20 when left out, 500 at most.
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -264,6 +277,135 @@ impl Server {
         .await
     }
 
+    /// A question about the vault answered in one call: start here. `query` takes plain words,
+    /// names, vault paths, `[[links]]` and `#tags` in any mix; the answer is markdown, the files
+    /// it is about best first, each with its outline, the links going out of it and coming in,
+    /// and the sections holding the words verbatim as `<line>\t<text>`, the rest named below
+    /// them. A query that is one path or one link answers with that file's whole card.
+    #[tool(annotations(read_only_hint = true))]
+    async fn explore(
+        &self,
+        Parameters(a): Parameters<explore::ExploreArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let text = explore::explore(s, &a)?;
+            Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+        })
+        .await
+    }
+
+    /// The entries of one folder, folders first: each one's path, kind (`dir`, `note`, `pdf`,
+    /// `file`), a file's size in bytes, when it was last modified (UTC), a note's title, and
+    /// whether the index holds it, which a dependency or build tree it never walks is listed
+    /// without.
+    #[tool(annotations(read_only_hint = true))]
+    async fn list_dir(&self, Parameters(a): Parameters<DirArgs>) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let rel = match a.path.as_deref().map(|p| p.trim_matches('/')) {
+                Some(p) if !p.is_empty() => s.inside(p)?,
+                _ => String::new(),
+            };
+            let partial = s.ready.wait();
+            let rows: Vec<Value> = s
+                .vault
+                .list_dir(&rel)
+                .map_err(fail)?
+                .into_iter()
+                .filter(|f| s.shown(&f.rel_path))
+                .map(|f| {
+                    let indexed = f.id != 0;
+                    let mut row = json!({"path": f.rel_path, "kind": kind_name(f.kind)});
+                    if indexed && f.kind != FileKind::Dir {
+                        row["size"] = json!(f.size);
+                    }
+                    if indexed {
+                        row["modified"] = json!(modified(f.mtime_ns));
+                    }
+                    if let Some(title) = f.title.filter(|_| f.kind == FileKind::Markdown) {
+                        row["title"] = json!(title);
+                    }
+                    row["indexed"] = json!(indexed);
+                    row
+                })
+                .collect();
+            Ok(answer(json!(rows), partial))
+        })
+        .await
+    }
+
+    /// The files modified last, newest first: notes, PDFs and other files alike, leaving out
+    /// what git ignores. Each row is the path and when it was modified (UTC).
+    #[tool(annotations(read_only_hint = true))]
+    async fn recent_changes(
+        &self,
+        Parameters(a): Parameters<LimitArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let partial = s.ready.wait();
+            let limit = a.limit.unwrap_or(20).min(500);
+            let rows: Vec<Value> = s
+                .vault
+                .recent_files(limit)
+                .map_err(fail)?
+                .into_iter()
+                .filter(|rel| s.shown(rel))
+                .filter_map(|rel| {
+                    let etag = s.vault.stat(&rel).ok()??;
+                    Some(json!({"path": rel, "modified": modified(etag.mtime_ns)}))
+                })
+                .collect();
+            Ok(answer(json!(rows), partial))
+        })
+        .await
+    }
+
+    /// The notes links point at that are not written yet, by the path a new note would take
+    /// for them, each with up to five of the notes and lines linking to it.
+    #[tool(annotations(read_only_hint = true))]
+    async fn missing_notes(
+        &self,
+        Parameters(a): Parameters<LimitArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let partial = s.ready.wait();
+            let missing = s.vault.missing_notes().map_err(fail)?;
+            let mut sources: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+            for (src, target, at) in s.vault.unresolved_links().map_err(fail)? {
+                let held = sources
+                    .entry(markdown::link_key(&linked_path(&target)))
+                    .or_default();
+                if held.len() < 5 {
+                    held.push((src, at as usize));
+                }
+            }
+            let limit = a.limit.unwrap_or(20).min(500);
+            let rows: Vec<Value> = missing
+                .iter()
+                .filter(|rel| s.shown(rel))
+                .take(limit)
+                .map(|rel| {
+                    let from = sources.remove(&markdown::link_key(rel)).unwrap_or_default();
+                    let from: Vec<Value> = s
+                        .lines(from)
+                        .into_iter()
+                        .map(|(path, line, _)| json!({"path": path, "line": line}))
+                        .collect();
+                    json!({"path": rel, "linked_from": from})
+                })
+                .collect();
+            let mut out = answer(json!(rows), partial);
+            if missing.len() > rows.len() {
+                out.content.push(ContentBlock::text(format!(
+                    "{} of {} missing notes listed: ask with a higher limit for more.",
+                    rows.len(),
+                    missing.len()
+                )));
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     /// The highlights made on a PDF, which accent keeps as links in the notes: each one's
     /// 1-based page, the text it quotes, and the note and line holding it.
     #[tool(annotations(read_only_hint = true))]
@@ -410,6 +552,24 @@ impl Server {
         })
         .await
     }
+}
+
+/// A file's kind as `list_dir` names it.
+fn kind_name(kind: FileKind) -> &'static str {
+    match kind {
+        FileKind::Dir => "dir",
+        FileKind::Markdown => "note",
+        FileKind::Pdf => "pdf",
+        FileKind::Other => "file",
+        FileKind::Conflict => "conflict",
+    }
+}
+
+/// A modification time as the wire carries it: RFC 3339, UTC, to the second.
+fn modified(mtime_ns: i64) -> String {
+    chrono::DateTime::from_timestamp_nanos(mtime_ns)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 /// Where a patch puts its text in the section: in place of it, after it, or before it.

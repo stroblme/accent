@@ -51,6 +51,10 @@ const CONTEXT: usize = 3;
 /// changed (2026-10-08), and room for both sides of a note the editor lays again on every
 /// keystroke (16 KB, `editor::INSTANT`).
 const ON_THE_SPOT: usize = 64 * 1024;
+/// How long a diff on a worker may spend refining changed lines word by word, where one made here
+/// gets [`diff::REFINE`]: room for every pair of a long file rewritten throughout (200 ms for
+/// 120,000 of them, 2026-10-08).
+const REFINE_ON_WORKER: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Row backgrounds. This is the one place DESIGN.md's "only accent, foreground and is_dark" rule
 /// bends: a diff has to read as green and red, and libadwaita publishes its success/error colours
@@ -246,18 +250,34 @@ struct Diffed {
     rows: Vec<Row>,
     /// [`line_starts`] of each text.
     starts: [Vec<i32>; 2],
+    /// Whether every changed pair was refined within the time it was given.
+    refined: bool,
 }
 
 impl Diffed {
-    fn of(old: &str, new: &str) -> Diffed {
-        let lines = diff::lines(old, new);
+    fn of(old: &str, new: &str, refine: std::time::Duration) -> Diffed {
+        let (lines, refined) = diff::lines_within(old, new, refine);
         Diffed {
             rows: diff::align(&lines),
             lines,
             starts: [line_starts(old), line_starts(new)],
+            refined,
         }
     }
 }
+
+/// Tag `line`'s emphasis `tag`, the line starting `from` characters into `buffer`.
+fn emphasise(buffer: &sourceview5::Buffer, tag: &str, from: i32, line: &DiffLine) {
+    // The diff's ranges are byte offsets into the line; the buffer counts characters.
+    for range in &line.emphasis {
+        let at =
+            |byte: usize| buffer.iter_at_offset(from + line.text[..byte].chars().count() as i32);
+        buffer.apply_tag_by_name(tag, &at(range.start), &at(range.end));
+    }
+}
+
+/// Lines of emphasis [`Compare::emphasise`] lays per turn of the main loop: about 5 ms of tags.
+const EMPHASIS_PER_TURN: usize = 2000;
 
 /// What an entry [`Compare::offer`] puts on the panes' menus does with a selection, and what a
 /// button [`Compare::offer_hunks`] puts on each hunk does with that hunk's lines.
@@ -344,6 +364,8 @@ pub struct Compare {
     edits: Cell<u64>,
     diffed: Cell<Option<u64>>,
     asked: Cell<Option<u64>>,
+    /// Lays so far, which ends a [`Compare::emphasise`] still under way.
+    lays: Cell<u64>,
     /// The row ranges hidden right now, each with the key it can be opened by.
     hidden: RefCell<Vec<(Range<usize>, usize)>>,
     /// Lines the user asked to see, every line of each run they opened, by their number on the
@@ -417,6 +439,7 @@ impl Compare {
             edits: Cell::new(0),
             diffed: Cell::new(None),
             asked: Cell::new(None),
+            lays: Cell::new(0),
             hidden: RefCell::new(Vec::new()),
             opened: RefCell::new(HashSet::new()),
             unfold,
@@ -552,8 +575,7 @@ impl Compare {
         editor::style_companion(pane.flavour, &pane.buffer, &pane.view);
         // Diffed here, not on a worker however long the texts: the next re-read keeps its line by
         // these rows, the Git pane reading both sides of a staged change one after the other.
-        let (old, new) = (self.text(Side::Old), self.text(Side::New));
-        self.store(Diffed::of(&old, &new), self.edits.get());
+        self.diff_here(self.text(Side::Old), self.text(Side::New));
         self.refresh();
     }
 
@@ -736,7 +758,8 @@ impl Compare {
     /// asks for diffing them again. The first lay diffs here, before the columns are shown: over
     /// shown columns, the thousands of buttons a long file's hidden runs and hunks carry held the
     /// main loop for 8.3 s, where the whole first lay takes 1.5 s (120,000 rows of CSV,
-    /// 2026-10-08). So does a side read again ([`Compare::set_side`]).
+    /// 2026-10-08). So does a side read again ([`Compare::set_side`]). A diff made here refines
+    /// what the main loop can spare and leaves the rest to a worker ([`Compare::diff_here`]).
     fn lay(&self, opening: bool) {
         let edits = self.edits.get();
         if !self.current() {
@@ -745,26 +768,87 @@ impl Compare {
             }
             let (old, new) = (self.text(Side::Old), self.text(Side::New));
             if !opening && old.len() + new.len() > ON_THE_SPOT {
-                self.asked.set(Some(edits));
                 self.columns.wait();
-                let weak = self.weak.clone();
-                glib::spawn_future_local(async move {
-                    let diffed =
-                        crate::work::off_thread("diff", move || Diffed::of(&old, &new)).await;
-                    let Some(c) = weak.upgrade().filter(|c| c.asked.get() == Some(edits)) else {
-                        return;
-                    };
-                    c.asked.set(None);
-                    if let Some(diffed) = diffed.filter(|_| c.edits.get() == edits) {
-                        c.store(diffed, edits);
-                        c.lay(false);
-                    }
-                });
+                self.diff_on_worker(old, new);
                 return;
             }
-            self.store(Diffed::of(&old, &new), edits);
+            self.diff_here(old, new);
         }
         self.apply(opening);
+    }
+
+    /// Diff `old` and `new`, the texts as they stand, here: the changed lines refined for
+    /// [`diff::REFINE`], and the diff made again on a worker with room for all of them where that
+    /// was too short, the rows laid again when it answers.
+    fn diff_here(&self, old: String, new: String) {
+        let edits = self.edits.get();
+        let diffed = Diffed::of(&old, &new, diff::REFINE);
+        let refined = diffed.refined;
+        self.store(diffed, edits);
+        if !refined {
+            self.diff_on_worker(old, new);
+        }
+    }
+
+    /// Diff `old` and `new`, the texts as they stand, on a worker, and lay the rows once it
+    /// answers, unless they have changed since.
+    fn diff_on_worker(&self, old: String, new: String) {
+        let edits = self.edits.get();
+        self.asked.set(Some(edits));
+        let weak = self.weak.clone();
+        glib::spawn_future_local(async move {
+            let diffed =
+                crate::work::off_thread("diff", move || Diffed::of(&old, &new, REFINE_ON_WORKER))
+                    .await;
+            let Some(c) = weak.upgrade().filter(|c| c.asked.get() == Some(edits)) else {
+                return;
+            };
+            c.asked.set(None);
+            match diffed.filter(|_| c.edits.get() == edits) {
+                // The rows as laid, only refined further: emphasis moves no row, so nothing else
+                // is laid again, which for a long file rewritten throughout held the main loop
+                // for 17 s (120,000 rows, 2026-10-08).
+                Some(diffed) if c.diffed.get() == Some(edits) => {
+                    let was = std::mem::replace(&mut *c.lines.borrow_mut(), diffed.lines);
+                    let lines = c.lines.borrow();
+                    let owed = (0..was.len())
+                        .filter(|&i| was[i].emphasis.is_empty() && !lines[i].emphasis.is_empty())
+                        .collect();
+                    drop(lines);
+                    c.emphasise(owed);
+                }
+                Some(diffed) => {
+                    c.store(diffed, edits);
+                    c.lay(false);
+                }
+                None => {}
+            }
+        });
+    }
+
+    /// Tag the emphasis of the kept lines `owed`, [`EMPHASIS_PER_TURN`] of them a turn of the
+    /// main loop, until the next lay takes over.
+    fn emphasise(&self, mut owed: Vec<usize>) {
+        let lays = self.lays.get();
+        let weak = self.weak.clone();
+        glib::idle_add_local(move || {
+            let Some(c) = weak.upgrade().filter(|c| c.lays.get() == lays) else {
+                return glib::ControlFlow::Break;
+            };
+            let (lines, starts) = (c.lines.borrow(), c.starts.borrow());
+            for i in owed.drain(..owed.len().min(EMPHASIS_PER_TURN)) {
+                let line = &lines[i];
+                for side in [Side::Old, Side::New] {
+                    if let (Some((_, tag)), Some(n)) = (tags(side, line.op), side.number(line)) {
+                        emphasise(&c.pane(side).buffer, tag, starts[side.idx()][n - 1], line);
+                    }
+                }
+            }
+            match owed.is_empty() {
+                true => glib::ControlFlow::Break,
+                false => glib::ControlFlow::Continue,
+            }
+        });
     }
 
     /// Whether the diff kept is the texts' as they stand.
@@ -782,6 +866,7 @@ impl Compare {
 
     /// Lay the diff kept over both panes, see [`Compare::lay`].
     fn apply(&self, opening: bool) {
+        self.lays.set(self.lays.get() + 1);
         let (lines, rows, starts) = (
             self.lines.borrow(),
             self.rows.borrow(),
@@ -791,6 +876,7 @@ impl Compare {
             self.clear_marks(side);
         }
 
+        let (mut emphasised, mut owed) = (0, Vec::new());
         for side in [Side::Old, Side::New] {
             let buffer = &self.pane(side).buffer;
             let st = &starts[side.idx()];
@@ -808,12 +894,13 @@ impl Compare {
                     &buffer.iter_at_offset(from),
                     &buffer.iter_at_offset(to),
                 );
-                // The diff's ranges are byte offsets into the line; the buffer counts characters.
-                for range in &line.emphasis {
-                    let at = |byte: usize| {
-                        buffer.iter_at_offset(from + line.text[..byte].chars().count() as i32)
-                    };
-                    buffer.apply_tag_by_name(emph_tag, &at(range.start), &at(range.end));
+                // The first lines' emphasis now, the rest a little at a time.
+                if !line.emphasis.is_empty() {
+                    match emphasised < EMPHASIS_PER_TURN {
+                        true => emphasise(buffer, emph_tag, from, line),
+                        false => owed.extend(side.of(row)),
+                    }
+                    emphasised += 1;
                 }
             }
         }
@@ -940,6 +1027,9 @@ impl Compare {
         self.columns.lay(laid);
         if let Some(laid) = self.laid.borrow().as_ref() {
             laid();
+        }
+        if !owed.is_empty() {
+            self.emphasise(owed);
         }
     }
 

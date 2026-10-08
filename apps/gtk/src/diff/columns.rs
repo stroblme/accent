@@ -203,7 +203,7 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
     press.connect_pressed(move |press, _, x, y| {
         let bar = |w: gtk::Widget| {
             w.ancestor(gtk::Scrollbar::static_type())
-                .or_else(|| w.ancestor(sourceview5::Map::static_type()))
+                .or_else(|| w.ancestor(crate::minimap::Minimap::static_type()))
                 .is_some()
         };
         let picked = press

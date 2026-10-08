@@ -482,6 +482,7 @@ impl Tab {
                     highlight::hang(&tab.buffer, &tab.view);
                 }
                 wrap::measure(&tab.view);
+                tab.map.relayout();
                 // A comparison's companion is set in the same font, and takes the page with it.
                 if let Some(hosted) = tab.hosted() {
                     hosted.follow_editor(true);
