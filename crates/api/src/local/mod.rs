@@ -301,7 +301,7 @@ impl Local {
     /// The caller must already be off the main loop: the worker may be in the middle of a walk,
     /// and this then waits for the batch that walk is on. A worker that has gone answers nothing,
     /// which is no reason to fail a write that already reached the disk.
-    fn settle_index(&self) {
+    pub(crate) fn settle_index(&self) {
         let (reply, answer) = channel();
         if self.tx.send(Msg::Settled(reply)).is_err() || answer.recv().is_err() {
             tracing::debug!("vault worker is gone; not waiting for the index");

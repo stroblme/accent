@@ -328,6 +328,7 @@ impl Server {
                 .vault
                 .save(&rel, &fs::for_disk(&text, t.crlf, false), Some(t.etag))
                 .map_err(|e| unsaved(&rel, e))?;
+            s.settle();
             Ok(answer(
                 json!({"path": rel, "etag": etag_string(etag)}),
                 None,
@@ -363,6 +364,7 @@ impl Server {
                 .vault
                 .save(&rel, &fs::for_disk(&a.content, crlf, false), expected)
                 .map_err(|e| unsaved(&rel, e))?;
+            s.settle();
             let created = a.etag.is_none();
             Ok(answer(
                 json!({"path": rel, "etag": etag_string(etag), "created": created}),
@@ -403,6 +405,7 @@ impl Server {
                     (rel, created)
                 }
             };
+            s.settle();
             Ok(answer(json!({"path": rel, "created": created}), None))
         })
         .await

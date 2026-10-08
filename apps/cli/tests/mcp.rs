@@ -245,10 +245,14 @@ fn mcp_writes_only_over_what_it_read() {
     let etag = serde_json::from_str::<Value>(&read[0]).unwrap()["etag"].clone();
     let patch = json!({"path": "a.md", "heading": "Part", "mode": "replace",
                        "content": "new body", "etag": etag});
+    // Once the index is up, a write is in it by the time the call answers.
+    c.call("search_notes", json!({"query": "kumquat"}));
     let (said, error) = c.call("patch_note", patch.clone());
     assert!(!error, "{said:?}");
     let patched = "# Title\nintro\n## Part\nnew body\n";
     assert_eq!(scratch.read("a.md"), patched);
+    let (hits, _) = c.call("search_notes", json!({"query": "new body"}));
+    assert!(hits[0].contains(r#""path":"a.md""#), "{hits:?}");
     let (said, error) = c.call("patch_note", patch);
     assert!(error && said[0].contains("changed since"), "{said:?}");
     assert_eq!(scratch.read("a.md"), patched);

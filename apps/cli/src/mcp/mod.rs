@@ -163,6 +163,15 @@ impl Shared {
         }
     }
 
+    /// Wait for the index to take in what was just written, so that what the agent asks next
+    /// finds it. Not while the first walk runs, which holds the write back until it ends: the
+    /// index reads say they are partial meanwhile.
+    fn settle(&self) {
+        if locked(&self.ready.state).done {
+            self.vault.settle_index();
+        }
+    }
+
     /// A text file's text, as the index counted its offsets.
     fn text(&self, rel: &str) -> Result<accent_api::Text, String> {
         match self.vault.read_text(rel).map_err(fail)? {

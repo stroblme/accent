@@ -224,6 +224,15 @@ impl Vault {
         }
     }
 
+    /// Wait until the index has taken in every write made through this vault before the call:
+    /// the worker takes a write in a batch later, and a search right after it would miss it.
+    /// Off the main loop only, a walk being one batch. A remote vault answers at once.
+    pub fn settle_index(&self) {
+        if let Backend::Local(v) = &self.backend {
+            v.settle_index();
+        }
+    }
+
     /// Join `rel` to the vault root, refusing anything that would land outside it.
     ///
     /// For a remote vault the answer is a path on the *host*, so it is what to show and what to
