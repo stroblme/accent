@@ -579,7 +579,7 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
     }
 }
 
-/// What the Tags pane asks of the index.
+/// What the Tags section asks of the index.
 fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
     sidebar::TagsData {
         tags: Arc::new({
@@ -791,6 +791,18 @@ fn adopt_sidebar(
         #[weak]
         app,
         move || app.follow_outline()
+    ));
+    // Which sections are open is session state; and the References section, which follows a
+    // code tab's caret only while it is on screen, catches up as it opens.
+    pane.connect_section_toggled(glib::clone!(
+        #[weak]
+        app,
+        move |name, open| {
+            app.save_session_soon();
+            if name == "references" && open {
+                app.refresh_references();
+            }
+        }
     ));
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
@@ -1033,6 +1045,7 @@ thread_local! {
 /// row's disclosure and a dropdown's arrow, drawn from the `go-*` names instead: themes redraw
 /// `pan-*` (WhiteSur's use a single-quoted `fill` GTK cannot recolour, and drew nothing), and the
 /// Git pane's own disclosures are `go-*` already (DESIGN.md, Iconography).
+/// `.accent-section` is an Info pane section's header, inset as the pane's rows are.
 /// `.accent-lone-header` drops the bottom padding of the sidebar header, the one header in the
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
 /// bottom and its bar area another 3, so with 6 above and none below both headers hold their
@@ -1181,6 +1194,7 @@ fn install_chrome_css() {
              .accent-label-editor {{ box-shadow: 0 0 0 1px var(--accent-bg-color), \
                0 1px 4px var(--shade-color); }} \
              .accent-current-layer {{ box-shadow: inset 3px 0 var(--accent-bg-color); }} \
+             .accent-section > box > title {{ padding: 6px 12px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \

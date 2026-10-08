@@ -1136,7 +1136,7 @@ pub(super) struct Pane {
     pub(super) restart: Rc<dyn Fn()>,
     /// The vault moved while this pane was behind the switcher, so its rows no longer answer the
     /// question. Set by [`Sidebar::requery_search_soon`](super::Sidebar::requery_search_soon),
-    /// cleared by the query the next show runs. It starts false, unlike the Tags pane's: a box
+    /// cleared by the query the next show runs. It starts false, unlike the Tags list's: a box
     /// with nothing in it has nothing to catch up on.
     pub(super) dirty: Rc<Cell<bool>>,
     /// The Replace All button, and which page the body is showing with the rows on it — each by

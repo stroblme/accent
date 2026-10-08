@@ -1,4 +1,5 @@
-//! The Tags pane drill: whether its list follows a note's tags as they are written and taken away.
+//! The Tags section drill: whether its list follows a note's tags as they are written and taken
+//! away.
 
 use super::*;
 
@@ -9,13 +10,13 @@ const MARKER: &str = "zzbenchtag";
 const SETTLE: Duration = Duration::from_millis(1200);
 
 /// `ACCENT_BENCH_TAGS=<rel_note>` writes `#zzbenchtag` into `<rel_note>`, saves, takes it away
-/// and saves again, printing what the Tags pane lists at each step while the pane is on screen.
+/// and saves again, printing what the Tags section lists at each step while it is on screen.
 ///
 /// `tags_before` must not hold the marker, `tags_added` must, and `tags_removed` must not: that
-/// is the pane following the index in both directions without being switched away from and back.
-/// The note is left exactly as it was found.
+/// is the section following the index in both directions without being switched away from and
+/// back. The note is left exactly as it was found.
 pub(super) fn bench_tags(app: &Rc<App>, rel: &str) {
-    app.show_pane("tags");
+    app.show_section("tags");
     app.open_path(rel);
     let app = app.clone();
     let rel = rel.to_string();
@@ -49,8 +50,8 @@ pub(super) fn bench_tags(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// What the pane lists at one step, with the marker called out so a long list still answers the
-/// question at a glance.
+/// What the section lists at one step, with the marker called out so a long list still answers
+/// the question at a glance.
 fn bench_tags_print(app: &Rc<App>, step: &str) {
     let Some(sidebar) = app.sidebar.get() else {
         return println!("bench tags step={step} pane=none");
@@ -58,14 +59,14 @@ fn bench_tags_print(app: &Rc<App>, step: &str) {
     let names = sidebar.tag_names();
     println!(
         "bench tags step={step} showing={} marker={} rows={} picked={:?}",
-        sidebar.is_showing("tags"),
+        sidebar.section_live("tags"),
         names.iter().any(|name| name == MARKER),
         names.len(),
         sidebar.selected_tag()
     );
 }
 
-/// The first tag the pane lists, whatever the vault happens to hold.
+/// The first tag the section lists, whatever the vault happens to hold.
 fn first_tag(app: &Rc<App>) -> Option<String> {
     app.sidebar.get()?.tag_names().into_iter().next()
 }

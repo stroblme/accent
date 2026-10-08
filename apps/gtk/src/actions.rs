@@ -173,7 +173,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // No chord: it is the Search pane's own All button, and the palette is how a command with
     // no chord is found.
     ("win.search-all", "Search Ignored Files", &[]),
-    ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
+    ("win.pane-info", "Info Pane", &["<Control><Shift>b"]),
     ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
     ("win.git-sync", "Sync", &[]),
     ("win.git-sync-all", "Sync All Repositories", &[]),
@@ -287,11 +287,6 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-text", "Add Text", &[]),
     ("win.diagram-connector", "Add Connector", &[]),
     ("win.diagram-image", "Add Image…", &[]),
-    (
-        "win.pane-references",
-        "References Pane",
-        &["<Control><Shift>b"],
-    ),
     ("win.view-mode", "Toggle Preview", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
@@ -582,7 +577,12 @@ impl App {
                     sidebar.toggle_search_all();
                 }
             }
-            "pane-tags" => self.show_pane("tags"),
+            // The References section follows a code tab's caret only while it is on screen, so
+            // the pane comes up with what is under the caret now.
+            "pane-info" => {
+                self.show_pane("info");
+                self.refresh_references();
+            }
             "pane-git" => {
                 self.show_pane("git");
                 // The chord is how the keyboard reaches the commit box; the pane on its own
@@ -630,10 +630,6 @@ impl App {
             }
             "pane-outline" => self.show_pane("outline"),
             "pane-properties" => self.show_pane("properties"),
-            "pane-references" => {
-                self.show_pane("references");
-                self.refresh_references();
-            }
             "view-mode" => self.set_mode(self.mode.get().next()),
             "follow-link" => self.go_to_definition(),
             "conflict-current" | "conflict-incoming" | "conflict-both" => {

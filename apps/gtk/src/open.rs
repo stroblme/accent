@@ -923,14 +923,15 @@ impl App {
                     app.follow_outline();
                 }
                 // A code tab's references are about the symbol under the caret, so they follow
-                // it — but only while the pane is on screen, since nobody is reading it otherwise.
+                // it — but only while the section is on screen, since nobody is reading it
+                // otherwise.
                 if !tab.flavour().is_note()
                     && app.is_active(tab)
                     && app.sidebar_column.is_visible()
                     && app
                         .sidebar
                         .get()
-                        .is_some_and(|s| s.is_showing("references"))
+                        .is_some_and(|s| s.section_live("references"))
                 {
                     app.refresh_references();
                 }

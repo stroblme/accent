@@ -81,7 +81,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### Sidebar
 
-- An `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of eight panes: Files, Search, Tags, References, Git, Ports, Outline, Properties. The switcher sits in the sidebar header, level with the sidebar toggle, so the tree's first row lines up with the tabs.
+- An `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of seven panes: Files, Search, Info, Git, Ports, Outline, Properties. The switcher sits in the sidebar header, level with the sidebar toggle, so the tree's first row lines up with the tabs.
 - Git shows only where there is a repository, Ports only on a remote vault, Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
 - A vault always opens on Files: a search from another sitting is not where a vault starts.
 - Width is dragged on the `GtkPaned` handle, floor 200.
@@ -120,13 +120,14 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A note is never excluded, whatever ignores it: a notes vault gitignoring its own `*.md` is ordinary, so every filter has a markdown escape, and the tree dims an ignored file rather than hiding it.
 - There is no ignore file in the vault: `[search] exclude` in `config.toml` (vault-relative directories) joins git's answer in the same exclusion, so every rule above holds for it and a vault without a repository still has one. It does not replace the walk's built-in skips, which are about what the index and the watch budget can hold, not what a reader wants to see.
 
-**Tags**
+**Info**
 
-- A vertical `GtkPaned`: the tag list above, the files carrying the selected tag in the lower third.
-
-**References**
-
-- On a note, the notes linking to it, once each. On a source file, every use of the symbol under the caret as `path:line`, following the caret while shown. Wherever that would be nothing (a PDF, an image, a diagram, a text file with no server, the caret on nothing the server knows), the notes linking to the file.
+- What links to the file in front and the vault's tags, as sections one above the other: References, then Tags (user decision 2026-10-08: one pane where there were two, each with its icon in a switcher that sets the sidebar's floor). Each section folds to its header, a `GtkExpander` whose header is a tab stop that Enter and Space fold; its chevron is the `go-*` one the tree's is. The pane's icon is `dialog-information-symbolic`.
+- The open sections share the pane across a divider the reader drags, as VS Code's views do: a vertical `GtkPaned` per divider, built once and never reparented. With a section shut beside it, the divider lies against that section, which shows its header alone; the divider keeps its share of the height through a section being shut and opened again, and a double-click splits evenly. Which sections are open and where the divider is are the vault's session: both open at first.
+- A section that does not apply to the tab in front is hidden, not emptied; a shell, a comparison or no tab at all shows one `.compact` status page instead of the sections.
+- **References** is titled by what it lists. Backlinks: on a note, the notes linking to it, once each; and wherever nothing else answers (a PDF, an image, a diagram, a text file with no server, the caret on nothing the server knows), the notes linking to the file. References: on a source file, every use of the symbol under the caret as `path:line`, following the caret while the section is on screen. Definitions: a Go to Definition with several answers, until the next refresh. The rows' count sits beside the title, left out while an answer is coming and when there is none; an empty section says why in one dim line.
+- **Tags**: every tag in the vault with its count, filtered by the box over it, and the files carrying the picked tag across a vertical `GtkPaned` in the lower third. Shown only while a markdown note is in front (user decision 2026-10-08); a tag picked in the palette's `#` mode shows it over any tab until another tab comes to the front.
+- Info Pane (`Ctrl+Shift+B`) brings the pane up and asks References again; Go to Definition's several answers open the References section, and the palette's tag the Tags section, none of them moving the keyboard.
 
 **Outline**
 
@@ -157,7 +158,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A search result row is a match, not a file: each quotes its line with the match marked and the file and line dim beside it, and past five rows from one file the rest gather into a "+N more in this file" row, so no file takes the list. A hit opens on its place with the match marked.
 - The "+N more" row opens nothing: a click lists those matches in its place, the first where the row was, so the pointer rests on a match and the list does not move. A hundred come at a time, any rest behind a "+N more" row again, so a file with thousands of matches is walked rather than poured into the list. The file stays open through the vault changing under the same query, and a new query lists it shut; there is no collapse.
 - The marks are the tab's, not the bar's: they last until an edit moves them or that pane's bar replaces or clears the query.
-- A refill behind the reader — a save, a watcher event — leaves every list here and in Tags and Outline where it is, as the tree's does (Files): a row that goes with the keyboard on it hands it to the row now in its place.
+- A refill behind the reader — a save, a watcher event — leaves every list here and in Info and Outline where it is, as the tree's does (Files): a row that goes with the keyboard on it hands it to the row now in its place.
 
 ### Git pane
 
@@ -513,7 +514,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - **Diagnostics** underline the text, mark the gutter and print errors and warnings at the ends of their lines, cut with an ellipsis to the room the text column leaves, and cut again as their line is typed on; the hover and the gutter icon carry the whole message. Between publishes they move with the text, messages included, so a line typed in above one takes it down with its line.
 - The status bar counts them where a note counts words, and pressing the count takes the underlines, marks and line-end messages out of the text and back, the count and hover staying. Per tab, and not kept across a restart: a way past something in the way, not a preference.
 - On a note they are accent's own: a hint on a link the index cannot resolve, and a warning with the converter's reason over each formula the preview shows as source — a warning because pulldown-latex rejects some valid LaTeX.
-- **Outline** and **References** are the sidebar panes; **folding** is the gutter chevrons.
+- **Outline** and the Info pane's **References** section are the sidebar's; **folding** is the gutter chevrons.
 - A file whose server is not installed says so once — a toast on Go to Definition, a sentence in the Outline pane — and everything else keeps working.
 - A Go to Definition whose request fails says why ("Cannot go to the definition: …"), a host that stopped answering included; "No definition found" is a server that answered with nothing.
 - Which server answers for which language is a table in the app, overridden per vault in `config.toml` (`[vaults."<root>".lsp.servers]`); no preference, the answer being whether it is installed.
@@ -544,8 +545,9 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### Empty states
 
-- `AdwStatusPage` (States): no vault; no note open (in a remote window, the stored tabs waiting for the host); no search results ("Nothing in this vault matches this search", a hit being possibly a source file); no backlinks or references; no language server for the open file; nothing to outline.
+- `AdwStatusPage` (States): no vault; no note open (in a remote window, the stored tabs waiting for the host); no search results ("Nothing in this vault matches this search", a hit being possibly a source file); no file in front of the Info pane; no language server for the open file; nothing to outline.
 - `.compact` in the sidebar, where the full size dwarfs a 200–420 px column.
+- An empty section of the Info pane is one dim line under its header: a status page each would stack two in a column.
 
 ### Feedback
 
@@ -735,7 +737,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Panes
 
-- Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, References `Ctrl+Shift+B`, Git `Ctrl+Shift+G`, Outline `Ctrl+Shift+W`, Properties `Ctrl+Shift+A` (a diagram's), Show Hidden Files (unbound, also in Preferences → Files).
+- Sidebar `F9`, Files / Search `Ctrl+Shift+E` / `Ctrl+Shift+F`, Info `Ctrl+Shift+B`, Git `Ctrl+Shift+G`, Outline `Ctrl+Shift+W`, Properties `Ctrl+Shift+A` (a diagram's), Show Hidden Files (unbound, also in Preferences → Files).
 - The pane chords carry Control and Shift, so they stay the window's while a shell has the keyboard and open their pane from a shell too, unless Forward All Keys gives the shell them as well.
 
 ### Git
@@ -827,7 +829,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 - Symbolic icons from the Adwaita theme, with the shipped sets below as the exception: no other bundled glyphs, no emoji.
 - Every theme name the code asks for (`grep -rhoE '"[a-z0-9-]+-symbolic"' apps/gtk/src`) must exist in `/usr/share/icons/Adwaita/symbolic/`.
-- Where the theme has no glyph, the nearest name that says what the control does: Tags is `user-bookmarks-symbolic` (there is no `tag-symbolic`); the Git pane and Sync are `mail-send-receive-symbolic`, arrows leaving and arriving, its one network action (there is no git glyph); References is `mail-reply-sender-symbolic`, an arrow turning back, for "what points here" (`insert-link-symbolic` is a text-insertion mark, drawn off-centre); Outline is `view-list-bullet-symbolic`; a tab from outside the vault is `document-open-symbolic`, the action that put it there.
+- Where the theme has no glyph, the nearest name that says what the control does: the Git pane and Sync are `mail-send-receive-symbolic`, arrows leaving and arriving, its one network action (there is no git glyph); Outline is `view-list-bullet-symbolic`; a tab from outside the vault is `document-open-symbolic`, the action that put it there.
 - Diagnostics are `dialog-error-symbolic` and `dialog-warning-symbolic` in the gutter, the pair every desktop reads as those severities. A fold's chevron is `go-down-symbolic` open and `go-next-symbolic` shut, as the sidebar's disclosures are.
 - Where nothing fits, ship a glyph in the app `GResource` under the `io.github.stroblme.Accent` prefix, drawn on the 16 px symbolic grid with `fill="currentColor"` so it recolours with the theme. Never a coloured icon. A GResource rather than hicolor, so a run from the source tree has them too.
 - The shipped sets are [tabler-icons](https://github.com/tabler/tabler-icons) outlines (MIT, `apps/gtk/data/icons/LICENSE.tabler`) with their strokes turned into fills, GTK recolouring a symbolic icon by its `fill`: eighteen completion kinds (`lsp-<kind>-symbolic`), Adwaita having no glyph for a function or a type parameter; the drawing tools (`tool-pen`, `tool-highlighter`, `tool-eraser`, `tool-line`, `tool-rect`, `tool-circle`, `tool-adjust`, and a diagram's `tool-select`), the theme having no pen, marker or eraser, beside Adwaita's `insert-text`, `insert-image` and the Drawing toggle's `document-edit-symbolic`; the file types; and `remote-server-symbolic`, tabler's `server`, for a remote vault on the start screen, in Open Recent and on its waiting pages: a rack, where Adwaita's `network-server` is a box on a cable and WhiteSur's a tower.

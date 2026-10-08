@@ -1,4 +1,4 @@
-//! The left sidebar: Files / Search / Tags / References / Git / Ports / Outline in a view
+//! The left sidebar: Files / Search / Info / Git / Ports / Outline / Properties in a view
 //! switcher.
 //!
 //! The pane knows nothing about the vault. The file tree arrives as a finished widget and every
@@ -7,6 +7,7 @@
 //! the Ports pane is built with what forwards a port and nothing else, which is what keeps a
 //! pane from being wired to machinery it never calls.
 
+mod info;
 mod outline;
 mod ports;
 mod search;
@@ -18,16 +19,18 @@ pub use ports::Data as PortsData;
 pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
 
+use accent_core::config::InfoPane;
 use adw::prelude::*;
+use gtk::glib;
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 use widgets::path_list;
 
-use crate::widgets::{Debounce, scroller, status_page};
+use crate::widgets::{Debounce, scroller};
 
-/// How long a pane that is *on screen* holds its refresh back when the vault has moved under it:
+/// How long a list that is *on screen* holds its refresh back when the vault has moved under it:
 /// the Tags list, and the Search rows.
 ///
 /// It is also what collapses a batch into one query. The window says "the vault moved" once per
@@ -42,26 +45,20 @@ use crate::widgets::{Debounce, scroller, status_page};
 /// `Event::Indexed` from the worker is what replaces all three.
 const INDEX_SETTLE: Duration = Duration::from_millis(300);
 
-/// Notes pointing back at the open one, as an arrow returning to where it came from. Adwaita's one
-/// link-named glyph, `insert-link-symbolic`, is a text-insertion mark (two rules over a caret): it
-/// reads as "paste a link here" rather than "what links here", and it is the only icon of the four
-/// whose artwork is off centre, sitting a pixel low in its 16 px box.
-const BACKLINK_ICON: &str = "mail-reply-sender-symbolic";
 /// Arrows leaving and arriving: the pane is about what has gone out and what is still to come in.
 /// The reading is the one this pane had all along; the name is not. `network-transmit-receive`
 /// draws as two arrows in Adwaita but as a boxed device in WhiteSur, where the Git tab read as a
 /// network port — the artwork is the theme's, so a name whose glyph is arrows in both is the one
 /// to hold (DESIGN.md, Iconography). Adwaita 50 has no git, branch or history glyph at all, so
-/// this follows the precedent the References pane set: a mail name whose drawing says the
-/// right thing.
+/// this is a mail name whose drawing says the right thing.
 const GIT_ICON: &str = "mail-send-receive-symbolic";
 /// Where in the file an activated row points, when it points at more than the file itself.
 #[derive(Clone)]
 pub enum Target {
     /// The byte range a search hit matched.
     Range(Range<usize>),
-    /// The tag a row under the Tags pane was listed under. The pane knows the name and not where
-    /// in the note it is written, so the note itself is asked once it is open.
+    /// The tag a row under the Tags section was listed under. The section knows the name and not
+    /// where in the note it is written, so the note itself is asked once it is open.
     Tag(String),
 }
 
@@ -104,7 +101,7 @@ struct VaultPanes {
     all_toggle: gtk::ToggleButton,
     replace_entry: gtk::Entry,
     restart_search: Rc<dyn Fn()>,
-    /// The Search pane's half of [`INDEX_SETTLE`], the shape the Tags pane's `tags_settle` has.
+    /// The Search pane's half of [`INDEX_SETTLE`], the shape the Tags list's `tags_settle` has.
     search_settle: Debounce,
     /// And its half of `tags_dirty`: the vault moved while another pane was in front.
     search_dirty: Rc<Cell<bool>>,
@@ -117,20 +114,27 @@ struct VaultPanes {
     search_running: Rc<dyn Fn() -> usize>,
     #[cfg(feature = "bench")]
     search_view: gtk::ListView,
+    /// The Info pane: References and Tags as sections.
+    info: Rc<info::Info>,
     references: gtk::StringList,
     references_stack: gtk::Stack,
-    /// The empty page of the References pane. Its words change with what the tab holds — a note
-    /// has backlinks, a source file has references — so they are set rather than built in.
-    references_empty: adw::StatusPage,
+    /// The line the References section shows instead of rows. Its words change with what the
+    /// tab holds — a note has backlinks, a source file has references — so they are set rather
+    /// than built in.
+    references_empty: gtk::Label,
     tags_dirty: Rc<Cell<bool>>,
     tags_refill: Rc<dyn Fn()>,
     #[cfg(feature = "bench")]
     tags_names: Rc<dyn Fn() -> Vec<String>>,
     #[cfg(feature = "bench")]
     tags_picked: Rc<dyn Fn() -> Option<String>>,
-    /// Holds a refill of the pane on screen back by [`INDEX_SETTLE`], and swallows a burst of
+    #[cfg(feature = "bench")]
+    tags_view: gtk::ListView,
+    /// Holds a refill of the list on screen back by [`INDEX_SETTLE`], and swallows a burst of
     /// watcher events into one query.
     tags_settle: Debounce,
+    /// Refills the tag list if it fell behind while out of sight and is on screen now.
+    tags_catch_up: Rc<dyn Fn(&adw::ViewStack)>,
     tags_divider: gtk::Paned,
     /// The Git pane's page, so it can be hidden: a vault under no version control has nothing to
     /// put in it, and one more icon in the switcher is one more thing to explain.
@@ -146,11 +150,11 @@ struct VaultPanes {
 
 impl Sidebar {
     /// `files` is the existing vault tree widget, dropped into the Files pane unchanged.
-    /// `vault` carries the tree widget and the index closures behind Files, Search, Tags and
-    /// References; `None` builds a sidebar with only the Outline pane, which is what a window
-    /// opened on a single file has to show. `on_open` is called with a vault-relative path when
-    /// the user activates a result, a tagged file or a reference, plus where in the note the row
-    /// points when it points at anything narrower than the file.
+    /// `vault` carries the tree widget and the index closures behind Files, Search and Info;
+    /// `None` builds a sidebar with only the Outline pane, which is what a window opened on a
+    /// single file has to show. `on_open` is called with a vault-relative path when the user
+    /// activates a result, a tagged file or a reference, plus where in the note the row points
+    /// when it points at anything narrower than the file.
     /// `on_reference` is called with a References row, which carries a line number of its own.
     pub fn new(
         vault: Option<(gtk::Widget, Data, gtk::Widget, gtk::Paned)>,
@@ -178,21 +182,10 @@ impl Sidebar {
             );
 
             let tags = tags::pane(&Rc::new(data.tags), &on_open);
-            stack.add_titled_with_icon(
-                &tags.widget,
-                Some("tags"),
-                "Tags",
-                "user-bookmarks-symbolic",
-            );
-
             let references = gtk::StringList::new(&[]);
             let (references_stack, references_empty) = references_body(&references, on_reference);
-            stack.add_titled_with_icon(
-                &references_stack,
-                Some("references"),
-                "References",
-                BACKLINK_ICON,
-            );
+            let info = info::Info::new(&references_stack, &tags.widget);
+            stack.add_titled_with_icon(&info.root, Some("info"), "Info", info::ICON);
 
             stack.add_titled_with_icon(&git, Some("git"), "Git", GIT_ICON);
             let git_page = stack.page(&git);
@@ -205,24 +198,49 @@ impl Sidebar {
             // Hidden until the window says its vault is on another machine.
             ports_page.set_visible(false);
 
-            // Lazy fill: a background reindex only flips the flag of whichever of the two panes
-            // is not being looked at, and it costs that pane one query the first time it is shown
+            // Lazy fill: a background reindex only flips the flag of whichever of the two lists
+            // is not being looked at, and it costs that list one query the first time it is shown
             // again. The Search pane's is its query re-run, which is 0.8 ms ranked and some 60 ms
             // as an exact scan on the generated 40k-file vault, and nothing at all while the box
-            // is empty or the vault has not moved.
+            // is empty or the vault has not moved. The tag list is on screen once the Info pane
+            // is in front with the Tags section open, so opening the section catches up too.
+            let tags_catch_up: Rc<dyn Fn(&adw::ViewStack)> = Rc::new({
+                let (info, dirty, refill) = (
+                    Rc::downgrade(&info),
+                    tags.dirty.clone(),
+                    tags.refill.clone(),
+                );
+                move |stack| {
+                    if info
+                        .upgrade()
+                        .is_some_and(|info| live(stack, &info, "tags"))
+                        && dirty.replace(false)
+                    {
+                        refill();
+                    }
+                }
+            });
             stack.connect_visible_child_notify({
-                let (dirty, refill) = (tags.dirty.clone(), tags.refill.clone());
                 let (searched, restart) = (search.dirty.clone(), search.restart.clone());
+                let catch_up = tags_catch_up.clone();
                 move |stack| match stack.visible_child_name().as_deref() {
-                    Some("tags") if dirty.replace(false) => refill(),
+                    Some("info") => catch_up(stack),
                     Some("search") if searched.replace(false) => restart(),
                     _ => {}
                 }
             });
+            info.tags.root.connect_expanded_notify(glib::clone!(
+                #[weak]
+                stack,
+                #[strong]
+                tags_catch_up,
+                move |_| tags_catch_up(&stack)
+            ));
             (
                 search,
                 tags,
-                (references, references_stack, references_empty),
+                (info, references, references_stack, references_empty),
+                tags_catch_up,
                 git_page,
                 git_divider,
                 (ports_page, ports_refill),
@@ -264,8 +282,16 @@ impl Sidebar {
             switcher: switcher.upcast(),
             stack,
             panes: panes.map(
-                |(search, tags, references, git_page, git_divider, (ports_page, ports_refill))| {
-                    let (references, references_stack, references_empty) = references;
+                |(
+                    search,
+                    tags,
+                    references,
+                    tags_catch_up,
+                    git_page,
+                    git_divider,
+                    (ports_page, ports_refill),
+                )| {
+                    let (info, references, references_stack, references_empty) = references;
                     VaultPanes {
                         search_entry: search.entry,
                         replace_toggle: search.replace_toggle,
@@ -282,6 +308,7 @@ impl Sidebar {
                         search_running: search.running,
                         #[cfg(feature = "bench")]
                         search_view: search.view,
+                        info,
                         references,
                         references_stack,
                         references_empty,
@@ -291,7 +318,10 @@ impl Sidebar {
                         tags_names: tags.names,
                         #[cfg(feature = "bench")]
                         tags_picked: tags.picked,
+                        #[cfg(feature = "bench")]
+                        tags_view: tags.view,
                         tags_settle: Debounce::new(INDEX_SETTLE),
+                        tags_catch_up,
                         tags_divider: tags.divider,
                         git_page,
                         git_divider,
@@ -335,6 +365,9 @@ impl Sidebar {
         let Some(panes) = self.panes.as_ref() else {
             return false;
         };
+        if panes.info.reset_divider(divider) {
+            return true;
+        }
         let share = if divider == &panes.tags_divider {
             tags::SHARE
         } else if divider == &panes.git_divider {
@@ -358,21 +391,91 @@ impl Sidebar {
         &self.root
     }
 
-    /// Replace what the References pane lists, and say what its emptiness would mean: a note's
-    /// backlinks and a source file's references are the same pane asking different questions.
-    pub fn set_references(&self, rows: &[String], empty: (&str, &str)) {
+    /// Replace what the References section lists, and say what its emptiness would mean: a
+    /// note's backlinks and a source file's references are the same section asking different
+    /// questions. `title` names what the rows are — the language server's References, the
+    /// Backlinks, a definition's several answers — and `None` keeps the one shown. `rows` is
+    /// `None` while the answer is still coming, which empties the list without calling it empty.
+    pub fn set_references(&self, title: Option<&str>, rows: Option<&[String]>, empty: &str) {
         let Some(panes) = self.panes.as_ref() else {
             return;
         };
-        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let section = &panes.info.references;
+        if let Some(title) = title {
+            section.set_title(title);
+        }
+        section.set_count(rows.map(<[String]>::len));
+        let list: Vec<&str> = rows
+            .unwrap_or_default()
+            .iter()
+            .map(String::as_str)
+            .collect();
         panes
             .references
-            .splice(0, panes.references.n_items(), rows.as_slice());
-        panes.references_empty.set_title(empty.0);
-        panes.references_empty.set_description(Some(empty.1));
-        panes
-            .references_stack
-            .set_visible_child_name(if rows.is_empty() { "empty" } else { "list" });
+            .splice(0, panes.references.n_items(), list.as_slice());
+        panes.references_empty.set_text(empty);
+        panes.references_stack.set_visible_child_name(match rows {
+            Some([]) => "empty",
+            _ => "list",
+        });
+    }
+
+    /// Fit the Info pane to the tab `key` in front (empty for none): its sections for a file,
+    /// with Tags over a markdown note, and a status page where there is no file.
+    pub fn sync_info(&self, key: &str, file: bool, note: bool) {
+        if let Some(panes) = self.panes.as_ref() {
+            panes.info.sync(key, file, note);
+            (panes.tags_catch_up)(&self.stack);
+        }
+    }
+
+    /// Bring the Info pane to the front with the section `name` — "references" or "tags" —
+    /// open, the keyboard left where it is.
+    pub fn show_section(&self, name: &str) {
+        let Some(panes) = self.panes.as_ref() else {
+            return;
+        };
+        self.stack.set_visible_child_name("info");
+        panes.info.open(name);
+        // Opening a section that was open but hidden notifies nothing.
+        (panes.tags_catch_up)(&self.stack);
+    }
+
+    /// Whether the section `name` is on screen: the Info pane in front with it shown and open.
+    pub fn section_live(&self, name: &str) -> bool {
+        self.panes
+            .as_ref()
+            .is_some_and(|panes| live(&self.stack, &panes.info, name))
+    }
+
+    /// Call `f` with a section's name and whether it is open now, whenever one is folded or
+    /// unfolded.
+    pub fn connect_section_toggled(&self, f: impl Fn(&str, bool) + 'static) {
+        let Some(panes) = self.panes.as_ref() else {
+            return;
+        };
+        let f = Rc::new(f);
+        for name in ["references", "tags"] {
+            if let Some(section) = panes.info.section(name) {
+                let f = f.clone();
+                section
+                    .root
+                    .connect_expanded_notify(move |e| f(name, e.is_expanded()));
+            }
+        }
+    }
+
+    /// The Info pane's sections, for the session.
+    pub fn info_saved(&self) -> InfoPane {
+        self.panes
+            .as_ref()
+            .map_or_else(InfoPane::default, |panes| panes.info.saved())
+    }
+
+    pub fn restore_info(&self, saved: &InfoPane) {
+        if let Some(panes) = self.panes.as_ref() {
+            panes.info.restore(saved);
+        }
     }
 
     /// Which pane is on screen, for the callers that only refresh what is being looked at.
@@ -495,16 +598,16 @@ impl Sidebar {
 
     /// The tag list is out of date.
     ///
-    /// A pane behind the switcher only takes the flag and refills the next time it is shown,
-    /// which costs no query while the user is looking at Files or Search. The pane *on screen*
-    /// has nobody to wait for, so it refills in place — a moment later, so that what was just
-    /// written has reached the index and a burst of watcher events is one query. See
-    /// [`INDEX_SETTLE`].
+    /// A list out of sight — another pane in front, or the Tags section shut or hidden — only
+    /// takes the flag and refills the next time it is shown, which costs no query while the user
+    /// is looking at Files or Search. The list *on screen* has nobody to wait for, so it refills
+    /// in place — a moment later, so that what was just written has reached the index and a burst
+    /// of watcher events is one query. See [`INDEX_SETTLE`].
     pub fn mark_tags_dirty(&self) {
         let Some(panes) = self.panes.as_ref() else {
             return;
         };
-        if !self.is_showing("tags") {
+        if !live(&self.stack, &panes.info, "tags") {
             panes.tags_dirty.set(true);
             return;
         }
@@ -513,7 +616,7 @@ impl Sidebar {
         panes.tags_settle.call(move || refill());
     }
 
-    /// The tag names the Tags pane is showing, and the one selected: what `ACCENT_BENCH_TAGS`
+    /// The tag names the Tags section is showing, and the one selected: what `ACCENT_BENCH_TAGS`
     /// reads, a refill being invisible from anywhere else.
     #[cfg(feature = "bench")]
     pub fn tag_names(&self) -> Vec<String> {
@@ -528,8 +631,31 @@ impl Sidebar {
         self.panes.as_ref().and_then(|panes| (panes.tags_picked)())
     }
 
-    /// Show a pane by name: "files", "search", "tags", "references", "git", "ports", "outline"
-    /// or "properties",
+    /// What the Info pane shows, as `ACCENT_BENCH_INFO` prints it.
+    #[cfg(feature = "bench")]
+    pub fn info_state(&self) -> String {
+        self.panes
+            .as_ref()
+            .map(|panes| panes.info.state())
+            .unwrap_or_default()
+    }
+
+    /// Fold or unfold the section `name`, as a click on its header does.
+    #[cfg(feature = "bench")]
+    pub fn fold_section(&self, name: &str, open: bool) {
+        if let Some(section) = self.panes.as_ref().and_then(|p| p.info.section(name)) {
+            section.root.set_expanded(open);
+        }
+    }
+
+    /// The tag list itself, for `ACCENT_BENCH_SCROLL`.
+    #[cfg(feature = "bench")]
+    pub fn tags_view(&self) -> Option<gtk::ListView> {
+        self.panes.as_ref().map(|panes| panes.tags_view.clone())
+    }
+
+    /// Show a pane by name: "files", "search", "info", "git", "ports", "outline" or
+    /// "properties",
     /// focusing its entry where there is one, all it holds selected, as the find bar's Ctrl+F
     /// leaves its box: what is typed next is a new query.
     pub fn show_pane(&self, name: &str) {
@@ -650,7 +776,7 @@ impl Sidebar {
     /// Called for every change the window hears about and for every save of its own, so the two
     /// guards are what keep it from costing anything most of the time: a box with nothing in it
     /// is left alone, and a pane nobody is looking at only takes the flag and asks the first time
-    /// it is shown again — the Tags pane's `tags_dirty` shape, which is why neither pane can be
+    /// it is shown again — the Tags list's `tags_dirty` shape, which is why neither list can be
     /// left showing rows a change has already made wrong.
     ///
     /// What it costs, measured on the generated 40k-file vault (41 690 entries, 21 360 indexed
@@ -696,34 +822,45 @@ impl Sidebar {
         (panes.restart_search)();
     }
 
-    /// Show the Tags pane with `tag` already selected.
+    /// Show the Tags section with `tag` already selected.
     pub fn show_tag(&self, tag: &str) {
         // Ordering matters: this refills the tag list if it is dirty, and the refill clears the
         // selection, so the tag has to be picked afterwards.
         let Some(panes) = self.panes.as_ref() else {
             return;
         };
-        self.show_pane("tags");
+        self.show_section("tags");
         (panes.select_tag)(tag);
     }
 }
 
-/// The References pane: the rows, and the page shown instead when there are none.
+/// Whether the Info pane's section `name` is on screen: the pane in front, showing its sections,
+/// with that one shown and open.
+fn live(stack: &adw::ViewStack, info: &info::Info, name: &str) -> bool {
+    stack.visible_child_name().as_deref() == Some("info")
+        && info.root.visible_child_name().as_deref() == Some("sections")
+        && info.section(name).is_some_and(info::Section::is_open)
+}
+
+/// The References section's body: the rows, and the line shown instead when there are none.
 fn references_body(
     model: &gtk::StringList,
     on_reference: impl Fn(&str) + 'static,
-) -> (gtk::Stack, adw::StatusPage) {
+) -> (gtk::Stack, gtk::Label) {
     let stack = gtk::Stack::builder().vexpand(true).build();
-    // What the pane says before any tab has been opened; from then on the window sets the words
-    // to suit what the tab holds (`references::references_empty`).
-    let empty = status_page(
-        BACKLINK_ICON,
-        "No References",
-        "Open a file from this vault to see what links to it.",
-    );
+    // The window sets the words to suit what the tab holds (`references::references_empty`).
+    let empty = gtk::Label::builder()
+        .xalign(0.0)
+        .valign(gtk::Align::Start)
+        .wrap(true)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
+        .margin_bottom(6)
+        .build();
+    empty.add_css_class("dim-label");
     stack.add_named(&empty, Some("empty"));
     let list = path_list(model, crate::references::reference_icon, on_reference);
     stack.add_named(&scroller(&list), Some("list"));
-    stack.set_visible_child_name("empty");
     (stack, empty)
 }

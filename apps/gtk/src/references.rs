@@ -1,16 +1,17 @@
-//! Following the caret to other places: the References pane, Go to Definition, and a jump into a
-//! note or a PDF at a location the index or a language server named.
+//! Following the caret to other places: the References section, Go to Definition, and a jump
+//! into a note or a PDF at a location the index or a language server named.
 
 use super::*;
 use accent_core::markdown;
 
-/// DESIGN.md, Motion: the References pane follows the caret by 300 ms.
+/// DESIGN.md, Motion: the References section follows the caret by 300 ms.
 const REFERENCES: Duration = Duration::from_millis(300);
 
 impl App {
-    /// Fill the References pane for the active document: a note's backlinks, what refers to the
-    /// symbol under the caret in any other text, and wherever that is nothing — a PDF, an image,
-    /// a diagram, a text file no language server answers for — the files that link to this one.
+    /// Fill the References section for the active document: a note's backlinks, what refers to
+    /// the symbol under the caret in any other text, and wherever that is nothing — a PDF, an
+    /// image, a diagram, a text file no language server answers for — the files that link to this
+    /// one. The section's title says which of the two it lists.
     ///
     /// Debounced and cancellable, because on a code tab it follows the caret: the previous
     /// request is dropped, which is what cancels it at the server rather than leaving it to be
@@ -24,16 +25,19 @@ impl App {
         };
         let doc = self.active_doc();
         let empty = references_empty(doc.as_ref());
-        // Emptied at once, so the pane never shows the last file's answer while this one's is
-        // still coming.
-        sidebar.set_references(&[], empty);
+        let code = matches!(&doc, Some(Doc::Text(tab)) if !tab.flavour().is_note());
+        // Whatever code asks, the answer is backlinks; a code tab's says which once it lands.
+        let title = (!code).then_some("Backlinks");
         // A diff, a shell and a file from outside the vault are nothing the index links to.
         let (Some(doc), Some(vault)) = (
             doc.filter(|doc| !doc.is_transient() && !doc.is_loose()),
             self.vault().cloned(),
         ) else {
-            return;
+            return sidebar.set_references(title, Some(&[]), empty);
         };
+        // Emptied at once, so the section never shows the last file's answer while this one's is
+        // still coming.
+        sidebar.set_references(title, None, empty);
         let (key, tab) = (doc.key(), doc.tab().cloned());
         let note = tab.as_ref().is_some_and(|tab| tab.flavour().is_note());
         let pos = tab
@@ -59,27 +63,34 @@ impl App {
             }
             let Some(app) = weak.upgrade() else { return };
             // The user may have moved on while we were asking; a stale answer must not replace
-            // the pane the current tab put there.
+            // the rows the current tab put there.
             if app.active_key().as_deref() != Some(&key) {
                 return;
             }
             if let Some(sidebar) = app.sidebar.get() {
-                sidebar.set_references(&reference_rows(&found, note || backlinks), empty);
+                let title = match note || backlinks {
+                    true => "Backlinks",
+                    false => "References",
+                };
+                let rows = reference_rows(&found, note || backlinks);
+                sidebar.set_references(Some(title), Some(&rows), empty);
             }
         });
         *self.references.borrow_mut() = Some(handle);
     }
 
-    /// Put a list of locations in the References pane and show it. What a definition with more
-    /// than one answer does, rather than the window picking one of them.
+    /// Put a list of locations in the References section and show it. What a definition with
+    /// more than one answer does, rather than the window picking one of them.
     fn show_locations(self: &Rc<Self>, found: &[Location]) {
+        // First: opening a shut section asks for its rows, which these then replace.
+        self.show_section("references");
         if let Some(handle) = self.references.borrow_mut().take() {
             handle.abort();
         }
         if let Some(sidebar) = self.sidebar.get() {
-            sidebar.set_references(&reference_rows(found, false), references_empty(None));
+            let rows = reference_rows(found, false);
+            sidebar.set_references(Some("Definitions"), Some(&rows), references_empty(None));
         }
-        self.show_pane("references");
     }
 
     /// Go to Definition: the chord, `F12` and a Ctrl+click in the view all end up here.
@@ -179,7 +190,7 @@ impl App {
     }
 }
 
-/// The References pane's rows: `path:line`, one-based, in the order the server answered.
+/// The References section's rows: `path:line`, one-based, in the order the server answered.
 ///
 /// `per_path` keeps one row per file, which is what a note's backlinks have always been — a note
 /// that links to the open one three times is one backlink, not three. A code tab wants every
@@ -223,22 +234,19 @@ pub fn reference_icon(row: &str) -> &'static str {
     crate::doc::icon_for(row.rsplit_once(':').map_or(row, |(path, _)| path))
 }
 
-/// What the References pane says when it has nothing to list. Any file in the vault has
+/// What the References section says when it has nothing to list. Any file in the vault has
 /// backlinks; any other text has references to whatever the caret is on as well.
-fn references_empty(doc: Option<&Doc>) -> (&'static str, &'static str) {
+fn references_empty(doc: Option<&Doc>) -> &'static str {
     match doc {
-        Some(Doc::Text(tab)) if !tab.flavour().is_note() => (
-            "No References",
-            "Nothing refers to the symbol under the caret, and no note links to this file.",
-        ),
-        Some(doc) if !doc.is_transient() && !doc.is_loose() => {
-            ("No Backlinks", "No notes link to this file yet.")
+        Some(doc) if doc.is_transient() || doc.is_loose() => {
+            "Open a file from this vault to see what links to it."
         }
-        // A diff, a shell, a file from outside the vault, or nothing open at all.
-        _ => (
-            "No References",
-            "Open a file from this vault to see what links to it.",
-        ),
+        Some(Doc::Text(tab)) if !tab.flavour().is_note() => {
+            "Nothing refers to the symbol under the caret, and no note links to this file."
+        }
+        Some(_) => "No notes link to this file yet.",
+        // Nothing open at all.
+        None => "Open a file from this vault to see what links to it.",
     }
 }
 

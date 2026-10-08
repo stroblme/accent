@@ -15,8 +15,8 @@ use super::*;
 /// The Git half asks for a refresh that finds nothing new, stages a file below the rows on
 /// screen, clicks the Stage button of one on screen, whose row leaves Changes, and commits with
 /// the keyboard on a history row, which replaces the whole page. Last the Search pane, with the
-/// keyboard on a result of `calibration` when a note holding the word is made, and the Tags pane,
-/// with it on a tag when a note with a new one is. On a remote vault the changes are made on the
+/// keyboard on a result of `calibration` when a note holding the word is made, and the Tags
+/// section, with it on a tag when a note with a new one is. On a remote vault the changes are made on the
 /// host, over the vault's own ssh master.
 pub(super) fn bench_scroll(app: &Rc<App>, dir: &str) {
     scratch_only(app, "ACCENT_BENCH_SCROLL");
@@ -126,14 +126,12 @@ pub(super) fn bench_scroll(app: &Rc<App>, dir: &str) {
         glib::timeout_future(Duration::from_secs(3)).await;
         say(&app, "search", "made", &results);
 
-        // The Tags pane asks for every tag again once the vault has been still for a moment.
-        app.show_pane("tags");
-        let tags = find_widget(sidebar.widget(), &|w| w.is::<adw::ViewStack>())
-            .and_downcast::<adw::ViewStack>()
-            .and_then(|stack| stack.child_by_name("tags"))
-            .and_then(|pane| find_widget(&pane, &|w| w.is::<gtk::ListView>()))
-            .and_downcast::<gtk::ListView>()
-            .expect("the tag list");
+        // The Tags section asks for every tag again once the vault has been still for a moment.
+        app.show_section("tags");
+        // The whole pane, as the list had before it shared one, for rows enough to focus the
+        // ninth of.
+        sidebar.fold_section("references", false);
+        let tags = sidebar.tags_view().expect("the tag list");
         halfway(&tags.vadjustment().expect("the tags scroll")).await;
         focus_row(&tags);
         say(&app, "tags", "before", &tags);
