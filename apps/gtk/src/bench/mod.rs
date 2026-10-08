@@ -416,6 +416,8 @@ use tags::bench_tags;
 /// switch to `<rel_other>` and back, and after the caret moved while the pane was hidden; last
 /// the list's scroll and row through a few edits, which leave them alone, and one caret move.
 /// `=hold:<rel_note>` prints where to aim and then the pane's state as XTEST drives it, for 20 s.
+/// `=index:<rel_code>` prints a code file's rows from the index, a jump, the caret followed, and
+/// the rows once a function typed at its end is saved and indexed (`outline::bench_outline_index`).
 ///
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
 /// highlight made of each selection, plus the two match colours and the priorities of the tags

@@ -146,6 +146,18 @@ impl App {
                 lang::rediagnose(tab);
             }
         }
+        // A code tab with no language server is outlined from the index, which has just taken
+        // in a walk, or a change of the file made elsewhere.
+        let indexed = |tab: &Rc<Tab>| match &event {
+            Event::Reconciled(_) => true,
+            Event::FileChanged(rel) => *rel == tab.rel(),
+            _ => false,
+        };
+        if matches!(event, Event::Reconciled(_) | Event::FileChanged(_)) {
+            for tab in self.open_tabs().iter().filter(|t| indexed(t)) {
+                lang::index_outline(tab);
+            }
+        }
         match event {
             Event::Progress(p) => {
                 self.statusbar

@@ -10,7 +10,7 @@
 //! of keystrokes costs one round trip rather than one per key.
 
 use crate::editor::{Flavour, Tab};
-use accent_api::{Kind, Pos, Support, Symbol, Vault};
+use accent_api::{CodeSymbol, Kind, Pos, Range, Support, Symbol, Vault};
 use futures_channel::oneshot;
 use gtk::glib;
 use gtk::prelude::*;
@@ -54,6 +54,11 @@ pub struct State {
     /// The same symbols as the Outline pane lists them, flattened once per answer rather than
     /// once per caret move.
     rows: RefCell<Vec<Row>>,
+    /// The index's declarations of a code file, which stand in for the symbols while no language
+    /// server has answered with any: see [`index_outline`].
+    index: RefCell<Vec<Symbol>>,
+    /// The last answer of a language server held symbols, which the outline is drawn from.
+    served: Cell<bool>,
     /// The pending post-edit refresh. Replaced rather than queued, so the latest edit wins.
     refresh: RefCell<Option<glib::JoinHandle<()>>>,
     /// The buffer's own edit counter, and how far the server has been told. A bool could only
@@ -116,6 +121,12 @@ impl State {
             .is_some_and(|row| line < row.lines.0)
     }
 
+    /// Whether the outline is a language server's rather than the index's.
+    #[cfg(feature = "bench")]
+    pub fn served(&self) -> bool {
+        self.served.get()
+    }
+
     /// Whether the "no language server" toast still has to be said, marking it said.
     pub fn claim_toast(&self) -> bool {
         !self.toasted.replace(true)
@@ -175,6 +186,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
     crate::hover::install(tab);
     crate::signature::install(tab);
     crate::ghost::install(tab);
+    index_outline(tab);
 
     let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
     let weak = Rc::downgrade(tab);
@@ -217,12 +229,52 @@ pub fn saved(tab: &Rc<Tab>) {
     let Some(vault) = tab.lang.vault() else {
         return;
     };
+    index_outline(tab);
     let tab = tab.clone();
     glib::spawn_future_local(async move {
         flush(tab.clone()).await;
         let rel = tab.rel();
         if let Err(e) = vault.save_document(&rel).await {
             tracing::debug!("saved {rel}: {e:#}");
+        }
+    });
+}
+
+/// Ask the index for a code file's declarations, which the Outline lists while no language
+/// server has answered with symbols: none is installed for the file, or it has not answered yet.
+/// The index holds the file as it was last saved, so this is asked when the tab opens, when a save
+/// of it lands and when the index takes in a walk or a change made elsewhere, never per keystroke.
+pub fn index_outline(tab: &Rc<Tab>) {
+    let rel = tab.rel();
+    if tab.flavour() != Flavour::Code
+        || tab.lang.served.get()
+        || accent_core::code::lang_of(&rel).is_none()
+    {
+        return;
+    }
+    let Some(vault) = tab.lang.vault() else {
+        return;
+    };
+    let text = tab.text();
+    let weak = Rc::downgrade(tab);
+    glib::spawn_future_local(async move {
+        let found = crate::work::off_thread("outline", move || {
+            // A save is taken in by the worker a batch later.
+            vault.settle_index();
+            vault
+                .file_symbols(&rel)
+                .map(|decls| declarations(&rel, &decls, &text))
+        })
+        .await;
+        let Some(tab) = weak.upgrade() else { return };
+        let symbols = match found {
+            Some(Ok(symbols)) => symbols,
+            Some(Err(e)) => return tracing::debug!("declarations of {}: {e:#}", tab.rel()),
+            None => return,
+        };
+        *tab.lang.index.borrow_mut() = symbols.clone();
+        if !tab.lang.served.get() {
+            show_symbols(&tab, symbols);
         }
     });
 }
@@ -411,11 +463,22 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
     pause(rest).await;
     let rel = tab.rel();
     match vault.symbols(&rel).await {
-        Ok(symbols) => {
-            *tab.lang.rows.borrow_mut() = flatten(&symbols);
-            *tab.lang.symbols.borrow_mut() = symbols;
+        Ok(symbols) if !symbols.is_empty() => {
+            tab.lang.served.set(true);
+            set_symbols(&tab, symbols);
         }
-        Err(e) => tracing::debug!("symbols for {rel}: {e:#}"),
+        // No symbols from a server, or no server at all: the index's declarations stand in. A
+        // request that failed keeps what a server last gave.
+        answer => {
+            if let Err(e) = &answer {
+                tracing::debug!("symbols for {rel}: {e:#}");
+            }
+            if answer.is_ok() || !tab.lang.served.get() {
+                tab.lang.served.set(false);
+                let index = tab.lang.index.borrow().clone();
+                set_symbols(&tab, index);
+            }
+        }
     }
     match vault.folds(&rel).await {
         // Folds laid over a text they were not worked out for hide the wrong lines, and a long
@@ -453,6 +516,111 @@ async fn outline_alone(tab: Rc<Tab>, rest: Duration) {
     let hooks = tab.lang.hooks.borrow().clone();
     if let Some(hooks) = hooks {
         (hooks.on_symbols)(&tab);
+    }
+}
+
+fn set_symbols(tab: &Tab, symbols: Vec<Symbol>) {
+    *tab.lang.rows.borrow_mut() = flatten(&symbols);
+    *tab.lang.symbols.borrow_mut() = symbols;
+}
+
+/// [`set_symbols`], and the panes drawn from them told.
+fn show_symbols(tab: &Rc<Tab>, symbols: Vec<Symbol>) {
+    set_symbols(tab, symbols);
+    let hooks = tab.lang.hooks.borrow().clone();
+    if let Some(hooks) = hooks {
+        (hooks.on_symbols)(tab);
+    }
+}
+
+/// The index's declarations of the file `rel` as a server's symbol tree, placed in `text`: one
+/// inside another's span is its child (a class's methods), and a run of a type's methods declared
+/// outside it is put under a row naming the type, as rust-analyzer's `impl Index` is.
+fn declarations(rel: &str, decls: &[CodeSymbol], text: &str) -> Vec<Symbol> {
+    let lines: Vec<&str> = text.lines().collect();
+    let rust = accent_core::code::lang_of(rel) == Some(accent_core::code::Lang::Rust);
+    let (mut at, mut out) = (0, Vec::<Symbol>::new());
+    // The type whose methods the last row gathers, while it is such a row.
+    let mut gathering = None;
+    while let Some(d) = decls.get(at) {
+        let symbol = declaration(decls, &mut at, &lines);
+        match d.container.as_deref() {
+            None => {
+                gathering = None;
+                out.push(symbol);
+            }
+            Some(owner) if gathering == Some(owner) => {
+                if let Some(group) = out.last_mut() {
+                    group.range.end = symbol.range.end;
+                    group.children.push(symbol);
+                }
+            }
+            Some(owner) => {
+                gathering = Some(owner);
+                out.push(Symbol {
+                    name: match rust {
+                        true => format!("impl {owner}"),
+                        false => owner.to_string(),
+                    },
+                    range: symbol.range,
+                    selection: symbol.selection,
+                    children: vec![symbol],
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The declaration at `at` with every one inside its span, `at` moved past them all.
+fn declaration(decls: &[CodeSymbol], at: &mut usize, lines: &[&str]) -> Symbol {
+    let d = &decls[*at];
+    *at += 1;
+    let mut children = Vec::new();
+    while decls
+        .get(*at)
+        .is_some_and(|c| c.byte_start < d.byte_end && c.byte_end <= d.byte_end)
+    {
+        children.push(declaration(decls, at, lines));
+    }
+    let first = d.line.saturating_sub(1);
+    let last = d.end_line.saturating_sub(1).max(first);
+    let name = name_at(lines, first, last, &d.name);
+    let line = |line| Pos { line, character: 0 };
+    Symbol {
+        name: d.name.clone(),
+        range: Range {
+            start: line(first),
+            end: line(last),
+        },
+        selection: Range {
+            start: name,
+            end: name,
+        },
+        children,
+    }
+}
+
+/// Where `name` is written as a word on the first of `lines` from `first` to `last` holding it,
+/// else the start of `first`: what a jump to a declaration lands on, its name rather than its
+/// attributes or annotations.
+pub fn name_at(lines: &[&str], first: u32, last: u32, name: &str) -> Pos {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let span = lines.iter().enumerate().skip(first as usize);
+    for (line, text) in span.take(last.saturating_sub(first) as usize + 1) {
+        let found = text.match_indices(name).find(|(i, _)| {
+            !word(text[..*i].chars().next_back()) && !word(text[i + name.len()..].chars().next())
+        });
+        if let Some((i, _)) = found {
+            return Pos {
+                line: line as u32,
+                character: text[..i].chars().count() as u32,
+            };
+        }
+    }
+    Pos {
+        line: first,
+        character: 0,
     }
 }
 
@@ -652,6 +820,47 @@ mod tests {
         assert_eq!(at(&code, 15), Some("Impl"), "after its last method");
         assert_eq!(at(&code, 22), None, "between two items");
         assert_eq!(at(&code, 40), None, "past the last one");
+    }
+
+    /// The index's flat rows nest as a server's do: what one's span holds under it, and the
+    /// methods of an `impl` under a row of their own, each landing on its name.
+    #[test]
+    fn index_declarations_nest_as_an_outline() {
+        use accent_core::code::{Lang, symbols};
+        let text = "pub struct Point;\n\nimpl Point {\n    #[inline]\n    pub fn x(&self) {}\n    \
+                    fn y(&self) {}\n}\n\nfn main() {}\n\nmod tests {\n    fn t() {}\n}\n";
+        let decls: Vec<CodeSymbol> = symbols(Lang::Rust, text)
+            .into_iter()
+            .map(|d| CodeSymbol {
+                rel_path: "a.rs".to_string(),
+                kind: d.kind,
+                name: d.name,
+                container: d.container,
+                byte_start: d.range.start as i64,
+                byte_end: d.range.end as i64,
+                line: d.line,
+                end_line: d.end_line,
+                signature: d.signature,
+                test: d.test,
+            })
+            .collect();
+        let rows: Vec<(u8, String, u32, u32)> = flatten(&declarations("a.rs", &decls, text))
+            .into_iter()
+            .map(|r| (r.depth, r.name, r.at.line, r.at.character))
+            .collect();
+        let row = |depth, name: &str, line, column| (depth, name.to_string(), line, column);
+        assert_eq!(
+            rows,
+            [
+                row(1, "Point", 0, 11),
+                row(1, "impl Point", 4, 11),
+                row(2, "x", 4, 11),
+                row(2, "y", 5, 7),
+                row(1, "main", 8, 3),
+                row(1, "tests", 10, 4),
+                row(2, "t", 11, 7),
+            ]
+        );
     }
 
     /// Above the first symbol is the one place without a row that sends the list to its top: a
