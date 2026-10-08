@@ -1,10 +1,12 @@
 //! accent-cli: index | scan | search | backlinks | tags | stats. Works without the GUI.
-//! Read-only with respect to the vault — the only thing it writes is the cache db, which it brings
-//! up to date through the same façade, scan policy and defaults as the app before it answers.
-//! Also what runs behind the window: `serve` on a remote host, and `hold`, `attach`, `kill`,
-//! `held` and `clip`, which keep the terminal tabs' shells alive between windows.
+//! These only read the vault — the one thing they write is the cache db, which they bring up to
+//! date through the same façade, scan policy and defaults as the app before they answer. `mcp`
+//! serves the vault to an agent. Also what runs behind the window: `serve` on a remote host, and
+//! `hold`, `attach`, `kill`, `held` and `clip`, which keep the terminal tabs' shells alive between
+//! windows.
 
 mod hold;
+mod mcp;
 
 use accent_api::{Event, Progress, ReconcileStats, Vault, VaultConfig};
 use accent_core::index::{Phase, default_db_path};
@@ -118,6 +120,16 @@ enum Cmd {
         /// Index database. Defaults to $XDG_CACHE_HOME/accent/<hash-of-vault-path>.db
         #[arg(long)]
         db: Option<PathBuf>,
+    },
+    /// Serve one vault to an agent over the Model Context Protocol, on stdin and stdout.
+    ///
+    /// Search, read, backlinks, tags, links and PDF highlights, over the index the app keeps,
+    /// which this shares and brings up to date as the app does. Answers until stdin closes. A
+    /// vault on this machine only: for one on another, run it there (`ssh host accent-cli mcp
+    /// --vault /path`).
+    Mcp {
+        #[command(flatten)]
+        common: Common,
     },
     /// Hold the terminals' shells: the daemon `attach` starts when none is running.
     ///
@@ -262,6 +274,8 @@ fn main() -> Result<()> {
             // because the server reads it on a thread of its own.
             accent_api::rpc::serve(&vault, db.as_deref(), std::io::stdin(), std::io::stdout())?;
         }
+        // Logging goes to stderr: stdout is the protocol.
+        Cmd::Mcp { common } => mcp::run(&common.vault, &common.db_path())?,
         Cmd::Hold => hold::daemon::run()?,
         Cmd::Attach { cwd, id } => std::process::exit(hold::client::attach(&id, cwd)),
         Cmd::Kill { id } => hold::client::kill(&id)?,
