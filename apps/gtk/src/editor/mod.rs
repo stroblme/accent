@@ -387,6 +387,8 @@ pub struct Tab {
     /// The post-edit pass: the change bars, and the styling a note too long to restyle inside a
     /// frame owes the rest of its text.
     debounce: crate::widgets::Debounce,
+    /// A CSV's column colouring, kept between passes: see [`highlight::Csv`].
+    csv: Rc<highlight::Csv>,
     autosave: crate::widgets::Debounce,
     /// First-wins ([`crate::widgets::Debounce::call_once`]): a caret held on an arrow key must
     /// still tell the outline where it is, rather than be pushed off for as long as it moves.
@@ -1286,7 +1288,7 @@ impl Tab {
                     })
                     .collect();
             }
-            Flavour::Csv => highlight::apply_csv(&self.buffer),
+            Flavour::Csv => self.csv.apply(&self.buffer),
             // Code is coloured by its language through the style scheme, with nothing to derive.
             Flavour::Code => {}
         }

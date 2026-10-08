@@ -62,6 +62,35 @@ async fn held(compare: &diff::Compare, act: impl FnOnce()) -> (f64, f64, f64) {
     (call, settle, worst.get())
 }
 
+/// Whether every cell of a CSV buffer carries its column's tag and nothing else carries one, as
+/// a pass over all of it leaves them: what passes that re-tag only around an edit must keep.
+fn csv_tagged(buffer: &sourceview5::Buffer) -> bool {
+    let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+    let offsets = crate::highlight::Offsets::new(&text);
+    let mut wanted = vec![Vec::new(); crate::highlight::CSV_COLUMNS];
+    for cell in accent_core::csv::columns(&text) {
+        let range = (
+            offsets.char_of(cell.range.start),
+            offsets.char_of(cell.range.end),
+        );
+        if range.0 < range.1 {
+            wanted[cell.column % crate::highlight::CSV_COLUMNS].push(range);
+        }
+    }
+    wanted.iter().enumerate().all(|(column, wanted)| {
+        let Some(tag) = buffer.tag_table().lookup(&format!("csv{column}")) else {
+            return false;
+        };
+        let (mut spans, mut at) = (Vec::new(), buffer.start_iter());
+        while at.has_tag(&tag) || at.forward_to_tag_toggle(Some(&tag)) {
+            let from = at.offset();
+            at.forward_to_tag_toggle(Some(&tag));
+            spans.push((from, at.offset()));
+        }
+        spans == *wanted
+    })
+}
+
 /// The median and the largest of `values`.
 fn spread(values: &mut [f64]) -> (f64, f64) {
     values.sort_by(f64::total_cmp);
@@ -74,7 +103,8 @@ fn spread(values: &mut [f64]) -> (f64, f64) {
 /// three characters into a changed line and takes them out again, and re-reads the other side
 /// twice. Each step prints how long its own call held the main loop (`call_ms`), how long until
 /// the rows were laid (`settle_ms`) and the longest the main loop went without turning meanwhile
-/// (`held_ms`); the last line, the median and the worst of `held_ms` per kind of step. The file is
+/// (`held_ms`); the last line, the median and the worst of `held_ms` per kind of step, and for a
+/// CSV whether its cells carry the column tags a pass over all of it gives them. The file is
 /// saved after the typing, as it was, so point it at a scratch copy.
 pub(in crate::bench) fn bench_compare_large(app: &Rc<App>, rel: &str) {
     let (every, rel) = match rel.strip_prefix("every:") {
@@ -152,6 +182,9 @@ pub(in crate::bench) fn bench_compare_large(app: &Rc<App>, rel: &str) {
             typed.push(worst);
         }
         kinds.push(("type", typed));
+        if tab.flavour() == crate::editor::Flavour::Csv {
+            println!("bench compare_large csv_tagged={}", csv_tagged(&tab.buffer));
+        }
         let mut reread = Vec::new();
         for round in 1..3 {
             let other = variant(&text, round, every);

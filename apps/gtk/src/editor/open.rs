@@ -291,6 +291,7 @@ pub fn open(
         snippet: RefCell::new(None),
         paste_link,
         debounce: crate::widgets::Debounce::new(DEBOUNCE),
+        csv: highlight::Csv::tracking(&buffer),
         autosave: crate::widgets::Debounce::new(AUTOSAVE),
         cursor: crate::widgets::Debounce::new(CURSOR),
         turn: Cell::new((false, false)),
