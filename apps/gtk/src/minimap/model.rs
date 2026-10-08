@@ -21,6 +21,8 @@ pub struct Line {
     pub hidden: bool,
     /// The fewest rows the line takes: a heading's label needs more than one.
     pub min_rows: u32,
+    /// The level of the heading whose label the line carries, 0 for none.
+    pub heading: u8,
     /// Read from the buffer since it last changed there.
     pub measured: bool,
 }
@@ -32,6 +34,7 @@ impl Default for Line {
             scale: 1.0,
             hidden: false,
             min_rows: 1,
+            heading: 0,
             measured: false,
         }
     }

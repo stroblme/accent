@@ -32,8 +32,9 @@ const XTEST: Duration = Duration::from_secs(10);
 ///   then prints `aim <x> <y> <dy>` for `"move <x> <y>; down; move <x> <y+dy/2>; move <x>
 ///   <y+dy>; up"` and the same once that drag has scrolled the view.
 /// - `look` saves the window as `minimap-<theme>-<what>.png` in the working directory, light and
-///   dark: a note of chapters and sections a quarter of the way down, and a comparison with the
-///   disk where it opens, on its first hunk; then, dark, a code file it writes beside the note.
+///   dark: a note holding h1 to h4 and a setext heading, at its top and a quarter of the way down,
+///   a comparison with the disk where it opens, on its first hunk, and a code file it writes
+///   beside the note.
 /// - `frames` scrolls the note down by a quarter page [`STEPS`] times, a step per frame, with the
 ///   map off and then on, three times over as the machine's load moves, printing each round's
 ///   median and worst frame: `paint_ms` from the end of the layout phase to the end of painting
@@ -41,7 +42,8 @@ const XTEST: Duration = Duration::from_secs(10);
 ///   `paint_cpu_ms` the main thread's CPU time over the painting, which a busy machine does not
 ///   inflate. `typing` is the same with a character typed into the middle of the note every
 ///   150 ms instead, adding the main thread's CPU time over the round (`cpu_ms`) and the median
-///   keystroke's own time (`key_us`), as `ACCENT_BENCH_STYLE=typing:` prints them.
+///   keystroke's own time (`key_us`), as `ACCENT_BENCH_STYLE=typing:` prints them. Both print
+///   what the map's own drawing cost per step (`map_us`).
 pub(super) fn bench_minimap(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_MINIMAP");
     let Some((round, rel)) = arg.split_once(':') else {
@@ -189,9 +191,14 @@ async fn look(app: &Rc<App>, tab: &Rc<Tab>) {
                 &format!("## Section {}", i + 1),
                 1,
             );
-            chapter + &section
+            let deeper = format!(
+                "### Part {}.1\n\nA few words.\n\n#### Detail\n\nMore.\n\n",
+                i + 1
+            );
+            chapter + &section + &deeper
         })
         .collect();
+    let note = format!("Setext title\n============\n\n{note}");
     let shoot = |what: &str, theme: Theme| {
         let name = format!("minimap-{}-{what}.png", format!("{theme:?}").to_lowercase());
         let saved = window_png(&app.window, Path::new(&name));
@@ -201,6 +208,8 @@ async fn look(app: &Rc<App>, tab: &Rc<Tab>) {
         crate::theme::apply(theme);
         tab.set_text(&note);
         glib::timeout_future(Duration::from_secs(1)).await;
+        scroll(tab, 0.0).await;
+        shoot("note-top", theme);
         scroll(tab, 0.25).await;
         shoot("note", theme);
         if compared(app, tab).await.is_some() {
@@ -209,12 +218,14 @@ async fn look(app: &Rc<App>, tab: &Rc<Tab>) {
         }
         tab.leave_compare();
     }
-    // A code file half way down, whose comments in the map's lines off the view are dimmed too.
+    // A code file half way down, whose keywords and comments in the map's lines off the view are
+    // toned too.
     let code: String = (0..60)
         .map(|i| {
             format!(
-                "/// What step {i} does,\n/// in two lines.\nfn step_{i}(x: u32) -> u32 {{\n    \
-                 // add\n    x + {i}\n}}\n\n"
+                "/// What step {i} does,\n/// in two lines.\npub fn step_{i}(x: u32) -> u32 \
+                 {{\n    // add\n    let y = x + {i};\n    if y > 10 {{\n        return y;\n    \
+                 }}\n    y * 2\n}}\n\n"
             )
         })
         .collect();
@@ -229,7 +240,11 @@ async fn look(app: &Rc<App>, tab: &Rc<Tab>) {
             code.set_minimap(true);
             scroll(&code, 0.5).await;
             glib::timeout_future(FRAME).await;
-            shoot("code", Theme::Dark);
+            for theme in [Theme::Light, Theme::Dark] {
+                crate::theme::apply(theme);
+                glib::timeout_future(Duration::from_secs(1)).await;
+                shoot("code", theme);
+            }
         }
     }
 }
@@ -406,6 +421,9 @@ async fn frames(app: &Rc<App>, tab: &Rc<Tab>, step: Step, map: &str) {
         clock.connect_paint(mark('p')),
     ];
     let painted = || marks.borrow().iter().filter(|m| m.0 == 'p').count();
+    let minimap = tab.minimap().downcast_ref::<Minimap>().cloned();
+    let spent = || minimap.as_ref().map_or(Duration::ZERO, Minimap::take_spent);
+    spent();
     let (start, mut keys) = (cpu(), Vec::with_capacity(STEPS));
     for ch in super::style::TYPING_WORDS.chars().cycle().take(STEPS) {
         let before = painted();
@@ -431,6 +449,7 @@ async fn frames(app: &Rc<App>, tab: &Rc<Tab>, step: Step, map: &str) {
         glib::timeout_future(Duration::from_millis(500)).await;
     }
     let used = (cpu() - start) / 1_000_000;
+    let map_us = spent().as_micros() / STEPS as u128;
     for handler in handlers {
         clock.disconnect(handler);
     }
@@ -463,7 +482,7 @@ async fn frames(app: &Rc<App>, tab: &Rc<Tab>, step: Step, map: &str) {
     };
     println!(
         "bench minimap {round} map={map} steps={STEPS} frames={} paint_ms={} frame_ms={} \
-         paint_cpu_ms={} cpu_ms={used} key_us={}",
+         paint_cpu_ms={} cpu_ms={used} key_us={} map_us={map_us}",
         marks.iter().filter(|m| m.0 == 'p').count(),
         say(&between('l', 'p', false)),
         say(&between('b', 'p', false)),

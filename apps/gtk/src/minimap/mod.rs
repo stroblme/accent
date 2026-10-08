@@ -5,9 +5,9 @@
 //! moves.
 //!
 //! Monochrome but for the accent: words in the foreground, a dimmer tone of it where the editor
-//! dims the text and the accent where the editor writes in it, never a syntax colour; a heading's
-//! text as a label to read, as VS Code draws a section header; a comparison's or a conflict's row
-//! tints, muted.
+//! dims the text, and the accent where the editor writes in it or, in code, writes a keyword;
+//! never a syntax colour. A heading's text as a label to read, sized and indented by its level, as
+//! VS Code draws a section header; a comparison's or a conflict's row tints as the page has them.
 //!
 //! Ours rather than GtkSourceMap, which laid the whole document out a second time in a view of
 //! its own, painted no band on GTK 4.22 and followed the adjustment its view had when it was set
@@ -35,20 +35,28 @@ use std::ops::Range;
 const WIDTH: i32 = 100;
 /// A row's height in logical pixels; a character is one pixel wide.
 const ROW: f64 = 2.0;
-/// Lines per cached chunk.
-const CHUNK: usize = 64;
+/// Lines per cached chunk. An edit draws its chunk again and a scroll the chunks coming onto the
+/// map: 32 drew a keystroke's in half the time 64 did and scrolled as cheaply, where 16 gained
+/// nothing more (`ACCENT_BENCH_MINIMAP=typing:` and `=frames:`, `map_us`).
+const CHUNK: usize = 32;
 /// How many chunks above and below the map's window are kept for a scroll to come back to.
 const KEEP: usize = 4;
-/// A heading label's size in logical pixels, and the rows its line takes so it has room.
-const LABEL_PX: f64 = 9.0;
-const LABEL_ROWS: u32 = 6;
+/// A heading label's size in logical pixels by level, h1 first, and how much further in each
+/// level starts: h1 largest and leftmost, as an outline reads.
+const LABEL_PX: [f64; 6] = [11.0, 10.0, 9.0, 8.5, 8.0, 8.0];
+const LABEL_INDENT: f64 = 4.0;
 /// GtkSourceView's tag over a comment, which the language spec names; the style tags that colour
 /// code have no names.
 const COMMENT: &str = "gtksourceview:context-classes:comment";
 
+/// The rows a heading label of `level` takes: its size, with a line's leading.
+fn label_rows(level: u8) -> u32 {
+    (LABEL_PX[usize::from(level.clamp(1, 6) - 1)] * 1.35 / ROW).ceil() as u32
+}
+
 /// A word's tone: the foreground, a dimmer one where the editor dims the text (a note's markup,
 /// quotes and done tasks, a comment in code), and the accent where the editor writes in it (a
-/// note's links and tags). Code has no accent: its colours are the style scheme's.
+/// note's links and tags) or, in code, where it writes a keyword.
 #[derive(Clone, Copy, PartialEq)]
 enum Tone {
     Ink,
@@ -58,10 +66,14 @@ enum Tone {
 
 impl Tone {
     /// The tone of the text at `at`, from its highest-priority tag that has one, as the editor
-    /// paints the foreground of the highest-priority tag that sets one.
-    fn at(at: &gtk::TextIter) -> Tone {
+    /// paints the foreground of the highest-priority tag that sets one. `keywords` are the looks
+    /// a keyword has in the style scheme ([`keyword_looks`]).
+    fn at(at: &gtk::TextIter, keywords: &[gtk::TextTag]) -> Tone {
         for tag in at.tags().iter().rev() {
             let Some(name) = tag.name() else {
+                if keywords.iter().any(|look| same_look(look, tag)) {
+                    return Tone::Accent;
+                }
                 continue;
             };
             let name = name.as_str();
@@ -89,7 +101,52 @@ struct Paint {
     renderer: gsk::Renderer,
     scale: f64,
     context: pango::Context,
+    /// The labels' face, bold; each level sets its own size.
     label: pango::FontDescription,
+    /// The looks of a keyword ([`keyword_looks`]), found when a chunk is first drawn.
+    keywords: std::cell::OnceCell<Vec<gtk::TextTag>>,
+}
+
+/// Probe tags with the looks a keyword and a statement have in `buffer`'s style scheme. The
+/// highlighter's tags have no names, only the style it gave them, so a keyword's tag is the one
+/// that looks exactly like this. The scheme names the two styles, or the `def` language maps them
+/// to one it does: Adwaita's keywords are its statements.
+fn keyword_looks(buffer: &gtk::TextBuffer) -> Vec<gtk::TextTag> {
+    let Some(buffer) = buffer
+        .downcast_ref::<sourceview5::Buffer>()
+        .filter(|buffer| buffer.is_highlight_syntax())
+    else {
+        return Vec::new();
+    };
+    let manager = sourceview5::LanguageManager::default();
+    let (Some(scheme), Some(def)) = (buffer.style_scheme(), manager.language("def")) else {
+        return Vec::new();
+    };
+    ["def:keyword", "def:statement"]
+        .into_iter()
+        .filter_map(|id| {
+            let mut id = glib::GString::from(id);
+            let style = loop {
+                match scheme.style(&id) {
+                    Some(style) => break style,
+                    None => id = def.style_fallback(&id)?,
+                }
+            };
+            let look = gtk::TextTag::new(None);
+            style.apply(&look);
+            Some(look)
+        })
+        .collect()
+}
+
+/// Whether `tag` writes its text exactly as `look` does: the same colour, weight and slant.
+fn same_look(look: &gtk::TextTag, tag: &gtk::TextTag) -> bool {
+    look.is_foreground_set() == tag.is_foreground_set()
+        && look.foreground_rgba() == tag.foreground_rgba()
+        && look.is_weight_set() == tag.is_weight_set()
+        && (!look.is_weight_set() || look.weight() == tag.weight())
+        && look.is_style_set() == tag.is_style_set()
+        && (!look.is_style_set() || look.style() == tag.style())
 }
 
 glib::wrapper! {
@@ -206,6 +263,12 @@ impl Minimap {
 
     pub fn let_go(&self) {
         self.imp().release();
+    }
+
+    /// The time the map has spent drawing since this was last asked: its model brought up to the
+    /// buffer, its chunks drawn and the frame put together.
+    pub fn take_spent(&self) -> std::time::Duration {
+        self.imp().spent.take()
     }
 }
 
@@ -388,7 +451,6 @@ impl imp::Minimap {
         }
         let context = obj.pango_context();
         let mut label = context.font_description().unwrap_or_default();
-        label.set_absolute_size(LABEL_PX * f64::from(pango::SCALE));
         label.set_weight(pango::Weight::Bold);
         let paint = Paint {
             text: ink,
@@ -399,6 +461,7 @@ impl imp::Minimap {
             scale,
             context,
             label,
+            keywords: std::cell::OnceCell::new(),
         };
         let model = self.model.borrow();
         let (width, height) = (f64::from(obj.width()), f64::from(obj.height()));
@@ -564,23 +627,24 @@ impl imp::Minimap {
 
 /// Whether `tag` changes what the map draws of a line: it hides it (a fold, a collapsed run),
 /// scales it or labels it (a heading), tints its row (a comparison, a merge, a conflict) or tones
-/// its words.
+/// its words, a highlighter's tag among them.
 fn matters(tag: &gtk::TextTag) -> bool {
     if tag.is_invisible_set() || tag.is_scale_set() || tag.is_paragraph_background_set() {
         return true;
     }
-    tag.name().is_some_and(|name| {
-        let name = name.as_str();
-        name == COMMENT
-            || [
-                &highlight::HEADING_TAGS[..],
-                &highlight::ACCENT_TAGS,
-                &highlight::MARKUP_TAGS,
-                &highlight::FADED_TAGS,
-            ]
-            .iter()
-            .any(|names| names.contains(&name))
-    })
+    let Some(name) = tag.name() else {
+        return tag.is_foreground_set();
+    };
+    let name = name.as_str();
+    name == COMMENT
+        || [
+            &highlight::HEADING_TAGS[..],
+            &highlight::ACCENT_TAGS,
+            &highlight::MARKUP_TAGS,
+            &highlight::FADED_TAGS,
+        ]
+        .iter()
+        .any(|names| names.contains(&name))
 }
 
 fn drop_chunk(chunks: &mut [Option<gsk::RenderNode>], chunk: usize) {
@@ -604,18 +668,23 @@ fn measure(buffer: &gtk::TextBuffer, at: usize) -> Line {
         chars: end.offset().saturating_sub(start.offset()) as u32,
         ..Line::default()
     };
-    let mut heading = false;
+    let mut level = 0;
     for tag in start.tags() {
         line.hidden |= tag.is_invisible_set() && tag.is_invisible();
         if tag.is_scale_set() {
             line.scale = line.scale.max(tag.scale() as f32);
         }
-        heading |= tag
-            .name()
-            .is_some_and(|name| highlight::HEADING_TAGS.contains(&name.as_str()));
+        let name = tag.name();
+        if let Some(at) = highlight::HEADING_TAGS
+            .iter()
+            .position(|heading| name.as_deref() == Some(*heading))
+        {
+            level = at as u8 + 1;
+        }
     }
-    if heading && model::label(&buffer.text(&start, &end, false)).is_some() {
-        line.min_rows = LABEL_ROWS;
+    if level > 0 && model::label(&buffer.text(&start, &end, false)).is_some() {
+        line.heading = level;
+        line.min_rows = label_rows(level);
     }
     line
 }
@@ -633,11 +702,12 @@ fn tint(start: &gtk::TextIter) -> Option<gdk::RGBA> {
 
 /// The characters of `text`, the line from `start` to `end`, each with its tone. Tags change only
 /// at their toggles, so the tone is looked up once per run between two.
-fn toned(
-    text: &str,
+fn toned<'a>(
+    text: &'a str,
     start: gtk::TextIter,
     end: gtk::TextIter,
-) -> impl Iterator<Item = (char, Tone)> + '_ {
+    keywords: &[gtk::TextTag],
+) -> impl Iterator<Item = (char, Tone)> + 'a {
     let mut runs = Vec::new();
     let mut at = start;
     while at < end {
@@ -645,7 +715,10 @@ fn toned(
         if !next.forward_to_tag_toggle(None::<&gtk::TextTag>) || next > end {
             next = end;
         }
-        runs.push(((next.offset() - at.offset()) as usize, Tone::at(&at)));
+        runs.push((
+            (next.offset() - at.offset()) as usize,
+            Tone::at(&at, keywords),
+        ));
         at = next;
     }
     let tones = runs
@@ -718,24 +791,31 @@ fn render(k: usize, model: &Model, view: &sourceview5::View, paint: &Paint) -> g
         let text = buffer.text(&start, &stop, true);
         let y = (f64::from(model.start(at)) - base) * ROW;
         if let Some(tint) = tint(&start) {
-            let muted = theme::at(tint, tint.alpha() * theme::MAP_TINT_SHARE);
-            snapshot.append_color(&muted, &rect(0.0, y, width, f64::from(rows) * ROW));
+            snapshot.append_color(&tint, &rect(0.0, y, width, f64::from(rows) * ROW));
         }
-        if let Some(label) = model::label(&text).filter(|_| line.min_rows == LABEL_ROWS) {
+        if let Some(label) = model::label(&text).filter(|_| line.heading > 0) {
+            let level = line.heading;
+            let mut font = paint.label.clone();
+            font.set_absolute_size(LABEL_PX[usize::from(level - 1)] * f64::from(pango::SCALE));
+            let indent = f64::from(level - 1) * LABEL_INDENT;
             let layout = pango::Layout::new(&paint.context);
-            layout.set_font_description(Some(&paint.label));
+            layout.set_font_description(Some(&font));
             layout.set_text(label);
-            layout.set_width(WIDTH * pango::SCALE);
+            layout.set_width(((width - indent) * f64::from(pango::SCALE)) as i32);
             layout.set_ellipsize(pango::EllipsizeMode::End);
-            let room = f64::from(LABEL_ROWS) * ROW - f64::from(layout.pixel_size().1);
+            let room = f64::from(label_rows(level)) * ROW - f64::from(layout.pixel_size().1);
             snapshot.save();
-            snapshot.translate(&graphene::Point::new(0.0, (y + room / 2.0) as f32));
+            snapshot.translate(&graphene::Point::new(
+                indent as f32,
+                (y + room / 2.0) as f32,
+            ));
             snapshot.append_layout(&layout, &paint.text);
             snapshot.restore();
             continue;
         }
         let scale = f64::from(line.scale);
-        let chars = toned(&text, start, stop);
+        let keywords = paint.keywords.get_or_init(|| keyword_looks(&buffer));
+        let chars = toned(&text, start, stop, keywords);
         for bar in model::bars(chars, line.per_row(model.cols()), rows, tab) {
             let colour = match bar.tone {
                 Tone::Ink => &paint.ink,
@@ -805,6 +885,9 @@ mod imp {
         pub frame: Cell<Option<Frame>>,
         pub hover: Cell<bool>,
         pub grab: Cell<Option<Grab>>,
+        /// What drawing has cost, for the drills.
+        #[cfg(feature = "bench")]
+        pub spent: Cell<std::time::Duration>,
     }
 
     #[glib::object_subclass]
@@ -845,7 +928,11 @@ mod imp {
         }
 
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            #[cfg(feature = "bench")]
+            let start = std::time::Instant::now();
             self.draw(snapshot);
+            #[cfg(feature = "bench")]
+            self.spent.set(self.spent.get() + start.elapsed());
         }
     }
 }
