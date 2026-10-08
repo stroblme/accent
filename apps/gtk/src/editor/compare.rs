@@ -287,7 +287,7 @@ impl Tab {
             flavour: self.flavour,
             pool: self.overlays.clone(),
         };
-        let hosted = self.with_map_unset(|| make(self, editor));
+        let hosted = make(self, editor);
         self.scroller.set_overlay_scrolling(overlay);
         // Every lay moves the hidden runs, and a message at the end of a collapsed line would be
         // drawn on the row that stands for the run: the diagnostics are laid again with them.
@@ -346,7 +346,7 @@ impl Tab {
         let Some(comparing) = self.comparing.borrow_mut().take() else {
             return;
         };
-        self.with_map_unset(|| comparing.hosted.leave());
+        comparing.hosted.leave();
         self.shut_again(comparing.shut);
         self.show_chevrons();
         // The gap tags went with it, so the messages the collapsed lines were keeping quiet about
@@ -405,17 +405,5 @@ impl Tab {
                 self.shut(f);
             }
         }
-    }
-
-    /// Run `swap`, which may hand the editor's view another vertical adjustment, with the minimap
-    /// let go of the view around it. GtkSourceMap follows the adjustment the view had when it was
-    /// set, and lets go of whichever the view has when it is unset: across the swap it stood still
-    /// while the comparison scrolled, and a tab closed mid-comparison logged `instance … has no
-    /// handler with id` for both of its handlers.
-    fn with_map_unset<T>(&self, swap: impl FnOnce() -> T) -> T {
-        self.map.set_property("view", None::<&sourceview5::View>);
-        let out = swap();
-        self.map.set_view(&self.view);
-        out
     }
 }

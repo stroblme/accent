@@ -291,7 +291,7 @@ pub struct Tab {
     /// Whether ghost text is wanted here. Mirrored onto `lang.ghost` so the request path reads
     /// one cell, and kept here so a tab built while the preference was off can be turned on.
     ghost_text: Cell<bool>,
-    map: sourceview5::Map,
+    map: crate::minimap::Minimap,
     /// The optional line-number gutter; hidden unless the preference turns it on.
     numbers: sourceview5::GutterRenderer,
     /// The sticky block title over the top of the view, and the bar it sits on. Hidden until
@@ -701,6 +701,7 @@ impl Tab {
         diagnostics::restyle(&self.buffer, &self.view);
         self.fold_renderer.restyle(&self.view);
         self.conflicts.restyle();
+        self.map.restyle();
         if let Some(hosted) = self.hosted() {
             hosted.restyle();
         }
@@ -1403,8 +1404,8 @@ impl Saves for Tab {
 
 impl Drop for Tab {
     /// A closed tab takes its font provider and its document on the language layer with it; the
-    /// three `Debounce`s cancel whatever they are holding as they drop. The view is let go of by
-    /// the minimap and then freed ([`release`]).
+    /// three `Debounce`s cancel whatever they are holding as they drop. The view is freed
+    /// ([`release`]).
     fn drop(&mut self) {
         lang::detach(self);
         if let (Some(display), Some(provider)) =
@@ -1412,7 +1413,6 @@ impl Drop for Tab {
         {
             gtk::style_context_remove_provider_for_display(&display, &provider);
         }
-        self.map.set_property("view", None::<&sourceview5::View>);
         release(&self.view);
     }
 }

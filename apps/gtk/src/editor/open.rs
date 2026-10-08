@@ -194,8 +194,7 @@ pub fn open(
 
     // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a
     // tab that is built before the config is read still starts in a defined state.
-    let map = sourceview5::Map::new();
-    map.set_view(&view);
+    let map = crate::minimap::Minimap::new(&view);
     map.set_vexpand(true);
     map.set_visible(false);
     // It goes with the chrome while the user types (`App::hide_chrome`).

@@ -200,7 +200,7 @@ async fn bench_style_retag(tab: &Rc<Tab>) {
 }
 
 /// Typed words, a character every [`TYPING_EVERY`], [`TYPING_KEYS`] of them per size.
-const TYPING_WORDS: &str = "the quick brown fox jumps over the lazy dog ";
+pub(super) const TYPING_WORDS: &str = "the quick brown fox jumps over the lazy dog ";
 const TYPING_KEYS: usize = 40;
 const TYPING_EVERY: Duration = Duration::from_millis(150);
 /// What a note is made of at every size: a section of prose with the markup a note carries.

@@ -1252,7 +1252,7 @@ async fn reader(
     } else {
         // Over the editor's column, at the right edge of the other column, where its scrollbar
         // is, or over the minimap.
-        let map = || find_widget(compare.widget(), &|w| w.is::<sourceview5::Map>());
+        let map = || find_widget(compare.widget(), &|w| w.is::<crate::minimap::Minimap>());
         let (target, x, y) = match (what, theirs.parent(), map()) {
             ("bar", Some(scroller), _) => {
                 let (w, h) = (scroller.width(), scroller.height());

@@ -1222,7 +1222,7 @@ fn install_chrome_css() {
              popover.accent-completion .kind {{ opacity: 0.7; }} \
              popover.accent-completion .detail {{ opacity: 0.6; margin-left: 12px; }} \
              popover.accent-completion .doc {{ margin: 3px 8px; }} \
-             textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }} \
+             minimap {{ color: var(--view-fg-color); }} \
              expander {{ -gtk-icon-source: -gtk-icontheme(\"go-next-symbolic\"); }} \
              expander:dir(rtl) {{ -gtk-icon-source: -gtk-icontheme(\"go-previous-symbolic\"); }} \
              expander:checked {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }} \

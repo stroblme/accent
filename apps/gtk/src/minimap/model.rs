@@ -219,8 +219,9 @@ pub fn offset(top: f64, band: f64, total: f64, height: f64) -> f64 {
     (top / (total - band)).clamp(0.0, 1.0) * (total - height)
 }
 
-/// How many rows of the document one row of pointer movement drags the band over: more than one
-/// once the map scrolls itself ([`offset`]), so the band stays under the pointer.
+/// The rows of the document per row of the map the band moves by: more than one once the map
+/// scrolls itself ([`offset`]). The band drawn `screen` rows down the map has its top on row
+/// `screen × drag_ratio`, which is how a drag keeps it under the pointer.
 pub fn drag_ratio(band: f64, total: f64, height: f64) -> f64 {
     if total <= height || height <= band {
         return 1.0;
@@ -228,9 +229,108 @@ pub fn drag_ratio(band: f64, total: f64, height: f64) -> f64 {
     (total - band) / (height - band)
 }
 
+/// A run of non-blank characters of one tone, as the map draws it: the row of its line it falls
+/// on, the column it starts at there and how many columns it takes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bar<T> {
+    pub row: u32,
+    pub col: u32,
+    pub len: u32,
+    pub tone: T,
+}
+
+/// The bars of a line, given its characters each with its tone: wrapped every `per_row` columns,
+/// a tab taking the columns to the next multiple of `tab`, and nothing past row `rows`. A word
+/// is cut at the wrap rather than carried to the next row, which a bar a pixel per character
+/// wide does not show.
+pub fn bars<T: Copy + PartialEq>(
+    chars: impl Iterator<Item = (char, T)>,
+    per_row: u32,
+    rows: u32,
+    tab: u32,
+) -> Vec<Bar<T>> {
+    let mut out = Vec::new();
+    let mut col = 0;
+    let mut run: Option<(u32, T)> = None;
+    for (c, tone) in chars {
+        if c.is_whitespace() {
+            if let Some((start, tone)) = run.take() {
+                split(&mut out, start..col, tone, per_row, rows);
+            }
+            col += if c == '\t' { tab - col % tab } else { 1 };
+            continue;
+        }
+        match run {
+            Some((_, current)) if current == tone => {}
+            Some((start, current)) => {
+                split(&mut out, start..col, current, per_row, rows);
+                run = Some((col, tone));
+            }
+            None => run = Some((col, tone)),
+        }
+        col += 1;
+    }
+    if let Some((start, tone)) = run {
+        split(&mut out, start..col, tone, per_row, rows);
+    }
+    out
+}
+
+/// The columns `cols` of a line as a bar on each row they cross.
+fn split<T: Copy>(out: &mut Vec<Bar<T>>, cols: Range<u32>, tone: T, per_row: u32, rows: u32) {
+    let mut from = cols.start;
+    while from < cols.end {
+        let row = from / per_row;
+        if row >= rows {
+            return;
+        }
+        let to = cols.end.min((row + 1).saturating_mul(per_row));
+        out.push(Bar {
+            row,
+            col: from - row * per_row,
+            len: to - from,
+            tone,
+        });
+        from = to;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bar_is_a_word_wrapped_at_the_column() {
+        let plain = |s: &'static str| s.chars().map(|c| (c, ()));
+        let spans = |bars: Vec<Bar<()>>| -> Vec<(u32, u32, u32)> {
+            bars.iter().map(|b| (b.row, b.col, b.len)).collect()
+        };
+        assert_eq!(
+            spans(bars(plain("ab  cde\tf"), 100, 1, 4)),
+            [(0, 0, 2), (0, 4, 3), (0, 8, 1)],
+            "a tab goes to the next stop"
+        );
+        assert_eq!(
+            spans(bars(plain("abcdefg hi"), 4, 9, 4)),
+            [(0, 0, 4), (1, 0, 3), (2, 0, 2)]
+        );
+        assert_eq!(
+            spans(bars(plain("abcdefg hi"), 4, 2, 4)),
+            [(0, 0, 4), (1, 0, 3)],
+            "no further than the line's rows"
+        );
+        assert_eq!(spans(bars(plain("abc"), u32::MAX, 1, 4)), [(0, 0, 3)]);
+        let toned = [('a', 1), ('b', 1), ('c', 2)].into_iter();
+        let toned = bars(toned, 100, 1, 4);
+        assert_eq!(
+            toned
+                .iter()
+                .map(|b| (b.col, b.len, b.tone))
+                .collect::<Vec<_>>(),
+            [(0, 2, 1), (2, 1, 2)],
+            "a new tone starts a new bar"
+        );
+    }
 
     fn line(chars: u32) -> Line {
         Line {
@@ -349,19 +449,17 @@ mod tests {
         );
     }
 
-    /// Dragging the band by some rows moves it on screen by exactly those rows, so it stays
-    /// under the pointer, scrolled map or not.
+    /// A band drawn some rows down the map, its top put where [`drag_ratio`] says, is drawn
+    /// exactly there again, scrolled map or not: a drag keeps it under the pointer.
     #[test]
     fn a_drag_keeps_the_band_under_the_pointer() {
+        let band = 40.0;
         for (total, height) in [(1000.0, 400.0), (300.0, 400.0)] {
-            let band = 40.0;
-            let screen = |top: f64| top - offset(top, band, total, height);
             let ratio = drag_ratio(band, total, height);
-            for (top, dy) in [(0.0, 50.0), (200.0, -30.0), (100.0, 120.0)] {
-                let moved = (top + dy * ratio).clamp(0.0, total - band);
-                if moved == top + dy * ratio {
-                    assert!((screen(moved) - screen(top) - dy).abs() < 1e-9);
-                }
+            for screen in [0.0, 50.0, 200.0, 359.0] {
+                let top = (screen * ratio).min(total - band);
+                let drawn = top - offset(top, band, total, height);
+                assert!((drawn - screen).abs() < 1e-9 || top == total - band);
             }
         }
     }

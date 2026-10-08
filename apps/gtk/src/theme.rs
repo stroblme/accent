@@ -226,6 +226,13 @@ pub const UNFOCUSED_SELECTION_ALPHA: f32 = 0.1;
 /// this is about how strong the colour is, not about whether the text survives.
 pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
 
+/// The minimap's words, in the foreground at this alpha so a page of them reads as grey under
+/// the text beside it, and the band over the lines on screen, at rest and under the pointer or a
+/// drag.
+pub const MAP_INK_ALPHA: f32 = 0.45;
+pub const MAP_BAND_ALPHA: f32 = 0.08;
+pub const MAP_BAND_HOVER_ALPHA: f32 = 0.16;
+
 /// A conflict block's incoming side and its marker line over `page` where the theme has a blue of
 /// its own for it, or `None` for the one derived from the foreground (`conflict::tints`).
 ///

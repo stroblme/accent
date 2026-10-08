@@ -24,10 +24,10 @@ use super::*;
 /// time to lay itself again (`scrolled want=… got=…`, the two equal): a file with one side empty
 /// — untracked, newly staged, deleted, or added by the commit — went back to `got=0`, the empty
 /// column's view pulling the scroll they share into its own few pixels. In the note's own tab the
-/// minimap is switched on first and its scroll printed either side (`map=…->…`), then again across
-/// a page of the editor's own scroll once the comparison is left (`left map=…->…`): it stood still
-/// while the editor was on the companion's scrollbar. Point it at a note whose changes keep most
-/// rows on screen, or the minimap has nothing to scroll. `stale:` opens the file
+/// minimap is switched on first and its band's top printed either side (`map=…->…`), then again
+/// across a page of the editor's own scroll once the comparison is left (`left map=…->…`): it
+/// stood still while the editor was on the companion's scrollbar. Point it at a note whose changes
+/// keep most rows on screen, or the view has nothing to scroll. `stale:` opens the file
 /// first and prints whether its editor has its own scrollbar back once the comparison has been
 /// left (`own_scroll=true`), then scrolls it: the editor used to keep the companion's adjustment,
 /// and with it the freed companion's handler, and that scroll crashed the window — every time
@@ -226,13 +226,13 @@ async fn bench_scroll(compare: &diff::Compare) -> String {
     )
 }
 
-/// Where the minimap's own scroll is while it is on, which has to follow the editor's.
+/// Where the minimap's band is while it is on, which has to follow the editor's scroll.
 fn bench_map(tab: &Tab) -> Option<f64> {
-    let map = tab.minimap().downcast_ref::<sourceview5::Map>()?;
+    let map = tab.minimap().downcast_ref::<crate::minimap::Minimap>()?;
     map.is_visible()
-        .then(|| map.vadjustment())
+        .then(|| map.band_px())
         .flatten()
-        .map(|adj| adj.value())
+        .map(|(top, _)| top)
 }
 
 /// Ask for a comparison on a file that is not text — `binary.md`, which the drill's vault holds —
