@@ -478,6 +478,11 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
+                move |tag: &str| app.show_tag(tag)
+            ),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
                 move |key: &str| app.invert_image(key)
             ),
         );

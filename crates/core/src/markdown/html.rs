@@ -1,11 +1,12 @@
-//! The preview pane's HTML: wikilinks become `accent://` anchors, math becomes MathML, every
-//! block carries the source line it starts on, and a conflict block its sides in boxes.
+//! The preview pane's HTML: wikilinks and tags become `accent://` anchors, math becomes MathML,
+//! every block carries the source line it starts on, and a conflict block its sides in boxes.
 
 use super::blocks::block_ids;
+use super::frontmatter::scan_tags;
 use super::links::{heading_named, is_image, percent_decode, percent_encode, slugs, split_anchor};
 use super::options;
 use crate::conflict::{self, Block};
-use pulldown_cmark::{Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
+use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
 use pulldown_latex::{Event as LatexEvent, ParserError, Storage};
 use std::collections::HashMap;
 use std::error::Error;
@@ -104,6 +105,9 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
 
 /// Render a note to an HTML fragment for the preview pane (wikilinks become `<a href="accent://…">`).
 ///
+/// A `#tag` becomes `<a href="accent://tag/<tag>" class="tag">`, the tag percent-encoded, which the
+/// app follows to the tag's notes; the class lets the page draw it as a tag rather than a link.
+///
 /// Each block opens with an empty `<span data-line="N">`, so the preview can scroll to the line
 /// the editor's cursor is on, and each heading gets its [`slugs`] anchor as its `id`, so an
 /// in-note `[text](#slug)` scrolls there; `[text](#My%20Section)`, naming the heading by its text,
@@ -188,6 +192,37 @@ impl<'a> Page<'a> {
         self.evts.push(Event::Html(html.into()));
     }
 
+    /// A text run of `src` at `r`, its `#tag`s as `accent://tag/<tag>` links the app follows to
+    /// the tag. They are found in the source by the rule the index reads tags with, so a run the
+    /// parser rewrote (an escape, an entity) is left as it is; one whose block id was cut off its
+    /// end is still the source up to there.
+    fn tagged(&mut self, src: &'a str, r: Range<usize>, t: CowStr<'a>) {
+        let shown = r.start..r.start + t.len();
+        let mut tags = Vec::new();
+        if src.get(shown.clone()) == Some(&*t) {
+            scan_tags(src, &shown, &mut tags, &mut Vec::new());
+        }
+        if tags.is_empty() {
+            return self.evts.push(Event::Text(t));
+        }
+        let mut at = shown.start;
+        for tag in tags {
+            if at < tag.range.start {
+                self.evts.push(Event::Text(src[at..tag.range.start].into()));
+            }
+            self.html(format!(
+                "<a href=\"accent://tag/{}\" class=\"tag\">",
+                percent_encode(&tag.name)
+            ));
+            self.evts.push(Event::Text(src[tag.range.clone()].into()));
+            self.html("</a>".into());
+            at = tag.range.end;
+        }
+        if at < shown.end {
+            self.evts.push(Event::Text(src[at..shown.end].into()));
+        }
+    }
+
     /// The markdown of `text[part]`, parsed as a note of its own.
     fn markdown(&mut self, text: &'a str, part: Range<usize>) {
         let src = &text[part.clone()];
@@ -211,6 +246,9 @@ impl<'a> Page<'a> {
         let mut image_wiki: Vec<bool> = Vec::new();
         let mut skip = 0usize;
         let mut in_heading = false;
+        // Where a text run is never a tag, as `analyze` reads them: code and the front matter.
+        let mut in_code = false;
+        let mut in_meta = false;
 
         // The definitions go on after the stretch, where the parser finds them; nothing of them
         // is shown, their events all starting past its end.
@@ -233,6 +271,10 @@ impl<'a> Page<'a> {
                     self.headings.push((self.evts.len(), String::new()));
                 }
                 Event::End(TagEnd::Heading(_)) => in_heading = false,
+                Event::Start(Cm::CodeBlock(_)) => in_code = true,
+                Event::End(TagEnd::CodeBlock) => in_code = false,
+                Event::Start(Cm::MetadataBlock(_)) => in_meta = true,
+                Event::End(TagEnd::MetadataBlock(_)) => in_meta = false,
                 Event::Text(t) | Event::Code(t) if in_heading => {
                     if let Some((_, h)) = self.headings.last_mut() {
                         h.push_str(t);
@@ -351,6 +393,11 @@ impl<'a> Page<'a> {
                     }
                     self.evts.push(ev);
                 }
+                Event::Text(t)
+                    if !in_code && !in_meta && link_wiki.is_empty() && image_wiki.is_empty() =>
+                {
+                    self.tagged(src, r, t)
+                }
                 _ => self.evts.push(ev),
             }
             self.evts.extend(marker);
@@ -443,6 +490,42 @@ mod tests {
         let h = bare("# Hi\n\n[x](y.md)\n");
         assert!(h.contains("<h1 id=\"hi\">Hi</h1>"), "{h}");
         assert!(h.contains("<a href=\"y.md\">x</a>"), "{h}");
+    }
+
+    /// A `#tag` is a link the app follows to the tag, by the rule the index reads tags with: not
+    /// in code, a link's text or the front matter, not mid-word and not a bare number.
+    #[test]
+    fn html_links_a_tag_to_its_notes() {
+        let h = bare("Read #inbox, then #area/work-1 and #café.\n");
+        for (href, text) in [
+            ("inbox", "inbox"),
+            ("area/work-1", "area/work-1"),
+            ("caf%C3%A9", "café"),
+        ] {
+            assert!(
+                h.contains(&format!(
+                    "<a href=\"accent://tag/{href}\" class=\"tag\">#{text}</a>"
+                )),
+                "{h}"
+            );
+        }
+        assert!(h.starts_with("<p>Read <a "), "{h}");
+        assert!(h.contains("</a>, then <a "), "{h}");
+
+        // A heading keeps the anchor its whole text makes, and a block keeps its tag before its id.
+        let h = bare("# Plan #draft\n\nNotes on #x ^para\n");
+        assert!(
+            h.contains("<h1 id=\"plan-draft\">Plan <a href=\"accent://tag/draft\""),
+            "{h}"
+        );
+        assert!(
+            h.contains("<p>Notes on <a href=\"accent://tag/x\" class=\"tag\">#x</a></p>"),
+            "{h}"
+        );
+
+        let src = "---\ntags: [meta]\n---\n`#code` [#text](x.md) [[N|#alias]] a#b #123 \\#esc\n\n\
+                   ```\n#fenced\n```\n";
+        assert!(!bare(src).contains("accent://tag/"), "{}", bare(src));
     }
 
     /// A diagram shows as a picture of its page, inside the link that opens it there.

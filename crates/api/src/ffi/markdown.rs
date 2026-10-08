@@ -19,8 +19,8 @@ pub fn pdf_anchor(anchor: String) -> Option<PdfAnchor> {
 }
 
 /// The note rendered as an HTML fragment, exactly as the desktop preview gets it: wikilinks as
-/// `accent://open/…`, embeds as `accent://file/…`, maths as MathML, a `data-line` marker before
-/// every block and a slug on every heading.
+/// `accent://open/…`, tags as `accent://tag/…`, embeds as `accent://file/…`, maths as MathML, a
+/// `data-line` marker before every block and a slug on every heading.
 #[uniffi::export]
 pub fn to_html(text: String) -> String {
     markdown::to_html(&text)

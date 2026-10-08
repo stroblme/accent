@@ -362,8 +362,9 @@ impl Preview {
     /// reader inverted, which are served the other way round from what the theme asks; `web` the
     /// diagrams whose pictures on the web an embed of them draws. `on_open`
     /// fires when the reader clicks a link into the vault, with a wikilink's target as written or
-    /// a markdown link's vault path, and the `#anchor` if there is one; `on_invert` when the
-    /// reader asks the image menu to invert an image, with its key.
+    /// a markdown link's vault path, and the `#anchor` if there is one; `on_tag` when the reader
+    /// clicks a `#tag`, with the tag; `on_invert` when the reader asks the image menu to invert an
+    /// image, with its key.
     ///
     /// ponytail: every `Preview` builds its own `WebContext`, so one per tab means one WebKit
     /// process group per tab. Sharing a context (and its registered scheme) across previews is the
@@ -373,16 +374,25 @@ impl Preview {
         inverted: Keys,
         web: Keys,
         on_open: impl Fn(&str) + 'static,
+        on_tag: impl Fn(&str) + 'static,
         on_invert: impl Fn(&str) + 'static,
     ) -> Preview {
-        Self::build(Arc::new(resolve), inverted, web, on_open, on_invert, false)
+        Self::build(
+            Arc::new(resolve),
+            inverted,
+            web,
+            on_open,
+            on_tag,
+            on_invert,
+            false,
+        )
     }
 
     /// A page to print or export a note from, never shown: the note on the light theme's white
     /// paper whatever the window's theme, its images as their files are, its diagrams in mermaid's
     /// `neutral` theme, and nothing in it followed anywhere.
     pub fn for_paper(resolve: Arc<Resolve>, web: Keys) -> Preview {
-        Self::build(resolve, Rc::default(), web, |_| {}, |_| {}, true)
+        Self::build(resolve, Rc::default(), web, |_| {}, |_| {}, |_| {}, true)
     }
 
     fn build(
@@ -390,6 +400,7 @@ impl Preview {
         inverted: Keys,
         web: Keys,
         on_open: impl Fn(&str) + 'static,
+        on_tag: impl Fn(&str) + 'static,
         on_invert: impl Fn(&str) + 'static,
         paper: bool,
     ) -> Preview {
@@ -495,7 +506,7 @@ impl Preview {
         inner
             .view
             .connect_decide_policy(move |view, decision, kind| {
-                decide(view, decision, kind, &on_open)
+                decide(view, decision, kind, &on_open, &on_tag)
             });
         image_menu(&inner, on_invert);
 
@@ -895,13 +906,15 @@ fn refusal(why: &str) -> String {
     )
 }
 
-/// Route a navigation: links into the vault back to the app, a web, mail, phone or message link
-/// to the system, our own document load and an anchor into it through, everything else nowhere.
+/// Route a navigation: links into the vault and tags back to the app, a web, mail, phone or
+/// message link to the system, our own document load and an anchor into it through, everything
+/// else nowhere.
 fn decide(
     view: &webkit6::WebView,
     decision: &webkit6::PolicyDecision,
     kind: webkit6::PolicyDecisionType,
     on_open: &impl Fn(&str),
+    on_tag: &impl Fn(&str),
 ) -> bool {
     use webkit6::PolicyDecisionType as Type;
     if !matches!(kind, Type::NavigationAction | Type::NewWindowAction) {
@@ -924,6 +937,8 @@ fn decide(
         Some(("file", _)) if action.navigation_type() != webkit6::NavigationType::LinkClicked => {
             return false;
         }
+        // A `#tag`, which `to_html` makes a link to the tag's notes.
+        Some(("tag", tag)) => on_tag(&tag),
         // An in-note `[text](#slug)`: WebKit scrolls to the heading `to_html` gave that `id`.
         _ if view.uri().is_some_and(|page| same_page(&uri, &page)) => return false,
         // A wikilink, or a markdown link the base URI has already made a vault path. The anchor
@@ -1273,6 +1288,8 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) 
          li.task-list-item {{ list-style: none; }}\n\
          li.task-list-item input {{ margin: 0 0 0 -1.4em; }}\n\
          a {{ color: {accent}; text-decoration: underline; }}\n\
+         /* A tag is drawn as the editor draws one: in the accent, not underlined. */\n\
+         a.tag {{ text-decoration: none; }}\n\
          img {{ max-width: 100%; height: auto; }}\n\
          /* A display formula's box is its ink: unlike a line of prose it carries none of the\n\
             half-leading `line-height: 1.6` gives, so two of them would sit closer together than\n\
@@ -1343,6 +1360,7 @@ mod tests {
             css.contains("a { color: rgba(255, 0, 0, 1.00); text-decoration: underline; }"),
             "{css}"
         );
+        assert!(css.contains("a.tag { text-decoration: none; }"), "{css}");
         assert!(css.contains("border-left: 3px solid rgba(255, 0, 0, 1.00)"));
     }
 

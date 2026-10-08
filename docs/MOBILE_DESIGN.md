@@ -49,6 +49,8 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
 - Tags is every tag with how many notes carry it, most used first and bottom-up as Files is, the
   query ranking them as it ranks names. A tap opens the tag on the same page: its notes by name and
   folder, from the top, under `#tag · N` in the accent, which a tap or Back takes back to the tags.
+  A tag tapped in a note — a link in the accent, as the editor colours it — opens Browse on that
+  page, its notes listed, as if it had been opened here.
 - Backlinks is the notes linking to the document in front — a note, a PDF or an image — once each,
   by name and folder under "Links to …", the desktop's References for a note. One opened from
   here is one step from where the reader was: Back from it opens that document again, at its top,
@@ -149,6 +151,7 @@ exist as a visible control.
 | Tap a highlight on a page | Opens the note whose link makes it; Back returns to the page | The highlight |
 | Tap another reader's comment on a page | Shows it with its author in a dialog | The mark pdfium paints |
 | Back on a tag's notes | Returns to the tags | The tag's heading |
+| Tap a tag in a note | Opens Browse on that tag's notes | The tag, in the accent |
 | Long press on a PDF page | Selects the word under the finger; a drag grows it, and the handles move either end | The handles and the floating toolbar it raises |
 | Long press on a note | Selects the text under the finger with the WebView's own handles, as a page of prose does everywhere else on the platform | The handles it raises |
 | Tap an image in a note | Opens it on its own screen, to zoom and invert; an image inside a link follows the link | The image |

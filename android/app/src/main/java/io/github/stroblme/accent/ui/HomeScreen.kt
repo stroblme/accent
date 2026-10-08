@@ -35,6 +35,8 @@ private enum class Screen { Home, Browse }
 fun HomeScreen(model: VaultModel) {
     val state by model.state.collectAsState()
     var screen by remember { mutableStateOf(Screen.Home) }
+    // The tag a tap in a note asked Browse to open on; the button opens it on Search.
+    var browseTag by remember { mutableStateOf<String?>(null) }
     val chrome = remember { Chrome() }
     val snackbar = remember { SnackbarHostState() }
 
@@ -78,6 +80,10 @@ fun HomeScreen(model: VaultModel) {
                     model = model,
                     open = open,
                     chrome = chrome,
+                    onTag = {
+                        browseTag = it
+                        screen = Screen.Browse
+                    },
                 )
                 image != null -> ImageScreen(image = image, chrome = chrome)
                 else -> Empty(
@@ -104,7 +110,10 @@ fun HomeScreen(model: VaultModel) {
                 // cannot disagree about whether the reader may start.
                 visible = screen == Screen.Home && chrome.shown && open?.finding != true &&
                     pdf?.finding != true && state.ready,
-                onBrowse = { screen = Screen.Browse },
+                onBrowse = {
+                    browseTag = null
+                    screen = Screen.Browse
+                },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
 
@@ -127,6 +136,7 @@ fun HomeScreen(model: VaultModel) {
                     expanded = state.expanded,
                     results = state.results,
                     front = open?.rel ?: pdf?.rel ?: image?.rel,
+                    openTag = browseTag,
                     onOpen = { rel, find ->
                         model.openFile(rel, find)
                         screen = Screen.Home

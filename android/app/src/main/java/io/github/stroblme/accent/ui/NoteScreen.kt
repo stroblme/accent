@@ -51,7 +51,7 @@ import kotlin.math.roundToInt
  * to the field's output rather than to a buffer of tags.
  */
 @Composable
-fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome) {
+fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) -> Unit) {
     var editing by remember(open.rel) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         // Above the bar rather than under it, since the bar lies over the note and would cover
@@ -89,7 +89,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome) {
             if (editing) {
                 Box(Modifier.padding(top = bar)) { Editor(model) }
             } else {
-                Rendered(model, open, chrome)
+                Rendered(model, open, chrome, onTag)
             }
         }
     }
@@ -171,10 +171,11 @@ private fun UnsavedDialog(why: String, onAnswer: (Boolean?) -> Unit) {
 /**
  * The rendered note, and where a search hit lands in it.
  *
- * `accent://open/…` is a link to another note and is handed back to the app; `accent://file/…` is
- * an image, served off the vault and recoloured as a PDF page is when it reads as a document
- * ([served]); [MERMAID] is the diagram library, served out of the APK. Nothing else loads at all —
- * the same rule the desktop preview enforces with a content blocker.
+ * `accent://open/…` is a link to another note and is handed back to the app, and so is
+ * `accent://tag/…`, a tag, which [onTag] opens Browse on; `accent://file/…` is an image, served
+ * off the vault and recoloured as a PDF page is when it reads as a document ([served]); [MERMAID]
+ * is the diagram library, served out of the APK. Nothing else loads at all — the same rule the
+ * desktop preview enforces with a content blocker.
  *
  * A tap on an image opens it on its own screen ([ImageScreen]), where it can be zoomed and
  * inverted; one on an image inside a link is the link's, as on any page. A long press on an image
@@ -197,7 +198,7 @@ private fun UnsavedDialog(why: String, onAnswer: (Boolean?) -> Unit) {
  * on the screen together — opening the bar clears whatever was marked before it.
  */
 @Composable
-private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
+private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) -> Unit) {
     val colors = MaterialTheme.colorScheme
     // What the images are served under, read by the loading thread; a change in either loads the
     // page again, since an image is recoloured on its way into it.
@@ -225,8 +226,10 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
     // of how many, straight off the view's own find listener. Reset every time the bar opens.
     var query by remember(open.finding) { mutableStateOf("") }
     var matches by remember { mutableStateOf(0 to 0) }
-    // Read inside the tap below, which is captured once and so cannot close over a parameter.
+    // Read inside the tap and the client below, which are captured once and so cannot close over
+    // a parameter.
     val finding by rememberUpdatedState(open.finding)
+    val tagged by rememberUpdatedState(onTag)
 
     // The reader's own find: every keystroke marks the page again, and an empty field — which is
     // where the bar opens, and what it leaves behind when it closes — takes the marks off. One
@@ -287,9 +290,10 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
                             request: WebResourceRequest,
                         ): Boolean {
                             val url = request.url.toString()
-                            if (!url.startsWith("accent://open/")) return true
-                            val target = decode(url.removePrefix("accent://open/"))
-                            model.openLink(target)
+                            when {
+                                url.startsWith(OPEN) -> model.openLink(decode(url.removePrefix(OPEN)))
+                                url.startsWith(TAG) -> tagged(decode(url.removePrefix(TAG)))
+                            }
                             return true
                         }
 
@@ -442,6 +446,10 @@ internal fun Color.rgba(): String = String.format(
 
 /** Whether rendered HTML holds a mermaid fence: pulldown-cmark's class on a fence's code. */
 internal fun diagrams(html: String): Boolean = "<code class=\"language-mermaid\">" in html
+
+/** A link to another note, and one to a tag's notes, as `to_html` writes them. */
+private const val OPEN = "accent://open/"
+private const val TAG = "accent://tag/"
 
 /** Where a page asks for mermaid and its bootstrap, answered from the APK's assets. */
 private const val MERMAID = "accent://app/mermaid.min.js"

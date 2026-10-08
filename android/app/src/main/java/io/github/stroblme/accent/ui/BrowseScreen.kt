@@ -56,6 +56,9 @@ private enum class Mode { Search, Files, Tags, Backlinks, Command }
  * nearest the field and the thumb. Search keeps the tree the way a tree reads, from the top, and so
  * do a tag's notes and the backlinks, which are a list under a heading rather than a ranking.
  *
+ * A tag tapped in a note opens the panel on that tag's notes ([openTag]), Back from them going to
+ * the tags as it does for one opened here.
+ *
  * A row hands over the file it names and, if it was a search hit, the query it was found by:
  * that query is the whole difference between the two ways in, and it is what the note marks
  * itself with (`NoteScreen`). A row picked off the tree or the switcher hands over nothing and
@@ -75,10 +78,11 @@ fun BrowseScreen(
     expanded: Set<String>,
     results: List<SearchHit>,
     front: String?,
+    openTag: String?,
     onOpen: (rel: String, find: String?) -> Unit,
     onClose: () -> Unit,
 ) {
-    val pager = rememberPagerState { Mode.entries.size }
+    val pager = rememberPagerState(if (openTag != null) Mode.Tags.ordinal else 0) { Mode.entries.size }
     val scope = rememberCoroutineScope()
     // Which page the pager is nearest, which is what the field means and which chip is lit: both
     // follow the surface across, rather than waiting for it to land.
@@ -102,7 +106,13 @@ fun BrowseScreen(
     fun placesIn(list: List<*>?) = listing?.takeIf { it.first === list }?.second.orEmpty()
     val focus = remember { FocusRequester() }
 
-    LaunchedEffect(Unit) { tags = model.tags() }
+    LaunchedEffect(Unit) {
+        val all = model.tags()
+        tags = all
+        // By its count from the same list, so its heading reads as one opened here would; a tag
+        // the index does not have yet, typed and not saved, has no notes to list.
+        if (openTag != null) tag = all.find { it.name == openTag } ?: TagCount(openTag, 0)
+    }
     LaunchedEffect(front) { linked = front?.let { model.linkedFrom(it) } }
     LaunchedEffect(tag) {
         tagged = null

@@ -209,12 +209,7 @@ impl App {
                     palette::Item::Command { action, .. } => {
                         let _ = WidgetExt::activate_action(&app.window, action, None);
                     }
-                    palette::Item::Tag(tag) => {
-                        app.sidebar_column.set_visible(true);
-                        if let Some(sidebar) = app.sidebar.get() {
-                            sidebar.show_tag(tag);
-                        }
-                    }
+                    palette::Item::Tag(tag) => app.show_tag(tag),
                     // Through the shell, which raises the window that vault already has rather
                     // than opening a second one on the same index, session and watcher.
                     palette::Item::Vault(key) => {
@@ -229,6 +224,15 @@ impl App {
             ),
         );
         self.corpus.borrow_mut().open = Some(refill);
+    }
+
+    /// The Info pane's Tags section with `tag` picked, the sidebar brought up for it: a tag
+    /// picked in the palette, or clicked in the preview.
+    pub(crate) fn show_tag(&self, tag: &str) {
+        self.sidebar_column.set_visible(true);
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.show_tag(tag);
+        }
     }
 
     /// Remember that this file was just looked at. Called from `sync_active`, so it covers
