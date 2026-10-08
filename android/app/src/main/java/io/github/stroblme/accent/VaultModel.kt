@@ -22,6 +22,7 @@ import io.github.stroblme.accent.ffi.Vault
 import io.github.stroblme.accent.ffi.pdfAnchor
 import io.github.stroblme.accent.ui.imageKind
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,6 +31,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -289,6 +292,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** The exit [leave] is holding while the reader answers, if there is one. */
     private var held: (suspend () -> Unit)? = null
 
+    /** One [write] at a time, so each goes out with the etag the one before it recorded. */
+    private val writing = Mutex()
+
     /** The switcher's files. See [corpus]. */
     private var corpus: Corpus? = null
 
@@ -298,15 +304,16 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     init {
         // Autosave: a pause in the typing, not a queue of them — `collectLatest` drops the wait
-        // the moment the next keystroke lands. It runs for as long as the model does rather than
-        // for as long as the editor is composed, so leaving the editor inside that second no
-        // longer needs a write of its own, and what it is compared against is read when the wait
-        // is over: typing a word and taking it back again saves nothing, and a note replaced
-        // under it (a reload, another note) is left alone.
+        // the moment the next keystroke lands, though not a write already under way ([write]).
+        // It runs for as long as the model does rather than for as long as the editor is
+        // composed, so leaving the editor inside that second no longer needs a write of its own,
+        // and what it is compared against is read when the wait is over: typing a word and
+        // taking it back again saves nothing, and a note replaced under it (a reload, another
+        // note) is left alone.
         viewModelScope.launch {
             snapshotFlow { buffer.text.toString() }.collectLatest { text ->
                 delay(SAVE_AFTER_MS)
-                if (text != _state.value.open?.text) write(text)
+                write(text)
             }
         }
     }
@@ -529,49 +536,57 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * return to; see [openFromPdf].
      */
     fun openFile(rel: String, find: String? = null, at: PdfPlace? = null, back: Back? = null) {
-        val v = vault ?: return
         // What is in the buffer belongs to the note it was typed into, and the buffer is about to
         // hold another note's text: a write left pending across the swap would put these words in
         // that file.
-        leave {
-            recents.touch(Recents.Kind.Notes, rel)
-            if (rel.endsWith(".pdf", ignoreCase = true)) {
-                val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
-                path.onSuccess { p ->
-                    _state.update {
-                        it.copy(pdf = OpenPdf(rel, p, at), open = null, image = null, back = null)
-                    }
-                }
-                    .onFailure { fail("Cannot open this file", it) }
-                return@leave
-            }
-            if (imageKind(rel) != null) {
-                val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
-                path.onSuccess { p ->
-                    _state.update {
-                        it.copy(image = OpenImage(rel, p), open = null, pdf = null, back = null)
-                    }
-                }
-                    .onFailure { fail("Cannot open this file", it) }
-                return@leave
-            }
-            val read = withContext(Dispatchers.IO) {
-                runCatching { v.read(rel) to v.conflictsOf(rel) }
-            }
-            read.onSuccess { (note, conflicts) ->
-                // The buffer and the state in one step, so nothing composes a note's name over
-                // another note's text.
-                buffer.load(note.text)
+        leave { show(rel, find, at, back) }
+    }
+
+    /** Put the file in front, whatever the buffer holds: [openFile] once [leave] has written it. */
+    private suspend fun show(
+        rel: String,
+        find: String? = null,
+        at: PdfPlace? = null,
+        back: Back? = null,
+    ) {
+        val v = vault ?: return
+        recents.touch(Recents.Kind.Notes, rel)
+        if (rel.endsWith(".pdf", ignoreCase = true)) {
+            val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
+            path.onSuccess { p ->
                 _state.update {
-                    it.copy(
-                        pdf = null,
-                        image = null,
-                        open = Open(rel, note.text, note.etag, conflicts = conflicts, find = find),
-                        back = back,
-                    )
+                    it.copy(pdf = OpenPdf(rel, p, at), open = null, image = null, back = null)
                 }
-            }.onFailure { fail("Cannot read this note", it) }
+            }
+                .onFailure { fail("Cannot open this file", it) }
+            return
         }
+        if (imageKind(rel) != null) {
+            val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
+            path.onSuccess { p ->
+                _state.update {
+                    it.copy(image = OpenImage(rel, p), open = null, pdf = null, back = null)
+                }
+            }
+                .onFailure { fail("Cannot open this file", it) }
+            return
+        }
+        val read = withContext(Dispatchers.IO) {
+            runCatching { v.read(rel) to v.conflictsOf(rel) }
+        }
+        read.onSuccess { (note, conflicts) ->
+            // The buffer and the state in one step, so nothing composes a note's name over
+            // another note's text.
+            buffer.load(note.text)
+            _state.update {
+                it.copy(
+                    pdf = null,
+                    image = null,
+                    open = Open(rel, note.text, note.etag, conflicts = conflicts, find = find),
+                    back = back,
+                )
+            }
+        }.onFailure { fail("Cannot read this note", it) }
     }
 
     /**
@@ -673,6 +688,18 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** What came of a [write]. */
+    private enum class Saved {
+        /** The vault has the text: written now, or nothing to write. */
+        Written,
+
+        /** Not written, because the file moved under the note: saving is paused, the banner up. */
+        Paused,
+
+        /** Not written, for a reason already said ([fail]). */
+        Failed,
+    }
+
     /**
      * Write the note back, refusing rather than resolving when the file has moved under it — its
      * text, not its etag alone ([saveOver]).
@@ -681,33 +708,48 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * both the edits and the answer nobody has given yet. Same rule as the desktop. [force] is
      * that answer given as Keep mine, and writes over whatever is on disk: a save that expects no
      * particular version is the core's forced write, the desktop's Overwrite.
+     *
+     * One at a time ([writing]), and once the core is writing, the rest runs whether or not the
+     * caller is still waiting: autosave is cancelled by the next keystroke, and a write the core
+     * committed but nobody recorded leaves an etag the file no longer has, which the next write
+     * reads as somebody else's change.
      */
-    private suspend fun write(text: String, force: Boolean = false) {
-        val v = vault ?: return
-        val open = _state.value.open ?: return
-        if (open.changedOnDisk && !force) return
-        val written = withContext(Dispatchers.IO) {
-            runCatching {
-                saveOver(if (force) null else open.etag, open.text, { v.read(open.rel) }) {
-                    v.save(open.rel, text, it)
+    private suspend fun write(text: String, force: Boolean = false): Saved = writing.withLock {
+        val v = vault ?: return@withLock Saved.Written
+        val open = _state.value.open ?: return@withLock Saved.Written
+        if (!force && !open.dirty(text)) return@withLock Saved.Written
+        if (!force && open.wouldLose(text)) return@withLock Saved.Paused
+        withContext(NonCancellable) {
+            val written = withContext(Dispatchers.IO) {
+                runCatching {
+                    saveOver(if (force) null else open.etag, open.text, { v.read(open.rel) }) {
+                        v.save(open.rel, text, it)
+                    }
                 }
             }
-        }
-        written.onSuccess { etag ->
-            // What was just written is what is on disk, so there is nothing left to choose between.
-            _state.update {
-                if (it.open?.rel != open.rel) {
-                    it
-                } else {
-                    it.copy(open = it.open.copy(text = text, etag = etag, changedOnDisk = false))
-                }
-            }
-        }.onFailure { e ->
-            when (e) {
-                is AccentException.ChangedOnDisk ->
-                    _state.update { it.copy(open = it.open?.copy(changedOnDisk = true)) }
-                else -> fail("Cannot save this note", e)
-            }
+            written.fold(
+                onSuccess = { etag ->
+                    // What was just written is what is on disk, so there is nothing left to
+                    // choose between.
+                    _state.update { s ->
+                        val now = s.open?.takeIf { it.rel == open.rel } ?: return@update s
+                        s.copy(open = now.copy(text = text, etag = etag, changedOnDisk = false))
+                    }
+                    Saved.Written
+                },
+                onFailure = { e ->
+                    when (e) {
+                        is AccentException.ChangedOnDisk -> {
+                            _state.update { it.copy(open = it.open?.copy(changedOnDisk = true)) }
+                            Saved.Paused
+                        }
+                        else -> {
+                            fail("Cannot save this note", e)
+                            Saved.Failed
+                        }
+                    }
+                },
+            )
         }
     }
 
@@ -719,27 +761,26 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * that pause is the point of the banner, and writing anyway would overwrite the file the
      * reader has not chosen yet.
      */
-    private suspend fun flush() {
-        val text = buffer.text.toString()
-        if (text != _state.value.open?.text) write(text)
-    }
+    private suspend fun flush(): Saved = write(buffer.text.toString())
 
     /**
      * Take the buffer away — for another note, for none, or with the vault — once [flush] has
-     * written it.
+     * written it, and otherwise keep the note in front.
      *
-     * Edits saving was paused on are what [flush] cannot write, and going anyway would drop them
-     * with nothing said. So the exit is held instead and the reader asked which version to keep
-     * ([Open.leaving]); [answer] lets it go or drops it.
+     * Edits saving is paused on, or was just refused, are what [flush] cannot write, and going
+     * anyway would drop them with nothing said. So the exit is held instead and the reader asked
+     * which version to keep ([Open.leaving]); [answer] lets it go or drops it. A write that failed
+     * has said why, and the edits are still only in the buffer, so the exit is dropped.
      */
     private fun leave(then: suspend () -> Unit) = viewModelScope.launch {
-        if (_state.value.open?.wouldLose(buffer.text) == true) {
-            held = then
-            _state.update { it.copy(open = it.open?.copy(leaving = true)) }
-            return@launch
+        when (flush()) {
+            Saved.Written -> then()
+            Saved.Paused -> {
+                held = then
+                _state.update { it.copy(open = it.open?.copy(leaving = true)) }
+            }
+            Saved.Failed -> {}
         }
-        flush()
-        then()
     }
 
     /**
@@ -752,22 +793,21 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         held = null
         _state.update { it.copy(open = it.open?.copy(leaving = false)) }
         if (keep == null) return@launch
-        if (keep) {
-            overwrite().join()
-            // A write that failed has said so, and the edits are still only in the buffer: stay.
-            if (_state.value.open?.wouldLose(buffer.text) == true) return@launch
-        }
+        // A write that failed has said so, and the edits are still only in the buffer: stay.
+        if (keep && write(buffer.text.toString(), force = true) != Saved.Written) return@launch
         then()
     }
 
     /** Keep mine: write the buffer over the version on disk. */
     fun overwrite() = viewModelScope.launch { write(buffer.text.toString(), force = true) }
 
-    /** Take what is on disk, dropping the edits in the buffer. */
+    /**
+     * Take what is on disk, dropping the edits in the buffer. Not through [leave], whose write of
+     * those edits would be refused and ask again the question this answers.
+     */
     fun reload() {
-        // The banner goes first, so the read that follows is allowed to replace the buffer.
-        _state.update { it.copy(open = it.open?.copy(changedOnDisk = false)) }
-        _state.value.open?.let { openFile(it.rel) }
+        val open = _state.value.open ?: return
+        viewModelScope.launch { show(open.rel) }
     }
 
     fun newNote(rel: String) = viewModelScope.launch {
@@ -793,12 +833,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     // ----------------------------------------------------------------------- sync conflicts
 
-    /** Keep the conflict copy: its text becomes the note's and the copy goes. */
+    /**
+     * Keep the conflict copy: its text becomes the note's and the copy goes, with any edits not
+     * written yet — kept away from [leave] as [reload] is, the file having just moved under them.
+     */
     fun keepTheirs(conflict: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val open = _state.value.open ?: return@launch
         val done = withContext(Dispatchers.IO) { runCatching { v.adoptConflict(open.rel, conflict) } }
-        done.onSuccess { openFile(open.rel) }.onFailure { fail("Cannot take the other copy", it) }
+        done.onSuccess { show(open.rel) }.onFailure { fail("Cannot take the other copy", it) }
     }
 
     /** Keep this note as it stands and delete the conflict copy. */
