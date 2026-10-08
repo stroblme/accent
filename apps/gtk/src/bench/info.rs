@@ -32,7 +32,10 @@ pub(super) fn bench_info(app: &Rc<App>, rels: &str) {
             .and_then(|info| find_widget(&info, &|w| w.is::<gtk::Paned>()))
             .and_downcast::<gtk::Paned>()
             .expect("the divider");
+        // A drag, as `paned::watch` marks one while the handle is held.
+        divider.add_css_class(crate::paned::DRAGGING);
         divider.set_position(200);
+        divider.remove_css_class(crate::paned::DRAGGING);
         for open in [
             [false, true, true],
             [true, false, true],
