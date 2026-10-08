@@ -255,15 +255,20 @@ impl Popup {
         }
     }
 
-    /// The selected row's documentation as Pango markup, or `None` to put the pane away.
+    /// The selected row's documentation as Pango markup, or `None` to put the pane away. Either
+    /// changes the popup's size, so it is presented again.
     pub(super) fn set_doc(&self, markup: Option<&str>) {
         if let Some(markup) = markup {
             self.doc.set_markup(markup);
         }
-        if self.pane.is_visible() != markup.is_some() {
-            self.pane.set_visible(markup.is_some());
-            present(&self.popover);
-        }
+        self.pane.set_visible(markup.is_some());
+        present(&self.popover);
+    }
+
+    /// The documentation pane's text, while it shows.
+    #[cfg(feature = "bench")]
+    pub(super) fn doc(&self) -> Option<String> {
+        self.pane.is_visible().then(|| self.doc.text().to_string())
     }
 
     /// The rows' labels as they read, first to last: what a drill prints.

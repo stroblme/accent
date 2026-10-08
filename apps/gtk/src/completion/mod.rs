@@ -705,6 +705,22 @@ impl Session {
     pub(crate) fn rows(&self) -> (Vec<String>, Option<u32>) {
         (self.popup.labels(), self.popup.selected())
     }
+
+    /// The documentation pane's text, while it shows.
+    #[cfg(feature = "bench")]
+    pub(crate) fn doc(&self) -> Option<String> {
+        self.popup.doc()
+    }
+
+    /// Whether nothing is being asked for or waited on: no answer, documentation or accepted
+    /// row's resolve in flight, and no keystroke still to narrow by.
+    #[cfg(feature = "bench")]
+    pub(crate) fn settled(&self) -> bool {
+        self.fetch.borrow().is_none()
+            && self.detail.borrow().is_none()
+            && self.accepting.borrow().is_none()
+            && !self.queued.get()
+    }
 }
 
 /// What was typed between `start` and the caret at `here`: read off `line`, the caret's line up to

@@ -1,0 +1,18 @@
+bench complete_link_open ["note", "complete-one", "complete-two"] shown=true
+bench complete_link_narrow ["complete-two"] shown=true
+bench complete_link_down Stop "[[complete-t]]" selected=Some(0) shown=true
+bench complete_link_tab Stop "[[complete-two]]" selected=None shown=false
+bench complete_link_undo "[[complete-t]]"
+bench complete_tag_open [] shown=false
+bench complete_tag_narrow ["#complete-tag"] shown=true
+bench complete_tag_down Stop "#c" selected=Some(0) shown=true
+bench complete_tag_return Stop "#complete-tag" selected=None shown=false
+bench complete_code_s [] shown=false
+bench complete_code_. ["alpha", "beta", "gamma"] shown=true
+bench complete_code_g ["gamma"] shown=true
+bench complete_code_down Stop "    s.g" selected=Some(0) shown=true
+bench complete_code_doc Some("void gamma(void)\n\nGamma does things.")
+bench complete_code_return Stop "    s.gamma()" selected=None shown=false
+bench complete_code_accepted "#include \"gamma.h\"" "    s.gamma()"
+bench complete_code_undo "int main(void)" "    s.g"
+bench complete_code_superseded ["alpha", "beta", "gamma"] shown=true

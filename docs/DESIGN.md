@@ -506,7 +506,9 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Language servers
 
 - One client for every text tab: accent's own index answers for markdown (Architecture), and a real server (clangd, rust-analyzer, pyright, taplo, …) starts on demand for code and stops when its last document closes, so nothing runs for a file nobody has open.
-- **Completion** is `GtkSourceCompletion` with one provider: kind icon, label, the server's detail, and documentation in the details panel, resolved when a row is looked at. Accepting applies the server's own edit, snippet stops and imports included, as one undo step.
+- **Completion** is a popup of our own at the caret, one provider behind it whatever the language: kind icon, the label with what was typed in bold, the server's detail, and beside the list the selected row's detail and documentation, resolved once the row has been looked at. Rows and documentation are set in the editor's font at the tab's zoom; a list of plain words drops the icons; eight rows show before it scrolls.
+- It opens on the server's trigger characters, after one character of an identifier in code and two of a word in prose, and at once on `[[`, `#` and a link's `(` in a note. It never takes the keyboard: typing goes into the text, the list helpers and brackets included, and narrows the rows by what was typed since each row's own start, those starting with it first, then the closer match, then the server's order, `cafe` finding `café`. The server is asked again only where it said its list was cut short; a request typed past is cancelled at the server.
+- Accepting applies the server's own edit over what was typed since it answered, snippet stops and imports included, as one undo step: a row the server can resolve is resolved first, which is when rust-analyzer sends an auto-import, and typing on before that answer calls the acceptance off. Words stay out of a link or a tag being typed.
 - In a note, `[[` offers notes and `![[` every file; both write a note by its stem and anything else by its whole name, or by its path where the name would resolve to another file first.
 - `[[` also offers the notes in the folders git ignores, after the indexed ones and marked ignored, and a link to one opens it with no dangling hint (Architecture, Gitignored folders).
 - `[[` also offers a note only linked to so far, after the real ones, by its path from the vault root and marked not created, so a second link reaches the same file once it is written; and a note by each front matter alias, written `[[Note|alias]]` because a link resolves by the file's name alone.
@@ -526,7 +528,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - **Ghost text** (Architecture) is the rest of the line as the vault has written it, in prose, painted dim after the caret; `Tab` accepts and `Esc` dismisses. It has a preference, Ghost Text, on by default: unlike a server it costs seconds of CPU and a hundred megabytes whether anyone looks or not. Switching it off ends `merl-rt` at once, its index with it, and takes every painted suggestion off the screen; switching it on starts it again, indexing the vault anew, as soon as a prose document is open.
 - A ghost session that exits is started again on the next suggestion asked for, the language server beside it untouched; after three starts in a minute the vault gives up on it until it is opened again or Ghost Text is switched on again, and says so once.
 - The completion popup wins every contest with it: while the popup is up nothing is asked or painted, so `Tab` is the selected row when there is one and the suggestion when there is not.
-- Nothing in the popup is selected until an arrow key or the pointer picks a row, and until then `Return` and `Tab` are the editor's, as in VS Code and Obsidian: a list carries on or an item indents, and the popup goes.
+- Nothing in the popup is selected until an arrow key picks a row, and until then `Return` and `Tab` are the editor's, as in VS Code and Obsidian: a list carries on or an item indents, and the popup goes.
 - **A move asks the servers already running**, never one started for it, what it breaks in the code (`workspace/willRenameFiles`), before anything moves, a server reading the disk to answer. The files it names follow the notes in the one Update question; a moved Rust or TypeScript file no running server answered for is said to be unchecked. rust-analyzer answers only for a rename within one folder.
 
 ### Context menus
@@ -773,6 +775,10 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - A shut block keeps to the lines it hid: text typed, pasted or inserted next to it stays in sight, and a line put between its header and what it hides opens it.
 - Up and Down pass over a shut block as over one line, with Shift and by the page too, at one caret and at a column, so no caret lands out of sight; with nothing shown past a block at the end of the text, Down stops at the end of its header. Add Caret Above / Below goes by the lines of the text instead and opens the block (Editing).
 - Nothing folds until a language server says what the blocks are, so there is no chevron column before it answers. Both chords carry Control and Shift, so they stay bound while a shell has the keyboard.
+
+### Completion
+
+- Down selects the first row and walks down, Up walks back to none, Page Down and Page Up go seven rows. Return and Tab accept the selected row; with none selected they are the editor's, a newline or an indent, and the popup goes. Escape closes the popup and nothing behind it. A click accepts a row. `Ctrl+Space` asks at the caret, over a column of carets too, where what the popup does not take goes to the primary caret and ends the column. Every other key is typed into the text and narrows the list; the input method's keys stay its own while it composes.
 
 ### Ghost text
 

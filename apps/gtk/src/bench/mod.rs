@@ -8,6 +8,7 @@ mod answer;
 mod attach;
 mod chrome;
 mod compare;
+mod complete;
 mod corpus;
 mod diagnostics;
 mod diagram;
@@ -147,7 +148,9 @@ use tags::bench_tags;
 /// takes to end and what the line says (see `suggest::bench_suggest_ghost`). `=words:<rel>`
 /// switches Word Suggestions on, off and on and prints the words offered and whether a word typed
 /// by XTEST brings the popup up (see `suggest::bench_suggest_words`), on a scratch vault under
-/// `/tmp`.
+/// `/tmp`. `ACCENT_BENCH_COMPLETE=note:<rel>` types `[[` and `#` completions into a note and
+/// `=code:<rel>` member completion into a file a language server answers for, and prints the
+/// rows, the documentation and the text each key leaves (see `complete::bench_complete`).
 /// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
 /// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
@@ -579,6 +582,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let suggest = std::env::var("ACCENT_BENCH_SUGGEST").ok();
+    let complete = std::env::var("ACCENT_BENCH_COMPLETE").ok();
     let theme = std::env::var("ACCENT_BENCH_THEME").ok();
     let numbers = std::env::var("ACCENT_BENCH_NUMBERS").ok();
     let reveal = std::env::var("ACCENT_BENCH_REVEAL").ok();
@@ -638,6 +642,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && tabs.is_none()
         && occur.is_none()
         && suggest.is_none()
+        && complete.is_none()
         && theme.is_none()
         && numbers.is_none()
         && reveal.is_none()
@@ -930,6 +935,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 return suggest::bench_suggest_words(&app, rel);
             }
             return bench_quit(&app);
+        }
+        if let Some(arg) = complete {
+            return complete::bench_complete(&app, &arg);
         }
         if let Some(rel) = theme {
             return bench_theme(&app, &rel);
