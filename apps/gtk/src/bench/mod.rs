@@ -136,11 +136,9 @@ use tags::bench_tags;
 /// with typing after them, and prints every selection and the buffer after each (see
 /// `keys::bench_occurrence_keys`). `=box:<rel>` asks for XTEST drags and a press with `Shift+Alt`
 /// and without, and prints the carets and the selection after each (see `keys::bench_box_drag`).
-/// It opens with the completion popup: whether "a popup is up" reads true against a real one,
-/// that Return at the end of a list item under it continues the list while no row is selected and
-/// is the popup's once one is, that "up" reads false against both a view taken off screen under
-/// one and a forged `show`, and that Return still continues a list after them. The popup wants the X input focus, which under Xvfb is
-/// `build-aux/xtest.py :<display> "move 700 500; focus"` run beside it.
+/// It opens with the completion popup: that Return at the end of a list item under it continues
+/// the list while no row is selected and accepts the row once one is, and that a view taken off
+/// screen takes the popup with it.
 /// `ACCENT_BENCH_SUGGEST=escape:<rel>` types a word for the popup and paints ghost text, with the
 /// find bar open and with the note compared with its disk copy, and asks for an XTEST Escape over
 /// each, printing what it put away (see `suggest::bench_suggest_escape`). Only on a scratch vault

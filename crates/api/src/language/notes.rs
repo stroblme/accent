@@ -213,8 +213,8 @@ pub(crate) fn link_names(rel: &str) -> (String, String) {
 /// The query is matched *anywhere* in the path and need not be contiguous, because it is
 /// [`fuzzy`]'s match — the matcher the palette and the file switcher use: `[[work]]` offers
 /// `Projects/Rework.md` and `[[dpwk]]` offers `deep-work.md`. It is taken as typed, though
-/// ([`fuzzy::Query::as_typed`]): its words in order and `é` not folded to `e`, which is how
-/// GtkSourceView narrows the same rows afterwards. What starts with the query still
+/// ([`fuzzy::Query::as_typed`]): its words in order, which is how the popup narrows the same rows
+/// as the link is typed on. What starts with the query still
 /// comes first — that is the file the reader most likely means — then the better match, then the
 /// shortest path, so a note at the root beats one buried under three directories.
 ///
@@ -1380,10 +1380,10 @@ mod tests {
         assert_eq!(labels(), ["Other", "Otherwise"]);
     }
 
-    /// GtkSourceView narrows the popup a second time, keeping a row only while what was typed
-    /// since the `[[` is a case-insensitive subsequence of its `filter`. The provider ranks a note
-    /// by its path with the extension on, so the filter has to carry the extension as well, or
-    /// `[[Other.md` ranked the note and the popup then dropped it.
+    /// The popup narrows the rows again as the link is typed on, keeping a row only while what
+    /// was typed since the `[[` matches its `filter`. The provider ranks a note by its path with
+    /// the extension on, so the filter has to carry the extension as well, or `[[Other.md` ranked
+    /// the note and the popup then dropped it.
     #[test]
     fn a_typed_extension_keeps_the_note_row() {
         let vault = tempfile::tempdir().unwrap();
@@ -1410,10 +1410,11 @@ mod tests {
 
         let inserts: Vec<&str> = items.iter().map(|i| i.insert.as_str()).collect();
         assert_eq!(inserts, ["[[Other]]", "[[Nowhere/Other]]"]);
-        // GtkSourceView's `fuzzy_match`, which the popup runs over every row it is handed.
+        // What the popup narrows every row it is handed by.
         let kept = |filter: &str| {
-            let mut rest = filter.chars().flat_map(char::to_lowercase);
-            "[[other.md".chars().all(|c| rest.any(|f| f == c))
+            fuzzy::Query::as_typed("[[Other.md", fuzzy::Corpus::Paths)
+                .score(filter)
+                .is_some()
         };
         for item in &items {
             let filter = item.filter.as_deref().unwrap_or(&item.label);
@@ -1448,13 +1449,11 @@ mod tests {
                 .unwrap()
                 .items;
             assert_eq!(items[0].insert, "sub/%C3%9Cber%20Notiz.md", "{typed}");
-            // GtkSourceView's `fuzzy_match`, which the popup runs over every row it is handed.
+            // What the popup narrows every row it is handed by.
             let filter = items[0].filter.as_deref().unwrap_or(&items[0].label);
-            let mut rest = filter.chars().flat_map(char::to_lowercase);
-            let kept = typed
-                .chars()
-                .flat_map(char::to_lowercase)
-                .all(|c| rest.any(|f| f == c));
+            let kept = fuzzy::Query::as_typed(typed, fuzzy::Corpus::Paths)
+                .score(filter)
+                .is_some();
             assert!(kept, "the popup would drop {filter:?} for {typed:?}");
         }
     }

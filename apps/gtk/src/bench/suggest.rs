@@ -194,11 +194,8 @@ pub(super) fn bench_suggest_words(app: &Rc<App>, rel: &str) {
             glib::timeout_future(Duration::from_millis(1500)).await;
             watch.remove();
             println!("bench suggest_words {case} popup={}", seen.get());
-            if let Some(popup) = tab
-                .popup_shown()
-                .then(|| sourceview5::prelude::ViewExt::completion(&tab.view))
-            {
-                popup.hide();
+            if let Some(session) = crate::completion::session(&tab) {
+                session.close();
             }
         }
         tab.set_text(&own);

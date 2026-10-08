@@ -1071,15 +1071,9 @@ impl Tab {
         *self.snippet.borrow_mut() = Some(snippet.clone());
     }
 
-    /// Whether the completion popup is on screen, asked of the widgets on this very press.
-    ///
-    /// While the popup is up it owns the keyboard and nothing else in the view may answer a key,
-    /// so an answer that can go stale silences the lot: this used to be a cell mirroring the
-    /// completion's `show` and `hide`, and a `hide` that never arrived left every key — Return
-    /// and Tab with it — to the view for the rest of this tab's life. Derived, there is nothing
-    /// left to strand: see [`keys::popup_visible`] for what the widgets are asked.
+    /// Whether the completion popup is on screen: mapped, which nothing can leave behind.
     pub(crate) fn popup_shown(&self) -> bool {
-        keys::popup_visible(&self.view)
+        crate::completion::is_shown(self)
     }
 
     /// Whether a template's stops are still being walked. A snippet lets its buffer go when it

@@ -112,3 +112,14 @@ bench occur_next_by_hand [(2, 5), (6, 9)]
 bench occur_all_by_hand [(2, 5), (6, 9), (15, 18), (19, 22)]
 bench occur_next_word [(2, 5), (19, 22)]
 bench occur_all_word [(2, 5), (19, 22)]
+bench popup_open ["alpha", "alphabet", "beta"] shown=true
+bench popup_filter ["alpha", "alphabet"]
+bench popup_down Some(Stop) Some(0)
+bench popup_page_down Some(Stop) Some(1)
+bench popup_up Some(Stop) Some(0)
+bench popup_tab Some(Stop) "use x;\nalpha()" shown=false
+bench popup_undo "al"
+bench popup_return_unselected None shown=false
+bench popup_escape Some(Stop) shown=false
+bench popup_nomatch "alz" shown=false
+bench popup_column Some(Proceed) shown=true carets=true

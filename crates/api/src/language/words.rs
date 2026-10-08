@@ -182,14 +182,7 @@ impl Words {
             return Completions::default();
         };
         let Some((start, typed)) = word_before(line_of(&doc.text, pos.line), pos.character) else {
-            // Nothing yet, but say so as "not yet": the popup asks once when a word starts and
-            // only narrows after that, so an answer that closed the question at one letter
-            // would never see the second.
-            return Completions {
-                items: Vec::new(),
-                incomplete: true,
-                pages: None,
-            };
+            return Completions::default();
         };
         let prefix = typed.to_lowercase();
         let replace = Range {
@@ -442,11 +435,18 @@ impl Language for Layered {
                 None => Completions::default(),
             };
             // A path has no use for prose words.
-            let words = match self.inputs(&rel, pos) {
+            let mut words = match self.inputs(&rel, pos) {
                 Some(files) => files,
                 None if self.words_on.load(Ordering::Relaxed) => self.words.completion(&rel, pos),
                 None => Completions::default(),
             };
+            // Nor has a link or a tag: an item of the primary's starting before the word does is
+            // completing more than the word, `[[My No` or `#project/ph`, and a word put in there
+            // would write prose into the link.
+            let start = words.items.first().map(|w| w.replace.start);
+            if start.is_some_and(|start| answer.items.iter().any(|i| i.replace.start < start)) {
+                words = Completions::default();
+            }
             let taken: HashSet<String> = answer.items.iter().map(|c| c.label.clone()).collect();
             answer.items.extend(
                 words
@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn one_letter_is_too_soon_but_not_the_end_of_the_question() {
+    fn one_letter_is_too_soon() {
         let words = Words::default();
         words.open("a.txt", "hello\nh".to_string());
         let answer = words.completion(
@@ -593,8 +593,48 @@ mod tests {
                 character: 1,
             },
         );
-        assert!(answer.items.is_empty());
-        assert!(answer.incomplete, "the next letter has to ask again");
+        assert_eq!(answer, Completions::default());
+    }
+
+    /// Inside a link the note's rows are the whole answer: a word would be prose in the link.
+    #[test]
+    fn a_link_being_typed_gets_no_words() {
+        let primary = Fake::new("primary");
+        let line = |character| Pos { line: 0, character };
+        locked(&primary.items).push(Completion {
+            label: "My Note".into(),
+            kind: Kind::File,
+            detail: None,
+            doc: None,
+            filter: None,
+            insert: "[[My Note]]".into(),
+            is_snippet: false,
+            replace: Range {
+                start: line(0),
+                end: line(7),
+            },
+            extra_edits: Vec::new(),
+            resolve: None,
+        });
+        let doc = Layered::new(
+            Some(primary),
+            None,
+            None,
+            Arc::new(AtomicBool::new(true)),
+            None,
+        );
+        doc.open("a.md", "markdown", "[[My No\nNotable notes".into())
+            .unwrap();
+        let labels = |character| {
+            accent_lsp::runtime()
+                .block_on(doc.completion("a.md", line(character), None))
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|c| c.label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(7), ["My Note"]);
     }
 
     /// A provider that says what it heard and answers a suggestion with its own name, until it
@@ -603,6 +643,8 @@ mod tests {
         name: &'static str,
         dead: AtomicBool,
         heard: Mutex<Vec<String>>,
+        /// What it completes with, wherever it is asked.
+        items: Mutex<Vec<Completion>>,
     }
 
     impl Fake {
@@ -611,6 +653,7 @@ mod tests {
                 name,
                 dead: AtomicBool::new(false),
                 heard: Mutex::new(Vec::new()),
+                items: Mutex::new(Vec::new()),
             })
         }
 
@@ -641,7 +684,12 @@ mod tests {
             })
         }
         fn completion(&self, _: &str, _: Pos, _: Option<char>) -> Fut<'_, Completions> {
-            Box::pin(async { Ok(Completions::default()) })
+            Box::pin(async {
+                Ok(Completions {
+                    items: locked(&self.items).clone(),
+                    ..Completions::default()
+                })
+            })
         }
         fn resolve(&self, _: &str, item: Completion) -> Fut<'_, Completion> {
             Box::pin(async { Ok(item) })

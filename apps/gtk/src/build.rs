@@ -1078,8 +1078,8 @@ thread_local! {
 /// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
 /// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
 /// `STYLE_PROVIDER_PRIORITY_APPLICATION` outranks both per property, so the document takes the
-/// theme's view colours instead of the scheme's grey, and the completion popup takes the
-/// popover's. The scheme itself stays: dropping it takes the find bar's match highlight with it.
+/// theme's view colours instead of the scheme's grey, and the hover takes the popover's. The
+/// scheme itself stays: dropping it takes the find bar's match highlight with it.
 /// On the `text` node only `color` is ours, because GtkSourceView pins that node's background to
 /// transparent at maximum priority; the background therefore goes on the `textview` node. The
 /// gutter is the same correction one node over: a scheme's `line-numbers` style carries a
@@ -1215,19 +1215,23 @@ fn install_chrome_css() {
                color: var(--popover-fg-color); \
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
              GtkSourceAssistant > contents {{ min-width: 1px; min-height: 1px; }} \
-             GtkSourceAssistant.completion {{ min-width: 240px; }} \
-             GtkSourceAssistant.completion list row {{ padding: 3px 6px; }} \
-             GtkSourceAssistant.completion list row cell.typed-text {{ margin-left: 12px; \
-               margin-right: 12px; min-height: 30px; }} \
-             GtkSourceAssistant.completion list row cell.icon {{ opacity: 0.7; }} \
-             GtkSourceAssistant.completion list row cell.after {{ opacity: 0.6; \
-               margin-left: 12px; }} \
+             popover.accent-completion > contents {{ padding: {inset}px; min-width: 240px; }} \
+             popover.accent-completion listview {{ background: none; }} \
+             popover.accent-completion listview > row {{ margin: 0; min-height: {text}px; \
+               padding: {row_y}px {row}px; }} \
+             popover.accent-completion .kind {{ opacity: 0.7; }} \
+             popover.accent-completion .detail {{ opacity: 0.6; margin-left: 12px; }} \
+             popover.accent-completion .doc {{ margin: 3px 8px; }} \
              textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }} \
              expander {{ -gtk-icon-source: -gtk-icontheme(\"go-next-symbolic\"); }} \
              expander:dir(rtl) {{ -gtk-icon-source: -gtk-icontheme(\"go-previous-symbolic\"); }} \
              expander:checked {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }} \
              dropdown arrow {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }}",
             away = fade::FLOOR,
+            inset = crate::completion::CONTENTS_PADDING,
+            row = crate::completion::ROW_PADDING,
+            row_y = crate::completion::ROW_PADDING_Y,
+            text = crate::completion::ROW_TEXT_MIN,
         ));
         gtk::style_context_add_provider_for_display(
             &display,

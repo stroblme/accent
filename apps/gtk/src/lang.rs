@@ -73,6 +73,8 @@ pub struct State {
     hooks: RefCell<Option<Rc<Hooks>>>,
     /// The signature popover of this tab, and the request that would fill it.
     pub signature: crate::signature::Help,
+    /// The completion popup of this tab, once [`attach`] gave it one.
+    pub(crate) completion: RefCell<Option<Rc<crate::completion::Session>>>,
     /// Whether ghost text is wanted here and whether anything is standing in its way.
     pub ghost: crate::ghost::State,
 }
@@ -261,6 +263,9 @@ pub fn rediagnose(tab: &Rc<Tab>) {
 /// the future it spawns holds the vault handle and the path and nothing else.
 pub fn detach(tab: &Tab) {
     tab.lang.signature.dismiss();
+    if let Some(session) = tab.lang.completion.take() {
+        session.close();
+    }
     if let Some(handle) = tab.lang.refresh.borrow_mut().take() {
         handle.abort();
     }

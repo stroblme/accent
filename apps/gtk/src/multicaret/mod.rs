@@ -22,7 +22,7 @@
 //! * while a column of carets exists this widget paints every caret, the primary one included,
 //!   because GTK's blink phase cannot be read and two blinks out of step read worse than one:
 //!   GTK's own caret goes transparent (`main::install_chrome_css`) and comes back with the column;
-//! * no completion popup unasked while a column is up, as no ghost text (`completion.rs`):
+//! * no completion popup unasked while a column is up, as no ghost text (`completion/`):
 //!   `Ctrl+Space` still opens one at the primary, and what is typed or accepted while it is up
 //!   goes to the primary alone, which ends the column.
 //!
@@ -511,6 +511,8 @@ mod imp {
         /// Where the fade is measured from instead of this view's carets
         /// ([`super::View::fade_from`]).
         pub fade_follows: RefCell<Option<Follows>>,
+        /// Told when a column starts ([`super::View::on_column_started`]).
+        pub column_started: RefCell<Option<Box<dyn Fn()>>>,
     }
 
     /// The lines a view's fade is measured from when not its own carets', 0-based.
@@ -992,7 +994,14 @@ impl View {
     fn start_column(&self) {
         self.imp().undo.take();
         self.imp().redo.take();
-        self.completion().hide();
+        if let Some(told) = self.imp().column_started.borrow().as_ref() {
+            told();
+        }
+    }
+
+    /// Call `f` whenever a column of carets starts: the completion popup goes then.
+    pub(crate) fn on_column_started(&self, f: impl Fn() + 'static) {
+        *self.imp().column_started.borrow_mut() = Some(Box::new(f));
     }
 
     /// Box selection, what a `Shift+Alt` drag makes: a caret on every line of the document from

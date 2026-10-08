@@ -220,18 +220,28 @@ pub(super) fn bench_chrome_keys(app: &Rc<App>, rels: &str) {
             column.clear_carets();
         }
         // The popup, as `keys::bench_popup` raises it, and Down inside it.
-        let completion = sourceview5::prelude::ViewExt::completion(&tab.view);
-        let words = sourceview5::CompletionWords::new(None);
-        sourceview5::prelude::CompletionWordsExt::register(&words, &tab.buffer);
-        completion.add_provider(&words);
-        tab.set_text("completion\n- comp");
+        let session = crate::completion::session(&tab);
+        tab.set_text("comp");
         tab.buffer.place_cursor(&tab.buffer.end_iter());
-        completion.show();
-        glib::timeout_future(Duration::from_millis(800)).await;
+        if let Some(session) = &session {
+            session.show_items(vec![accent_api::Completion {
+                label: "completion".to_string(),
+                kind: accent_api::Kind::Text,
+                detail: None,
+                doc: None,
+                filter: None,
+                insert: "completion".to_string(),
+                is_snippet: false,
+                replace: accent_api::Range::default(),
+                extra_edits: Vec::new(),
+                resolve: None,
+            }]);
+        }
         println!("bench chrome_keys popup_up={}", tab.popup_shown());
         bench_chrome_key(&app, &view, "popup", "Down").await;
-        completion.hide();
-        completion.remove_provider(&words);
+        if let Some(session) = &session {
+            session.close();
+        }
         tab.set_text(&own);
         if let Some(tree) = app.tree.get() {
             let list = tree.view().clone().upcast::<gtk::Widget>();

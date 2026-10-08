@@ -41,7 +41,8 @@ pub(crate) mod words;
 use notes::Notes;
 
 /// A line and a column, both zero-based; the column counts characters from the line start.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// Ordered as the document is, the line first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct Pos {
     pub line: u32,
     pub character: u32,
@@ -230,6 +231,11 @@ pub struct Diagnostic {
 pub struct Fold {
     pub start_line: u32,
     pub end_line: u32,
+}
+
+/// Whether a document with this language id is prose: what gets the words in its completion.
+pub fn is_prose(language_id: &str) -> bool {
+    words::PROSE.contains(&language_id)
 }
 
 /// What attached to an opened document.

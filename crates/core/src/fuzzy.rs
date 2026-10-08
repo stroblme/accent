@@ -2,9 +2,9 @@
 //!
 //! Three callers ask it. The desktop palette and the Android file switcher rank a whole corpus
 //! with [`rank`], which is why they offer the same note first for the same query. The note
-//! completion popup scores one candidate at a time with [`Query::as_typed`], because it orders its
-//! rows by rules of its own — what starts with the query, then the shortest path — and because
-//! GtkSourceView filters the same rows again by rules the query has to agree with.
+//! completion and the completion popup score one candidate at a time with [`Query::as_typed`],
+//! because they order their rows by rules of their own — what starts with the query first — and
+//! because what is typed there is one word being written rather than a search.
 //!
 //! `nucleo-matcher` is fzf's algorithm as a library: a subsequence match with bonuses for word
 //! and path-segment starts, so `dpwk` finds `deep-work.md` and a contiguous match outscores a
@@ -55,14 +55,13 @@ impl Query {
     }
 
     /// The whole query as one needle, in the order typed, spaces and punctuation included, and
-    /// with no diacritic folded: what GtkSourceView's own completion filter keeps. The popup runs
-    /// that filter over every row the provider hands it, so a query wider than it computes rows
-    /// only for them to be dropped, and one narrower loses rows.
+    /// `cafe` still finding `café`: what completion narrows by, where the query is the start of a
+    /// word or a link being written, so its order is the point and fzf's syntax is not.
     pub fn as_typed(query: &str, corpus: Corpus) -> Query {
         // No atom at all for an empty query, which then matches everything as `new`'s does.
         let mut pattern = Pattern::default();
         if !query.is_empty() {
-            let (case, normalize) = (CaseMatching::Ignore, Normalization::Never);
+            let (case, normalize) = (CaseMatching::Ignore, Normalization::Smart);
             let atom = Atom::new(query, case, normalize, AtomKind::Fuzzy, false);
             pattern.atoms.push(atom);
         }
@@ -78,6 +77,17 @@ impl Query {
     pub fn score(&mut self, haystack: &str) -> Option<u32> {
         let text = Utf32Str::new(haystack, &mut self.buf);
         self.pattern.score(text, &mut self.matcher)
+    }
+
+    /// [`Query::score`], and which characters of `haystack` matched, by character index in
+    /// ascending order: what a row emboldens.
+    pub fn indices(&mut self, haystack: &str) -> Option<(u32, Vec<u32>)> {
+        let text = Utf32Str::new(haystack, &mut self.buf);
+        let mut at = Vec::new();
+        let score = self.pattern.indices(text, &mut self.matcher, &mut at)?;
+        at.sort_unstable();
+        at.dedup();
+        Some((score, at))
     }
 }
 
@@ -188,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn a_query_as_typed_keeps_its_order_and_its_accents() {
+    fn a_query_as_typed_keeps_its_order_and_folds_its_accents() {
         // A list takes the words in any order and folds `é`.
         assert!(
             Query::new("work deep", Corpus::Paths)
@@ -196,14 +206,14 @@ mod tests {
                 .is_some()
         );
         assert!(Query::new("cafe", Corpus::Paths).score("café.md").is_some());
-        // The completion popup's filter does neither, so its query does not either.
+        // Completion keeps the order, and folds `é` the same.
         let mut typed = Query::as_typed("work deep", Corpus::Paths);
         assert!(typed.score("deep-work.md").is_none());
         assert!(typed.score("Work on the deep end.md").is_some());
         assert!(
             Query::as_typed("cafe", Corpus::Paths)
                 .score("café.md")
-                .is_none()
+                .is_some()
         );
         assert!(
             Query::as_typed("CAF", Corpus::Paths)
@@ -215,6 +225,16 @@ mod tests {
                 .score("anything")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn indices_name_the_matched_characters() {
+        let mut q = Query::as_typed("gf", Corpus::Words);
+        assert_eq!(q.indices("get_func").map(|(_, at)| at), Some(vec![0, 4]));
+        // Characters, not bytes: the `é` is one.
+        let mut q = Query::as_typed("fn", Corpus::Words);
+        assert_eq!(q.indices("café_fn").map(|(_, at)| at), Some(vec![5, 6]));
+        assert!(q.indices("nothing").is_none());
     }
 
     #[test]
