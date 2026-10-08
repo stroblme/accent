@@ -158,6 +158,30 @@ pub struct Backlink {
     pub byte_end: i64,
 }
 
+/// One link written in a note, as [`Index::links_from`] lists it: what the note points at and
+/// where that leads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutLink {
+    /// The target as written, a markdown link's made the vault path it names.
+    pub target: String,
+    /// The file it resolves to, `None` when nothing in the vault answers to it.
+    pub path: Option<String>,
+    pub kind: crate::markdown::LinkKind,
+    pub anchor: Option<String>,
+    pub byte_start: i64,
+}
+
+/// A heading [`Index::headings_matching`] found, in which note, and how many of the words it
+/// holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadingHit {
+    pub rel_path: String,
+    pub level: u8,
+    pub text: String,
+    pub byte_start: i64,
+    pub words: usize,
+}
+
 /// A note link that points into a page of a PDF: what paints as a highlight over that page.
 ///
 /// `page` is zero-based like [`crate::pdf::Selection`], `selection` the four numbers the link

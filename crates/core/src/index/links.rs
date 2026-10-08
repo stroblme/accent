@@ -1,6 +1,7 @@
 //! Link resolution and what reads its result: backlinks, PDF highlights, dangling targets.
 
-use super::{Backlink, Index, PdfLink};
+use super::reconcile::link_kind_of;
+use super::{Backlink, Index, OutLink, PdfLink};
 use crate::markdown;
 use crate::path::{self, FileType, file_type, linked_path};
 use anyhow::Result;
@@ -149,14 +150,37 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// `(source rel_path, target as written)` for every link that resolves to nothing.
-    pub fn unresolved_links(&self) -> Result<Vec<(String, String)>> {
+    /// `(source rel_path, target as written, byte offset in the source)` for every link that
+    /// resolves to nothing.
+    pub fn unresolved_links(&self) -> Result<Vec<(String, String, i64)>> {
         let mut st = self.conn.prepare_cached(
-            "SELECT s.rel_path, l.target FROM links l JOIN files s ON s.id = l.src_file
+            "SELECT s.rel_path, l.target, l.byte_start FROM links l JOIN files s ON s.id = l.src_file
              WHERE l.resolved_file IS NULL AND l.kind <> 3
              ORDER BY s.rel_path, l.byte_start",
         )?;
-        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every link written in the note `src`, in the order it writes them, and the file each
+    /// resolves to: a note's way out, as [`backlinks`](Self::backlinks) is its way in.
+    pub fn links_from(&self, src: &str) -> Result<Vec<OutLink>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT l.target, t.rel_path, l.kind, l.anchor, l.byte_start FROM links l
+             JOIN files s ON s.id = l.src_file
+             LEFT JOIN files t ON t.id = l.resolved_file
+             WHERE s.rel_path = ?1
+             ORDER BY l.byte_start",
+        )?;
+        let rows = st.query_map([src], |r| {
+            Ok(OutLink {
+                target: r.get(0)?,
+                path: r.get(1)?,
+                kind: link_kind_of(r.get(2)?),
+                anchor: r.get(3)?,
+                byte_start: r.get(4)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -245,7 +269,7 @@ mod tests {
         assert_eq!(ix.backlinks("sub/Beta.md").unwrap().len(), 2);
         assert_eq!(
             ix.unresolved_links().unwrap(),
-            vec![("a.md".into(), "Nope".into())]
+            vec![("a.md".into(), "Nope".into(), 40)]
         );
         assert_eq!(ix.stats().unwrap().unresolved, 1);
     }
@@ -333,6 +357,40 @@ mod tests {
             Change::Updated(FileKind::Dir)
         );
         assert!(ix.backlinks("Ideas").unwrap().is_empty());
+    }
+
+    /// A note's links in the order it writes them, each with the file it leads to, or none.
+    #[test]
+    fn links_from_lists_where_each_link_leads() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("d.md"),
+            "[[Beta#Part]] then [gone](Nowhere.md)\n",
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let out = ix.links_from("d.md").unwrap();
+        let rows: Vec<_> = out
+            .iter()
+            .map(|l| {
+                (
+                    l.target.as_str(),
+                    l.path.as_deref(),
+                    l.anchor.as_deref(),
+                    l.byte_start,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Beta", Some("sub/Beta.md"), Some("Part"), 0),
+                ("Nowhere.md", None, None, 19)
+            ]
+        );
+        assert_eq!(out[1].kind, crate::markdown::LinkKind::Markdown);
     }
 
     /// A note linked to before it is written is offered once, by the path New File would make,

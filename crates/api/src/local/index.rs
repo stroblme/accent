@@ -17,7 +17,8 @@ use super::{Local, Msg};
 use crate::language::notes;
 use crate::paths::conflict_pairs;
 use crate::{
-    Backlink, FileRow, Location, Match, Options, PdfLink, Repo, SearchHit, Stats, fs, locked,
+    Backlink, FileRow, HeadingHit, Location, Match, Options, OutLink, PdfLink, Repo, SearchHit,
+    Stats, fs, locked,
 };
 
 impl Local {
@@ -209,6 +210,27 @@ impl Local {
         Ok(notes::placed(rows, |src| {
             Ok(std::fs::read_to_string(Local::join(&self.root, src)?)?)
         }))
+    }
+
+    pub fn links_from(&self, rel: &str) -> Result<Vec<OutLink>> {
+        self.index().links_from(rel)
+    }
+
+    pub fn unresolved_links(&self) -> Result<Vec<(String, String, i64)>> {
+        self.index().unresolved_links()
+    }
+
+    pub fn headings_matching(&self, words: &[String], limit: usize) -> Result<Vec<HeadingHit>> {
+        self.index().headings_matching(words, limit)
+    }
+
+    /// Ranked as [`search`](Self::search) is, on the search connection and superseded with it.
+    pub fn rank_files(
+        &self,
+        words: &[String],
+        limit: usize,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        self.supersede(|index| index.rank_files(words, limit))
     }
 
     pub(crate) fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {

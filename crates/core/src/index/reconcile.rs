@@ -725,6 +725,16 @@ fn link_kind_i64(k: markdown::LinkKind) -> i64 {
     }
 }
 
+/// [`link_kind_i64`] read back.
+pub(super) fn link_kind_of(k: i64) -> markdown::LinkKind {
+    match k {
+        0 => markdown::LinkKind::Wiki,
+        1 => markdown::LinkKind::Embed,
+        2 => markdown::LinkKind::Markdown,
+        _ => markdown::LinkKind::External,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,7 +1077,7 @@ mod tests {
         assert_eq!(from_beta("sub/Beta.md"), 1, "a plain name is a sibling");
         assert_eq!(
             ix.unresolved_links().unwrap(),
-            vec![("sub/Beta.md".to_string(), "sub/c.pdf".to_string())],
+            vec![("sub/Beta.md".to_string(), "sub/c.pdf".to_string(), 37)],
             "the dangling target is reported as the vault path it names"
         );
     }
@@ -1301,7 +1311,7 @@ mod tests {
         assert!(ix.search("ferris", 10, false).unwrap().is_empty());
         assert_eq!(
             ix.unresolved_links().unwrap(),
-            vec![("a.md".to_string(), "Beta".to_string())]
+            vec![("a.md".to_string(), "Beta".to_string(), 12)]
         );
         assert_eq!(
             ix.remove_file_batched("sub").unwrap(),

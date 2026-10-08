@@ -45,7 +45,8 @@ pub use accent_core::fs::{Etag, Read, SaveError, Text};
 pub use accent_core::git;
 pub use accent_core::git::{Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
 pub use accent_core::index::{
-    Backlink, FileRow, Match, PdfLink, Progress, ReconcileStats, SearchHit, Stats,
+    Backlink, FileRow, HeadingHit, Match, OutLink, PdfLink, Progress, ReconcileStats, SearchHit,
+    Stats,
 };
 pub use accent_core::page_edit::PageEdit;
 pub use accent_core::search::{self, Options, Regex};
