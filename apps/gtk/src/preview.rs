@@ -153,6 +153,9 @@ struct Inner {
     mermaid: RefCell<Option<webkit6::UserScript>>,
     /// Whether a page may load yet; see [`Gate`].
     gate: RefCell<Gate>,
+    /// How many renders were asked for: a page back from its worker loads only if it is the
+    /// latest, so a long note's render never lands over a shorter one asked for after it.
+    renders: Cell<u64>,
     loaded: Cell<bool>,
     /// A line asked for while the page was still loading.
     pending: Cell<Option<u32>>,
@@ -457,6 +460,7 @@ impl Preview {
             sheet: RefCell::new(None),
             mermaid: RefCell::new(None),
             gate: RefCell::new(Gate::Waiting(None)),
+            renders: Cell::new(0),
             loaded: Cell::new(false),
             pending: Cell::new(None),
             query: RefCell::new(None),
@@ -518,17 +522,30 @@ impl Preview {
     /// Render `text`, resolving relative links as if the note lived at `rel`.
     ///
     /// Re-rendering starts the page from the top; the caller restores the reading position with
-    /// [`Preview::scroll_to_line`]. A render asked for before the network filter is on the view
-    /// waits for it ([`Gate`]).
-    ///
-    /// ponytail: `to_html` runs on the main thread, behind the editor's render debounce. Moving it
-    /// to a worker is the upgrade path if a large note ever shows up in a profile.
+    /// [`Preview::scroll_to_line`]. `to_html` runs on a worker, a note of a megabyte taking some
+    /// 20 ms, and only the latest render asked for loads. One asked for before the network filter
+    /// is on the view waits for it ([`Gate`]).
     pub fn render(&self, rel: &str, text: &str) {
-        let body = accent_core::markdown::to_html(text);
-        let next = self.inner.gate.borrow_mut().pass((rel.to_string(), body));
-        if let Some((rel, body)) = next {
-            self.inner.load(&rel, &body);
-        }
+        let render = self.inner.renders.get() + 1;
+        self.inner.renders.set(render);
+        // The page up is not this render's: a scroll asked for meanwhile waits for it.
+        self.inner.loaded.set(false);
+        let (rel, text) = (rel.to_string(), text.to_string());
+        let inner = Rc::downgrade(&self.inner);
+        glib::spawn_future_local(async move {
+            let body = crate::work::off_thread("preview", move || markdown::to_html(&text)).await;
+            let Some((inner, body)) = inner
+                .upgrade()
+                .zip(body)
+                .filter(|(inner, _)| inner.renders.get() == render)
+            else {
+                return;
+            };
+            let next = inner.gate.borrow_mut().pass((rel, body));
+            if let Some((rel, body)) = next {
+                inner.load(&rel, &body);
+            }
+        });
     }
 
     /// Why the page shows no note: the network filter could not be installed.

@@ -329,6 +329,12 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 /// the inverted images and the page's requests every two seconds, for an XTEST right-click on an
 /// image and a pick from its menu.
 ///
+/// `=time:<rel_note>` instead renders the note five times over and prints, for each, how long the
+/// render held the main thread (`render_ms`), until the page had loaded (`shown_ms`), and the
+/// longest the main loop went without turning from the render until 200 ms past the load
+/// (`stall_ms`), which is how long typing would wait on the preview; then whether, of the note
+/// and a word rendered at once, the word asked for last is what the page shows (`latest`).
+///
 /// `=change:<rel_note>,<rel_img>,<rel_other>` instead copies `<rel_other>` over `<rel_img>` once
 /// the note shows, a figure exported again under the preview, and prints the page either side.
 /// `=gone:<rel_note>,<rel_img>[,<rel_to>]` removes `<rel_img>` instead, or renames it to
@@ -348,6 +354,10 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
         Some(rel) => (true, rel),
         None => (false, rel),
     };
+    let (time, rel) = match rel.strip_prefix("time:") {
+        Some(rel) => (true, rel),
+        None => (false, rel),
+    };
     app.open_path(rel);
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -355,6 +365,9 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
         app.set_mode(Mode::Split);
         if hold {
             return hold_preview(&app).await;
+        }
+        if time {
+            return time_preview(&app).await;
         }
         preview_look(&app, "first").await;
         if let Some(tab) = app.active() {
@@ -531,6 +544,69 @@ fn change_files(app: &Rc<App>, op: &str, rels: &[String]) -> Result<(), String> 
         Ok(status) => Err(status.to_string()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// See `=time:` on [`bench_preview_look`].
+async fn time_preview(app: &Rc<App>) {
+    let (Some(view), Some(tab)) = (
+        app.preview.borrow().as_ref().map(|p| p.view().clone()),
+        app.active(),
+    ) else {
+        println!("bench preview_look time no_preview");
+        return bench_quit(app);
+    };
+    let loads = Rc::new(Cell::new(0));
+    view.connect_load_changed(glib::clone!(
+        #[strong]
+        loads,
+        move |_, event| {
+            if event == webkit6::LoadEvent::Finished {
+                loads.set(loads.get() + 1);
+            }
+        }
+    ));
+    let bytes = tab.text().len();
+    for _ in 0..5 {
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let (worst, last) = (Rc::new(Cell::new(0.0)), Rc::new(Cell::new(Instant::now())));
+        let beat = glib::timeout_add_local(Duration::from_millis(1), {
+            let (worst, last) = (worst.clone(), last.clone());
+            move || {
+                let now = Instant::now();
+                worst.set(f64::max(worst.get(), ms_since(last.replace(now))));
+                glib::ControlFlow::Continue
+            }
+        });
+        let (t, before) = (Instant::now(), loads.get());
+        app.render(&tab);
+        let render = ms_since(t);
+        while loads.get() == before && t.elapsed() < Duration::from_secs(20) {
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
+        let shown = ms_since(t);
+        glib::timeout_future(Duration::from_millis(200)).await;
+        beat.remove();
+        println!(
+            "bench preview_look time bytes={bytes} render_ms={render:.1} shown_ms={shown:.0} \
+             stall_ms={:.1}",
+            worst.get()
+        );
+    }
+    // The note and a word asked for at once: the word, asked for last, is what stays up.
+    if let Some(preview) = app.preview.borrow().as_ref() {
+        preview.render(&tab.rel(), &tab.text());
+        preview.render(&tab.rel(), "latest");
+    }
+    glib::timeout_future(Duration::from_secs(2)).await;
+    let shown = view
+        .evaluate_javascript_future("document.body.textContent", None, None)
+        .await
+        .map_or_else(|e| e.to_string(), |v| v.to_str().to_string());
+    println!(
+        "bench preview_look time latest={}",
+        shown.trim() == "latest"
+    );
+    bench_quit(app);
 }
 
 /// See `=hold:` on [`bench_preview_look`].
