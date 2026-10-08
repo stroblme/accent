@@ -49,6 +49,12 @@ target/release/accent /path/to/notes
 
 You can also launch `target/release/accent` without a path and choose a folder in the app. `accent --help` lists the other launch forms: a file such as a PDF, a remote vault, a terminal. `make server` builds the static helper remote vaults upload, for x86_64 and aarch64 hosts; it needs [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) and zig.
 
+`accent-cli mcp` serves a vault to an AI agent over the Model Context Protocol: search, read, backlinks, tags, links and PDF highlights, and edits to a note or one of its sections, each checked against the version the agent read. It shares the app's index and works with the app closed; `--read-only` leaves out the tools that write. For Claude Code:
+
+```sh
+claude mcp add accent -- /path/to/accent-cli mcp --vault /path/to/notes
+```
+
 For Android, install a JDK, the Android SDK and NDK, then build a debug APK:
 
 ```sh
