@@ -470,17 +470,49 @@ pub fn wire_window(app: &Rc<App>) {
         app,
         move |gesture, _, _, _| {
             gesture.set_state(gtk::EventSequenceState::Claimed);
-            if app.active_pdf().is_none() {
-                return;
-            }
-            let menu = gio::Menu::new();
-            for action in ["win.pdf-fit-width", "win.pdf-fit-page"] {
-                menu.append(Some(label_of(action)), Some(action));
-            }
-            bar_menu(&app, app.statusbar.zoom(), &menu);
+            fit_menu(&app);
         }
     ));
     app.statusbar.zoom().add_controller(fit);
+
+    // While presenting, a press GTK aims at the document although the status bar is up where
+    // it lands (`App::bar_widget_at` says when) goes to the bar instead: a click activates the
+    // control there, a right-click on the zoom readout opens its menu. On the content, in the
+    // capture phase, so it sees only presses aimed past the bar, and before the document does.
+    let stray = gtk::GestureClick::builder()
+        .button(0)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    stray.connect_pressed(glib::clone!(
+        #[weak]
+        app,
+        move |gesture, _, x, y| {
+            let Some(picked) = gesture
+                .widget()
+                .and_then(|content| app.bar_widget_at(&content, x, y))
+            else {
+                return;
+            };
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let zoom = app.statusbar.zoom();
+            match gesture.current_button() {
+                // The label under the pointer has no activation; the button around it has.
+                gdk::BUTTON_PRIMARY => {
+                    let bar = app.statusbar.widget();
+                    let _ = std::iter::successors(Some(picked), |w| w.parent())
+                        .take_while(|w| w != bar)
+                        .find(|w| w.activate());
+                }
+                gdk::BUTTON_SECONDARY if picked == *zoom || picked.is_ancestor(zoom) => {
+                    fit_menu(&app)
+                }
+                _ => {}
+            }
+        }
+    ));
+    if let Some(content) = app.toolbar.content() {
+        content.add_controller(stray);
+    }
 
     app.modes.connect_toggled(glib::clone!(
         #[weak]
@@ -839,6 +871,18 @@ pub fn dismiss(app: &App) -> bool {
         }
         None => false,
     }
+}
+
+/// A PDF's two fitting modes, off the zoom readout; nothing for any other tab.
+fn fit_menu(app: &Rc<App>) {
+    if app.active_pdf().is_none() {
+        return;
+    }
+    let menu = gio::Menu::new();
+    for action in ["win.pdf-fit-width", "win.pdf-fit-page"] {
+        menu.append(Some(label_of(action)), Some(action));
+    }
+    bar_menu(app, app.statusbar.zoom(), &menu);
 }
 
 /// A menu off one of the status bar's controls, opening upwards, the bar being the window's
