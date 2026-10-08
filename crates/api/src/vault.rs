@@ -17,10 +17,10 @@ use accent_core::path::linked_path;
 
 use crate::local::Local;
 use crate::{
-    Backlink, Commit, Etag, Event, FileRow, HeadingHit, KeptLink, Location, Match, Options,
-    OutLink, PageEdit, PdfLink, RenamePlan, RenameReport, RepageReport, ReplaceReport, Repo,
-    SaveError, SearchHit, Session, Stats, Status, Submodule, UndoReport, VaultConfig, fs, git,
-    remote, rpc, ssh,
+    Backlink, CodeSymbol, Commit, Etag, Event, FileRow, HeadingHit, KeptLink, Location, Match,
+    Mention, Options, OutLink, PageEdit, PdfLink, RenamePlan, RenameReport, RepageReport,
+    ReplaceReport, Repo, SaveError, SearchHit, Session, Stats, Status, Submodule, UndoReport,
+    VaultConfig, fs, git, remote, rpc, ssh,
 };
 
 /// One open vault, wherever it lives.
@@ -462,6 +462,16 @@ methods! {
     any headings_matching(words: ref [String], limit: val usize) -> Vec<HeadingHit>;
     /// `(file, title)` for the files holding any of `words`, best first.
     any rank_files(words: ref [String], limit: val usize) -> Vec<(String, Option<String>)>;
+    /// A code file's declarations, in order.
+    any file_symbols(rel: ref str) -> Vec<CodeSymbol>;
+    /// The declarations a name or `Container::name` finds, best first.
+    any find_symbols(query: ref str, limit: val usize) -> Vec<CodeSymbol>;
+    /// The declarations of each of `names`, those in `near` first.
+    any symbols_named(names: ref [String], near: ref str, per: val usize) -> Vec<CodeSymbol>;
+    /// Where a name is written in code, with the declaration around it.
+    any mentions(name: ref str, limit: val usize) -> Vec<Mention>;
+    /// The declarations named by a question's words, with how many of their parts it holds.
+    any symbols_by_words(words: ref [String], limit: val usize) -> Vec<(CodeSymbol, usize)>;
     /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,
     /// because that is where the notes and the index are.
     any pdf_links(rel: ref str) -> Vec<PdfLink>;

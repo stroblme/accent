@@ -635,6 +635,32 @@ fn upsert(
                 .execute(params![id, name])?;
         }
     }
+    // A code file's declarations, read from the text its body is.
+    let lang = (f.kind == FileKind::Other)
+        .then(|| crate::code::lang_of(&f.rel_path))
+        .flatten();
+    if let (Some(lang), Some(text)) = (lang, text.as_deref()) {
+        let test_file = crate::code::is_test_path(&f.rel_path);
+        for d in crate::code::symbols(lang, text) {
+            tx.prepare_cached(
+                "INSERT INTO symbols(file_id, kind, name, container, byte_start, byte_end, line,
+                                     end_line, signature, test)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            )?
+            .execute(params![
+                id,
+                d.kind.as_i64(),
+                d.name,
+                d.container,
+                d.range.start as i64,
+                d.range.end as i64,
+                d.line,
+                d.end_line,
+                d.signature,
+                d.test || test_file,
+            ])?;
+        }
+    }
     // Set aside for [`write_bodies`], which the caller runs before it commits.
     if let Some(body) = text.as_ref() {
         tx.prepare_cached(
@@ -691,6 +717,8 @@ fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     tx.prepare_cached("DELETE FROM tags WHERE file_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("DELETE FROM headings WHERE file_id = ?1")?
+        .execute([id])?;
+    tx.prepare_cached("DELETE FROM symbols WHERE file_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("DELETE FROM note_aliases WHERE file_id = ?1")?
         .execute([id])?;

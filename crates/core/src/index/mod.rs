@@ -11,6 +11,7 @@ mod links;
 mod reconcile;
 mod schema;
 mod search;
+mod symbols;
 
 use crate::walk::FileKind;
 use anyhow::{Context, Result};
@@ -23,6 +24,7 @@ use search::{folded_find, snippet_window};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::Path;
+pub use symbols::{CodeSymbol, Mention};
 
 pub struct Index {
     conn: Connection,
@@ -277,12 +279,20 @@ impl Index {
         // the one that rebuilds, which a second build opening the same stale index waits for.
         if !current(&conn)? {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if !current(&tx)? {
+            let rebuild = !current(&tx)?;
+            if rebuild {
                 tx.execute_batch(DROP_ALL)?;
                 tx.execute_batch(SCHEMA)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
             tx.commit()?;
+            // The dropped tables' pages stay in the file as free pages, which nothing gives
+            // back: this repository's index was 1.56 GB with 23 MB of it live. Empty now, the
+            // file is rewritten in moments. Another connection reading it keeps it as it is,
+            // which costs space and nothing else.
+            if rebuild && let Err(e) = conn.execute_batch("VACUUM") {
+                tracing::debug!("the rebuilt index keeps its free pages: {e}");
+            }
         }
         conn.execute_batch(BODIES)?;
         Ok(Index { conn })
@@ -438,6 +448,10 @@ mod tests {
     #[test]
     fn an_index_from_the_previous_schema_is_rebuilt_whole() {
         let (vault, db) = fixture();
+        // Pages enough that the empty schema cannot take them all up again.
+        for i in 0..50 {
+            fs::write(vault.path().join(format!("n{i}.md")), "word ".repeat(400)).unwrap();
+        }
         let path = db.path().join("i.db");
         {
             let mut ix = Index::open(&path).unwrap();
@@ -457,6 +471,11 @@ mod tests {
             0,
             "the old cache must be dropped"
         );
+        let free: i64 = ix
+            .conn
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(free, 0, "the dropped pages are given back");
         ix.reconcile(vault.path(), |_| {}).unwrap();
         assert!(
             ix.note_aliases().is_ok(),

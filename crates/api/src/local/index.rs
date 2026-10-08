@@ -17,8 +17,8 @@ use super::{Local, Msg};
 use crate::language::notes;
 use crate::paths::conflict_pairs;
 use crate::{
-    Backlink, FileRow, HeadingHit, Location, Match, Options, OutLink, PdfLink, Repo, SearchHit,
-    Stats, fs, locked,
+    Backlink, CodeSymbol, FileRow, HeadingHit, Location, Match, Mention, Options, OutLink, PdfLink,
+    Repo, SearchHit, Stats, fs, locked,
 };
 
 impl Local {
@@ -231,6 +231,36 @@ impl Local {
         limit: usize,
     ) -> Result<Vec<(String, Option<String>)>> {
         self.supersede(|index| index.rank_files(words, limit))
+    }
+
+    pub fn file_symbols(&self, rel: &str) -> Result<Vec<CodeSymbol>> {
+        self.index().file_symbols(rel)
+    }
+
+    pub fn find_symbols(&self, query: &str, limit: usize) -> Result<Vec<CodeSymbol>> {
+        self.index().find_symbols(query, limit)
+    }
+
+    pub fn symbols_named(
+        &self,
+        names: &[String],
+        near: &str,
+        per: usize,
+    ) -> Result<Vec<CodeSymbol>> {
+        self.index().symbols_named(names, near, per)
+    }
+
+    pub fn symbols_by_words(
+        &self,
+        words: &[String],
+        limit: usize,
+    ) -> Result<Vec<(CodeSymbol, usize)>> {
+        self.index().symbols_by_words(words, limit)
+    }
+
+    /// Read on the search connection, as a search is: every code body holding the name's words.
+    pub fn mentions(&self, name: &str, limit: usize) -> Result<Vec<Mention>> {
+        self.supersede(|index| index.mentions(name, limit))
     }
 
     pub(crate) fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {

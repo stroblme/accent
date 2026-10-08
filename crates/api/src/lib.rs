@@ -42,11 +42,12 @@ pub use accent_core::diff::{DiffLine, Op};
 pub use accent_core::fs::{Etag, Read, SaveError, Text};
 // The module as well as its types: the git operations take a `Repo`, not a `Vault`, so callers
 // reach them as `accent_api::git::status(&repo)` after asking the vault which repos there are.
+pub use accent_core::code::SymbolKind;
 pub use accent_core::git;
 pub use accent_core::git::{Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
 pub use accent_core::index::{
-    Backlink, FileRow, HeadingHit, Match, OutLink, PdfLink, Progress, ReconcileStats, SearchHit,
-    Stats,
+    Backlink, CodeSymbol, FileRow, HeadingHit, Match, Mention, OutLink, PdfLink, Progress,
+    ReconcileStats, SearchHit, Stats,
 };
 pub use accent_core::page_edit::PageEdit;
 pub use accent_core::search::{self, Options, Regex};
