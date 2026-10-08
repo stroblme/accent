@@ -658,6 +658,18 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         vault?.let { v -> runCatching { v.templateTargets() }.getOrDefault(emptyList()) }
     }
 
+    /**
+     * The templates Today's Note may use: those whose `accent-target:` is dated (`{{date…}}`), so
+     * the note one makes is the day's. Null with no vault open.
+     */
+    suspend fun dailyTemplates(): List<String>? = withContext(Dispatchers.IO) {
+        vault?.let { v ->
+            runCatching {
+                v.templateTargets().filter { v.templateRawTarget(it)?.contains("{{date") == true }
+            }.getOrDefault(emptyList())
+        }
+    }
+
     /** Where the templates are read from, for the reader told there are none to offer. */
     fun templatesDir(): String? = vault?.templatesDir()
 

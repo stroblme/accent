@@ -103,8 +103,9 @@ fun BrowseScreen(
     var tag by remember { mutableStateOf<TagCount?>(null) }
     var tagged by remember { mutableStateOf<List<String>?>(null) }
     var linked by remember { mutableStateOf<List<String>?>(null) }
-    // The templates New from Template… offers, in the commands' place while it asks for one.
-    var templates by remember { mutableStateOf<List<String>?>(null) }
+    // The template command asking which template, and the ones it offers, listed in the
+    // commands' place until one is picked.
+    var picking by remember { mutableStateOf<Pair<Command, List<String>>?>(null) }
     // Their ranking, with the list its places are places in: the tags and a tag's notes share a
     // page, and a place drawn against the other list is a row naming the wrong thing.
     var listing by remember { mutableStateOf<Pair<List<*>, List<Int>>?>(null) }
@@ -124,13 +125,13 @@ fun BrowseScreen(
         tagged = tag?.let { model.filesWithTag(it.name) }
     }
 
-    LaunchedEffect(query, mode, tags, tag, tagged, linked, templates) {
+    LaunchedEffect(query, mode, tags, tag, tagged, linked, picking) {
         if (mode == Mode.Search) return@LaunchedEffect
-        val picking = mode == Mode.Command && templates != null
-        if (mode == Mode.Tags || mode == Mode.Backlinks || picking) {
+        val choosing = mode == Mode.Command && picking != null
+        if (mode == Mode.Tags || mode == Mode.Backlinks || choosing) {
             val list = when {
                 mode == Mode.Backlinks -> linked
-                picking -> templates
+                choosing -> picking?.second
                 tag != null -> tagged
                 else -> tags
             } ?: return@LaunchedEffect
@@ -171,7 +172,7 @@ fun BrowseScreen(
     // Back from a tag is the list of tags, before it is the way out of the panel; and from the
     // templates, the commands.
     BackHandler(enabled = mode == Mode.Tags && tag != null) { tag = null }
-    BackHandler(enabled = mode == Mode.Command && templates != null) { templates = null }
+    BackHandler(enabled = mode == Mode.Command && picking != null) { picking = null }
 
     // The chip of the page in front is kept on screen: five do not fit across a phone, and a row
     // scrolled away from the lit one no longer says which page this is.
@@ -201,9 +202,10 @@ fun BrowseScreen(
                 }
                 return@HorizontalPager
             }
-            val picks = templates
-            if (tab == Mode.Command && picks != null) {
-                Notes("New from Template", picks, placesIn(picks), onBack = { templates = null }) {
+            val (asking, picks) = picking ?: (null to null)
+            if (tab == Mode.Command && asking != null && picks != null) {
+                val heading = asking.label.removeSuffix("…")
+                Notes(heading, picks, placesIn(picks), onBack = { picking = null }) {
                     model.fromTemplate(it)
                     onClose()
                 }
@@ -232,8 +234,11 @@ fun BrowseScreen(
                             colors = flatRow(),
                             modifier = Modifier.row {
                                 model.recents.touch(Recents.Kind.Commands, command.label)
-                                if (command === NewFromTemplate) {
-                                    scope.launch { templates = pickable(model, onClose) }
+                                if (command === NewFromTemplate || command === TodaysNote) {
+                                    scope.launch {
+                                        val offered = pickable(command, model, onClose)
+                                        picking = offered?.let { command to it }
+                                    }
                                     query = ""
                                 } else {
                                     command.run(model)
@@ -320,7 +325,7 @@ fun BrowseScreen(
                 Mode.Files -> "Go to a file"
                 Mode.Tags -> tag?.let { "Filter #${it.name}" } ?: "Find a tag"
                 Mode.Backlinks -> "Filter backlinks"
-                Mode.Command -> if (templates != null) "Find a template" else "Run a command"
+                Mode.Command -> if (picking != null) "Find a template" else "Run a command"
             },
             modifier = Modifier.focusRequester(focus),
         )
@@ -486,20 +491,34 @@ private fun LazyListScope.rows(
 class Command(val label: String, val run: (VaultModel) -> Unit)
 
 /**
- * New from Template…, the one command that asks something first: which template. The Command page
- * lists the ones that say where their notes go in its own place, as the Tags page lists a tag's
+ * New from Template… and Today's Note, the commands that may ask something first: which template.
+ * The Command page lists the ones they offer in its own place, as the Tags page lists a tag's
  * notes, and a pick makes the note there or opens the one it made ([VaultModel.fromTemplate]).
+ * New from Template… offers every template that says where its notes go, as the desktop's does;
+ * Today's Note those whose destination is dated, and asks only when there are several.
  */
 val NewFromTemplate = Command("New from Template…") {}
+val TodaysNote = Command("Today's Note") {}
 
 /**
- * The templates New from Template… can offer, or null when there is nothing to pick from — which
- * says why, as the desktop does, and closes the panel.
+ * The templates [command] asks the reader to pick from, or null when it does not ask: with none
+ * to offer it says why, as the desktop does, and with Today's Note's one it makes that note
+ * straight away. Either way the panel closes.
  */
-private suspend fun pickable(model: VaultModel, onClose: () -> Unit): List<String>? {
-    val found = model.templateTargets() ?: return null
-    if (found.isNotEmpty()) return found
-    model.said("No template has a destination. Add accent-target: to one in ${model.templatesDir()}")
+private suspend fun pickable(command: Command, model: VaultModel, onClose: () -> Unit): List<String>? {
+    val today = command === TodaysNote
+    val found = (if (today) model.dailyTemplates() else model.templateTargets()) ?: return null
+    val dir = model.templatesDir()
+    when {
+        found.isEmpty() && today -> model.said(
+            "No template has a dated destination. Add accent-target: Daily/{{date}}.md to one in $dir",
+        )
+        found.isEmpty() -> model.said(
+            "No template has a destination. Add accent-target: to one in $dir",
+        )
+        today && found.size == 1 -> model.fromTemplate(found.single())
+        else -> return found
+    }
     onClose()
     return null
 }
@@ -513,6 +532,7 @@ private suspend fun pickable(model: VaultModel, onClose: () -> Unit): List<Strin
 val Commands = listOf(
     Command("New Note") { it.newNote(newName()) },
     NewFromTemplate,
+    TodaysNote,
     Command("Find") { it.finding(true) },
     Command("Reload Vault") { it.reloadVault() },
     Command("Close Note") { it.close() },

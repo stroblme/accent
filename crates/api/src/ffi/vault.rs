@@ -264,6 +264,14 @@ impl Vault {
     pub fn template_target(&self, template: String) -> Answer<Option<String>> {
         Ok(self.inner.template_target(&template)?)
     }
+
+    /// What a template's `accent-target:` says as written, `Daily/{{date}}.md` before today fills
+    /// it in: how a dated destination, the daily note's, is told from a fixed one. `None` when the
+    /// template says nothing about where its notes go.
+    pub fn template_raw_target(&self, template: String) -> Answer<Option<String>> {
+        let (text, _) = self.inner.read(&template)?;
+        Ok(accent_core::template::parse(&text).target)
+    }
 }
 
 #[cfg(test)]
@@ -303,5 +311,10 @@ mod tests {
         );
         assert_eq!(made().as_deref(), Some("Logs/Log.md"));
         assert_eq!(v.templates_dir(), "Templates");
+        // The target as written, which is what tells a dated one, the daily note's, apart.
+        let raw = v
+            .template_raw_target("Templates/Log.md".to_string())
+            .unwrap();
+        assert_eq!(raw.as_deref(), Some("Logs/{{title}}.md"));
     }
 }
