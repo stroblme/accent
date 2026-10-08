@@ -4,9 +4,11 @@
 //! finds a different etag on disk is refused so the UI can offer a diff instead of clobbering
 //! a change that Syncthing (or another device) pulled in behind our back.
 
-use std::io::{self, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{self, Read as _, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
@@ -51,18 +53,53 @@ pub fn digest(bytes: &str) -> Digest {
 /// one writing in place moves the mtime past the etag, so a writer that raced the read costs a
 /// refused save rather than a silent overwrite. A stat of the path after the read paired the
 /// bytes of the file opened with the etag of the one renamed over it.
+///
+/// Only a regular file is opened: a FIFO or a device has no end to read to. The open does not
+/// block, so a FIFO is refused rather than waited on until something writes to it; a regular
+/// file ignores the flag.
 fn open_stamped(path: &Path) -> io::Result<(std::fs::File, std::fs::Metadata)> {
-    let file = std::fs::File::open(path)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
     let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
     Ok((file, meta))
 }
 
-/// Read a note and the etag to hand back to [`write_note`].
+/// The bytes of the file at `path` and its etag, taken as [`open_stamped`] takes it, or the
+/// file's size as the error when it holds more than [`MAX_TEXT`]. The cap holds while reading, so
+/// a file that grows past it mid-read is too large too, never read to wherever it ends.
+fn read_capped(path: &Path) -> io::Result<Result<(Vec<u8>, Etag), u64>> {
+    let (file, meta) = open_stamped(path)?;
+    if meta.size() > MAX_TEXT {
+        return Ok(Err(meta.size()));
+    }
+    let mut bytes = Vec::with_capacity(meta.size() as usize);
+    (&file).take(MAX_TEXT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_TEXT {
+        return Ok(Err(file.metadata()?.size()));
+    }
+    Ok(Ok((bytes, Etag::from_meta(&meta))))
+}
+
+/// Read a note and the etag to hand back to [`write_note`]. A file over [`MAX_TEXT`] is a
+/// `FileTooLarge` error, one that is not UTF-8 an `InvalidData` one.
 pub fn read_note(path: &Path) -> io::Result<(String, Etag)> {
-    let (mut file, meta) = open_stamped(path)?;
-    let mut text = String::new();
-    io::Read::read_to_string(&mut file, &mut text)?;
-    Ok((text, Etag::from_meta(&meta)))
+    let (bytes, etag) = read_capped(path)?.map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!("the file is larger than {} MiB", MAX_TEXT / (1024 * 1024)),
+        )
+    })?;
+    let text =
+        String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok((text, etag))
 }
 
 /// Biggest file we will pull into memory as text; anything larger stays closed.
@@ -91,13 +128,10 @@ pub struct Text {
 /// Read any file as text, saying so when it is binary or too big to hold. The etag is taken as
 /// [`read_note`] takes it.
 pub fn read_text(path: &Path) -> io::Result<Read> {
-    let (mut file, meta) = open_stamped(path)?;
-    let size = meta.size();
-    if size > MAX_TEXT {
-        return Ok(Read::TooLarge { size });
-    }
-    let mut bytes = Vec::with_capacity(size as usize);
-    io::Read::read_to_end(&mut file, &mut bytes)?;
+    let (bytes, etag) = match read_capped(path)? {
+        Ok(read) => read,
+        Err(size) => return Ok(Read::TooLarge { size }),
+    };
     // A NUL byte is the same "this is not text" test `grep` and `git` use.
     if bytes.contains(&0) {
         return Ok(Read::Binary {
@@ -116,7 +150,7 @@ pub fn read_text(path: &Path) -> io::Result<Read> {
     };
     Ok(Read::Text(Text {
         text,
-        etag: Etag::from_meta(&meta),
+        etag,
         crlf,
         lossy,
     }))
@@ -184,6 +218,12 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
 ///
 /// Split out of [`write_note`] rather than duplicated, so a PDF gets the etag gate, the symlink
 /// resolution and the preserved ownership a note has always had.
+///
+/// The etag is checked once the bytes are written and synced, right before the rename, and the
+/// saves of one file in this process take turns at the two ([`turn`]): of saves holding the same
+/// etag, the first lands and the others are refused. Another process (Syncthing, a second accent)
+/// can still replace the file between that check and the rename, and its write is then lost:
+/// Linux has no rename that replaces a file only while it is still the one checked.
 pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<Etag, SaveError> {
     // Resolve symlinks first: writing through a link must replace the link *target*, otherwise the
     // rename below would silently turn a symlinked note into a regular file in the vault.
@@ -193,30 +233,7 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
 
     let existing = std::fs::metadata(&canonical).ok();
-    if let Some(exp) = expected {
-        match &existing {
-            Some(m) if Etag::from_meta(m) != exp => {
-                return Err(SaveError::ChangedOnDisk {
-                    current: Etag::from_meta(m),
-                });
-            }
-            None => {
-                return Err(
-                    io::Error::new(io::ErrorKind::NotFound, "file vanished before save").into(),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    // Opened with 0666 as `File::create` would be, so the umask decides and a new file gets the
-    // mode a new note gets (0644 under the usual 022) rather than tempfile's own 0600: an image
-    // nobody else on a shared vault could open. An existing file's own mode is put back below.
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".accent-")
-        .permissions(std::fs::Permissions::from_mode(0o666))
-        .tempfile_in(parent)
-        .map_err(SaveError::Io)?;
+    let mut tmp = temp_file(parent, existing.as_ref())?;
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
 
@@ -231,6 +248,23 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
         let _ = std::os::unix::fs::chown(tmp.path(), Some(m.uid()), Some(m.gid()));
     }
 
+    let _turn = turn(&canonical);
+    if let Some(exp) = expected {
+        match std::fs::metadata(&canonical) {
+            Ok(m) if Etag::from_meta(&m) != exp => {
+                return Err(SaveError::ChangedOnDisk {
+                    current: Etag::from_meta(&m),
+                });
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return Err(
+                    io::Error::new(io::ErrorKind::NotFound, "file vanished before save").into(),
+                );
+            }
+        }
+    }
+
     // ponytail: no directory fsync after the rename. The rename itself is atomic, so a crash can
     // only lose the whole save, never half of it. Add `File::open(parent)?.sync_all()` here if
     // crash-consistency (as opposed to torn-write safety) ever matters.
@@ -238,6 +272,40 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
         .persist(&canonical)
         .map_err(|e| SaveError::Io(e.error))?;
     Ok(Etag::from_meta(&file.metadata()?))
+}
+
+/// A temporary file in `parent` for a save to write into, no more open to others than the file it
+/// replaces (`existing`) while it holds the bytes.
+///
+/// Created with that file's mode, or with 0666 for a new one as `File::create` would, the umask
+/// applying to both: a 0600 file's bytes never wait in a 0644 temp file, and a new file gets the
+/// mode a new note gets (0644 under the usual 022) rather than tempfile's own 0600, an image
+/// nobody else on a shared vault could open. What the umask took from an existing file's mode is
+/// put back before the rename.
+fn temp_file(
+    parent: &Path,
+    existing: Option<&std::fs::Metadata>,
+) -> io::Result<tempfile::NamedTempFile> {
+    let mode = existing.map_or(0o666, |m| m.mode() & 0o777);
+    tempfile::Builder::new()
+        .prefix(".accent-")
+        .permissions(std::fs::Permissions::from_mode(mode))
+        .tempfile_in(parent)
+}
+
+/// The turn a save of `canonical` takes at its etag check and its rename, so two saves of one file
+/// in this process cannot both pass the check before either renames. It is held for a `stat` and a
+/// `rename`, never the write or the fsync. One lock per stripe of paths rather than per path, so
+/// there is no table of paths to clear: two files sharing a stripe only wait a rename for each
+/// other.
+fn turn(canonical: &Path) -> MutexGuard<'static, ()> {
+    static TURNS: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
+    let mut hash = DefaultHasher::new();
+    canonical.hash(&mut hash);
+    // The lock guards no data, so a save that panicked holding it left nothing to distrust.
+    TURNS[hash.finish() as usize % TURNS.len()]
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Create a new note, refusing to clobber an existing file. Missing parent directories are created.
@@ -366,6 +434,30 @@ mod tests {
     }
 
     #[test]
+    fn reads_hold_the_cap_and_refuse_special_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.md");
+        // Sparse, so the test writes nothing to disk.
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_TEXT + 1)
+            .unwrap();
+        let kind = read_note(&big).err().map(|e| e.kind());
+        assert_eq!(kind, Some(io::ErrorKind::FileTooLarge));
+        assert!(
+            matches!(read_text(&big).unwrap(), Read::TooLarge { size } if size == MAX_TEXT + 1)
+        );
+
+        // Opening a FIFO nobody writes to for reading would wait forever.
+        let fifo = dir.path().join("fifo.md");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let kind = read_note(&fifo).err().map(|e| e.kind());
+        assert_eq!(kind, Some(io::ErrorKind::InvalidInput));
+        assert!(read_text(&fifo).is_err());
+    }
+
+    #[test]
     fn a_read_digests_the_bytes_a_write_of_it_leaves() {
         let dir = tempfile::tempdir().unwrap();
         let note = dir.path().join("Note.md");
@@ -401,6 +493,36 @@ mod tests {
     }
 
     #[test]
+    fn of_saves_holding_one_etag_only_the_first_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("Note.md");
+        std::fs::write(&note, "zero").unwrap();
+        let (_, etag) = read_note(&note).unwrap();
+
+        let start = std::sync::Barrier::new(8);
+        let landed = std::thread::scope(|s| {
+            let saves: Vec<_> = (0..8)
+                .map(|i| {
+                    let (note, start) = (&note, &start);
+                    s.spawn(move || {
+                        start.wait();
+                        write_note(note, &i.to_string(), Some(etag))
+                    })
+                })
+                .collect();
+            saves
+                .into_iter()
+                .map(|save| match save.join().unwrap() {
+                    Ok(_) => 1,
+                    Err(SaveError::ChangedOnDisk { .. }) => 0,
+                    Err(e) => panic!("{e}"),
+                })
+                .sum::<usize>()
+        });
+        assert_eq!(landed, 1);
+    }
+
+    #[test]
     fn write_through_symlink_replaces_the_target() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real.md");
@@ -432,6 +554,22 @@ mod tests {
 
         let mode = std::fs::metadata(&note).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "saved file kept the original mode");
+    }
+
+    #[test]
+    fn a_private_file_is_written_through_a_private_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("Note.md");
+        std::fs::write(&note, "one").unwrap();
+        std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let tmp = temp_file(dir.path(), Some(&std::fs::metadata(&note).unwrap())).unwrap();
+        let mode = tmp.as_file().metadata().unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "the bytes are readable to others: {mode:o}"
+        );
     }
 
     #[test]
