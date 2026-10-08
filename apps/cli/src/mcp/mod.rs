@@ -19,6 +19,7 @@ use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabiliti
 use rmcp::{ServerHandler, ServiceExt, tool_handler};
 use serde_json::Value;
 
+mod explore;
 mod tools;
 
 /// Most a read hands back: a note past it is read a section at a time, an image past it not at
@@ -31,9 +32,12 @@ const WAIT: Duration = Duration::from_secs(20);
 
 /// What the agent is told about the server before it asks anything.
 const INSTRUCTIONS: &str = "The notes of one accent vault: markdown files linked by [[wikilinks]] \
-    and tagged with #tags, beside PDFs and other files, indexed for search. Every path is \
-    relative to the vault root. A write takes the etag the last read gave, and is refused when \
-    the file changed since.";
+    and tagged with #tags, beside PDFs, code and other files, indexed for search. Start with \
+    explore: one call answers a question, a name, a path, a [[link]] or a #tag with the files \
+    it is about, their outlines, links in and out, and the matching sections verbatim with line \
+    numbers; a path alone answers with that file's card. Every path is relative to the vault \
+    root. A write takes the etag the last read gave, and is refused when the file changed \
+    since.";
 
 /// Serve the vault at `root`, its index at `db`, until stdin closes; `read_only` leaves out the
 /// tools that write.

@@ -159,11 +159,15 @@ fn names(list: &Value) -> Vec<String> {
     names
 }
 
-const READ_TOOLS: [&str; 6] = [
+const READ_TOOLS: [&str; 10] = [
+    "explore",
     "list_backlinks",
+    "list_dir",
     "list_tags",
+    "missing_notes",
     "pdf_annotations",
     "read_note",
+    "recent_changes",
     "resolve_link",
     "search_notes",
 ];
@@ -239,7 +243,7 @@ fn mcp_writes_only_over_what_it_read() {
     let scratch = Scratch::new("write");
     let mut c = Client::start(&scratch, &[]);
     c.initialize();
-    assert_eq!(names(&c.ask("tools/list", json!({}))).len(), 9);
+    assert_eq!(names(&c.ask("tools/list", json!({}))).len(), 13);
 
     let (read, _) = c.call("read_note", json!({"path": "a.md"}));
     let etag = serde_json::from_str::<Value>(&read[0]).unwrap()["etag"].clone();
@@ -278,6 +282,94 @@ fn mcp_writes_only_over_what_it_read() {
     assert!(!error, "{said:?}");
     assert_eq!(said[0], r#"{"created":true,"path":"Days/Day.md"}"#);
     assert_eq!(scratch.read("Days/Day.md"), "# Made\n");
+    c.close();
+}
+
+/// The cards of `explore`: a note linked from two of the files a word finds outranks one found
+/// the same way that nothing links, a path alone is answered with its whole card, and the
+/// answer keeps to its budget.
+#[test]
+fn explore_ranks_by_links_and_answers_a_path_with_its_card() {
+    let scratch = Scratch::new("explore");
+    let write = |rel: &str, text: &str| std::fs::write(scratch.dir.join("vault").join(rel), text);
+    write("plain.md", "quince\n").unwrap();
+    write("x.md", "quince [[linked]]\n").unwrap();
+    write("y.md", "quince [[linked]]\n").unwrap();
+    let long = "a longer note that says more about other things than fruit ".repeat(4);
+    write("linked.md", &format!("{long}quince\n")).unwrap();
+    let big: String = (1..=500).map(|n| format!("quince line {n}\n")).collect();
+    write("big.md", &big).unwrap();
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+
+    let (said, error) = c.call("explore", json!({"query": "quince"}));
+    assert!(!error, "{said:?}");
+    let at = |rel: &str| said[0].find(&format!("### `{rel}`"));
+    assert!(
+        at("linked.md").unwrap() < at("plain.md").unwrap(),
+        "{}",
+        said[0]
+    );
+
+    let (said, _) = c.call("explore", json!({"query": "a.md"}));
+    let card = &said[0];
+    for row in [
+        "### `a.md` — Title (4 lines)",
+        "Outline:\n  1  # Title\n  3  ## Part\n",
+        "Links out:\n  4 → `b.md`\n",
+        "Backlinks:\n  `b.md`:2  see [[a#Part]]\n",
+        "1\t# Title\n2\tintro\n3\t## Part\n4\tbody about kumquat [[b]]\n",
+    ] {
+        assert!(card.contains(row), "{row:?} not in {card}");
+    }
+
+    let (said, _) = c.call("explore", json!({"query": "big.md", "max_chars": 4000}));
+    assert!(said[0].len() <= 4000, "{} chars", said[0].len());
+    assert!(said[0].contains("(cut: read_note `big.md`"), "{}", said[0]);
+    c.close();
+}
+
+/// The listings beside `explore`: a folder, the files changed last, and the notes links wait for.
+#[test]
+fn mcp_lists_folders_recent_files_and_missing_notes() {
+    let scratch = Scratch::new("lists");
+    std::fs::write(
+        scratch.dir.join("vault/c.md"),
+        "[[Later]]\nand [[Later#Part]]\n",
+    )
+    .unwrap();
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+
+    let (said, error) = c.call("list_dir", json!({}));
+    assert!(!error, "{said:?}");
+    let rows: Value = serde_json::from_str(&said[0]).unwrap();
+    let paths: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["path"].as_str().unwrap())
+        .collect();
+    // Folders first, and nothing a symlink brings in from outside.
+    assert_eq!(paths, ["Templates", "a.md", "b.md", "c.md"], "{rows}");
+    assert_eq!(rows[1]["kind"], "note");
+    assert_eq!(rows[1]["title"], "Title");
+    assert!(
+        rows[1]["modified"].as_str().unwrap().ends_with('Z'),
+        "{rows}"
+    );
+    let (said, error) = c.call("list_dir", json!({"path": "link"}));
+    assert!(error, "a folder outside the vault was listed: {said:?}");
+
+    let (said, _) = c.call("recent_changes", json!({"limit": 2}));
+    let rows: Value = serde_json::from_str(&said[0]).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
+
+    let (said, _) = c.call("missing_notes", json!({}));
+    assert_eq!(
+        said[0],
+        r#"[{"linked_from":[{"line":1,"path":"c.md"},{"line":2,"path":"c.md"}],"path":"Later.md"}]"#
+    );
     c.close();
 }
 
