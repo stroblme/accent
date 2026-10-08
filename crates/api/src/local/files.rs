@@ -43,9 +43,9 @@ impl Local {
     /// with an event.
     pub fn save(&self, rel: &str, text: &str, expected: Option<Etag>) -> Result<Etag, SaveError> {
         let etag = fs::write_note(&self.resolve(rel)?, text, expected)?;
-        self.post(Msg::Update {
+        self.post(Msg::Saved {
             rel: rel.to_string(),
-            own: true,
+            etag,
         });
         Ok(etag)
     }

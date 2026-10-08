@@ -83,6 +83,12 @@ pub(crate) enum Msg {
         rel: String,
         own: bool,
     },
+    /// A save of this vault's own, at the etag it left: what tells its echo from another
+    /// process's change whatever order the two reach the worker in. See [`Worker::mine`].
+    Saved {
+        rel: String,
+        etag: Etag,
+    },
     /// The git directories to watch, as `repos()` last found them. The walk hard-skips `.git`,
     /// so these are never in the index's directory list and the watcher has to be told.
     WatchGit(Vec<PathBuf>),
@@ -131,8 +137,7 @@ struct Worker {
     /// [`Worker::reconcile`].
     held: Vec<Msg>,
     /// The etag each file this vault wrote was left at, so the watcher's echo of the write can
-    /// be told from a change another process sharing the index took in first: both find the row
-    /// up to date. See [`Worker::unchanged`].
+    /// be told from another process's change. See [`Worker::mine`].
     own: HashMap<String, Etag>,
     /// Set by [`Local::stop_indexing`](crate::local::Local::stop_indexing) and by the vault's
     /// `Drop` from another thread, and read inside the walk: the inbox cannot be reached from there.
@@ -220,6 +225,13 @@ impl Worker {
     }
 
     fn process_batch(&mut self, batch: Vec<Msg>) {
+        // Before anything in the batch is taken in: an echo of an earlier change of the file, come
+        // late, may be read ahead of the save, with the save already on disk.
+        for msg in &batch {
+            if let Msg::Saved { rel, etag } = msg {
+                self.own.insert(rel.clone(), *etag);
+            }
+        }
         // Git first, and before anything else looks at these paths. A `.git` directory is full of
         // children, so `walk_scope` would read a commit as a whole tree moved in and walk the
         // vault; and `rel` cannot place a submodule's git directory, which lives outside the
@@ -337,7 +349,17 @@ impl Worker {
                 | Msg::WatchUnindexed(..)
                 | Msg::SetExcluded(..)
                 | Msg::Settled(_) => {}
-                Msg::Update { rel, own } => self.update(&rel, own, &mut batched),
+                Msg::Update { rel, own } => {
+                    self.update(&rel, own, &mut batched);
+                    // Any other write of this vault's own is known by what it left on disk.
+                    if own {
+                        match Etag::of(&self.root.join(&rel)) {
+                            Ok(etag) => self.own.insert(rel, etag),
+                            Err(_) => self.own.remove(&rel),
+                        };
+                    }
+                }
+                Msg::Saved { rel, .. } => self.update(&rel, true, &mut batched),
                 Msg::Fs(ev) => self.apply(ev, &mut batched),
             }
         }
@@ -390,7 +412,7 @@ impl Worker {
             Msg::Resume | Msg::Fs(VaultEvent::Rescan) => Some(String::new()),
             Msg::Fs(VaultEvent::Changed(p)) => folder(p),
             Msg::Fs(VaultEvent::Renamed { to, .. }) => folder(to),
-            Msg::Update { rel, .. } => folder(&self.root.join(rel)),
+            Msg::Update { rel, .. } | Msg::Saved { rel, .. } => folder(&self.root.join(rel)),
             _ => None,
         }
     }
@@ -419,7 +441,7 @@ impl Worker {
                 (from, to) => from.or(to),
             },
             // Our own save of one, which the watcher reports as well; whichever arrives first walks.
-            Msg::Update { rel, .. } => dir(rel),
+            Msg::Update { rel, .. } | Msg::Saved { rel, .. } => dir(rel),
             _ => None,
         }
     }
@@ -698,15 +720,7 @@ impl Worker {
         }
         // The links the file holds and the ones its names answer to are resolved as it goes, in a
         // few index lookups: a pass over every link is 0.1–0.35 s a batch at `make vault`.
-        let change = self.index.update_file(&self.root, rel);
-        // Only a watched vault hears its writes again.
-        if own && self.watch {
-            match Etag::of(&self.root.join(rel)) {
-                Ok(etag) => self.own.insert(rel.to_string(), etag),
-                Err(_) => self.own.remove(rel),
-            };
-        }
-        match change {
+        match self.index.update_file(&self.root, rel) {
             Ok(Change::Added(kind)) => {
                 b.dirs.insert(parent_dir(rel).to_string());
                 if kind == FileKind::Dir {
@@ -715,7 +729,7 @@ impl Worker {
                 }
                 // A path this batch removed and is seeing again was rewritten, not created:
                 // whoever has it open has to reload it.
-                if kind != FileKind::Dir && !own && b.removed.remove(rel) {
+                if kind != FileKind::Dir && !own && b.removed.remove(rel) && !self.mine(rel) {
                     self.emit(Event::FileChanged(rel.to_string()));
                 }
             }
@@ -726,7 +740,7 @@ impl Worker {
             Ok(Change::Updated(kind)) => {
                 // Every kind but a directory reports: a PDF rebuilt by a tool or a source file
                 // edited in another editor has to refresh in the UI just like a note does.
-                if kind != FileKind::Dir && !own {
+                if kind != FileKind::Dir && !own && !self.mine(rel) {
                     self.emit(Event::FileChanged(rel.to_string()));
                 }
             }
@@ -749,10 +763,7 @@ impl Worker {
     /// twice. New or edited is unknowable too, so the folder's listing is news either way.
     fn unchanged(&mut self, rel: &str, b: &mut Batch) {
         let path = self.root.join(rel);
-        let Ok(etag) = Etag::of(&path) else {
-            return;
-        };
-        if self.own.get(rel) == Some(&etag) {
+        if !path.exists() || self.mine(rel) {
             return;
         }
         b.dirs.insert(parent_dir(rel).to_string());
@@ -761,6 +772,15 @@ impl Worker {
             true => b.rewatch = true,
             false => self.emit(Event::FileChanged(rel.to_string())),
         }
+    }
+
+    /// Whether `rel` is on disk as this vault's own last write of it left it, which is no news to
+    /// its window whichever order the write and the watcher's news reach the worker in: the echo
+    /// of an earlier change, read after the save landed, finds the save.
+    fn mine(&self, rel: &str) -> bool {
+        self.own
+            .get(rel)
+            .is_some_and(|own| Etag::of(&self.root.join(rel)).is_ok_and(|now| now == *own))
     }
 
     /// Watcher paths are absolute. Map one back into the vault: the watch set is built from the
