@@ -151,6 +151,8 @@ struct Inner {
     sheet: RefCell<Option<webkit6::UserStyleSheet>>,
     /// [`MERMAID`] while a note with a diagram is shown, `None` otherwise.
     mermaid: RefCell<Option<webkit6::UserScript>>,
+    /// Whether a page may load yet; see [`Gate`].
+    gate: RefCell<Gate>,
     loaded: Cell<bool>,
     /// A line asked for while the page was still loading.
     pending: Cell<Option<u32>>,
@@ -176,6 +178,26 @@ struct Inner {
 }
 
 impl Inner {
+    /// Put `body` on the page as `rel`'s.
+    fn load(&self, rel: &str, body: &str) {
+        *self.assets.note.borrow_mut() = rel.to_string();
+        self.set_mermaid(body.contains("language-mermaid"));
+        self.loaded.set(false);
+        self.view.load_html(&document(body), Some(&base_uri(rel)));
+    }
+
+    /// The network filter is in, or could not be: load what waited for it.
+    fn unlock(&self, filter: &Filter) {
+        let filter = filter
+            .as_ref()
+            .map(|f| self.content.add_filter(f))
+            .map_err(Clone::clone);
+        let next = self.gate.borrow_mut().settle(filter);
+        if let Some((rel, body)) = next {
+            self.load(&rel, &body);
+        }
+    }
+
     fn scroll(&self, line: u32) {
         self.view.evaluate_javascript(
             &format!("window.__accentScrollToLine({line})"),
@@ -416,7 +438,6 @@ impl Preview {
             &[],
         ));
         install_console(&content);
-        block_network(&content);
 
         let view = webkit6::WebView::builder()
             .web_context(&context)
@@ -435,6 +456,7 @@ impl Preview {
             look: Cell::new(Look::now()),
             sheet: RefCell::new(None),
             mermaid: RefCell::new(None),
+            gate: RefCell::new(Gate::Waiting(None)),
             loaded: Cell::new(false),
             pending: Cell::new(None),
             query: RefCell::new(None),
@@ -445,6 +467,11 @@ impl Preview {
             counting: Cell::new(false),
             lost: Cell::new(false),
         });
+        network_filter(glib::clone!(
+            #[weak]
+            inner,
+            move |filter| inner.unlock(filter)
+        ));
 
         inner.view.connect_load_changed(glib::clone!(
             #[weak]
@@ -491,18 +518,25 @@ impl Preview {
     /// Render `text`, resolving relative links as if the note lived at `rel`.
     ///
     /// Re-rendering starts the page from the top; the caller restores the reading position with
-    /// [`Preview::scroll_to_line`].
+    /// [`Preview::scroll_to_line`]. A render asked for before the network filter is on the view
+    /// waits for it ([`Gate`]).
     ///
     /// ponytail: `to_html` runs on the main thread, behind the editor's render debounce. Moving it
     /// to a worker is the upgrade path if a large note ever shows up in a profile.
     pub fn render(&self, rel: &str, text: &str) {
         let body = accent_core::markdown::to_html(text);
-        *self.inner.assets.note.borrow_mut() = rel.to_string();
-        self.inner.set_mermaid(body.contains("language-mermaid"));
-        self.inner.loaded.set(false);
-        self.inner
-            .view
-            .load_html(&document(&body), Some(&base_uri(rel)));
+        let next = self.inner.gate.borrow_mut().pass((rel.to_string(), body));
+        if let Some((rel, body)) = next {
+            self.inner.load(&rel, &body);
+        }
+    }
+
+    /// Why the page shows no note: the network filter could not be installed.
+    pub fn refused(&self) -> Option<String> {
+        match &*self.inner.gate.borrow() {
+            Gate::Shut(why) => Some(why.clone()),
+            _ => None,
+        }
     }
 
     /// Scroll so the block containing source line `line` is visible.
@@ -725,28 +759,123 @@ fn install_console(content: &webkit6::UserContentManager) {
 
 // ------------------------------------------------------------------------------- network policy
 
-/// Compile [`BLOCK_NETWORK`] and hand the filter to `content`. Compilation is asynchronous and
-/// disk-backed (that is the only API WebKit offers), so the filter arrives a moment after the
-/// pane does; the first note is on screen well before any of its subresources resolve.
-fn block_network(content: &webkit6::UserContentManager) {
+/// [`BLOCK_NETWORK`] as WebKit compiled it, or why it could not.
+pub(crate) type Filter = Result<webkit6::UserContentFilter, String>;
+
+/// The app's one compiled [`Filter`]: being compiled for those waiting, or done.
+enum Compiled {
+    Waiting(Vec<Waiter>),
+    Done(Filter),
+}
+
+/// Who wants the filter; see [`network_filter`].
+type Waiter = Box<dyn FnOnce(&Filter)>;
+
+thread_local! {
+    static FILTER: RefCell<Option<Compiled>> = const { RefCell::new(None) };
+}
+
+/// Call `then` with the network filter, which every view loading what a file holds puts on
+/// itself before its first load. WebKit compiles it asynchronously and disk-backed, the only
+/// API it offers, so the first view to ask waits a moment and every one after has it at once.
+pub(crate) fn network_filter(then: impl FnOnce(&Filter) + 'static) {
+    let ready = FILTER.with_borrow_mut(|compiled| match compiled.get_or_insert_with(compile) {
+        Compiled::Waiting(waiting) => {
+            waiting.push(Box::new(then));
+            None
+        }
+        Compiled::Done(filter) => Some((then, filter.clone())),
+    });
+    if let Some((then, filter)) = ready {
+        then(&filter);
+    }
+}
+
+/// Start compiling [`BLOCK_NETWORK`] into the app's cache; its callback, never called before this
+/// returns, hands the filter to everyone waiting for it.
+fn compile() -> Compiled {
     let dir = glib::user_cache_dir()
         .join("accent")
         .join("content-filters");
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!("preview: no content-filter store at {}: {e}", dir.display());
-        return;
+        return Compiled::Done(Err(not_installed(format!(
+            "no content-filter store at {}: {e}",
+            dir.display()
+        ))));
     }
-    let content = content.clone();
     webkit6::UserContentFilterStore::new(&dir.to_string_lossy()).save(
         "accent-block-network",
         &glib::Bytes::from_static(BLOCK_NETWORK.as_bytes()),
         gio::Cancellable::NONE,
-        move |result| match result {
-            Ok(filter) => content.add_filter(&filter),
-            // Loud, because a preview without it can be made to talk to the network.
-            Err(e) => tracing::error!("preview: network filter not installed: {e}"),
+        |result| {
+            let filter = result.map_err(|e| not_installed(e.to_string()));
+            let done = Compiled::Done(filter.clone());
+            if let Some(Compiled::Waiting(waiting)) = FILTER.with_borrow_mut(|c| c.replace(done)) {
+                for then in waiting {
+                    then(&filter);
+                }
+            }
         },
     );
+    Compiled::Waiting(Vec::new())
+}
+
+/// Say loudly that the filter is missing: no page loads without it, and one that did could talk
+/// to the network.
+fn not_installed(why: String) -> String {
+    tracing::error!("preview: network filter not installed: {why}");
+    why
+}
+
+/// What stands between a render and the page: the network filter, which arrives a moment after
+/// the view does. No page loads before it is on the view, so not even the first note's images
+/// reach the network, and no note at all if it could not be put there.
+enum Gate {
+    /// On its way; the latest page asked for meanwhile.
+    Waiting(Option<Page>),
+    Open,
+    /// It could not be installed, and why.
+    Shut(String),
+}
+
+/// A page to load: the note's vault path and its HTML body.
+type Page = (String, String);
+
+impl Gate {
+    /// What to load for `page` now: itself once the filter is in, a page saying why there is
+    /// none once it could not be, and nothing while it is on its way, `page` waiting in place of
+    /// whatever waited before.
+    fn pass(&mut self, page: Page) -> Option<Page> {
+        match self {
+            Gate::Waiting(waiting) => {
+                *waiting = Some(page);
+                None
+            }
+            Gate::Open => Some(page),
+            Gate::Shut(why) => Some((page.0, refusal(why))),
+        }
+    }
+
+    /// The filter is in, or could not be: what to load for the page that waited, if one did.
+    fn settle(&mut self, filter: Result<(), String>) -> Option<Page> {
+        let next = match filter {
+            Ok(()) => Gate::Open,
+            Err(why) => Gate::Shut(why),
+        };
+        match std::mem::replace(self, next) {
+            Gate::Waiting(Some(page)) => self.pass(page),
+            _ => None,
+        }
+    }
+}
+
+/// The page in place of a note while the network filter is missing: why, and nothing to fetch.
+fn refusal(why: &str) -> String {
+    format!(
+        "<p>No preview: the filter that keeps notes off the network could not be installed \
+         ({}).</p>",
+        glib::markup_escape_text(why)
+    )
 }
 
 /// Route a navigation: links into the vault back to the app, a web, mail, phone or message link
@@ -1436,6 +1565,25 @@ mod tests {
         // Nothing found: both directions stay at nothing.
         assert_eq!(stepped(0, 0, true), 0);
         assert_eq!(stepped(0, 0, false), 0);
+    }
+
+    #[test]
+    fn a_page_waits_for_the_network_filter_and_never_loads_without_it() {
+        let page = |body: &str| ("a.md".to_string(), body.to_string());
+        let mut gate = Gate::Waiting(None);
+        assert_eq!(gate.pass(page("one")), None);
+        assert_eq!(gate.pass(page("two")), None);
+        // Only the latest render goes, once the filter is on the view.
+        assert_eq!(gate.settle(Ok(())), Some(page("two")));
+        assert_eq!(gate.pass(page("three")), Some(page("three")));
+
+        let mut gate = Gate::Waiting(None);
+        gate.pass(page(r#"<img src="http://example.com/x.png">"#));
+        let (rel, shown) = gate.settle(Err("no store".into())).unwrap();
+        assert_eq!(rel, "a.md");
+        assert!(shown.contains("no store") && !shown.contains("example.com"));
+        let (_, shown) = gate.pass(page("<p>four</p>")).unwrap();
+        assert!(!shown.contains("four"));
     }
 
     #[test]

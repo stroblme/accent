@@ -96,21 +96,25 @@ impl Typesetter {
     }
 
     /// The view, made the first time a batch needs one since the last was let go.
-    fn view(&self) -> webkit6::WebView {
+    fn view(&self, filter: &webkit6::UserContentFilter) -> webkit6::WebView {
         let mut view = self.view.borrow_mut();
-        view.get_or_insert_with(|| self.make_view()).clone()
+        view.get_or_insert_with(|| self.make_view(filter)).clone()
     }
 
-    /// A view that lives, unseen and untouchable, in a host of its own.
-    fn make_view(&self) -> webkit6::WebView {
+    /// A view that lives, unseen and untouchable, in a host of its own, kept off the network by
+    /// the preview's filter: a label's HTML comes from the file.
+    fn make_view(&self, filter: &webkit6::UserContentFilter) -> webkit6::WebView {
         let host = gtk::Overlay::new();
         let settings = webkit6::Settings::new();
         settings.set_enable_javascript_markup(false);
         settings.set_enable_media(false);
         settings.set_enable_webgl(false);
         settings.set_enable_page_cache(false);
+        let content = webkit6::UserContentManager::new();
+        content.add_filter(filter);
         let view = webkit6::WebView::builder()
             .network_session(&webkit6::NetworkSession::new_ephemeral())
+            .user_content_manager(&content)
             .settings(&settings)
             .build();
         view.set_halign(gtk::Align::Start);
@@ -220,7 +224,8 @@ impl Typesetter {
         self.load();
     }
 
-    /// Load the batch as one document.
+    /// Load the batch as one document once the network filter is in; without one, the batch
+    /// stays as its source.
     fn load(&self) {
         let mut body = String::new();
         for (i, label) in self.batch.borrow().iter().enumerate() {
@@ -238,7 +243,22 @@ impl Typesetter {
              ul {{ margin: 0; padding-left: 1.2em; }}\
              </style></head><body>{body}</body></html>"
         );
-        self.view().load_html(&page, None);
+        let me = self.me.clone();
+        crate::preview::network_filter(move |filter| {
+            let Some(t) = me.upgrade() else {
+                return;
+            };
+            match filter {
+                Ok(filter) => t.view(filter).load_html(&page, None),
+                Err(_) => {
+                    let batch: Vec<Label> = t.batch.borrow_mut().drain(..).collect();
+                    t.done
+                        .borrow_mut()
+                        .extend(batch.iter().map(|l| (l.key, None)));
+                    t.finish();
+                }
+            }
+        });
     }
 
     /// The document is laid out: measure every label, take one picture, and cut it up.
@@ -247,7 +267,10 @@ impl Typesetter {
         if keys.is_empty() {
             return;
         }
-        let view = self.view();
+        // There is one: it is what said the batch had loaded.
+        let Some(view) = self.view.borrow().clone() else {
+            return;
+        };
         let measured = view
             .evaluate_javascript_future(MEASURE, None, None)
             .await

@@ -246,7 +246,8 @@ impl App {
     }
 }
 
-/// What `tab` holds on paper, ready to be taken: loaded, its diagrams drawn, its fonts in.
+/// What `tab` holds on paper, ready to be taken: loaded, its diagrams drawn, its fonts in. No
+/// page when the preview's network filter is missing ([`Preview::refused`]).
 async fn paper(app: &Rc<App>, tab: &Rc<Tab>) -> Result<Preview, String> {
     let page = Preview::for_paper(app.asset_resolver(), app.web_images.clone());
     let view = page.view().clone();
@@ -265,12 +266,16 @@ async fn paper(app: &Rc<App>, tab: &Rc<Tab>) -> Result<Preview, String> {
     page.render(&tab.rel(), &tab.text());
     let ready = async {
         loaded.await;
+        if let Some(why) = page.refused() {
+            return Err(why);
+        }
         view.call_async_javascript_function_future(READY, None, None, None)
             .await
+            .map_err(|e| e.to_string())
     };
     match glib::future_with_timeout(PATIENCE, ready).await {
         Ok(Ok(_)) => Ok(page),
-        Ok(Err(e)) => Err(e.to_string()),
+        Ok(Err(e)) => Err(e),
         Err(_) => Err("the page took too long to lay out".to_string()),
     }
 }
