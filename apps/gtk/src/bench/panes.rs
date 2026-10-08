@@ -1182,7 +1182,7 @@ pub(super) fn bench_tree(app: &Rc<App>, rels: &str) {
 
 /// Every pane's tabs in bar order, panes left to right: the preview marked `~`, a pinned tab `^`,
 /// the tab in front `*`.
-fn bench_tree_line(app: &Rc<App>) -> String {
+pub(super) fn bench_tree_line(app: &Rc<App>) -> String {
     let root = app.window.clone().upcast::<gtk::Widget>();
     let mut panes = app.panes.borrow().clone();
     panes.sort_by(|p, q| pane_rect(p, &root).x().total_cmp(&pane_rect(q, &root).x()));
