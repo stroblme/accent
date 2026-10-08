@@ -370,6 +370,10 @@ use tags::bench_tags;
 /// root has to list the three, as a scratch vault of three notes does. Under
 /// `ACCENT_BENCH_SLOW_READ=<ms>`, which holds every text read that long on its worker as a slow
 /// host would, each double click's second press comes before its tab, which must land kept.
+/// `=edited:<pdf>,<diagram>,<note>` opens the PDF as a click on its tree row does, draws a stroke
+/// across it with the pen through XTEST, opens the diagram the same way and adds a page to it,
+/// then opens the note, and prints the pane's tabs after each: an edit keeps a preview, so neither
+/// the PDF nor the diagram may be replaced, which would take its Undo with it.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
@@ -914,6 +918,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rels) = rels.strip_prefix("tree:") {
                 return bench_tree(&app, rels);
+            }
+            if let Some(rels) = rels.strip_prefix("edited:") {
+                return panes::bench_edited(&app, rels);
             }
             if let Some(pdf) = rels.strip_prefix("loose:") {
                 return loose::bench_loose(&app, pdf);

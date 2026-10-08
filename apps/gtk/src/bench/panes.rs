@@ -1180,6 +1180,65 @@ pub(super) fn bench_tree(app: &Rc<App>, rels: &str) {
     });
 }
 
+/// See `ACCENT_BENCH_TABS=edited:` above. The stroke is a real drag through XTEST, the clicks in
+/// the sidebar the open a tree row's click makes.
+pub(super) fn bench_edited(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    let [pdf, diagram, note] = &rels[..] else {
+        return bench_quit(app);
+    };
+    let (app, pdf, diagram, note) = (app.clone(), pdf.clone(), diagram.clone(), note.clone());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        app.open_preview(&pdf);
+        let mut shown = None;
+        for _ in 0..100 {
+            wait(100).await;
+            shown = app.active_pdf().filter(|tab| tab.page_count() > 0);
+            if shown.is_some() {
+                break;
+            }
+        }
+        let Some(tab) = shown else {
+            println!("bench edited no_pdf");
+            return bench_quit(&app);
+        };
+        wait(500).await;
+        println!("bench edited pdf {}", bench_tree_line(&app));
+        // Across the middle of the reading view, with the pen.
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-pen", None);
+        let view = tab.key_target();
+        let (dx, dy) = app.window.surface_transform();
+        let at = |x: f32, y: f32| {
+            view.compute_point(&app.window, &graphene::Point::new(x, y))
+                .map(|p| format!("{} {}", p.x() as f64 + dx, p.y() as f64 + dy))
+                .unwrap_or_default()
+        };
+        let (w, h) = (view.width() as f32, view.height() as f32);
+        let stroke = format!("drag {} {}", at(w * 0.4, h * 0.5), at(w * 0.6, h * 0.55));
+        super::git::xtest(&stroke).await;
+        let undo = tab.history().0;
+        println!("bench edited stroke undo={undo} {}", bench_tree_line(&app));
+        app.open_preview(&diagram);
+        let mut shown = None;
+        for _ in 0..50 {
+            wait(100).await;
+            shown = app.active_diagram();
+            if shown.is_some() {
+                break;
+            }
+        }
+        println!("bench edited diagram {}", bench_tree_line(&app));
+        let _ = WidgetExt::activate_action(&app.window, "win.diagram-add-page", None);
+        let undo = shown.is_some_and(|d| d.history().0);
+        println!("bench edited page undo={undo} {}", bench_tree_line(&app));
+        app.open_preview(&note);
+        wait(800).await;
+        println!("bench edited note {}", bench_tree_line(&app));
+        bench_quit(&app);
+    });
+}
+
 /// Every pane's tabs in bar order, panes left to right: the preview marked `~`, a pinned tab `^`,
 /// the tab in front `*`.
 pub(super) fn bench_tree_line(app: &Rc<App>) -> String {
