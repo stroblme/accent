@@ -282,6 +282,7 @@ pub fn build_window(
         docs: RefCell::new(Vec::new()),
         awaiting: RefCell::new(HashMap::new()),
         revealing: RefCell::new(HashMap::new()),
+        keep_on_landing: RefCell::new(HashSet::new()),
         placing: RefCell::new(HashMap::new()),
         launched: RefCell::new(Vec::new()),
         restore: RefCell::new(std::rc::Weak::new()),
@@ -432,17 +433,16 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
         // The row's kind used to decide what opened. `open_path` reads the name itself, so the
         // tree no longer has to agree with it about what a file is. A row opens as a preview:
         // one click is looking, not keeping. A double click keeps the tab its first click opened,
-        // as a double click on the tab does.
+        // as a double click on the tab does, or will keep it once it lands.
         glib::clone!(
             #[weak]
             app,
-            move |_kind, rel: &str, double| match double {
-                true => {
-                    if let Some(doc) = app.doc_for(rel) {
-                        app.promote(doc.page());
-                    }
+            move |_kind, rel: &str, double| match (double, app.doc_for(rel)) {
+                (true, Some(doc)) => app.promote(doc.page()),
+                (true, None) => {
+                    app.keep_on_landing.borrow_mut().insert(rel.to_string());
                 }
-                false => app.open_preview(rel),
+                (false, _) => app.open_preview(rel),
             }
         ),
         // A drag out of the tree is the only notice the panes get that their drop zones should

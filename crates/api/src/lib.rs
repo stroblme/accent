@@ -53,7 +53,7 @@ pub use accent_core::page_edit::PageEdit;
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
 pub use language::{
-    Completion, Completions, Diagnostic, Fold, Hover, Kind, Location, PdfPages, Pos, Range,
+    Call, Completion, Completions, Diagnostic, Fold, Hover, Kind, Location, PdfPages, Pos, Range,
     Severity, Signature, Support, Symbol, Task, TextEdit,
 };
 

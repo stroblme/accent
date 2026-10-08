@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -51,7 +52,7 @@ import kotlin.math.roundToInt
  * to the field's output rather than to a buffer of tags.
  */
 @Composable
-fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome) {
+fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) -> Unit) {
     var editing by remember(open.rel) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         // Above the bar rather than under it, since the bar lies over the note and would cover
@@ -89,7 +90,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome) {
             if (editing) {
                 Box(Modifier.padding(top = bar)) { Editor(model) }
             } else {
-                Rendered(model, open, chrome)
+                Rendered(model, open, chrome, onTag)
             }
         }
     }
@@ -171,10 +172,11 @@ private fun UnsavedDialog(why: String, onAnswer: (Boolean?) -> Unit) {
 /**
  * The rendered note, and where a search hit lands in it.
  *
- * `accent://open/…` is a link to another note and is handed back to the app; `accent://file/…` is
- * an image, served off the vault and recoloured as a PDF page is when it reads as a document
- * ([served]); [MERMAID] is the diagram library, served out of the APK. Nothing else loads at all —
- * the same rule the desktop preview enforces with a content blocker.
+ * `accent://open/…` is a link to another note and is handed back to the app, and so is
+ * `accent://tag/…`, a tag, which [onTag] opens Browse on; `accent://file/…` is an image, served
+ * off the vault and recoloured as a PDF page is when it reads as a document ([served]); [MERMAID]
+ * is the diagram library, served out of the APK. Nothing else loads at all — the same rule the
+ * desktop preview enforces with a content blocker.
  *
  * A tap on an image opens it on its own screen ([ImageScreen]), where it can be zoomed and
  * inverted; one on an image inside a link is the link's, as on any page. A long press on an image
@@ -197,7 +199,7 @@ private fun UnsavedDialog(why: String, onAnswer: (Boolean?) -> Unit) {
  * on the screen together — opening the bar clears whatever was marked before it.
  */
 @Composable
-private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
+private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) -> Unit) {
     val colors = MaterialTheme.colorScheme
     // What the images are served under, read by the loading thread; a change in either loads the
     // page again, since an image is recoloured on its way into it.
@@ -225,8 +227,10 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
     // of how many, straight off the view's own find listener. Reset every time the bar opens.
     var query by remember(open.finding) { mutableStateOf("") }
     var matches by remember { mutableStateOf(0 to 0) }
-    // Read inside the tap below, which is captured once and so cannot close over a parameter.
+    // Read inside the tap and the client below, which are captured once and so cannot close over
+    // a parameter.
     val finding by rememberUpdatedState(open.finding)
+    val tagged by rememberUpdatedState(onTag)
 
     // The reader's own find: every keystroke marks the page again, and an empty field — which is
     // where the bar opens, and what it leaves behind when it closes — takes the marks off. One
@@ -249,6 +253,18 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
 
     // Back puts the bar away, which is how the panel closes too.
     BackHandler(enabled = open.finding) { model.finding(false) }
+
+    // Print… from the palette: the note as it is typed, on paper. The request is taken back once
+    // the print system has it, not before, which would cancel this on the way.
+    val context = LocalContext.current
+    LaunchedEffect(open.printing) {
+        if (!open.printing) return@LaunchedEffect
+        try {
+            printNote(context, model, open.rel, text.toString(), paperAccent(colors))
+        } finally {
+            model.printing(false)
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         AndroidView(
@@ -287,31 +303,20 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome) {
                             request: WebResourceRequest,
                         ): Boolean {
                             val url = request.url.toString()
-                            if (!url.startsWith("accent://open/")) return true
-                            val target = decode(url.removePrefix("accent://open/"))
-                            model.openLink(target)
+                            when {
+                                url.startsWith(OPEN) -> model.openLink(decode(url.removePrefix(OPEN)))
+                                url.startsWith(TAG) -> tagged(decode(url.removePrefix(TAG)))
+                            }
                             return true
                         }
 
                         override fun shouldInterceptRequest(
                             view: WebView,
                             request: WebResourceRequest,
-                        ): WebResourceResponse? {
-                            if (request.isForMainFrame) return null
-                            val url = request.url.toString()
-                            if (url in SCRIPTS) {
-                                return WebResourceResponse(
-                                    "text/javascript",
-                                    "utf-8",
-                                    view.context.assets.open(url.substringAfterLast('/')),
-                                )
+                        ): WebResourceResponse? =
+                            pageRequest(view, request, model, serving, Inverted.files) { url, image ->
+                                images[url] = image
                             }
-                            if (!url.startsWith("accent://file/")) return blocked()
-                            val image = model.image(decode(url.removePrefix("accent://file/")))
-                                ?: return blocked()
-                            images[url] = image
-                            return served(File(image.path), serving)
-                        }
                     }
                     // Taken only on an image, a linked one too, where it inverts; anywhere else it
                     // is left to the view, whose long press is the selection.
@@ -378,13 +383,41 @@ private data class Load(val rel: String, val html: String, val dark: Boolean, va
  */
 private fun WebView.imageHit(vararg types: Int): String? = hitTestResult.takeIf { it.type in types }?.extra
 
+/**
+ * What a rendered page may load: [MERMAID] and its bootstrap out of the APK, and the vault's
+ * images, [served] in the [dark] theme or a light one with the [inverted] ones turned round, each
+ * handed to [onImage] by the address the page asked for it at. Nothing else.
+ */
+internal fun pageRequest(
+    view: WebView,
+    request: WebResourceRequest,
+    model: VaultModel,
+    dark: Boolean,
+    inverted: Set<String>,
+    onImage: (String, OpenImage) -> Unit = { _, _ -> },
+): WebResourceResponse? {
+    if (request.isForMainFrame) return null
+    val url = request.url.toString()
+    if (url in SCRIPTS) {
+        return WebResourceResponse(
+            "text/javascript",
+            "utf-8",
+            view.context.assets.open(url.substringAfterLast('/')),
+        )
+    }
+    if (!url.startsWith("accent://file/")) return blocked()
+    val image = model.image(decode(url.removePrefix("accent://file/"))) ?: return blocked()
+    onImage(url, image)
+    return served(File(image.path), dark, inverted)
+}
+
 /** What a relative link inside the note resolves against: the directory the note is in. */
-private fun baseUri(rel: String): String {
+internal fun baseUri(rel: String): String {
     val dir = rel.substringBeforeLast('/', "")
     return if (dir.isEmpty()) "accent://file/" else "accent://file/$dir/"
 }
 
-private fun decode(s: String): String = runCatching { URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)
+internal fun decode(s: String): String = runCatching { URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)
 
 /**
  * The shell around `to_html`'s fragment.
@@ -443,6 +476,10 @@ internal fun Color.rgba(): String = String.format(
 /** Whether rendered HTML holds a mermaid fence: pulldown-cmark's class on a fence's code. */
 internal fun diagrams(html: String): Boolean = "<code class=\"language-mermaid\">" in html
 
+/** A link to another note, and one to a tag's notes, as `to_html` writes them. */
+private const val OPEN = "accent://open/"
+private const val TAG = "accent://tag/"
+
 /** Where a page asks for mermaid and its bootstrap, answered from the APK's assets. */
 private const val MERMAID = "accent://app/mermaid.min.js"
 private const val BOOTSTRAP = "accent://app/bootstrap.js"
@@ -458,7 +495,8 @@ private val SCRIPTS = setOf(MERMAID, BOOTSTRAP)
  * `javascript:` link stays as dead as on a page with scripting off. All sit in the head, ahead of
  * the note, where nothing it leaves unclosed can take them in; the library and the bootstrap are
  * deferred, so the note is drawn before 3.4 MB of it is parsed. MOBILE_DESIGN.md says why the rest
- * of the view's lockdown makes this enough.
+ * of the view's lockdown makes this enough. `accentDrawn` says the drawing is done, which is what
+ * a print waits for ([printNote]).
  */
 private fun mermaid(theme: String): String {
     val nonce = UUID.randomUUID()
@@ -467,7 +505,9 @@ private fun mermaid(theme: String): String {
 <script nonce="$nonce" defer src="$MERMAID"></script>
 <script nonce="$nonce" defer src="$BOOTSTRAP"></script>
 <script nonce="$nonce">
-document.addEventListener('DOMContentLoaded', function () { accentDiagrams('$theme'); });
+document.addEventListener('DOMContentLoaded', function () {
+  Promise.resolve(accentDiagrams('$theme')).then(function () { window.accentDrawn = true; });
+});
 </script>"""
 }
 

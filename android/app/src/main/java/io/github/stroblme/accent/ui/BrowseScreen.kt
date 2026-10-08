@@ -56,6 +56,9 @@ private enum class Mode { Search, Files, Tags, Backlinks, Command }
  * nearest the field and the thumb. Search keeps the tree the way a tree reads, from the top, and so
  * do a tag's notes and the backlinks, which are a list under a heading rather than a ranking.
  *
+ * A tag tapped in a note opens the panel on that tag's notes ([openTag]), Back from them going to
+ * the tags as it does for one opened here.
+ *
  * A row hands over the file it names and, if it was a search hit, the query it was found by:
  * that query is the whole difference between the two ways in, and it is what the note marks
  * itself with (`NoteScreen`). A row picked off the tree or the switcher hands over nothing and
@@ -75,16 +78,20 @@ fun BrowseScreen(
     expanded: Set<String>,
     results: List<SearchHit>,
     front: String?,
+    openTag: String?,
+    /** Whether a note or a PDF is in front, which is what Print… acts on. */
+    printable: Boolean,
     onOpen: (rel: String, find: String?) -> Unit,
     onClose: () -> Unit,
 ) {
-    val pager = rememberPagerState { Mode.entries.size }
+    val palette = if (printable) Commands + Print else Commands
+    val pager = rememberPagerState(if (openTag != null) Mode.Tags.ordinal else 0) { Mode.entries.size }
     val scope = rememberCoroutineScope()
     // Which page the pager is nearest, which is what the field means and which chip is lit: both
     // follow the surface across, rather than waiting for it to land.
     val mode = Mode.entries[pager.currentPage]
     var query by remember { mutableStateOf("") }
-    // The ranking and the page it was ranked for, as places in [Commands] or in [files]. Two pages
+    // The ranking and the page it was ranked for, as places in [palette] or in [files]. Two pages
     // are composed at once while one is being dragged in, and a file row drawn from a command's
     // place is a row that says the wrong thing.
     var ranked by remember { mutableStateOf(Mode.Search to emptyList<Int>()) }
@@ -96,24 +103,35 @@ fun BrowseScreen(
     var tag by remember { mutableStateOf<TagCount?>(null) }
     var tagged by remember { mutableStateOf<List<String>?>(null) }
     var linked by remember { mutableStateOf<List<String>?>(null) }
+    // The template command asking which template, and the ones it offers, listed in the
+    // commands' place until one is picked.
+    var picking by remember { mutableStateOf<Pair<Command, List<String>>?>(null) }
     // Their ranking, with the list its places are places in: the tags and a tag's notes share a
     // page, and a place drawn against the other list is a row naming the wrong thing.
     var listing by remember { mutableStateOf<Pair<List<*>, List<Int>>?>(null) }
     fun placesIn(list: List<*>?) = listing?.takeIf { it.first === list }?.second.orEmpty()
     val focus = remember { FocusRequester() }
 
-    LaunchedEffect(Unit) { tags = model.tags() }
+    LaunchedEffect(Unit) {
+        val all = model.tags()
+        tags = all
+        // By its count from the same list, so its heading reads as one opened here would; a tag
+        // the index does not have yet, typed and not saved, has no notes to list.
+        if (openTag != null) tag = all.find { it.name == openTag } ?: TagCount(openTag, 0)
+    }
     LaunchedEffect(front) { linked = front?.let { model.linkedFrom(it) } }
     LaunchedEffect(tag) {
         tagged = null
         tagged = tag?.let { model.filesWithTag(it.name) }
     }
 
-    LaunchedEffect(query, mode, tags, tag, tagged, linked) {
+    LaunchedEffect(query, mode, tags, tag, tagged, linked, picking) {
         if (mode == Mode.Search) return@LaunchedEffect
-        if (mode == Mode.Tags || mode == Mode.Backlinks) {
+        val choosing = mode == Mode.Command && picking != null
+        if (mode == Mode.Tags || mode == Mode.Backlinks || choosing) {
             val list = when {
                 mode == Mode.Backlinks -> linked
+                choosing -> picking?.second
                 tag != null -> tagged
                 else -> tags
             } ?: return@LaunchedEffect
@@ -126,7 +144,7 @@ fun BrowseScreen(
         // The note corpus is fetched on demand rather than kept in step with the index, so the
         // first query in a session waits for it once.
         val read = if (commands) null else model.corpus()
-        val corpus = read?.names ?: Commands.map { it.label }
+        val corpus = read?.names ?: palette.map { it.label }
         ranked = mode to withContext(Dispatchers.Default) {
             if (read != null && query.isBlank()) {
                 model.recents.list(Recents.Kind.Notes).mapNotNull { read.find(it) }.take(50)
@@ -151,8 +169,10 @@ fun BrowseScreen(
         if (landed == Mode.Files || landed == Mode.Command) focus.requestFocus()
     }
 
-    // Back from a tag is the list of tags, before it is the way out of the panel.
+    // Back from a tag is the list of tags, before it is the way out of the panel; and from the
+    // templates, the commands.
     BackHandler(enabled = mode == Mode.Tags && tag != null) { tag = null }
+    BackHandler(enabled = mode == Mode.Command && picking != null) { picking = null }
 
     // The chip of the page in front is kept on screen: five do not fit across a phone, and a row
     // scrolled away from the lit one no longer says which page this is.
@@ -182,6 +202,15 @@ fun BrowseScreen(
                 }
                 return@HorizontalPager
             }
+            val (asking, picks) = picking ?: (null to null)
+            if (tab == Mode.Command && asking != null && picks != null) {
+                val heading = asking.label.removeSuffix("…")
+                Notes(heading, picks, placesIn(picks), onBack = { picking = null }) {
+                    model.fromTemplate(it)
+                    onClose()
+                }
+                return@HorizontalPager
+            }
             if (tab == Mode.Backlinks) {
                 val to = front
                 when {
@@ -197,7 +226,7 @@ fun BrowseScreen(
             LazyColumn(Modifier.fillMaxSize(), reverseLayout = tab != Mode.Search) {
                 when {
                     tab == Mode.Command -> items(rows, key = { it }) { i ->
-                        val command = Commands[i]
+                        val command = palette[i]
                         ListItem(
                             headlineContent = {
                                 Text(command.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -205,8 +234,16 @@ fun BrowseScreen(
                             colors = flatRow(),
                             modifier = Modifier.row {
                                 model.recents.touch(Recents.Kind.Commands, command.label)
-                                command.run(model)
-                                onClose()
+                                if (command === NewFromTemplate || command === TodaysNote) {
+                                    scope.launch {
+                                        val offered = pickable(command, model, onClose)
+                                        picking = offered?.let { command to it }
+                                    }
+                                    query = ""
+                                } else {
+                                    command.run(model)
+                                    onClose()
+                                }
                             },
                         )
                     }
@@ -288,7 +325,7 @@ fun BrowseScreen(
                 Mode.Files -> "Go to a file"
                 Mode.Tags -> tag?.let { "Filter #${it.name}" } ?: "Find a tag"
                 Mode.Backlinks -> "Filter backlinks"
-                Mode.Command -> "Run a command"
+                Mode.Command -> if (picking != null) "Find a template" else "Run a command"
             },
             modifier = Modifier.focusRequester(focus),
         )
@@ -454,6 +491,39 @@ private fun LazyListScope.rows(
 class Command(val label: String, val run: (VaultModel) -> Unit)
 
 /**
+ * New from Template… and Today's Note, the commands that may ask something first: which template.
+ * The Command page lists the ones they offer in its own place, as the Tags page lists a tag's
+ * notes, and a pick makes the note there or opens the one it made ([VaultModel.fromTemplate]).
+ * New from Template… offers every template that says where its notes go, as the desktop's does;
+ * Today's Note those whose destination is dated, and asks only when there are several.
+ */
+val NewFromTemplate = Command("New from Template…") {}
+val TodaysNote = Command("Today's Note") {}
+
+/**
+ * The templates [command] asks the reader to pick from, or null when it does not ask: with none
+ * to offer it says why, as the desktop does, and with Today's Note's one it makes that note
+ * straight away. Either way the panel closes.
+ */
+private suspend fun pickable(command: Command, model: VaultModel, onClose: () -> Unit): List<String>? {
+    val today = command === TodaysNote
+    val found = (if (today) model.dailyTemplates() else model.templateTargets()) ?: return null
+    val dir = model.templatesDir()
+    when {
+        found.isEmpty() && today -> model.said(
+            "No template has a dated destination. Add accent-target: Daily/{{date}}.md to one in $dir",
+        )
+        found.isEmpty() -> model.said(
+            "No template has a destination. Add accent-target: to one in $dir",
+        )
+        today && found.size == 1 -> model.fromTemplate(found.single())
+        else -> return found
+    }
+    onClose()
+    return null
+}
+
+/**
  * Find is the palette's one entry that changes the screen rather than the vault: it opens the find
  * bar of the note or the PDF in front, which searches that where Search above searches every
  * note. Close Vault was reachable only from the screen with nothing open,
@@ -461,11 +531,19 @@ class Command(val label: String, val run: (VaultModel) -> Unit)
  */
 val Commands = listOf(
     Command("New Note") { it.newNote(newName()) },
+    NewFromTemplate,
+    TodaysNote,
     Command("Find") { it.finding(true) },
     Command("Reload Vault") { it.reloadVault() },
     Command("Close Note") { it.close() },
     Command("Close Vault") { it.closeVault() },
 )
+
+/**
+ * Print… of the note or the PDF in front, listed only while there is one: the system's print UI,
+ * which offers Save as PDF too, so there is no Export beside it.
+ */
+val Print = Command("Print…") { it.printing(true) }
 
 private fun newName(): String {
     val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HHmm", java.util.Locale.US)

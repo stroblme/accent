@@ -57,7 +57,8 @@ internal fun imageTheme(kind: ImageKind, dark: Boolean, inverted: Boolean, docum
 
 /**
  * [file] as a rendered page is to show it in a [dark] theme or a light one: as it is on disk, or
- * recoloured. A file that cannot be read is refused rather than thrown out of the WebView's thread.
+ * recoloured, and turned round if it is among the [inverted] — the reader's, or none on paper. A
+ * file that cannot be read is refused rather than thrown out of the WebView's thread.
  *
  * Both screens that show an image draw it in a WebView — a note in its page, the image screen on
  * its own — and both come through here, so one figure looks the same in either. Which image reads
@@ -71,9 +72,13 @@ internal fun imageTheme(kind: ImageKind, dark: Boolean, inverted: Boolean, docum
  * Called on the WebView's own loading thread, never the main one: a verdict can be a decode, and a
  * recolour always is.
  */
-fun served(file: File, dark: Boolean): WebResourceResponse = runCatching {
+fun served(
+    file: File,
+    dark: Boolean,
+    inverted: Set<String> = Inverted.files,
+): WebResourceResponse = runCatching {
     val kind = imageKind(file.name) ?: return@runCatching asItIs(file, null)
-    when (val theme = imageTheme(kind, dark, file.path in Inverted.files) { document(file) }) {
+    when (val theme = imageTheme(kind, dark, file.path in inverted) { document(file) }) {
         Theme.Plain -> asItIs(file, kind)
         is Theme.Recolour -> when (kind) {
             ImageKind.Svg -> recolourSvg(file.readText(), theme, fill = !dark)
@@ -95,14 +100,14 @@ internal fun blocked() = WebResourceResponse(null, null, null)
 
 /**
  * Clear the WebViews' memory cache when what it holds was served in another palette, or under
- * another set of inverted files. Called before every page load.
+ * another set of [inverted] files. Called before every page load, a printed one's too.
  *
  * The cache is the app's rather than the view's, and a page loaded again takes an image it already
  * holds from there: without this a note would come back from a theme change, or an Invert, with
  * its images as they were. Main thread only, as every load is.
  */
-fun WebView.freshen(dark: Boolean) {
-    val now = dark to Inverted.files
+fun WebView.freshen(dark: Boolean, inverted: Set<String> = Inverted.files) {
+    val now = dark to inverted
     if (servedUnder.let { it != null && it != now }) clearCache(false)
     servedUnder = now
 }

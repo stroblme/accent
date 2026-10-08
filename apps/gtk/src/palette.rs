@@ -1,8 +1,8 @@
-//! Command palette, file switcher and vault switcher: one dialog, four modes.
+//! Command palette, file, symbol and vault switcher: one dialog, five modes.
 //!
 //! The caller says which mode the palette opens in, so `Ctrl+P` and `Ctrl+Shift+P` both land on an
-//! empty entry that is already searching the right thing. A typed leading `>` or `#` still switches
-//! mode mid-search, VS Code style. Command mode is also the app's shortcuts reference
+//! empty entry that is already searching the right thing. A typed leading `>` (commands), `#`
+//! (tags) or `@` (declarations across the vault) still switches mode mid-search, VS Code style. Command mode is also the app's shortcuts reference
 //! (DESIGN.md "Keyboard": there is no shortcuts window until the libadwaita floor reaches 1.8), so
 //! every command row carries its accelerator.
 //!
@@ -13,6 +13,7 @@
 
 use crate::start;
 use crate::widgets::{Debounce, status_page};
+use accent_api::CodeSymbol;
 use accent_core::fuzzy::{self, Corpus};
 use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
@@ -28,7 +29,7 @@ use std::time::{Duration, Instant};
 const OPENERS: [&str; 2] = ["app.open-vault", "app.open-remote"];
 
 /// Beyond this the list stops being scannable and nucleo's single-threaded matcher starts to show.
-const MAX_RESULTS: usize = 200;
+pub const MAX_RESULTS: usize = 200;
 /// Long enough to swallow a burst of keystrokes, short enough to feel immediate.
 const DEBOUNCE: Duration = Duration::from_millis(50);
 /// How many rows Page Up and Page Down move by: what the 420 px dialog shows at once.
@@ -61,6 +62,8 @@ pub enum Item {
     },
     /// A tag to filter by.
     Tag(String),
+    /// A declaration the index holds, to open its file at.
+    Symbol(CodeSymbol),
     /// A recent vault to switch to, by the key it is stored under: a canonical path, or an
     /// `ssh://` address for one on another machine.
     Vault(String),
@@ -74,6 +77,7 @@ impl Item {
             Item::Alias { name, .. } => name,
             Item::Command { label, .. } => label,
             Item::Tag(tag) => tag,
+            Item::Symbol(symbol) => &symbol.name,
             Item::Vault(key) => key,
         }
     }
@@ -102,6 +106,8 @@ pub struct Sources {
     /// Bind an action to a new set of accelerators, or to its default when given `None`. Returns
     /// what is in force afterwards, so the row can be redrawn without asking again.
     pub on_rebind: Box<Rebind>,
+    /// The declarations a query names, handed to the callback once the index answers.
+    pub symbols: Box<Find>,
     /// Drop a vault from the recent list, by the key its row carries, and run the callback once
     /// the row may go: at once for a vault, after the question for a terminal session, whose
     /// shells end with it (`Shell::remove_recent`), and never if that question is declined.
@@ -123,18 +129,22 @@ pub struct Files {
 /// Hand an open dialog the window's files as they are now. See [`present`].
 pub type Refill = Box<dyn Fn(Files)>;
 
+/// Find the declarations `query` names, at most [`MAX_RESULTS`], and hand them to the callback.
+pub type Find = dyn Fn(&str, Box<dyn FnOnce(Vec<CodeSymbol>)>);
+
 /// Remove the recent vault `key`, then run the callback once its row may go.
 pub type Forget = dyn Fn(&str, Box<dyn FnOnce()>);
 
 /// Bind `action` to `accels`, or to its default when they are `None`; yields what is in force.
 pub type Rebind = dyn Fn(&str, Option<Vec<String>>) -> Vec<String>;
 
-/// Which of the three lists the palette is showing.
+/// Which of the lists the palette is showing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Files,
     Commands,
     Tags,
+    Symbols,
     Vaults,
 }
 
@@ -145,6 +155,7 @@ impl Mode {
             Mode::Files => "Go to File",
             Mode::Commands => "Run Command",
             Mode::Tags => "Filter by Tag",
+            Mode::Symbols => "Go to Symbol",
             Mode::Vaults => "Open Recent",
         }
     }
@@ -154,6 +165,7 @@ impl Mode {
             Mode::Files => "Search files…",
             Mode::Commands => "Run a command…",
             Mode::Tags => "Filter by tag…",
+            Mode::Symbols => "Search symbols…",
             Mode::Vaults => "Search recent vaults…",
         }
     }
@@ -188,6 +200,7 @@ fn parse_query(raw: &str, opened_in: Mode) -> (Mode, &str) {
     match raw.as_bytes().first() {
         Some(b'>') => (Mode::Commands, &raw[1..]),
         Some(b'#') => (Mode::Tags, &raw[1..]),
+        Some(b'@') => (Mode::Symbols, &raw[1..]),
         _ => (opened_in, raw),
     }
 }
@@ -202,6 +215,21 @@ fn rank(haystacks: &[String], recent: &[Option<usize>], query: &str, corpus: Cor
     let mut hits = fuzzy::rank(haystacks, recent, query, corpus);
     hits.truncate(MAX_RESULTS);
     hits
+}
+
+/// The declarations the index found for `query`, ranked by their names as the other lists are
+/// ranked, its own order (the name itself, then a name it starts, then one holding it, a test's
+/// last) breaking ties. `Type::name` and `Type.name` are a name in a type to the index, and
+/// ranked by the name.
+fn rank_symbols(found: Vec<CodeSymbol>, query: &str) -> Vec<Rc<Item>> {
+    let name = query.rsplit([':', '.']).next().unwrap_or(query).trim();
+    let names: Vec<String> = found.iter().map(|s| s.name.clone()).collect();
+    let mut found: Vec<Option<CodeSymbol>> = found.into_iter().map(Some).collect();
+    rank(&names, &[], name, Corpus::Words)
+        .into_iter()
+        .filter_map(|i| found[i].take())
+        .map(|symbol| Rc::new(Item::Symbol(symbol)))
+        .collect()
 }
 
 /// Where each of `corpus` sits in `mru`, for [`rank`]'s recency tiebreak. A map rather than a
@@ -471,6 +499,17 @@ fn row_factory(
                     name.set_text(tag);
                     dir.set_text("");
                 }
+                // The kind's glyph, the name, then the type it is in and where.
+                Item::Symbol(symbol) => {
+                    icon.set_icon_name(Some(crate::lang::declaration_icon(symbol.kind)));
+                    icon.set_visible(true);
+                    name.set_text(&symbol.name);
+                    let place = format!("{}:{}", symbol.rel_path, symbol.line);
+                    dir.set_text(&match &symbol.container {
+                        Some(container) => format!("{container} · {place}"),
+                        None => place,
+                    });
+                }
                 // The reading the start screen's recent list gives a vault: a local one named by its
                 // folder and placed by its path, a remote one by its host and the path on that host.
                 Item::Vault(key) => {
@@ -596,8 +635,10 @@ pub fn present(
         vaults,
         taken,
         on_rebind,
+        symbols,
         on_forget,
     } = sources;
+    let find: Rc<Find> = Rc::from(symbols);
     let recent = Rc::new(recent);
     let mru = Rc::new(mru);
     // Behind a cell because the trash button on a row rewrites the list without closing the
@@ -694,8 +735,23 @@ pub fn present(
         .child(&toolbar)
         .build();
 
-    let refresh = Rc::new({
+    // A query's rows into the list, the first highlighted, or the empty page; how many there are.
+    let show = Rc::new({
         let (model, selection, stack) = (model.clone(), selection.clone(), stack.clone());
+        move |hits: Vec<Rc<Item>>| {
+            let objects: Vec<glib::BoxedAnyObject> =
+                hits.into_iter().map(glib::BoxedAnyObject::new).collect();
+            model.splice(0, model.n_items(), &objects);
+            if !objects.is_empty() {
+                selection.set_selected(0);
+            }
+            stack.set_visible_child_name(if objects.is_empty() { "empty" } else { "list" });
+            objects.len()
+        }
+    });
+
+    let refresh = Rc::new({
+        let (show, empty, entry) = (show.clone(), empty.clone(), entry.downgrade());
         let (recent, files, tags) = (recent.clone(), files.clone(), tags.clone());
         let (mru, typed) = (mru.clone(), typed.clone());
         let (vaults, vault_places) = (vaults.clone(), vault_places.clone());
@@ -708,6 +764,15 @@ pub fn present(
             let t0 = Instant::now();
             let (mode, query) = parse_query(raw, mode);
             let empty_query = query.trim().is_empty();
+            // A bare `@` has nothing to look for yet, which is not a search that found nothing.
+            let (title, body) = match mode {
+                Mode::Symbols if empty_query => {
+                    ("Go to Symbol", "Type a name to find where it is declared.")
+                }
+                _ => ("No Results", "Try a different search."),
+            };
+            empty.set_title(title);
+            empty.set_description(Some(body));
             let hits: Vec<Rc<Item>> =
                 match mode {
                     // No corpus and no matching until the user actually types: the dialog is up in the
@@ -757,6 +822,22 @@ pub fn present(
                         .into_iter()
                         .map(|i| Rc::new(Item::Tag(tags[i].clone())))
                         .collect(),
+                    Mode::Symbols if empty_query => Vec::new(),
+                    // The index answers off the main loop, on the host for a remote vault, and
+                    // an answer to a query typed past since is dropped.
+                    Mode::Symbols => {
+                        let (show, entry) = (show.clone(), entry.clone());
+                        let (raw, typed) = (raw.to_string(), query.to_string());
+                        find(
+                            query,
+                            Box::new(move |found| {
+                                if entry.upgrade().is_some_and(|e| e.text() == raw) {
+                                    show(rank_symbols(found, &typed));
+                                }
+                            }),
+                        );
+                        return;
+                    }
                     // The two ways of opening a vault that is *not* in the list end the rows, and are
                     // never filtered out: one surface reaches every way of changing vault, and the
                     // picker is never the empty status page even in a window on the only vault known.
@@ -786,16 +867,10 @@ pub fn present(
                     }
                 };
 
-            let objects: Vec<glib::BoxedAnyObject> =
-                hits.into_iter().map(glib::BoxedAnyObject::new).collect();
-            model.splice(0, model.n_items(), &objects);
-            if !objects.is_empty() {
-                selection.set_selected(0);
-            }
-            stack.set_visible_child_name(if objects.is_empty() { "empty" } else { "list" });
+            let hits = show(hits);
             tracing::debug!(
                 query = raw,
-                hits = objects.len(),
+                hits,
                 ms = t0.elapsed().as_secs_f64() * 1e3,
                 "palette query"
             );
@@ -1085,6 +1160,7 @@ mod tests {
         assert_eq!(files(">save"), (Mode::Commands, "save"));
         assert_eq!(files("#"), (Mode::Tags, ""));
         assert_eq!(files("#area"), (Mode::Tags, "area"));
+        assert_eq!(files("@Index::open"), (Mode::Symbols, "Index::open"));
         // A `>` or `#` further in is part of the file search, not a mode switch.
         assert_eq!(files("notes > misc"), (Mode::Files, "notes > misc"));
         assert_eq!(files("a#b"), (Mode::Files, "a#b"));
@@ -1116,6 +1192,34 @@ mod tests {
             rank(&corpus, &[], "zzzz", Corpus::Paths),
             Vec::<usize>::new()
         );
+    }
+
+    /// The index's order stands where the names score alike, and a type in the query is no
+    /// part of what the names are ranked by.
+    #[test]
+    fn symbols_rank_by_their_names() {
+        let symbol = |name: &str| CodeSymbol {
+            rel_path: "a.rs".to_string(),
+            kind: accent_api::SymbolKind::Function,
+            name: name.to_string(),
+            container: Some("Index".to_string()),
+            byte_start: 0,
+            byte_end: 0,
+            line: 1,
+            end_line: 1,
+            signature: String::new(),
+            test: false,
+        };
+        let names = |query| -> Vec<String> {
+            let found = vec![symbol("open"), symbol("open_at"), symbol("reopen")];
+            rank_symbols(found, query)
+                .iter()
+                .map(|item| item.text().to_string())
+                .collect()
+        };
+        assert_eq!(names("open"), ["open", "open_at", "reopen"]);
+        assert_eq!(names("Index::open"), ["open", "open_at", "reopen"]);
+        assert_eq!(names("Index.open_"), ["open_at"]);
     }
 
     /// A note in an ignored folder joins the files once, behind them, so the indexed one of two

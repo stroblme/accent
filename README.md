@@ -25,6 +25,8 @@ Some other cool featurs involve (but are not limited to):
 - Automatic light and dark theme with a solarized option for both
 - Presentation mode to show off whatever you're working on
 - Early version of a draw.io editor (not just embedded; an actual native rust version!)
+- MCP server and [Codegraph](https://github.com/colbymchenry/codegraph)-like `explore` command to make agents more efficient
+- LaTeX (SyncTeX) PDF <-> Code sync: navigate from text to pdf and vice-versa
 
 Accent is open source under GPL-3.0-or-later and still evolving.
 

@@ -13,6 +13,9 @@ const WALK: [i32; 8] = [0, 6, 60, 120, 400, 0, 12, 190];
 /// hidden and show it again. `hold:<note>` instead prints where the editor and the list are and
 /// then the pane's state whenever it changes, for 20 s, for keys and a pointer driven by XTEST.
 pub(super) fn bench_outline(app: &Rc<App>, arg: &str) {
+    if let Some(rel) = arg.strip_prefix("index:") {
+        return bench_outline_index(app, rel);
+    }
     let (hold, note, other) = match arg.strip_prefix("hold:") {
         Some(note) => (true, note, ""),
         None => match arg.split_once(',') {
@@ -34,6 +37,101 @@ pub(super) fn bench_outline(app: &Rc<App>, arg: &str) {
             return bench_outline_hold(&app, &tab);
         }
         bench_outline_walk(app, tab, other, 0);
+    });
+}
+
+/// `index:<rel_code>`: a Rust or Python file's Outline from the index. Prints the rows once there are any,
+/// whether a language server's or the index's, and what the missing server is; the same 6 s later,
+/// when a server that is installed has answered; then a row activated and where the caret landed,
+/// the caret put inside the first function and the row that follows it; last a function typed at
+/// the end and the file saved, and the rows once the save is indexed. It writes the file, so point
+/// it at a scratch vault under `/tmp`.
+fn bench_outline_index(app: &Rc<App>, rel: &str) {
+    scratch_only(app, "ACCENT_BENCH_OUTLINE=index");
+    app.open_path(rel);
+    app.show_pane("outline");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let rows = |app: &Rc<App>, tab: &Rc<Tab>, when: &str| {
+            let lines = app.sidebar.get().map(|s| s.outline_lines(None));
+            let missing = tab.lang.support().and_then(|s| s.missing.clone());
+            println!(
+                "bench outline index {when} served={} missing={missing:?}",
+                tab.lang.served()
+            );
+            for line in lines.unwrap_or_default() {
+                println!("bench outline index {when} row {line}");
+            }
+        };
+        let mut tab = None;
+        for _ in 0..75 {
+            glib::timeout_future(Duration::from_millis(200)).await;
+            tab = app.active().filter(|t| !t.lang.outline().is_empty());
+            if tab.is_some() {
+                break;
+            }
+        }
+        let Some(tab) = tab else {
+            println!("bench outline index no_rows");
+            return bench_quit(&app);
+        };
+        rows(&app, &tab, "first");
+        glib::timeout_future(Duration::from_secs(6)).await;
+        rows(&app, &tab, "later");
+
+        let outline = tab.lang.outline();
+        let last = outline.len() - 1;
+        if let Some(sidebar) = app.sidebar.get() {
+            sidebar.outline_lines(Some(last));
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let caret = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+        let mut end = caret;
+        end.forward_to_line_end();
+        let mut start = caret;
+        start.set_line_offset(0);
+        println!(
+            "bench outline index jump row={:?} caret={}:{} line={:?}",
+            outline[last].1,
+            caret.line(),
+            caret.line_offset(),
+            tab.buffer.text(&start, &end, false).trim()
+        );
+
+        tab.view.grab_focus();
+        let body = outline
+            .iter()
+            .find(|(_, name, _)| !name.starts_with("impl "));
+        if let Some((_, _, at)) = body {
+            let line = at.line as i32 + 1;
+            tab.buffer
+                .place_cursor(&tab.buffer.iter_at_line(line).expect("bench line"));
+            glib::timeout_future(Duration::from_millis(250)).await;
+            println!(
+                "bench outline index follow {}",
+                outline_state(&app, &tab, line)
+            );
+        }
+
+        let added = match tab.rel().ends_with(".py") {
+            true => "\ndef added_by_drill():\n    pass\n",
+            false => "\nfn added_by_drill() {}\n",
+        };
+        tab.buffer.insert(&mut tab.buffer.end_iter(), added);
+        let _ = WidgetExt::activate_action(&app.window, "win.save", None);
+        for _ in 0..50 {
+            glib::timeout_future(Duration::from_millis(200)).await;
+            if tab
+                .lang
+                .outline()
+                .iter()
+                .any(|row| row.1 == "added_by_drill")
+            {
+                break;
+            }
+        }
+        rows(&app, &tab, "saved");
+        bench_quit(&app);
     });
 }
 

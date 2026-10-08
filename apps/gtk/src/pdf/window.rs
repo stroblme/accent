@@ -81,10 +81,17 @@ impl App {
                 app.sync_history();
             }
         ));
+        // A stroke, an erase or a page edit keeps a preview, as typing keeps a note's: the next
+        // click in the sidebar would otherwise take the tab, and its Undo with it.
         pdf.connect_history(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| app.sync_history()
+            move |pdf| {
+                if pdf.history().0 {
+                    app.promote(&pdf.page);
+                }
+                app.sync_history();
+            }
         ));
         pdf.connect_note(glib::clone!(
             #[weak(rename_to = app)]
@@ -126,14 +133,12 @@ impl App {
         pdf.connect_imported(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |pdf, name, pages| {
+            move |_, name, pages| {
                 let what = match pages {
                     Ok(1) => format!("Inserted 1 page from {name}"),
                     Ok(n) => format!("Inserted {n} pages from {name}"),
                     Err(why) => return app.cannot(&format!("insert the pages of {name}"), why),
                 };
-                // A drop keeps the tab it went into, as an edit keeps a note's.
-                app.promote(&pdf.page);
                 app.toast(&what);
             }
         ));

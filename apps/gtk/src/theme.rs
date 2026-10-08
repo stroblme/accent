@@ -228,15 +228,13 @@ pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
 
 /// The minimap's words, in the foreground at this alpha so a page of them reads as grey under
 /// the text beside it, those the editor dims at the second, and those it writes in the accent in
-/// the accent at the third; the band over the lines on screen, at rest and under the pointer or a
-/// drag; and how much of a row tint's own alpha the map keeps, so a comparison's hunks show
-/// without colouring the map.
+/// the accent at the third; and the band over the lines on screen, at rest and under the pointer
+/// or a drag.
 pub const MAP_INK_ALPHA: f32 = 0.45;
 pub const MAP_DIM_ALPHA: f32 = 0.2;
 pub const MAP_ACCENT_ALPHA: f32 = 0.8;
 pub const MAP_BAND_ALPHA: f32 = 0.08;
 pub const MAP_BAND_HOVER_ALPHA: f32 = 0.16;
-pub const MAP_TINT_SHARE: f32 = 1.5;
 
 /// A conflict block's incoming side and its marker line over `page` where the theme has a blue of
 /// its own for it, or `None` for the one derived from the foreground (`conflict::tints`).

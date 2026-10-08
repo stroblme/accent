@@ -9,6 +9,7 @@ import io.github.stroblme.accent.ui.conflictTints
 import io.github.stroblme.accent.ui.flattened
 import io.github.stroblme.accent.ui.page
 import io.github.stroblme.accent.ui.pageTheme
+import io.github.stroblme.accent.ui.paperAccent
 import io.github.stroblme.accent.ui.rgba
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -38,6 +39,16 @@ class ThemeTest {
         assertEquals(shade, dark.background)
         assertEquals(shade, dark.surfaceVariant)
         assertEquals(shade, dark.surfaceContainerHighest)
+    }
+
+    /** A printout is the light page in either theme, so its accent is the light theme's. */
+    @Test
+    fun `paper takes the light theme's accent`() {
+        val ink = Color(0xFF3584E4)
+        val pastel = Color(0xFF99C1F1)
+        assertEquals(ink, paperAccent(lightColorScheme(primary = ink).flattened(dark = false)))
+        val dark = darkColorScheme(primary = pastel, inversePrimary = ink).flattened(dark = true)
+        assertEquals(ink, paperAccent(dark))
     }
 
     @Test

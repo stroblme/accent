@@ -16,6 +16,10 @@ use super::*;
 /// HEAD did not touch it — the shape a commit's file list has once history has moved under it.
 /// All three now say so and ask git again instead of opening a tab of two identical columns.
 ///
+/// Pointed at a binary file — modified, untracked, staged alone, renamed, or in `commit:` — the
+/// row opens the file as it is now, in the pane's preview tab and without a toast, where it used
+/// to toast that the file is binary; a deleted one says it is no longer on disk.
+///
 /// Pointed at a file HEAD did change, `commit:` prints whether the tab opened with its first change
 /// on screen, and the shared scrollbar's value, upper and page size: a long file whose one change
 /// is deep inside used to open scrolled away from it, with everything around it folded.
@@ -130,6 +134,7 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
             if app.toasted.get() > said
                 || matches!(app.doc_for(&key), Some(Doc::Diff(_)))
                 || app.open_tabs().iter().any(|tab| tab.comparison().is_some())
+                || app.doc_for(&rel).is_some_and(|doc| doc.tab().is_none())
             {
                 break;
             }
@@ -181,13 +186,15 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                 println!("bench compare_row tops {}", bench_tops(compare));
                 println!("bench compare_row scrolled {}", bench_scroll(compare).await);
             }
-            // The refusal is a toast, and it asks git again, so the row it refused goes too.
+            // The refusal is a toast, and it asks git again, so the row it refused goes too. A
+            // binary opens as the file itself, in the pane's preview, and says nothing.
             (None, _) => {
                 println!(
-                    "bench compare_row opened tabs={:?} comparing=false toasts={} said={:?}",
+                    "bench compare_row opened tabs={:?} comparing=false toasts={} said={:?} {}",
                     tabs.iter().map(|tab| tab.rel()).collect::<Vec<_>>(),
                     app.toasted.get() - said,
-                    bench_toast(&app)
+                    bench_toast(&app),
+                    crate::bench::panes::bench_tree_line(&app)
                 );
                 if let Some(own) = own
                     && let Some(adj) = tabs

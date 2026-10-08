@@ -79,6 +79,8 @@ data class Open(
      * types into. It belongs to the note in front, so opening another puts it away.
      */
     val finding: Boolean = false,
+    /** Print… was picked for the note, and its screen has yet to hand it to the print system. */
+    val printing: Boolean = false,
     /**
      * The reader is on the way out of the note — closing it, closing the vault, opening another —
      * over edits saving was paused on, and has been asked which version to keep
@@ -104,13 +106,15 @@ data class Open(
 
 /**
  * The PDF in front of the reader: where it is in the vault, where on disk, and where it opens —
- * and whether its find is open ([VaultModel.finding]), as a note's is ([Open.finding]).
+ * and whether its find is open ([VaultModel.finding]) and Print… waits on it, as a note's do
+ * ([Open.finding], [Open.printing]).
  */
 data class OpenPdf(
     val rel: String,
     val path: String,
     val at: PdfPlace? = null,
     val finding: Boolean = false,
+    val printing: Boolean = false,
 )
 
 /**
@@ -646,6 +650,29 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         runCatching { vault?.filesWithTag(tag) }.getOrNull().orEmpty().map { it.relPath }
     }
 
+    /**
+     * The templates that say where their notes go (`accent-target:`), which New from Template…
+     * offers, as the desktop's does; null with no vault open.
+     */
+    suspend fun templateTargets(): List<String>? = withContext(Dispatchers.IO) {
+        vault?.let { v -> runCatching { v.templateTargets() }.getOrDefault(emptyList()) }
+    }
+
+    /**
+     * The templates Today's Note may use: those whose `accent-target:` is dated (`{{date…}}`), so
+     * the note one makes is the day's. Null with no vault open.
+     */
+    suspend fun dailyTemplates(): List<String>? = withContext(Dispatchers.IO) {
+        vault?.let { v ->
+            runCatching {
+                v.templateTargets().filter { v.templateRawTarget(it)?.contains("{{date") == true }
+            }.getOrDefault(emptyList())
+        }
+    }
+
+    /** Where the templates are read from, for the reader told there are none to offer. */
+    fun templatesDir(): String? = vault?.templatesDir()
+
     /** The note links into this PDF, which paint as its highlights. */
     suspend fun pdfLinks(rel: String): List<PdfLink> = withContext(Dispatchers.IO) {
         runCatching { vault?.pdfLinks(rel) }.getOrNull().orEmpty()
@@ -840,6 +867,21 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Make the note [template] says it goes to and open it, or open the one it made already —
+     * asked twice in a day, a dated target is the same note, which is what makes it a daily one.
+     */
+    fun fromTemplate(template: String) = viewModelScope.launch {
+        val v = vault ?: return@launch
+        val made = withContext(Dispatchers.IO) { runCatching { v.noteFromTemplate(template) } }
+        made.onSuccess { rel ->
+            // The file changed since the list was read; nothing was made.
+            if (rel == null) return@onSuccess said("This template no longer has a destination")
+            corpus = null
+            openFile(rel)
+        }.onFailure { fail("Cannot create this note", it) }
+    }
+
+    /**
      * Write a note a link names, and open it: a "Not created" row in the switcher.
      *
      * The rows are kept from one walk to the next, so the note may have been written since they
@@ -916,6 +958,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun finding(on: Boolean) = _state.update {
         it.copy(open = it.open?.copy(finding = on), pdf = it.pdf?.copy(finding = on))
+    }
+
+    /**
+     * Ask for, or take back once it is under way, Print… of whatever is in front, a note or a
+     * PDF: the screen showing it does the printing, since that wants the page and the document
+     * it holds. With neither in front it does nothing, as [finding] does.
+     */
+    fun printing(on: Boolean) = _state.update {
+        it.copy(open = it.open?.copy(printing = on), pdf = it.pdf?.copy(printing = on))
     }
 
     fun said(message: String?) = _state.update { it.copy(message = message) }

@@ -280,6 +280,10 @@ struct App {
     /// What each diagram still being opened is to show once it is up, by key: the label a search
     /// hit found ([`App::open_label`]) or the page a link names.
     revealing: RefCell<HashMap<String, open::Reveal>>,
+    /// The keys a double click in the Files tree kept while the first click's read was still out
+    /// (a slow host, a large file): kept once their tab lands ([`App::mark_opened`]), forgotten
+    /// once their open fails.
+    keep_on_landing: RefCell<HashSet<String>>,
     /// The pane a restored tab goes into, by key, until it has one: see [`App::tabs_for`].
     placing: RefCell<HashMap<String, std::rc::Weak<Pane>>>,
     /// The tabs the files of the last launch naming several have landed in so far, each with its

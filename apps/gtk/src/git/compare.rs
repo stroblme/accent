@@ -176,10 +176,13 @@ impl Panel {
                 }
             }
         };
-        // The same test the tab opener uses, and the same answer: a diff of two binaries is
-        // noise, so the pane says why instead of showing it.
+        // The same test the tab opener uses: a diff of two binaries is noise, so the row shows
+        // the file as it is now instead.
         let (Blob::Text(left), Blob::Text(right)) = read else {
-            return say(&format!("{name} is binary"));
+            if !restored {
+                self.open_current(&what);
+            }
+            return;
         };
         let left_name = split_name(left_rel(&what)).1;
         let left_title = format!("{left_name} ({})", left_title(&what.sides));
@@ -257,6 +260,35 @@ impl Panel {
                 }
             }
         }
+    }
+
+    /// Open the binary file `what` names as it is now, as a click on it in the Files tree does: an
+    /// image or a PDF in its viewer, anything else on the Binary File page. One gone from the disk
+    /// — deleted, or moved since the commit that listed it — has nothing to show, which the pane
+    /// says. A file outside the vault is left to the open, which looks for it itself.
+    fn open_current(self: &Rc<Self>, what: &Comparison) {
+        let key = vault_key(&self.hooks.vault.root(), &what.repo, &what.rel);
+        let name = split_name(&what.rel).1.to_string();
+        let (panel, vault, asked) = (self.clone(), self.hooks.vault.clone(), self.asked.get());
+        glib::spawn_future_local(async move {
+            let there = {
+                let key = key.clone();
+                crate::work::off_thread("git", move || {
+                    Path::new(&key).is_absolute() || vault.exists(&key)
+                })
+                .await
+            };
+            if panel.asked.get() != asked {
+                return;
+            }
+            match there {
+                Some(true) => (panel.hooks.open)(&key),
+                Some(false) => {
+                    (panel.hooks.toast)(&format!("{name} is binary and no longer on disk"))
+                }
+                None => {}
+            }
+        });
     }
 
     /// Stage Selected Lines and Revert Selected Lines on a comparison of the working tree with

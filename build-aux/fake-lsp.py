@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""A language server answering completion only, the same three items wherever it is asked:
-what `ACCENT_BENCH_COMPLETE=code:` drives the popup against, so the drill does not depend on a
-real server's ranking, its indexing or its version.
+"""A language server answering completion, the same three items wherever it is asked: what
+`ACCENT_BENCH_COMPLETE=code:` drives the popup against, so the drill does not depend on a real
+server's ranking, its indexing or its version. With `--calls FILE` it also answers a call
+hierarchy from that file, which `apps/cli/tests/mcp.rs` holds `explore`'s `precise` mode against.
 
 `.` triggers it and it can resolve: `alpha` is a snippet with a stop, `beta` a plain word, and
 `gamma` resolves to its documentation and an `#include` at the top of the file, which is what a
@@ -9,7 +10,8 @@ server keeps back until a row is accepted. A completion is answered after `DELAY
 messages that arrive meanwhile still read, so a request the editor has typed past can be
 cancelled; each cancel is said on stderr, which accent logs under `accent_lsp::stderr`.
 """
-import json, os, select, sys, time
+import json, os, re, select, sys, time
+from urllib.parse import unquote
 
 DELAY = 0.15
 ITEMS = [
@@ -23,6 +25,31 @@ IMPORT = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "ch
           "newText": '#include "gamma.h"\n'}
 
 inbox, pending = b"", []
+
+# The call hierarchy, `{"file:line": {"incoming": [[file, line, name, [call lines]]], "outgoing":
+# [...]}}`, lines 0-based: a declaration is the one whose name is on that line. The first
+# `--loading N` questions about it are refused, as rust-analyzer refuses them while it loads.
+CALLS = json.load(open(sys.argv[sys.argv.index("--calls") + 1])) if "--calls" in sys.argv else None
+LOADING = [int(sys.argv[sys.argv.index("--loading") + 1]) if "--loading" in sys.argv else 0]
+ROOT = [""]
+
+
+def declared(rel, line, name):
+    """The declaration called `name` on `rel`'s `line`."""
+    text = open(os.path.join(ROOT[0], rel)).read().split("\n")[line]
+    at = re.search(r"\b%s\b" % re.escape(name), text)
+    span = {"start": {"line": line, "character": at.start()},
+            "end": {"line": line, "character": at.end()}}
+    return {"name": at.group(), "kind": 12, "uri": "file://" + os.path.join(ROOT[0], rel),
+            "range": span, "selectionRange": span, "data": f"{rel}:{line}"}
+
+
+def calls(direction, key):
+    lines = lambda ls: [{"start": {"line": l, "character": 0}, "end": {"line": l, "character": 1}}
+                        for l in ls]
+    side = "from" if direction == "incoming" else "to"
+    return [{side: declared(rel, line, name), "fromRanges": lines(at)}
+            for rel, line, name, at in CALLS.get(key, {}).get(direction, [])]
 
 
 def send(message):
@@ -47,9 +74,24 @@ def messages():
 def answer(message):
     method, id = message.get("method"), message.get("id")
     if method == "initialize":
+        ROOT[0] = unquote(message["params"]["rootUri"][len("file://"):])
         send({"id": id, "result": {"capabilities": {
             "textDocumentSync": 1,
-            "completionProvider": {"triggerCharacters": ["."], "resolveProvider": True}}}})
+            "completionProvider": {"triggerCharacters": ["."], "resolveProvider": True},
+            "callHierarchyProvider": CALLS is not None}}})
+    elif method == "textDocument/prepareCallHierarchy" and LOADING[0] > 0:
+        LOADING[0] -= 1
+        send({"id": id, "error": {"code": -32801, "message": "content modified"}})
+    elif method == "textDocument/prepareCallHierarchy":
+        p = message["params"]
+        rel = os.path.relpath(unquote(p["textDocument"]["uri"][len("file://"):]), ROOT[0])
+        line, column = p["position"]["line"], p["position"]["character"]
+        key = f"{rel}:{line}"
+        text = open(os.path.join(ROOT[0], rel)).read().split("\n")[line]
+        word = re.match(r"\w*", text[column:]).group()
+        send({"id": id, "result": [declared(rel, line, word)] if key in CALLS else []})
+    elif method in ("callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"):
+        send({"id": id, "result": calls(method.split("/")[1][:8], message["params"]["item"]["data"])})
     elif method == "textDocument/completion":
         pending.append((time.monotonic() + DELAY, id))
     elif method == "completionItem/resolve":

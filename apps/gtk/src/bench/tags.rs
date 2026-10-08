@@ -1,7 +1,8 @@
 //! The Tags section drill: whether its list follows a note's tags as they are written and taken
-//! away.
+//! away, and whether a tag clicked in the preview is picked there.
 
 use super::*;
+use webkit6::prelude::*;
 
 /// A tag no vault would already carry, so its presence in the list is the whole answer.
 const MARKER: &str = "zzbenchtag";
@@ -9,12 +10,14 @@ const MARKER: &str = "zzbenchtag";
 /// the query it then runs. A local vault answers all four in a few milliseconds each.
 const SETTLE: Duration = Duration::from_millis(1200);
 
-/// `ACCENT_BENCH_TAGS=<rel_note>` writes `#zzbenchtag` into `<rel_note>`, saves, takes it away
-/// and saves again, printing what the Tags section lists at each step while it is on screen.
+/// `ACCENT_BENCH_TAGS=<rel_note>` writes `#zzbenchtag` into `<rel_note>`, saves, clicks the tag
+/// in the preview, takes it away and saves again, printing what the Tags section lists at each
+/// step while it is on screen.
 ///
 /// `tags_before` must not hold the marker, `tags_added` must, and `tags_removed` must not: that
 /// is the section following the index in both directions without being switched away from and
-/// back. The note is left exactly as it was found.
+/// back. `tags_clicked` must show the section with the marker picked, where `before` picked the
+/// first tag. The note is left exactly as it was found.
 pub(super) fn bench_tags(app: &Rc<App>, rel: &str) {
     app.show_section("tags");
     app.open_path(rel);
@@ -39,15 +42,38 @@ pub(super) fn bench_tags(app: &Rc<App>, rel: &str) {
         app.save_tab(&tab, true);
         glib::timeout_add_local_once(SETTLE, move || {
             bench_tags_print(&app, "added");
-            tab.set_text(&original);
-            tab.save.modified.set(true);
-            app.save_tab(&tab, true);
-            glib::timeout_add_local_once(SETTLE, move || {
-                bench_tags_print(&app, "removed");
-                bench_quit(&app);
+            glib::spawn_future_local(async move {
+                click_marker(&app).await;
+                bench_tags_print(&app, "clicked");
+                tab.set_text(&original);
+                tab.save.modified.set(true);
+                app.save_tab(&tab, true);
+                glib::timeout_add_local_once(SETTLE, move || {
+                    bench_tags_print(&app, "removed");
+                    bench_quit(&app);
+                });
             });
         });
     });
+}
+
+/// Show the note in the split view and click the marker's tag link there: the anchor's own
+/// `click()`, which WebKit hands the preview's navigation policy as a pointer's click is.
+async fn click_marker(app: &Rc<App>) {
+    app.set_mode(Mode::Split);
+    glib::timeout_future(SETTLE).await;
+    let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
+        return println!("bench tags step=clicked preview=none");
+    };
+    let script = format!(
+        "var a = document.querySelector('a.tag[href=\"accent://tag/{MARKER}\"]'); \
+         if (a) {{ a.click(); }} !!a"
+    );
+    match view.evaluate_javascript_future(&script, None, None).await {
+        Ok(found) => println!("bench tags link={}", found.to_boolean()),
+        Err(e) => println!("bench tags js_error {e}"),
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
 }
 
 /// What the section lists at one step, with the marker called out so a long list still answers

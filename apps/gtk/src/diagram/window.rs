@@ -165,7 +165,11 @@ impl App {
             }
         }));
         tab.connect_selection(on(|_, _| {}));
+        // An edit keeps a preview, as typing keeps a note's.
         tab.connect_history(on(|app, tab| {
+            if tab.history().0 {
+                app.promote(&tab.page);
+            }
             if app.is_active_diagram(tab) {
                 app.sync_diagram_tools();
                 app.sync_history();

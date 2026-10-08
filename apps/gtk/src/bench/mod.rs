@@ -35,6 +35,7 @@ mod search;
 mod start;
 mod style;
 mod suggest;
+mod symbols;
 mod synctex;
 mod tags;
 mod toasts;
@@ -103,7 +104,8 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` clicks outside each dialog through XTEST
 /// instead (`dismiss::bench_dismiss`), `=prefs` times Preferences presenting (`bench_prefs`), and
 /// `=ignored:<rel>` follows a note in a gitignored folder into the window (`ignored::bench_ignored`),
-/// and `=early:<query>` is the list landing in a dialog already open (`corpus::bench_early`).
+/// and `=early:<query>` is the list landing in a dialog already open (`corpus::bench_early`), and
+/// `=symbol:<query>` is Go to Symbol's rows for `@<query>` and its first opened (`symbols`).
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
@@ -367,7 +369,13 @@ use tags::bench_tags;
 /// `=tree:<a>,<b>,<c>` clicks `a` and then `b` in the Files tree, double-clicks `c` and then
 /// `a`, drags `b` onto the right edge of the pane, all through XTEST, then pins `c` and fires
 /// Close Tabs in Pane over the left pane, and prints each pane's tabs after every step: the vault
-/// root has to list the three, as a scratch vault of three notes does.
+/// root has to list the three, as a scratch vault of three notes does. Under
+/// `ACCENT_BENCH_SLOW_READ=<ms>`, which holds every text read that long on its worker as a slow
+/// host would, each double click's second press comes before its tab, which must land kept.
+/// `=edited:<pdf>,<diagram>,<note>` opens the PDF as a click on its tree row does, draws a stroke
+/// across it with the pen through XTEST, opens the diagram the same way and adds a page to it,
+/// then opens the note, and prints the pane's tabs after each: an edit keeps a preview, so neither
+/// the PDF nor the diagram may be replaced, which would take its Undo with it.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
 /// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
 /// remote vault it waits for the host, and neither tab may leave: the file is on the host.
@@ -410,6 +418,8 @@ use tags::bench_tags;
 /// switch to `<rel_other>` and back, and after the caret moved while the pane was hidden; last
 /// the list's scroll and row through a few edits, which leave them alone, and one caret move.
 /// `=hold:<rel_note>` prints where to aim and then the pane's state as XTEST drives it, for 20 s.
+/// `=index:<rel_code>` prints a code file's rows from the index, a jump, the caret followed, and
+/// the rows once a function typed at its end is saved and indexed (`outline::bench_outline_index`).
 ///
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
@@ -913,6 +923,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rels) = rels.strip_prefix("tree:") {
                 return bench_tree(&app, rels);
             }
+            if let Some(rels) = rels.strip_prefix("edited:") {
+                return panes::bench_edited(&app, rels);
+            }
             if let Some(pdf) = rels.strip_prefix("loose:") {
                 return loose::bench_loose(&app, pdf);
             }
@@ -1070,6 +1083,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(query) = query.strip_prefix("early:") {
             return corpus::bench_early(&app, query);
+        }
+        if let Some(query) = query.strip_prefix("symbol:") {
+            return symbols::bench_symbol(&app, query);
         }
         if query == "prefs" {
             return bench_prefs(&app);

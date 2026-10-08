@@ -74,9 +74,9 @@ private val AccentShapes = Shapes(
  * for the same reason a rendered page needs it opaque: libadwaita's light `--view-fg-color` is
  * `RGB(0 0 6 / 80%)`, and over white that is `#333338`.
  */
-private val PageLight = Color(0xFFFFFFFF)
+internal val PageLight = Color(0xFFFFFFFF)
 private val PageDark = Color(0xFF1D1D20)
-private val InkLight = Color(0xFF333338)
+internal val InkLight = Color(0xFF333338)
 private val InkDark = Color(0xFFEBEBEB)
 
 /**

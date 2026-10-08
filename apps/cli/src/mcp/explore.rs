@@ -76,6 +76,11 @@ pub(super) struct ExploreArgs {
     query: String,
     /// Most characters to answer with: 16000 when left out, 4000 to 24000.
     max_chars: Option<usize>,
+    /// Find the callers and callees of the declarations named by the language server's call
+    /// hierarchy (rust-analyzer, pyright, …) instead of by name: exact where several
+    /// declarations share a name, but slower, and the first such call for a language starts its
+    /// server, falling back to names if it is not ready within 10 s. False when left out.
+    precise: Option<bool>,
 }
 
 /// The question taken apart.
@@ -146,7 +151,7 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
     // The callers and callees of what the question names, shown in the files likeliest to get
     // a card.
     let carded: Vec<String> = found.iter().take(CARDED).map(|(r, _)| r.clone()).collect();
-    let graph = graph::graph(s, &seeds, &carded)?;
+    let graph = graph::graph(s, &seeds, &carded, a.precise.unwrap_or(false))?;
     for sym in graph.glue {
         if let Some((_, f)) = found.iter_mut().find(|(r, _)| *r == sym.rel_path) {
             f.symbols.push(sym);
@@ -159,7 +164,7 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
         );
         return Ok(out);
     }
-    out.push_str(&format!("{} files, best first.\n\n", found.len()));
+    out.push_str(&format!("{}, best first.\n\n", count(found.len(), "file")));
     out.push_str(&graph.summary);
     // Cards in rank order while they fit beside a line for each of the files after them, which
     // the first card that does not fit leaves to that list.
@@ -187,7 +192,7 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
             let why = match (f.hits, f.near) {
                 (0, 0) => String::new(),
                 (0, near) => format!(" (linked with {near} of these)"),
-                (hits, _) => format!(" ({hits} hits)"),
+                (hits, _) => format!(" ({})", count(hits, "hit")),
             };
             let line = format!("- `{rel}`{title}{why}\n");
             if out.len() + line.len() > budget {
@@ -722,6 +727,14 @@ fn merge(mut ranges: Vec<RangeInclusive<usize>>) -> Vec<RangeInclusive<usize>> {
         }
     }
     merged
+}
+
+/// `n` of `what`, in the plural but for one.
+pub(super) fn count(n: usize, what: &str) -> String {
+    match n {
+        1 => format!("1 {what}"),
+        n => format!("{n} {what}s"),
+    }
 }
 
 /// The longest run of backticks in `text`: the fence around it has to be longer.

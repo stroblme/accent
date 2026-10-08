@@ -46,9 +46,18 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   switcher — the recent files, then names ranked against the query — and Command the palette; both
   lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the
   keyboard up when their page lands.
+- New from Template… and Today's Note are the commands that ask first: the Command page lists the
+  templates they offer under the command's name in the accent, as a tag lists its notes, and the
+  field narrows them. A pick makes the note there, or opens the one it made — a dated target asked
+  twice in a day is the day's note — and Back returns to the commands. New from Template… offers
+  every template that says where its notes go (`accent-target:`, as the desktop's does); Today's
+  Note those whose destination is dated (`{{date…}}`), and goes straight to the day's note when
+  there is one. With none to offer, either says so in a `Snackbar` instead.
 - Tags is every tag with how many notes carry it, most used first and bottom-up as Files is, the
   query ranking them as it ranks names. A tap opens the tag on the same page: its notes by name and
   folder, from the top, under `#tag · N` in the accent, which a tap or Back takes back to the tags.
+  A tag tapped in a note — a link in the accent, as the editor colours it — opens Browse on that
+  page, its notes listed, as if it had been opened here.
 - Backlinks is the notes linking to the document in front — a note, a PDF or an image — once each,
   by name and folder under "Links to …", the desktop's References for a note. One opened from
   here is one step from where the reader was: Back from it opens that document again, at its top,
@@ -113,6 +122,20 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   the WebView reads one, so it opens as any other file, and an embed of one in a note, which the
   shared markdown makes an image, shows as one that did not load.
 
+### Print
+
+- Print… is a palette command, listed while a note or a PDF is in front. It opens the system's
+  print UI, which paginates, picks the printer and offers Save as PDF, so there is no Export as…
+  beside it.
+- A note goes out as the desktop prints one: the text as typed, on the light page whatever the
+  theme, links in the light theme's accent, images as their files are (no recolouring, no
+  inversion), diagrams in mermaid's light theme. A WebView of its own that is never shown lays it
+  out (`WebView.createPrintDocumentAdapter`), once its images are in and its diagrams drawn, so the
+  page being read keeps its place and its marks.
+- A PDF goes out as a copy of the document as it stands, its ink in and the notes' highlights
+  written in as `/Highlight` annotations in that accent, each carrying the text it quotes
+  (`PdfSession::copy_with_highlights`): the desktop's copy. The file itself gains nothing.
+
 ### Message
 
 - A `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog —
@@ -149,6 +172,7 @@ exist as a visible control.
 | Tap a highlight on a page | Opens the note whose link makes it; Back returns to the page | The highlight |
 | Tap another reader's comment on a page | Shows it with its author in a dialog | The mark pdfium paints |
 | Back on a tag's notes | Returns to the tags | The tag's heading |
+| Tap a tag in a note | Opens Browse on that tag's notes | The tag, in the accent |
 | Long press on a PDF page | Selects the word under the finger; a drag grows it, and the handles move either end | The handles and the floating toolbar it raises |
 | Long press on a note | Selects the text under the finger with the WebView's own handles, as a page of prose does everywhere else on the platform | The handles it raises |
 | Tap an image in a note | Opens it on its own screen, to zoom and invert; an image inside a link follows the link | The image |
@@ -342,6 +366,5 @@ The decisions under the Android app, each with its reason; the shared ones are i
   the platform does (a phone keyboard completes words), and the rest would be a second app inside
   this one. The test for any feature: does it help someone read their vault, make a small edit, or
   read and mark up a PDF.
-- Deferred rather than refused: templates and the daily note, a native Compose renderer in place
-  of the WebView, exporting highlights, the PDF shapes and Adjust tool, and printing or exporting
-  a note or a PDF (the desktop's Print… and Export as…; NOTEPAD says what it would take).
+- Deferred rather than refused: a native Compose renderer in place of the WebView, exporting
+  highlights, and the PDF shapes and Adjust tool.
