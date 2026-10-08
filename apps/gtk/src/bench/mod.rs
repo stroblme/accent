@@ -23,6 +23,7 @@ mod info;
 mod keys;
 mod loose;
 mod memory;
+mod minimap;
 mod outline;
 mod panes;
 mod pdf;
@@ -70,6 +71,7 @@ use keys::{
     bench_box_drag, bench_hold, bench_keys, bench_list, bench_menu_caret, bench_occurrence_keys,
     bench_shell_keys, bench_term,
 };
+use minimap::bench_minimap;
 use outline::bench_outline;
 use panes::{
     bench_apart, bench_back, bench_collapse, bench_cycle, bench_layout, bench_layout_pick,
@@ -552,8 +554,11 @@ use tags::bench_tags;
 /// remote vault they wait for the host to
 /// answer, `<a>,…` and `=1` printing what the window shows until then, and `=quit` quits there the
 /// way Ctrl+Q does.
+///
+/// `ACCENT_BENCH_MINIMAP=<round>:<rel>` is the minimap's (`minimap::bench_minimap`).
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
+    let minimap = std::env::var("ACCENT_BENCH_MINIMAP").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
     let style = std::env::var("ACCENT_BENCH_STYLE").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").ok();
@@ -655,6 +660,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && preview_look.is_none()
         && !close
         && !hidden
+        && minimap.is_none()
     {
         return;
     }
@@ -673,6 +679,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if collapse {
             return bench_collapse(&app);
+        }
+        if let Some(arg) = minimap {
+            return bench_minimap(&app, &arg);
         }
         if let Some(arg) = memory {
             return memory::bench_memory(&app, &arg);

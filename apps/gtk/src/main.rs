@@ -39,6 +39,7 @@ mod layout;
 mod look;
 mod malloc;
 mod marks;
+mod minimap;
 mod multicaret;
 mod nav;
 mod open;
