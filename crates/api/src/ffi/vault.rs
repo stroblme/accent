@@ -13,7 +13,7 @@ use accent_core::config::VaultConfig;
 use accent_core::fs::Etag;
 use accent_core::index::{Backlink, FileRow};
 
-use crate::ffi::convert::{self, NewNote, Note, NoteAlias, PdfLink, SearchHit, TagCount, Utf16};
+use crate::ffi::convert::{self, Note, NoteAlias, PdfLink, SearchHit, TagCount};
 use crate::ffi::error::Answer;
 use crate::ffi::event::{self, Event};
 
@@ -109,10 +109,10 @@ impl Vault {
         Ok(self.inner.stat(&rel)?)
     }
 
-    /// Create a note, optionally from a template, and say where the template asked for the caret.
-    pub fn create_note(&self, rel: String, template: Option<String>) -> Answer<NewNote> {
-        let (text, carets) = self.inner.create_note(&rel, template.as_deref())?;
-        Ok(new_note(text, carets))
+    /// Create a note, optionally from a template.
+    pub fn create_note(&self, rel: String, template: Option<String>) -> Answer<()> {
+        self.inner.create_note(&rel, template.as_deref())?;
+        Ok(())
     }
 
     /// Delete a file. There is no trash here: Android has none to put it in.
@@ -246,13 +246,18 @@ impl Vault {
         Ok(self.inner.template_targets()?)
     }
 
-    /// Make the note a template's `accent-target:` names, or open the one it already made.
-    /// `None` when the template names no destination.
-    pub fn note_from_template(&self, template: String) -> Answer<Option<NewNote>> {
+    /// Make the note a template's `accent-target:` names, or find the one it already made, and
+    /// say where it is. `None` when the template names no destination.
+    pub fn note_from_template(&self, template: String) -> Answer<Option<String>> {
         Ok(self
             .inner
             .note_from_template(&template)?
-            .map(|(text, carets)| new_note(text, carets)))
+            .map(|(rel, _)| rel))
+    }
+
+    /// The folder the templates are read from, which is where a reader is told to look.
+    pub fn templates_dir(&self) -> String {
+        self.inner.config().templates_dir
     }
 
     /// Where the note a template would make goes, without making it.
@@ -261,22 +266,42 @@ impl Vault {
     }
 }
 
-/// A template's caret offsets are bytes into the text it produced; the caller counts UTF-16.
-fn new_note(text: String, carets: Vec<usize>) -> NewNote {
-    let map = Utf16::new(&text);
-    let carets = carets.iter().map(|at| map.at(*at)).collect();
-    NewNote { text, carets }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The one conversion this file makes rather than forwards: a template's caret lands where
-    /// Kotlin would put it, not where Rust counted it.
+    /// New from Template… opens the note the template made: its path comes back, and the same
+    /// one when it is asked again, which is what makes a dated target a daily note.
     #[test]
-    fn a_templates_caret_crosses_in_utf16_units() {
-        let note = new_note("🙂 title\n".to_string(), vec![0, 6]);
-        assert_eq!(note.carets, vec![0, 4], "two units for the emoji");
+    fn a_template_hands_back_the_note_it_made() {
+        let root = tempfile::tempdir().unwrap();
+        let index = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Templates")).unwrap();
+        std::fs::write(
+            root.path().join("Templates/Log.md"),
+            "---\naccent-target: Logs/{{title}}.md\n---\n# Log\n",
+        )
+        .unwrap();
+        let (inner, events) = crate::Vault::open_unwatched_at(
+            root.path(),
+            &index.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        let v = Vault {
+            inner,
+            events: Mutex::new(events),
+        };
+        let made = || {
+            v.note_from_template("Templates/Log.md".to_string())
+                .unwrap()
+        };
+        assert_eq!(made().as_deref(), Some("Logs/Log.md"));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("Logs/Log.md")).unwrap(),
+            "# Log\n"
+        );
+        assert_eq!(made().as_deref(), Some("Logs/Log.md"));
+        assert_eq!(v.templates_dir(), "Templates");
     }
 }

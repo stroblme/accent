@@ -46,6 +46,11 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   switcher — the recent files, then names ranked against the query — and Command the palette; both
   lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the
   keyboard up when their page lands.
+- New from Template… is the one command that asks first: the Command page lists the templates that
+  say where their notes go (`accent-target:`, as the desktop's does) under its heading in the
+  accent, as a tag lists its notes, and the field narrows them. A pick makes the note there, or
+  opens the one it made — a dated target asked twice in a day is the day's note — and Back returns
+  to the commands. With no such template it says so in a `Snackbar` instead.
 - Tags is every tag with how many notes carry it, most used first and bottom-up as Files is, the
   query ranking them as it ranks names. A tap opens the tag on the same page: its notes by name and
   folder, from the top, under `#tag · N` in the accent, which a tap or Back takes back to the tags.
@@ -359,5 +364,6 @@ The decisions under the Android app, each with its reason; the shared ones are i
   the platform does (a phone keyboard completes words), and the rest would be a second app inside
   this one. The test for any feature: does it help someone read their vault, make a small edit, or
   read and mark up a PDF.
-- Deferred rather than refused: templates and the daily note, a native Compose renderer in place
-  of the WebView, exporting highlights, and the PDF shapes and Adjust tool.
+- Deferred rather than refused: a Today's Note command of its own (New from Template… makes the
+  daily note already), a native Compose renderer in place of the WebView, exporting highlights, and
+  the PDF shapes and Adjust tool.

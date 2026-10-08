@@ -165,13 +165,6 @@ pub struct Note {
     pub etag: Etag,
 }
 
-/// A note a template made: its text and where the template asked for the caret, in UTF-16 units.
-#[derive(uniffi::Record)]
-pub struct NewNote {
-    pub text: String,
-    pub carets: Vec<u32>,
-}
-
 #[derive(uniffi::Record)]
 pub struct TagCount {
     pub name: String,

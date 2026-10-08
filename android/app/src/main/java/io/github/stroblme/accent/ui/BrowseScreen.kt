@@ -103,6 +103,8 @@ fun BrowseScreen(
     var tag by remember { mutableStateOf<TagCount?>(null) }
     var tagged by remember { mutableStateOf<List<String>?>(null) }
     var linked by remember { mutableStateOf<List<String>?>(null) }
+    // The templates New from Template… offers, in the commands' place while it asks for one.
+    var templates by remember { mutableStateOf<List<String>?>(null) }
     // Their ranking, with the list its places are places in: the tags and a tag's notes share a
     // page, and a place drawn against the other list is a row naming the wrong thing.
     var listing by remember { mutableStateOf<Pair<List<*>, List<Int>>?>(null) }
@@ -122,11 +124,13 @@ fun BrowseScreen(
         tagged = tag?.let { model.filesWithTag(it.name) }
     }
 
-    LaunchedEffect(query, mode, tags, tag, tagged, linked) {
+    LaunchedEffect(query, mode, tags, tag, tagged, linked, templates) {
         if (mode == Mode.Search) return@LaunchedEffect
-        if (mode == Mode.Tags || mode == Mode.Backlinks) {
+        val picking = mode == Mode.Command && templates != null
+        if (mode == Mode.Tags || mode == Mode.Backlinks || picking) {
             val list = when {
                 mode == Mode.Backlinks -> linked
+                picking -> templates
                 tag != null -> tagged
                 else -> tags
             } ?: return@LaunchedEffect
@@ -164,8 +168,10 @@ fun BrowseScreen(
         if (landed == Mode.Files || landed == Mode.Command) focus.requestFocus()
     }
 
-    // Back from a tag is the list of tags, before it is the way out of the panel.
+    // Back from a tag is the list of tags, before it is the way out of the panel; and from the
+    // templates, the commands.
     BackHandler(enabled = mode == Mode.Tags && tag != null) { tag = null }
+    BackHandler(enabled = mode == Mode.Command && templates != null) { templates = null }
 
     // The chip of the page in front is kept on screen: five do not fit across a phone, and a row
     // scrolled away from the lit one no longer says which page this is.
@@ -195,6 +201,14 @@ fun BrowseScreen(
                 }
                 return@HorizontalPager
             }
+            val picks = templates
+            if (tab == Mode.Command && picks != null) {
+                Notes("New from Template", picks, placesIn(picks), onBack = { templates = null }) {
+                    model.fromTemplate(it)
+                    onClose()
+                }
+                return@HorizontalPager
+            }
             if (tab == Mode.Backlinks) {
                 val to = front
                 when {
@@ -218,8 +232,13 @@ fun BrowseScreen(
                             colors = flatRow(),
                             modifier = Modifier.row {
                                 model.recents.touch(Recents.Kind.Commands, command.label)
-                                command.run(model)
-                                onClose()
+                                if (command === NewFromTemplate) {
+                                    scope.launch { templates = pickable(model, onClose) }
+                                    query = ""
+                                } else {
+                                    command.run(model)
+                                    onClose()
+                                }
                             },
                         )
                     }
@@ -301,7 +320,7 @@ fun BrowseScreen(
                 Mode.Files -> "Go to a file"
                 Mode.Tags -> tag?.let { "Filter #${it.name}" } ?: "Find a tag"
                 Mode.Backlinks -> "Filter backlinks"
-                Mode.Command -> "Run a command"
+                Mode.Command -> if (templates != null) "Find a template" else "Run a command"
             },
             modifier = Modifier.focusRequester(focus),
         )
@@ -467,6 +486,25 @@ private fun LazyListScope.rows(
 class Command(val label: String, val run: (VaultModel) -> Unit)
 
 /**
+ * New from Template…, the one command that asks something first: which template. The Command page
+ * lists the ones that say where their notes go in its own place, as the Tags page lists a tag's
+ * notes, and a pick makes the note there or opens the one it made ([VaultModel.fromTemplate]).
+ */
+val NewFromTemplate = Command("New from Template…") {}
+
+/**
+ * The templates New from Template… can offer, or null when there is nothing to pick from — which
+ * says why, as the desktop does, and closes the panel.
+ */
+private suspend fun pickable(model: VaultModel, onClose: () -> Unit): List<String>? {
+    val found = model.templateTargets() ?: return null
+    if (found.isNotEmpty()) return found
+    model.said("No template has a destination. Add accent-target: to one in ${model.templatesDir()}")
+    onClose()
+    return null
+}
+
+/**
  * Find is the palette's one entry that changes the screen rather than the vault: it opens the find
  * bar of the note or the PDF in front, which searches that where Search above searches every
  * note. Close Vault was reachable only from the screen with nothing open,
@@ -474,6 +512,7 @@ class Command(val label: String, val run: (VaultModel) -> Unit)
  */
 val Commands = listOf(
     Command("New Note") { it.newNote(newName()) },
+    NewFromTemplate,
     Command("Find") { it.finding(true) },
     Command("Reload Vault") { it.reloadVault() },
     Command("Close Note") { it.close() },

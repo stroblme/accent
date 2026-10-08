@@ -650,6 +650,17 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         runCatching { vault?.filesWithTag(tag) }.getOrNull().orEmpty().map { it.relPath }
     }
 
+    /**
+     * The templates that say where their notes go (`accent-target:`), which New from Template…
+     * offers, as the desktop's does; null with no vault open.
+     */
+    suspend fun templateTargets(): List<String>? = withContext(Dispatchers.IO) {
+        vault?.let { v -> runCatching { v.templateTargets() }.getOrDefault(emptyList()) }
+    }
+
+    /** Where the templates are read from, for the reader told there are none to offer. */
+    fun templatesDir(): String? = vault?.templatesDir()
+
     /** The note links into this PDF, which paint as its highlights. */
     suspend fun pdfLinks(rel: String): List<PdfLink> = withContext(Dispatchers.IO) {
         runCatching { vault?.pdfLinks(rel) }.getOrNull().orEmpty()
@@ -838,6 +849,21 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val made = withContext(Dispatchers.IO) { runCatching { v.createNote(rel, null) } }
         made.onSuccess {
             // The switcher reads its files again next time, so the note is one of them there.
+            corpus = null
+            openFile(rel)
+        }.onFailure { fail("Cannot create this note", it) }
+    }
+
+    /**
+     * Make the note [template] says it goes to and open it, or open the one it made already —
+     * asked twice in a day, a dated target is the same note, which is what makes it a daily one.
+     */
+    fun fromTemplate(template: String) = viewModelScope.launch {
+        val v = vault ?: return@launch
+        val made = withContext(Dispatchers.IO) { runCatching { v.noteFromTemplate(template) } }
+        made.onSuccess { rel ->
+            // The file changed since the list was read; nothing was made.
+            if (rel == null) return@onSuccess said("This template no longer has a destination")
             corpus = null
             openFile(rel)
         }.onFailure { fail("Cannot create this note", it) }
