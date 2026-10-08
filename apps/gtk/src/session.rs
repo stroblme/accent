@@ -2,6 +2,7 @@
 //! and restores between runs.
 
 use super::*;
+use accent_api::CodeSymbol;
 use accent_api::git::Sides;
 
 /// What the palette lists before the user types anything.
@@ -177,6 +178,30 @@ impl App {
                     None => Vec::new(),
                 }
             }),
+            // Go to Symbol's rows: the index's, on the host for a remote vault.
+            symbols: Box::new({
+                let app = Rc::downgrade(self);
+                move |query: &str, done: Box<dyn FnOnce(Vec<CodeSymbol>)>| {
+                    let Some(vault) = app.upgrade().and_then(|app| app.vault().cloned()) else {
+                        return done(Vec::new());
+                    };
+                    let query = query.to_string();
+                    glib::spawn_future_local(async move {
+                        let found = crate::work::off_thread("symbols", move || {
+                            vault.find_symbols(&query, palette::MAX_RESULTS)
+                        })
+                        .await;
+                        done(match found {
+                            Some(Ok(found)) => found,
+                            Some(Err(e)) => {
+                                tracing::debug!("finding symbols: {e:#}");
+                                Vec::new()
+                            }
+                            None => Vec::new(),
+                        });
+                    });
+                }
+            }),
             // The start screen's own removal, so one list is written one way.
             on_forget: Box::new({
                 let app = Rc::downgrade(self);
@@ -210,6 +235,7 @@ impl App {
                         let _ = WidgetExt::activate_action(&app.window, action, None);
                     }
                     palette::Item::Tag(tag) => app.show_tag(tag),
+                    palette::Item::Symbol(symbol) => app.goto_symbol(symbol),
                     // Through the shell, which raises the window that vault already has rather
                     // than opening a second one on the same index, session and watcher.
                     palette::Item::Vault(key) => {
@@ -233,6 +259,21 @@ impl App {
         if let Some(sidebar) = self.sidebar.get() {
             sidebar.show_tag(tag);
         }
+    }
+
+    /// Open the file a declaration is in, as Go to File does, with the caret on its name.
+    fn goto_symbol(self: &Rc<Self>, symbol: &CodeSymbol) {
+        self.mark();
+        let name = symbol.name.clone();
+        let (first, last) = (
+            symbol.line.saturating_sub(1),
+            symbol.end_line.saturating_sub(1),
+        );
+        self.with_tab(&symbol.rel_path, Opened::Kept, "go to", move |_, tab| {
+            let text = tab.text();
+            let lines: Vec<&str> = text.lines().collect();
+            tab.goto_pos(lang::name_at(&lines, first, last, &name));
+        });
     }
 
     /// Remember that this file was just looked at. Called from `sync_active`, so it covers

@@ -313,6 +313,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 ### Palette
 
 - One `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code's convention).
+- A leading `#` lists the vault's tags, and a leading `@` is Go to Symbol: the declarations the index holds across the vault (Architecture, Code declarations) whose names hold what follows, `Type::name` or `Type.name` keeping to a type's, each row the kind's glyph and the name with the type it is in and `path:line` dim beside it. The index is asked as the query changes, on the host for a remote vault, and its rows are ranked by the fuzzy matcher over their names, its own order (the name itself, then a name starting with it, then one holding it, a test's last) breaking ties. Picking one opens its file as Go to File does, the caret on the name; a bare `@` says what to type. VS Code's `@` is the open file's symbols and its `#` the workspace's: here `#` was the tags' first, and the open file's symbols are the Outline.
 - A primary click outside it closes it as Escape does, and does nothing else: no tab switches and no caret moves under it. libadwaita closes only a bottom sheet so, a floating dialog's dimming being a window handle, so the dialog's own capture-phase gesture does it (`dialogs::close_on_outside_press`), Preferences' and About's too (Dismiss).
 - Go to File also lists each note a link names that is not written yet, after the files at the same score and marked Not created; picking one follows it as the link would, offering New File with its path typed in.
 - It lists the notes in the folders git ignores too, after the indexed files at the same score and marked Ignored, as the tree dims them: the last walk of those folders, shown at once, and walked again in the background as the dialog opens (Architecture, Gitignored folders). A note a link finds in one is no Not created row.
@@ -663,6 +664,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Search `Ctrl+Shift+F` and Replace in Files `Ctrl+Shift+H` do the same in the Search pane: the editor's selection, where there is one, is the query, and the box that takes the keyboard has all it holds selected, so what is typed next replaces it.
 - `Up` / `Down` in a query or replacement box, the find bar's or the Search pane's, walk back through the ones used earlier in this run and forward again to what was being typed, as a shell does; each kind of box shares one list, not saved.
 - Search Ignored Files is the Search pane's `All` button by another route.
+- Typed first in the palette, `>` runs a command, `#` filters by tag and `@` goes to a symbol (Palette); the last two have no chord or command of their own.
 
 ### Editing
 

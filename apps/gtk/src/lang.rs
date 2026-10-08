@@ -10,7 +10,7 @@
 //! of keystrokes costs one round trip rather than one per key.
 
 use crate::editor::{Flavour, Tab};
-use accent_api::{CodeSymbol, Kind, Pos, Range, Support, Symbol, Vault};
+use accent_api::{CodeSymbol, Kind, Pos, Range, Support, Symbol, SymbolKind, Vault};
 use futures_channel::oneshot;
 use gtk::glib;
 use gtk::prelude::*;
@@ -715,6 +715,22 @@ pub fn icon_name(kind: Kind) -> &'static str {
         Kind::Folder => "lsp-folder-symbolic",
         Kind::Tag => "lsp-tag-symbolic",
     }
+}
+
+/// The icon for a declaration the index holds: the one a server's completion of the same thing
+/// gets, a trait being an interface and a type alias a type parameter, as rust-analyzer has them.
+pub fn declaration_icon(kind: SymbolKind) -> &'static str {
+    icon_name(match kind {
+        SymbolKind::Function | SymbolKind::Macro => Kind::Function,
+        SymbolKind::Method => Kind::Method,
+        SymbolKind::Struct => Kind::Struct,
+        SymbolKind::Enum => Kind::Enum,
+        SymbolKind::Trait => Kind::Interface,
+        SymbolKind::Class => Kind::Class,
+        SymbolKind::TypeAlias => Kind::TypeParameter,
+        SymbolKind::Module => Kind::Module,
+        SymbolKind::Const => Kind::Constant,
+    })
 }
 
 #[cfg(test)]

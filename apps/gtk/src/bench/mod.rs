@@ -35,6 +35,7 @@ mod search;
 mod start;
 mod style;
 mod suggest;
+mod symbols;
 mod synctex;
 mod tags;
 mod toasts;
@@ -103,7 +104,8 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` clicks outside each dialog through XTEST
 /// instead (`dismiss::bench_dismiss`), `=prefs` times Preferences presenting (`bench_prefs`), and
 /// `=ignored:<rel>` follows a note in a gitignored folder into the window (`ignored::bench_ignored`),
-/// and `=early:<query>` is the list landing in a dialog already open (`corpus::bench_early`).
+/// and `=early:<query>` is the list landing in a dialog already open (`corpus::bench_early`), and
+/// `=symbol:<query>` is Go to Symbol's rows for `@<query>` and its first opened (`symbols`).
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
@@ -1081,6 +1083,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(query) = query.strip_prefix("early:") {
             return corpus::bench_early(&app, query);
+        }
+        if let Some(query) = query.strip_prefix("symbol:") {
+            return symbols::bench_symbol(&app, query);
         }
         if query == "prefs" {
             return bench_prefs(&app);
