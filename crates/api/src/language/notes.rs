@@ -333,11 +333,8 @@ pub(crate) fn folds_of(text: &str, a: &markdown::Analysis) -> Vec<Fold> {
 /// The last byte of the section opened by `headings[i]`: everything down to the next heading
 /// that is not below it, or to the end of the note.
 fn section_end(text: &str, headings: &[markdown::Heading], i: usize) -> usize {
-    headings[i + 1..]
-        .iter()
-        .find(|next| next.level <= headings[i].level)
-        // The byte before the next heading is the newline that ends the section's last line.
-        .map_or(text.len(), |next| next.range.start)
+    // The byte before the next heading is the newline that ends the section's last line.
+    markdown::section_end(headings, i, text.len())
         .saturating_sub(1)
         .max(headings[i].range.end)
 }
