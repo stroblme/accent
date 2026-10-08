@@ -20,6 +20,7 @@ use rmcp::{ServerHandler, ServiceExt, tool_handler};
 use serde_json::Value;
 
 mod explore;
+mod graph;
 mod tools;
 
 /// Most a read hands back: a note past it is read a section at a time, an image past it not at

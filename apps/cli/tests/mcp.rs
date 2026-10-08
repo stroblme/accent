@@ -329,6 +329,53 @@ fn explore_ranks_by_links_and_answers_a_path_with_its_card() {
     c.close();
 }
 
+/// `explore` on code: a declaration named is shown with its callers, what it calls, whether a
+/// test reaches it and the calls from it to another named, and a code file's card is its
+/// outline.
+#[test]
+fn explore_follows_code_by_name() {
+    let scratch = Scratch::new("code");
+    let write = |rel: &str, text: &str| std::fs::write(scratch.dir.join("vault").join(rel), text);
+    write(
+        "lib.rs",
+        "pub struct Index;\n\nimpl Index {\n    /// Finds the links.\n    pub fn backlinks(&self) -> \
+         usize {\n        helper()\n    }\n}\n\nfn helper() -> usize {\n    1\n}\n\n\
+         #[cfg(test)]\nmod tests {\n    #[test]\n    fn counts() {\n        \
+         assert_eq!(super::Index.backlinks(), 1);\n    }\n}\n",
+    )
+    .unwrap();
+    write(
+        "use.rs",
+        "fn caller(ix: &Index) -> usize {\n    ix.backlinks()\n}\n",
+    )
+    .unwrap();
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+
+    let (said, error) = c.call("explore", json!({"query": "Index::backlinks helper"}));
+    assert!(!error, "{said:?}");
+    for row in [
+        "- `Index::backlinks` method (lib.rs:5) — 2 calls in `lib.rs`, `use.rs`; tested by \
+         `counts` (lib.rs)",
+        "  calls `helper`",
+        "**Call paths**\n- `backlinks` → `helper`",
+        "4\t    /// Finds the links.\n5\t    pub fn backlinks(&self) -> usize {",
+    ] {
+        assert!(said[0].contains(row), "{row:?} not in {}", said[0]);
+    }
+
+    let (said, _) = c.call("explore", json!({"query": "lib.rs"}));
+    assert!(
+        said[0].contains(
+            "Outline:\n  1  struct Index\n  5  method Index::backlinks\n  10  fn helper\n  \
+             15  mod tests\n  17  fn counts\n"
+        ),
+        "{}",
+        said[0]
+    );
+    c.close();
+}
+
 /// The listings beside `explore`: a folder, the files changed last, and the notes links wait for.
 #[test]
 fn mcp_lists_folders_recent_files_and_missing_notes() {
