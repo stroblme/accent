@@ -430,8 +430,13 @@ impl Language for Layered {
     fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Completions> {
         let rel = rel.to_string();
         Box::pin(async move {
+            // A primary that fails, a server still indexing say, takes nothing from the words.
             let mut answer = match &self.primary {
-                Some(p) => p.completion(&rel, pos, trigger).await?,
+                Some(p) => p
+                    .completion(&rel, pos, trigger)
+                    .await
+                    .inspect_err(|e| tracing::debug!("completion for {rel}: {e:#}"))
+                    .unwrap_or_default(),
                 None => Completions::default(),
             };
             // A path has no use for prose words.
@@ -596,6 +601,28 @@ mod tests {
         assert_eq!(answer, Completions::default());
     }
 
+    /// A primary that fails is no reason to go without the words.
+    #[test]
+    fn a_failing_primary_still_leaves_the_words() {
+        let primary = Fake::new("primary");
+        primary.dead.store(true, Ordering::Relaxed);
+        let doc = Layered::new(
+            Some(primary),
+            None,
+            None,
+            Arc::new(AtomicBool::new(true)),
+            None,
+        );
+        doc.open("a.md", "markdown", "theorem theory\nthe".into())
+            .unwrap_or_default();
+        let at = Pos {
+            line: 1,
+            character: 3,
+        };
+        let answer = accent_lsp::runtime().block_on(doc.completion("a.md", at, None));
+        assert!(answer.unwrap().items.len() >= 2, "theorem and theory");
+    }
+
     /// Inside a link the note's rows are the whole answer: a word would be prose in the link.
     #[test]
     fn a_link_being_typed_gets_no_words() {
@@ -685,6 +712,7 @@ mod tests {
         }
         fn completion(&self, _: &str, _: Pos, _: Option<char>) -> Fut<'_, Completions> {
             Box::pin(async {
+                anyhow::ensure!(!self.is_dead(), "{} has exited", self.name);
                 Ok(Completions {
                     items: locked(&self.items).clone(),
                     ..Completions::default()

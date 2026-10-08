@@ -29,7 +29,7 @@ use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
-use accent_api::{Completion, Completions, Kind, Pos};
+use accent_api::{Completion, Completions, Kind, Pos, TextEdit};
 use accent_core::fuzzy::Corpus;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -54,7 +54,8 @@ pub(crate) trait Source {
     /// The answer at `at`, `trigger` being the character just typed when it is one the provider
     /// asked to be told about. A provider that cannot answer answers nothing.
     fn fetch(&self, at: Pos, trigger: Option<char>) -> Reply<Completions>;
-    /// `item` with what the provider keeps back until a row is looked at: its documentation.
+    /// `item` with what the provider keeps back until a row is looked at or accepted: its
+    /// documentation, and an import. A provider that cannot answer hands `item` back.
     fn resolve(&self, item: Completion) -> Reply<Completion>;
     /// The popup came up, or went.
     fn shown(&self, _up: bool) {}
@@ -145,6 +146,11 @@ pub(crate) struct Session {
     detail: RefCell<Option<glib::JoinHandle<()>>>,
     /// The session is editing the buffer itself, which opens nothing.
     muted: Cell<bool>,
+    /// How many times the buffer has changed: an accepted row waiting for its import is off
+    /// once this moves.
+    edits: Cell<u64>,
+    /// An accepted row waiting for what the provider kept back.
+    accepting: RefCell<Option<glib::JoinHandle<()>>>,
     /// The input method holds text not committed yet: the keys are its own.
     preedit: Cell<bool>,
     /// A look at the caret is queued for the next idle: a keystroke edits the buffer and moves
@@ -181,6 +187,8 @@ impl Session {
                 asked_at: Cell::new(None),
                 detail: RefCell::default(),
                 muted: Cell::new(false),
+                edits: Cell::new(0),
+                accepting: RefCell::default(),
                 preedit: Cell::new(false),
                 queued: Cell::new(false),
             }
@@ -195,6 +203,11 @@ impl Session {
             #[weak(rename_to = me)]
             self,
             move |_| me.queue()
+        ));
+        view.buffer().connect_changed(glib::clone!(
+            #[weak(rename_to = me)]
+            self,
+            move |_| me.edits.set(me.edits.get().wrapping_add(1))
         ));
         // Ahead of GtkSourceView's own handler, which runs last and would bring up its own popup.
         view.connect_show_completion(glib::clone!(
@@ -544,7 +557,12 @@ impl Session {
     }
 
     /// Write the item at `row` into the text, and end the session.
-    fn accept(&self, row: u32) {
+    ///
+    /// An item the provider can resolve is resolved first, the buffer untouched meanwhile: what
+    /// it kept back until now includes the import a symbol from another module needs, which
+    /// rust-analyzer sends only then, and which lands in the same undo step. Typing on before
+    /// the answer is in calls the acceptance off.
+    fn accept(self: &Rc<Self>, row: u32) {
         let buffer = self.view.buffer();
         let caret = caret(&buffer);
         let accepted = {
@@ -553,15 +571,41 @@ impl Session {
                 let item = &shown.items[*shown.rows.get(row as usize)?].completion;
                 let moved = shown.anchor.moved(&buffer, &caret)?;
                 let range = apply::replaced(item.replace, moved, lang::pos_of(&caret));
-                Some((item.clone(), range))
+                let extras = item.extra_edits.iter().map(|e| moved.edit(e)).collect();
+                Some((item.clone(), range, extras))
             })
         };
         self.close();
-        let Some((item, range)) = accepted else {
+        let Some((item, range, extras)) = accepted else {
             return;
         };
+        if item.resolve.is_none() {
+            return self.write(&item, range, extras);
+        }
+        let (me, edits) = (Rc::downgrade(self), self.edits.get());
+        let asked = self.source.resolve(item.clone());
+        let handle = glib::spawn_future_local(async move {
+            let full = asked.await;
+            let Some(me) = me.upgrade().filter(|me| me.edits.get() == edits) else {
+                return;
+            };
+            drop(me.accepting.take());
+            // Edits the answer itself had are about the text it was asked about, and were
+            // moved on above; the provider's own resolve answers about the text as it is.
+            let extras = match full.extra_edits == item.extra_edits {
+                true => extras,
+                false => full.extra_edits,
+            };
+            me.write(&item, range, extras);
+        });
+        if let Some(old) = self.accepting.replace(Some(handle)) {
+            old.abort();
+        }
+    }
+
+    fn write(&self, item: &Completion, range: accent_api::Range, extras: Vec<TextEdit>) {
         self.muted.set(true);
-        apply::apply(&buffer, &item, range, |snippet, at| {
+        apply::apply(&self.view.buffer(), item, range, extras, |snippet, at| {
             self.source.push_snippet(&self.view, snippet, at)
         });
         self.muted.set(false);

@@ -75,13 +75,20 @@ pub fn markup(sig: &Signature) -> String {
 /// Wire a tab's view to ask for a signature and to know when to stop showing one. Called by
 /// [`lang::attach`].
 pub fn install(tab: &Rc<Tab>) {
-    // A trigger character was typed. Connected before the insertion lands, so the caret is read
-    // one idle later, once it sits after the character the server is being asked about.
+    // A trigger character was typed: one character, or the pair `typing` writes for a bracket,
+    // at the caret, as for the completion popup. A template landing with a `(` in it is not a
+    // call being typed. Connected before the insertion lands, so the caret is read one idle
+    // later, once it sits after the character the server is being asked about.
     tab.buffer.connect_insert_text(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_, _, text| {
-            let Some(last) = text.chars().next_back().filter(|_| !tab.is_loading()) else {
+        move |buffer, at, text| {
+            let typed = text.chars().count() <= 2 && at.offset() == caret(buffer).offset();
+            let Some(last) = text
+                .chars()
+                .next_back()
+                .filter(|_| typed && !tab.is_loading())
+            else {
                 return;
             };
             let asks = tab
