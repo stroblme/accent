@@ -424,11 +424,20 @@ fn cut(
 /// page units or not at all.
 pub fn label_html(runs: &[Run], font: &Font, align: Align, width: Option<f64>) -> String {
     // `Arial,Helvetica` is a list of two families, as draw.io's default is: each is quoted on its
-    // own, or CSS reads the whole thing as one family name nothing answers to.
+    // own, or CSS reads the whole thing as one family name nothing answers to. Each is a CSS
+    // string inside an HTML attribute, as whoever wrote the file wrote it: a quote, a backslash,
+    // a line break or a tag could end one or the other, and so could the character an `&` names.
     let families: Vec<String> = font
         .family
         .split(',')
-        .map(|f| format!("'{}'", f.trim().replace('\'', "")))
+        .map(|f| {
+            let f: String = f
+                .trim()
+                .chars()
+                .filter(|c| !matches!(c, '\'' | '"' | '\\' | '&' | '<' | '>') && !c.is_control())
+                .collect();
+            format!("'{f}'")
+        })
         .collect();
     let mut style = format!(
         "font-family: {}, sans-serif; font-size: {}px; color: {};",
@@ -560,6 +569,38 @@ mod tests {
             key_of(&html),
             key_of(&label_html(&runs, &font, Align::Left, None))
         );
+    }
+
+    /// A family is a CSS string inside an HTML attribute, written by whoever wrote the file:
+    /// nothing in it ends either, so a `.drawio` file can put neither markup on the typesetter's
+    /// page nor a declaration fetching something into the label's style.
+    #[test]
+    fn a_font_family_stays_inside_its_quotes() {
+        for family in [
+            "x\"><img src=\"http://example.com/x.png\">",
+            "x'; background: url(http://example.com/x.png); '",
+            "x\\'; background: url(http://example.com/x.png); '",
+            "x&#39;; background: url(http://example.com/x.png); &#39;",
+            "x\n;background: url(http://example.com/x.png);",
+        ] {
+            let font = Font {
+                size: 14.0,
+                family: family.into(),
+                color: Color::rgb(0, 0, 0),
+                bold: false,
+                italic: false,
+                underline: false,
+            };
+            let html = label_html(&[], &font, Align::Left, None);
+            let quoted = html
+                .strip_prefix("<div style=\"font-family: '")
+                .and_then(|s| s.split_once("', sans-serif;"))
+                .map_or("", |(quoted, _)| quoted);
+            assert!(
+                quoted.starts_with('x') && !quoted.contains(['\'', '"', '\\', '&', '<', '\n']),
+                "{html}"
+            );
+        }
     }
 
     #[test]
