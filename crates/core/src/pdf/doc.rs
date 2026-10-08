@@ -7,7 +7,9 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow};
 use pdfium_render::prelude::*;
 
-use super::{Glyph, Link, LinkTarget, Outline, Rect, RgbaImage, Theme, lock, pdfium};
+use super::{
+    Glyph, Info, Link, LinkTarget, Outline, Rect, RgbaImage, Theme, lock, parse_date, pdfium,
+};
 use crate::fs::Etag;
 use crate::recolour::recolour;
 use crate::search::Options;
@@ -362,6 +364,40 @@ impl PdfDoc {
             }
         }
         Ok(out)
+    }
+
+    /// What the document says about itself, blank entries left out (`Info`).
+    pub fn info(&self) -> Info {
+        use PdfDocumentMetadataTagType as Tag;
+        let _guard = lock();
+        let doc = self.doc();
+        let tag = |kind| {
+            let value = doc.metadata().get(kind)?;
+            let value = value.value().trim();
+            (!value.is_empty()).then(|| value.to_string())
+        };
+        let version = match doc.version() {
+            PdfDocumentVersion::Pdf1_0 => Some("1.0"),
+            PdfDocumentVersion::Pdf1_1 => Some("1.1"),
+            PdfDocumentVersion::Pdf1_2 => Some("1.2"),
+            PdfDocumentVersion::Pdf1_3 => Some("1.3"),
+            PdfDocumentVersion::Pdf1_4 => Some("1.4"),
+            PdfDocumentVersion::Pdf1_5 => Some("1.5"),
+            PdfDocumentVersion::Pdf1_6 => Some("1.6"),
+            PdfDocumentVersion::Pdf1_7 => Some("1.7"),
+            PdfDocumentVersion::Pdf2_0 => Some("2.0"),
+            PdfDocumentVersion::Unset | PdfDocumentVersion::Other(_) => None,
+        };
+        Info {
+            title: tag(Tag::Title),
+            author: tag(Tag::Author),
+            subject: tag(Tag::Subject),
+            keywords: tag(Tag::Keywords),
+            creator: tag(Tag::Creator),
+            producer: tag(Tag::Producer),
+            created: tag(Tag::CreationDate).as_deref().and_then(parse_date),
+            version: version.map(str::to_string),
+        }
     }
 
     /// Text matches on one page: one entry per match, one rect per line the match spans.

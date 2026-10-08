@@ -482,6 +482,54 @@ fn flatten_samples_a_bezier_and_a_matrix_inverts() {
 }
 
 #[test]
+fn a_pdf_date_reads_with_or_without_its_parts() {
+    assert_eq!(parse_date("D:20231015143000+02'00'"), Some(1_697_373_000));
+    assert_eq!(parse_date("D:20231015143000Z"), Some(1_697_380_200));
+    assert_eq!(parse_date("D:20231015163000+0200"), Some(1_697_380_200));
+    assert_eq!(parse_date("D:2023"), Some(1_672_531_200));
+    assert_eq!(parse_date("20231015"), Some(1_697_328_000));
+    assert_eq!(parse_date("D:19991231235959-00'00'"), Some(946_684_799));
+    for garbage in [
+        "",
+        "yesterday",
+        "D:202",
+        "D:20231345",
+        "D:2023101525",
+        "D:2023x",
+    ] {
+        assert_eq!(parse_date(garbage), None, "{garbage:?}");
+    }
+}
+
+/// The information dictionary as a document carries it, blank entries and a date with a zone
+/// among them.
+#[test]
+fn a_documents_info_is_its_dictionary() {
+    if !available() {
+        eprintln!("skipping: no libpdfium");
+        return;
+    }
+    let objs = [
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>".to_string(),
+        "<</Title(Field Notes)/Author( )/Creator(Writer)\
+         /CreationDate(D:20231015143000+02'00')>>"
+            .to_string(),
+    ];
+    let bytes = String::from_utf8(pdf_of(&objs)).unwrap();
+    let bytes = bytes.replace("/Root 1 0 R>>", "/Root 1 0 R/Info 4 0 R>>");
+    let doc = PdfDoc::from_bytes(bytes.into_bytes()).unwrap();
+    let info = doc.info();
+    assert_eq!(info.title.as_deref(), Some("Field Notes"));
+    assert_eq!(info.author, None);
+    assert_eq!(info.creator.as_deref(), Some("Writer"));
+    assert_eq!(info.producer, None);
+    assert_eq!(info.created, Some(1_697_373_000));
+    assert_eq!(info.version.as_deref(), Some("1.4"));
+}
+
+#[test]
 fn blank_pdf_is_one_page_of_the_size_it_was_asked_for() {
     if !available() {
         eprintln!("skipping: no libpdfium");

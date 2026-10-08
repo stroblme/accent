@@ -37,7 +37,10 @@ impl App {
                 title: "File",
                 facts: vec![
                     fact("Size", glib::format_size(etag.size)),
-                    fact("Modified", date_label(etag.mtime_ns)),
+                    fact(
+                        "Modified",
+                        date_label(etag.mtime_ns.div_euclid(1_000_000_000)),
+                    ),
                 ],
             });
         }
@@ -161,6 +164,21 @@ fn kind_group(doc: &Doc) -> Option<Group> {
                 pdf.page_size(0)
                     .map(|size| fact("Page Size", paper_label(size))),
             );
+            let info = pdf.info();
+            let said = [
+                ("Title", info.title),
+                ("Author", info.author),
+                ("Subject", info.subject),
+                ("Keywords", info.keywords),
+                ("Application", info.creator),
+                ("Producer", info.producer),
+                ("Created", info.created.map(date_label)),
+                ("PDF Version", info.version),
+            ];
+            facts.extend(
+                said.into_iter()
+                    .filter_map(|(name, value)| Some(fact(name, value?))),
+            );
             ("PDF", facts)
         }
         Doc::Image(image) => {
@@ -188,9 +206,9 @@ fn lines(buffer: &sourceview5::Buffer) -> i32 {
     buffer.line_count() - i32::from(ends_open)
 }
 
-/// An mtime as the locale writes a date and a time.
-fn date_label(mtime_ns: i64) -> String {
-    glib::DateTime::from_unix_local(mtime_ns.div_euclid(1_000_000_000))
+/// A time, in seconds since the epoch, as the locale writes a date and a time.
+fn date_label(secs: i64) -> String {
+    glib::DateTime::from_unix_local(secs)
         .and_then(|time| time.format("%x %X"))
         .map(|text| text.to_string())
         .unwrap_or_default()
