@@ -159,7 +159,7 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
         );
         return Ok(out);
     }
-    out.push_str(&format!("{} files, best first.\n\n", found.len()));
+    out.push_str(&format!("{}, best first.\n\n", count(found.len(), "file")));
     out.push_str(&graph.summary);
     // Cards in rank order while they fit beside a line for each of the files after them, which
     // the first card that does not fit leaves to that list.
@@ -187,7 +187,7 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
             let why = match (f.hits, f.near) {
                 (0, 0) => String::new(),
                 (0, near) => format!(" (linked with {near} of these)"),
-                (hits, _) => format!(" ({hits} hits)"),
+                (hits, _) => format!(" ({})", count(hits, "hit")),
             };
             let line = format!("- `{rel}`{title}{why}\n");
             if out.len() + line.len() > budget {
@@ -722,6 +722,14 @@ fn merge(mut ranges: Vec<RangeInclusive<usize>>) -> Vec<RangeInclusive<usize>> {
         }
     }
     merged
+}
+
+/// `n` of `what`, in the plural but for one.
+pub(super) fn count(n: usize, what: &str) -> String {
+    match n {
+        1 => format!("1 {what}"),
+        n => format!("{n} {what}s"),
+    }
 }
 
 /// The longest run of backticks in `text`: the fence around it has to be longer.

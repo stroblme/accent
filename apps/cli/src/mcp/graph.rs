@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use accent_api::{CodeSymbol, Mention, Read};
 use accent_core::code;
 
+use super::explore::count;
 use super::{Shared, fail};
 
 /// Declarations one name stands for, at most, and the names followed.
@@ -100,13 +101,12 @@ pub(super) fn graph(s: &Shared, seeds: &[Seed], shown: &[String]) -> Result<Grap
         line.push_str(&match callers.len() {
             0 => "no callers found".to_string(),
             n => format!(
-                "{n} call{} in {}{}",
-                if n == 1 { "" } else { "s" },
+                "{} in {}{}",
+                count(n, "call"),
                 files.join(", "),
-                if more > 0 {
-                    format!(" +{more} files")
-                } else {
-                    String::new()
+                match more {
+                    0 => String::new(),
+                    more => format!(" +{}", count(more, "file")),
                 }
             ),
         });
