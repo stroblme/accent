@@ -163,6 +163,58 @@ pub(super) fn carried(view: &sourceview5::View, at: &gtk::TextIter) -> (i32, i32
     (above, below)
 }
 
+/// What [`carried`] reads off the paragraph starting at each of `starts`, which ascend, for all of
+/// them in one walk over the padding tags' own toggles: reading every paragraph's tags took 430 ms
+/// a relayout at 120,000 rows a column (2026-10-08).
+pub(super) fn carried_all(
+    view: &sourceview5::View,
+    buffer: &sourceview5::Buffer,
+    starts: &[i32],
+) -> Vec<(i32, i32)> {
+    let base = [view.pixels_above_lines(), view.pixels_below_lines()];
+    let mut tags = Vec::new();
+    buffer.tag_table().foreach(|tag| {
+        if is_pad(tag) {
+            tags.push(tag.clone());
+        }
+    });
+    // Every stretch a padding tag covers: where it begins and ends, the tag's priority, whether
+    // it pads below, and its pixels over the view's own.
+    let mut spans = Vec::new();
+    for tag in &tags {
+        let below = tag.name().is_some_and(|name| name.starts_with(PAD_BELOW));
+        let px = match below {
+            true => tag.pixels_below_lines() - base[1],
+            false => tag.pixels_above_lines() - base[0],
+        };
+        let mut at = buffer.start_iter();
+        while at.has_tag(tag) || at.forward_to_tag_toggle(Some(tag)) {
+            let from = at.offset();
+            at.forward_to_tag_toggle(Some(tag));
+            spans.push((from, at.offset(), tag.priority(), below, px));
+        }
+    }
+    spans.sort_unstable_by_key(|span| span.0);
+    let (mut next, mut open) = (0, Vec::new());
+    starts
+        .iter()
+        .map(|&at| {
+            while let Some(&span) = spans.get(next).filter(|span| span.0 <= at) {
+                open.push(span);
+                next += 1;
+            }
+            open.retain(|span| span.1 > at);
+            // The one GTK uses where two cover it, as `carried` reads it.
+            let pick = |below: bool| {
+                (open.iter().filter(|span| span.3 == below))
+                    .max_by_key(|span| span.2)
+                    .map_or(0, |span| span.4)
+            };
+            (pick(false), pick(true))
+        })
+        .collect()
+}
+
 /// Give the paragraph `from..to` (its newline included) `above` pixels of padding above it and
 /// `below` under it, where its first character does not carry exactly that already: a paragraph
 /// left alone is not laid out again. `true` when it was not left alone.

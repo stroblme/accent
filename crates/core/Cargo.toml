@@ -36,7 +36,8 @@ regex = "1"
 memchr = "2"
 blake3.workspace = true
 toml = "1"
-similar = { version = "3", default-features = false, features = ["text", "inline"] }
+# `std` for the clock: without it every deadline the word diff is given is ignored.
+similar = { version = "3", default-features = false, features = ["std", "text", "inline"] }
 chrono.workspace = true
 # `setsid` and `kill` for git's process group: a git stopped part way takes its hooks and its ssh
 # with it (`git::bounded`).

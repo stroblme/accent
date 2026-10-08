@@ -8,6 +8,7 @@ use accent_api::{Fold, Severity};
 
 mod disk;
 mod git;
+mod large;
 mod merge;
 
 pub(super) use disk::{
@@ -19,6 +20,7 @@ pub(super) use git::{
     bench_compare_clicks, bench_compare_lines, bench_compare_pads, bench_compare_pick,
     bench_compare_row, bench_compare_session, bench_compare_stale, bench_compare_typing,
 };
+pub(super) use large::bench_compare_large;
 pub(super) use merge::bench_compare_merge;
 
 /// What the newest toast over the window reads, whatever it says: [`bench_said`] looks for a

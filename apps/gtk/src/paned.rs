@@ -11,8 +11,9 @@
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
-/// The class the CSS in `main::install_chrome_css` widens the line for.
-const DRAGGING: &str = "dragging";
+/// The class the CSS in `main::install_chrome_css` widens the line for, and what tells the Info
+/// pane's dividers a move is the reader's.
+pub(crate) const DRAGGING: &str = "dragging";
 
 /// One button press on a handle, in window coordinates and GDK's own event time (milliseconds),
 /// which is what `gtk-double-click-time` is measured in.

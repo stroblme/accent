@@ -62,16 +62,21 @@ impl Section {
     }
 }
 
-/// A divider between two parts of the pane. Where it sits while both sides are open is a share
-/// of its height, so it survives the side beside it being shut and opened again.
+/// A share of a divider's height, where the paned's own handlers can reach it.
+type Share = Rc<Cell<Option<f64>>>;
+
+/// A divider between two parts of the pane. While both sides are open it is held at an even
+/// split of what is open, or at the share of its height the reader dragged it to, which it keeps
+/// through the side beside it being shut and opened again.
 struct Divider {
     paned: gtk::Paned,
-    /// The start side's share, from where the reader left the divider; `None` is an even split.
-    share: Cell<Option<f64>>,
-    /// Whether both sides were open the last time the pane was fitted.
-    both: Cell<bool>,
-    /// A share waiting for the paned to be given a height.
-    pending: Rc<Cell<Option<f64>>>,
+    /// The start side's share where the reader last dragged the divider; `None` until they do,
+    /// which keeps it at an even split however many sections come and go.
+    share: Share,
+    /// The share the divider is held at while both sides are open; `None` while one is shut.
+    held: Share,
+    /// Whether a placing is waiting for the frame's layout.
+    placing: Rc<Cell<bool>>,
 }
 
 impl Divider {
@@ -84,71 +89,90 @@ impl Divider {
             .shrink_end_child(false)
             .vexpand(true)
             .build();
-        // A paned learns its height in its first allocation, which is also the first time its
-        // range moves: a share asked for before then is put in place there.
-        let pending: Rc<Cell<Option<f64>>> = Rc::default();
-        paned.connect_max_position_notify({
-            let pending = pending.clone();
+        let (share, held): (Share, Share) = Default::default();
+        // A drag is told from every other move by the class `paned::watch` puts on a handle
+        // while it is held: the pane placing the divider, and GTK handing a resize out, are not
+        // the reader's.
+        paned.connect_position_notify({
+            let (share, held) = (share.clone(), held.clone());
             move |paned| {
-                if let Some(share) = pending.take() {
-                    paned.set_position(at(paned, share));
+                let height = paned.height();
+                if paned.has_css_class(crate::paned::DRAGGING) && held.get().is_some() && height > 0
+                {
+                    let dragged = f64::from(paned.position()) / f64::from(height);
+                    share.set(Some(dragged));
+                    held.set(Some(dragged));
                 }
             }
         });
         Divider {
             paned,
-            share: Cell::new(None),
-            both: Cell::new(false),
-            pending,
+            share,
+            held,
+            placing: Rc::default(),
         }
     }
 
-    /// Lay the divider out for which of its sides are open: at its share while both are, else
-    /// against the shut side, `GtkPaned` sizing that side to its header when no position is set
-    /// and only the other side takes the space.
+    /// Lay the divider out for which of its sides are open: while both are, at the reader's
+    /// share or else at `even`, which moves with the sections open; else against the shut side,
+    /// `GtkPaned` sizing that side to its header when no position is set and only the other side
+    /// takes the space.
     fn fit(&self, start: bool, end: bool, even: f64) {
-        let both = start && end;
-        if self.both.get() && !both {
-            self.share.set(self.measured());
-        }
-        let was = self.both.replace(both);
         self.paned.set_resize_start_child(start);
         self.paned.set_resize_end_child(end || !start);
-        match both {
-            true if !was => self.place(self.share.get().unwrap_or(even)),
-            true => {}
-            false => {
-                self.pending.set(None);
-                self.paned.set_position(-1);
-            }
+        let held = (start && end).then(|| self.share.get().unwrap_or(even));
+        self.held.set(held);
+        match held {
+            Some(_) => self.place(),
+            None => self.paned.set_position(-1),
         }
     }
 
-    fn place(&self, share: f64) {
-        match self.paned.height() {
-            0 => self.pending.set(Some(share)),
-            _ => {
-                self.pending.set(None);
-                self.paned.set_position(at(&self.paned, share));
-            }
+    /// Put the divider at its held share of the height it is about to have.
+    ///
+    /// In the frame's layout, after the window's own handler has allocated: a section shown or
+    /// shut above this divider changes its height in the same turn, so the height it has now is
+    /// the one it is leaving, and `GtkPaned` hands the change out by the old position — or not at
+    /// all, where it last laid out one side alone. What is moved there is laid out again within
+    /// the frame (`App::restyle_all` leans on the same order). A paned not realized yet is placed
+    /// when the pane is mapped.
+    fn place(&self) {
+        let Some(clock) = self.paned.frame_clock() else {
+            return;
+        };
+        if self.placing.replace(true) {
+            return;
         }
-    }
-
-    /// The share to remember: where the divider is while both sides are open, else where it was.
-    fn measured(&self) -> Option<f64> {
-        match (self.both.get(), self.paned.height()) {
-            (true, height) if height > 0 => {
-                Some(f64::from(self.paned.position()) / f64::from(height))
+        let handler = Rc::new(RefCell::new(None));
+        let id = clock.connect_layout({
+            let (paned, held, placing) = (
+                self.paned.downgrade(),
+                self.held.clone(),
+                self.placing.clone(),
+            );
+            let handler = handler.clone();
+            move |clock| {
+                if let Some(id) = handler.take() {
+                    clock.disconnect(id);
+                }
+                placing.set(false);
+                if let (Some(paned), Some(share)) = (paned.upgrade(), held.get())
+                    && paned.height() > 0
+                {
+                    paned.set_position(at(&paned, share));
+                }
             }
-            _ => self.share.get(),
-        }
+        });
+        *handler.borrow_mut() = Some(id);
+        clock.request_phase(gtk::gdk::FrameClockPhase::LAYOUT);
     }
 
     /// Back to an even split: a double-click on the handle.
     fn reset(&self, even: f64) {
         self.share.set(None);
-        if self.both.get() {
-            self.place(even);
+        if self.held.get().is_some() {
+            self.held.set(Some(even));
+            self.place();
         }
     }
 }
@@ -208,6 +232,16 @@ impl Info {
             vault: vault.is_some(),
             shown_for: RefCell::default(),
             tags_forced: Cell::new(false),
+        });
+        // A paned has its height once the pane is on screen, which is where the dividers placed
+        // before then go.
+        info.root.connect_map({
+            let weak = Rc::downgrade(&info);
+            move |_| {
+                if let Some(info) = weak.upgrade() {
+                    info.fit();
+                }
+            }
         });
         for section in [&info.references, &info.tags, &info.details] {
             let weak = Rc::downgrade(&info);
@@ -300,7 +334,7 @@ impl Info {
             references: self.references.root.is_expanded(),
             tags: self.tags.root.is_expanded(),
             details: self.details.root.is_expanded(),
-            dividers: self.dividers.each_ref().map(Divider::measured),
+            dividers: self.dividers.each_ref().map(|divider| divider.share.get()),
         }
     }
 
@@ -340,9 +374,6 @@ impl Info {
     pub(super) fn restore(&self, saved: &InfoPane) {
         for (divider, share) in self.dividers.iter().zip(saved.dividers) {
             divider.share.set(share);
-            // Placed again even where both sides stay open, so the share read back is the one
-            // shown.
-            divider.both.set(false);
         }
         self.references.root.set_expanded(saved.references);
         self.tags.root.set_expanded(saved.tags);

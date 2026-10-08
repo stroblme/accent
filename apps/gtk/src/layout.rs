@@ -366,6 +366,23 @@ impl App {
         self.lift_toasts(over.then_some(height));
     }
 
+    /// While presenting, the status bar's widget a fresh pick finds at `(x, y)` in `from`'s
+    /// coordinates, or `None` where the bar is not up there.
+    ///
+    /// GTK aims a press at the widget the last motion was over. It moves a pointer at rest onto
+    /// what a layout change put under it with a motion of its own, but only once the surface's
+    /// frame is thawed, which a compositor's frame callback does and Xvfb or an X11 window
+    /// manager without frame sync never does: there the press beats it, and a bar that came up
+    /// under a resting pointer had its press go to the document beneath (`wire_window`).
+    pub fn bar_widget_at(&self, from: &gtk::Widget, x: f64, y: f64) -> Option<gtk::Widget> {
+        self.presenting.get()?;
+        let point = from.compute_point(&self.window, &graphene::Point::new(x as f32, y as f32))?;
+        let bar = self.statusbar.widget();
+        self.window
+            .pick(point.x().into(), point.y().into(), gtk::PickFlags::DEFAULT)
+            .filter(|picked| picked == bar || picked.is_ancestor(bar))
+    }
+
     /// The pointer in the window's coordinates, `None` while it is off the window.
     pub fn pointer(&self) -> Option<(f64, f64)> {
         let pointer = WidgetExt::display(&self.window).default_seat()?.pointer()?;

@@ -17,6 +17,13 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { version = "4", features = ["derive"] }
+# `mcp`: the Model Context Protocol over stdio, on the process's one runtime (`accent-lsp`).
+rmcp = { version = "3.5", features = ["transport-io"] }
+accent-lsp.workspace = true
+tokio.workspace = true
+serde.workspace = true
+# What `read_note` hands an image in as; rmcp's own.
+base64 = "0.23"
 # The terminal holder: ptys and signals, and a screen model to redraw a shell on reattach.
 libc = "0.2"
 vt100 = "0.16"

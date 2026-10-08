@@ -23,6 +23,7 @@ mod info;
 mod keys;
 mod loose;
 mod memory;
+mod minimap;
 mod outline;
 mod panes;
 mod pdf;
@@ -42,11 +43,11 @@ use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_find, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_clicks, bench_compare_conflict, bench_compare_diag,
-    bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_left,
-    bench_compare_lines, bench_compare_merge, bench_compare_pads, bench_compare_page,
-    bench_compare_pick, bench_compare_press, bench_compare_reader, bench_compare_row,
-    bench_compare_runaway, bench_compare_session, bench_compare_stale, bench_compare_typing,
-    bench_compare_unfold,
+    bench_compare_folds, bench_compare_gap, bench_compare_gutter, bench_compare_large,
+    bench_compare_left, bench_compare_lines, bench_compare_merge, bench_compare_pads,
+    bench_compare_page, bench_compare_pick, bench_compare_press, bench_compare_reader,
+    bench_compare_row, bench_compare_runaway, bench_compare_session, bench_compare_stale,
+    bench_compare_typing, bench_compare_unfold,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -70,6 +71,7 @@ use keys::{
     bench_box_drag, bench_hold, bench_keys, bench_list, bench_menu_caret, bench_occurrence_keys,
     bench_shell_keys, bench_term,
 };
+use minimap::bench_minimap;
 use outline::bench_outline;
 use panes::{
     bench_apart, bench_back, bench_collapse, bench_cycle, bench_layout, bench_layout_pick,
@@ -235,7 +237,8 @@ use tags::bench_tags;
 /// frames meanwhile showed of the line typed into and its partner
 /// (`compare::bench_compare_typing`). `=session:save:<rel>,<other>` then `=session:back:…` on
 /// one scratch home leave comparisons with git open across a restart and print what came back
-/// (`compare::bench_compare_session`).
+/// (`compare::bench_compare_session`). `=large:<rel>` compares a long file with a copy changed
+/// throughout and prints how long each step held the main loop (`compare::bench_compare_large`).
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` reads the PDF through, hides and closes it
 /// and prints what the process holds after each, then opens and closes every kind of tab, a
 /// comparison, the preview, a shell and a window, and prints what outlived its close and how the
@@ -551,8 +554,11 @@ use tags::bench_tags;
 /// remote vault they wait for the host to
 /// answer, `<a>,…` and `=1` printing what the window shows until then, and `=quit` quits there the
 /// way Ctrl+Q does.
+///
+/// `ACCENT_BENCH_MINIMAP=<round>:<rel>` is the minimap's (`minimap::bench_minimap`).
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
+    let minimap = std::env::var("ACCENT_BENCH_MINIMAP").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
     let style = std::env::var("ACCENT_BENCH_STYLE").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").ok();
@@ -654,6 +660,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && preview_look.is_none()
         && !close
         && !hidden
+        && minimap.is_none()
     {
         return;
     }
@@ -672,6 +679,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if collapse {
             return bench_collapse(&app);
+        }
+        if let Some(arg) = minimap {
+            return bench_minimap(&app, &arg);
         }
         if let Some(arg) = memory {
             return memory::bench_memory(&app, &arg);
@@ -745,6 +755,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("typing:") {
                 return bench_compare_typing(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("large:") {
+                return bench_compare_large(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
@@ -829,13 +842,13 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = answer {
             return bench_answer(&app, &rel);
         }
+        if let Some(rels) = info {
+            return bench_info(&app, &rels);
+        }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);
         }
         if replace {
-        if let Some(rels) = info {
-            return bench_info(&app, &rels);
-        }
             return bench_replace(&app);
         }
         if let Some(query) = search {

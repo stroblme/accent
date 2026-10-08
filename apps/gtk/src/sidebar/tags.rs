@@ -136,8 +136,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     })));
     files_box.set_visible(false);
 
-    // A paned rather than a fixed height: the two lists share the pane, and where the user puts
-    // the divider survives the window being resized.
+    // A paned rather than a fixed height: the two lists share the section, and where the user
+    // puts the divider survives the window being resized.
     let paned = gtk::Paned::builder()
         .orientation(gtk::Orientation::Vertical)
         .start_child(&scroller(&view))
@@ -149,7 +149,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         .vexpand(true)
         .build();
     // The default position is set the first time there is anything below the divider, when the
-    // pane already knows how tall it is. Afterwards the position is the user's.
+    // section already knows how tall it is. Afterwards the position is the user's.
     let placed = Cell::new(false);
     // Weak: the paned holds the box this is connected to, and a strong handle would be a cycle
     // keeping the pane, and the vault behind `data`, alive after the window has closed.

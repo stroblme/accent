@@ -5,8 +5,10 @@ use accent_core::csv;
 use accent_core::markdown::{self, Span, Style};
 use gtk::prelude::*;
 use gtk::{gdk, pango};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 
 /// Byte offset -> char offset. `markdown::analyze` reports byte ranges, `TextBuffer` iters count
 /// characters, so every span boundary needs translating.
@@ -621,21 +623,99 @@ pub fn install_csv_tags(buffer: &sourceview5::Buffer) {
     }
 }
 
-/// Tag every cell with its column's tag, replacing whatever was there. A file that ends without a
-/// row terminator still has its last cell tagged, and an empty buffer yields no cells at all, so
-/// both are the same loop over nothing special.
+/// Tag every cell of `buffer` with its column's tag, replacing whatever was there: a companion's
+/// whole text, which is set at once. The editor keeps a [`Csv`] instead.
 pub fn apply_csv(buffer: &sourceview5::Buffer) {
-    let (start, end) = buffer.bounds();
-    let text = buffer.text(&start, &end, true);
-    for name in CSV_TAG_NAMES {
-        buffer.remove_tag_by_name(name, &start, &end);
+    Csv::default().apply(buffer);
+}
+
+/// A cell as a pass tags it: its characters and its column.
+type Tagged = (i32, i32, usize);
+
+/// A buffer's column colouring, kept from one pass to the next so that a pass after an edit
+/// re-tags only the cells the edit can have moved: tagging all of them took 1–2.5 s a pass at
+/// 120,000 rows (2026-10-08). A file that ends without a row terminator still has its last cell
+/// tagged, and an empty buffer yields no cells at all.
+#[derive(Default)]
+pub struct Csv {
+    /// The cells the last pass left tagged and the length of the text they are in, `None` before
+    /// the first pass.
+    tagged: RefCell<Option<(Vec<Tagged>, i32)>>,
+    /// How many characters lie before the first edit since that pass, and after the last one.
+    edited: Cell<Option<(i32, i32)>>,
+}
+
+impl Csv {
+    /// Colouring for `buffer`, its edits counted from now on, ahead of each landing.
+    pub fn tracking(buffer: &sourceview5::Buffer) -> Rc<Csv> {
+        let csv = Rc::new(Csv::default());
+        let c = csv.clone();
+        buffer.connect_insert_text(move |buffer, at, _| {
+            c.edit(at.offset(), buffer.char_count() - at.offset());
+        });
+        let c = csv.clone();
+        buffer.connect_delete_range(move |buffer, from, to| {
+            c.edit(from.offset(), buffer.char_count() - to.offset());
+        });
+        csv
     }
-    let offsets = Offsets::new(&text);
-    for cell in csv::columns(&text) {
-        let s = buffer.iter_at_offset(offsets.char_of(cell.range.start));
-        let e = buffer.iter_at_offset(offsets.char_of(cell.range.end));
-        buffer.apply_tag_by_name(CSV_TAG_NAMES[cell.column % CSV_COLUMNS], &s, &e);
+
+    fn edit(&self, before: i32, after: i32) {
+        let (b, a) = self.edited.get().unwrap_or((before, after));
+        self.edited.set(Some((b.min(before), a.min(after))));
     }
+
+    /// Tag every cell with its column's tag: all of them on the first pass, and after that the
+    /// ones [`kept`] cannot vouch for, with what lies between them cleared first.
+    pub fn apply(&self, buffer: &sourceview5::Buffer) {
+        let edited = self.edited.take();
+        let mut tagged = self.tagged.borrow_mut();
+        if tagged.is_some() && edited.is_none() {
+            return;
+        }
+        let (start, end) = buffer.bounds();
+        let text = buffer.text(&start, &end, true);
+        let offsets = Offsets::new(&text);
+        let cells: Vec<Tagged> = csv::columns(&text)
+            .into_iter()
+            .map(|cell| {
+                let at = |byte| offsets.char_of(byte);
+                (at(cell.range.start), at(cell.range.end), cell.column)
+            })
+            .collect();
+        let total = end.offset();
+        let (head, tail) = match (tagged.take(), edited) {
+            (Some((old, was)), Some((before, after))) => {
+                kept(&old, &cells, total - was, before, total - after)
+            }
+            _ => (0, 0),
+        };
+        let from = head.checked_sub(1).map_or(0, |i| cells[i].1);
+        let to = cells.get(cells.len() - tail).map_or(total, |cell| cell.0);
+        let iter = |offset| buffer.iter_at_offset(offset);
+        for name in CSV_TAG_NAMES {
+            buffer.remove_tag_by_name(name, &iter(from), &iter(to));
+        }
+        for &(s, e, column) in &cells[head..cells.len() - tail] {
+            buffer.apply_tag_by_name(CSV_TAG_NAMES[column % CSV_COLUMNS], &iter(s), &iter(e));
+        }
+        *tagged = Some((cells, total));
+    }
+}
+
+/// How many of `cells` at the start and at the end still carry the tags a pass gave them as
+/// `old`, in a text `shift` characters shorter: those wholly before `before`, where the edits
+/// since began, or wholly after `after`, where they ended, that parse as they did. Tags move with
+/// the text around them, but text typed at the end of a cell takes its tag, so a cell touching an
+/// edit is not one of them.
+fn kept(old: &[Tagged], cells: &[Tagged], shift: i32, before: i32, after: i32) -> (usize, usize) {
+    let head = (old.iter().zip(cells))
+        .take_while(|(was, cell)| was == cell && cell.1 < before)
+        .count();
+    let tail = (old[head..].iter().rev().zip(cells[head..].iter().rev()))
+        .take_while(|(was, cell)| (was.0 + shift, was.1 + shift, was.2) == **cell && cell.0 > after)
+        .count();
+    (head, tail)
 }
 
 /// Give the column tags their colours, derived from the current accent. Call it where [`restyle`]
@@ -676,6 +756,28 @@ pub(crate) fn rotate(hsv: (f32, f32, f32), column: usize) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_csv_pass_re_tags_only_the_cells_an_edit_reached() {
+        let cells = |text: &str| -> Vec<Tagged> {
+            (csv::columns(text).into_iter())
+                .map(|c| (c.range.start as i32, c.range.end as i32, c.column))
+                .collect()
+        };
+        let old = cells("a,b\nc,d\ne,f\n");
+        // A "d" typed after "d": that cell and nothing else.
+        let new = cells("a,b\nc,dd\ne,f\n");
+        assert_eq!(kept(&old, &new, 1, 7, 8), (3, 2));
+        // "x," typed before "d": the rest of its row moves a column on, the next row does not.
+        let new = cells("a,b\nc,x,d\ne,f\n");
+        assert_eq!(kept(&old, &new, 2, 6, 8), (3, 2));
+        // An opening quote runs on to the end: nothing after it parses as before.
+        let new = cells("a,b\n\"c,d\ne,f\n");
+        assert_eq!(kept(&old, &new, 1, 4, 5), (2, 0));
+        // Text typed at the end of "b" takes its tag, so "b" goes again though it parses the same.
+        let new = cells("a,b\n\nc,d\ne,f\n");
+        assert_eq!(kept(&old, &new, 1, 3, 4).0, 1);
+    }
 
     #[test]
     fn a_dim_colour_the_page_has_room_for_keeps_its_alpha() {

@@ -41,8 +41,8 @@ fn column_max(available: i32, percent: u32, zoom: f64) -> i32 {
 
 // -------------------------------------------------------------------------------- line numbers
 
-/// How many digits the last line's number needs. Every label is padded to this width, so they all
-/// measure the same and the gutter cannot change width as the view scrolls.
+/// How many digits the last line's number needs. The column is as wide as that many of the
+/// font's widest digit, so it cannot change width as the view scrolls.
 fn digits(line_count: i32) -> usize {
     line_count.max(1).to_string().len()
 }
@@ -59,41 +59,19 @@ fn digits(line_count: i32) -> usize {
 /// at an alpha, which is how `highlight::restyle` dims everything else. The pointer takes it back
 /// to the full strength it was drawn at before, which is the style scheme's own gutter grey.
 ///
-/// `query-data` arrives once per visible line and only has to print a number; where it is drawn
-/// is [`numbers`]'s part. The renderer is a child of the view, so the per-tab `accent-doc-N` font
-/// provider reaches it and the zoom follows.
+/// The numbers are laid out and drawn by [`numbers`]. The renderer is a child of the view, so the
+/// per-tab `accent-doc-N` font provider reaches it and the zoom follows.
 pub(super) fn line_numbers(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
-) -> sourceview5::GutterRendererText {
-    let renderer: sourceview5::GutterRendererText =
-        glib::Object::new::<numbers::Numbers>().upcast();
+) -> sourceview5::GutterRenderer {
+    let renderer = glib::Object::new::<numbers::Numbers>();
     renderer.set_xalign(1.0);
     renderer.set_xpad(6);
     renderer.set_visible(false);
     renderer.set_opacity(DIM);
+    renderer.set_digits(digits(buffer.line_count()));
 
-    let width = Rc::new(Cell::new(digits(buffer.line_count())));
-    renderer.set_text(&" ".repeat(width.get()));
-
-    renderer.connect_query_data(glib::clone!(
-        #[strong]
-        width,
-        move |renderer, lines, line| {
-            // A line hidden inside a fold still reaches here and is laid out with no height, so
-            // its number would be painted on top of the header's. Nothing is the right number.
-            // The signal hands the lines over as a plain `GObject`, hence the cast.
-            if let Some(lines) = lines.downcast_ref::<sourceview5::GutterLines>() {
-                let mode = sourceview5::GutterRendererAlignmentMode::Cell;
-                if lines.line_yrange(line, mode).1 <= 0 {
-                    renderer.set_text("");
-                    return;
-                }
-            }
-            let width = width.get();
-            renderer.set_text(&format!("{:>width$}", line + 1));
-        }
-    ));
     // A caret move repaints the column. GTK4 keeps a widget's render node until that widget is
     // invalidated, and moving the caret invalidates the view rather than the gutter renderer
     // inside it: the highlight the renderer draws under the caret's number stayed on the line the
@@ -108,15 +86,7 @@ pub(super) fn line_numbers(
     buffer.connect_changed(glib::clone!(
         #[weak]
         renderer,
-        #[strong]
-        width,
-        move |buffer| {
-            let wanted = digits(buffer.line_count());
-            if width.replace(wanted) != wanted {
-                renderer.set_text(&" ".repeat(wanted));
-                renderer.queue_resize();
-            }
-        }
+        move |buffer| renderer.set_digits(digits(buffer.line_count()))
     ));
 
     // Disambiguated: `TextViewExt` has a `gutter` of its own.
@@ -138,52 +108,57 @@ pub(super) fn line_numbers(
         move |_| renderer.set_opacity(DIM)
     ));
     gutter.add_controller(motion);
-    renderer
+    renderer.upcast()
 }
 
 /// Which line `renderer` last drew the caret's highlight on — what `ACCENT_BENCH_DIAG` prints
 /// beside the line the caret is really on.
 #[cfg(feature = "bench")]
-pub(super) fn painted_cursor(renderer: &sourceview5::GutterRendererText) -> Option<u32> {
+pub(super) fn painted_cursor(renderer: &sourceview5::GutterRenderer) -> Option<u32> {
     renderer
         .downcast_ref::<numbers::Numbers>()
         .and_then(numbers::Numbers::painted_cursor)
 }
 
-/// The line numbers, drawn level with the first line of their text rather than at the top of the
-/// line's cell.
+/// The line numbers: a plain gutter renderer that lays each number out and draws it itself, as
+/// `GtkSourceGutterRendererText` would, the caret's line in the scheme's `current-line-number`
+/// colour and weight.
 ///
-/// The two differ where a comparison lays blank space above a line to keep it beside its partner
-/// (`diff::pad`): GtkSourceView aligns a renderer in the whole cell, blank included, so the number
-/// sat beside the blank, or beside the "⋯ N unchanged lines" button over it. `alignment-mode`
-/// `first` with a centred `yalign` would move the numbers of lines with text, but it takes an
-/// empty line's cell whole, and a blank line is the commonest line in a note.
+/// Each number is drawn level with the first line of its text rather than at the top of the
+/// line's cell. The two differ where a comparison lays blank space above a line to keep it beside
+/// its partner (`diff::pad`): GtkSourceView aligns a renderer in the whole cell, blank included,
+/// so the number sat beside the blank, or beside the "⋯ N unchanged lines" button over it.
+/// `alignment-mode` `first` with a centred `yalign` would move the numbers of lines with text,
+/// but it takes an empty line's cell whole, and a blank line is the commonest line in a note.
 mod numbers {
     use gtk::prelude::*;
     use gtk::subclass::prelude::*;
-    use gtk::{glib, graphene};
+    use gtk::{gdk, glib, graphene, pango};
+    use sourceview5::prelude::*;
     use sourceview5::subclass::prelude::*;
+    use std::cell::{Cell, RefCell};
 
     glib::wrapper! {
         pub struct Numbers(ObjectSubclass<imp::Numbers>)
-            @extends sourceview5::GutterRendererText, sourceview5::GutterRenderer, gtk::Widget,
+            @extends sourceview5::GutterRenderer, gtk::Widget,
             @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
     }
 
     impl Numbers {
+        /// Make the column as wide as `digits` digits.
+        pub(super) fn set_digits(&self, digits: usize) {
+            if self.imp().digits.replace(digits) != digits {
+                self.queue_resize();
+            }
+        }
+
         /// The line the last pass over the gutter drew as the caret's, or `None` where the caret
         /// was not among the lines it drew.
         #[cfg(feature = "bench")]
         pub(super) fn painted_cursor(&self) -> Option<u32> {
-            use gtk::subclass::prelude::ObjectSubclassIsExt;
             self.imp().cursor.get()
         }
     }
-
-    // The bindings make only `GutterRenderer` subclassable. `GutterRendererText` is derivable in C
-    // and adds no virtual methods of its own, its class being `GutterRendererClass` and padding,
-    // so the parent's class setup is all it needs.
-    unsafe impl IsSubclassable<imp::Numbers> for sourceview5::GutterRendererText {}
 
     /// How far below the top of its cell a line's text starts, beyond the view's own spacing: the
     /// padding a comparison gave it, and 0 anywhere else.
@@ -192,13 +167,48 @@ mod numbers {
         (view.iter_location(line).y() - top - view.pixels_above_lines()).max(0)
     }
 
+    /// What the caret's number is drawn with, as GtkSourceView has it: the scheme's
+    /// `current-line-number` foreground where it names one, and bold unless it says otherwise.
+    fn caret_attributes(buffer: Option<sourceview5::Buffer>) -> pango::AttrList {
+        let attributes = pango::AttrList::new();
+        let Some(scheme) = buffer.and_then(|buffer| buffer.style_scheme()) else {
+            return attributes;
+        };
+        let style = scheme.style("current-line-number");
+        let colour = style
+            .as_ref()
+            .filter(|style| style.is_foreground_set())
+            .and_then(|style| style.foreground())
+            .and_then(|colour| gdk::RGBA::parse(colour.as_str()).ok());
+        if let Some(c) = colour {
+            let channel = |v: f32| (f64::from(v) * 65535.0) as u16;
+            attributes.insert(pango::AttrColor::new_foreground(
+                channel(c.red()),
+                channel(c.green()),
+                channel(c.blue()),
+            ));
+        }
+        if style.is_none_or(|style| !style.is_bold_set() || style.is_bold()) {
+            attributes.insert(pango::AttrInt::new_weight(pango::Weight::Bold));
+        }
+        attributes
+    }
+
+    /// What one pass over the gutter draws with, from its `begin` to its `end`.
+    pub struct Pass {
+        layout: pango::Layout,
+        ink: gdk::RGBA,
+        /// The caret's number's attributes, `None` while a selection is up.
+        caret: Option<pango::AttrList>,
+    }
+
     mod imp {
         use super::*;
-        #[cfg(feature = "bench")]
-        use std::cell::Cell;
 
         #[derive(Default)]
         pub struct Numbers {
+            pub digits: Cell<usize>,
+            pub pass: RefCell<Option<Pass>>,
             /// Which line this renderer last drew as the caret's. Read by `ACCENT_BENCH_DIAG`,
             /// where the point is that a gutter nothing invalidated still says the line the
             /// caret has left.
@@ -210,20 +220,48 @@ mod numbers {
         impl ObjectSubclass for Numbers {
             const NAME: &'static str = "AccentLineNumbers";
             type Type = super::Numbers;
-            type ParentType = sourceview5::GutterRendererText;
+            type ParentType = sourceview5::GutterRenderer;
         }
 
         impl ObjectImpl for Numbers {}
-        impl WidgetImpl for Numbers {}
+
+        impl WidgetImpl for Numbers {
+            /// As wide as the widest number the buffer can need, in the font the numbers are
+            /// drawn in, plus the padding either side.
+            fn measure(
+                &self,
+                orientation: gtk::Orientation,
+                _for_size: i32,
+            ) -> (i32, i32, i32, i32) {
+                if orientation != gtk::Orientation::Horizontal {
+                    return (0, 0, -1, -1);
+                }
+                let digits = self.digits.get().max(1);
+                let layout = self.obj().create_pango_layout(None);
+                let widest = (0..10)
+                    .map(|digit| {
+                        layout.set_text(&digit.to_string().repeat(digits));
+                        layout.pixel_size().0
+                    })
+                    .max()
+                    .unwrap_or(0);
+                let width = widest + 2 * self.obj().xpad();
+                (width, width, -1, -1)
+            }
+        }
 
         impl GutterRendererImpl for Numbers {
-            /// Once per pass over the gutter, before any line is drawn: the caret's line as this
-            /// pass sees it, which is the one the parent paints its background under.
-            #[cfg(feature = "bench")]
             fn begin(&self, lines: &sourceview5::GutterLines) {
-                self.cursor
-                    .set((lines.first()..=lines.last()).find(|&line| lines.is_cursor(line)));
                 self.parent_begin(lines);
+                let obj = self.obj();
+                let selecting = lines.buffer().has_selection();
+                self.pass.replace(Some(Pass {
+                    layout: obj.create_pango_layout(None),
+                    ink: obj.color(),
+                    caret: (!selecting).then(|| caret_attributes(obj.buffer())),
+                }));
+                #[cfg(feature = "bench")]
+                self.cursor.set(None);
             }
 
             fn snapshot_line(
@@ -232,11 +270,35 @@ mod numbers {
                 lines: &sourceview5::GutterLines,
                 line: u32,
             ) {
+                let pass = self.pass.borrow();
+                let Some(Pass { layout, ink, caret }) = pass.as_ref() else {
+                    return;
+                };
+                // A line hidden inside a fold still reaches here, laid out with no height, and its
+                // number would be painted on top of the header's.
+                let mode = sourceview5::GutterRendererAlignmentMode::Cell;
+                if lines.line_yrange(line, mode).1 <= 0 {
+                    return;
+                }
+                let caret = caret.as_ref().filter(|_| lines.is_cursor(line));
+                layout.set_text(&(line + 1).to_string());
+                layout.set_attributes(caret);
+                let (width, height) = layout.pixel_size();
+                let (x, y) = self.obj().align_cell(line, width as f32, height as f32);
                 let blank = blank_above(&lines.view(), &lines.iter_at_line(line));
                 snapshot.save();
-                snapshot.translate(&graphene::Point::new(0.0, blank as f32));
-                self.parent_snapshot_line(snapshot, lines, line);
+                snapshot.translate(&graphene::Point::new(x.ceil(), y.ceil() + blank as f32));
+                snapshot.append_layout(layout, ink);
                 snapshot.restore();
+                #[cfg(feature = "bench")]
+                if caret.is_some() {
+                    self.cursor.set(Some(line));
+                }
+            }
+
+            fn end(&self) {
+                self.pass.take();
+                self.parent_end();
             }
         }
     }

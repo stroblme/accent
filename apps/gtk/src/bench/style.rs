@@ -204,7 +204,7 @@ const TYPING_WORDS: &str = "the quick brown fox jumps over the lazy dog ";
 const TYPING_KEYS: usize = 40;
 const TYPING_EVERY: Duration = Duration::from_millis(150);
 /// What a note is made of at every size: a section of prose with the markup a note carries.
-const TYPING_SECTION: &str = "## Section\n\nSome prose with **bold**, *emphasis*, `code`, a \
+pub(super) const TYPING_SECTION: &str = "## Section\n\nSome prose with **bold**, *emphasis*, `code`, a \
     [[Wiki Link]] and a #tag, plus a [link](https://example.org). A second sentence that runs on \
     for a while, so that the line wraps in a window of ordinary width, as prose does.\n\n\
     - a list item with **bold**\n- [ ] a task\n- [x] a done task\n\n> a quote with *emphasis*\n\n\

@@ -33,7 +33,10 @@ use webkit6::prelude::WebViewExt;
 /// bar's menus over the PDF by pointer, `bar_menu_<step>` saying whether a menu is up, the bar
 /// with it and the zoom: the zoom readout right-clicked (`open`), the pointer up over the page
 /// (`away`), Fit Width picked (`pick`, the bar gone with the pointer off it), the page count
-/// clicked (`page`) and Escape (`escape`, the bar staying under the pointer); and F5 and Escape
+/// clicked (`page`) and Escape (`escape`, the bar staying under the pointer), then the zoom
+/// readout right-clicked (`rest`) and clicked (`rest_click`, Fit Height) by a pointer that came
+/// to rest on it before the bar was up, `bar_menu_page_menu` saying whether the page's own menu
+/// opened instead (both to read `false`); and F5 and Escape
 /// pressed in the presented shell (`shell_F5`, `shell_Escape`, both to read
 /// `presenting=false`). `bench present xtest <steps>` asks for those steps, under Xvfb
 /// `build-aux/xtest.py :N "<steps>"`, the first of them giving the window the X input focus.
@@ -306,6 +309,33 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
         println!("bench present xtest key Escape");
         glib::timeout_future(Duration::from_millis(800)).await;
         state("escape");
+        // The pointer comes to rest on the zoom readout in one motion from above the strip, so
+        // the bar comes up under a pointer whose last motion was over the page, and is pressed
+        // with no motion since: right-clicked, the readout's menu and not the page's (`rest`);
+        // then, the menu put away and the same again, clicked, Fit Height (`rest_click`).
+        let rest = |button: u32| {
+            println!(
+                "bench present xtest move {zx} {}; sleep 0.8; move {zx} {zy}; sleep 0.8; \
+                 down {button}; up {button}",
+                zy - 150.0
+            )
+        };
+        let page_menu = || {
+            let menu = find_widget(app.window.upcast_ref(), &|w| {
+                w.is::<gtk::Popover>() && w.is_visible() && !w.is_ancestor(app.statusbar.widget())
+            });
+            println!("bench present bar_menu_page_menu {}", menu.is_some());
+        };
+        rest(3);
+        glib::timeout_future(Duration::from_millis(2400)).await;
+        state("rest");
+        page_menu();
+        println!("bench present xtest key Escape");
+        glib::timeout_future(Duration::from_millis(800)).await;
+        rest(1);
+        glib::timeout_future(Duration::from_millis(2400)).await;
+        state("rest_click");
+        page_menu();
         // F5 and Escape leave from a presented shell, which has every other key.
         let shell = app
             .docs()
