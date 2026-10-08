@@ -85,6 +85,11 @@ data class Open(
      * ([VaultModel.answer]).
      */
     val leaving: Boolean = false,
+    /**
+     * The reader is on the way out of the note, its edits could not be written, for this reason,
+     * and they have been asked whether to go without them ([VaultModel.answer]).
+     */
+    val unsaved: String? = null,
 ) {
     /** Whether [typed] holds anything the vault does not have: what a write would put there. */
     fun dirty(typed: CharSequence): Boolean = typed.toString() != text
@@ -313,7 +318,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             snapshotFlow { buffer.text.toString() }.collectLatest { text ->
                 delay(SAVE_AFTER_MS)
-                write(text)
+                tell(write(text))
             }
         }
     }
@@ -595,7 +600,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun close() = leave {
         when (val to = _state.value.back) {
-            is Back.File -> openFile(to.rel)
+            // [show], not [openFile]: the buffer has been dealt with, and going through [leave]
+            // again would ask again about edits the reader has just chosen to drop.
+            is Back.File -> show(to.rel)
             else -> _state.update {
                 it.copy(open = null, pdf = (to as? Back.Pdf)?.pdf, image = null, back = null)
             }
@@ -689,15 +696,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** What came of a [write]. */
-    private enum class Saved {
+    private sealed interface Saved {
         /** The vault has the text: written now, or nothing to write. */
-        Written,
+        data object Written : Saved
 
         /** Not written, because the file moved under the note: saving is paused, the banner up. */
-        Paused,
+        data object Paused : Saved
 
-        /** Not written, for a reason already said ([fail]). */
-        Failed,
+        /** Not written, for [why], worded as [fail] words it. */
+        data class Failed(val why: String) : Saved
     }
 
     /**
@@ -743,10 +750,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                             _state.update { it.copy(open = it.open?.copy(changedOnDisk = true)) }
                             Saved.Paused
                         }
-                        else -> {
-                            fail("Cannot save this note", e)
-                            Saved.Failed
-                        }
+                        else -> Saved.Failed(failure("Cannot save this note", e))
                     }
                 },
             )
@@ -765,41 +769,56 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Take the buffer away — for another note, for none, or with the vault — once [flush] has
-     * written it, and otherwise keep the note in front.
-     *
-     * Edits saving is paused on, or was just refused, are what [flush] cannot write, and going
-     * anyway would drop them with nothing said. So the exit is held instead and the reader asked
-     * which version to keep ([Open.leaving]); [answer] lets it go or drops it. A write that failed
-     * has said why, and the edits are still only in the buffer, so the exit is dropped.
+     * written it.
      */
-    private fun leave(then: suspend () -> Unit) = viewModelScope.launch {
-        when (flush()) {
+    private fun leave(then: suspend () -> Unit) = viewModelScope.launch { exit(flush(), then) }
+
+    /**
+     * Go once the buffer is [saved], and otherwise hold the exit and ask.
+     *
+     * Edits saving is paused on, or was just refused, and edits a write failed on are what no
+     * exit can write, and going anyway would drop them with nothing said. So the exit is held
+     * instead and the reader asked which version to keep ([Open.leaving]), or whether to go
+     * without them ([Open.unsaved]); [answer] lets it go or drops it.
+     */
+    private suspend fun exit(saved: Saved, then: suspend () -> Unit) {
+        when (saved) {
             Saved.Written -> then()
             Saved.Paused -> {
                 held = then
                 _state.update { it.copy(open = it.open?.copy(leaving = true)) }
             }
-            Saved.Failed -> {}
+            is Saved.Failed -> {
+                held = then
+                _state.update { it.copy(open = it.open?.copy(unsaved = saved.why)) }
+            }
         }
     }
 
     /**
-     * The reader's answer to the exit [leave] is holding: `true` keeps their edits over the
-     * version on disk and goes, `false` goes without them — saving is still paused, so nothing
-     * writes them — and `null` stays, edits and banner as they were.
+     * The reader's answer to the exit [exit] holds: `true` keeps their edits over the version on
+     * disk and goes, `false` goes without them — nothing writes them, saving being paused or
+     * failing — and `null` stays, edits and banner as they were. A failed write is offered only
+     * `false` and `null`, and a Keep mine that fails is asked about as one.
      */
     fun answer(keep: Boolean?) = viewModelScope.launch {
         val then = held ?: return@launch
         held = null
-        _state.update { it.copy(open = it.open?.copy(leaving = false)) }
-        if (keep == null) return@launch
-        // A write that failed has said so, and the edits are still only in the buffer: stay.
-        if (keep && write(buffer.text.toString(), force = true) != Saved.Written) return@launch
-        then()
+        _state.update { it.copy(open = it.open?.copy(leaving = false, unsaved = null)) }
+        when (keep) {
+            null -> {}
+            true -> exit(write(buffer.text.toString(), force = true), then)
+            false -> then()
+        }
     }
 
     /** Keep mine: write the buffer over the version on disk. */
-    fun overwrite() = viewModelScope.launch { write(buffer.text.toString(), force = true) }
+    fun overwrite() = viewModelScope.launch { tell(write(buffer.text.toString(), force = true)) }
+
+    /** Say why a write failed, where nothing is waiting on it to ask instead. */
+    private fun tell(saved: Saved) {
+        if (saved is Saved.Failed) said(saved.why)
+    }
 
     /**
      * Take what is on disk, dropping the edits in the buffer. Not through [leave], whose write of
@@ -949,9 +968,12 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         Thread({ going.close() }, "vault-close").start()
     }
 
-    private fun fail(what: String, e: Throwable) {
+    private fun fail(what: String, e: Throwable) = said(failure(what, e))
+
+    /** [what] could not be done, with the core's reason when it gave one. */
+    private fun failure(what: String, e: Throwable): String {
         val why = (e as? AccentException.Failed)?.reason ?: e.message
-        _state.update { it.copy(message = if (why.isNullOrBlank()) what else "$what: $why") }
+        return if (why.isNullOrBlank()) what else "$what: $why"
     }
 
     override fun onCleared() {

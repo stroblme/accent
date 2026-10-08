@@ -117,7 +117,8 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
 
 - A `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog —
   except on the way out, where the row would go with the content: leaving a note over edits whose
-  saving was paused asks the row's question in an `AlertDialog`.
+  saving was paused asks the row's question in an `AlertDialog`, and over edits that could not be
+  written (a disk error) asks whether to stay or leave without them.
 
 ## Spacing and type
 

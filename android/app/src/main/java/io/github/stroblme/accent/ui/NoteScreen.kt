@@ -69,6 +69,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome) {
         if (open.leaving) {
             LeaveDialog(name = File(open.rel).name.removeSuffix(".md"), onAnswer = { model.answer(it) })
         }
+        open.unsaved?.let { why -> UnsavedDialog(why = why, onAnswer = { model.answer(it) }) }
         DocumentFrame(
             // The bar goes with the rest of the chrome while reading, and never while writing:
             // Done is the only way out of the editor, so it has to stay where it can be reached.
@@ -125,10 +126,10 @@ private fun ChangedBanner(onKeep: () -> Unit, onReload: () -> Unit) {
  * Leaving a note — closing it, closing the vault, opening another — over edits saving was paused
  * on, which would otherwise drop them with nothing said.
  *
- * The app's one dialog. A decision is a row above the note (MOBILE_DESIGN.md), but this one is
- * asked on the way out, and the row goes with the note it sits over. The choices are the banner's,
- * and Cancel stays with it; stacked, because three labels this long do not fit side by side on a
- * phone.
+ * One of the app's two dialogs, with [UnsavedDialog]. A decision is a row above the note
+ * (MOBILE_DESIGN.md), but this one is asked on the way out, and the row goes with the note it
+ * sits over. The choices are the banner's, and Cancel stays with it; stacked, because three
+ * labels this long do not fit side by side on a phone.
  */
 @Composable
 private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
@@ -144,6 +145,23 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
                 TextButton(onClick = { onAnswer(false) }) { Text("Take the version on disk") }
                 TextButton(onClick = { onAnswer(null) }) { Text("Cancel") }
             }
+        },
+    )
+}
+
+/**
+ * Leaving a note whose edits could not be written, for [why] — a full disk, a folder gone — and
+ * will not be on any exit: [LeaveDialog]'s question, with the one way out that does not write.
+ */
+@Composable
+private fun UnsavedDialog(why: String, onAnswer: (Boolean?) -> Unit) {
+    AlertDialog(
+        onDismissRequest = { onAnswer(null) },
+        title = { Text("Unsaved edits") },
+        text = { Text("$why. Your edits have not been saved.") },
+        confirmButton = { TextButton(onClick = { onAnswer(null) }) { Text("Stay") } },
+        dismissButton = {
+            TextButton(onClick = { onAnswer(false) }) { Text("Leave without saving") }
         },
     )
 }
