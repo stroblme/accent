@@ -33,7 +33,7 @@ const XTEST: Duration = Duration::from_secs(10);
 ///   <y+dy>; up"` and the same once that drag has scrolled the view.
 /// - `look` saves the window as `minimap-<theme>-<what>.png` in the working directory, light and
 ///   dark: a note of chapters and sections a quarter of the way down, and a comparison with the
-///   disk.
+///   disk where it opens, on its first hunk; then, dark, a code file it writes beside the note.
 /// - `frames` scrolls the note down by a quarter page [`STEPS`] times, a step per frame, with the
 ///   map off and then on, three times over as the machine's load moves, printing each round's
 ///   median and worst frame: `paint_ms` from the end of the layout phase to the end of painting
@@ -204,10 +204,33 @@ async fn look(app: &Rc<App>, tab: &Rc<Tab>) {
         scroll(tab, 0.25).await;
         shoot("note", theme);
         if compared(app, tab).await.is_some() {
-            scroll(tab, 0.3).await;
+            glib::timeout_future(FRAME).await;
             shoot("compare", theme);
         }
         tab.leave_compare();
+    }
+    // A code file half way down, whose comments in the map's lines off the view are dimmed too.
+    let code: String = (0..60)
+        .map(|i| {
+            format!(
+                "/// What step {i} does,\n/// in two lines.\nfn step_{i}(x: u32) -> u32 {{\n    \
+                 // add\n    x + {i}\n}}\n\n"
+            )
+        })
+        .collect();
+    if std::fs::write(app.root().join("minimap-look.rs"), code).is_ok() {
+        app.open_path("minimap-look.rs");
+        glib::timeout_future(Duration::from_secs(1)).await;
+        if let Some(code) = app
+            .open_tabs()
+            .into_iter()
+            .find(|t| t.rel() == "minimap-look.rs")
+        {
+            code.set_minimap(true);
+            scroll(&code, 0.5).await;
+            glib::timeout_future(FRAME).await;
+            shoot("code", Theme::Dark);
+        }
     }
 }
 
@@ -219,8 +242,9 @@ fn window_png(window: &adw::ApplicationWindow, path: &Path) -> bool {
     let (Some(node), Some(renderer)) = (snapshot.to_node(), window.renderer()) else {
         return false;
     };
+    let shown = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
     renderer
-        .render_texture(&node, None)
+        .render_texture(&node, Some(&shown))
         .save_to_png(path)
         .is_ok()
 }

@@ -4,6 +4,11 @@
 //! and either then scrolls the view with the pointer; the wheel scrolls the view. The caret never
 //! moves.
 //!
+//! Monochrome but for the accent: words in the foreground, a dimmer tone of it where the editor
+//! dims the text and the accent where the editor writes in it, never a syntax colour; a heading's
+//! text as a label to read, as VS Code draws a section header; a comparison's or a conflict's row
+//! tints, muted.
+//!
 //! Ours rather than GtkSourceMap, which laid the whole document out a second time in a view of
 //! its own, painted no band on GTK 4.22 and followed the adjustment its view had when it was set
 //! (ISSUES.md). Nothing here asks GTK's layout where a row is, which is where its hidden-text
@@ -11,19 +16,20 @@
 //! is the lines the view shows, placed on those rows.
 //!
 //! Drawn in chunks of [`CHUNK`] lines, each kept as a texture and put back at its row until
-//! something in it changes: an edit, a tag that hides or scales a line, a new width, ink or
-//! screen scale. A texture rather than the rectangles themselves, which cairo paints one by one,
-//! thousands to a frame. The buffer is followed only while the map is on screen; one that changed
-//! while it was not is read whole again when it comes back.
+//! something in it changes: an edit, a tag that changes how a line looks, a new width, ink, accent
+//! or screen scale. A texture rather than the rectangles themselves, which cairo paints one by
+//! one, thousands to a frame. The buffer is followed only while the map is on screen; one that
+//! changed while it was not is read whole again when it comes back.
 
 mod model;
 
-use crate::theme;
+use crate::{highlight, theme};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 use model::{Line, Model};
-use sourceview5::prelude::ViewExt as _;
+use sourceview5::prelude::{BufferExt as _, ViewExt as _};
+use std::ops::Range;
 
 /// The map's width, in logical pixels.
 const WIDTH: i32 = 100;
@@ -33,6 +39,58 @@ const ROW: f64 = 2.0;
 const CHUNK: usize = 64;
 /// How many chunks above and below the map's window are kept for a scroll to come back to.
 const KEEP: usize = 4;
+/// A heading label's size in logical pixels, and the rows its line takes so it has room.
+const LABEL_PX: f64 = 9.0;
+const LABEL_ROWS: u32 = 6;
+/// GtkSourceView's tag over a comment, which the language spec names; the style tags that colour
+/// code have no names.
+const COMMENT: &str = "gtksourceview:context-classes:comment";
+
+/// A word's tone: the foreground, a dimmer one where the editor dims the text (a note's markup,
+/// quotes and done tasks, a comment in code), and the accent where the editor writes in it (a
+/// note's links and tags). Code has no accent: its colours are the style scheme's.
+#[derive(Clone, Copy, PartialEq)]
+enum Tone {
+    Ink,
+    Dim,
+    Accent,
+}
+
+impl Tone {
+    /// The tone of the text at `at`, from its highest-priority tag that has one, as the editor
+    /// paints the foreground of the highest-priority tag that sets one.
+    fn at(at: &gtk::TextIter) -> Tone {
+        for tag in at.tags().iter().rev() {
+            let Some(name) = tag.name() else {
+                continue;
+            };
+            let name = name.as_str();
+            if highlight::ACCENT_TAGS.contains(&name) {
+                return Tone::Accent;
+            }
+            if name == COMMENT
+                || highlight::MARKUP_TAGS.contains(&name)
+                || highlight::FADED_TAGS.contains(&name)
+            {
+                return Tone::Dim;
+            }
+        }
+        Tone::Ink
+    }
+}
+
+/// What every chunk of a frame is drawn with.
+struct Paint {
+    /// The foreground itself, which a label is written in.
+    text: gdk::RGBA,
+    ink: gdk::RGBA,
+    dim: gdk::RGBA,
+    accent: gdk::RGBA,
+    renderer: gsk::Renderer,
+    scale: f64,
+    context: pango::Context,
+    label: pango::FontDescription,
+}
 
 glib::wrapper! {
     pub struct Minimap(ObjectSubclass<imp::Minimap>)
@@ -231,6 +289,7 @@ impl imp::Minimap {
             self.stale.set(true);
             return;
         }
+        self.highlighted.set(None);
         let mut model = self.model.borrow_mut();
         let mut chunks = self.chunks.borrow_mut();
         match edit.filter(|_| model.len() > 0) {
@@ -250,7 +309,7 @@ impl imp::Minimap {
 
     /// A tag went on or came off between `start` and `end`.
     fn tagged(&self, tag: &gtk::TextTag, start: &gtk::TextIter, end: &gtk::TextIter) {
-        if !shapes(tag) {
+        if !matters(tag) {
             return;
         }
         let map = self.obj();
@@ -322,35 +381,61 @@ impl imp::Minimap {
             return;
         };
         let ink = obj.color();
+        let accent = highlight::text_accent();
         let scale = native.surface().map_or(1.0, |surface| surface.scale());
-        if self.drawn.replace(Some((ink, scale))) != Some((ink, scale)) {
+        if self.drawn.replace(Some((ink, accent, scale))) != Some((ink, accent, scale)) {
             self.chunks.borrow_mut().clear();
         }
+        let context = obj.pango_context();
+        let mut label = context.font_description().unwrap_or_default();
+        label.set_absolute_size(LABEL_PX * f64::from(pango::SCALE));
+        label.set_weight(pango::Weight::Bold);
+        let paint = Paint {
+            text: ink,
+            ink: theme::at(ink, theme::MAP_INK_ALPHA),
+            dim: theme::at(ink, theme::MAP_DIM_ALPHA),
+            accent: theme::at(accent, theme::MAP_ACCENT_ALPHA),
+            renderer,
+            scale,
+            context,
+            label,
+        };
         let model = self.model.borrow();
         let (width, height) = (f64::from(obj.width()), f64::from(obj.height()));
         let total = f64::from(model.total());
         let (top, bottom) = band(&view, &model);
         let band = (bottom - top).max(1.0);
         let rows = height / ROW;
-        let offset = model::offset(top, band, total, rows);
+        // The rows a screen holds on average: the document's rows over its pixels, a screen high.
+        let usual = view
+            .vadjustment()
+            .filter(|adjustment| adjustment.upper() > 0.0)
+            .map_or(band, |adjustment| {
+                total * adjustment.page_size() / adjustment.upper()
+            });
+        let pace = model::Pace {
+            total,
+            height: rows,
+            usual,
+        };
+        let offset = pace.offset(top, band);
         self.frame.set(Some(imp::Frame {
             offset,
             top,
             band,
-            total,
-            height: rows,
+            pace,
         }));
         snapshot.push_clip(&rect(0.0, 0.0, width, height));
         if total > 0.0 {
-            let first = model.line_at_row(offset).0 / CHUNK;
-            let last = model.line_at_row(offset + rows).0 / CHUNK;
+            let lines = model.line_at_row(offset).0..model.line_at_row(offset + rows).0 + 1;
+            self.highlight(&view, lines.clone());
+            let (first, last) = (lines.start / CHUNK, lines.end / CHUNK);
             let mut chunks = self.chunks.borrow_mut();
             for k in first..=last {
                 if chunks.len() <= k {
                     chunks.resize(k + 1, None);
                 }
-                let node = chunks[k]
-                    .get_or_insert_with(|| render(k, &model, &view, ink, &renderer, scale));
+                let node = chunks[k].get_or_insert_with(|| render(k, &model, &view, &paint));
                 let y = (f64::from(model.start(k * CHUNK)) - offset) * ROW;
                 snapshot.save();
                 snapshot.translate(&graphene::Point::new(0.0, y as f32));
@@ -374,34 +459,63 @@ impl imp::Minimap {
         snapshot.pop();
     }
 
+    /// Have GtkSourceView colour the `lines` the map shows, from an idle. It colours only what its
+    /// view shows, and the map's comments are dimmed by what it colours; never from inside a
+    /// frame, since the tags it applies come back here as changes.
+    fn highlight(&self, view: &sourceview5::View, lines: Range<usize>) {
+        let Some(buffer) = view
+            .buffer()
+            .downcast::<sourceview5::Buffer>()
+            .ok()
+            .filter(|buffer| buffer.is_highlight_syntax())
+        else {
+            return;
+        };
+        let done = self.highlighted.get();
+        if done.is_some_and(|(start, end)| start <= lines.start && lines.end <= end) {
+            return;
+        }
+        self.highlighted.set(Some((lines.start, lines.end)));
+        glib::idle_add_local_once(move || {
+            let at = |line: usize| buffer.iter_at_line(line as i32);
+            if let Some(start) = at(lines.start) {
+                buffer.ensure_highlight(&start, &at(lines.end).unwrap_or(buffer.end_iter()));
+            }
+        });
+    }
+
     /// A press at `y`: on the band it takes hold of it, anywhere else it first puts the row
     /// pressed in the middle of the view, and either way the drag after it moves the band.
     fn press(&self, y: f64) {
-        let Some(frame) = self.frame.get() else {
+        let (Some(frame), Some(view)) = (self.frame.get(), self.view.upgrade()) else {
             return;
         };
         let row = y / ROW + frame.offset;
-        let top = match (frame.top..=frame.top + frame.band).contains(&row) {
-            true => frame.top,
+        let screen = match (frame.top..=frame.top + frame.band).contains(&row) {
+            true => frame.top - frame.offset,
             false => {
-                let top = (row - frame.band / 2.0).clamp(0.0, last_top(frame));
-                self.scroll_to(top);
-                top
+                let (at, frac) = self.line_at_row(row);
+                scroll_line_to(&view, at, frac, 0.5);
+                let (top, band) = self.band_now(&view);
+                top - frame.pace.offset(top, band)
             }
         };
-        let screen = top - model::offset(top, frame.band, frame.total, frame.height);
         self.grab.set(Some(imp::Grab { screen }));
         self.obj().queue_draw();
     }
 
     /// The pointer `dy` below where it pressed: the band's top that far below where it was on
-    /// screen, measured against the band as it is now, which grows and shrinks with the lines.
+    /// the map.
     fn drag(&self, dy: f64) {
-        let (Some(grab), Some(frame)) = (self.grab.get(), self.frame.get()) else {
+        let (Some(grab), Some(frame), Some(view)) =
+            (self.grab.get(), self.frame.get(), self.view.upgrade())
+        else {
             return;
         };
-        let ratio = model::drag_ratio(frame.band, frame.total, frame.height);
-        self.scroll_to(((grab.screen + dy / ROW) * ratio).clamp(0.0, last_top(frame)));
+        let last = (frame.pace.total - frame.band).max(0.0);
+        let top = ((grab.screen + dy / ROW) * frame.pace.ratio()).clamp(0.0, last);
+        let (at, frac) = self.line_at_row(top);
+        scroll_line_to(&view, at, frac, 0.0);
     }
 
     fn release(&self) {
@@ -414,16 +528,17 @@ impl imp::Minimap {
         self.obj().queue_draw();
     }
 
-    /// Put the band's top on row `top`.
-    fn scroll_to(&self, top: f64) {
-        let Some(view) = self.view.upgrade() else {
-            return;
-        };
+    /// The line drawn on `row`, and how far down it.
+    fn line_at_row(&self, row: f64) -> (usize, f64) {
         let mut model = self.model.borrow_mut();
         model.sum();
-        let (at, frac) = model.line_at_row(top);
-        drop(model);
-        scroll_top_to(&view, at, frac);
+        model.line_at_row(row)
+    }
+
+    /// The band's top and height in rows as `view` stands now, between frames.
+    fn band_now(&self, view: &sourceview5::View) -> (f64, f64) {
+        let (top, bottom) = band(view, &self.model.borrow());
+        (top, (bottom - top).max(1.0))
     }
 
     fn wheel(&self, wheel: &gtk::EventControllerScroll, dy: f64) -> glib::Propagation {
@@ -447,21 +562,31 @@ impl imp::Minimap {
     }
 }
 
-/// Whether `tag` changes a line's rows: a fold's or a collapsed run's, which hide it, and a
-/// heading's, which scale it.
-fn shapes(tag: &gtk::TextTag) -> bool {
-    tag.is_invisible_set() || tag.is_scale_set()
+/// Whether `tag` changes what the map draws of a line: it hides it (a fold, a collapsed run),
+/// scales it or labels it (a heading), tints its row (a comparison, a merge, a conflict) or tones
+/// its words.
+fn matters(tag: &gtk::TextTag) -> bool {
+    if tag.is_invisible_set() || tag.is_scale_set() || tag.is_paragraph_background_set() {
+        return true;
+    }
+    tag.name().is_some_and(|name| {
+        let name = name.as_str();
+        name == COMMENT
+            || [
+                &highlight::HEADING_TAGS[..],
+                &highlight::ACCENT_TAGS,
+                &highlight::MARKUP_TAGS,
+                &highlight::FADED_TAGS,
+            ]
+            .iter()
+            .any(|names| names.contains(&name))
+    })
 }
 
 fn drop_chunk(chunks: &mut [Option<gsk::RenderNode>], chunk: usize) {
     if let Some(node) = chunks.get_mut(chunk) {
         *node = None;
     }
-}
-
-/// The furthest down the band's top goes.
-fn last_top(frame: imp::Frame) -> f64 {
-    (frame.total - frame.band).max(0.0)
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> graphene::Rect {
@@ -474,17 +599,59 @@ fn measure(buffer: &gtk::TextBuffer, at: usize) -> Line {
     let Some(start) = buffer.iter_at_line(at as i32) else {
         return Line::default();
     };
+    let end = line_end(start);
     let mut line = Line {
-        chars: line_end(start).offset().saturating_sub(start.offset()) as u32,
+        chars: end.offset().saturating_sub(start.offset()) as u32,
         ..Line::default()
     };
+    let mut heading = false;
     for tag in start.tags() {
         line.hidden |= tag.is_invisible_set() && tag.is_invisible();
         if tag.is_scale_set() {
             line.scale = line.scale.max(tag.scale() as f32);
         }
+        heading |= tag
+            .name()
+            .is_some_and(|name| highlight::HEADING_TAGS.contains(&name.as_str()));
+    }
+    if heading && model::label(&buffer.text(&start, &end, false)).is_some() {
+        line.min_rows = LABEL_ROWS;
     }
     line
+}
+
+/// The row tint of the line starting at `start`: the paragraph background of its highest-priority
+/// tag that sets one, which is a comparison's, a merge's or a conflict block's.
+fn tint(start: &gtk::TextIter) -> Option<gdk::RGBA> {
+    start
+        .tags()
+        .iter()
+        .rev()
+        .filter(|tag| tag.is_paragraph_background_set())
+        .find_map(|tag| tag.paragraph_background_rgba())
+}
+
+/// The characters of `text`, the line from `start` to `end`, each with its tone. Tags change only
+/// at their toggles, so the tone is looked up once per run between two.
+fn toned(
+    text: &str,
+    start: gtk::TextIter,
+    end: gtk::TextIter,
+) -> impl Iterator<Item = (char, Tone)> + '_ {
+    let mut runs = Vec::new();
+    let mut at = start;
+    while at < end {
+        let mut next = at;
+        if !next.forward_to_tag_toggle(None::<&gtk::TextTag>) || next > end {
+            next = end;
+        }
+        runs.push(((next.offset() - at.offset()) as usize, Tone::at(&at)));
+        at = next;
+    }
+    let tones = runs
+        .into_iter()
+        .flat_map(|(chars, tone)| std::iter::repeat_n(tone, chars));
+    text.chars().zip(tones)
 }
 
 fn line_end(start: gtk::TextIter) -> gtk::TextIter {
@@ -512,9 +679,9 @@ fn band(view: &sourceview5::View, model: &Model) -> (f64, f64) {
     (row(shown.y()), row(shown.y() + shown.height()))
 }
 
-/// Scroll `view` to have the point `frac` of the way down line `at` at its top. Nothing while the
-/// whole document fits.
-fn scroll_top_to(view: &sourceview5::View, at: usize, frac: f64) {
+/// Scroll `view` to have the point `frac` of the way down line `at` `place` of the way down the
+/// screen: at its top for 0, in its middle for 0.5. Nothing while the whole document fits.
+fn scroll_line_to(view: &sourceview5::View, at: usize, frac: f64, place: f64) {
     let (Some(adjustment), Some(iter)) =
         (view.vadjustment(), view.buffer().iter_at_line(at as i32))
     else {
@@ -525,23 +692,19 @@ fn scroll_top_to(view: &sourceview5::View, at: usize, frac: f64) {
     }
     let (y, height) = view.line_yrange(&iter);
     let target = f64::from(y) + frac * f64::from(height);
-    adjustment.set_value(adjustment.value() + target - f64::from(view.visible_rect().y()));
+    let shown = view.visible_rect();
+    let at = f64::from(shown.y()) + place * f64::from(shown.height());
+    adjustment.set_value(adjustment.value() + target - at);
 }
 
-/// Chunk `k`, drawn from its own first row down into a texture at the screen's `scale`.
-fn render(
-    k: usize,
-    model: &Model,
-    view: &sourceview5::View,
-    ink: gdk::RGBA,
-    renderer: &gsk::Renderer,
-    scale: f64,
-) -> gsk::RenderNode {
+/// Chunk `k`, drawn from its own first row down into a texture at the screen's scale: each
+/// line's row tint, then its label if it is a heading, or else its words.
+fn render(k: usize, model: &Model, view: &sourceview5::View, paint: &Paint) -> gsk::RenderNode {
     let snapshot = gtk::Snapshot::new();
-    snapshot.scale(scale as f32, scale as f32);
+    snapshot.scale(paint.scale as f32, paint.scale as f32);
     let buffer = view.buffer();
-    let colour = theme::at(ink, theme::MAP_INK_ALPHA);
     let tab = view.tab_width().max(1);
+    let width = f64::from(WIDTH);
     let (first, end) = (k * CHUNK, ((k + 1) * CHUNK).min(model.len()));
     let base = f64::from(model.start(first));
     let height = (f64::from(model.start(end)) - base) * ROW;
@@ -551,13 +714,36 @@ fn render(
         let Some(start) = buffer.iter_at_line(at as i32).filter(|_| rows > 0) else {
             continue;
         };
-        let text = buffer.text(&start, &line_end(start), true);
+        let stop = line_end(start);
+        let text = buffer.text(&start, &stop, true);
         let y = (f64::from(model.start(at)) - base) * ROW;
+        if let Some(tint) = tint(&start) {
+            let muted = theme::at(tint, tint.alpha() * theme::MAP_TINT_SHARE);
+            snapshot.append_color(&muted, &rect(0.0, y, width, f64::from(rows) * ROW));
+        }
+        if let Some(label) = model::label(&text).filter(|_| line.min_rows == LABEL_ROWS) {
+            let layout = pango::Layout::new(&paint.context);
+            layout.set_font_description(Some(&paint.label));
+            layout.set_text(label);
+            layout.set_width(WIDTH * pango::SCALE);
+            layout.set_ellipsize(pango::EllipsizeMode::End);
+            let room = f64::from(LABEL_ROWS) * ROW - f64::from(layout.pixel_size().1);
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(0.0, (y + room / 2.0) as f32));
+            snapshot.append_layout(&layout, &paint.text);
+            snapshot.restore();
+            continue;
+        }
         let scale = f64::from(line.scale);
-        let chars = text.chars().map(|c| (c, ()));
+        let chars = toned(&text, start, stop);
         for bar in model::bars(chars, line.per_row(model.cols()), rows, tab) {
+            let colour = match bar.tone {
+                Tone::Ink => &paint.ink,
+                Tone::Dim => &paint.dim,
+                Tone::Accent => &paint.accent,
+            };
             snapshot.append_color(
-                &colour,
+                colour,
                 &rect(
                     f64::from(bar.col) * scale,
                     y + f64::from(bar.row) * ROW,
@@ -567,11 +753,10 @@ fn render(
             );
         }
     }
-    let width = f64::from(WIDTH);
     match snapshot.to_node().filter(|_| height > 0.0) {
         Some(node) => {
-            let pixels = rect(0.0, 0.0, width * scale, height * scale);
-            let texture = renderer.render_texture(&node, Some(&pixels));
+            let pixels = rect(0.0, 0.0, width * paint.scale, height * paint.scale);
+            let texture = paint.renderer.render_texture(&node, Some(&pixels));
             gsk::TextureNode::new(&texture, &rect(0.0, 0.0, width, height)).upcast()
         }
         None => gsk::ContainerNode::new(&[]).upcast(),
@@ -590,9 +775,7 @@ mod imp {
         /// The band's top and height.
         pub top: f64,
         pub band: f64,
-        /// The rows in all, and the rows the map has room for.
-        pub total: f64,
-        pub height: f64,
+        pub pace: model::Pace,
     }
 
     /// A hold on the band: the row of the map its top was drawn on as the press began.
@@ -607,8 +790,10 @@ mod imp {
         pub model: RefCell<Model>,
         /// A texture per [`CHUNK`] lines, `None` until it is drawn again.
         pub chunks: RefCell<Vec<Option<gsk::RenderNode>>>,
-        /// The foreground and the screen scale the chunks were drawn at.
-        pub drawn: Cell<Option<(gdk::RGBA, f64)>>,
+        /// The foreground, the accent and the screen scale the chunks were drawn at.
+        pub drawn: Cell<Option<(gdk::RGBA, gdk::RGBA, f64)>>,
+        /// The lines last handed to GtkSourceView to colour, until the next edit.
+        pub highlighted: Cell<Option<(usize, usize)>>,
         /// The buffer changed while the map was off screen: read it whole again.
         pub stale: Cell<bool>,
         /// The line the edit in progress starts on, from `insert-text` or `delete-range` to

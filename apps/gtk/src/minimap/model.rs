@@ -206,27 +206,44 @@ impl Model {
     }
 }
 
-/// Where the map's own scroll is, in rows, with the band's top at row `top` and `band` rows
-/// tall, over `total` rows on a map `height` rows tall.
-///
-/// The map scrolls itself only when the document outgrows it, and then in step with the band, as
-/// VS Code's minimap does: the band's top runs from the map's top down to `height − band` as the
-/// view goes from its first screen to its last, so the band never leaves the map.
-pub fn offset(top: f64, band: f64, total: f64, height: f64) -> f64 {
-    if total <= height || total <= band {
-        return 0.0;
-    }
-    (top / (total - band)).clamp(0.0, 1.0) * (total - height)
+/// How the map scrolls itself: over `total` rows on a map `height` rows tall, `usual` being the
+/// rows a screen of the document holds on average.
+#[derive(Clone, Copy, Debug)]
+pub struct Pace {
+    pub total: f64,
+    pub height: f64,
+    pub usual: f64,
 }
 
-/// The rows of the document per row of the map the band moves by: more than one once the map
-/// scrolls itself ([`offset`]). The band drawn `screen` rows down the map has its top on row
-/// `screen × drag_ratio`, which is how a drag keeps it under the pointer.
-pub fn drag_ratio(band: f64, total: f64, height: f64) -> f64 {
-    if total <= height || height <= band {
-        return 1.0;
+impl Pace {
+    /// The rows of the document per row of the map the band moves by: more than one once the map
+    /// scrolls itself. The band drawn `screen` rows down the map has its top on row
+    /// `screen × ratio`, which is how a drag keeps it under the pointer.
+    pub fn ratio(&self) -> f64 {
+        if self.total <= self.height || self.height <= self.usual {
+            return 1.0;
+        }
+        (self.total - self.usual) / (self.height - self.usual)
     }
-    (total - band) / (height - band)
+
+    /// Where the map's own scroll is, in rows, with the band's top at row `top` and `band` rows
+    /// tall.
+    ///
+    /// The map scrolls itself only when the document outgrows it, and then in step with the band,
+    /// as VS Code's minimap does: the band's top runs down the map as the view goes down the
+    /// document. At the pace of the usual band rather than this one, which grows and shrinks with
+    /// the lines on screen (a heading's label takes several rows), so a heading coming into view
+    /// does not jolt the map; at either end the band is kept on the map.
+    pub fn offset(&self, top: f64, band: f64) -> f64 {
+        if self.total <= self.height {
+            return 0.0;
+        }
+        let paced = top - top / self.ratio();
+        paced
+            .max(top + band - self.height)
+            .min(top)
+            .clamp(0.0, self.total - self.height)
+    }
 }
 
 /// A run of non-blank characters of one tone, as the map draws it: the row of its line it falls
@@ -295,9 +312,32 @@ fn split<T: Copy>(out: &mut Vec<Bar<T>>, cols: Range<u32>, tone: T, per_row: u32
     }
 }
 
+/// What a heading's label on the map says: its text without the `#` markers, an ATX closing
+/// sequence's included, or `None` where nothing is left to read (a setext heading's underline).
+pub fn label(line: &str) -> Option<&str> {
+    let text = line.trim().trim_start_matches('#');
+    let closed = text.trim_end_matches('#');
+    let text = match closed.ends_with(char::is_whitespace) {
+        true => closed,
+        false => text,
+    }
+    .trim();
+    text.chars().any(char::is_alphanumeric).then_some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_label_is_the_heading_without_its_markers() {
+        assert_eq!(label("## Section 2"), Some("Section 2"));
+        assert_eq!(label("# Closed #"), Some("Closed"));
+        assert_eq!(label("### C#"), Some("C#"), "a # in the text stays");
+        assert_eq!(label("Setext title"), Some("Setext title"));
+        assert_eq!(label("========"), None, "an underline has nothing to read");
+        assert_eq!(label("##"), None);
+    }
 
     #[test]
     fn a_bar_is_a_word_wrapped_at_the_column() {
@@ -426,40 +466,57 @@ mod tests {
     }
 
     /// The map's scroll is a number in every case a document can be in: no lines, fewer rows than
-    /// the map, a band as tall as the document.
+    /// the map, a band as tall as the document or taller than the map.
     #[test]
     fn the_offset_is_always_finite() {
-        for (top, band, total, height) in [
-            (0.0, 0.0, 0.0, 0.0),
-            (0.0, 10.0, 5.0, 400.0),
-            (0.0, 50.0, 50.0, 10.0),
-            (3.0, 0.0, 1000.0, 0.0),
-            (2000.0, 40.0, 1000.0, 400.0),
+        for (top, band, usual, total, height) in [
+            (0.0, 0.0, 0.0, 0.0, 0.0),
+            (0.0, 10.0, 10.0, 5.0, 400.0),
+            (0.0, 50.0, 50.0, 50.0, 10.0),
+            (3.0, 0.0, 0.0, 1000.0, 0.0),
+            (2000.0, 40.0, 40.0, 1000.0, 400.0),
         ] {
-            let at = offset(top, band, total, height);
+            let pace = Pace {
+                total,
+                height,
+                usual,
+            };
+            let at = pace.offset(top, band);
             assert!(at.is_finite(), "{top} {band} {total} {height}");
             assert!((0.0..=total.max(0.0)).contains(&at));
-            assert!(drag_ratio(band, total, height).is_finite());
+            assert!(pace.ratio().is_finite());
         }
-        assert_eq!(offset(10.0, 40.0, 300.0, 400.0), 0.0, "fits: no scroll");
-        assert_eq!(
-            offset(960.0, 40.0, 1000.0, 400.0),
-            600.0,
-            "the end at the end"
-        );
+        let pace = Pace {
+            total: 1000.0,
+            height: 400.0,
+            usual: 40.0,
+        };
+        assert_eq!(pace.offset(960.0, 40.0), 600.0, "the end at the end");
+        assert_eq!(pace.offset(950.0, 50.0), 600.0, "with a taller band too");
+        let fits = Pace {
+            total: 300.0,
+            ..pace
+        };
+        assert_eq!(fits.offset(10.0, 40.0), 0.0, "fits: no scroll");
     }
 
-    /// A band drawn some rows down the map, its top put where [`drag_ratio`] says, is drawn
-    /// exactly there again, scrolled map or not: a drag keeps it under the pointer.
+    /// A band drawn some rows down the map, its top put where [`Pace::ratio`] says, is drawn
+    /// exactly there again, scrolled map or not: a drag keeps it under the pointer. And however
+    /// tall the band is, away from the ends: a heading coming onto the screen does not move it.
     #[test]
     fn a_drag_keeps_the_band_under_the_pointer() {
-        let band = 40.0;
-        for (total, height) in [(1000.0, 400.0), (300.0, 400.0)] {
-            let ratio = drag_ratio(band, total, height);
-            for screen in [0.0, 50.0, 200.0, 359.0] {
-                let top = (screen * ratio).min(total - band);
-                let drawn = top - offset(top, band, total, height);
-                assert!((drawn - screen).abs() < 1e-9 || top == total - band);
+        for total in [1000.0, 300.0] {
+            let pace = Pace {
+                total,
+                height: 400.0,
+                usual: 40.0,
+            };
+            for screen in [0.0, 50.0, 200.0, 300.0] {
+                let top = (screen * pace.ratio()).min(total - 40.0);
+                for band in [30.0, 40.0, 46.0] {
+                    let drawn = top - pace.offset(top, band);
+                    assert!((drawn - screen).abs() < 1e-9 || top == total - 40.0);
+                }
             }
         }
     }
