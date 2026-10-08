@@ -123,13 +123,17 @@ enum Cmd {
     },
     /// Serve one vault to an agent over the Model Context Protocol, on stdin and stdout.
     ///
-    /// Search, read, backlinks, tags, links and PDF highlights, over the index the app keeps,
-    /// which this shares and brings up to date as the app does. Answers until stdin closes. A
-    /// vault on this machine only: for one on another, run it there (`ssh host accent-cli mcp
-    /// --vault /path`).
+    /// Search, read, backlinks, tags, links and PDF highlights over the index the app keeps,
+    /// which this shares and brings up to date as the app does; and patch, write and make notes
+    /// from templates, each write checked against the etag of the read before it. Answers until
+    /// stdin closes. A vault on this machine only: for one on another, run it there (`ssh host
+    /// accent-cli mcp --vault /path`).
     Mcp {
         #[command(flatten)]
         common: Common,
+        /// Leave out the tools that write: the agent searches and reads, and changes nothing.
+        #[arg(long)]
+        read_only: bool,
     },
     /// Hold the terminals' shells: the daemon `attach` starts when none is running.
     ///
@@ -275,7 +279,7 @@ fn main() -> Result<()> {
             accent_api::rpc::serve(&vault, db.as_deref(), std::io::stdin(), std::io::stdout())?;
         }
         // Logging goes to stderr: stdout is the protocol.
-        Cmd::Mcp { common } => mcp::run(&common.vault, &common.db_path())?,
+        Cmd::Mcp { common, read_only } => mcp::run(&common.vault, &common.db_path(), read_only)?,
         Cmd::Hold => hold::daemon::run()?,
         Cmd::Attach { cwd, id } => std::process::exit(hold::client::attach(&id, cwd)),
         Cmd::Kill { id } => hold::client::kill(&id)?,

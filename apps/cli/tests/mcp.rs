@@ -18,7 +18,7 @@ impl Scratch {
     fn new(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!("accent-mcp-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        for sub in ["vault", "outside", "config", "cache"] {
+        for sub in ["vault/Templates", "outside", "config", "cache"] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
         }
         let write = |rel: &str, text: &str| std::fs::write(dir.join(rel), text).unwrap();
@@ -27,6 +27,10 @@ impl Scratch {
             "# Title\nintro\n## Part\nbody about kumquat [[b]]\n",
         );
         write("vault/b.md", "#tag\nsee [[a#Part]]\n");
+        write(
+            "vault/Templates/Day.md",
+            "---\naccent-target: Days/{{title}}.md\n---\n# Made\n",
+        );
         write("outside/secret.md", "secret kumquat\n");
         std::os::unix::fs::symlink(dir.join("outside"), dir.join("vault/link")).unwrap();
         Scratch { dir }
@@ -34,6 +38,10 @@ impl Scratch {
 
     fn read(&self, rel: &str) -> String {
         std::fs::read_to_string(self.dir.join("vault").join(rel)).unwrap()
+    }
+
+    fn exists(&self, rel: &str) -> bool {
+        self.dir.join(rel).exists()
     }
 }
 
@@ -73,6 +81,17 @@ impl Client {
             child,
             id: 0,
         }
+    }
+
+    /// The 2025-11-25 lifecycle: `initialize`, then the notification that ends it.
+    fn initialize(&mut self) -> Value {
+        let init = self.ask(
+            "initialize",
+            json!({"protocolVersion": "2025-11-25", "capabilities": {},
+                   "clientInfo": {"name": "test", "version": "0"}}),
+        );
+        self.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        init
     }
 
     fn send(&mut self, msg: Value) {
@@ -153,13 +172,8 @@ const READ_TOOLS: [&str; 6] = [
 fn mcp_answers_after_initialize_and_holds_to_the_vault() {
     let scratch = Scratch::new("init");
     let mut c = Client::start(&scratch, &[]);
-    let init = c.ask(
-        "initialize",
-        json!({"protocolVersion": "2025-11-25", "capabilities": {},
-               "clientInfo": {"name": "test", "version": "0"}}),
-    );
+    let init = c.initialize();
     assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
-    c.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
 
     let tools = names(&c.ask("tools/list", json!({})));
     for tool in READ_TOOLS {
@@ -214,5 +228,60 @@ fn mcp_answers_a_client_that_never_initializes() {
         json!({"name": "read_note", "arguments": {"path": "b.md"}, "_meta": meta}),
     );
     assert_eq!(read["result"]["content"][1]["text"], scratch.read("b.md"));
+    c.close();
+}
+
+/// Every write is checked against the read before it: a patch with an etag the note has moved
+/// past changes nothing, and a file that exists is overwritten only with one. Nothing is written
+/// where a symlink leads out of the vault.
+#[test]
+fn mcp_writes_only_over_what_it_read() {
+    let scratch = Scratch::new("write");
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+    assert_eq!(names(&c.ask("tools/list", json!({}))).len(), 9);
+
+    let (read, _) = c.call("read_note", json!({"path": "a.md"}));
+    let etag = serde_json::from_str::<Value>(&read[0]).unwrap()["etag"].clone();
+    let patch = json!({"path": "a.md", "heading": "Part", "mode": "replace",
+                       "content": "new body", "etag": etag});
+    let (said, error) = c.call("patch_note", patch.clone());
+    assert!(!error, "{said:?}");
+    let patched = "# Title\nintro\n## Part\nnew body\n";
+    assert_eq!(scratch.read("a.md"), patched);
+    let (said, error) = c.call("patch_note", patch);
+    assert!(error && said[0].contains("changed since"), "{said:?}");
+    assert_eq!(scratch.read("a.md"), patched);
+
+    let (said, error) = c.call(
+        "write_note",
+        json!({"path": "new/n.md", "content": "fresh\n"}),
+    );
+    assert!(!error && said[0].contains(r#""created":true"#), "{said:?}");
+    assert_eq!(scratch.read("new/n.md"), "fresh\n");
+    let (said, error) = c.call("write_note", json!({"path": "a.md", "content": "gone\n"}));
+    assert!(
+        error,
+        "an existing note was overwritten without its etag: {said:?}"
+    );
+    let (_, error) = c.call("write_note", json!({"path": "link/x.md", "content": "x"}));
+    assert!(error && !scratch.exists("outside/x.md"));
+
+    let (said, error) = c.call(
+        "create_note_from_template",
+        json!({"template": "Templates/Day.md"}),
+    );
+    assert!(!error, "{said:?}");
+    assert_eq!(said[0], r#"{"created":true,"path":"Days/Day.md"}"#);
+    assert_eq!(scratch.read("Days/Day.md"), "# Made\n");
+    c.close();
+}
+
+#[test]
+fn read_only_leaves_the_writing_tools_out() {
+    let scratch = Scratch::new("read-only");
+    let mut c = Client::start(&scratch, &["--read-only"]);
+    c.initialize();
+    assert_eq!(names(&c.ask("tools/list", json!({}))), READ_TOOLS);
     c.close();
 }

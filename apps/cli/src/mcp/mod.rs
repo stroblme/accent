@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use accent_api::{Etag, Event, Read, Vault};
 use accent_core::config::Config;
+use accent_core::template;
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig};
@@ -31,10 +32,12 @@ const WAIT: Duration = Duration::from_secs(20);
 /// What the agent is told about the server before it asks anything.
 const INSTRUCTIONS: &str = "The notes of one accent vault: markdown files linked by [[wikilinks]] \
     and tagged with #tags, beside PDFs and other files, indexed for search. Every path is \
-    relative to the vault root.";
+    relative to the vault root. A write takes the etag the last read gave, and is refused when \
+    the file changed since.";
 
-/// Serve the vault at `root`, its index at `db`, until stdin closes.
-pub fn run(root: &Path, db: &Path) -> Result<()> {
+/// Serve the vault at `root`, its index at `db`, until stdin closes; `read_only` leaves out the
+/// tools that write.
+pub fn run(root: &Path, db: &Path, read_only: bool) -> Result<()> {
     let cfg = Config::load().vault(root);
     let (vault, events) = Vault::open_at(root, db, cfg)?;
     let ready = Arc::new(Ready::default());
@@ -42,13 +45,19 @@ pub fn run(root: &Path, db: &Path) -> Result<()> {
     std::thread::Builder::new()
         .name("accent-mcp-events".to_string())
         .spawn(move || drain.follow(events))?;
+    let mut tool_router = Server::tool_router();
+    if read_only {
+        for tool in tools::WRITE_TOOLS {
+            tool_router.remove_route(tool);
+        }
+    }
     let server = Server {
         shared: Arc::new(Shared {
             vault,
             ready,
             search: Mutex::new(()),
         }),
-        tool_router: Server::tool_router(),
+        tool_router,
     };
     accent_lsp::runtime().block_on(async move {
         server
@@ -139,6 +148,19 @@ impl Shared {
     /// results as for arguments, or a search would quote what a symlink brings in from outside.
     fn shown(&self, rel: &str) -> bool {
         self.inside(rel).is_ok()
+    }
+
+    /// Refuse a template a symlink takes outside the vault: its text is what the note gets.
+    /// The first of the places the vault looks for it that holds a file is the one it reads.
+    fn template(&self, name: &str) -> Result<(), String> {
+        let dir = self.vault.config().templates_dir;
+        match template::candidates(&dir, name)
+            .into_iter()
+            .find(|rel| self.vault.exists(rel))
+        {
+            Some(rel) => self.inside(&rel).map(drop),
+            None => Ok(()),
+        }
     }
 
     /// A text file's text, as the index counted its offsets.
