@@ -36,6 +36,8 @@ pub struct Viewer {
     pub look: Cell<Option<(Look, bool, i32, f64)>>,
     /// Counts the times the image was sent to be shown, so only the last one's answer lands.
     pub shows: Cell<u32>,
+    /// The image's own size, in pixels: an SVG's as it is drawn, a photo's the right way up.
+    pub size: Cell<Option<(i32, i32)>>,
     /// The monitor on a loose image, which nothing else watches (`App::watch_loose`).
     pub monitor: RefCell<Option<gio::FileMonitor>>,
 }
@@ -49,6 +51,7 @@ impl Viewer {
             image: RefCell::new(None),
             look: Cell::new(None),
             shows: Cell::new(0),
+            size: Cell::new(None),
             monitor: RefCell::default(),
         })
     }

@@ -415,6 +415,11 @@ impl PdfTab {
         self.view.page_count()
     }
 
+    /// One page's size in points.
+    pub fn page_size(&self, page: usize) -> Option<(f32, f32)> {
+        self.view.page_size(page)
+    }
+
     /// The page being read: the one under the middle of the reading view.
     pub fn current_page(&self) -> usize {
         self.view.current_page()

@@ -399,6 +399,9 @@ impl App {
                     // old percentage. Asked again of this one, so the zoom means the same thing
                     // either side of a reload.
                     zoom::set_image_zoom(&picture, image.zoom.get());
+                    let own = (shown.original.width(), shown.original.height());
+                    image.size.set(Some(shown.size.unwrap_or(own)));
+                    app.sync_details();
                     *image.image.borrow_mut() = Some((path, shown.original));
                     app.show_image(&image, None);
                 }

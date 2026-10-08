@@ -174,6 +174,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // no chord is found.
     ("win.search-all", "Search Ignored Files", &[]),
     ("win.pane-info", "Info Pane", &["<Control><Shift>b"]),
+    // No chord: the Info pane's own section, found by name.
+    ("win.file-details", "Show File Details", &[]),
     ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
     ("win.git-sync", "Sync", &[]),
     ("win.git-sync-all", "Sync All Repositories", &[]),
@@ -583,6 +585,7 @@ impl App {
                 self.show_pane("info");
                 self.refresh_references();
             }
+            "file-details" => self.show_section("details"),
             "pane-git" => {
                 self.show_pane("git");
                 // The chord is how the keyboard reaches the commit box; the pane on its own

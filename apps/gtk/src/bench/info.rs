@@ -6,24 +6,26 @@ use super::*;
 const SETTLE: Duration = Duration::from_millis(1500);
 
 /// `ACCENT_BENCH_INFO=<rel>[,<rel>…]` brings the Info pane to the front, prints it before any tab
-/// is open, then opens each file in turn and prints it again once the file's answers have landed:
-/// the page the pane shows, each section as `Title:open|shut|hidden` with its count, and the
-/// divider as `position/height`. Last, over the last file, it drags the divider to 200 px and
-/// folds the sections as clicks on their headers would — References shut, Tags shut, both shut,
-/// both open — printing each: the divider comes back to 200 px.
+/// is open, opens the Details section, then opens each file in turn and prints the pane again
+/// once the file's answers have landed: the page it shows, each section as
+/// `Title:open|shut|hidden` with its count, the dividers as `position/height`, and the Details
+/// rows as `Group.Name=value`. Last, over the last file, it drags the upper divider to 200 px and
+/// folds the sections as clicks on their headers would, printing each fold: the divider comes
+/// back to 200 px with all three open again.
 pub(super) fn bench_info(app: &Rc<App>, rels: &str) {
     app.show_pane("info");
     let (app, rels) = (app.clone(), rels.to_string());
     glib::spawn_future_local(async move {
+        let sidebar = app.sidebar.get().expect("a sidebar");
         glib::timeout_future(SETTLE).await;
         print_info(&app, "none");
+        sidebar.fold_section("details", true);
         for rel in rels.split(',') {
             app.open_path(rel);
             glib::timeout_future(SETTLE).await;
             print_info(&app, rel);
         }
-        let sidebar = app.sidebar.get().expect("a sidebar");
-        // The pane's own divider is the first paned in it; the Tags section's is inside that.
+        // The pane's own divider is the first paned in it; the others are inside that.
         let divider = find_widget(sidebar.widget(), &|w| w.is::<adw::ViewStack>())
             .and_downcast::<adw::ViewStack>()
             .and_then(|stack| stack.child_by_name("info"))
@@ -31,9 +33,16 @@ pub(super) fn bench_info(app: &Rc<App>, rels: &str) {
             .and_downcast::<gtk::Paned>()
             .expect("the divider");
         divider.set_position(200);
-        for (references, tags) in [(false, true), (true, false), (false, false), (true, true)] {
-            sidebar.fold_section("references", references);
-            sidebar.fold_section("tags", tags);
+        for open in [
+            [false, true, true],
+            [true, false, true],
+            [true, true, false],
+            [false, false, false],
+            [true, true, true],
+        ] {
+            for (name, open) in ["references", "tags", "details"].into_iter().zip(open) {
+                sidebar.fold_section(name, open);
+            }
             glib::timeout_future(Duration::from_millis(300)).await;
             print_info(&app, "fold");
         }
@@ -43,6 +52,10 @@ pub(super) fn bench_info(app: &Rc<App>, rels: &str) {
 
 fn print_info(app: &Rc<App>, rel: &str) {
     if let Some(sidebar) = app.sidebar.get() {
-        println!("bench info {rel} {}", sidebar.info_state());
+        let (state, details) = sidebar.info_state();
+        println!("bench info {rel} {state}");
+        if !details.is_empty() {
+            println!("bench info {rel} details {}", details.join(" | "));
+        }
     }
 }

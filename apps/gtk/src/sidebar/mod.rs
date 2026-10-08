@@ -7,6 +7,7 @@
 //! the Ports pane is built with what forwards a port and nothing else, which is what keeps a
 //! pane from being wired to machinery it never calls.
 
+mod details;
 mod info;
 mod outline;
 mod ports;
@@ -14,6 +15,7 @@ mod search;
 mod tags;
 mod widgets;
 
+pub use details::{Fact, Group};
 pub use outline::{Line, above, outline_note};
 pub use ports::Data as PortsData;
 pub use search::{Answer, Data as SearchData, Query};
@@ -79,8 +81,11 @@ pub struct Sidebar {
     switcher: gtk::Widget,
     stack: adw::ViewStack,
     /// Everything that needs an index behind it. `None` in a window with no vault, where the
-    /// Outline pane is the only one there is.
+    /// Info pane holds Details alone.
     panes: Option<VaultPanes>,
+    /// The Info pane: References, Tags and Details as sections, and what Details shows.
+    info: Rc<info::Info>,
+    details: details::Details,
     /// Whatever the Outline pane is showing. A `Bin` rather than a list of its own, because what
     /// belongs in it depends entirely on the open tab: a note's headings, a PDF's bookmarks and
     /// thumbnails, or a sentence saying why there is nothing.
@@ -114,8 +119,6 @@ struct VaultPanes {
     search_running: Rc<dyn Fn() -> usize>,
     #[cfg(feature = "bench")]
     search_view: gtk::ListView,
-    /// The Info pane: References and Tags as sections.
-    info: Rc<info::Info>,
     references: gtk::StringList,
     references_stack: gtk::Stack,
     /// The line the References section shows instead of rows. Its words change with what the
@@ -151,8 +154,8 @@ struct VaultPanes {
 impl Sidebar {
     /// `files` is the existing vault tree widget, dropped into the Files pane unchanged.
     /// `vault` carries the tree widget and the index closures behind Files, Search and Info;
-    /// `None` builds a sidebar with only the Outline pane, which is what a window opened on a
-    /// single file has to show. `on_open` is called with a vault-relative path when the user
+    /// `None` builds a sidebar with only the Info pane's Details and the Outline pane, which is
+    /// what a window opened on a single file has to show. `on_open` is called with a vault-relative path when the user
     /// activates a result, a tagged file or a reference, plus where in the note the row points
     /// when it points at anything narrower than the file.
     /// `on_reference` is called with a References row, which carries a line number of its own.
@@ -168,8 +171,10 @@ impl Sidebar {
             .transition_duration(crate::widgets::FADE_MS)
             .build();
 
-        // Every pane but the outline is a view of an index, so without one there is nothing for
-        // them to show and they are not built at all.
+        // Every pane but Info's Details and the outline is a view of an index, so without one
+        // there is nothing for them to show and they are not built at all.
+        let details = details::Details::new();
+        let mut vault_info = None;
         let panes = vault.map(|(files, data, git, git_divider)| {
             stack.add_titled_with_icon(&files, Some("files"), "Files", "folder-symbolic");
 
@@ -184,8 +189,12 @@ impl Sidebar {
             let tags = tags::pane(&Rc::new(data.tags), &on_open);
             let references = gtk::StringList::new(&[]);
             let (references_stack, references_empty) = references_body(&references, on_reference);
-            let info = info::Info::new(&references_stack, &tags.widget);
+            let info = info::Info::new(
+                Some((references_stack.upcast_ref(), &tags.widget)),
+                &details.root,
+            );
             stack.add_titled_with_icon(&info.root, Some("info"), "Info", info::ICON);
+            vault_info = Some(info.clone());
 
             stack.add_titled_with_icon(&git, Some("git"), "Git", GIT_ICON);
             let git_page = stack.page(&git);
@@ -239,12 +248,18 @@ impl Sidebar {
             (
                 search,
                 tags,
-                (info, references, references_stack, references_empty),
+                (references, references_stack, references_empty),
                 tags_catch_up,
                 git_page,
                 git_divider,
                 (ports_page, ports_refill),
             )
+        });
+
+        let info = vault_info.unwrap_or_else(|| {
+            let info = info::Info::new(None, &details.root);
+            stack.add_titled_with_icon(&info.root, Some("info"), "Info", info::ICON);
+            info
         });
 
         let outline_bin = adw::Bin::builder().vexpand(true).build();
@@ -291,7 +306,7 @@ impl Sidebar {
                     git_divider,
                     (ports_page, ports_refill),
                 )| {
-                    let (info, references, references_stack, references_empty) = references;
+                    let (references, references_stack, references_empty) = references;
                     VaultPanes {
                         search_entry: search.entry,
                         replace_toggle: search.replace_toggle,
@@ -308,7 +323,6 @@ impl Sidebar {
                         search_running: search.running,
                         #[cfg(feature = "bench")]
                         search_view: search.view,
-                        info,
                         references,
                         references_stack,
                         references_empty,
@@ -331,6 +345,8 @@ impl Sidebar {
                     }
                 },
             ),
+            info,
+            details,
             outline_bin,
             outline_list: RefCell::new(None),
             properties_bin,
@@ -362,12 +378,12 @@ impl Sidebar {
     /// was. The window's double-click handler asks every divider owner in turn, so the rule for a
     /// pane lives next to the pane rather than in the shell.
     pub fn reset_divider(&self, divider: &gtk::Paned) -> bool {
+        if self.info.reset_divider(divider) {
+            return true;
+        }
         let Some(panes) = self.panes.as_ref() else {
             return false;
         };
-        if panes.info.reset_divider(divider) {
-            return true;
-        }
         let share = if divider == &panes.tags_divider {
             tags::SHARE
         } else if divider == &panes.git_divider {
@@ -400,7 +416,7 @@ impl Sidebar {
         let Some(panes) = self.panes.as_ref() else {
             return;
         };
-        let section = &panes.info.references;
+        let section = &self.info.references;
         if let Some(title) = title {
             section.set_title(title);
         }
@@ -423,40 +439,34 @@ impl Sidebar {
     /// Fit the Info pane to the tab `key` in front (empty for none): its sections for a file,
     /// with Tags over a markdown note, and a status page where there is no file.
     pub fn sync_info(&self, key: &str, file: bool, note: bool) {
+        self.info.sync(key, file, note);
         if let Some(panes) = self.panes.as_ref() {
-            panes.info.sync(key, file, note);
             (panes.tags_catch_up)(&self.stack);
         }
     }
 
-    /// Bring the Info pane to the front with the section `name` — "references" or "tags" —
-    /// open, the keyboard left where it is.
+    /// Bring the Info pane to the front with the section `name` — "references", "tags" or
+    /// "details" — open, the keyboard left where it is.
     pub fn show_section(&self, name: &str) {
-        let Some(panes) = self.panes.as_ref() else {
-            return;
-        };
         self.stack.set_visible_child_name("info");
-        panes.info.open(name);
+        self.info.open(name);
         // Opening a section that was open but hidden notifies nothing.
-        (panes.tags_catch_up)(&self.stack);
+        if let Some(panes) = self.panes.as_ref() {
+            (panes.tags_catch_up)(&self.stack);
+        }
     }
 
     /// Whether the section `name` is on screen: the Info pane in front with it shown and open.
     pub fn section_live(&self, name: &str) -> bool {
-        self.panes
-            .as_ref()
-            .is_some_and(|panes| live(&self.stack, &panes.info, name))
+        live(&self.stack, &self.info, name)
     }
 
     /// Call `f` with a section's name and whether it is open now, whenever one is folded or
     /// unfolded.
     pub fn connect_section_toggled(&self, f: impl Fn(&str, bool) + 'static) {
-        let Some(panes) = self.panes.as_ref() else {
-            return;
-        };
         let f = Rc::new(f);
-        for name in ["references", "tags"] {
-            if let Some(section) = panes.info.section(name) {
+        for name in ["references", "tags", "details"] {
+            if let Some(section) = self.info.section(name) {
                 let f = f.clone();
                 section
                     .root
@@ -465,17 +475,18 @@ impl Sidebar {
         }
     }
 
+    /// Show the file's facts in the Details section.
+    pub fn set_details(&self, groups: &[Group]) {
+        self.details.set(groups);
+    }
+
     /// The Info pane's sections, for the session.
     pub fn info_saved(&self) -> InfoPane {
-        self.panes
-            .as_ref()
-            .map_or_else(InfoPane::default, |panes| panes.info.saved())
+        self.info.saved()
     }
 
     pub fn restore_info(&self, saved: &InfoPane) {
-        if let Some(panes) = self.panes.as_ref() {
-            panes.info.restore(saved);
-        }
+        self.info.restore(saved);
     }
 
     /// Which pane is on screen, for the callers that only refresh what is being looked at.
@@ -484,7 +495,7 @@ impl Sidebar {
     }
 
     /// Whether this sidebar has the named pane at all, and is showing it. A window with no vault
-    /// has only the outline, and a vault with no repository has no Git pane, so the chords for
+    /// has only Info and the outline, and a vault with no repository has no Git pane, so the chords for
     /// the others must not open a column that cannot answer them.
     pub fn has_pane(&self, name: &str) -> bool {
         self.stack
@@ -607,7 +618,7 @@ impl Sidebar {
         let Some(panes) = self.panes.as_ref() else {
             return;
         };
-        if !live(&self.stack, &panes.info, "tags") {
+        if !live(&self.stack, &self.info, "tags") {
             panes.tags_dirty.set(true);
             return;
         }
@@ -631,19 +642,16 @@ impl Sidebar {
         self.panes.as_ref().and_then(|panes| (panes.tags_picked)())
     }
 
-    /// What the Info pane shows, as `ACCENT_BENCH_INFO` prints it.
+    /// What the Info pane shows, and the Details rows, as `ACCENT_BENCH_INFO` prints them.
     #[cfg(feature = "bench")]
-    pub fn info_state(&self) -> String {
-        self.panes
-            .as_ref()
-            .map(|panes| panes.info.state())
-            .unwrap_or_default()
+    pub fn info_state(&self) -> (String, Vec<String>) {
+        (self.info.state(), self.details.lines())
     }
 
     /// Fold or unfold the section `name`, as a click on its header does.
     #[cfg(feature = "bench")]
     pub fn fold_section(&self, name: &str, open: bool) {
-        if let Some(section) = self.panes.as_ref().and_then(|p| p.info.section(name)) {
+        if let Some(section) = self.info.section(name) {
             section.root.set_expanded(open);
         }
     }
@@ -660,7 +668,7 @@ impl Sidebar {
     /// leaves its box: what is typed next is a new query.
     pub fn show_pane(&self, name: &str) {
         // A pane this sidebar does not have leaves it where it was, which for a window with no
-        // vault means the outline stays up whatever chord was pressed.
+        // vault means Info or the outline stays up whatever chord was pressed.
         if !self.has_pane(name) {
             return;
         }

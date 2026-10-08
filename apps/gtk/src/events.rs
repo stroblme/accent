@@ -62,6 +62,7 @@ impl App {
     /// window has changed.
     pub(crate) fn changed_on_disk(self: &Rc<Self>, rel: &str) {
         self.reshow_preview_image(rel);
+        self.details_stale(rel);
         let Some(doc) = self.doc_for(rel) else {
             return;
         };

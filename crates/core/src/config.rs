@@ -353,7 +353,8 @@ pub struct ShellPlace {
 pub struct InfoPane {
     pub references: bool,
     pub tags: bool,
-    pub dividers: [Option<f64>; 1],
+    pub details: bool,
+    pub dividers: [Option<f64>; 2],
 }
 
 impl Default for InfoPane {
@@ -361,7 +362,8 @@ impl Default for InfoPane {
         InfoPane {
             references: true,
             tags: true,
-            dividers: [None],
+            details: false,
+            dividers: [None, None],
         }
     }
 }
@@ -1382,7 +1384,8 @@ daily_dir = "Daily"
             info: InfoPane {
                 references: false,
                 tags: true,
-                dividers: [Some(0.25)],
+                details: true,
+                dividers: [Some(0.25), None],
             },
             view: "preview".to_string(),
             zoom: 1.2,

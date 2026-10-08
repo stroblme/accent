@@ -290,6 +290,7 @@ pub fn build_window(
         git: OnceCell::new(),
         excluded: RefCell::new(None),
         references: RefCell::new(None),
+        details_stat: RefCell::new(None),
         ops: OnceCell::new(),
         preferences: OnceCell::new(),
         preview: RefCell::new(None),
@@ -785,22 +786,31 @@ fn adopt_sidebar(
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
     // The panes fade while the user types, on the same transition as the bars.
     pane.widget().add_css_class("chrome-fade");
-    // The Outline pane does nothing while it is out of sight, so it catches up with the caret
-    // when it comes to the front.
+    // The Outline pane and the Details section do nothing while they are out of sight, so they
+    // catch up when they come to the front.
     pane.connect_pane_shown(glib::clone!(
         #[weak]
         app,
-        move || app.follow_outline()
+        move || {
+            app.follow_outline();
+            app.stat_details();
+            app.sync_details();
+        }
     ));
     // Which sections are open is session state; and the References section, which follows a
-    // code tab's caret only while it is on screen, catches up as it opens.
+    // code tab's caret only while it is on screen, catches up as it opens, as Details does.
     pane.connect_section_toggled(glib::clone!(
         #[weak]
         app,
         move |name, open| {
             app.save_session_soon();
-            if name == "references" && open {
-                app.refresh_references();
+            match (name, open) {
+                ("references", true) => app.refresh_references(),
+                ("details", true) => {
+                    app.stat_details();
+                    app.sync_details();
+                }
+                _ => {}
             }
         }
     ));

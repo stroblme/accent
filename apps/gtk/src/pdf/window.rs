@@ -48,10 +48,14 @@ impl App {
                 app.save_session_soon();
             }
         ));
+        // Asked again after a page edit, which moves the page count too.
         pdf.connect_outline(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| app.sync_outline()
+            move |_| {
+                app.sync_outline();
+                app.sync_details();
+            }
         ));
         pdf.connect_opened(glib::clone!(
             #[weak(rename_to = app)]
@@ -102,6 +106,7 @@ impl App {
             move |pdf| {
                 app.synctex_written(pdf);
                 app.push_pdf(pdf);
+                app.details_stale(&pdf.key());
             }
         ));
         pdf.connect_export(glib::clone!(

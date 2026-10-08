@@ -520,15 +520,21 @@ impl Tab {
 
     /// How the file is encoded and how its lines end, for the readout in the header.
     pub fn encoding_label(&self) -> String {
-        let encoding = match self.lossy.get() {
+        format!("{} · {}", self.encoding(), self.line_ending())
+    }
+
+    pub fn encoding(&self) -> &'static str {
+        match self.lossy.get() {
             true => "Not UTF-8",
             false => "UTF-8",
-        };
-        let ending = match self.crlf.get() {
+        }
+    }
+
+    pub fn line_ending(&self) -> &'static str {
+        match self.crlf.get() {
             true => "CRLF",
             false => "LF",
-        };
-        format!("{encoding} · {ending}")
+        }
     }
 
     /// A rename landed: point the tab at the new path without losing the buffer.
@@ -696,6 +702,11 @@ impl Tab {
         if let Some(hosted) = self.hosted() {
             hosted.restyle();
         }
+    }
+
+    /// How many links the note holds, as of its last analysis.
+    pub fn link_count(&self) -> usize {
+        self.links.borrow().len()
     }
 
     /// The text's words, as the status bar counts them for a note.
