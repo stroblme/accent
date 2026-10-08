@@ -293,7 +293,7 @@ pub struct Tab {
     ghost_text: Cell<bool>,
     map: sourceview5::Map,
     /// The optional line-number gutter; hidden unless the preference turns it on.
-    numbers: sourceview5::GutterRendererText,
+    numbers: sourceview5::GutterRenderer,
     /// The sticky block title over the top of the view, and the bar it sits on. Hidden until
     /// something is scrolled out of sight above the first visible line.
     sticky: gtk::Label,

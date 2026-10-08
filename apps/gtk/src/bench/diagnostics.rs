@@ -70,7 +70,11 @@ pub(super) fn bench_diagnostics(app: &Rc<App>, rel: &str) {
 /// that widget is invalidated, a caret move invalidates the view and not the gutter renderer
 /// inside it, and the highlight stayed on the line the caret had left until the pointer entered
 /// the column and changed its opacity.
+///
+/// The numbers are turned on first, whatever the scratch config says: a hidden renderer draws
+/// nothing, and `gutter` then reads `None`.
 fn bench_gutter(tab: &Rc<Tab>) {
+    tab.set_line_numbers(true);
     let step = |label: &str| {
         bench_frame();
         println!(
