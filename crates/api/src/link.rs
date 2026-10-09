@@ -16,42 +16,12 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::locked;
 use crate::ssh::{self, Url};
+use crate::{Error, Result, locked};
 
 /// How much of the server binary goes out per write, and therefore how often the progress bar
 /// moves while it is uploading.
 const CHUNK: usize = 256 * 1024;
-
-/// Why a host is not ready, which decides whether another attempt is worth making.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Failure {
-    /// Anything on the way to the vault: ssh, the link, the upload, a server that went quiet.
-    Link(String),
-    /// The host will not run this build's server, or its `serve` will not serve the vault:
-    /// another attempt meets the same answer until someone changes the host or the build.
-    Refused(String),
-}
-
-impl std::fmt::Display for Failure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Failure::Link(why) | Failure::Refused(why) => f.write_str(why),
-        }
-    }
-}
-
-impl From<String> for Failure {
-    fn from(why: String) -> Failure {
-        Failure::Link(why)
-    }
-}
-
-impl From<&str> for Failure {
-    fn from(why: &str) -> Failure {
-        Failure::Link(why.to_string())
-    }
-}
 
 /// The musl-static `accent-cli` this machine uploads, one build per architecture, and what it is
 /// known by on a host.
@@ -77,26 +47,28 @@ struct Build {
 impl Server {
     /// The build for a host whose `uname -sm` says `system`, or why there is none: a host that is
     /// not Linux on one of [`ssh::SERVER_ARCHES`], or a build of this app that left that one out.
-    fn for_host(&self, host: &str, system: &str) -> Result<&Build, String> {
+    fn for_host(&self, host: &str, system: &str) -> Result<&Build> {
         let arch = match system.split_whitespace().collect::<Vec<_>>()[..] {
             ["Linux", arch] => ssh::SERVER_ARCHES.iter().find(|a| **a == arch),
             _ => None,
         };
         let Some(arch) = arch else {
-            return Err(format!(
+            return Err(Error::Refused(format!(
                 "{host} runs {system}, and accent's server is built for Linux on {} only",
                 ssh::SERVER_ARCHES.join(" and ")
-            ));
+            )));
         };
         self.builds.iter().find(|b| b.arch == *arch).ok_or_else(|| {
-            format!("{host} runs {system}, and this build has no server for it: run `make server`")
+            Error::Refused(format!(
+                "{host} runs {system}, and this build has no server for it: run `make server`"
+            ))
         })
     }
 }
 
 /// The server builds, hashed once per build rather than once per connection: 8 MB of blake3 each
 /// is not free, and every tab on a host asks for its name.
-pub fn server() -> Result<Server, String> {
+pub fn server() -> Result<Server> {
     /// The files as they were when they were hashed: a rebuild changes a length or an mtime.
     type Stamp = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
     static HASHED: Mutex<Option<(Stamp, Server)>> = Mutex::new(None);
@@ -106,11 +78,13 @@ pub fn server() -> Result<Server, String> {
         .filter_map(|arch| Some((*arch, ssh::server_binary(arch)?)))
         .collect();
     if found.is_empty() {
-        return Err("no server binary to upload; run `make server` first".to_string());
+        return Err(Error::Remote(
+            "no server binary to upload; run `make server` first".to_string(),
+        ));
     }
     let mut stamp = Vec::new();
     for (_, path) in &found {
-        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let meta = std::fs::metadata(path).map_err(|e| unreadable(path, e))?;
         stamp.push((path.clone(), meta.len(), meta.modified().ok()));
     }
     let mut hashed = locked(&HASHED);
@@ -121,7 +95,7 @@ pub fn server() -> Result<Server, String> {
     }
     let mut builds = Vec::new();
     for (arch, path) in found {
-        let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|e| unreadable(&path, e))?;
         builds.push(Build {
             arch,
             hash: ssh::hash_of(&bytes),
@@ -151,12 +125,7 @@ pub fn host(url: &Url) -> Url {
 /// each step, with a fraction for the upload, the one step that can measure itself.
 ///
 /// `quiet` is for an attempt nobody asked for: see [`ssh::master`].
-pub fn prepare(
-    url: &Url,
-    ctl: &Path,
-    quiet: bool,
-    say: &dyn Fn(&str, Option<f64>),
-) -> Result<(), Failure> {
+pub fn prepare(url: &Url, ctl: &Path, quiet: bool, say: &dyn Fn(&str, Option<f64>)) -> Result<()> {
     say(&format!("Connecting to {}", url.host), None);
     once(&url.authority(), ctl, quiet, || {
         // A live master skips the handshake and the round trip `ssh::master` would make to adopt
@@ -173,7 +142,7 @@ pub fn prepare(
             // `BatchMode` refuses at the first prompt. Adopting it again would repeat that on
             // every attempt, so it is retired and a fresh master dials in its place, asking for
             // the passphrase where this attempt may.
-            Err(Failure::Link(why)) if adopted => {
+            Err(Error::Remote(why)) if adopted => {
                 tracing::debug!("the master for {} opens no session: {why}", url.host);
                 let _ = run(&ssh::stop(url, ctl));
                 dial(url, ctl, quiet, say)?;
@@ -183,21 +152,28 @@ pub fn prepare(
         };
         match missing {
             None => Ok(()),
-            Some(build) => Ok(upload(url, ctl, &server.hash, build, say)?),
+            Some(build) => upload(url, ctl, &server.hash, build, say),
         }
     })
 }
 
 /// Start the background master behind `ctl`, which is where a prompt can come up.
-fn dial(url: &Url, ctl: &Path, quiet: bool, say: &dyn Fn(&str, Option<f64>)) -> Result<(), String> {
+fn dial(url: &Url, ctl: &Path, quiet: bool, say: &dyn Fn(&str, Option<f64>)) -> Result<()> {
     say(&format!("Connecting to {}", url.host), None);
     if let Some(dir) = ctl.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| unreadable(dir, e))?;
     }
-    run(&ssh::master(url, ctl, quiet)).map_err(|why| match why.is_empty() {
-        true => format!("cannot connect to {}", url.host),
-        false => why,
+    run(&ssh::master(url, ctl, quiet)).map_err(|e| match e {
+        Error::Remote(why) if why.is_empty() => {
+            Error::Remote(format!("cannot connect to {}", url.host))
+        }
+        e => e,
     })
+}
+
+/// A local file the link needs and could not have, by its path.
+fn unreadable(path: &Path, e: std::io::Error) -> Error {
+    Error::Remote(format!("{}: {e}", path.display()))
 }
 
 /// One ssh invocation, with the environment that makes a prompt reach a dialog instead of a
@@ -220,15 +196,22 @@ pub(crate) fn command(argv: &[String]) -> Command {
 
 /// Run one ssh invocation to its end, answering with what it said on stderr when it failed. It
 /// must not read our stdin, and its prompts go through `SSH_ASKPASS`.
-fn run(argv: &[String]) -> Result<(), String> {
+fn run(argv: &[String]) -> Result<()> {
     let out = command(argv)
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("cannot run ssh: {e}"))?;
+        .map_err(no_ssh)?;
     match out.status.success() {
         true => Ok(()),
-        false => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        false => Err(Error::Remote(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        )),
     }
+}
+
+/// ssh would not even start.
+pub(crate) fn no_ssh(e: std::io::Error) -> Error {
+    Error::Remote(format!("cannot run ssh: {e}"))
 }
 
 /// The build the host still needs, `None` where it holds it already, or why it cannot have one
@@ -238,26 +221,24 @@ fn installed<'s>(
     ctl: &Path,
     server: &'s Server,
     say: &dyn Fn(&str, Option<f64>),
-) -> Result<Option<&'s Build>, Failure> {
+) -> Result<Option<&'s Build>> {
     say("Checking the remote server", None);
     let out = command(&ssh::run(url, ctl, &ssh::have_server_cmd(&server.hash)))
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("cannot run ssh: {e}"))?;
+        .map_err(no_ssh)?;
     let said = String::from_utf8_lossy(&out.stdout);
     let mut lines = said.lines().map(str::trim);
     let (Some(system), Some(Ok(size))) = (lines.next(), lines.next().map(str::parse::<usize>))
     else {
-        return Err(Failure::Link(
+        return Err(Error::Remote(
             match String::from_utf8_lossy(&out.stderr).trim() {
                 "" => format!("cannot run a command on {}", url.host),
                 why => why.to_string(),
             },
         ));
     };
-    let build = server
-        .for_host(&url.host, system)
-        .map_err(Failure::Refused)?;
+    let build = server.for_host(&url.host, system)?;
     Ok((size != build.size).then_some(build))
 }
 
@@ -268,12 +249,14 @@ fn upload(
     hash: &str,
     build: &Build,
     say: &dyn Fn(&str, Option<f64>),
-) -> Result<(), String> {
+) -> Result<()> {
     let total = build.size;
-    let bytes = std::fs::read(&build.path).map_err(|e| format!("{}: {e}", build.path.display()))?;
+    let bytes = std::fs::read(&build.path).map_err(|e| unreadable(&build.path, e))?;
     // Rebuilt since it was hashed: these bytes would go up under another build's name.
     if ssh::hash_of(&bytes) != build.hash {
-        return Err("the server binary changed while connecting; try again".to_string());
+        return Err(Error::Remote(
+            "the server binary changed while connecting; try again".to_string(),
+        ));
     }
     say(
         &format!("Uploading the server (0 / {} MB)", mb(total)),
@@ -295,7 +278,7 @@ fn upload(
             false => say("Installing the server", None),
         }
     })
-    .map_err(|e| format!("cannot install the server: {e}"))
+    .map_err(|e| Error::Remote(format!("cannot install the server: {e}")))
 }
 
 /// Run `argv` with `input` on its stdin, a chunk at a time, telling `progress` the bytes written
@@ -303,19 +286,20 @@ fn upload(
 ///
 /// A write that fails is ssh having ended already, so what it said on stderr is the reason, not
 /// the broken pipe the write found. ssh's own failure, exit status 255 rather than the command's,
-/// is the link that went: `NotConnected`, as a call over a dead link is.
+/// is the link that went: [`Error::Offline`], as a call over a dead link is.
 pub(crate) fn send(
     argv: &[String],
     mut input: impl Read,
     total: u64,
     progress: &dyn Fn(u64, u64),
-) -> std::io::Result<()> {
+) -> Result<()> {
     let mut child = command(argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .spawn()?;
-    let written = (|| {
+        .spawn()
+        .map_err(no_ssh)?;
+    let written = (|| -> std::io::Result<()> {
         // Dropped on the way out, which closes the pipe: the host's `cat` ends there.
         let mut stdin = child
             .stdin
@@ -332,15 +316,13 @@ pub(crate) fn send(
             progress(done, total);
         }
     })();
-    let out = child.wait_with_output()?;
+    let out = child.wait_with_output().map_err(no_ssh)?;
     let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
     match (written, out.status.success()) {
         (Ok(()), true) => Ok(()),
-        _ if out.status.code() == Some(255) => {
-            Err(std::io::Error::new(std::io::ErrorKind::NotConnected, said))
-        }
-        (Err(e), _) if said.is_empty() => Err(e),
-        _ => Err(std::io::Error::other(said)),
+        _ if out.status.code() == Some(255) => Err(Error::Offline(said)),
+        (Err(e), _) if said.is_empty() => Err(Error::Remote(e.to_string())),
+        _ => Err(Error::Remote(said)),
     }
 }
 
@@ -363,7 +345,7 @@ struct Host {
 struct Ended {
     ctl: PathBuf,
     quiet: bool,
-    outcome: Result<(), Failure>,
+    outcome: Result<()>,
 }
 
 impl Ended {
@@ -380,12 +362,7 @@ impl Ended {
 ///
 /// Keyed by the authority rather than the socket because the upload is the host's: two masters
 /// to one host, a vault window's and a terminal window's, must not upload over each other.
-fn once(
-    authority: &str,
-    ctl: &Path,
-    quiet: bool,
-    work: impl FnOnce() -> Result<(), Failure>,
-) -> Result<(), Failure> {
+fn once(authority: &str, ctl: &Path, quiet: bool, work: impl FnOnce() -> Result<()>) -> Result<()> {
     static HOSTS: Mutex<Vec<(String, Arc<Host>)>> = Mutex::new(Vec::new());
     let host = {
         let mut hosts = locked(&HOSTS);
@@ -427,27 +404,21 @@ mod tests {
     use super::*;
 
     /// ssh ending on its own (255) is the link that went; the command failing is the host
-    /// refusing, and a call that never reached the host is the link too.
+    /// refusing.
     #[test]
-    fn a_transfer_the_link_dropped_is_not_connected() {
-        let kind = |script: &str| {
+    fn a_transfer_the_link_dropped_is_offline() {
+        let sent = |script: &str| {
             let argv = ["sh", "-c", script].map(String::from);
-            send(&argv, &b"bytes"[..], 5, &|_, _| ())
-                .unwrap_err()
-                .kind()
+            send(&argv, &b"bytes"[..], 5, &|_, _| ()).unwrap_err()
         };
-        let gone = std::io::ErrorKind::NotConnected;
-        assert_eq!(kind("cat >/dev/null; echo lost >&2; exit 255"), gone);
         assert_eq!(
-            kind("cat >/dev/null; echo no >&2; exit 1"),
-            std::io::ErrorKind::Other
+            sent("cat >/dev/null; echo lost >&2; exit 255"),
+            Error::Offline("lost".to_string())
         );
-        let never = crate::rpc::RpcError {
-            code: crate::rpc::DISCONNECTED,
-            message: "Lost the connection".to_string(),
-            data: None,
-        };
-        assert_eq!(never.io_error().kind(), gone);
+        assert_eq!(
+            sent("cat >/dev/null; echo no >&2; exit 1"),
+            Error::Remote("no".to_string())
+        );
     }
 
     /// A host gets the build for its machine; any other kind of host is refused, naming what it
@@ -477,10 +448,10 @@ mod tests {
         ] {
             assert_eq!(
                 server.for_host("box", other).map(|b| b.arch),
-                Err(format!(
+                Err(Error::Refused(format!(
                     "box runs {other}, and accent's server is built for Linux on x86_64 and \
                      aarch64 only"
-                ))
+                )))
             );
         }
         let one = Server {
@@ -489,10 +460,10 @@ mod tests {
         };
         assert_eq!(
             one.for_host("box", "Linux aarch64").map(|b| b.arch),
-            Err(
+            Err(Error::Refused(
                 "box runs Linux aarch64, and this build has no server for it: run `make server`"
                     .to_string()
-            )
+            ))
         );
     }
 
@@ -501,7 +472,7 @@ mod tests {
 
     const CTL: &str = "/run/user/1000/accent/0123456789abcdef";
 
-    type Outcome = Result<(), Failure>;
+    type Outcome = Result<()>;
 
     /// Start an attempt on `authority` that holds the host until the test says how it went.
     fn held<'s>(
@@ -558,10 +529,10 @@ mod tests {
         let mut ran = false;
         let again = once("a-waited-host", ctl, false, || {
             ran = true;
-            Err(Failure::from("gone"))
+            Err(Error::Remote("gone".to_string()))
         });
         assert!(ran);
-        assert_eq!(again, Err(Failure::from("gone")));
+        assert_eq!(again, Err(Error::Remote("gone".to_string())));
 
         // A quiet attempt fails where a prompt might have got through, so a caller that may
         // prompt is not handed that failure.
@@ -569,8 +540,13 @@ mod tests {
             let (release, quiet) = held(s, "a-quiet-host", true);
             let loud = s.spawn(|| once("a-quiet-host", ctl, false, || Ok(())));
             std::thread::sleep(QUEUED);
-            release.send(Err(Failure::from("no agent"))).unwrap();
-            assert_eq!(quiet.join().unwrap(), Err(Failure::from("no agent")));
+            release
+                .send(Err(Error::Remote("no agent".to_string())))
+                .unwrap();
+            assert_eq!(
+                quiet.join().unwrap(),
+                Err(Error::Remote("no agent".to_string()))
+            );
             assert_eq!(loud.join().unwrap(), Ok(()));
         });
     }

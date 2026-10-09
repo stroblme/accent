@@ -608,7 +608,7 @@ fn worktree(what: &Comparison, vault: &Vault) -> Result<Blob, String> {
         return Err(format!("{name} is outside the vault on the remote host"));
     }
     let read = match outside {
-        true => accent_core::fs::read_text(Path::new(&what.key)),
+        true => accent_core::fs::read_text(Path::new(&what.key)).map_err(Into::into),
         false => vault.read_text(&what.key),
     };
     Ok(match read {
@@ -618,7 +618,7 @@ fn worktree(what: &Comparison, vault: &Vault) -> Result<Blob, String> {
         // back on every line.
         Ok(accent_api::fs::Read::Text(t)) if t.crlf => {
             let raw = match outside {
-                true => accent_core::fs::read_note(Path::new(&what.key)),
+                true => accent_core::fs::read_note(Path::new(&what.key)).map_err(Into::into),
                 false => vault.read(&what.key),
             };
             Blob::Text(raw.map_or_else(

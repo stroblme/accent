@@ -21,16 +21,16 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use crate::{Error, Result};
 use accent_core::index::Index;
 use accent_core::markdown;
-use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::local::Ignored;
 use crate::remote::Remote;
-use crate::vault::{Backend, remote_err};
+use crate::vault::Backend;
 use crate::{Event, FileEdits, Local, LspConfig, Vault, locked};
 
 pub(crate) mod external;
@@ -283,7 +283,7 @@ impl<T> Future for Task<T> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.handle).poll(cx) {
             Poll::Ready(Ok(r)) => Poll::Ready(r),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(anyhow::anyhow!("{e}"))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e.into())),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -385,7 +385,7 @@ pub(crate) trait Language: Send + Sync {
     }
     /// The calls into the declaration whose name is at `pos` (`incoming`), or out of it, as the
     /// file is on disk unless it is open; `None` where the provider knows no declaration, and
-    /// [`NotYet`] where it cannot tell yet.
+    /// [`Error::NotYet`] where it cannot tell yet.
     fn calls(
         &self,
         _rel: &str,
@@ -394,6 +394,11 @@ pub(crate) trait Language: Send + Sync {
         _incoming: bool,
     ) -> Fut<'_, Option<Vec<Call>>> {
         Box::pin(async { Ok(None) })
+    }
+    /// Whether it has answered [`Self::calls`] with a declaration, which a server still loading
+    /// its project has not.
+    fn has_answered(&self) -> bool {
+        true
     }
     /// The provider stopped answering (the server exited); the registry starts a fresh one.
     fn is_dead(&self) -> bool {
@@ -451,6 +456,8 @@ pub(crate) struct Languages {
     listing: Arc<Listing>,
     /// The files in the folders git ignores, which the notes provider and the vault both ask.
     pub(crate) ignored: Arc<Ignored>,
+    /// When each session [`Self::calls`] used was last asked, for its idle stop.
+    asked: Mutex<HashMap<Key, tokio::time::Instant>>,
 }
 
 /// The vault's listing of a folder, the file tree's own ([`crate::local::list_dir`]), for a
@@ -492,6 +499,7 @@ impl Languages {
             words: Arc::new(AtomicBool::new(true)),
             listing,
             ignored,
+            asked: Mutex::new(HashMap::new()),
         })
     }
 
@@ -564,11 +572,12 @@ impl Languages {
             root.to_string_lossy().into_owned(),
         ];
         let start = async {
-            anyhow::ensure!(self.ghost.load(Ordering::Relaxed), "Ghost Text is off");
-            anyhow::ensure!(
-                self.ghost_may_start(Instant::now()),
-                "{GHOST} keeps exiting"
-            );
+            if !self.ghost.load(Ordering::Relaxed) {
+                return Err(Error::Language("Ghost Text is off".to_string()));
+            }
+            if !self.ghost_may_start(Instant::now()) {
+                return Err(Error::Language(format!("{GHOST} keeps exiting")));
+            }
             external::start(
                 argv,
                 root.clone(),
@@ -632,7 +641,7 @@ impl Languages {
         locked(&self.docs)
             .get(rel)
             .map(|(_, provider, _)| provider.clone())
-            .ok_or_else(|| anyhow::anyhow!("{rel} is not open"))
+            .ok_or_else(|| Error::Language(format!("{rel} is not open")))
     }
 
     /// Stop every provider and forget every document.
@@ -712,49 +721,59 @@ impl Languages {
     }
 
     /// [`Language::calls`] from the language server for `rel`'s language, as the app would run
-    /// it, started for this when it is not running and kept until the vault closes: no document
-    /// is open to end it. Waits up to `wait` for a server that is starting or loading its
-    /// project; an error says why there is no answer ("rust-analyzer not ready").
+    /// it, started for this when it is not running and stopped once it has gone `waits.idle`
+    /// without a question, unless a tab's document holds it. Waits `waits.starting` for a server
+    /// that has not answered yet, `waits.asking` for one that has; an error says why there is no
+    /// answer ("rust-analyzer not ready").
     pub(crate) fn calls(
         self: &Arc<Self>,
         rel: String,
         pos: Pos,
         incoming: bool,
         cfg: &LspConfig,
-        wait: Duration,
+        waits: Waits,
     ) -> Task<Option<Vec<Call>>> {
         let me = self.clone();
         let which = language_of(&rel).and_then(|language| server(cfg, language));
         Task::spawn(async move {
             let (language_id, argv) = match which {
                 Some(Server::External { language_id, argv }) => (language_id, argv),
-                Some(Server::Missing(name)) => anyhow::bail!("{name} is not installed"),
-                _ => anyhow::bail!("no language server for {rel}"),
+                Some(Server::Missing(name)) => {
+                    return Err(Error::Language(format!("{name} is not installed")));
+                }
+                _ => return Err(Error::Language(format!("no language server for {rel}"))),
             };
             let name = Path::new(&argv[0])
                 .file_name()
                 .map_or_else(|| argv[0].clone(), |n| n.to_string_lossy().into_owned());
-            let deadline = tokio::time::Instant::now() + wait;
+            let asked_at = tokio::time::Instant::now();
             let root = session_root(&me.root, &Local::join(&me.root, &rel)?);
             let key = (argv[0].clone(), root.clone());
+            me.asked_now(&key, waits.idle);
             let start = external::start(argv, root, me.root.clone(), me.events.clone(), None);
             // A task of its own, so a call that stops waiting leaves the server starting.
             let starting = accent_lsp::runtime().spawn({
                 let me = me.clone();
                 async move { me.session(key, start).await }
             });
-            let Ok(session) = tokio::time::timeout_at(deadline, starting).await else {
-                anyhow::bail!("{name} not ready");
+            let Ok(session) = tokio::time::timeout_at(asked_at + waits.starting, starting).await
+            else {
+                return Err(Error::NotYet(format!("{name} not ready")));
             };
             let session = session??;
             // Whether it said it cannot tell yet, which a wait that runs out is then put down to.
-            let mut loading = false;
+            let mut loading = !session.has_answered();
             loop {
+                let wait = match session.has_answered() {
+                    true => waits.asking,
+                    false => waits.starting,
+                };
+                let deadline = asked_at + wait;
                 let asked = session.calls(&rel, &language_id, pos, incoming);
                 match tokio::time::timeout_at(deadline, asked).await {
                     Ok(Ok(found)) => return Ok(found),
-                    Ok(Err(e)) if e.downcast_ref::<NotYet>().is_none() => {
-                        anyhow::bail!("{name}: {e:#}")
+                    Ok(Err(e)) if !matches!(e, Error::NotYet(_)) => {
+                        return Err(Error::Language(format!("{name}: {e}")));
                     }
                     Ok(Err(e)) => {
                         tracing::debug!("{name} is not ready for {rel}: {e}");
@@ -763,14 +782,26 @@ impl Languages {
                     Err(_) => {}
                 }
                 if tokio::time::Instant::now() + AGAIN >= deadline {
-                    match loading {
-                        true => anyhow::bail!("{name} not ready"),
-                        false => anyhow::bail!("{name} did not answer within {}s", wait.as_secs()),
-                    }
+                    return Err(match loading {
+                        true => Error::NotYet(format!("{name} not ready")),
+                        false => Error::Language(format!(
+                            "{name} did not answer within {}s",
+                            wait.as_secs()
+                        )),
+                    });
                 }
                 tokio::time::sleep(AGAIN).await;
             }
         })
+    }
+
+    /// Note a question to the session under `key`, and on its first watch it for `idle`.
+    fn asked_now(self: &Arc<Self>, key: &Key, idle: Duration) {
+        let now = tokio::time::Instant::now();
+        if locked(&self.asked).insert(key.clone(), now).is_none() {
+            let me = Arc::downgrade(self);
+            accent_lsp::runtime().spawn(stop_when_idle(me, key.clone(), idle));
+        }
     }
 
     pub(crate) fn open_document(
@@ -898,18 +929,51 @@ const GHOST: &str = "merl-rt";
 /// How long a server still loading its project is left before it is asked again.
 const AGAIN: Duration = Duration::from_millis(250);
 
-/// A server's answer that it cannot answer yet, still loading its project: what
-/// [`Languages::calls`] asks again past.
-#[derive(Debug)]
-pub(crate) struct NotYet(pub(crate) String);
-
-impl std::fmt::Display for NotYet {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
+/// How long [`Vault::calls`] waits on a language server — `starting` until it has answered once,
+/// rust-analyzer loading a project for seconds first, and `asking` a question after that — and
+/// how long one started for them is kept without a question (`idle`, counted from a question's
+/// start, so longer than the waits).
+#[derive(Debug, Clone, Copy)]
+pub struct Waits {
+    pub starting: Duration,
+    pub asking: Duration,
+    pub idle: Duration,
 }
 
-impl std::error::Error for NotYet {}
+/// Stop the session under `key` once it has gone `idle` without a question to
+/// [`Languages::calls`], unless a tab's document holds it, whose close stops it then.
+async fn stop_when_idle(me: std::sync::Weak<Languages>, key: Key, idle: Duration) {
+    loop {
+        let Some(last) = me
+            .upgrade()
+            .and_then(|me| locked(&me.asked).get(&key).copied())
+        else {
+            return;
+        };
+        tokio::time::sleep_until(last + idle).await;
+        let Some(me) = me.upgrade() else { return };
+        // Under the one lock a question takes first, so none is asked of a session going away.
+        let session = {
+            let mut asked = locked(&me.asked);
+            if asked.get(&key).is_some_and(|t| t.elapsed() < idle) {
+                continue;
+            }
+            asked.remove(&key);
+            let held = locked(&me.docs)
+                .values()
+                .any(|(open, _, _)| open.as_ref() == Some(&key));
+            match held {
+                true => None,
+                false => locked(&me.sessions).remove(&key),
+            }
+        };
+        if let Some(session) = session.as_ref().and_then(|cell| cell.get()) {
+            tracing::debug!("stopping {} after {idle:?} without a question", key.0);
+            let _ = session.shutdown().await;
+        }
+        return;
+    }
+}
 
 /// Starts of the ghost session a vault allows within [`GHOST_WINDOW`]: the first, and two more
 /// after it exits.
@@ -1061,22 +1125,24 @@ impl Vault {
     /// The calls into the declaration whose name is at `pos` in `rel` (`incoming`), or out of
     /// it, by the call hierarchy of the language server the app runs for the file — which needs
     /// no tab open: the server reads the file from disk. `None` where it knows no declaration.
-    /// Waits up to `wait` for a server that is starting or loading its project, and keeps it
-    /// running until the vault closes. A local vault's only: `accent-cli mcp`, which asks this,
-    /// runs where the files are.
+    /// Waits for a server that is starting or loading its project, and keeps it running until
+    /// it goes unasked, as `waits` says. A local vault's only: `accent-cli mcp`, which asks
+    /// this, runs where the files are.
     pub fn calls(
         &self,
         rel: &str,
         pos: Pos,
         incoming: bool,
-        wait: Duration,
+        waits: Waits,
     ) -> Task<Option<Vec<Call>>> {
         match &self.backend {
             Backend::Local(v) => {
                 v.lang
-                    .calls(rel.to_string(), pos, incoming, &v.config().lsp, wait)
+                    .calls(rel.to_string(), pos, incoming, &v.config().lsp, waits)
             }
-            Backend::Remote(_) => Task::spawn(async { anyhow::bail!("not on a remote vault") }),
+            Backend::Remote(_) => {
+                Task::spawn(async { Err(Error::Language("not on a remote vault".to_string())) })
+            }
         }
     }
 }
@@ -1140,10 +1206,10 @@ macro_rules! requests {
             vault: &Local,
             method: &str,
             p: &Value,
-        ) -> Option<std::result::Result<Value, crate::rpc::RpcError>> {
+        ) -> Option<Result<Value>> {
             $( if method == stringify!($name) {
                 crate::rpc::args!(p; rel: String $(, $arg: $ty)*);
-                return Some(crate::rpc::any(crate::rpc::block(
+                return Some(crate::rpc::answer(crate::rpc::block(
                     vault.$name(&rel, $($arg),*),
                 )));
             } )*
@@ -1204,9 +1270,7 @@ fn remote_task_then<T: DeserializeOwned + Send + 'static>(
     Task::blocking({
         let (r, asked) = (r.clone(), asked.clone());
         move || {
-            let answer = r
-                .call_tracked(method, params, &asked, crate::rpc::DEADLINE)
-                .map_err(remote_err)?;
+            let answer = r.call_tracked(method, params, &asked, crate::rpc::DEADLINE)?;
             then(&r, answer)
         }
     })
@@ -1219,7 +1283,10 @@ fn remote_task_then<T: DeserializeOwned + Send + 'static>(
 fn list_pages(r: &Remote, mut answer: Completions) -> Result<Completions> {
     match answer.pages.take() {
         Some(pages) => {
-            let outline = notes::pdf_outline(&r.fetch(&pages.rel)?)?;
+            let copy = r
+                .fetch(&pages.rel)
+                .map_err(|e| accent_core::Error::io(&pages.rel, e))?;
+            let outline = notes::pdf_outline(&copy)?;
             Ok(pages.answer(outline))
         }
         None => Ok(answer),
@@ -1465,6 +1532,63 @@ mod tests {
                 "nothing is open, so nothing is kept"
             );
         });
+    }
+
+    /// A server started for `calls` is waited on longer until it first answers — the fake one
+    /// refuses for longer than `asking` here, as rust-analyzer does while it loads a project —
+    /// and stopped once it has gone `idle` without a question.
+    #[test]
+    fn a_server_started_for_calls_is_waited_for_then_stopped_when_idle() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("lib.rs"),
+            "fn helper() {}\n\nfn main() {\n    helper();\n}\n",
+        )
+        .unwrap();
+        let calls = cache.path().join("calls.json");
+        let called = r#"{"lib.rs:0": {"incoming": [["lib.rs", 2, "main", [3]]]}}"#;
+        std::fs::write(&calls, called).unwrap();
+        let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/fake-lsp.py");
+        let calls = calls.to_str().unwrap();
+        let argv = ["python3", fake, "--calls", calls, "--loading", "4"];
+        let cfg = crate::VaultConfig {
+            lsp: configured("rust", &argv),
+            ..Default::default()
+        };
+        let (vault, _events) =
+            Local::open_at(root.path(), &cache.path().join("index.db"), cfg).unwrap();
+        let waits = Waits {
+            starting: Duration::from_secs(5),
+            asking: Duration::from_millis(500),
+            idle: Duration::from_secs(2),
+        };
+
+        // Refused four times, a second at `AGAIN` apiece.
+        let at = Pos {
+            line: 0,
+            character: 3,
+        };
+        let asked = vault
+            .lang
+            .calls("lib.rs".to_string(), at, true, &vault.config().lsp, waits);
+        let found = accent_lsp::runtime().block_on(asked).unwrap().unwrap();
+        assert_eq!(
+            (found[0].name.as_str(), found[0].lines.as_slice()),
+            ("main", &[3][..])
+        );
+        let session = locked(&vault.lang.sessions)
+            .values()
+            .find_map(|cell| cell.get().cloned())
+            .expect("the server is kept");
+
+        std::thread::sleep(Duration::from_millis(2_500));
+        assert!(locked(&vault.lang.sessions).is_empty(), "idle, so stopped");
+        let stopped = Instant::now() + Duration::from_secs(3);
+        while !session.is_dead() && Instant::now() < stopped {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(session.is_dead(), "the server exited");
     }
 
     /// A note created after a link to it was flagged: the hint goes when the walk that found it

@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::os::raw::{c_int, c_ulong};
 
-use anyhow::{Context, Result, anyhow};
+use crate::{Error, Result};
 use pdfium_render::prelude::*;
 
 use super::doc::paper;
@@ -20,20 +20,22 @@ impl PdfDoc {
         let _guard = lock();
         let count = self.doc().pages().len() as usize;
         if count == 0 || at > count {
-            return Err(anyhow!("cannot insert page {at} into {count}"));
+            return Err(Error::Invalid(format!(
+                "cannot insert page {at} into {count}"
+            )));
         }
         let beside = at.saturating_sub(1);
         let rect = self
             .doc()
             .pages()
             .page_size(beside as PdfPageIndex)
-            .map_err(|e| anyhow!("page {beside}: {e:?}"))?;
+            .map_err(|e| Error::Pdf(format!("page {beside}: {e:?}")))?;
         let size = paper((rect.width().value, rect.height().value));
         let mut page = self
             .doc_mut()
             .pages_mut()
             .create_page_at_index(size, at as PdfPageIndex)
-            .map_err(|e| anyhow!("insert page {at}: {e:?}"))?;
+            .map_err(|e| Error::Pdf(format!("insert page {at}: {e:?}")))?;
         // Manual, as every other mutation in this module sets it: dropping the page otherwise
         // re-serialises a content stream we never wrote.
         page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
@@ -44,11 +46,11 @@ impl PdfDoc {
     pub fn delete_page(&mut self, page: usize) -> Result<()> {
         let _guard = lock();
         if self.doc().pages().len() < 2 {
-            return Err(anyhow!("a PDF keeps at least one page"));
+            return Err(Error::Invalid("a PDF keeps at least one page".to_string()));
         }
         self.page(page)?
             .delete()
-            .map_err(|e| anyhow!("delete page {page}: {e:?}"))
+            .map_err(|e| Error::Pdf(format!("delete page {page}: {e:?}")))
     }
 
     /// The document as it now stands, as a second document of its own: what a page delete keeps
@@ -66,7 +68,7 @@ impl PdfDoc {
             file.write_all(&bytes)?;
             Ok(file)
         });
-        PdfDoc::from_file(file.with_context(|| format!("snapshot into {}", dir.display()))?)
+        PdfDoc::from_file(file.map_err(|e| Error::io(dir.display(), e))?)
     }
 
     /// Every page of `source` in at `at`, in order, each with its text, its annotations and its
@@ -83,7 +85,9 @@ impl PdfDoc {
         let _guard = lock();
         let count = self.doc().pages().len() as usize;
         if at > count {
-            return Err(anyhow!("cannot import pages at {at} of {count}"));
+            return Err(Error::Invalid(format!(
+                "cannot import pages at {at} of {count}"
+            )));
         }
         let pages = source.doc().pages();
         let added = pages.len() as usize;
@@ -94,7 +98,7 @@ impl PdfDoc {
                 pages.as_range_inclusive(),
                 at as PdfPageIndex,
             )
-            .map_err(|e| anyhow!("import {added} pages at {at}: {e:?}"))?;
+            .map_err(|e| Error::Pdf(format!("import {added} pages at {at}: {e:?}")))?;
         for page in at..at + added {
             let mut p = self.page(page)?;
             p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
@@ -114,7 +118,9 @@ impl PdfDoc {
         let doc = self.doc();
         let count = doc.pages().len() as usize;
         if from >= count || to >= count {
-            return Err(anyhow!("cannot move page {from} to {to} of {count}"));
+            return Err(Error::Invalid(format!(
+                "cannot move page {from} to {to} of {count}"
+            )));
         }
         let bindings = doc.bindings();
         let pages = [from as c_int];
@@ -134,7 +140,9 @@ impl PdfDoc {
         };
         match bindings.is_true(moved) {
             true => Ok(()),
-            false => Err(anyhow!("pdfium would not move page {from} to {to}")),
+            false => Err(Error::Pdf(format!(
+                "pdfium would not move page {from} to {to}"
+            ))),
         }
     }
 }

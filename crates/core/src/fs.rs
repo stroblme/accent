@@ -12,6 +12,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{Error, Result};
+
 /// Cheap identity of a file's content, taken from `stat(2)`.
 ///
 /// `ino` is part of it on purpose: every save replaces the file via rename, so a save by us or
@@ -25,8 +27,9 @@ pub struct Etag {
 
 impl Etag {
     /// Stat `path`, following symlinks (the vault may link notes in from elsewhere).
-    pub fn of(path: &Path) -> io::Result<Etag> {
-        Ok(Etag::from_meta(&std::fs::metadata(path)?))
+    pub fn of(path: &Path) -> Result<Etag> {
+        let meta = std::fs::metadata(path).map_err(|e| Error::io(path.display(), e))?;
+        Ok(Etag::from_meta(&meta))
     }
 
     /// The etag of a file already open, which a path could have been renamed away from since.
@@ -88,17 +91,18 @@ fn read_capped(path: &Path) -> io::Result<Result<(Vec<u8>, Etag), u64>> {
     Ok(Ok((bytes, Etag::from_meta(&meta))))
 }
 
-/// Read a note and the etag to hand back to [`write_note`]. A file over [`MAX_TEXT`] is a
-/// `FileTooLarge` error, one that is not UTF-8 an `InvalidData` one.
-pub fn read_note(path: &Path) -> io::Result<(String, Etag)> {
-    let (bytes, etag) = read_capped(path)?.map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::FileTooLarge,
-            format!("the file is larger than {} MiB", MAX_TEXT / (1024 * 1024)),
-        )
+/// Read a note and the etag to hand back to [`write_note`]. A file over [`MAX_TEXT`], or one that
+/// is not UTF-8, is [`Error::Invalid`].
+pub fn read_note(path: &Path) -> Result<(String, Etag)> {
+    let read = read_capped(path).map_err(|e| Error::io(path.display(), e))?;
+    let (bytes, etag) = read.map_err(|_| {
+        Error::Invalid(format!(
+            "the file is larger than {} MiB",
+            MAX_TEXT / (1024 * 1024)
+        ))
     })?;
-    let text =
-        String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|e| Error::Invalid(format!("the file is not UTF-8: {e}")))?;
     Ok((text, etag))
 }
 
@@ -127,8 +131,8 @@ pub struct Text {
 
 /// Read any file as text, saying so when it is binary or too big to hold. The etag is taken as
 /// [`read_note`] takes it.
-pub fn read_text(path: &Path) -> io::Result<Read> {
-    let (bytes, etag) = match read_capped(path)? {
+pub fn read_text(path: &Path) -> Result<Read> {
+    let (bytes, etag) = match read_capped(path).map_err(|e| Error::io(path.display(), e))? {
         Ok(read) => read,
         Err(size) => return Ok(Read::TooLarge { size }),
     };
@@ -313,12 +317,13 @@ fn turn(canonical: &Path) -> MutexGuard<'static, ()> {
 /// `File::create_new` claims the name in one syscall, so two writers racing for the same new note
 /// cannot both believe they won it. The content then goes through [`write_note`], which is what
 /// gives a brand new note the same atomic-rename guarantees as every later save.
-pub fn create_note(path: &Path, text: &str) -> io::Result<Etag> {
+pub fn create_note(path: &Path, text: &str) -> Result<Etag> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent.display(), e))?;
     }
-    std::fs::File::create_new(path)?; // AlreadyExists if the name is taken
-    write_note(path, text, None).map_err(io::Error::other)
+    // AlreadyExists if the name is taken.
+    std::fs::File::create_new(path).map_err(|e| Error::io(path.display(), e))?;
+    write_note(path, text, None).map_err(|e| Error::Io(format!("{}: {e}", path.display())))
 }
 
 /// Move a file or directory, refusing to overwrite an existing target.
@@ -328,14 +333,11 @@ pub fn create_note(path: &Path, text: &str) -> io::Result<Etag> {
 ///
 /// ponytail: the existence check races a concurrent create, and a move across mount points still
 /// fails with `EXDEV`. `renameat2(RENAME_NOREPLACE)` closes the first, copy-then-delete the second.
-pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+pub fn rename(from: &Path, to: &Path) -> Result<()> {
     if to.symlink_metadata().is_ok() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("{} already exists", to.display()),
-        ));
+        return Err(Error::AlreadyExists(to.display().to_string()));
     }
-    std::fs::rename(from, to)
+    std::fs::rename(from, to).map_err(|e| Error::io(from.display(), e))
 }
 
 /// `canonicalize()`, but tolerating a file that does not exist yet by resolving its parent.
@@ -442,8 +444,7 @@ mod tests {
             .unwrap()
             .set_len(MAX_TEXT + 1)
             .unwrap();
-        let kind = read_note(&big).err().map(|e| e.kind());
-        assert_eq!(kind, Some(io::ErrorKind::FileTooLarge));
+        assert!(matches!(read_note(&big), Err(Error::Invalid(_))));
         assert!(
             matches!(read_text(&big).unwrap(), Read::TooLarge { size } if size == MAX_TEXT + 1)
         );
@@ -452,8 +453,7 @@ mod tests {
         let fifo = dir.path().join("fifo.md");
         let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        let kind = read_note(&fifo).err().map(|e| e.kind());
-        assert_eq!(kind, Some(io::ErrorKind::InvalidInput));
+        assert!(matches!(read_note(&fifo), Err(Error::Invalid(_))));
         assert!(read_text(&fifo).is_err());
     }
 
@@ -610,7 +610,7 @@ mod tests {
         assert_eq!(etag, Etag::of(&note).unwrap());
 
         match create_note(&note, "other") {
-            Err(e) => assert_eq!(e.kind(), io::ErrorKind::AlreadyExists),
+            Err(e) => assert!(matches!(e, Error::AlreadyExists(_)), "{e}"),
             Ok(_) => panic!("clobbered an existing note"),
         }
         assert_eq!(std::fs::read_to_string(&note).unwrap(), "hello");
@@ -631,7 +631,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         match rename(&link, &target) {
-            Err(e) => assert_eq!(e.kind(), io::ErrorKind::AlreadyExists),
+            Err(e) => assert!(matches!(e, Error::AlreadyExists(_)), "{e}"),
             Ok(()) => panic!("overwrote an existing file"),
         }
 

@@ -2,9 +2,9 @@
 //! and mark a snippet the way the FTS tokenizer folds it.
 
 use super::{Index, Match, SearchHit};
+use crate::Result;
 use crate::search::Regex;
 use crate::walk::FileKind;
-use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 use std::ops::Range;
 

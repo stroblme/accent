@@ -38,6 +38,8 @@ Accent is open source under GPL-3.0-or-later and still evolving.
 
 ![Screenshot 3](docs/screenshot-3.png)
 
+![Screenshot 3](docs/screenshot-4.png)
+
 ## Get started
 
 On Linux, install the [desktop requirements](#desktop-requirements), then run:

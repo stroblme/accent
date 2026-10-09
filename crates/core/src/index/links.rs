@@ -2,9 +2,9 @@
 
 use super::reconcile::link_kind_of;
 use super::{Backlink, Index, OutLink, PdfLink};
+use crate::Result;
 use crate::markdown;
 use crate::path::{self, FileType, file_type, linked_path};
-use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 

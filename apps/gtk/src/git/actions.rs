@@ -963,8 +963,8 @@ const ON_THE_HOST: &str =
 
 /// Whether the link went while `e`'s call was out on the host, rather than before it got there.
 fn lost(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<accent_api::rpc::RpcError>()
-        .is_some_and(|e| e.code == accent_api::rpc::LOST)
+    e.downcast_ref::<accent_api::Error>()
+        .is_some_and(|e| matches!(e, accent_api::Error::Lost(_)))
 }
 
 fn files(n: usize) -> String {
@@ -1060,17 +1060,11 @@ mod tests {
 
     #[test]
     fn only_a_link_lost_mid_call_may_still_finish_on_the_host() {
-        use accent_api::rpc::{DISCONNECTED, LOST, RpcError};
-        let failed = |code| {
-            anyhow::Error::new(RpcError {
-                code,
-                message: "the connection closed".to_string(),
-                data: None,
-            })
-        };
-        assert!(lost(&failed(LOST)));
+        use accent_api::Error;
+        let closed = || "the connection closed".to_string();
+        assert!(lost(&anyhow::Error::new(Error::Lost(closed()))));
         // Never asked: the host has nothing to finish.
-        assert!(!lost(&failed(DISCONNECTED)));
+        assert!(!lost(&anyhow::Error::new(Error::Offline(closed()))));
         assert!(!lost(&anyhow::anyhow!("rejected")));
     }
 

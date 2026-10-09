@@ -224,7 +224,7 @@ impl Shell {
     /// The shell `key` names, held on the host `at` names and started in its path, riding the
     /// master of `link`.
     pub fn remote(at: ssh::Url, link: ssh::Url, key: &str) -> Result<Self, String> {
-        let server = ssh::server_path(&accent_api::link::server()?.hash);
+        let server = ssh::server_path(&accent_api::link::server().map_err(|e| e.to_string())?.hash);
         let ctl = ssh::control_path(&link);
         Ok(Self::Remote {
             argv: ssh::attach(&at, &ctl, &server, id(key)),
@@ -873,7 +873,7 @@ pub fn cli() -> Option<PathBuf> {
 /// On a host, over that host's own master, which is the one a window of shells rides there.
 pub fn end(key: &str, at: &str) {
     if ssh::is_remote(at) {
-        let url = ssh::parse(at);
+        let url = ssh::parse(at).map_err(|e| e.to_string());
         match url.and_then(|url| Shell::remote(url.clone(), accent_api::link::host(&url), key)) {
             Ok(Shell::Remote { kill, link, .. }) => run_kill(kill, Some(ssh::control_path(&link))),
             Ok(Shell::Local(_)) => {}

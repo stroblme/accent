@@ -5,16 +5,20 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use accent_api::{Call, CodeSymbol, Mention};
+use accent_api::{Call, CodeSymbol, Mention, Waits};
 use accent_core::code::{self, Lang, SymbolKind};
 
 use super::Shared;
 
-/// How long one question waits for a language server that is starting or loading its project,
-/// or slow to answer: an agent waits on every second. rust-analyzer first answers on this
-/// repository 8–14 s after it starts, so a session's first precise call may go by name, saying
-/// so, and the next find it loaded.
-pub(super) const COLD: Duration = Duration::from_secs(10);
+/// How long a question waits on a language server: `starting` until it has answered once —
+/// rust-analyzer first answers on this repository 8–14 s after it starts — and `asking` after
+/// that, an agent waiting on every second; and how long one goes without a question before it
+/// is stopped, its memory (rust-analyzer: 2.5–3.4 GB here) freed for a cold start next time.
+const WAITS: Waits = Waits {
+    starting: Duration::from_secs(20),
+    asking: Duration::from_secs(10),
+    idle: Duration::from_secs(10 * 60),
+};
 
 pub(super) struct Precise<'a> {
     s: &'a Shared,
@@ -120,7 +124,7 @@ impl<'a> Precise<'a> {
             let at = code::name_at(text, span.clone(), &sym.name).or(made.then_some(span.start));
             accent_api::language::pos_of(text, at?)
         };
-        let asked = self.s.vault.calls(&sym.rel_path, pos, incoming, COLD);
+        let asked = self.s.vault.calls(&sym.rel_path, pos, incoming, WAITS);
         match accent_lsp::runtime().block_on(asked) {
             Ok(Some(found)) => Some(found),
             // One the index found is left to its name; one the server made up and cannot find

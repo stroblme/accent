@@ -29,7 +29,6 @@
 use ignore::{IncrementalIgnore, WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -310,7 +309,7 @@ fn file_meta(rel_path: String, path: &Path, meta: &std::fs::Metadata) -> FileMet
 /// This is the watcher's counterpart to `scan`: one changed path costs one stat instead of a walk.
 /// The two must agree, or a `pip install` in a skipped tree would put back, one event at a time,
 /// exactly what the walk refused.
-pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
+pub fn stat_one(root: &Path, rel: &str) -> crate::Result<Option<FileMeta>> {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     // Always the strict rule: the watcher must agree with the index's own walk, and the All
     // toggle never feeds the watcher, so the two cannot drift apart.
@@ -327,7 +326,7 @@ pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
         }
     }
     let path = root.join(rel);
-    let meta = std::fs::metadata(&path)?;
+    let meta = std::fs::metadata(&path).map_err(|e| crate::Error::io(rel, e))?;
     // Last, because it is the only test that needs to know whether the path is a directory: a
     // gitignored *file* is indexed, a gitignored *directory* is not entered.
     if in_ignored_dir(&mut dir_ignores(root), rel, meta.is_dir()) {
@@ -400,14 +399,15 @@ pub fn unindexed_children(
     root: &Path,
     rel: &str,
     held: &std::collections::HashSet<&str>,
-) -> io::Result<Vec<(String, FileKind, Unindexed)>> {
+) -> crate::Result<Vec<(String, FileKind, Unindexed)>> {
     // One matcher for the whole listing: it caches the ignore files it reads on the way down, so
     // a directory of a thousand children asks the disk for them once.
     let mut ignores = dir_ignores(root);
     let inside = is_unindexed(root, rel, &mut ignores);
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(root.join(rel))? {
-        let entry = entry?;
+    let listed = |e| crate::Error::io(rel, e);
+    for entry in std::fs::read_dir(root.join(rel)).map_err(listed)? {
+        let entry = entry.map_err(listed)?;
         let name = entry.file_name().to_string_lossy().into_owned();
         // The skipped trees are exactly what this lists; what stays refused is `ALWAYS_SKIP_DIRS`
         // and the temporaries.
@@ -1320,8 +1320,8 @@ mod tests {
             );
         }
         assert_eq!(
-            stat_one(vault.path(), "gone.md").unwrap_err().kind(),
-            io::ErrorKind::NotFound
+            stat_one(vault.path(), "gone.md").unwrap_err(),
+            crate::Error::NotFound("gone.md".to_string())
         );
     }
 

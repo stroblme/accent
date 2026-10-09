@@ -395,8 +395,8 @@ impl App {
                     Some(vault) => vault.stat(&rel)?,
                     None => match Etag::of(&path) {
                         Ok(etag) => Some(etag),
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(e) => return Err(e),
+                        Err(accent_core::Error::NotFound(_)) => None,
+                        Err(e) => return Err(e.into()),
                     },
                 };
                 Ok(match disk {
@@ -702,7 +702,7 @@ impl App {
         glib::spawn_future_local(async move {
             let read = crate::work::off_thread("reader", move || match vault {
                 Some(vault) => vault.read(&rel),
-                None => accent_core::fs::read_note(&path),
+                None => accent_core::fs::read_note(&path).map_err(Into::into),
             })
             .await;
             if let (Some(app), Some(tab)) = (app.upgrade(), asked.upgrade()) {
@@ -1183,7 +1183,7 @@ fn unchanged(vault: Option<&Vault>, rel: &str, path: &Path, base: Option<Digest>
     let base = base?;
     let read = match vault {
         Some(vault) => vault.read_text(rel),
-        None => accent_core::fs::read_text(path),
+        None => accent_core::fs::read_text(path).map_err(Into::into),
     };
     match read {
         Ok(accent_core::fs::Read::Text(text)) if text.digest() == base => Some(text.etag),

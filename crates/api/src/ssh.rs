@@ -31,7 +31,11 @@ pub struct Url {
 ///
 /// The error is a sentence fragment shown to the user, so it names what is wrong with the address
 /// they typed rather than what the parser wanted to see.
-pub fn parse(url: &str) -> Result<Url, String> {
+pub fn parse(url: &str) -> crate::Result<Url> {
+    parsed(url).map_err(|why| accent_core::Error::Invalid(why).into())
+}
+
+fn parsed(url: &str) -> Result<Url, String> {
     let rest = url
         .get(..6)
         .filter(|scheme| scheme.eq_ignore_ascii_case("ssh://"))
@@ -722,11 +726,11 @@ mod tests {
 
     #[test]
     fn an_unusable_address_says_what_is_wrong_with_it() {
-        assert_eq!(parse("/srv/vault"), Err("not an ssh:// address".into()));
-        assert_eq!(parse("ssh://box"), Err("the path must be absolute".into()));
-        assert_eq!(parse("ssh:///srv"), Err("no host in the address".into()));
+        assert_eq!(parsed("/srv/vault"), Err("not an ssh:// address".into()));
+        assert_eq!(parsed("ssh://box"), Err("the path must be absolute".into()));
+        assert_eq!(parsed("ssh:///srv"), Err("no host in the address".into()));
         assert_eq!(
-            parse("ssh://box:http/srv"),
+            parsed("ssh://box:http/srv"),
             Err("\"http\" is not a port number".into())
         );
         assert!(parse("ssh://::1/srv").is_err());

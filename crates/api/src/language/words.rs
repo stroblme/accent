@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::Result;
+use crate::Result;
 
 use super::external::map::line_of;
 use super::{
@@ -685,7 +685,9 @@ mod tests {
         }
 
         fn hear(&self, what: String) -> Result<()> {
-            anyhow::ensure!(!self.is_dead(), "{} has exited", self.name);
+            if self.is_dead() {
+                return Err(crate::Error::Language(format!("{} has exited", self.name)));
+            }
             locked(&self.heard).push(what);
             Ok(())
         }
@@ -706,13 +708,17 @@ mod tests {
         fn close(&self, _: &str) {}
         fn inline_completion(&self, _: &str, _: Pos) -> Fut<'_, Option<String>> {
             Box::pin(async move {
-                anyhow::ensure!(!self.is_dead(), "{} has exited", self.name);
+                if self.is_dead() {
+                    return Err(crate::Error::Language(format!("{} has exited", self.name)));
+                }
                 Ok(Some(self.name.to_string()))
             })
         }
         fn completion(&self, _: &str, _: Pos, _: Option<char>) -> Fut<'_, Completions> {
             Box::pin(async {
-                anyhow::ensure!(!self.is_dead(), "{} has exited", self.name);
+                if self.is_dead() {
+                    return Err(crate::Error::Language(format!("{} has exited", self.name)));
+                }
                 Ok(Completions {
                     items: locked(&self.items).clone(),
                     ..Completions::default()

@@ -7,6 +7,7 @@ pub mod config;
 pub mod conflict;
 pub mod csv;
 pub mod diff;
+mod error;
 pub mod fs;
 pub mod fuzzy;
 pub mod git;
@@ -23,3 +24,5 @@ pub mod synctex;
 pub mod template;
 pub mod walk;
 pub mod watch;
+
+pub use error::{Error, Result};

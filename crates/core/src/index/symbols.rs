@@ -2,8 +2,8 @@
 //! outline, the declarations a name finds, and where a name is written — a caller, by name.
 
 use super::Index;
+use crate::Result;
 use crate::code::{self, SymbolKind};
-use anyhow::Result;
 use regex::Regex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -215,7 +215,8 @@ impl Index {
         if words.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let re = Regex::new(&format!(r"\b{}\b", regex::escape(name)))?;
+        let re = Regex::new(&format!(r"\b{}\b", regex::escape(name)))
+            .map_err(|e| crate::Error::Invalid(e.to_string()))?;
         let mut st = self.conn.prepare_cached(
             "SELECT f.rel_path, n.body FROM notes_fts
              JOIN notes n ON n.file_id = notes_fts.rowid JOIN files f ON f.id = n.file_id

@@ -462,7 +462,7 @@ fn webkit() -> String {
 }
 
 /// The processes under this one, by pid and name.
-fn descendants() -> Vec<(u32, String)> {
+pub(super) fn descendants() -> Vec<(u32, String)> {
     let me = std::process::id();
     let mut parents = std::collections::HashMap::new();
     for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {

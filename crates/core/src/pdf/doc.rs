@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
+use super::refused;
+use crate::{Error, Result};
 use pdfium_render::prelude::*;
 
 use super::{
@@ -33,10 +34,7 @@ impl Drop for PdfDoc {
 impl PdfDoc {
     pub fn open(path: impl AsRef<Path>) -> Result<PdfDoc> {
         let path = path.as_ref();
-        File::open(path)
-            .map_err(anyhow::Error::from)
-            .and_then(PdfDoc::from_file)
-            .with_context(|| format!("open pdf {}", path.display()))
+        PdfDoc::from_file(File::open(path).map_err(|e| Error::io(path.display(), e))?)
     }
 
     /// A document read from a file already open, which pdfium reads as it needs it for as long as
@@ -44,10 +42,12 @@ impl PdfDoc {
     pub(super) fn from_file(file: File) -> Result<PdfDoc> {
         let pdfium = pdfium()?;
         // The same open file, not the path again: a rename in between would hand back another.
-        let kept = file.try_clone()?;
-        let read = Etag::from_meta(&kept.metadata()?);
+        let kept = file.try_clone().map_err(|e| Error::io("the pdf", e))?;
+        let read = Etag::from_meta(&kept.metadata().map_err(|e| Error::io("the pdf", e))?);
         let _guard = lock();
-        let doc = pdfium.load_pdf_from_reader(file, None)?;
+        let doc = pdfium
+            .load_pdf_from_reader(file, None)
+            .map_err(refused("open pdf"))?;
         Ok(PdfDoc {
             doc: Some(doc),
             file: Some((kept, read)),
@@ -75,7 +75,7 @@ impl PdfDoc {
         let _guard = lock();
         let doc = pdfium
             .load_pdf_from_byte_vec(bytes, None)
-            .context("open pdf from bytes")?;
+            .map_err(refused("open pdf from bytes"))?;
         Ok(PdfDoc {
             doc: Some(doc),
             file: None,
@@ -99,7 +99,7 @@ impl PdfDoc {
         self.doc()
             .pages()
             .get(page as PdfPageIndex)
-            .map_err(|e| anyhow!("page {page}: {e:?}"))
+            .map_err(|e| Error::Pdf(format!("page {page}: {e:?}")))
     }
 
     /// `(width, height)` in points.
@@ -114,7 +114,7 @@ impl PdfDoc {
             .doc()
             .pages()
             .page_size(page as PdfPageIndex)
-            .map_err(|e| anyhow!("page {page}: {e:?}"))?;
+            .map_err(|e| Error::Pdf(format!("page {page}: {e:?}")))?;
         Ok((rect.width().value, rect.height().value))
     }
 
@@ -125,7 +125,7 @@ impl PdfDoc {
             .doc()
             .pages()
             .page_sizes()
-            .map_err(|e| anyhow!("page sizes: {e:?}"))?;
+            .map_err(|e| Error::Pdf(format!("page sizes: {e:?}")))?;
         Ok(sizes
             .into_iter()
             .map(|rect| (rect.width().value, rect.height().value))
@@ -142,7 +142,7 @@ impl PdfDoc {
                 .render_annotations(true);
             let bitmap = p
                 .render_with_config(&config)
-                .map_err(|e| anyhow!("render page {page}: {e:?}"))?;
+                .map_err(|e| Error::Pdf(format!("render page {page}: {e:?}")))?;
             (
                 bitmap.width() as u32,
                 bitmap.height() as u32,
@@ -187,9 +187,9 @@ impl PdfDoc {
             let page_h = (p.height().value * scale).round() as i32;
             let (w, h) = (w.min(page_w - x), h.min(page_h - y));
             if x < 0 || y < 0 || w <= 0 || h <= 0 {
-                return Err(anyhow!(
+                return Err(Error::Invalid(format!(
                     "tile ({x},{y}) {w}x{h} is outside page {page} at {page_w}x{page_h} px"
-                ));
+                )));
             }
             // A negative origin shifts the page up and left; the render is clipped to the bitmap.
             let config = PdfRenderConfig::new()
@@ -197,9 +197,9 @@ impl PdfDoc {
                 .set_origin(-x, -y)
                 .render_annotations(true);
             let mut bitmap = PdfBitmap::empty(w, h, PdfBitmapFormat::BGRA)
-                .map_err(|e| anyhow!("tile bitmap {w}x{h}: {e:?}"))?;
+                .map_err(|e| Error::Pdf(format!("tile bitmap {w}x{h}: {e:?}")))?;
             p.render_into_bitmap_with_config(&mut bitmap, &config)
-                .map_err(|e| anyhow!("render tile of page {page}: {e:?}"))?;
+                .map_err(|e| Error::Pdf(format!("render tile of page {page}: {e:?}")))?;
             (w as u32, h as u32, bitmap.as_rgba_bytes())
         };
         if let Theme::Recolour { paper, ink } = theme {
@@ -223,7 +223,9 @@ impl PdfDoc {
     fn page_text_locked(&self, page: usize) -> Result<Vec<Glyph>> {
         let p = self.page(page)?;
         let page_height = p.height().value;
-        let text = p.text().map_err(|e| anyhow!("text page {page}: {e:?}"))?;
+        let text = p
+            .text()
+            .map_err(|e| Error::Pdf(format!("text page {page}: {e:?}")))?;
         let chars = text.chars();
         let mut out = Vec::with_capacity(chars.len());
         for c in chars.iter() {
@@ -267,7 +269,7 @@ impl PdfDoc {
     // grows by what was read again in every session that saves (measured 2026-09-30).
     pub fn save(&self) -> Result<Vec<u8>> {
         let _guard = lock();
-        self.doc().save_to_bytes().context("save pdf")
+        self.doc().save_to_bytes().map_err(refused("save pdf"))
     }
 
     /// The `/Link` annotations on one page, in document order. Links whose target we cannot
@@ -411,7 +413,9 @@ impl PdfDoc {
         let _guard = lock();
         let p = self.page(page)?;
         let page_height = p.height().value;
-        let text = p.text().map_err(|e| anyhow!("text page {page}: {e:?}"))?;
+        let text = p
+            .text()
+            .map_err(|e| Error::Pdf(format!("text page {page}: {e:?}")))?;
         let search = text
             .search(
                 query,
@@ -419,7 +423,7 @@ impl PdfDoc {
                     .match_case(options.case)
                     .match_whole_word(options.word),
             )
-            .map_err(|e| anyhow!("search page {page}: {e:?}"))?;
+            .map_err(|e| Error::Pdf(format!("search page {page}: {e:?}")))?;
         Ok(search
             .iter(PdfSearchDirection::SearchForward)
             .map(|hit| {
@@ -456,11 +460,11 @@ pub const A4: (f32, f32) = (595.28, 841.89);
 pub fn blank_pdf(size: (f32, f32)) -> Result<Vec<u8>> {
     let pdfium = pdfium()?;
     let _guard = lock();
-    let mut doc = pdfium.create_new_pdf().context("create pdf")?;
+    let mut doc = pdfium.create_new_pdf().map_err(refused("create pdf"))?;
     doc.pages_mut()
         .create_page_at_end(paper(size))
-        .context("create page")?;
-    let bytes = doc.save_to_bytes().context("save new pdf")?;
+        .map_err(refused("create page"))?;
+    let bytes = doc.save_to_bytes().map_err(refused("save new pdf"))?;
     // Closed here rather than at the end of the function, so it happens under the lock like
     // every other document this module drops.
     drop(doc);

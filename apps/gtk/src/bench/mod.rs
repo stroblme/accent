@@ -29,6 +29,7 @@ mod outline;
 mod panes;
 mod pdf;
 mod present;
+mod preview;
 mod replace;
 mod scroll;
 mod search;
@@ -86,6 +87,7 @@ use pdf::{
     bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip,
     bench_sketch,
 };
+use preview::bench_preview_type;
 use replace::bench_replace;
 use scroll::bench_scroll;
 use search::bench_search;

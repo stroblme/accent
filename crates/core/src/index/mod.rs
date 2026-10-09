@@ -14,7 +14,7 @@ mod search;
 mod symbols;
 
 use crate::walk::FileKind;
-use anyhow::{Context, Result};
+use crate::{Error, Result};
 pub use rusqlite::InterruptHandle;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension};
@@ -215,11 +215,10 @@ pub struct Stats {
 impl Index {
     pub fn open(db_path: &Path) -> Result<Self> {
         if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating cache dir {}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|e| Error::io(parent.display(), e))?;
         }
         let conn = Connection::open(db_path)
-            .with_context(|| format!("opening index {}", db_path.display()))?;
+            .map_err(|e| Error::Index(format!("{}: {e}", db_path.display())))?;
         Self::from_conn(conn)
     }
 
@@ -326,11 +325,12 @@ impl Index {
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let version = schema_version(&tx)?;
-        anyhow::ensure!(
-            version == SCHEMA_VERSION,
-            "the index was rebuilt by another accent build (schema {version}, this one writes \
-             {SCHEMA_VERSION}): restart this one"
-        );
+        if version != SCHEMA_VERSION {
+            return Err(Error::Index(format!(
+                "the index was rebuilt by another accent build (schema {version}, this one \
+                 writes {SCHEMA_VERSION}): restart this one"
+            )));
+        }
         Ok(tx)
     }
 }
@@ -344,11 +344,12 @@ fn schema_version(conn: &Connection) -> Result<i64> {
 /// dropped under it.
 fn current(conn: &Connection) -> Result<bool> {
     let version = schema_version(conn)?;
-    anyhow::ensure!(
-        version <= SCHEMA_VERSION,
-        "the index was built by a newer accent (schema {version}, this one reads \
-         {SCHEMA_VERSION}): update this one"
-    );
+    if version > SCHEMA_VERSION {
+        return Err(Error::Index(format!(
+            "the index was built by a newer accent (schema {version}, this one reads \
+             {SCHEMA_VERSION}): update this one"
+        )));
+    }
     let has_files: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'",

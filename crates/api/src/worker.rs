@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use crate::Result;
 
 use accent_core::index::{Change, Index};
 use accent_core::path::parent_dir;
@@ -61,7 +61,7 @@ pub(crate) fn spawn(
     std::thread::Builder::new()
         .name("accent-vault".to_string())
         .spawn(move || worker.run())
-        .context("spawning the vault worker")
+        .map_err(|e| accent_core::Error::io("the vault worker", e).into())
 }
 
 /// How long after a walk ends the next one the watcher's news asks for waits: a `.gitignore`
@@ -97,7 +97,7 @@ pub(crate) enum Msg {
     WatchUnindexed(Vec<String>, bool),
     /// What search leaves out, and where to say it has been written. See
     /// [`Local::set_excluded`]: the worker holds the only writing connection.
-    SetExcluded(Vec<String>, Sender<Result<()>>),
+    SetExcluded(Vec<String>, Sender<accent_core::Result<()>>),
     /// Answered once everything posted before it has reached the index. The one thing the
     /// worker's batching costs a caller is that a write it has just made is not yet readable;
     /// this is how [`Local::settle_index`] waits for it instead of guessing at a delay.

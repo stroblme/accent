@@ -8,7 +8,7 @@
 //! worked example.
 
 use crate::git::Comparison;
-use anyhow::{Context, Result};
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -538,7 +538,7 @@ impl Config {
         let text = std::fs::read_to_string(&path);
         let parsed = match &text {
             Ok(text) => Config::parse(text, &path),
-            Err(e) => Err(anyhow::anyhow!("reading {}: {e}", path.display())),
+            Err(e) => Err(Error::Io(format!("{}: {e}", path.display()))),
         };
         match parsed {
             Ok(c) => {
@@ -550,12 +550,12 @@ impl Config {
                     let aside = path.with_extension("toml.broken");
                     match std::fs::rename(&path, &aside) {
                         Ok(()) => tracing::warn!(
-                            "{}: {e:#}; using defaults, the file is kept as {}",
+                            "{}: {e}; using defaults, the file is kept as {}",
                             path.display(),
                             aside.display()
                         ),
                         Err(re) => tracing::warn!(
-                            "{}: {e:#}; using defaults, and could not move it aside: {re}",
+                            "{}: {e}; using defaults, and could not move it aside: {re}",
                             path.display()
                         ),
                     }
@@ -567,22 +567,17 @@ impl Config {
     }
 
     pub fn read(path: &Path) -> Result<Config> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|e| Error::io(path.display(), e))?;
         Config::parse(&text, path)
     }
 
     /// `text` as a config; `path` is only for the messages.
     fn parse(text: &str, path: &Path) -> Result<Config> {
-        let table: toml::Table = text
-            .parse()
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let table: toml::Table = text.parse().map_err(|e| unreadable(path, e))?;
         for key in unknown_keys(&table) {
             tracing::warn!("{}: unknown key `{key}` is ignored", path.display());
         }
-        table
-            .try_into()
-            .with_context(|| format!("parsing {}", path.display()))
+        table.try_into().map_err(|e| unreadable(path, e))
     }
 
     /// Write the config, unless the file holds a change accent has not taken in yet
@@ -597,14 +592,15 @@ impl Config {
         if on_disk.is_some() && on_disk != known() {
             return Ok(false);
         }
-        let text = toml::to_string_pretty(self)?;
+        let text = toml::to_string_pretty(self).map_err(|e| unreadable(&path, e))?;
         replace(&path, text.as_bytes())?;
         set_known(Some(text));
         Ok(true)
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
-        replace(path, toml::to_string_pretty(self)?.as_bytes())
+        let text = toml::to_string_pretty(self).map_err(|e| unreadable(path, e))?;
+        replace(path, text.as_bytes())
     }
 
     /// Take in a change someone else made to `config.toml`: the file's config, with whatever
@@ -624,14 +620,11 @@ impl Config {
             .as_deref()
             .and_then(|k| Config::parse(k, &path).ok())
             .unwrap_or_default();
-        let (base, ours, file) = (
-            toml::Value::try_from(base)?,
-            toml::Value::try_from(self)?,
-            toml::Value::try_from(file)?,
-        );
+        let value = |c: &Config| toml::Value::try_from(c).map_err(|e| unreadable(&path, e));
+        let (base, ours, file) = (value(&base)?, value(self)?, value(&file)?);
         let mut lost = Vec::new();
         let merged = merge(Some(&base), Some(&ours), Some(&file), "", &mut lost)
-            .context("merging config.toml")?;
+            .ok_or_else(|| Error::Config("merging config.toml".to_string()))?;
         for key in lost {
             tracing::warn!(
                 "config.toml: `{key}` was changed by hand and here at once; the file's value is kept"
@@ -640,7 +633,7 @@ impl Config {
         set_known(text);
         Ok(Some(Reread {
             unwritten: merged != file,
-            config: merged.try_into().context("merging config.toml")?,
+            config: merged.try_into().map_err(|e| unreadable(&path, e))?,
         }))
     }
 
@@ -680,7 +673,9 @@ impl Session {
     }
 
     pub fn save(&self, root: &Path) -> Result<()> {
-        replace(&state_path(root), &serde_json::to_vec_pretty(self)?)
+        let path = state_path(root);
+        let bytes = serde_json::to_vec_pretty(self).map_err(|e| unreadable(&path, e))?;
+        replace(&path, &bytes)
     }
 
     /// Every session written down on this machine, whatever vault or terminal session it is for.
@@ -804,7 +799,7 @@ fn on_disk(path: &Path) -> Result<Option<String>> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
+        Err(e) => Err(Error::io(path.display(), e)),
     }
 }
 
@@ -872,7 +867,7 @@ fn merge(
 fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| Error::io(dir.display(), e))?;
     // A unique temp name: the GUI and `accent-cli`, or two windows, may write at once, and a
     // fixed `<name>.tmp` would have them tear each other's file.
     let write = || -> std::io::Result<()> {
@@ -884,7 +879,12 @@ fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
         tmp.persist(path).map_err(|e| e.error)?;
         Ok(())
     };
-    write().with_context(|| format!("writing {}", path.display()))
+    write().map_err(|e| Error::io(path.display(), e))
+}
+
+/// A config or state file that does not parse, or a config that does not serialise, by its path.
+fn unreadable(path: &Path, e: impl std::fmt::Display) -> Error {
+    Error::Config(format!("{}: {e}", path.display()))
 }
 
 /// `$XDG_<var>` when set and absolute, else `$HOME/<fallback>`, else the temp dir.

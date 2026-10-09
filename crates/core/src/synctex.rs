@@ -92,10 +92,11 @@ struct Container {
 
 impl Synctex {
     /// Read `path`, gzip-compressed or not.
-    pub fn read(path: &Path) -> io::Result<Synctex> {
-        let bytes = std::fs::read(path)?;
+    pub fn read(path: &Path) -> crate::Result<Synctex> {
+        let failed = |e| crate::Error::io(path.display(), e);
+        let bytes = std::fs::read(path).map_err(failed)?;
         let text = match bytes.starts_with(&[0x1f, 0x8b]) {
-            true => gunzip(&bytes)?,
+            true => gunzip(&bytes).map_err(failed)?,
             false => bytes,
         };
         Ok(Synctex::parse(text, path.parent().unwrap_or(Path::new(""))))

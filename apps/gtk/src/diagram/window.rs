@@ -58,7 +58,7 @@ impl App {
                 move || {
                     parse(match vault {
                         Some(vault) => vault.read_text(&key),
-                        None => accent_core::fs::read_text(&path),
+                        None => accent_core::fs::read_text(&path).map_err(Into::into),
                     })
                 }
             })
@@ -434,7 +434,7 @@ impl App {
             let parsed = crate::work::off_thread("diagram reader", move || {
                 parse(match vault {
                     Some(vault) => vault.read_text(&key),
-                    None => accent_core::fs::read_text(&path),
+                    None => accent_core::fs::read_text(&path).map_err(Into::into),
                 })
             })
             .await;

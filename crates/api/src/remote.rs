@@ -23,10 +23,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::json;
 
-use crate::link::{self, Failure};
-use crate::rpc::{Client, Hello, RpcError};
+use crate::link;
+use crate::rpc::{Client, Hello};
 use crate::ssh::{self, Forward, Url};
-use crate::{Event, VaultConfig};
+use crate::{Error, Event, Result, VaultConfig};
 
 /// A call on the main thread that takes longer than this has cost the windows a frame.
 const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
@@ -328,7 +328,7 @@ impl Remote {
         &self,
         method: &str,
         params: serde_json::Value,
-    ) -> Result<T, RpcError> {
+    ) -> Result<T> {
         self.call_within(method, params, crate::rpc::DEADLINE)
     }
 
@@ -339,7 +339,7 @@ impl Remote {
         method: &str,
         params: serde_json::Value,
         deadline: std::time::Duration,
-    ) -> Result<T, RpcError> {
+    ) -> Result<T> {
         self.call_tracked(method, params, &Asked::default(), deadline)
     }
 
@@ -350,7 +350,7 @@ impl Remote {
         params: serde_json::Value,
         asked: &Asked,
         deadline: std::time::Duration,
-    ) -> Result<T, RpcError> {
+    ) -> Result<T> {
         self.remember(method, &params);
         let client = self.wait_for_client()?;
         let asked_at = std::time::Instant::now();
@@ -475,21 +475,15 @@ impl Remote {
     /// an upload longer than the deadline made every call fail anyway, saying "not connected"
     /// about a connection that was still being made. The UI hears [`Event::Connected`] and asks
     /// again; there is nothing here worth blocking a frame for.
-    fn wait_for_client(&self) -> Result<Arc<Client>, RpcError> {
+    fn wait_for_client(&self) -> Result<Arc<Client>> {
         match &*self.locked(&self.state) {
-            State::Connecting => {
-                return Err(RpcError {
-                    code: crate::rpc::CONNECTING,
-                    message: "still connecting".to_string(),
-                    data: None,
-                });
-            }
-            State::Disconnected(why) => return Err(RpcError::disconnected(why)),
+            State::Connecting => return Err(Error::Offline("still connecting".to_string())),
+            State::Disconnected(why) => return Err(Error::Offline(why.clone())),
             State::Connected => {}
         }
         match self.locked(&self.client).clone() {
             Some(client) => Ok(client),
-            None => Err(RpcError::disconnected("not connected")),
+            None => Err(Error::Offline("not connected".to_string())),
         }
     }
 
@@ -525,9 +519,7 @@ impl Remote {
         if unsent(&dest, stamped) {
             return Ok(dest);
         }
-        let current: Option<crate::Etag> = self
-            .call("stat", json!([rel]))
-            .map_err(RpcError::io_error)?;
+        let current: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let Some(current) = current else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -584,9 +576,7 @@ impl Remote {
         if stamped.is_some() && !unsent(&dest, stamped) {
             return Ok(Pushed::Sent);
         }
-        let current: Option<crate::Etag> = self
-            .call("stat", json!([rel]))
-            .map_err(RpcError::io_error)?;
+        let current: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let Some(current) = current else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -663,9 +653,7 @@ impl Remote {
     fn free_edited_name(&self, rel: &str) -> std::io::Result<String> {
         for nth in 1..=EDITED_COPIES {
             let name = edited_name(rel, nth);
-            let held: Option<crate::Etag> = self
-                .call("stat", json!([&name]))
-                .map_err(RpcError::io_error)?;
+            let held: Option<crate::Etag> = self.call("stat", json!([&name]))?;
             if held.is_none() {
                 return Ok(name);
             }
@@ -747,9 +735,7 @@ impl Remote {
         dest: &Path,
         progress: &dyn Fn(u64, u64),
     ) -> std::io::Result<()> {
-        let size: Option<crate::Etag> = self
-            .call("stat", json!([rel]))
-            .map_err(RpcError::io_error)?;
+        let size: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let size = size.map_or(0, |etag| etag.size);
         self.receive(rel, dest, size, progress)
     }
@@ -821,7 +807,7 @@ impl Remote {
 
     /// Ask ssh to start forwarding a port, either way, over the master that is already open.
     /// Nothing is spawned: the running master takes the instruction and keeps it.
-    pub fn forward(&self, f: Forward) -> Result<(), String> {
+    pub fn forward(&self, f: Forward) -> Result<()> {
         self.control(ssh::forward(&self.url, &self.ctl, f))?;
         let mut forwards = self.locked(&self.forwards);
         if !forwards.contains(&f) {
@@ -832,7 +818,7 @@ impl Remote {
 
     /// Stop a forward. It is forgotten whatever ssh answers: a master that has died took the
     /// forward with it, and a reconnect must not bring back one the window stopped.
-    pub fn cancel_forward(&self, f: Forward) -> Result<(), String> {
+    pub fn cancel_forward(&self, f: Forward) -> Result<()> {
         self.locked(&self.forwards).retain(|kept| *kept != f);
         self.control(ssh::cancel(&self.url, &self.ctl, f))
     }
@@ -857,7 +843,8 @@ impl Remote {
             if let Err(e) = self.control(ssh::forward(&self.url, &self.ctl, f)) {
                 self.locked(&self.forwards).retain(|kept| *kept != f);
                 // ssh's first line, "… Port forwarding failed": a toast is one line.
-                let why = e.lines().next().unwrap_or_default();
+                let why = e.to_string();
+                let why = why.lines().next().unwrap_or_default();
                 let _ = self.events.send(Event::Error(format!(
                     "Cannot restore the forward {f}: {why}"
                 )));
@@ -865,7 +852,7 @@ impl Remote {
         }
     }
 
-    fn control(&self, argv: Vec<String>) -> Result<(), String> {
+    fn control(&self, argv: Vec<String>) -> Result<()> {
         control(&argv)
     }
 
@@ -903,8 +890,8 @@ impl Remote {
                         self.send_hello();
                     }
                 }
-                Err(Failure::Link(why)) => self.disconnect(&why, Event::Disconnected),
-                Err(Failure::Refused(why)) => self.disconnect(&why, Event::Refused),
+                Err(Error::Refused(why)) => self.disconnect(&why, Event::Refused),
+                Err(e) => self.disconnect(&e.to_string(), Event::Disconnected),
             });
     }
 
@@ -954,7 +941,7 @@ impl Remote {
         })
     }
 
-    fn connect(&self, quiet: bool) -> Result<(), Failure> {
+    fn connect(&self, quiet: bool) -> Result<()> {
         // Whatever the last attempt left running goes first: `spawn_server` overwrites both slots,
         // so without this a retry would leak an ssh child and a reader thread every time.
         teardown(
@@ -969,7 +956,7 @@ impl Remote {
         Ok(())
     }
 
-    fn spawn_server(&self, hash: &str) -> Result<(), Failure> {
+    fn spawn_server(&self, hash: &str) -> Result<()> {
         self.say("Opening the vault");
         let command = ssh::serve_cmd(&ssh::server_path(hash), &self.url.path);
         let mut child = self
@@ -978,9 +965,10 @@ impl Remote {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("cannot run ssh: {e}"))?;
-        let stdin = child.stdin.take().ok_or("ssh has no stdin")?;
-        let stdout = child.stdout.take().ok_or("ssh has no stdout")?;
+            .map_err(link::no_ssh)?;
+        let piped = || Error::Remote("ssh has no pipes".to_string());
+        let stdin = child.stdin.take().ok_or_else(piped)?;
+        let stdout = child.stdout.take().ok_or_else(piped)?;
         if let Some(stderr) = child.stderr.take() {
             drain(stderr);
         }
@@ -997,9 +985,9 @@ impl Remote {
             // The server's own refusal ("/srv/x is not a folder") or the link's failure.
             .map_err(|e| {
                 let why = format!("cannot open the vault on {}: {e}", self.url.host);
-                match e.code {
-                    crate::rpc::REFUSED => Failure::Refused(why),
-                    _ => Failure::Link(why),
+                match e {
+                    Error::Refused(_) => Error::Refused(why),
+                    _ => Error::Remote(why),
                 }
             })?;
         *self.root.write().unwrap_or_else(|e| e.into_inner()) = hello.root;
@@ -1104,17 +1092,19 @@ fn teardown(client: Option<Arc<Client>>, child: Option<Child>) {
 }
 
 /// Run one `ssh -O` instruction to the master, saying why it was refused.
-fn control(argv: &[String]) -> Result<(), String> {
+fn control(argv: &[String]) -> Result<()> {
     let out = link::command(argv)
         .stdin(Stdio::null())
         .output()
-        .map_err(|e| format!("cannot run ssh: {e}"))?;
+        .map_err(link::no_ssh)?;
     match out.status.success() {
         true => Ok(()),
-        false => Err(match String::from_utf8_lossy(&out.stderr).trim() {
-            "" => "ssh refused".to_string(),
-            why => why.to_string(),
-        }),
+        false => Err(Error::Remote(
+            match String::from_utf8_lossy(&out.stderr).trim() {
+                "" => "ssh refused".to_string(),
+                why => why.to_string(),
+            },
+        )),
     }
 }
 

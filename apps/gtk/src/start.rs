@@ -892,7 +892,9 @@ fn address(host: &str, path: &str, home: Option<&str>) -> Result<String, String>
     if !path.starts_with('/') {
         return Err("the path must be absolute".to_string());
     }
-    ssh::parse(&format!("ssh://{host}{path}")).map(|url| url.to_string())
+    ssh::parse(&format!("ssh://{host}{path}"))
+        .map(|url| url.to_string())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

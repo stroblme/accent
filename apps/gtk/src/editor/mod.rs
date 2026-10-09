@@ -621,7 +621,7 @@ impl Tab {
         glib::spawn_future_local(async move {
             let read = crate::work::off_thread("reader", move || match vault {
                 Some(vault) => vault.read_text(&rel),
-                None => fs::read_text(&path),
+                None => fs::read_text(&path).map_err(Into::into),
             })
             .await;
             let Some(tab) = weak.upgrade() else { return };

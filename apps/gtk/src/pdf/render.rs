@@ -503,6 +503,7 @@ fn render_loop(
                     let highlights = as_highlights(quads, &links, color);
                     let written = doc
                         .add_highlights(&highlights)
+                        .map_err(anyhow::Error::from)
                         .and_then(|added| match added {
                             // Nothing new is not a write: the file is already what it should be.
                             0 => Ok(0),

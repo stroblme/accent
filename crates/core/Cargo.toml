@@ -12,7 +12,6 @@ pdf = ["dep:pdfium-render"]
 [dependencies]
 # A diagram's labels are what the index holds of it (`index::reconcile`), read through the model.
 accent-drawio.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -53,6 +52,8 @@ unicode-width = "0.2"
 pdfium-render = { version = "=0.9.3", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
 
 [dev-dependencies]
+# The examples' own errors: repo tooling, which matches on none of them.
+anyhow.workspace = true
 tempfile.workspace = true
 
 # `cargo test` builds examples too, so this one must not be built without its feature.

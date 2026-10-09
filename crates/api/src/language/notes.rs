@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use crate::Result;
 
 use accent_core::fuzzy;
 use accent_core::index::Index;
@@ -505,7 +505,8 @@ impl Notes {
         if let Some(text) = locked(&self.docs).get(rel) {
             return Ok(text.clone());
         }
-        Ok(std::fs::read_to_string(Local::join(&self.root, rel)?)?)
+        std::fs::read_to_string(Local::join(&self.root, rel)?)
+            .map_err(|e| accent_core::Error::io(rel, e).into())
     }
 
     /// Say what is wrong with the note as it now stands. An empty list is what clears the last one.
