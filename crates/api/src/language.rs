@@ -1176,9 +1176,14 @@ impl Vault {
     pub fn open_document(&self, rel: &str, language_id: &str, text: String) -> Task<Support> {
         match &self.backend {
             Backend::Local(v) => v.open_document(rel, language_id, text),
-            Backend::Remote(r) => {
-                remote_task(r.clone(), "open_document", json!([rel, language_id, text]))
-            }
+            // The host may be starting the file's server, which has `STARTING` to answer.
+            Backend::Remote(r) => remote_task_then(
+                r.clone(),
+                "open_document",
+                json!([rel, language_id, text]),
+                accent_lsp::STARTING + crate::rpc::DEADLINE,
+                |_, answer| Ok(answer),
+            ),
         }
     }
 
@@ -1228,7 +1233,7 @@ macro_rules! requests {
         remote_task($r.clone(), stringify!($name), $params)
     };
     (@remote $r:ident $name:ident $params:expr, $then:path) => {
-        remote_task_then($r.clone(), stringify!($name), $params, $then)
+        remote_task_then($r.clone(), stringify!($name), $params, crate::rpc::DEADLINE, $then)
     };
     (@ret) => { () };
     (@ret $ret:ty) => { $ret };
@@ -1327,21 +1332,25 @@ fn remote_task<T: DeserializeOwned + Send + 'static>(
     method: &'static str,
     params: Value,
 ) -> Task<T> {
-    remote_task_then(r, method, params, |_, answer| Ok(answer))
+    remote_task_then(r, method, params, crate::rpc::DEADLINE, |_, answer| {
+        Ok(answer)
+    })
 }
 
-/// [`remote_task`], with the answer finished by `then` on the same blocking thread.
+/// [`remote_task`], waiting up to `deadline`, with the answer finished by `then` on the same
+/// blocking thread.
 fn remote_task_then<T: DeserializeOwned + Send + 'static>(
     r: Arc<Remote>,
     method: &'static str,
     params: Value,
+    deadline: Duration,
     then: fn(&Remote, T) -> Result<T>,
 ) -> Task<T> {
     let asked: Arc<crate::remote::Asked> = Arc::default();
     Task::blocking({
         let (r, asked) = (r.clone(), asked.clone());
         move || {
-            let answer = r.call_tracked(method, params, &asked, crate::rpc::DEADLINE)?;
+            let answer = r.call_tracked(method, params, &asked, deadline)?;
             then(&r, answer)
         }
     })

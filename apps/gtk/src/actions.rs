@@ -101,7 +101,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         &["<Control><Alt>Down"],
     ),
     ("app.new-window", "New Window", &[]),
-    ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
+    ("app.open-local", "Open Local…", &["<Control><Shift>o"]),
     ("app.open-remote", "Open Remote…", &[]),
     ("win.open-recent", "Open Recent…", &["<Control>r"]),
     ("app.close-vault", "Close Vault", &[]),
@@ -1076,7 +1076,7 @@ fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     // What changes which vault this window is on: the three ways in, then this one again, then
     // the way out.
     let mut vaults = vec![
-        "app.open-vault",
+        "app.open-local",
         "app.open-remote",
         "win.open-recent",
         "win.reload-window",
@@ -1368,7 +1368,7 @@ mod tests {
         assert_eq!(
             vault[1],
             [
-                "app.open-vault",
+                "app.open-local",
                 "app.open-remote",
                 "win.open-recent",
                 "win.reload-window",
@@ -1386,7 +1386,7 @@ mod tests {
         assert_eq!(
             named[1],
             [
-                "app.open-vault",
+                "app.open-local",
                 "app.open-remote",
                 "win.open-recent",
                 "win.reload-window",
@@ -1397,7 +1397,7 @@ mod tests {
         assert_eq!(
             unnamed[1],
             [
-                "app.open-vault",
+                "app.open-local",
                 "app.open-remote",
                 "win.open-recent",
                 "win.reload-window",
@@ -1409,7 +1409,7 @@ mod tests {
         assert_eq!(
             documents[1],
             [
-                "app.open-vault",
+                "app.open-local",
                 "app.open-remote",
                 "win.open-recent",
                 "win.reload-window"

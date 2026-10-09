@@ -9,13 +9,13 @@ use super::protocol::Request;
 use super::ring;
 use super::{self as pdfview, Anchor, PdfView, PdfZoom, Span, render};
 use crate::widgets::{Debounce, Hook};
-use accent_api::{KeptLink, PdfLink};
+use accent_api::PdfLink;
 use accent_core::pdf;
 use accent_core::search::Options;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -45,20 +45,6 @@ type UriHook = Hook<dyn Fn(&str)>;
 type RepageHook = Hook<dyn Fn(&Rc<PdfTab>, pdf::PageEdit, u32)>;
 /// Another PDF's pages went in: its name, and how many or why they could not.
 type ImportHook = Hook<dyn Fn(&Rc<PdfTab>, &str, Result<usize, String>)>;
-
-/// The notes' links following this document's page edits, which the window runs
-/// (`App::relink`): one rewrite at a time, in the order the edits were made, since each reads
-/// what the one before it wrote.
-#[derive(Default)]
-pub struct Relinks {
-    /// The edits still to follow, oldest first, each with its history step.
-    pub queue: VecDeque<(pdf::PageEdit, u32)>,
-    /// A rewrite is out on a worker.
-    pub running: bool,
-    /// The links each delete left naming the page it took out, by its step: what the Undo that
-    /// puts the page back keeps where they are.
-    pub left: HashMap<u32, Vec<KeptLink>>,
-}
 
 pub struct PdfTab {
     pub(super) key: RefCell<String>,
@@ -200,7 +186,6 @@ pub struct PdfTab {
     pub(super) on_choice: ChoiceHook,
     pub(super) on_repaged: RepageHook,
     pub(super) on_imported: ImportHook,
-    pub relinks: RefCell<Relinks>,
     /// The monitor on a loose file, which nothing else watches (`App::watch_loose`).
     pub monitor: RefCell<Option<gio::FileMonitor>>,
 }
@@ -330,7 +315,6 @@ pub fn open(
         on_choice: Hook::default(),
         on_repaged: Hook::default(),
         on_imported: Hook::default(),
-        relinks: RefCell::default(),
         monitor: RefCell::default(),
     });
 

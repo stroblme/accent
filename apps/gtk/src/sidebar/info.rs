@@ -206,7 +206,7 @@ impl Info {
                 }
             });
         }
-        info.sync("", false, false);
+        info.sync("", false, false, false);
         info
     }
 
@@ -241,20 +241,21 @@ impl Info {
     }
 
     /// Show what applies to the tab `key` (empty for none): the sections for a file, the Tags
-    /// section over a note, and a status page for no file at all.
-    pub(super) fn sync(&self, key: &str, file: bool, note: bool) {
+    /// section over a note, Details alone over a shell, and a status page for neither.
+    pub(super) fn sync(&self, key: &str, file: bool, shell: bool, note: bool) {
         if *self.shown_for.borrow() != key {
             self.shown_for.replace(key.to_string());
             self.tags_forced.set(false);
         }
         let forced = self.tags_forced.get();
-        self.references.root.set_visible(self.vault);
+        self.references.root.set_visible(self.vault && !shell);
         self.tags.root.set_visible(self.vault && (note || forced));
-        self.details.root.set_visible(file);
-        self.root.set_visible_child_name(match file || forced {
-            true => "sections",
-            false => "nothing",
-        });
+        self.details.root.set_visible(file || shell);
+        self.root
+            .set_visible_child_name(match file || shell || forced {
+                true => "sections",
+                false => "nothing",
+            });
         self.fit();
     }
 

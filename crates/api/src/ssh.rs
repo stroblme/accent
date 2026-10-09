@@ -549,6 +549,11 @@ pub fn clip_cmd(server: &str, id: &str) -> String {
     format!("{server} clip {}", quote(id))
 }
 
+/// The command that lists the shells the host holds, for [`run`].
+pub fn held_cmd(server: &str) -> String {
+    format!("{server} held")
+}
+
 // --------------------------------------------------------------------- cache
 
 /// The musl-static `accent-cli` this machine uploads to an `arch` host ([`SERVER_ARCHES`]), if
@@ -605,6 +610,13 @@ pub fn cache_path(url: &Url, rel: &str) -> Option<PathBuf> {
 /// Where the stamp of `rel`'s cached copy goes: its [`cache_path`] in the stamp tree.
 pub fn stamp_path(url: &Url, rel: &str) -> Option<PathBuf> {
     inside(stamp_dir(url), rel)
+}
+
+/// Where the page edits made in `rel`'s cached copy wait for the notes to follow them (the
+/// window's `Relinks`): its [`cache_path`] in a tree of its own, `<id>.relink`, as the stamps
+/// have theirs.
+pub fn relink_path(url: &Url, rel: &str) -> Option<PathBuf> {
+    inside(cache_dir(url).with_extension("relink"), rel)
 }
 
 /// `rel` joined onto `base`, or `None` where it would land outside it (see [`cache_path`]).

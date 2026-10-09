@@ -22,7 +22,7 @@ pub struct Shell {
     /// Each carries what it was opened on (`App::key`), so a vault-less one is found again by its
     /// kind.
     pub windows: RefCell<Vec<Rc<App>>>,
-    /// The start screen while one is up, so Open Folder… presents it again instead of stacking a
+    /// The start screen while one is up, so New Window presents it again instead of stacking a
     /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
     pub start: glib::WeakRef<adw::ApplicationWindow>,
     /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
@@ -163,7 +163,7 @@ impl Changed {
 }
 
 impl Shell {
-    /// The actions that outlive the window firing them: Open Folder… and Open Remote… both land a
+    /// The actions that outlive the window firing them: Open Local… and Open Remote… both land a
     /// vault that may not be this window's, Close Vault takes the current window away, and Quit
     /// takes them all, so none of them can live on a window the way the `win.` actions do.
     /// Registered once on the application, where the shell is in scope.
@@ -177,7 +177,7 @@ impl Shell {
         // keys. Both of the first two are provided: this is the one DESIGN.md's Keyboard rule
         // asks for, and the desktop file carries the other for a shell that reads it first.
         let actions: [(&str, AppAction); 5] = [
-            ("open-vault", Shell::choose_vault),
+            ("open-local", Shell::choose_local),
             ("open-remote", Shell::choose_remote),
             ("new-window", Shell::start_screen),
             ("close-vault", Shell::close_vault),
@@ -493,44 +493,15 @@ impl Shell {
         code
     }
 
-    /// Open Folder…: the picker, straight away.
+    /// Open Local…: this machine's folder picker, straight away, from whichever window asked — a
+    /// remote one too, whose own folders are Open Remote…'s. The folder is a vault in a window of
+    /// its own, as every vault is.
     ///
     /// It used to land on the start screen, which then showed a button that opened this dialog —
     /// a screen in the way of the thing it was asking for. The start screen is still what a bare
     /// launch with no vault lands on, where it also lists the recent ones.
-    ///
-    /// A remote window's folders are on its host, so there the picker is the Open Remote form,
-    /// filled in with this window's address: a vault opened at a mistyped path is steered from
-    /// here. What it picks replaces this window — one window per vault, and the vault this one
-    /// was on is the one being corrected — unless it is the same vault, which only raises it.
-    fn choose_vault(self: &Rc<Self>, gtk_app: &adw::Application) {
+    fn choose_local(self: &Rc<Self>, gtk_app: &adw::Application) {
         let parent = gtk_app.active_window();
-        let asking = parent.as_ref().and_then(|w| self.app_at(w));
-        if let Some(app) = asking
-            && let Some(vault) = app.vault()
-            && let Some(remote) = vault.remote()
-        {
-            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            let (from, here) = (app.window.downgrade(), vault.key().to_owned());
-            let recent = self.config.borrow().recent_vaults.clone();
-            start::connect_dialog(
-                &app.window,
-                Some(remote.url()),
-                &recent,
-                "Open Remote Vault",
-                "Connect",
-                move |address| {
-                    let root = PathBuf::from(address);
-                    let replace = root != here;
-                    shell.open_from_start(&gtk_app, root);
-                    // Once the new one is up, so the application never stands at zero windows.
-                    if let Some(window) = from.upgrade().filter(|_| replace) {
-                        window.close();
-                    }
-                },
-            );
-            return;
-        }
         let dialog = gtk::FileDialog::builder().title("Open Vault").build();
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
         dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |result| {
@@ -544,15 +515,21 @@ impl Shell {
     /// Open Remote…: the same host-and-path form the start screen asks with, over whichever
     /// window is in front. A remote vault is opened, keyed and remembered exactly as a local one
     /// is, so there is nothing here but the address.
+    ///
+    /// Over a remote window the form starts at that window's host and path, its folders asked for
+    /// at once: the way to the host's other folders, and to the right one after a mistyped path.
     fn choose_remote(self: &Rc<Self>, gtk_app: &adw::Application) {
         let Some(window) = gtk_app.active_window() else {
             return;
         };
+        let at = self
+            .app_at(&window)
+            .and_then(|app| Some(app.vault()?.remote()?.url().clone()));
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
         let recent = self.config.borrow().recent_vaults.clone();
         start::connect_dialog(
             &window,
-            None,
+            at.as_ref(),
             &recent,
             "Open Remote Vault",
             "Connect",

@@ -1,5 +1,6 @@
 //! The Info pane's Details section, filled from what the window already holds about the file in
 //! front: its size and time from the tab's etag or one stat of the disk, and what its kind adds.
+//! A shell in front has what its holder says about it instead.
 //!
 //! No Created row: `statx`'s birth time is missing on the musl `accent-cli` a remote vault runs,
 //! and accent's own save (a temporary file renamed over the old one), Syncthing and most editors
@@ -17,6 +18,9 @@ impl App {
         };
         if !sidebar.section_live("details") {
             return;
+        }
+        if let Some(Doc::Terminal(term)) = self.active_doc() {
+            return sidebar.set_details(&[shell_group(term.facts(self.keeps_session()))]);
         }
         let Some(doc) = self.active_doc().filter(|doc| !doc.is_transient()) else {
             return sidebar.set_details(&[]);
@@ -51,6 +55,9 @@ impl App {
     /// Ask the disk for the size and time of the file in front where no tab holds them — a PDF,
     /// an image, a status page — once per file, and show them when they land. A round trip on a
     /// remote vault, so on a worker.
+    ///
+    /// A shell's holder is asked instead, every time: what runs in a shell changes with no file
+    /// to say so.
     pub(crate) fn stat_details(self: &Rc<Self>) {
         if !self
             .sidebar
@@ -58,6 +65,14 @@ impl App {
             .is_some_and(|s| s.section_live("details"))
         {
             return;
+        }
+        if let Some(Doc::Terminal(term)) = self.active_doc() {
+            let weak = Rc::downgrade(self);
+            return term.ask(move |_| {
+                if let Some(app) = weak.upgrade() {
+                    app.sync_details();
+                }
+            });
         }
         let Some(key) = self
             .active_doc()
@@ -199,6 +214,31 @@ fn kind_group(doc: &Doc) -> Option<Group> {
     Some(Group { title, facts })
 }
 
+/// What the shell in front is, each row only where it is known, and Running only while a command
+/// is.
+fn shell_group(facts: terminal::Facts) -> Group {
+    let held = match facts.survives {
+        true => "Yes, survives closing the window",
+        false => "No, ends with the window",
+    };
+    let said = [
+        ("Shell", facts.program),
+        ("PID", facts.pid.map(|pid| pid.to_string())),
+        ("Host", Some(facts.host)),
+        ("Directory", facts.dir),
+        ("Running", facts.running),
+        ("Started", facts.started.map(date_label)),
+        ("Held", Some(held.to_string())),
+    ];
+    Group {
+        title: "Terminal",
+        facts: said
+            .into_iter()
+            .filter_map(|(name, value)| Some(fact(name, value?)))
+            .collect(),
+    }
+}
+
 /// The lines a file holds, as `wc -l` counts them: the empty line after a last newline, which
 /// the buffer counts, is none.
 fn lines(buffer: &sourceview5::Buffer) -> i32 {
@@ -232,4 +272,46 @@ fn paper_label((width, height): (f32, f32)) -> String {
             let mm = |points: f32| (points * 25.4 / 72.0).round();
             format!("{} × {} mm", mm(width), mm(height))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shell at its prompt has no Running row, and one the holder has not answered for yet
+    /// shows what its tab knows.
+    #[test]
+    fn a_shell_lists_what_is_known_of_it() {
+        let names =
+            |facts| -> Vec<&str> { shell_group(facts).facts.iter().map(|f| f.name).collect() };
+        let tab = terminal::Facts {
+            host: "box".into(),
+            dir: Some("/home/me".into()),
+            ..Default::default()
+        };
+        assert_eq!(names(tab.clone()), ["Host", "Directory", "Held"]);
+        let told = terminal::Facts {
+            program: Some("/bin/zsh".into()),
+            pid: Some(42),
+            running: Some("cargo build".into()),
+            started: Some(1_760_000_000),
+            survives: true,
+            ..tab
+        };
+        assert_eq!(
+            names(told.clone()),
+            [
+                "Shell",
+                "PID",
+                "Host",
+                "Directory",
+                "Running",
+                "Started",
+                "Held"
+            ]
+        );
+        let facts = shell_group(told).facts;
+        assert_eq!(facts[4].value, "cargo build");
+        assert_eq!(facts[6].value, "Yes, survives closing the window");
+    }
 }

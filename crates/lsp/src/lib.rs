@@ -11,7 +11,7 @@ mod codec;
 mod runtime;
 pub mod types;
 
-pub use client::{Client, DEADLINE, Error, Notification, Notifications};
+pub use client::{Client, DEADLINE, Error, Notification, Notifications, STARTING};
 pub use runtime::runtime;
 
 /// A path as the protocol wants it: `file://` and percent-encoding for everything that is not an

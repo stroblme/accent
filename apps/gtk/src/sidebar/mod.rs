@@ -482,9 +482,10 @@ impl Sidebar {
     }
 
     /// Fit the Info pane to the tab `key` in front (empty for none): its sections for a file,
-    /// with Tags over a markdown note, and a status page where there is no file.
-    pub fn sync_info(&self, key: &str, file: bool, note: bool) {
-        self.info.sync(key, file, note);
+    /// with Tags over a markdown note, Details alone over a shell, and a status page where there
+    /// is neither.
+    pub fn sync_info(&self, key: &str, file: bool, shell: bool, note: bool) {
+        self.info.sync(key, file, shell, note);
         if let Some(panes) = self.panes.as_ref() {
             (panes.tags_catch_up)(&self.stack);
         }

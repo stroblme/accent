@@ -910,7 +910,9 @@ fn vault_pages(app: &Rc<App>, key: &str) -> String {
 /// the stamp against the host, so this is the same input from where it stands.
 ///
 /// A second page is added after the first refusal, which is the reader who keeps drawing: it
-/// must go into that copy as any write does, neither into a numbered one nor with a toast.
+/// must go into that copy as any write does, neither into a numbered one nor with a toast. A note
+/// linking into pages 1 to 3 is written first, whose links must stay as they are throughout: the
+/// original keeps its pages.
 pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -922,6 +924,9 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
             println!("bench pdf stale not_remote");
             return bench_quit(&app);
         };
+        let note = linked_note(&app, &key).await;
+        app.open_path(&key);
+        let said = Cell::new(app.toasted.get());
         let stamp = accent_api::ssh::stamp_path(remote.url(), &key);
         // The stamp as the file spells one, written by hand because the app does not link
         // serde_json: the copy's own etag as it is, and a host's it will never report.
@@ -942,9 +947,10 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
             std::fs::write(stamp, stamped)
         });
         println!(
-            "bench pdf stale opened pages={} in_vault {} moved={moved:?}",
+            "bench pdf stale opened pages={} in_vault {} moved={moved:?} {}",
             pdf.page_count(),
-            vault_pages(&app, &key)
+            vault_pages(&app, &key),
+            links_read(&app, &note, &said)
         );
         let kept = pdf.path().with_extension("kept.pdf");
         let (first, second) = (
@@ -954,25 +960,28 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         written(&app).await;
         println!(
-            "bench pdf stale refused key={:?} pages={} in_vault {} edited {} said={} {:?} kept={}",
+            "bench pdf stale refused key={:?} pages={} in_vault {} edited {} said={} {:?} kept={} \
+             {}",
             pdf.key(),
             pdf.page_count(),
             vault_pages(&app, &key),
             vault_pages(&app, &first),
             app.toasted.get(),
             bench_said(&app),
-            kept.exists()
+            kept.exists(),
+            links_read(&app, &note, &said)
         );
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
         written(&app).await;
         println!(
-            "bench pdf stale again key={:?} pages={} in_vault {} edited {} said={} numbered={}",
+            "bench pdf stale again key={:?} pages={} in_vault {} edited {} said={} numbered={} {}",
             pdf.key(),
             pdf.page_count(),
             vault_pages(&app, &key),
             vault_pages(&app, &first),
             app.toasted.get(),
-            vault.exists(&second)
+            vault.exists(&second),
+            links_read(&app, &note, &said)
         );
         let _ = std::fs::remove_file(&kept);
         bench_quit(&app);
@@ -1081,6 +1090,11 @@ fn chmod_on_host(
 /// vault back, and the page must reach the host and the links follow it without another stroke.
 /// A note linking into pages 1 to 3 is written first, so point it at a document of three pages
 /// or more: the page goes in after the first, so 1, 2, 3, 2, 1 become 1, 3, 4, 3, 1.
+///
+/// Then the same with the tab closed while the link is down, and the window's own record of the
+/// edit forgotten, as a new window has none: it waits beside the cached copy, the links stay as
+/// they are through the reconnect, and they follow once the document is opened again and the
+/// page reaches the host — 1, 4, 5, 4, 1, the page going in after the second.
 pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -1142,6 +1156,53 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
             pdf.unsent(),
             vault_pages(&app, &key),
             app.toasted.get(),
+            links_read(&app, &note, &said)
+        );
+
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        let argv = accent_api::ssh::exit(remote.url(), remote.control_path());
+        let ended = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .status()
+            .is_ok_and(|s| s.success());
+        for _ in 0..50 {
+            if app.connection.is_revealed() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        app.connection_refused("the drill holds the link down");
+        written(&app).await;
+        let page = pdf.page.clone();
+        drop(pdf);
+        app.close_page(&page);
+        written(&app).await;
+        let kept = accent_api::ssh::relink_path(remote.url(), &key).unwrap_or_default();
+        app.relinks.borrow_mut().remove(&key);
+        println!(
+            "bench pdf dropped closed_down ended={ended} offline={} open={} kept={}",
+            app.offline(),
+            app.doc_for(&key).is_some(),
+            kept.exists()
+        );
+        said.set(app.toasted.get());
+        app.reconnect_now();
+        online(&app).await;
+        written(&app).await;
+        println!(
+            "bench pdf dropped closed_back offline={} in_vault {} kept={} {}",
+            app.offline(),
+            vault_pages(&app, &key),
+            kept.exists(),
+            links_read(&app, &note, &said)
+        );
+        let pdf = opened(&app, &key).await;
+        written(&app).await;
+        println!(
+            "bench pdf dropped reopened pages={:?} in_vault {} kept={} {}",
+            pdf.map(|pdf| pdf.page_count()),
+            vault_pages(&app, &key),
+            kept.exists(),
             links_read(&app, &note, &said)
         );
         bench_quit(&app);

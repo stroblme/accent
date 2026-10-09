@@ -649,8 +649,8 @@ fn reset_group(
             crate::dialogs::confirm(
                 &dialog,
                 "Restore Default Preferences?",
-                "Theme, fonts, editor options, every vault's folders and any shortcuts you \
-                 changed go back to their defaults. Your recent vaults are kept.",
+                "Theme, recolouring, fonts, editor options, every vault's folders and any \
+                 shortcuts you changed go back to their defaults. Your recent vaults are kept.",
                 "Restore",
                 true,
                 move || {

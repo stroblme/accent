@@ -6,7 +6,7 @@ use super::*;
 /// clicked as Tab and Space would, and where the keyboard went each time. Point it at a config
 /// whose recent vaults are four folders that exist; it forgets all four. The second row goes to
 /// the third (`focus=` its name), the last to the one before it, the one the search shows while
-/// the other is hidden to the search (`focus=search`), and the last left to Open Folder….
+/// the other is hidden to the search (`focus=search`), and the last left to Open Local….
 pub(crate) fn bench_start(window: &adw::ApplicationWindow) {
     let window = window.clone();
     glib::spawn_future_local(async move {

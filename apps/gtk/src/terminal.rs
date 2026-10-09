@@ -26,7 +26,7 @@
 //! ends it explicitly ([`Term::kill`]). A leaked view is an attach that never lets go. What a
 //! window leaves held without a session to name it in is ended at the next start ([`sweep`]).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -66,6 +66,30 @@ pub struct Term {
     lost: Cell<bool>,
     /// Whether the shell has ended, so there is nothing left for [`kill`](Self::kill) to end.
     ended: Cell<bool>,
+    /// What the holder last said about the shell ([`ask`](Self::ask)), and whether an ask is out
+    /// and another is due when it lands.
+    holder: RefCell<Facts>,
+    asking: Cell<bool>,
+    again: Cell<bool>,
+}
+
+/// What the Info pane's Details says about a shell ([`Term::facts`]). The holder tells the
+/// program, PID, directory, foreground command and start (`accent-cli held`), each `None` until
+/// it has answered and where it could not tell.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Facts {
+    pub program: Option<String>,
+    pub pid: Option<u64>,
+    /// The machine it runs on: this one's name, or the host's as its address gives it.
+    pub host: String,
+    pub dir: Option<String>,
+    /// The command line of what runs in the foreground; `None` at the prompt.
+    pub running: Option<String>,
+    /// When it started, in seconds since the epoch.
+    pub started: Option<i64>,
+    /// Whether it outlives its window: a holder keeps it, and the window keeps a session to bring
+    /// it back in.
+    pub survives: bool,
 }
 
 impl Term {
@@ -105,6 +129,66 @@ impl Term {
             }
             Shell::Remote { at, .. } => Some(at.to_string()),
         }
+    }
+
+    /// What the Info pane says about the shell: the holder's last answer, and what the tab knows
+    /// where it has none. `kept` is whether the window keeps a session to bring the shell back
+    /// in; one that does not ends its shells as it closes (`App::release_shells`).
+    pub fn facts(&self, kept: bool) -> Facts {
+        let told = self.holder.borrow().clone();
+        let (host, dir, program, held) = match &self.shell {
+            Shell::Local(_) => (
+                glib::host_name().to_string(),
+                self.at(),
+                Some(user_shell()),
+                cli().is_some(),
+            ),
+            Shell::Remote { at, .. } => (
+                at.host.clone(),
+                Some(at.path.to_string_lossy().into_owned()),
+                None,
+                true,
+            ),
+        };
+        Facts {
+            program: told.program.or(program),
+            host,
+            dir: told.dir.or(dir),
+            survives: held && kept,
+            ..told
+        }
+    }
+
+    /// Ask the holder about the shell — off the main loop, a round trip on a host — and run
+    /// `landed` once [`facts`](Self::facts) has its answer. Asked while an ask is out, it asks
+    /// once more when that lands, so answers never cross. Nothing is asked of a shell nothing
+    /// holds, or whose link is down.
+    pub fn ask(self: &Rc<Self>, landed: impl Fn(&Rc<Term>) + 'static) {
+        let Some(argv) = self.shell.held().filter(|_| !self.lost.get()) else {
+            return;
+        };
+        if self.asking.replace(true) {
+            return self.again.set(true);
+        }
+        let (weak, id) = (Rc::downgrade(self), id(&self.key).to_string());
+        glib::spawn_future_local(async move {
+            let listing = crate::work::attempt("list the held shells", move || output(&argv)).await;
+            let Some(term) = weak.upgrade() else {
+                return;
+            };
+            term.asking.set(false);
+            *term.holder.borrow_mut() = match listing {
+                Ok(listing) => told(&String::from_utf8_lossy(&listing), &id),
+                Err(why) => {
+                    tracing::debug!("{why}");
+                    Facts::default()
+                }
+            };
+            landed(&term);
+            if term.again.take() {
+                term.ask(landed);
+            }
+        });
     }
 
     /// Attach again to the shell a dropped link cut this tab off from. The host still holds it and
@@ -234,6 +318,25 @@ impl Shell {
         })
     }
 
+    /// What lists the shells held where this one is, run on this machine: `accent-cli held`, here
+    /// or over the master on the host. `None` without `accent-cli`, when nothing holds it.
+    fn held(&self) -> Option<Vec<String>> {
+        match self {
+            Shell::Local(_) => Some(vec![
+                cli()?.to_string_lossy().into_owned(),
+                "held".to_string(),
+            ]),
+            Shell::Remote { at, link, .. } => {
+                let server = ssh::server_path(&accent_api::link::server().ok()?.hash);
+                Some(ssh::run(
+                    at,
+                    &ssh::control_path(link),
+                    &ssh::held_cmd(&server),
+                ))
+            }
+        }
+    }
+
     /// What prints the last copy a program in shell `id` made ([`take_copies`]), run on this
     /// machine: `accent-cli clip`, here or over the master on the host.
     fn clip(&self, id: &str) -> Option<Vec<String>> {
@@ -310,6 +413,9 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
         shell: shell.clone(),
         lost: Cell::new(false),
         ended: Cell::new(false),
+        holder: RefCell::default(),
+        asking: Cell::new(false),
+        again: Cell::new(false),
     });
     take_copies(&term);
     start(&term);
@@ -392,19 +498,8 @@ fn take_copies(term: &Rc<Term>) {
         let argv = term.shell.clip(id(&term.key))?;
         let clipboard = term.view.clipboard();
         glib::spawn_future_local(async move {
-            let copy = crate::work::attempt("take the terminal's copy", move || {
-                let out = std::process::Command::new(&argv[0])
-                    .args(&argv[1..])
-                    .stdin(std::process::Stdio::null())
-                    .output()?;
-                match out.status.success() {
-                    true => Ok(out.stdout),
-                    false => Err(std::io::Error::other(
-                        String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                    )),
-                }
-            })
-            .await;
+            let copy =
+                crate::work::attempt("take the terminal's copy", move || output(&argv)).await;
             match copy {
                 Ok(base64) => {
                     let text = glib::base64_decode(&String::from_utf8_lossy(&base64));
@@ -415,6 +510,40 @@ fn take_copies(term: &Rc<Term>) {
         });
         None
     });
+}
+
+/// Run `argv` and hand back what it printed, or what it said on stderr when it failed.
+fn output(argv: &[String]) -> std::io::Result<Vec<u8>> {
+    let out = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    match out.status.success() {
+        true => Ok(out.stdout),
+        false => Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        )),
+    }
+}
+
+/// What `accent-cli held` says about the shell `id`: nothing when it does not hold it.
+fn told(listing: &str, id: &str) -> Facts {
+    let Some(shell) = listing
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|shell| shell["id"] == id)
+    else {
+        return Facts::default();
+    };
+    let text = |name: &str| shell[name].as_str().map(str::to_string);
+    Facts {
+        program: text("shell"),
+        pid: shell["pid"].as_u64(),
+        dir: text("cwd"),
+        running: text("running"),
+        started: shell["started"].as_i64(),
+        ..Facts::default()
+    }
 }
 
 /// Draw one of [`start`]'s progress lines over the last, from the worker making the host ready:
@@ -542,15 +671,39 @@ fn when_laid_out(view: &vte4::Terminal, then: impl FnOnce(&vte4::Terminal) + 'st
     view.connect_map(wait);
 }
 
-/// Run `changed` whenever VTE reports a title of its own: once a moment after the shell has
-/// started, and again on every `cd`. Weak, for the reason [`on_exit`] is.
-pub fn on_title(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
+/// The termprops the shell integration VTE ships (`vte.sh`) raises as a command starts and as
+/// the prompt comes back.
+const SHELL_TURNS: [&str; 2] = ["vte.shell.preexec", "vte.shell.precmd"];
+
+/// Run `changed` whenever the shell says something about itself: a title, which VTE reports a
+/// moment after the shell has started and again on every `cd`; a directory (OSC 7); and, where
+/// its shell integration says so, a command starting and the prompt coming back. Weak, for the
+/// reason [`on_exit`] is.
+pub fn on_report(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
     let weak = Rc::downgrade(term);
-    term.view.connect_window_title_changed(move |_| {
+    let report = Rc::new(move || {
         if let Some(term) = weak.upgrade() {
             changed(&term);
         }
     });
+    let view = &term.view;
+    view.connect_window_title_changed(glib::clone!(
+        #[strong]
+        report,
+        move |_| report()
+    ));
+    view.connect_current_directory_uri_changed(glib::clone!(
+        #[strong]
+        report,
+        move |_| report()
+    ));
+    for name in SHELL_TURNS {
+        let report = report.clone();
+        view.connect_local(&format!("termprop-changed::{name}"), false, move |_| {
+            report();
+            None
+        });
+    }
 }
 
 /// The shell exited: hand the terminal back so the caller can close its tab.
@@ -1080,6 +1233,30 @@ mod tests {
             orphans(&held, &named, |pid| pid != 5),
             ["terminal:00000000000000a1"]
         );
+    }
+
+    /// The holder lists every shell it keeps; the tab reads its own line, and a shell it does not
+    /// hold, or a field it does not say, is left unknown.
+    #[test]
+    fn a_shell_reads_its_own_line_of_the_listing() {
+        let listing = [
+            r#"{"attached":true,"cwd":"/srv","id":"00000000000000b1","pid":7,"title":""}"#,
+            r#"{"attached":true,"cwd":"/home/me/src","id":"00000000000000b2","pid":42,"title":"","shell":"/bin/zsh","started":1760000000,"running":"cargo build"}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            told(&listing, "00000000000000b2"),
+            Facts {
+                program: Some("/bin/zsh".into()),
+                pid: Some(42),
+                dir: Some("/home/me/src".into()),
+                running: Some("cargo build".into()),
+                started: Some(1_760_000_000),
+                ..Facts::default()
+            }
+        );
+        assert_eq!(told(&listing, "00000000000000b1").running, None);
+        assert_eq!(told(&listing, "00000000000000ff"), Facts::default());
     }
 
     /// VTE hands over the wait status, so ssh's 255 arrives as 255 << 8.

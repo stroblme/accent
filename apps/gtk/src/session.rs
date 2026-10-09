@@ -376,7 +376,7 @@ impl App {
     /// Whether this window writes a session down and puts it back: a vault's does, and a named
     /// terminal session's. A window opened on a file, or an unnamed one of shells, has nothing to
     /// key one on, and is opened the same way again.
-    fn keeps_session(&self) -> bool {
+    pub(crate) fn keeps_session(&self) -> bool {
         self.key.borrow().saved_as().is_some()
     }
 

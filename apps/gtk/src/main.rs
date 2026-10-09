@@ -376,6 +376,9 @@ struct App {
     /// The keys whose bytes are on their way from a host ([`App::local_copy`]). Their count is the
     /// status bar's line meanwhile, so a PDF among them is not yet "Opening the document…".
     fetching: RefCell<HashSet<String>>,
+    /// The page edits of each PDF the notes have still to follow, by its key: the document's
+    /// rather than its tab's, so a tab closed first leaves them to the next ([`relink::Relinks`]).
+    relinks: RefCell<HashMap<String, Rc<RefCell<relink::Relinks>>>>,
     /// Whether the stored tabs have been put back. A remote vault answers nothing until it is
     /// connected, so its window waits for `Event::Connected` to restore them, and this is what
     /// keeps a later reconnect from restoring them a second time over the tabs already open.
@@ -735,7 +738,7 @@ impl App {
     }
 
     /// Fit the Info pane to the tab in front: its sections for a file, Tags only over a markdown
-    /// note, and a status page for a shell, a comparison or no tab at all.
+    /// note, Details alone over a shell, and a status page for a comparison or no tab at all.
     fn sync_info(&self) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
@@ -743,11 +746,12 @@ impl App {
         let doc = self.active_doc();
         let key = doc.as_ref().map(Doc::key).unwrap_or_default();
         let file = doc.as_ref().is_some_and(|doc| !doc.is_transient());
+        let shell = matches!(doc, Some(Doc::Terminal(_)));
         let note = doc
             .as_ref()
             .and_then(Doc::tab)
             .is_some_and(|tab| tab.flavour().is_note());
-        sidebar.sync_info(&key, file, note);
+        sidebar.sync_info(&key, file, shell, note);
     }
 
     fn clear_preview(&self) {
@@ -1235,8 +1239,9 @@ impl App {
         );
         // The subtitle is taken when a tab comes to the front, and VTE has not reported a title
         // by then: the shell is still starting. So the header hears about each one as it lands,
-        // which is also what follows a `cd` into another directory.
-        terminal::on_title(
+        // which is also what follows a `cd` into another directory; and the Details section asks
+        // the holder again, which is what follows a command starting and ending.
+        terminal::on_report(
             &term,
             glib::clone!(
                 #[weak(rename_to = app)]
@@ -1244,6 +1249,7 @@ impl App {
                 move |term: &Rc<terminal::Term>| {
                     if app.active_doc().is_some_and(|doc| doc.page() == &term.page) {
                         app.title.set_subtitle(&term.subtitle());
+                        app.stat_details();
                     }
                 }
             ),
@@ -1580,6 +1586,8 @@ impl App {
             for diff in self.diffs() {
                 diff.set_font(config.editor_font.as_deref(), self.zoom.get());
             }
+            // The goals are set in the editor's font when they land.
+            self.refresh_goals();
         }
         for pdf in self.pdfs() {
             pdf.set_drawing_config(config.drawing.clone());

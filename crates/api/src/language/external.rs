@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::{Error, Result};
 use serde_json::{Value, json};
@@ -145,11 +146,32 @@ async fn forward_notifications(
     let mut painted: HashSet<String> = HashSet::new();
     // Whether it said it is busy and has not yet said it is done, likewise.
     let mut working = false;
-    // The line each file is being checked from, as last said, and so the files to say done with
-    // when it exits. Lean says one line many times over (3 660 notifications, 301 lines, for a
-    // 600-line file), and only a new one is news.
-    let mut checking: HashMap<String, u32> = HashMap::new();
-    while let Some(n) = notifications.recv().await {
+    // How far each file's check has got, and so the files to say done with when it exits.
+    let mut checking: HashMap<String, Check> = HashMap::new();
+    loop {
+        // A line held back goes on at the end of its interval, whether the server says more by
+        // then or not.
+        let next = match checking.values().filter_map(Check::held).min() {
+            Some(due) => tokio::time::timeout_at(due.into(), notifications.recv()).await,
+            None => Ok(notifications.recv().await),
+        };
+        let n = match next {
+            Ok(Some(n)) => n,
+            Ok(None) => break,
+            Err(_) => {
+                let now = Instant::now();
+                let mut due = checking
+                    .iter_mut()
+                    .filter_map(|(rel, check)| Some((rel.clone(), check.due(now)?)));
+                if due.any(|(rel, line)| {
+                    let line = Some(line);
+                    events.send(Event::Checking { rel, line }).is_err()
+                }) {
+                    break;
+                }
+                continue;
+            }
+        };
         match n.method.as_str() {
             "textDocument/publishDiagnostics" => {
                 let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(n.params)
@@ -201,11 +223,20 @@ async fn forward_notifications(
                 let Some(rel) = uri.and_then(|uri| rel_of(uri, &vault_root)) else {
                     continue;
                 };
-                let news = match line {
-                    Some(line) => checking.insert(rel.clone(), line) != Some(line),
-                    None => checking.remove(&rel).is_some(),
+                // The end of a check goes on at once, and only for a check the UI was told of.
+                let line = match line {
+                    Some(line) => {
+                        let check = checking
+                            .entry(rel.clone())
+                            .or_insert(Check { line, sent: None });
+                        check.line = line;
+                        check.due(Instant::now()).map(Some)
+                    }
+                    None => checking.remove(&rel).map(|_| None),
                 };
-                if news && events.send(Event::Checking { rel, line }).is_err() {
+                if let Some(line) = line
+                    && events.send(Event::Checking { rel, line }).is_err()
+                {
                     break;
                 }
             }
@@ -286,6 +317,42 @@ fn progress_of(params: &Value) -> Option<(bool, Option<String>)> {
     };
     let message = value.get("message").and_then(Value::as_str);
     Some((busy, message.filter(|_| busy).map(str::to_string)))
+}
+
+/// The least time between two lines of a file's check sent on as `Event::Checking`. Lean says
+/// where it is a dozen times a line (3 660 notifications, 301 lines, for a 600-line file), and
+/// over an ssh link each line sent on is a message; ten a second still reads as moving.
+const CHECKING_EVERY: Duration = Duration::from_millis(100);
+
+/// How far a server's check of one file has got, and what the UI was last told of it.
+struct Check {
+    /// The line the server last said it is checking from.
+    line: u32,
+    /// The line last sent on, and when.
+    sent: Option<(u32, Instant)>,
+}
+
+impl Check {
+    /// The line to send on at `now`: one the UI has not been told, at least [`CHECKING_EVERY`]
+    /// after the last. Otherwise it is held back until then ([`Check::held`]), so the UI still
+    /// ends on the line the check sits on.
+    fn due(&mut self, now: Instant) -> Option<u32> {
+        let ready = match self.sent {
+            Some((line, at)) => line != self.line && now >= at + CHECKING_EVERY,
+            None => true,
+        };
+        ready.then(|| {
+            self.sent = Some((self.line, now));
+            self.line
+        })
+    }
+
+    /// When the line held back is due, if one is.
+    fn held(&self) -> Option<Instant> {
+        self.sent
+            .filter(|&(line, _)| line != self.line)
+            .map(|(_, at)| at + CHECKING_EVERY)
+    }
 }
 
 /// Where Lean's `$/lean/fileProgress` says a file is still being checked: the start line of the
@@ -887,6 +954,26 @@ mod tests {
             checking_of(&progress(json!([{"range": from(4), "kind": 2}]))),
             Some(None)
         );
+    }
+
+    /// A check's first line goes on at once; one said within the interval after waits for its
+    /// end, and what goes on then is the last line said.
+    #[test]
+    fn a_checking_line_goes_on_at_most_once_an_interval() {
+        let start = Instant::now();
+        let mut check = Check {
+            line: 3,
+            sent: None,
+        };
+        assert_eq!(check.due(start), Some(3));
+        assert_eq!(check.held(), None);
+        check.line = 5;
+        assert_eq!(check.due(start + CHECKING_EVERY / 2), None);
+        check.line = 7;
+        assert_eq!(check.held(), Some(start + CHECKING_EVERY));
+        assert_eq!(check.due(start + CHECKING_EVERY), Some(7));
+        assert_eq!(check.held(), None);
+        assert_eq!(check.due(start + 3 * CHECKING_EVERY), None, "nothing new");
     }
 
     /// A server that exits — a crash, an OOM kill — leaves its marks in the gutter with nothing

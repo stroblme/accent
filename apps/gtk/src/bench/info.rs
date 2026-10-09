@@ -1,6 +1,7 @@
 //! The Info pane drill: which sections it shows over each kind of tab, and what they say.
 
 use super::*;
+use vte4::TerminalExt as _;
 
 /// Long enough for a file to open and the References answer, 300 ms behind it, to land.
 const SETTLE: Duration = Duration::from_millis(1500);
@@ -9,9 +10,11 @@ const SETTLE: Duration = Duration::from_millis(1500);
 /// is open, opens the Details section, then opens each file in turn and prints the pane again
 /// once the file's answers have landed: the page it shows, each section as
 /// `Title:open|shut|hidden` with its count, the dividers as `position/height`, and the Details
-/// rows as `Group.Name=value`. Last, over the last file, it drags the upper divider to 200 px and
-/// folds the sections as clicks on their headers would, printing each fold: the divider comes
-/// back to 200 px with all three open again.
+/// rows as `Group.Name=value`. `terminal` opens a shell instead, and prints it again with
+/// `sleep 30` typed into it, which the Details section hears of from the shell's own reports.
+/// Last, over the last file, it drags the upper divider to 200 px and folds the sections as
+/// clicks on their headers would, printing each fold: the divider comes back to 200 px with all
+/// three open again.
 pub(super) fn bench_info(app: &Rc<App>, rels: &str) {
     app.show_pane("info");
     let (app, rels) = (app.clone(), rels.to_string());
@@ -21,9 +24,21 @@ pub(super) fn bench_info(app: &Rc<App>, rels: &str) {
         print_info(&app, "none");
         sidebar.fold_section("details", true);
         for rel in rels.split(',') {
-            app.open_path(rel);
+            if rel != "terminal" {
+                app.open_path(rel);
+                glib::timeout_future(SETTLE).await;
+                print_info(&app, rel);
+                continue;
+            }
+            app.open_terminal();
             glib::timeout_future(SETTLE).await;
             print_info(&app, rel);
+            if let Some(Doc::Terminal(term)) = app.active_doc() {
+                term.view.feed_child(b"sleep 30\n");
+            }
+            // A shell's start-up files can take longer than a file takes to open.
+            glib::timeout_future(SETTLE * 2).await;
+            print_info(&app, "terminal sleep");
         }
         // The pane's own divider is the first paned in it; the others are inside that.
         let divider = find_widget(sidebar.widget(), &|w| w.is::<adw::ViewStack>())

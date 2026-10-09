@@ -56,7 +56,7 @@ pub fn present(
 
     // Ellipsis: the label needs a folder before it can act.
     let open = gtk::Button::builder()
-        .label("Open Folder…")
+        .label("Open Local…")
         .halign(gtk::Align::Center)
         .build();
     open.add_css_class("suggested-action");
@@ -285,7 +285,7 @@ fn matches(query: &str, title: &str, subtitle: &str) -> bool {
 }
 
 /// `fallbacks` are where the keyboard goes when its row is removed and no other row shows: the
-/// search while there are rows it hides, and Open Folder… once the list is empty.
+/// search while there are rows it hides, and Open Local… once the list is empty.
 fn recent_row(
     path: PathBuf,
     home: Option<&Path>,
@@ -487,7 +487,7 @@ pub(crate) fn other_vaults(recent: &[PathBuf], current: Option<&Path>) -> Vec<St
 /// failure the user would then have to reopen the dialog to correct. The start screen has no
 /// toast overlay, so there is nowhere else for that sentence to go anyway.
 ///
-/// `at` fills the form in with a remote window's own address, for Open Folder… there: the host
+/// `at` fills the form in with a remote window's own address, for Open Remote… there: the host
 /// is the one the window is on, and the path is the one it was opened at, ready to be corrected.
 /// `title` and `verb` say what the address is for: a vault to open, or a shell to start there.
 /// `recent` is the recent vaults, which order the config's hosts in the host menu.

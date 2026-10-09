@@ -287,7 +287,8 @@ use tags::bench_tags;
 /// etag the host never had, adds a page and prints whether the host's copy is untouched, what
 /// `<name> (edited).pdf` beside it holds and which of the two the tab is on, then adds another
 /// and prints the same again — the page must go into that copy rather than a numbered one, and
-/// leave the toast count where the refusal put it. `=failed:<rel_path>` makes the document and its folder
+/// leave the toast count where the refusal put it; a note's links into the original stay as they
+/// were. `=failed:<rel_path>` makes the document and its folder
 /// read-only on the host, adds two pages and prints the toast count after each (one failure said,
 /// the second quiet), then makes them writable and presses the toast's Retry, which sends both,
 /// and fails once more, which is said again; then writes a one-page document over it on the host
@@ -296,7 +297,8 @@ use tags::bench_tags;
 /// `=dropped:<rel_path>` writes a note linking into pages 1 to 3, adds a page and ends the vault's
 /// ssh master at once, holds the link down while the save and the links' rewrite land, and prints
 /// what was said, then reconnects and prints whether the page reached the host and the links
-/// followed it. `=renaming:<rel_path>` adds a page and renames the document while its
+/// followed it; then the same with the tab closed while the link is down, whose links follow once
+/// the document is opened again. `=renaming:<rel_path>` adds a page and renames the document while its
 /// upload is still out (point it at a PDF of a few megabytes on a remote vault), then prints
 /// whether the old name came back on the host and where the page landed. `=closed:<rel_path>`
 /// adds a page and closes the tab in the same turn, then prints what the vault holds; on a remote
@@ -493,7 +495,8 @@ use tags::bench_tags;
 /// the Tags section on screen, printing whether its list holds the marker at each step.
 ///
 /// `ACCENT_BENCH_INFO=<rel>[,<rel>…]` opens each file with the Info pane on screen and prints
-/// which sections it shows, open or shut, and what they say (`info::bench_info`).
+/// which sections it shows, open or shut, and what they say (`info::bench_info`); `terminal`
+/// opens a shell there instead.
 ///
 /// `ACCENT_BENCH_GOALS=<rel>:<line>:<col>[:<line>:<col>]` puts the caret there in a Lean file and
 /// prints the goals the Code pane shows, and with a second place those it asks for as the sidebar

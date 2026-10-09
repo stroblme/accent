@@ -112,6 +112,7 @@ impl App {
             self,
             move |pdf| {
                 app.synctex_written(pdf);
+                app.pages_saved(&pdf.key());
                 app.push_pdf(pdf);
                 app.details_stale(&pdf.key());
             }
@@ -284,6 +285,9 @@ impl App {
         if !pdf.claim_upload() {
             return;
         }
+        // The page edits in the file now are what this upload carries, so their notes follow once
+        // it lands; one made meanwhile waits for the next.
+        let carried = self.pages_carried(&key);
         let (weak_app, pdf) = (Rc::downgrade(self), pdf.clone());
         glib::spawn_future_local(async move {
             let asked = key.clone();
@@ -296,11 +300,15 @@ impl App {
             // again under the new name, below.
             let renamed = pdf.key() != key;
             match sent {
-                Some(Ok(accent_api::remote::Pushed::Sent)) => pdf.clear_conflict(),
+                Some(Ok(accent_api::remote::Pushed::Sent)) => {
+                    pdf.clear_conflict();
+                    app.pages_landed(&pdf.key(), carried);
+                }
                 // The host's copy moved while this one was being changed. Overwriting it would
                 // lose whatever moved it, so the changes went beside it in the vault instead, and
                 // the tab follows them there: what is drawn next goes into the copy it shows.
                 Some(Ok(accent_api::remote::Pushed::Conflict(copy))) if !renamed => {
+                    app.pages_refused(&key);
                     app.cannot(
                         &what,
                         format!(
@@ -313,14 +321,17 @@ impl App {
                     app.move_onto_copy(&pdf, &copy);
                 }
                 // Renamed while it was out, so the tab is on another file: only say where.
-                Some(Ok(accent_api::remote::Pushed::Conflict(copy))) => app.cannot(
-                    &what,
-                    format!(
-                        "it changed on {}; your changes are saved as {}",
-                        app.host(),
-                        doc::file_name(&copy)
-                    ),
-                ),
+                Some(Ok(accent_api::remote::Pushed::Conflict(copy))) => {
+                    app.pages_refused(&pdf.key());
+                    app.cannot(
+                        &what,
+                        format!(
+                            "it changed on {}; your changes are saved as {}",
+                            app.host(),
+                            doc::file_name(&copy)
+                        ),
+                    );
+                }
                 // Not even the copy would go up. The changes are on this machine only, so say
                 // where before anything else writes over it.
                 Some(Ok(accent_api::remote::Pushed::Kept(at, why))) => {

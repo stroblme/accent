@@ -27,6 +27,12 @@ use crate::{codec, from_uri, to_uri};
 /// `rpc.rs`: longer than any answer a person would wait for, shorter than a hang.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
+/// How long the handshake waits instead (user decision 2026-10-09). A cold `lake serve` loads its
+/// package before it answers `initialize`: 3-9 s here, past 10 s on a machine busy with builds,
+/// and longer where Lake has to elaborate a `lakefile.lean` first. Missing it left the tab without
+/// a server, so it is a hang this bounds, not a person waiting on an answer.
+pub const STARTING: Duration = Duration::from_secs(120);
+
 /// A message the server sent to nobody in particular and this client does not handle itself —
 /// `textDocument/publishDiagnostics`, above all.
 #[derive(Debug, Clone)]
@@ -147,12 +153,22 @@ impl Client {
         }))
     }
 
-    /// Ask the server something and wait for its answer.
+    /// Ask the server something and wait up to [`DEADLINE`] for its answer.
     ///
     /// Dropping the returned future — a superseded completion, an aborted `Task` — cancels the
     /// request at the server instead of letting it finish into nothing.
     pub async fn request<R: DeserializeOwned>(
         &self,
+        method: &str,
+        params: impl Serialize,
+    ) -> Result<R, Error> {
+        self.request_within(DEADLINE, method, params).await
+    }
+
+    /// [`Client::request`], waiting up to `deadline` for the answer.
+    async fn request_within<R: DeserializeOwned>(
+        &self,
+        deadline: Duration,
         method: &str,
         params: impl Serialize,
     ) -> Result<R, Error> {
@@ -178,7 +194,7 @@ impl Client {
             inner: self.inner.clone(),
             id,
         };
-        let answer = match tokio::time::timeout(DEADLINE, rx).await {
+        let answer = match tokio::time::timeout(deadline, rx).await {
             Ok(Ok(answer)) => answer?,
             // The reader task cleared the map: the server is gone.
             Ok(Err(_)) => return Err(Error::Closed),
@@ -245,7 +261,7 @@ impl Client {
             }
         });
 
-        let result: InitializeResult = self.request("initialize", params).await?;
+        let result: InitializeResult = self.request_within(STARTING, "initialize", params).await?;
         self.notify("initialized", json!({}))?;
         Ok(result.capabilities)
     }

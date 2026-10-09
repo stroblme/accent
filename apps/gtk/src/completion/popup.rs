@@ -97,10 +97,13 @@ impl Popup {
             .focusable(false)
             .build();
         list.add_css_class("navigation-sidebar");
+        // The row column takes whatever width the documentation leaves: the popover is at least
+        // the CSS's 240 px and keeps the widest it has been, and narrower rows would leave a gap.
         let rows = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
             .propagate_natural_width(true)
+            .hexpand(true)
             .can_focus(false)
             .child(&list)
             .build();
@@ -177,6 +180,8 @@ impl Popup {
         self.font.replace(font);
         // Sized before it is presented, which is the size it will have.
         self.estimate();
+        self.rows
+            .set_vscrollbar_policy(scrollbar(rows.len() > MAX_ROWS as usize));
         let icons = rows.iter().any(|row| row.icon.is_some());
         let objects: Vec<glib::BoxedAnyObject> =
             rows.into_iter().map(glib::BoxedAnyObject::new).collect();
@@ -284,6 +289,10 @@ impl Popup {
     pub(super) fn set_doc(&self, markup: Option<&str>) {
         if let Some(markup) = markup {
             self.doc.set_markup(markup);
+            let (_, wide, _, _) = self.doc.measure(gtk::Orientation::Horizontal, -1);
+            let (_, tall, _, _) = self.doc.measure(gtk::Orientation::Vertical, wide);
+            self.doc_scroll
+                .set_vscrollbar_policy(scrollbar(tall > self.doc_scroll.max_content_height()));
         }
         self.pane.set_visible(markup.is_some());
         present(&self.popover);
@@ -317,6 +326,16 @@ fn present(popover: &gtk::Popover) {
     let (pointed, at) = popover.pointing_to();
     if pointed && popover.is_visible() {
         popover.set_pointing_to(Some(&at));
+    }
+}
+
+/// A vertical scrollbar where the content is taller than its scrolled window may grow, and none
+/// otherwise: one that may show holds the window at least its own length tall, about two rows,
+/// which a single row or a line of documentation would otherwise be given.
+fn scrollbar(overflows: bool) -> gtk::PolicyType {
+    match overflows {
+        true => gtk::PolicyType::Automatic,
+        false => gtk::PolicyType::Never,
     }
 }
 

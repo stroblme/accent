@@ -27,7 +27,7 @@ use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long a terminal may leave output unread before it is dropped.
 const STALL: Duration = Duration::from_secs(5);
@@ -66,6 +66,9 @@ struct Shells {
 
 struct Shell {
     pid: u32,
+    /// What was started, and when, in seconds since the epoch: for `held`.
+    program: PathBuf,
+    started: u64,
     master: File,
     screen: Mutex<Screen>,
 }
@@ -194,6 +197,10 @@ impl Daemon {
         let child = spawn(hello, slave)?;
         let shell = Arc::new(Shell {
             pid: child.id(),
+            program: program(hello).to_path_buf(),
+            started: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs()),
             master,
             screen: Mutex::new(Screen {
                 parser: screen::parser(hello.rows, hello.cols),
@@ -295,8 +302,8 @@ impl Daemon {
         signal(libc::SIGKILL);
     }
 
-    /// One JSON object per line and shell: its id, pid, working directory, title, and whether a
-    /// terminal is attached.
+    /// One JSON object per line and shell: its id, pid, working directory, title, whether a
+    /// terminal is attached, the program started and when, and what runs in its foreground.
     fn list(&self) -> Vec<u8> {
         // Copied out first, so the `screen` locks below are never taken under `shells`.
         let shells: Vec<_> = lock(&self.shells)
@@ -318,6 +325,9 @@ impl Daemon {
                 "cwd": cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
                 "title": title,
                 "attached": attached,
+                "shell": shell.program.to_string_lossy(),
+                "started": shell.started,
+                "running": shell.foreground(),
             });
             out.extend(line.to_string().into_bytes());
             out.push(b'\n');
@@ -397,6 +407,17 @@ impl Shell {
             let _ = protocol::write_frame(&mut client, EXIT, &code.to_be_bytes());
             let _ = client.shutdown(Shutdown::Both);
         }
+    }
+
+    /// The command line of what runs in the foreground, `None` at the shell's own prompt: the
+    /// pty's foreground group, named by its leader, the first command of a pipeline.
+    fn foreground(&self) -> Option<String> {
+        // SAFETY: a plain query on a descriptor `self` keeps open.
+        let group = unsafe { libc::tcgetpgrp(self.master.as_raw_fd()) };
+        if group <= 0 || group as u32 == self.pid {
+            return None;
+        }
+        command_line(&std::fs::read(format!("/proc/{group}/cmdline")).ok()?)
     }
 
     /// Ask the foreground program to redraw itself, for a full-screen one whose scroll margins and
@@ -511,6 +532,23 @@ fn var<'a>(hello: &'a Hello, name: &str) -> Option<&'a OsStr> {
         .filter(|value| !value.is_empty())
 }
 
+/// The longest command line `held` reports, in characters: a listing travels in one frame of at
+/// most [`protocol::MAX`] bytes, and a command line can be two megabytes.
+const LONGEST: usize = 256;
+
+/// A `/proc/<pid>/cmdline` as a line: its NUL-separated arguments joined by spaces, cut at
+/// [`LONGEST`]. `None` for a process with none, a kernel thread or one that has exited.
+fn command_line(raw: &[u8]) -> Option<String> {
+    let line = String::from_utf8_lossy(raw.strip_suffix(&[0]).unwrap_or(raw)).replace('\0', " ");
+    if line.is_empty() {
+        return None;
+    }
+    Some(match line.chars().nth(LONGEST) {
+        Some(_) => line.chars().take(LONGEST - 1).chain(['…']).collect(),
+        None => line,
+    })
+}
+
 /// How much of [`WAIT`] is left for a holder a terminal last connected to at `seen`.
 fn wait_left(seen: Instant, now: Instant) -> Duration {
     WAIT.saturating_sub(now.saturating_duration_since(seen))
@@ -540,5 +578,18 @@ mod tests {
         assert_eq!(wait_left(seen, seen + WAIT), Duration::ZERO);
         assert_eq!(wait_left(seen, seen + WAIT * 2), Duration::ZERO);
         assert_eq!(wait_left(seen + Duration::from_secs(1), seen), WAIT);
+    }
+
+    #[test]
+    fn a_command_line_reads_as_typed_and_never_outgrows_a_frame() {
+        assert_eq!(
+            command_line(b"vim\0notes.md\0").as_deref(),
+            Some("vim notes.md")
+        );
+        // A kernel thread, or a process gone meanwhile, has none.
+        assert_eq!(command_line(b""), None);
+        let long = command_line("x\0".repeat(1000).as_bytes()).unwrap();
+        assert_eq!(long.chars().count(), LONGEST);
+        assert!(long.ends_with('…'));
     }
 }

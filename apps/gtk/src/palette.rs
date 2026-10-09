@@ -26,7 +26,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// The two rows that close the Open Recent list: the ways to a vault that is not in it.
-const OPENERS: [&str; 2] = ["app.open-vault", "app.open-remote"];
+const OPENERS: [&str; 2] = ["app.open-local", "app.open-remote"];
 
 /// Beyond this the list stops being scannable and nucleo's single-threaded matcher starts to show.
 pub const MAX_RESULTS: usize = 200;

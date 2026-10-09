@@ -25,12 +25,7 @@ impl App {
             self.watch_folder_of(&moved);
         }
         accent_core::config::rename_in(&mut self.recent_files.borrow_mut(), from, to);
-        // The links a PDF's page delete left are found again by their note's path at its Undo.
-        for pdf in self.docs().iter().filter_map(Doc::pdf) {
-            for kept in pdf.relinks.borrow_mut().left.values_mut().flatten() {
-                accent_core::config::rename_in(std::slice::from_mut(&mut kept.note), from, to);
-            }
-        }
+        self.relinks_renamed(from, to);
         self.sync_active();
     }
 

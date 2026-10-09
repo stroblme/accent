@@ -552,6 +552,10 @@ impl Remote {
             std::fs::create_dir_all(dir).map_err(|e| cached(dir, e))?;
         }
         self.receive(rel, &dest, current.size, progress)?;
+        // A copy fetched afresh holds no page edit made here, so none waits on it for the notes.
+        if let Some(edits) = ssh::relink_path(&self.url, rel) {
+            let _ = std::fs::remove_file(edits);
+        }
         if let Ok(copy) = crate::Etag::of(&dest) {
             let _ = stamp.set(&Stamped {
                 host: current,
@@ -603,12 +607,13 @@ impl Remote {
         Ok(Pushed::Sent)
     }
 
-    /// The cached copy of `from` and its stamp go to `to`, where the host has just moved the file
-    /// or folder. A rename keeps the host's etag, so the copy is as current under the new name as
-    /// under the old: a reader that follows the rename reads it there, and its next push finds the
-    /// stamp rather than taking the renamed file for somebody else's change.
+    /// The cached copy of `from`, its stamp and the page edits waiting on it go to `to`, where the
+    /// host has just moved the file or folder. A rename keeps the host's etag, so the copy is as
+    /// current under the new name as under the old: a reader that follows the rename reads it
+    /// there, and its next push finds the stamp rather than taking the renamed file for somebody
+    /// else's change.
     pub fn moved(&self, from: &str, to: &str) {
-        for place in [ssh::cache_path, ssh::stamp_path] {
+        for place in [ssh::cache_path, ssh::stamp_path, ssh::relink_path] {
             if let (Some(from), Some(to)) = (place(&self.url, from), place(&self.url, to)) {
                 carry(&from, &to);
             }
