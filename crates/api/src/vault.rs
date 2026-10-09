@@ -90,7 +90,7 @@ impl Vault {
     /// reports itself through the events: [`Event::Connecting`] while it works, then
     /// [`Event::Connected`] or [`Event::Disconnected`].
     pub fn open_remote(url: &str, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
-        let url = ssh::parse(url).map_err(|e| anyhow::anyhow!("{url}: {e}"))?;
+        let url = ssh::parse(url)?;
         let (events, event_rx) = channel::<Event>();
         let key = PathBuf::from(url.to_string());
         let remote = remote::Remote::open(url, cfg, events);
@@ -191,7 +191,7 @@ impl Vault {
                 v.rescan();
                 Ok(())
             }
-            Backend::Remote(r) => r.call("rescan", json!([])).map_err(remote_err),
+            Backend::Remote(r) => r.call("rescan", json!([])).map_err(anyhow::Error::from),
         }
     }
 
@@ -209,7 +209,9 @@ impl Vault {
                 v.stop_indexing();
                 Ok(())
             }
-            Backend::Remote(r) => r.call("stop_indexing", json!([])).map_err(remote_err),
+            Backend::Remote(r) => r
+                .call("stop_indexing", json!([]))
+                .map_err(anyhow::Error::from),
         }
     }
 
@@ -221,7 +223,9 @@ impl Vault {
                 v.resume_indexing();
                 Ok(())
             }
-            Backend::Remote(r) => r.call("resume_indexing", json!([])).map_err(remote_err),
+            Backend::Remote(r) => r
+                .call("resume_indexing", json!([]))
+                .map_err(anyhow::Error::from),
         }
     }
 
@@ -275,13 +279,6 @@ pub(crate) const MOVE_BOUND: std::time::Duration = std::time::Duration::from_sec
 /// finishes them.
 pub(crate) const REPLACE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Turn an RPC failure into the `anyhow` error every caller of the façade already handles. It
-/// reads as its message, and a caller that has to know whether the host was asked at all
-/// downcasts it ([`rpc::RpcError::unasked`]).
-pub(crate) fn remote_err(e: rpc::RpcError) -> anyhow::Error {
-    anyhow::Error::new(e)
-}
-
 /// The methods that mean the same thing wherever the files are, written once.
 ///
 /// Each line here used to be three that had to agree: a [`Vault`] method with a local arm and a
@@ -317,9 +314,9 @@ macro_rules! methods {
     (@ret io $t:ty) => { io::Result<$t> };
     (@ret any $t:ty) => { Result<$t> };
     (@ret git $t:ty) => { Result<$t> };
-    (@err io) => { rpc::RpcError::io_error };
-    (@err any) => { remote_err };
-    (@err git) => { remote_err };
+    (@err io) => { std::io::Error::from };
+    (@err any) => { anyhow::Error::from };
+    (@err git) => { anyhow::Error::from };
 
     // The call itself: on this machine, and on the host answering for it.
     (@here $v:ident io $name:ident ($($a:tt)*)) => { Ok($v.$name($($a)*)?) };
@@ -327,10 +324,10 @@ macro_rules! methods {
     (@here $v:ident git $name:ident $core:ident ($($a:tt)*)) => {
         git::$core($($a)*).map_err(anyhow::Error::from)
     };
-    (@serve $v:ident io $name:ident ($($a:tt)*)) => { rpc::io($v.$name($($a)*)) };
-    (@serve $v:ident any $name:ident ($($a:tt)*)) => { rpc::any($v.$name($($a)*)) };
+    (@serve $v:ident io $name:ident ($($a:tt)*)) => { rpc::answer($v.$name($($a)*)) };
+    (@serve $v:ident any $name:ident ($($a:tt)*)) => { rpc::answer($v.$name($($a)*)) };
     (@serve $v:ident git $name:ident $core:ident ($($a:tt)*)) => {
-        rpc::git_result(git::$core($($a)*))
+        rpc::answer(git::$core($($a)*))
     };
 
     // How long a remote caller waits: the host's own bound, if it has one, and a round trip.
@@ -368,7 +365,7 @@ macro_rules! methods {
             vault: &Local,
             method: &str,
             p: &serde_json::Value,
-        ) -> Option<Result<serde_json::Value, rpc::RpcError>> {
+        ) -> Option<crate::Result<serde_json::Value>> {
             $(
                 if method == stringify!($name) {
                     rpc::args!(p; $($arg: methods!(@wty $kind $t)),*);
@@ -550,7 +547,7 @@ impl Vault {
             Backend::Local(v) => v.save(rel, text, expected),
             Backend::Remote(r) => r
                 .call("save", json!([rel, text, expected]))
-                .map_err(rpc::RpcError::save_error),
+                .map_err(SaveError::from),
         }
     }
 
@@ -629,7 +626,7 @@ impl Vault {
             Backend::Local(v) => Ok(v.create_note(rel, template)?),
             Backend::Remote(r) => r
                 .call("create_note", json!([rel, template]))
-                .map_err(remote_err),
+                .map_err(anyhow::Error::from),
         }
     }
 
@@ -657,7 +654,7 @@ impl Vault {
             Backend::Local(v) => Ok(v.grep_unindexed(query, options, limit, stop)?),
             Backend::Remote(r) => r
                 .call("grep_unindexed", json!([query, options, limit]))
-                .map_err(remote_err),
+                .map_err(anyhow::Error::from),
         }
     }
 
@@ -707,7 +704,7 @@ impl Vault {
     pub fn repos(&self) -> Result<Vec<Repo>> {
         match &self.backend {
             Backend::Local(v) => Ok(v.repos()),
-            Backend::Remote(r) => r.call("repos", json!([])).map_err(remote_err),
+            Backend::Remote(r) => r.call("repos", json!([])).map_err(anyhow::Error::from),
         }
     }
 }

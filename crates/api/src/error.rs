@@ -69,7 +69,7 @@ impl From<tokio::task::JoinError> for Error {
     }
 }
 
-// ponytail: the two below carry the façade's old shapes, `SaveError` and `io::Result`, until it
+// ponytail: the three below carry the façade's old shapes, `SaveError` and `io::Result`, until it
 // speaks `Error` itself. They go with them.
 impl From<accent_core::fs::SaveError> for Error {
     fn from(e: accent_core::fs::SaveError) -> Error {
@@ -96,15 +96,15 @@ impl From<Error> for std::io::Error {
     }
 }
 
-// ponytail: until the wire carries `Error` itself.
-impl From<crate::rpc::RpcError> for Error {
-    fn from(e: crate::rpc::RpcError) -> Error {
-        use crate::rpc::{CONNECTING, DISCONNECTED, LOST, REFUSED};
-        match e.code {
-            DISCONNECTED | CONNECTING => Error::Offline(e.message),
-            LOST => Error::Lost(e.message),
-            REFUSED => Error::Refused(e.message),
-            _ => Error::Remote(e.message),
+impl From<Error> for accent_core::fs::SaveError {
+    fn from(e: Error) -> accent_core::fs::SaveError {
+        use accent_core::fs::SaveError;
+        match e {
+            Error::Core(accent_core::Error::ChangedOnDisk { current }) => {
+                SaveError::ChangedOnDisk { current }
+            }
+            e if e.is_offline() => SaveError::Offline,
+            e => SaveError::Io(e.into()),
         }
     }
 }

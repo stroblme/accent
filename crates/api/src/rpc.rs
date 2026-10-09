@@ -26,11 +26,9 @@ use serde_json::{Value, json};
 
 /// Who is waiting for which answer. One entry per call in flight, taken out by the reader thread
 /// when the answer arrives and dropped wholesale when the connection dies.
-type Waiting = Arc<Mutex<HashMap<u64, Sender<Result<Value, RpcError>>>>>;
+type Waiting = Arc<Mutex<HashMap<u64, Sender<Result<Value>>>>>;
 
-use crate::{Event, Local, locked};
-
-use accent_core::fs::{Etag, SaveError};
+use crate::{Error, Event, Local, Result, locked};
 
 /// How long a call waits before giving up on the far end. Generous next to a round trip on any
 /// link a person would edit over, and short enough that a wedged server is a message rather than
@@ -59,135 +57,33 @@ const _: () = assert!(
     "a rewrite may outlast the wait a server gives the requests it is running"
 );
 
-/// A save refused because the file changed under it. Its `data` is the current [`Etag`], so the
-/// client can rebuild [`SaveError::ChangedOnDisk`] and the UI can offer the same comparison it
-/// offers locally.
-pub const CHANGED_ON_DISK: i64 = -32001;
-/// Anything that was an `io::Error` on the far side.
-pub const IO: i64 = -32002;
-/// Everything else, already formatted for a human.
-pub const FAILED: i64 = -32000;
-/// There is no link: it went away, or it was never made. Nothing was asked of anything, which is
-/// what tells a failed save apart from one the disk refused.
-pub const DISCONNECTED: i64 = -32004;
-/// The link went while the call was out: the host may have done what it was asked, and the answer
-/// is what was lost. Offline like [`DISCONNECTED`], but not a call to make again as if unasked.
-pub const LOST: i64 = -32006;
-/// The link is still being made, so there is nobody to ask yet. Not a failure of the call: the
-/// same call answers once [`Event::Connected`](crate::Event::Connected) has arrived.
-pub const CONNECTING: i64 = -32003;
-/// The server has no vault to serve — its root is not a folder, or its index would not open — and
-/// says so to the `hello`. Unlike a link that failed, another attempt meets the same answer until
-/// someone changes the host.
-pub const REFUSED: i64 = -32005;
+/// JSON-RPC's own code for a method the server does not have.
+const NO_METHOD: i64 = -32601;
+/// JSON-RPC's own code for arguments that do not read.
+const BAD_PARAMS: i64 = -32602;
+/// Every other failure. Whichever the code, the error itself is the `data`.
+const FAILED: i64 = -32000;
 
-/// What the far end said instead of an answer.
-#[derive(Debug, Clone)]
-pub struct RpcError {
-    pub code: i64,
-    pub message: String,
-    pub data: Option<Value>,
+/// An error as it crosses: JSON-RPC's code for it, the sentence a person reads, and the error
+/// itself as `data`, which is what the caller on the other end is handed.
+fn to_wire(e: &Error) -> Value {
+    let code = match e {
+        Error::UnknownMethod(_) => NO_METHOD,
+        Error::Protocol(_) => BAD_PARAMS,
+        _ => FAILED,
+    };
+    json!({"code": code, "message": e.to_string(), "data": e})
 }
 
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for RpcError {}
-
-impl RpcError {
-    pub(crate) fn failed(message: impl std::fmt::Display) -> RpcError {
-        RpcError {
-            code: FAILED,
-            message: message.to_string(),
-            data: None,
-        }
-    }
-
-    /// Nothing reached the far end, because there is no far end to reach.
-    pub(crate) fn disconnected(message: impl std::fmt::Display) -> RpcError {
-        RpcError {
-            code: DISCONNECTED,
-            message: message.to_string(),
-            data: None,
-        }
-    }
-
-    /// Whether the link, rather than the call, is what failed.
-    pub fn is_offline(&self) -> bool {
-        matches!(self.code, DISCONNECTED | CONNECTING | LOST)
-    }
-
-    /// Whether the call never reached the host, so asking it again once the link is back cannot
-    /// do twice what it does: a rewrite of the vault, say.
-    pub fn unasked(&self) -> bool {
-        matches!(self.code, DISCONNECTED | CONNECTING)
-    }
-
-    /// The `SaveError` this stands for, so a remote save fails exactly as a local one does.
-    pub fn save_error(self) -> SaveError {
-        if self.is_offline() {
-            return SaveError::Offline;
-        }
-        if self.code == CHANGED_ON_DISK
-            && let Some(data) = self.data.clone()
-            && let Ok(current) = serde_json::from_value::<Etag>(data)
-        {
-            return SaveError::ChangedOnDisk { current };
-        }
-        SaveError::Io(self.io_error())
-    }
-
-    /// The `io::Error` this stands for, kind and all.
-    ///
-    /// The kind travels in `data` because callers branch on it — the open path treats `NotFound`
-    /// as "offer to create it" rather than as a failure — and everything used to arrive as
-    /// `Other`, so the same file missing matched one way locally and another way remotely. No
-    /// link at all is `NotConnected`, which the window already shows rather than reports.
-    pub fn io_error(self) -> std::io::Error {
-        if self.is_offline() {
-            return std::io::Error::new(std::io::ErrorKind::NotConnected, self.message);
-        }
-        match self.data.as_ref().and_then(Value::as_str).and_then(kind_of) {
-            Some(kind) => std::io::Error::new(kind, self.message),
-            None => std::io::Error::other(self.message),
-        }
-    }
-}
-
-/// The `io::ErrorKind`s worth carrying, by name.
-///
-/// `ErrorKind` is neither serialisable nor exhaustively matchable, so the ones the app actually
-/// branches on are named and everything else crosses as `Other` — which is what all of them used
-/// to cross as.
-const KINDS: &[(&str, std::io::ErrorKind)] = &[
-    ("NotFound", std::io::ErrorKind::NotFound),
-    ("PermissionDenied", std::io::ErrorKind::PermissionDenied),
-    ("AlreadyExists", std::io::ErrorKind::AlreadyExists),
-    ("InvalidInput", std::io::ErrorKind::InvalidInput),
-    ("InvalidData", std::io::ErrorKind::InvalidData),
-];
-
-fn kind_name(kind: std::io::ErrorKind) -> Option<&'static str> {
-    KINDS
-        .iter()
-        .find(|(_, k)| *k == kind)
-        .map(|(name, _)| *name)
-}
-
-fn kind_of(name: &str) -> Option<std::io::ErrorKind> {
-    KINDS.iter().find(|(n, _)| *n == name).map(|(_, k)| *k)
-}
-
-/// An `io::Error` as it crosses: the message a person reads, and the kind a caller matches on.
-pub(crate) fn io_failure(e: &std::io::Error) -> RpcError {
-    RpcError {
-        code: IO,
-        message: e.to_string(),
-        data: kind_name(e.kind()).map(Value::from),
-    }
+/// The error an answer carries, as it was on the far side: its `data`, or its message where
+/// there is none, which only another program on the other end would send.
+fn from_wire(e: &Value) -> Error {
+    e.get("data")
+        .and_then(|data| serde_json::from_value(data.clone()).ok())
+        .unwrap_or_else(|| {
+            let said = e.get("message").and_then(Value::as_str);
+            Error::Protocol(said.unwrap_or("the server refused").to_string())
+        })
 }
 
 /// What `hello` answers: who is on the other end, and where the vault really is.
@@ -297,7 +193,7 @@ impl Client {
     }
 
     /// Ask, and wait up to [`DEADLINE`] for the answer.
-    pub fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, RpcError> {
+    pub fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
         self.call_tracked(method, params, &Mutex::new(None), DEADLINE)
     }
 
@@ -309,10 +205,10 @@ impl Client {
         params: Value,
         asked: &Mutex<Option<u64>>,
         deadline: Duration,
-    ) -> Result<T, RpcError> {
+    ) -> Result<T> {
         let value = self.call_value(method, params, asked, deadline)?;
         serde_json::from_value(value)
-            .map_err(|e| RpcError::failed(format!("{method} answered something unreadable: {e}")))
+            .map_err(|e| Error::Protocol(format!("{method} answered something unreadable: {e}")))
     }
 
     /// Tell the server this request has no reader left. A notification, with no id of its own:
@@ -323,7 +219,7 @@ impl Client {
     /// on a slow link would otherwise pile them up, one per pause, each until the host answered.
     pub fn cancel(&self, id: u64) {
         if let Some(waiter) = locked(&self.pending).remove(&id) {
-            let _ = waiter.send(Err(RpcError::failed("cancelled")));
+            let _ = waiter.send(Err(accent_core::Error::Cancelled.into()));
         }
         let _ = emit(
             &self.out,
@@ -337,9 +233,9 @@ impl Client {
         params: Value,
         asked: &Mutex<Option<u64>>,
         deadline: Duration,
-    ) -> Result<Value, RpcError> {
+    ) -> Result<Value> {
         if self.is_dead() {
-            return Err(RpcError::disconnected("not connected"));
+            return Err(Error::Offline("not connected".to_string()));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = channel();
@@ -350,26 +246,22 @@ impl Client {
         let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         if let Err(e) = emit(&self.out, &line) {
             locked(&self.pending).remove(&id);
-            return Err(RpcError::disconnected(format!(
-                "cannot reach the server: {e}"
-            )));
+            return Err(Error::Offline(format!("cannot reach the server: {e}")));
         }
 
         match rx.recv_timeout(deadline) {
             Ok(answer) => answer,
             // The sender was dropped: the reader thread saw EOF and cleared the map.
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(RpcError {
-                code: LOST,
-                message: "the connection closed".to_string(),
-                data: None,
-            }),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(Error::Lost("the connection closed".to_string()))
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 locked(&self.pending).remove(&id);
                 // Nobody is left to read this one, and the server is still working on it: the
                 // same notification a dropped `Task` sends, said here because a caller that gives
                 // up on a timeout has no `Asked` of its own to cancel through.
                 self.cancel(id);
-                Err(RpcError::failed(format!("{method} timed out")))
+                Err(Error::Remote(format!("{method} timed out")))
             }
         }
     }
@@ -427,15 +319,7 @@ thread_local! {
 fn route(msg: Value, pending: &Waiting, events: &Sender<Event>) {
     if let Some(id) = msg.get("id").and_then(Value::as_u64) {
         let answer = match msg.get("error") {
-            Some(e) => Err(RpcError {
-                code: e.get("code").and_then(Value::as_i64).unwrap_or(FAILED),
-                message: e
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("the server refused")
-                    .to_string(),
-                data: e.get("data").cloned(),
-            }),
+            Some(e) => Err(from_wire(e)),
             None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
         };
         if let Some(tx) = locked(pending).remove(&id) {
@@ -467,7 +351,7 @@ pub fn serve(
     db: Option<&std::path::Path>,
     input: impl Read + Send + 'static,
     output: impl Write + Send + 'static,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let cfg = crate::VaultConfig::default();
     let opened = match db {
         Some(db) => Local::open_at(root, db, cfg),
@@ -477,7 +361,7 @@ pub fn serve(
         Ok(opened) => opened,
         Err(e) => {
             refuse(&e, input, output);
-            return Err(e.into());
+            return Err(e);
         }
     };
     serve_local(vault, events, input, output, SILENCE);
@@ -487,15 +371,17 @@ pub fn serve(
 /// Answer the first request — the client's `hello` — with why there is no vault to serve.
 /// Exiting alone would only close the pipe, and the window would say the link closed.
 fn refuse(e: &crate::Error, input: impl Read, mut output: impl Write) {
-    for line in BufReader::new(input).lines().map_while(Result::ok) {
+    for line in BufReader::new(input)
+        .lines()
+        .map_while(std::result::Result::ok)
+    {
         // The client's pings come without an id, and one may arrive before the `hello`.
         let id = serde_json::from_str::<Value>(&line)
             .ok()
             .and_then(|msg| msg.get("id").cloned());
         if let Some(id) = id {
-            let answer = json!({"jsonrpc": "2.0", "id": id, "error": {
-                "code": REFUSED, "message": e.to_string(),
-            }});
+            let refused = Error::Refused(e.to_string());
+            let answer = json!({"jsonrpc": "2.0", "id": id, "error": to_wire(&refused)});
             let _ = writeln!(output, "{answer}").and_then(|()| output.flush());
             return;
         }
@@ -540,7 +426,10 @@ pub(crate) fn serve_local(
     let _ = std::thread::Builder::new()
         .name("accent-stdin".to_string())
         .spawn(move || {
-            for line in BufReader::new(input).lines().map_while(Result::ok) {
+            for line in BufReader::new(input)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
                 if tx.send(line).is_err() {
                     break;
                 }
@@ -612,9 +501,7 @@ pub(crate) fn serve_local(
             let Some(id) = id else { return };
             let line = match answer {
                 Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-                Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": {
-                    "code": e.code, "message": e.message, "data": e.data,
-                }}),
+                Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": to_wire(&e)}),
             };
             let _ = emit(&out, &line);
         });
@@ -645,10 +532,10 @@ fn emit(out: &Mutex<Box<dyn Write + Send>>, line: &Value) -> std::io::Result<()>
 // ----------------------------------------------------------------- dispatch
 
 /// One positional argument, deserialised.
-pub(crate) fn arg<T: DeserializeOwned>(params: &Value, n: usize) -> Result<T, RpcError> {
+pub(crate) fn arg<T: DeserializeOwned>(params: &Value, n: usize) -> Result<T> {
     let value = params.get(n).cloned().unwrap_or(Value::Null);
     serde_json::from_value(value)
-        .map_err(|e| RpcError::failed(format!("argument {n} is not what was expected: {e}")))
+        .map_err(|e| Error::Protocol(format!("argument {n} is not what was expected: {e}")))
 }
 
 /// Bind each named argument to its position in `p`, in order, answering the dispatch with the
@@ -669,26 +556,13 @@ macro_rules! args {
 pub(crate) use args;
 
 /// Whatever the method returned, as JSON.
-pub(crate) fn ok<T: serde::Serialize>(value: T) -> Result<Value, RpcError> {
-    serde_json::to_value(value).map_err(|e| RpcError::failed(format!("cannot answer: {e}")))
+pub(crate) fn ok<T: serde::Serialize>(value: T) -> Result<Value> {
+    serde_json::to_value(value).map_err(|e| Error::Protocol(format!("cannot answer: {e}")))
 }
 
-/// An `anyhow` failure, formatted the way the app would have shown it locally.
-pub(crate) fn any<T: serde::Serialize>(r: crate::Result<T>) -> Result<Value, RpcError> {
-    ok(r.map_err(RpcError::failed)?)
-}
-
-pub(crate) fn io<T: serde::Serialize>(r: crate::Result<T>) -> Result<Value, RpcError> {
-    match r {
-        Ok(v) => ok(v),
-        Err(e) => Err(io_failure(&e.into())),
-    }
-}
-
-pub(crate) fn git_result<T: serde::Serialize>(
-    r: accent_core::Result<T>,
-) -> Result<Value, RpcError> {
-    ok(r.map_err(RpcError::failed)?)
+/// A method's answer, whatever error it failed with: the vault's own, or the core's.
+pub(crate) fn answer<T: serde::Serialize>(r: Result<T, impl Into<Error>>) -> Result<Value> {
+    ok(r.map_err(Into::into)?)
 }
 
 /// The whole remote surface. Most of it is one line of the [`methods!`](crate::vault) table and
@@ -696,7 +570,7 @@ pub(crate) fn git_result<T: serde::Serialize>(
 /// the methods whose two sides differ, and the document's own lifecycle. Anything absent from
 /// both is deliberately local: the session file, the config, and path arithmetic, all of which
 /// belong to the machine the window is on.
-fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
+fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
     if let Some(answer) = crate::vault::dispatch(vault, method, p)
         .or_else(|| crate::language::dispatch(vault, method, p))
     {
@@ -716,25 +590,14 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
             })
         }
 
-        // A save has an error of its own.
-        "save" => match vault.save(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?, arg(p, 2)?) {
-            Ok(etag) => ok(etag),
-            Err(SaveError::ChangedOnDisk { current }) => Err(RpcError {
-                code: CHANGED_ON_DISK,
-                message: "file changed on disk since it was read".to_string(),
-                data: serde_json::to_value(current).ok(),
-            }),
-            Err(SaveError::Io(e)) => Err(io_failure(&e)),
-            // The server is the far end; it has a disk, so it is never the one that is offline.
-            Err(SaveError::Offline) => Err(RpcError::disconnected("the vault is not connected")),
-        },
-        "create_note" => any(vault.create_note(
+        "save" => answer(vault.save(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?, arg(p, 2)?)),
+        "create_note" => answer(vault.create_note(
             &arg::<String>(p, 0)?,
             arg::<Option<String>>(p, 1)?.as_deref(),
         )),
         // The caller's `stop` stays with the caller: the host's walk runs to its budget.
         "grep_unindexed" => {
-            any(vault.grep_unindexed(&arg::<String>(p, 0)?, arg(p, 1)?, arg(p, 2)?, &|| false))
+            answer(vault.grep_unindexed(&arg::<String>(p, 0)?, arg(p, 1)?, arg(p, 2)?, &|| false))
         }
         "rescan" => {
             vault.rescan();
@@ -755,14 +618,14 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         // The document's lifecycle. Opening one is the only call that reads the vault's config,
         // and closing one forgets it rather than telling a provider, so neither fits the table
         // the other three go through.
-        "open_document" => any(block(vault.open_document(
+        "open_document" => answer(block(vault.open_document(
             &arg::<String>(p, 0)?,
             &arg::<String>(p, 1)?,
             arg(p, 2)?,
         ))),
-        "close_document" => any(block(vault.close_document(&arg::<String>(p, 0)?))),
+        "close_document" => answer(block(vault.close_document(&arg::<String>(p, 0)?))),
 
-        _ => Err(RpcError::failed(format!("no such method: {method}"))),
+        _ => Err(Error::UnknownMethod(method.to_string())),
     }
 }
 
@@ -786,7 +649,8 @@ pub(crate) fn block<T>(task: crate::Task<T>) -> crate::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Session, VaultConfig};
+    use crate::{Etag, Session, VaultConfig};
+    use accent_core::Error as Core;
     use std::time::{Duration, Instant};
 
     /// A client and a server joined by two pipes, exactly as ssh joins them, with no ssh in the
@@ -908,11 +772,66 @@ mod tests {
             .client
             .call::<Etag>("save", json!(["a.md", "second\n", etag]))
             .unwrap_err();
-        assert_eq!(refused.code, CHANGED_ON_DISK);
-        assert!(
-            matches!(refused.save_error(), SaveError::ChangedOnDisk { current } if current == fresh),
-            "the client has to be able to rebuild the local error"
+        assert_eq!(
+            refused,
+            Error::Core(Core::ChangedOnDisk { current: fresh }),
+            "the client has to be handed the error the host met, with the etag on disk"
         );
+    }
+
+    /// Every error crosses as the value it was: the code a JSON-RPC client reads, and the error
+    /// itself in `data`.
+    #[test]
+    fn every_error_crosses_the_wire_as_itself() {
+        let etag = Etag {
+            mtime_ns: 1,
+            size: 2,
+            ino: 3,
+        };
+        let errors = [
+            Error::Core(Core::NotFound("a.md".into())),
+            Error::Core(Core::AlreadyExists("a.md".into())),
+            Error::Core(Core::ChangedOnDisk { current: etag }),
+            Error::Core(Core::NotMerged("side".into())),
+            Error::Core(Core::Cancelled),
+            Error::Core(Core::Io("a.md: denied".into())),
+            Error::Core(Core::Index("locked".into())),
+            Error::Core(Core::Git("fatal".into())),
+            Error::Core(Core::Config("bad".into())),
+            Error::Core(Core::Pdf("broken".into())),
+            Error::Core(Core::Invalid("outside".into())),
+            Error::Offline("down".into()),
+            Error::Lost("gone".into()),
+            Error::Refused("no folder".into()),
+            Error::Remote("timed out".into()),
+            Error::UnknownMethod("nonesuch".into()),
+            Error::Protocol("argument 0".into()),
+            Error::Language("no server".into()),
+            Error::NotYet("loading".into()),
+        ];
+        for e in errors {
+            let wire = to_wire(&e);
+            assert_eq!(wire["message"], e.to_string());
+            assert_eq!(from_wire(&wire), e);
+        }
+        assert_eq!(
+            to_wire(&Error::UnknownMethod("x".into()))["code"],
+            NO_METHOD
+        );
+        assert_eq!(to_wire(&Error::Protocol("x".into()))["code"], BAD_PARAMS);
+        assert_eq!(to_wire(&Error::Core(Core::Cancelled))["code"], FAILED);
+    }
+
+    /// New File on a name that is taken says so on a remote vault as it does locally, which is
+    /// what the window offers another name on.
+    #[test]
+    fn a_taken_name_comes_back_as_already_exists() {
+        let w = Wired::open();
+        let refused = w
+            .client
+            .call::<(String, Vec<usize>)>("create_note", json!(["a.md", null]))
+            .unwrap_err();
+        assert_eq!(refused, Error::Core(Core::AlreadyExists("a.md".into())));
     }
 
     #[test]
@@ -976,8 +895,7 @@ mod tests {
             .client
             .call::<(String, Etag)>("read", json!(["nope.md"]))
             .unwrap_err();
-        assert_eq!(refused.code, IO);
-        assert_eq!(refused.io_error().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(refused, Error::Core(Core::NotFound("nope.md".into())));
     }
 
     /// An exact search crosses as what was typed plus its toggles and is compiled on the host, so
@@ -1004,8 +922,10 @@ mod tests {
             .client
             .call::<(Vec<crate::Match>, usize)>("grep", json!(["(", regex, 10, false]))
             .unwrap_err();
-        assert_eq!(refused.code, FAILED);
-        assert!(refused.message.contains("unclosed group"), "{refused}");
+        assert!(
+            matches!(&refused, Error::Core(Core::Invalid(why)) if why.contains("unclosed group")),
+            "{refused}"
+        );
     }
 
     /// A cancel is a notification: it is taken, nothing comes back for it, and the connection
@@ -1020,11 +940,40 @@ mod tests {
         assert!(tags.iter().any(|(tag, _)| tag == "tag"), "{tags:?}");
     }
 
+    /// A method the host does not have is JSON-RPC's own -32601, never read as an empty answer:
+    /// what an `accent-cli` older than the window answers.
     #[test]
-    fn a_missing_method_is_an_error_and_not_a_dropped_call() {
+    fn a_missing_method_is_its_own_error_and_not_a_dropped_call() {
         let w = Wired::open();
         let e = w.client.call::<()>("nonesuch", json!([])).unwrap_err();
-        assert!(e.message.contains("nonesuch"), "{e}");
+        assert_eq!(e, Error::UnknownMethod("nonesuch".into()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, events) = Local::open_at(
+            dir.path(),
+            &dir.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        let (server_in, mut input) = std::io::pipe().unwrap();
+        let (output, server_out) = std::io::pipe().unwrap();
+        let server = std::thread::spawn(move || {
+            serve_local(vault, events, server_in, server_out, SILENCE);
+        });
+        writeln!(input, r#"{{"jsonrpc":"2.0","id":7,"method":"nonesuch"}}"#).unwrap();
+        let line = BufReader::new(output)
+            .lines()
+            .map_while(std::result::Result::ok)
+            .find(|line| line.contains("\"id\":7"))
+            .unwrap();
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(answer["error"]["code"], -32601);
+        assert_eq!(
+            answer["error"]["data"],
+            json!({"UnknownMethod": "nonesuch"})
+        );
+        drop(input);
+        server.join().unwrap();
     }
 
     /// The window closed: `serve` must return rather than sit on a dead pipe, and the calls that
@@ -1046,7 +995,7 @@ mod tests {
             t.elapsed() < Duration::from_secs(1),
             "a dead client must fail immediately, not after {DEADLINE:?}"
         );
-        assert!(e.message.contains("connect"), "{e}");
+        assert_eq!(e, Error::Offline("not connected".into()));
     }
 
     /// A call waits as long as its caller gave it: a method the host may take longer over is
@@ -1060,7 +1009,10 @@ mod tests {
         // A host that takes 300 ms over every answer, and ignores the pings.
         let heard = cancelled.clone();
         let server = std::thread::spawn(move || {
-            for line in BufReader::new(server_in).lines().map_while(Result::ok) {
+            for line in BufReader::new(server_in)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
                 let message = serde_json::from_str::<Value>(&line).unwrap();
                 let Some(id) = message.get("id").cloned() else {
                     if message.get("method") == Some(&json!("cancel")) {
@@ -1086,7 +1038,7 @@ mod tests {
         };
 
         let e = ask(Duration::from_millis(100)).unwrap_err();
-        assert_eq!(e.message, "slow timed out");
+        assert_eq!(e, Error::Remote("slow timed out".into()));
         // The next answer proves the host has read past the cancel the timeout sent.
         assert_eq!(ask(Duration::from_secs(2)).unwrap(), "done");
         assert_eq!(
@@ -1105,12 +1057,12 @@ mod tests {
         let (server_in, client_out) = std::io::pipe().unwrap();
         let (client_in, server_out) = std::io::pipe().unwrap();
         // A host that reads every request and answers none.
-        let server =
-            std::thread::spawn(
-                move || {
-                    for _ in BufReader::new(server_in).lines().map_while(Result::ok) {}
-                },
-            );
+        let server = std::thread::spawn(move || {
+            for _ in BufReader::new(server_in)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {}
+        });
         let client = Arc::new(Client::new(
             Box::new(client_out),
             Box::new(client_in),
@@ -1134,7 +1086,7 @@ mod tests {
         };
         client.cancel(id);
         let (answer, took) = call.join().unwrap();
-        assert!(answer.is_err());
+        assert_eq!(answer.unwrap_err(), Error::Core(Core::Cancelled));
         assert!(took < Duration::from_secs(1), "the caller waited {took:?}");
         // The host's end first: the reader the shutdown joins ends with it.
         drop(server_out);
@@ -1153,7 +1105,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let _request = BufReader::new(server_in)
                 .lines()
-                .map_while(Result::ok)
+                .map_while(std::result::Result::ok)
                 .find(|line| line.contains("\"id\""));
             drop(server_out);
         });
@@ -1324,9 +1276,11 @@ mod tests {
         let e = client
             .call::<Hello>("hello", json!([VaultConfig::default()]))
             .unwrap_err();
-        assert_eq!(e.message, format!("{} is not a folder", root.display()));
-        // Its own code, so the window can tell it from a link that failed and stop retrying.
-        assert_eq!(e.code, REFUSED);
+        // Its own kind, so the window can tell it from a link that failed and stop retrying.
+        assert_eq!(
+            e,
+            Error::Refused(format!("{} is not a folder", root.display()))
+        );
         assert!(server.join().unwrap().is_err(), "serve must exit failing");
         assert!(!db.exists(), "no index for a vault that is not there");
     }

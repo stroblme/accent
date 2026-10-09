@@ -8,7 +8,6 @@ use crate::doc::{self, Doc};
 use crate::pdftab::PdfTab;
 use crate::toasts::Toast;
 use crate::{App, pdfview};
-use accent_api::rpc::RpcError;
 use accent_api::{PageEdit, RepageReport};
 use gtk::glib;
 use std::rc::Rc;
@@ -106,7 +105,10 @@ impl App {
                         app.relinked(&pdf, &message);
                     }
                 }
-                Some(Err(e)) if e.downcast_ref::<RpcError>().is_some_and(RpcError::unasked) => {
+                Some(Err(e))
+                    if e.downcast_ref::<accent_api::Error>()
+                        .is_some_and(accent_api::Error::unasked) =>
+                {
                     let mut relinks = pdf.relinks.borrow_mut();
                     relinks.running = false;
                     relinks.queue.push_front((edit, step));

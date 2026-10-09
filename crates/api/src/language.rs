@@ -1206,10 +1206,10 @@ macro_rules! requests {
             vault: &Local,
             method: &str,
             p: &Value,
-        ) -> Option<std::result::Result<Value, crate::rpc::RpcError>> {
+        ) -> Option<Result<Value>> {
             $( if method == stringify!($name) {
                 crate::rpc::args!(p; rel: String $(, $arg: $ty)*);
-                return Some(crate::rpc::any(crate::rpc::block(
+                return Some(crate::rpc::answer(crate::rpc::block(
                     vault.$name(&rel, $($arg),*),
                 )));
             } )*

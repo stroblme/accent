@@ -1172,7 +1172,10 @@ impl App {
     fn restore_shell(self: &Rc<Self>, key: &str, place: Option<&ShellPlace>) {
         let at = place.map_or("", |p| p.at.as_str());
         let shell = match ssh::is_remote(at) {
-            true => match ssh::parse(at).and_then(|url| self.remote_shell(url, key)) {
+            true => match ssh::parse(at)
+                .map_err(|e| e.to_string())
+                .and_then(|url| self.remote_shell(url, key))
+            {
                 Ok(shell) => shell,
                 Err(why) => return self.cannot("put back a shell on the host", why),
             },

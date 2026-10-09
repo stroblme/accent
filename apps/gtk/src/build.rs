@@ -608,7 +608,7 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
         add_forward: Arc::new({
             let vault = vault.clone();
             move |f| match vault.remote() {
-                Some(r) => r.forward(f),
+                Some(r) => r.forward(f).map_err(|e| e.to_string()),
                 None => Err("this vault is not remote".to_string()),
             }
         }),
