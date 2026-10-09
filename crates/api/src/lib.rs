@@ -54,7 +54,7 @@ pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
 pub use language::{
     Call, Completion, Completions, Diagnostic, Fold, Hover, Kind, Location, PdfPages, Pos, Range,
-    Severity, Signature, Support, Symbol, Task, TextEdit,
+    Severity, Signature, Support, Symbol, Task, TextEdit, Waits,
 };
 
 // ---------------------------------------------------------------- public data

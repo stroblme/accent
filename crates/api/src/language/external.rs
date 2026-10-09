@@ -705,6 +705,10 @@ impl Language for External {
         })
     }
 
+    fn has_answered(&self) -> bool {
+        self.found_one.load(Ordering::Relaxed)
+    }
+
     fn renames(&self, abs: &Path, is_dir: bool) -> bool {
         renamed_by(&self.renames, abs, is_dir)
     }
