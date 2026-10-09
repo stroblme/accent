@@ -6,11 +6,9 @@
 //! ssh connection. The UI was written against a local vault and did not have to learn anything to
 //! work on a remote one, which is the whole point of the split.
 
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
-use anyhow::Result;
 use serde_json::json;
 
 use accent_core::path::linked_path;
@@ -19,7 +17,7 @@ use crate::local::Local;
 use crate::{
     Backlink, CodeSymbol, Commit, Etag, Event, FileRow, HeadingHit, KeptLink, Location, Match,
     Mention, Options, OutLink, PageEdit, PdfLink, RenamePlan, RenameReport, RepageReport,
-    ReplaceReport, Repo, SaveError, SearchHit, Session, Stats, Status, Submodule, UndoReport,
+    ReplaceReport, Repo, Result, SearchHit, Session, Stats, Status, Submodule, UndoReport,
     VaultConfig, fs, git, remote, rpc, ssh,
 };
 
@@ -191,7 +189,7 @@ impl Vault {
                 v.rescan();
                 Ok(())
             }
-            Backend::Remote(r) => r.call("rescan", json!([])).map_err(anyhow::Error::from),
+            Backend::Remote(r) => r.call("rescan", json!([])),
         }
     }
 
@@ -209,9 +207,7 @@ impl Vault {
                 v.stop_indexing();
                 Ok(())
             }
-            Backend::Remote(r) => r
-                .call("stop_indexing", json!([]))
-                .map_err(anyhow::Error::from),
+            Backend::Remote(r) => r.call("stop_indexing", json!([])),
         }
     }
 
@@ -223,9 +219,7 @@ impl Vault {
                 v.resume_indexing();
                 Ok(())
             }
-            Backend::Remote(r) => r
-                .call("resume_indexing", json!([]))
-                .map_err(anyhow::Error::from),
+            Backend::Remote(r) => r.call("resume_indexing", json!([])),
         }
     }
 
@@ -242,10 +236,10 @@ impl Vault {
     ///
     /// For a remote vault the answer is a path on the *host*, so it is what to show and what to
     /// pass to a remote command — never something to open. Use [`fetch`](Self::fetch) for that.
-    pub fn resolve(&self, rel: &str) -> io::Result<PathBuf> {
+    pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
         match &self.backend {
-            Backend::Local(v) => Ok(v.resolve(rel)?),
-            Backend::Remote(_) => Ok(Local::join(&self.root(), rel)?),
+            Backend::Local(v) => v.resolve(rel),
+            Backend::Remote(_) => Local::join(&self.root(), rel),
         }
     }
 
@@ -286,10 +280,9 @@ pub(crate) const REPLACE_BOUND: std::time::Duration = std::time::Duration::from_
 /// them the same. The name is now the wire name by construction, and a method that is added or
 /// removed is added or removed everywhere at once.
 ///
-/// The first word is what the answer travels as. `io` is an [`io::Result`]; `any` is an
-/// [`anyhow::Result`], which crosses as a formatted message; `git` runs where the repository is
-/// and names the [`accent_core::git`] function after the wire name, because that name carries a
-/// `git_` prefix the module does not.
+/// Every one answers a [`Result`], whose error crosses the wire as itself. A row naming a function
+/// after `=` runs that function where the repository is, rather than a [`Local`] method of its own
+/// name: the git rows, whose wire names carry a `git_` prefix the module does not.
 ///
 /// An argument marked `ref` is taken by reference and travels as the owned form of its type
 /// (`str` as a `String`); one marked `val` travels as itself.
@@ -298,9 +291,9 @@ pub(crate) const REPLACE_BOUND: std::time::Duration = std::time::Duration::from_
 /// remote caller waits for it plus [`rpc::DEADLINE`] rather than the deadline alone. Without it a
 /// merge whose hooks ran past ten seconds timed out here while the host carried on and landed it.
 ///
-/// What is *not* here is anything whose two sides differ: a save, which has an error of its own;
-/// the walk for unindexed matches, whose `stop` cannot cross; the transfers, which carry bytes
-/// outside the protocol; and `repos`, which posts to the vault's own worker.
+/// What is *not* here is anything whose two sides differ: the walk for unindexed matches, whose
+/// `stop` cannot cross; the transfers, which carry bytes outside the protocol; and `repos`, which
+/// posts to the vault's own worker.
 macro_rules! methods {
     // What one argument is, on the façade, on the wire, and at the call the host makes.
     (@fty ref $t:ty) => { &$t };
@@ -310,24 +303,10 @@ macro_rules! methods {
     (@pass ref $n:ident) => { &$n };
     (@pass val $n:ident) => { $n };
 
-    // What the answer is, and how a remote failure reads as one.
-    (@ret io $t:ty) => { io::Result<$t> };
-    (@ret any $t:ty) => { Result<$t> };
-    (@ret git $t:ty) => { Result<$t> };
-    (@err io) => { std::io::Error::from };
-    (@err any) => { anyhow::Error::from };
-    (@err git) => { anyhow::Error::from };
-
-    // The call itself: on this machine, and on the host answering for it.
-    (@here $v:ident io $name:ident ($($a:tt)*)) => { Ok($v.$name($($a)*)?) };
-    (@here $v:ident any $name:ident ($($a:tt)*)) => { Ok($v.$name($($a)*)?) };
-    (@here $v:ident git $name:ident $core:ident ($($a:tt)*)) => {
-        git::$core($($a)*).map_err(anyhow::Error::from)
-    };
-    (@serve $v:ident io $name:ident ($($a:tt)*)) => { rpc::answer($v.$name($($a)*)) };
-    (@serve $v:ident any $name:ident ($($a:tt)*)) => { rpc::answer($v.$name($($a)*)) };
-    (@serve $v:ident git $name:ident $core:ident ($($a:tt)*)) => {
-        rpc::answer(git::$core($($a)*))
+    // The call itself, where the files are: the vault's own method, or the function a row names.
+    (@here $v:ident $name:ident ($($a:tt)*)) => { $v.$name($($a)*) };
+    (@here $v:ident $name:ident $module:ident $core:ident ($($a:tt)*)) => {
+        $module::$core($($a)*).map_err(crate::Error::from)
     };
 
     // How long a remote caller waits: the host's own bound, if it has one, and a round trip.
@@ -336,24 +315,23 @@ macro_rules! methods {
 
     ($(
         $(#[$doc:meta])*
-        $group:ident $name:ident $(= $core:ident)? ($($arg:ident : $kind:tt $t:ty),* $(,)?) -> $ret:ty
+        $name:ident $(= $module:ident :: $core:ident)? ($($arg:ident : $kind:tt $t:ty),* $(,)?)
+            -> $ret:ty
             $(, bounded by $bound:expr)?;
     )*) => {
         impl Vault {
             $(
                 $(#[$doc])*
-                pub fn $name(&self $(, $arg: methods!(@fty $kind $t))*)
-                    -> methods!(@ret $group $ret)
-                {
+                pub fn $name(&self $(, $arg: methods!(@fty $kind $t))*) -> Result<$ret> {
                     match &self.backend {
-                        Backend::Local(_v) => methods!(@here _v $group $name $($core)? ($($arg),*)),
-                        Backend::Remote(r) => r
-                            .call_within(
-                                stringify!($name),
-                                json!([$($arg),*]),
-                                methods!(@deadline $($bound)?),
-                            )
-                            .map_err(methods!(@err $group)),
+                        Backend::Local(_v) => {
+                            methods!(@here _v $name $($module $core)? ($($arg),*))
+                        }
+                        Backend::Remote(r) => r.call_within(
+                            stringify!($name),
+                            json!([$($arg),*]),
+                            methods!(@deadline $($bound)?),
+                        ),
                     }
                 }
             )*
@@ -365,12 +343,13 @@ macro_rules! methods {
             vault: &Local,
             method: &str,
             p: &serde_json::Value,
-        ) -> Option<crate::Result<serde_json::Value>> {
+        ) -> Option<Result<serde_json::Value>> {
             $(
                 if method == stringify!($name) {
                     rpc::args!(p; $($arg: methods!(@wty $kind $t)),*);
-                    return Some(methods!(@serve vault $group $name $($core)?
-                        ($(methods!(@pass $kind $arg)),*)));
+                    let answer = methods!(@here vault $name $($module $core)?
+                        ($(methods!(@pass $kind $arg)),*));
+                    return Some(rpc::answer(answer));
                 }
             )*
             None
@@ -380,41 +359,41 @@ macro_rules! methods {
 
 methods! {
     // ------------------------------------------------------------------ files
-    io read(rel: ref str) -> (String, Etag);
-    io read_text(rel: ref str) -> fs::Read;
-    io stat(rel: ref str) -> Option<Etag>;
+    read(rel: ref str) -> (String, Etag);
+    read_text(rel: ref str) -> fs::Read;
+    stat(rel: ref str) -> Option<Etag>;
     /// Delete a file or a directory. Local vaults go to the system trash through the desktop, so
     /// this is the remote path only — permanent, and confirmed as such by the UI.
-    io delete(rel: ref str) -> ();
-    io create_dir(rel: ref str) -> ();
+    delete(rel: ref str) -> ();
+    create_dir(rel: ref str) -> ();
     /// Take a file written behind the index's back into it at once, as a local write is, rather
     /// than a watcher debounce later: what [`write_file`](Vault::write_file) asks of a host once
     /// the bytes are there.
-    io wrote(rel: ref str) -> ();
+    wrote(rel: ref str) -> ();
     /// Copy a file or a whole directory inside the vault. It runs where the files are, so a
     /// paste inside a remote vault sends nothing over the link; overwriting is not its business,
     /// the caller naming a path nothing holds yet.
-    io copy(from: ref str, to: ref str) -> ();
-    any plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
-    any rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
+    copy(from: ref str, to: ref str) -> ();
+    plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
+    rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
     /// A note's text as Save As writes it at another path, its relative links pointed back at
     /// what they named: asked where the index is.
-    any relink_copy(from: ref str, to: ref str, text: ref str) -> Option<String>;
+    relink_copy(from: ref str, to: ref str, text: ref str) -> Option<String>;
     /// The notes' links into a PDF after a page edit, rewritten where the notes are.
-    any repage_links(rel: ref str, edit: val PageEdit, keep: ref [KeptLink]) -> RepageReport,
+    repage_links(rel: ref str, edit: val PageEdit, keep: ref [KeptLink]) -> RepageReport,
         bounded by MOVE_BOUND;
-    any adopt_conflict(original: ref str, conflict: ref str) -> Etag;
-    any template_target(template: ref str) -> Option<String>;
-    any note_from_template(template: ref str) -> Option<(String, Vec<usize>)>;
-    any render_template(template: ref str, title: ref str) -> (String, Vec<usize>);
-    any templates() -> Vec<String>;
+    adopt_conflict(original: ref str, conflict: ref str) -> Etag;
+    template_target(template: ref str) -> Option<String>;
+    note_from_template(template: ref str) -> Option<(String, Vec<usize>)>;
+    render_template(template: ref str, title: ref str) -> (String, Vec<usize>);
+    templates() -> Vec<String>;
     /// The templates that name a target: one question for New from Template rather than one
     /// [`template_target`](Vault::template_target) per template, a round trip each when remote.
-    any template_targets() -> Vec<String>;
+    template_targets() -> Vec<String>;
     /// Replace every match in every file whose indexed body has one: what
     /// [`grep`](Vault::grep) counts under the same `include_ignored`. The pattern crosses as what
     /// the user typed plus its toggles, and is compiled where the files are.
-    any replace_all(
+    replace_all(
         query: ref str,
         options: val Options,
         replacement: ref str,
@@ -423,115 +402,115 @@ methods! {
     ) -> ReplaceReport, bounded by REPLACE_BOUND;
     /// Put back what the last [`replace_all`](Vault::replace_all) rewrote. The text it needs
     /// stayed wherever the rewrite ran, the host on a remote vault, so only the report crosses.
-    any undo_replace() -> UndoReport, bounded by REPLACE_BOUND;
+    undo_replace() -> UndoReport, bounded by REPLACE_BOUND;
 
     // ------------------------------------------------------------ index reads
-    any list_dir(rel: ref str) -> Vec<FileRow>;
+    list_dir(rel: ref str) -> Vec<FileRow>;
     /// Keep the listings of these folders, which the index does not walk, fresh until
     /// [`unwatch_unindexed`](Vault::unwatch_unindexed): a file made, removed or renamed directly
     /// inside one comes back as [`Event::UnindexedChanged`]. Watched where the files are, one
     /// level each, never the tree under one.
-    any watch_unindexed(dirs: ref [String]) -> ();
-    any unwatch_unindexed(dirs: ref [String]) -> ();
+    watch_unindexed(dirs: ref [String]) -> ();
+    unwatch_unindexed(dirs: ref [String]) -> ();
     /// Walk one folder of the vault (Reload on its row), where [`rescan`](Vault::rescan) walks
     /// all of it: what the watcher never reported under it is taken in.
-    io rescan_dir(dir: ref str) -> ();
-    any search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
-    any search_mid_word(
+    rescan_dir(dir: ref str) -> ();
+    search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
+    search_mid_word(
         query: ref str,
         limit: val usize,
         include_ignored: val bool,
         skip: ref [String],
     ) -> Vec<SearchHit>;
-    any grep(query: ref str, options: val Options, limit: val usize, include_ignored: val bool)
+    grep(query: ref str, options: val Options, limit: val usize, include_ignored: val bool)
         -> (Vec<Match>, usize);
-    any tags() -> Vec<(String, i64)>;
+    tags() -> Vec<(String, i64)>;
     /// What the index holds, counted: `accent-cli stats`.
-    any stats() -> Stats;
-    any files_with_tag(tag: ref str) -> Vec<FileRow>;
-    any backlinks(rel: ref str) -> Vec<Backlink>;
-    any backlink_locations(rel: ref str) -> Vec<Location>;
+    stats() -> Stats;
+    files_with_tag(tag: ref str) -> Vec<FileRow>;
+    backlinks(rel: ref str) -> Vec<Backlink>;
+    backlink_locations(rel: ref str) -> Vec<Location>;
     /// The links written in a note, in order, and where each leads.
-    any links_from(rel: ref str) -> Vec<OutLink>;
+    links_from(rel: ref str) -> Vec<OutLink>;
     /// `(note, target, byte offset)` for every link nothing in the vault answers to.
-    any unresolved_links() -> Vec<(String, String, i64)>;
+    unresolved_links() -> Vec<(String, String, i64)>;
     /// The headings holding the most of `words`, best first.
-    any headings_matching(words: ref [String], limit: val usize) -> Vec<HeadingHit>;
+    headings_matching(words: ref [String], limit: val usize) -> Vec<HeadingHit>;
     /// `(file, title)` for the files holding any of `words`, best first.
-    any rank_files(words: ref [String], limit: val usize) -> Vec<(String, Option<String>)>;
+    rank_files(words: ref [String], limit: val usize) -> Vec<(String, Option<String>)>;
     /// A code file's declarations, in order.
-    any file_symbols(rel: ref str) -> Vec<CodeSymbol>;
+    file_symbols(rel: ref str) -> Vec<CodeSymbol>;
     /// The declarations a name or `Container::name` finds, best first.
-    any find_symbols(query: ref str, limit: val usize) -> Vec<CodeSymbol>;
+    find_symbols(query: ref str, limit: val usize) -> Vec<CodeSymbol>;
     /// The declarations of each of `names`, those in `near` first.
-    any symbols_named(names: ref [String], near: ref str, per: val usize) -> Vec<CodeSymbol>;
+    symbols_named(names: ref [String], near: ref str, per: val usize) -> Vec<CodeSymbol>;
     /// Where a name is written in code, with the declaration around it.
-    any mentions(name: ref str, limit: val usize) -> Vec<Mention>;
+    mentions(name: ref str, limit: val usize) -> Vec<Mention>;
     /// The declarations named by a question's words, with how many of their parts it holds.
-    any symbols_by_words(words: ref [String], limit: val usize) -> Vec<(CodeSymbol, usize)>;
+    symbols_by_words(words: ref [String], limit: val usize) -> Vec<(CodeSymbol, usize)>;
     /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,
     /// because that is where the notes and the index are.
-    any pdf_links(rel: ref str) -> Vec<PdfLink>;
-    any file_paths(include_ignored: val bool) -> Vec<String>;
-    any set_excluded(entries: ref [String]) -> ();
-    any recent_files(limit: val usize) -> Vec<String>;
-    any resolve_link(target: ref str) -> Option<String>;
+    pdf_links(rel: ref str) -> Vec<PdfLink>;
+    file_paths(include_ignored: val bool) -> Vec<String>;
+    set_excluded(entries: ref [String]) -> ();
+    recent_files(limit: val usize) -> Vec<String>;
+    resolve_link(target: ref str) -> Option<String>;
     /// What Go to File and `[[` completion offer to write.
-    any missing_notes() -> Vec<String>;
+    missing_notes() -> Vec<String>;
     /// The notes in the folders git ignores, walked again when `fresh`: what Go to File lists
     /// behind the indexed files. Walked where the files are.
-    any ignored_notes(fresh: val bool) -> Vec<String>;
+    ignored_notes(fresh: val bool) -> Vec<String>;
     /// The file a link target names in the folders git ignores, when the index has none.
-    any resolve_ignored(target: ref str) -> Option<String>;
+    resolve_ignored(target: ref str) -> Option<String>;
     /// `(alias, note)` for every frontmatter alias: what Go to File also finds a note by.
-    any note_aliases() -> Vec<(String, String)>;
-    any conflicts() -> Vec<(String, String)>;
-    any conflicts_of(rel: ref str) -> Vec<String>;
+    note_aliases() -> Vec<(String, String)>;
+    conflicts() -> Vec<(String, String)>;
+    conflicts_of(rel: ref str) -> Vec<String>;
 
     // -------------------------------------------------------------------- git
     // The repositories belong to the machine the files are on, so every one of these runs there —
     // the `git` binary the user configured, with their hooks and their credential helper.
-    git git_status = status(repo: ref Repo) -> Status;
-    git git_untracked = untracked(repo: ref Repo, dir: ref str) -> Vec<String>;
+    git_status = git::status(repo: ref Repo) -> Status;
+    git_untracked = git::untracked(repo: ref Repo, dir: ref str) -> Vec<String>;
     /// One page of history. The graph itself is computed where it is drawn: [`git::lanes`] is a
     /// forward pass over every commit so far, so the pane keeps the list and re-lanes it, and
     /// there is nothing in it for a remote host to do.
-    git git_log = log(repo: ref Repo, skip: val usize, limit: val usize) -> Vec<Commit>;
-    git git_show = show(repo: ref Repo, rev: ref str, path: ref str) -> Option<git::Blob>;
-    git git_changed_files = changed_files(repo: ref Repo, oid: ref str) -> Vec<git::ChangedFile>;
-    git git_submodules = submodules(repo: ref Repo) -> Vec<Submodule>;
-    git git_branches = branches(repo: ref Repo) -> git::Branches;
-    git git_checkout = checkout(repo: ref Repo, branch: ref str) -> (),
+    git_log = git::log(repo: ref Repo, skip: val usize, limit: val usize) -> Vec<Commit>;
+    git_show = git::show(repo: ref Repo, rev: ref str, path: ref str) -> Option<git::Blob>;
+    git_changed_files = git::changed_files(repo: ref Repo, oid: ref str) -> Vec<git::ChangedFile>;
+    git_submodules = git::submodules(repo: ref Repo) -> Vec<Submodule>;
+    git_branches = git::branches(repo: ref Repo) -> git::Branches;
+    git_checkout = git::checkout(repo: ref Repo, branch: ref str) -> (),
         bounded by git::TRANSFER_TIMEOUT;
-    git git_track = track(repo: ref Repo, remote: ref str) -> (),
+    git_track = git::track(repo: ref Repo, remote: ref str) -> (),
         bounded by git::TRANSFER_TIMEOUT;
-    git git_checkout_commit = checkout_commit(repo: ref Repo, oid: ref str) -> (),
+    git_checkout_commit = git::checkout_commit(repo: ref Repo, oid: ref str) -> (),
         bounded by git::TRANSFER_TIMEOUT;
-    git git_create_branch = create_branch(repo: ref Repo, name: ref str, checkout: val bool) -> (),
+    git_create_branch = git::create_branch(repo: ref Repo, name: ref str, checkout: val bool) -> (),
         bounded by git::TRANSFER_TIMEOUT;
-    git git_delete_branch = delete_branch(repo: ref Repo, name: ref str, force: val bool) -> ();
-    git git_merge = merge(repo: ref Repo, branch: ref str) -> git::Merge,
+    git_delete_branch = git::delete_branch(repo: ref Repo, name: ref str, force: val bool) -> ();
+    git_merge = git::merge(repo: ref Repo, branch: ref str) -> git::Merge,
         bounded by git::TRANSFER_TIMEOUT;
-    git git_merge_abort = merge_abort(repo: ref Repo) -> ();
+    git_merge_abort = git::merge_abort(repo: ref Repo) -> ();
     /// A rebase stopped part way, carried on or given up.
-    git git_rebase_continue = rebase_continue(repo: ref Repo) -> git::Rebase,
+    git_rebase_continue = git::rebase_continue(repo: ref Repo) -> git::Rebase,
         bounded by git::TRANSFER_TIMEOUT;
-    git git_rebase_abort = rebase_abort(repo: ref Repo) -> ();
-    git git_stage = stage(repo: ref Repo, paths: ref [String]) -> ();
-    git git_unstage = unstage(repo: ref Repo, paths: ref [String]) -> ();
-    git git_discard = discard(repo: ref Repo, paths: ref [String]) -> ();
+    git_rebase_abort = git::rebase_abort(repo: ref Repo) -> ();
+    git_stage = git::stage(repo: ref Repo, paths: ref [String]) -> ();
+    git_unstage = git::unstage(repo: ref Repo, paths: ref [String]) -> ();
+    git_discard = git::discard(repo: ref Repo, paths: ref [String]) -> ();
     /// What Stage and Unstage Selected Lines write.
-    git git_stage_text = stage_text(repo: ref Repo, path: ref str, text: ref str) -> (),
+    git_stage_text = git::stage_text(repo: ref Repo, path: ref str, text: ref str) -> (),
         bounded by git::TRANSFER_TIMEOUT;
-    git git_commit = commit(repo: ref Repo, message: ref str, all: val bool) -> String,
+    git_commit = git::commit(repo: ref Repo, message: ref str, all: val bool) -> String,
         bounded by git::TRANSFER_TIMEOUT;
     /// A Sync's two halves, asked for one after the other so the window knows which is running.
-    git git_pull = pull(repo: ref Repo) -> String, bounded by git::TRANSFER_TIMEOUT;
-    git git_push = push(repo: ref Repo) -> String, bounded by git::TRANSFER_TIMEOUT;
+    git_pull = git::pull(repo: ref Repo) -> String, bounded by git::TRANSFER_TIMEOUT;
+    git_push = git::push(repo: ref Repo) -> String, bounded by git::TRANSFER_TIMEOUT;
     /// Bring the remote-tracking refs up to date.
-    git git_fetch = fetch(repo: ref Repo) -> String, bounded by git::FETCH_TIMEOUT;
+    git_fetch = git::fetch(repo: ref Repo) -> String, bounded by git::FETCH_TIMEOUT;
     /// The oids a pull would bring in. Asked only where [`git::Status`] says there are any.
-    git git_incoming = incoming(repo: ref Repo) -> Vec<String>;
+    git_incoming = git::incoming(repo: ref Repo) -> Vec<String>;
 }
 
 /// The rest: the methods whose two sides really do differ.
@@ -542,12 +521,12 @@ impl Vault {
         matches!(self.stat(rel), Ok(Some(_)))
     }
 
-    pub fn save(&self, rel: &str, text: &str, expected: Option<Etag>) -> Result<Etag, SaveError> {
+    /// Write a note, refused with [`accent_core::Error::ChangedOnDisk`] when the file is no longer
+    /// at `expected`. `None` writes whatever is there.
+    pub fn save(&self, rel: &str, text: &str, expected: Option<Etag>) -> Result<Etag> {
         match &self.backend {
             Backend::Local(v) => v.save(rel, text, expected),
-            Backend::Remote(r) => r
-                .call("save", json!([rel, text, expected]))
-                .map_err(SaveError::from),
+            Backend::Remote(r) => r.call("save", json!([rel, text, expected])),
         }
     }
 
@@ -555,65 +534,64 @@ impl Vault {
     /// local, a cached copy fetched over ssh when it is not. For the readers that need a real
     /// file — the PDF viewer, an image, the preview's assets. `NotFound` when there is nothing at
     /// `rel`, on either backend.
-    pub fn fetch(&self, rel: &str) -> io::Result<PathBuf> {
+    pub fn fetch(&self, rel: &str) -> Result<PathBuf> {
         self.fetch_with(rel, &|_, _| ())
     }
 
     /// [`fetch`](Self::fetch), telling `progress` the bytes so far and how many there are while
     /// a remote vault's copy downloads. A local file is already here, so it tells nothing.
-    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> io::Result<PathBuf> {
+    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<PathBuf> {
         match &self.backend {
             Backend::Local(v) => {
                 let path = v.resolve(rel)?;
-                std::fs::metadata(&path).map(|_| path)
+                match std::fs::metadata(&path) {
+                    Ok(_) => Ok(path),
+                    Err(e) => Err(accent_core::Error::io(rel, e).into()),
+                }
             }
             Backend::Remote(r) => r.fetch_with(rel, progress),
         }
     }
 
     /// Copy a file from this machine into the vault.
-    pub fn upload(&self, local: &Path, rel: &str) -> io::Result<()> {
+    pub fn upload(&self, local: &Path, rel: &str) -> Result<()> {
         self.upload_with(local, rel, &|_, _| ())
     }
 
     /// [`upload`](Self::upload), telling `progress` the bytes sent so far and how many there are
     /// on a remote vault. A local copy is the disk's speed, and tells nothing.
-    pub fn upload_with(
-        &self,
-        local: &Path,
-        rel: &str,
-        progress: &dyn Fn(u64, u64),
-    ) -> io::Result<()> {
+    pub fn upload_with(&self, local: &Path, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<()> {
         match &self.backend {
-            Backend::Local(v) => std::fs::copy(local, v.resolve(rel)?).map(|_| ()),
+            Backend::Local(v) => match std::fs::copy(local, v.resolve(rel)?) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(accent_core::Error::io(local.display(), e).into()),
+            },
             Backend::Remote(r) => r.upload_with(local, rel, progress),
         }
     }
 
     /// Write `bytes` to a file nothing holds yet: an image pasted or dropped into a note. The bytes
     /// travel as an upload's do, over ssh rather than in the protocol.
-    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> io::Result<()> {
+    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
         match &self.backend {
-            Backend::Local(v) => Ok(v.write_file(rel, bytes)?),
+            Backend::Local(v) => v.write_file(rel, bytes),
             Backend::Remote(r) => r.write_file(rel, bytes),
         }
     }
 
     /// Copy a file out of the vault to somewhere on this machine.
-    pub fn download(&self, rel: &str, dest: &Path) -> io::Result<()> {
+    pub fn download(&self, rel: &str, dest: &Path) -> Result<()> {
         self.download_with(rel, dest, &|_, _| ())
     }
 
     /// [`download`](Self::download), telling `progress` the bytes so far and how many there are
     /// on a remote vault.
-    pub fn download_with(
-        &self,
-        rel: &str,
-        dest: &Path,
-        progress: &dyn Fn(u64, u64),
-    ) -> io::Result<()> {
+    pub fn download_with(&self, rel: &str, dest: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
         match &self.backend {
-            Backend::Local(v) => std::fs::copy(v.resolve(rel)?, dest).map(|_| ()),
+            Backend::Local(v) => match std::fs::copy(v.resolve(rel)?, dest) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(accent_core::Error::io(rel, e).into()),
+            },
             Backend::Remote(r) => r.download_with(rel, dest, progress),
         }
     }
@@ -623,10 +601,8 @@ impl Vault {
     /// out.
     pub fn create_note(&self, rel: &str, template: Option<&str>) -> Result<(String, Vec<usize>)> {
         match &self.backend {
-            Backend::Local(v) => Ok(v.create_note(rel, template)?),
-            Backend::Remote(r) => r
-                .call("create_note", json!([rel, template]))
-                .map_err(anyhow::Error::from),
+            Backend::Local(v) => v.create_note(rel, template),
+            Backend::Remote(r) => r.call("create_note", json!([rel, template])),
         }
     }
 
@@ -651,10 +627,8 @@ impl Vault {
             return Ok(Vec::new());
         }
         match &self.backend {
-            Backend::Local(v) => Ok(v.grep_unindexed(query, options, limit, stop)?),
-            Backend::Remote(r) => r
-                .call("grep_unindexed", json!([query, options, limit]))
-                .map_err(anyhow::Error::from),
+            Backend::Local(v) => v.grep_unindexed(query, options, limit, stop),
+            Backend::Remote(r) => r.call("grep_unindexed", json!([query, options, limit])),
         }
     }
 
@@ -704,7 +678,7 @@ impl Vault {
     pub fn repos(&self) -> Result<Vec<Repo>> {
         match &self.backend {
             Backend::Local(v) => Ok(v.repos()),
-            Backend::Remote(r) => r.call("repos", json!([])).map_err(anyhow::Error::from),
+            Backend::Remote(r) => r.call("repos", json!([])),
         }
     }
 }
@@ -872,8 +846,8 @@ mod tests {
             f.vault.root().join("a.png")
         );
         assert_eq!(
-            f.vault.fetch("gone.png").unwrap_err().kind(),
-            std::io::ErrorKind::NotFound
+            f.vault.fetch("gone.png").unwrap_err(),
+            crate::Error::Core(accent_core::Error::NotFound("gone.png".into()))
         );
     }
 

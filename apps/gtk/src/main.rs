@@ -32,6 +32,7 @@ mod find;
 mod fold;
 mod ghost;
 mod git;
+mod goals;
 mod highlight;
 mod hover;
 mod lang;
@@ -77,7 +78,7 @@ mod work;
 mod wrap;
 mod zoom;
 
-use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
+use accent_api::{Config, Etag, Event, Location, Session, Vault, ssh};
 use accent_core::config::{FocusMode, Layout, PdfZoom, ShellPlace};
 use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;
@@ -304,6 +305,8 @@ struct App {
     /// The References request in flight. Replaced rather than queued: the caret moves faster
     /// than a server answers.
     references: RefCell<Option<glib::JoinHandle<()>>>,
+    /// The goals request in flight, replaced the same way.
+    goals: RefCell<Option<glib::JoinHandle<()>>>,
     /// The file whose size and time the Details section last asked the disk for, and the answer:
     /// `None` while it is coming, or for a file that is gone (`App::stat_details`).
     details_stat: RefCell<Option<(String, Option<Etag>)>>,
@@ -667,6 +670,7 @@ impl App {
             tree.set_active(open.as_deref());
         }
         self.sync_info();
+        self.sync_code_pane();
         let Some(doc) = self.active_doc() else {
             self.title.set_subtitle(&self.host());
             self.refresh_references();
@@ -955,6 +959,8 @@ impl App {
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
+        self.statusbar
+            .set_checking(self.active().and_then(|tab| tab.lang.checking.get()));
         // The count of what is wrong with a document is also the switch that keeps it out of the
         // text, and a PDF's page count opens the page commands for that page; every other count
         // is a readout with nothing to press.

@@ -18,6 +18,7 @@ mod files;
 mod find;
 mod folders;
 mod git;
+mod goals;
 mod ignored;
 mod image;
 mod info;
@@ -68,6 +69,7 @@ use git::{
     bench_git_init, bench_git_markers, bench_git_press, bench_git_rebase, bench_git_scroll,
     bench_git_switch, bench_git_sync_all, bench_git_sync_over_fetch,
 };
+use goals::bench_goals;
 use image::{bench_image, bench_image_look, bench_preview_look};
 use info::bench_info;
 use keys::{
@@ -493,6 +495,10 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_INFO=<rel>[,<rel>…]` opens each file with the Info pane on screen and prints
 /// which sections it shows, open or shut, and what they say (`info::bench_info`).
 ///
+/// `ACCENT_BENCH_GOALS=<rel>:<line>:<col>` puts the caret there in a Lean file and prints the
+/// goals the Code pane shows (`goals::bench_goals`). It needs elan's Lean, so `make drills` does
+/// not run it.
+///
 /// `ACCENT_BENCH_REPLACE=1` writes a note holding one unique word, presses the Search pane's
 /// Replace All on it and prints what the pane lists before and after the rewrite.
 ///
@@ -613,6 +619,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let tags = std::env::var("ACCENT_BENCH_TAGS").ok();
     let replace = std::env::var("ACCENT_BENCH_REPLACE").is_ok();
     let info = std::env::var("ACCENT_BENCH_INFO").ok();
+    let goals = std::env::var("ACCENT_BENCH_GOALS").ok();
     let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
@@ -636,6 +643,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && tags.is_none()
         && !replace
         && info.is_none()
+        && goals.is_none()
         && search.is_none()
         && clip.is_none()
         && transfer.is_none()
@@ -859,6 +867,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rels) = info {
             return bench_info(&app, &rels);
+        }
+        if let Some(arg) = goals {
+            return bench_goals(&app, &arg);
         }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);

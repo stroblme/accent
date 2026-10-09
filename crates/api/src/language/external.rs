@@ -26,8 +26,8 @@ use accent_lsp::types::{
 use accent_lsp::{Client, Notifications, from_uri, to_uri};
 
 use super::{
-    Call, Completion, Completions, Fold, Fut, Hover, Language, Location, Pos, Signature, Support,
-    Symbol,
+    Call, Completion, Completions, Fold, Fut, Goals, Hover, Language, Location, Pos, Signature,
+    Support, Symbol,
 };
 use crate::{Event, FileEdits, Local, locked};
 use map::{
@@ -64,6 +64,8 @@ pub(crate) struct External {
     root: PathBuf,
     /// The server is texlab, whose outline wants putting right ([`super::latex`]).
     texlab: bool,
+    /// The server is Lean's (`lake serve`, `lean --server`), which answers proof goals.
+    lean: bool,
     /// The builds' tables of contents that number texlab's outline.
     tocs: super::latex::Tocs,
     /// Whether the server has found a declaration to answer calls about: until then, finding
@@ -117,6 +119,9 @@ pub(crate) async fn start(
         texlab: Path::new(&name)
             .file_stem()
             .is_some_and(|stem| stem == "texlab"),
+        lean: Path::new(&name)
+            .file_name()
+            .is_some_and(|file| file == "lake" || file == "lean"),
         tocs: Default::default(),
         found_one: AtomicBool::new(false),
     }))
@@ -140,6 +145,10 @@ async fn forward_notifications(
     let mut painted: HashSet<String> = HashSet::new();
     // Whether it said it is busy and has not yet said it is done, likewise.
     let mut working = false;
+    // The line each file is being checked from, as last said, and so the files to say done with
+    // when it exits. Lean says one line many times over (3 660 notifications, 301 lines, for a
+    // 600-line file), and only a new one is news.
+    let mut checking: HashMap<String, u32> = HashMap::new();
     while let Some(n) = notifications.recv().await {
         match n.method.as_str() {
             "textDocument/publishDiagnostics" => {
@@ -181,6 +190,25 @@ async fn forward_notifications(
                     break;
                 }
             }
+            "$/lean/fileProgress" => {
+                let Some(line) = checking_of(&n.params) else {
+                    continue;
+                };
+                let uri = n
+                    .params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str);
+                let Some(rel) = uri.and_then(|uri| rel_of(uri, &vault_root)) else {
+                    continue;
+                };
+                let news = match line {
+                    Some(line) => checking.insert(rel.clone(), line) != Some(line),
+                    None => checking.remove(&rel).is_some(),
+                };
+                if news && events.send(Event::Checking { rel, line }).is_err() {
+                    break;
+                }
+            }
             _ => continue,
         }
     }
@@ -203,6 +231,10 @@ async fn forward_notifications(
             rel,
             items: Vec::new(),
         });
+    }
+    // Nor will it finish checking a file it was in the middle of.
+    for rel in checking.into_keys() {
+        let _ = events.send(Event::Checking { rel, line: None });
     }
 }
 
@@ -254,6 +286,32 @@ fn progress_of(params: &Value) -> Option<(bool, Option<String>)> {
     };
     let message = value.get("message").and_then(Value::as_str);
     Some((busy, message.filter(|_| busy).map(str::to_string)))
+}
+
+/// Where Lean's `$/lean/fileProgress` says a file is still being checked: the start line of the
+/// first range in progress (`kind` 1, or none given), and `None` once only a fatal error (`kind`
+/// 2) or nothing is left. `None` for a notification that does not read.
+fn checking_of(params: &Value) -> Option<Option<u32>> {
+    let processing = params.get("processing")?.as_array()?;
+    Some(
+        processing
+            .iter()
+            .filter(|p| p.get("kind").and_then(Value::as_u64).unwrap_or(1) == 1)
+            .find_map(|p| p.pointer("/range/start/line")?.as_u64())
+            .map(|line| line as u32),
+    )
+}
+
+/// Lean's answer to `$/lean/plainGoal`, its `rendered` Markdown left out.
+#[derive(serde::Deserialize)]
+struct PlainGoal {
+    goals: Vec<String>,
+}
+
+/// Lean's answer to `$/lean/plainTermGoal`, its `range` left out.
+#[derive(serde::Deserialize)]
+struct PlainTermGoal {
+    goal: String,
 }
 
 impl External {
@@ -343,6 +401,7 @@ impl External {
                 .map_or_else(Vec::new, |s| firsts(&s.trigger_characters)),
             missing: None,
             inline: on(&self.caps.inline_completion_provider),
+            goals: self.lean,
         }
     }
 
@@ -573,6 +632,26 @@ impl Language for External {
         })
     }
 
+    /// Lean's two answers, one after the other: Lean answers about a position once it has
+    /// checked that far, so the second is asked of a checked file and answered at once. A
+    /// position still unchecked at the request's deadline is an error, asked again by the window
+    /// once the check is done.
+    fn goals(&self, rel: &str, pos: Pos) -> Fut<'_, Option<Goals>> {
+        let rel = rel.to_string();
+        Box::pin(async move {
+            if !self.lean {
+                return Ok(None);
+            }
+            let (params, _) = self.at(&rel, pos)?;
+            let tactic: Option<PlainGoal> = self.ask("$/lean/plainGoal", params.clone()).await?;
+            let term: Option<PlainTermGoal> = self.ask("$/lean/plainTermGoal", params).await?;
+            Ok(Some(Goals {
+                tactic: tactic.map(|g| g.goals),
+                expected: term.map(|g| g.goal),
+            }))
+        })
+    }
+
     fn definition(&self, rel: &str, pos: Pos) -> Fut<'_, Vec<Location>> {
         let rel = rel.to_string();
         Box::pin(async move {
@@ -780,6 +859,34 @@ mod tests {
             Some((false, None))
         );
         assert_eq!(progress_of(&value(json!({"kind": "other"}))), None);
+    }
+
+    /// Lean's `$/lean/fileProgress`: the first range still being checked, and nothing once all
+    /// that is left is a fatal error or no range at all.
+    #[test]
+    fn lean_says_where_it_is_still_checking() {
+        let progress = |processing: Value| {
+            json!({"textDocument": {"uri": "file:///v/A.lean", "version": 1},
+                   "processing": processing})
+        };
+        let from = |line: u32| json!({"start": {"line": line, "character": 0}, "end": {"line": 99, "character": 0}});
+        assert_eq!(
+            checking_of(&progress(json!([
+                {"range": from(4), "kind": 2},
+                {"range": from(7), "kind": 1},
+            ]))),
+            Some(Some(7))
+        );
+        assert_eq!(
+            checking_of(&progress(json!([{"range": from(3)}]))),
+            Some(Some(3)),
+            "no kind is processing"
+        );
+        assert_eq!(checking_of(&progress(json!([]))), Some(None));
+        assert_eq!(
+            checking_of(&progress(json!([{"range": from(4), "kind": 2}]))),
+            Some(None)
+        );
     }
 
     /// A server that exits — a crash, an OOM kill — leaves its marks in the gutter with nothing
@@ -1066,6 +1173,60 @@ mod tests {
                 "settle re-indexed"
             );
         });
+    }
+
+    /// The goals of a core-only proof, from `lean --server` as a vault would configure it: the
+    /// hypotheses and target inside the proof, none at its end. Skipped where elan has not
+    /// installed Lean.
+    #[test]
+    fn lean_answers_the_goals_of_a_proof() {
+        let lean = "~/.elan/bin/lean";
+        let home = std::env::var_os("HOME").unwrap_or_default();
+        if !super::super::home_relative(lean, Path::new(&home)).is_file() {
+            eprintln!("lean is not installed: skipping the end-to-end test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let proof = "theorem t (p : Prop) (h : p) : p := by\n  exact h";
+        std::fs::write(root.path().join("T.lean"), proof).unwrap();
+        let config = crate::VaultConfig {
+            lsp: crate::LspConfig {
+                servers: [(
+                    "lean".to_string(),
+                    vec![lean.to_string(), "--server".to_string()],
+                )]
+                .into(),
+            },
+            ..Default::default()
+        };
+        let (vault, events) =
+            crate::Vault::open_at(root.path(), &cache.path().join("index.db"), config).unwrap();
+        let rt = accent_lsp::runtime();
+        let support = rt
+            .block_on(vault.open_document("T.lean", "lean", proof.to_string()))
+            .unwrap();
+        assert!(support.goals, "Lean answers goals");
+        let checked =
+            |e: &Event| matches!(e, Event::Checking { rel, line: None } if rel == "T.lean");
+        let budget = std::time::Duration::from_secs(60);
+        assert!(crate::tests::wait_for(&events, checked, budget).is_some());
+
+        let at = |line, character| {
+            let goals = rt.block_on(vault.goals("T.lean", Pos { line, character }));
+            goals.unwrap().expect("Lean answers")
+        };
+        assert_eq!(
+            at(1, 2).tactic,
+            Some(vec!["p : Prop\nh : p\n⊢ p".to_string()])
+        );
+        let end = at(1, 9);
+        assert_eq!(end.tactic, Some(vec![]), "the proof is finished");
+        assert_eq!(
+            end.expected.as_deref(),
+            Some("p : Prop\nh : p\n⊢ p"),
+            "`h` is a `p`"
+        );
     }
 
     #[test]

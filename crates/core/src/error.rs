@@ -70,19 +70,6 @@ impl From<rusqlite::Error> for Error {
     }
 }
 
-// ponytail: until the façade speaks `Error` itself, its `io::Result` methods take a core error
-// through this, kind and all. It goes with them.
-impl From<Error> for std::io::Error {
-    fn from(e: Error) -> std::io::Error {
-        let kind = match e {
-            Error::NotFound(_) => std::io::ErrorKind::NotFound,
-            Error::AlreadyExists(_) => std::io::ErrorKind::AlreadyExists,
-            _ => std::io::ErrorKind::Other,
-        };
-        std::io::Error::new(kind, e)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

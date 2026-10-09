@@ -104,6 +104,11 @@ fn keep(dest: &Path, why: String) -> Pushed {
     }
 }
 
+/// A cached copy here that could not be read or written, by its path.
+fn cached(path: &Path, e: std::io::Error) -> Error {
+    accent_core::Error::io(path.display(), e).into()
+}
+
 /// Move a cached file or folder to where the host moved its original, making the folders it goes
 /// into. Nothing cached there is nothing to move, and a move that fails costs the next fetch a
 /// download.
@@ -198,6 +203,8 @@ pub struct Remote {
     /// The unindexed folders the window asked to have watched, which a new server has to be
     /// asked again for the same reason. See [`Vault::watch_unindexed`](crate::Vault::watch_unindexed).
     unindexed: Mutex<BTreeSet<String>>,
+    /// The methods the host's server was found not to have, each said once.
+    unknown: Mutex<BTreeSet<String>>,
     /// The forwards the window started and has not stopped. They live in the ssh master, so a
     /// link that drops takes them with it and the master a reconnect makes has none of them;
     /// [`connect`](Self::connect) puts them back. Nothing outlives the vault: closing it cancels
@@ -224,6 +231,7 @@ impl Remote {
             client: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
             unindexed: Mutex::new(BTreeSet::new()),
+            unknown: Mutex::new(BTreeSet::new()),
             forwards: Mutex::new(Vec::new()),
             state: Arc::new(Mutex::new(State::Connecting)),
             child: Mutex::new(None),
@@ -364,7 +372,21 @@ impl Remote {
         if answer.is_err() && client.is_dead() {
             self.disconnect(&self.lost(), Event::Disconnected);
         }
+        if let Err(Error::UnknownMethod(method)) = &answer {
+            self.unknown(method);
+        }
         answer
+    }
+
+    /// Say once per method that the host's server is older than this window: every call of it
+    /// fails the same way from now on, and a reader that can do without the answer says nothing
+    /// on screen of its own.
+    fn unknown(&self, method: &str) {
+        if self.locked(&self.unknown).insert(method.to_string()) {
+            let _ = self.events.send(Event::Error(format!(
+                "The host's accent-cli has no method {method}: run make server"
+            )));
+        }
     }
 
     /// Tell the server nobody is waiting for that request any more. Nothing to do if it never
@@ -498,33 +520,27 @@ impl Remote {
     /// A copy written here since it was fetched or pushed is never fetched over: what the pen drew
     /// is in it and nowhere else. It is handed back as it is, for a [`push`](Self::push) to send,
     /// beside the host's file if that has moved on.
-    pub fn fetch(&self, rel: &str) -> std::io::Result<PathBuf> {
+    pub fn fetch(&self, rel: &str) -> Result<PathBuf> {
         self.fetch_with(rel, &|_, _| ())
     }
 
     /// [`fetch`](Self::fetch), telling `progress` the bytes received so far and how many there
     /// are, as they arrive. Nothing is told when the cached copy is current.
-    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
+    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<PathBuf> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
         ) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{rel} is outside the vault"),
-            ));
+            return Err(crate::paths::outside(rel));
         };
-        let stamp = Stamp::hold(&stamp)?;
+        let stamp = Stamp::hold(&stamp).map_err(|e| cached(&dest, e))?;
         let stamped = stamp.read();
         if unsent(&dest, stamped) {
             return Ok(dest);
         }
         let current: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let Some(current) = current else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{rel} is not in the vault"),
-            ));
+            return Err(accent_core::Error::NotFound(rel.to_string()).into());
         };
         // The remote etag against the one the cached copy was written with. Size and mtime are
         // enough here: the inode is the remote's, and it is in the etag we stored.
@@ -533,7 +549,7 @@ impl Remote {
         }
 
         if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir)?;
+            std::fs::create_dir_all(dir).map_err(|e| cached(dir, e))?;
         }
         self.receive(rel, &dest, current.size, progress)?;
         if let Ok(copy) = crate::Etag::of(&dest) {
@@ -561,27 +577,21 @@ impl Remote {
     /// A file no longer on the host — moved or deleted there, while the copy was being written or
     /// was on its way — is `NotFound`, and nothing goes up: under the old name it would come back.
     /// The reader that follows a rename sends it again under the new one.
-    pub fn push(&self, rel: &str) -> std::io::Result<Pushed> {
+    pub fn push(&self, rel: &str) -> Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
         ) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{rel} is outside the vault"),
-            ));
+            return Err(crate::paths::outside(rel));
         };
-        let stamp = Stamp::hold(&stamp)?;
+        let stamp = Stamp::hold(&stamp).map_err(|e| cached(&dest, e))?;
         let stamped = stamp.read();
         if stamped.is_some() && !unsent(&dest, stamped) {
             return Ok(Pushed::Sent);
         }
         let current: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let Some(current) = current else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{rel} was moved or deleted"),
-            ));
+            return Err(accent_core::Error::NotFound(rel.to_string()).into());
         };
         if Some(current) != stamped.map(|s| s.host) {
             return Ok(self.push_beside(&dest, rel));
@@ -650,7 +660,7 @@ impl Remote {
     }
 
     /// The first of `<name> (edited).pdf`, `<name> (edited 2).pdf`, … the host does not hold.
-    fn free_edited_name(&self, rel: &str) -> std::io::Result<String> {
+    fn free_edited_name(&self, rel: &str) -> Result<String> {
         for nth in 1..=EDITED_COPIES {
             let name = edited_name(rel, nth);
             let held: Option<crate::Etag> = self.call("stat", json!([&name]))?;
@@ -658,25 +668,17 @@ impl Remote {
                 return Ok(name);
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("{EDITED_COPIES} edited copies of it are already there"),
-        ))
+        Err(accent_core::Error::AlreadyExists(edited_name(rel, EDITED_COPIES)).into())
     }
 
     /// Copy a local file into the vault. The remote watcher indexes it as it lands.
-    pub fn upload(&self, local: &Path, rel: &str) -> std::io::Result<()> {
+    pub fn upload(&self, local: &Path, rel: &str) -> Result<()> {
         self.upload_with(local, rel, &|_, _| ())
     }
 
     /// [`upload`](Self::upload), read and sent a chunk at a time, telling `progress` the bytes
     /// sent so far and how many there are.
-    pub fn upload_with(
-        &self,
-        local: &Path,
-        rel: &str,
-        progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<()> {
+    pub fn upload_with(&self, local: &Path, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<()> {
         self.send(local, rel, false, progress).map(|_| ())
     }
 
@@ -689,9 +691,10 @@ impl Remote {
         rel: &str,
         replace: bool,
         progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<crate::Etag> {
-        let file = std::fs::File::open(local)?;
-        let sent = crate::Etag::from_meta(&file.metadata()?);
+    ) -> Result<crate::Etag> {
+        let unread = |e| accent_core::Error::io(local.display(), e);
+        let file = std::fs::File::open(local).map_err(unread)?;
+        let sent = crate::Etag::from_meta(&file.metadata().map_err(unread)?);
         link::send(
             &self.put_into(rel, sent.size, replace),
             file,
@@ -707,7 +710,7 @@ impl Remote {
     /// embed and the preview at once, not on the host watcher's debounce, which raced the
     /// preview's. Its watcher takes the file in all the same, so a telling that fails is no
     /// failed write.
-    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
+    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
         let size = bytes.len() as u64;
         link::send(&self.put_into(rel, size, false), bytes, size, &|_, _| ())?;
         if let Err(e) = self.call::<()>("wrote", json!([rel])) {
@@ -723,18 +726,13 @@ impl Remote {
     }
 
     /// Copy a file out of the vault to somewhere on this machine.
-    pub fn download(&self, rel: &str, dest: &Path) -> std::io::Result<()> {
+    pub fn download(&self, rel: &str, dest: &Path) -> Result<()> {
         self.download_with(rel, dest, &|_, _| ())
     }
 
     /// [`download`](Self::download), telling `progress` the bytes received so far and how many
     /// there are, as they arrive.
-    pub fn download_with(
-        &self,
-        rel: &str,
-        dest: &Path,
-        progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<()> {
+    pub fn download_with(&self, rel: &str, dest: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
         let size: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let size = size.map_or(0, |etag| etag.size);
         self.receive(rel, dest, size, progress)
@@ -750,7 +748,7 @@ impl Remote {
         dest: &Path,
         total: u64,
         progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<()> {
+    ) -> Result<()> {
         let mut child = self
             .ssh(&ssh::run(
                 &self.url,
@@ -760,11 +758,12 @@ impl Remote {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(link::no_ssh)?;
         let mut part = dest.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);
-        let received = (|| {
+        let received = (|| -> std::io::Result<()> {
             let mut stdout = child
                 .stdout
                 .take()
@@ -781,13 +780,16 @@ impl Remote {
                 progress(done, total);
             }
         })();
-        let out = child.wait_with_output()?;
-        let finished = received.and_then(|()| match out.status.success() {
-            true => std::fs::rename(&part, dest),
-            false => Err(std::io::Error::other(
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            )),
-        });
+        let out = child.wait_with_output().map_err(link::no_ssh)?;
+        let finished =
+            received
+                .map_err(|e| cached(&part, e))
+                .and_then(|()| match out.status.success() {
+                    true => std::fs::rename(&part, dest).map_err(|e| cached(dest, e)),
+                    false => Err(Error::Remote(
+                        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                    )),
+                });
         if finished.is_err() {
             let _ = std::fs::remove_file(&part);
         }
@@ -1128,6 +1130,73 @@ mod tests {
     use super::{Stamp, Stamped, carry, edited_name, kept_path, unsent};
     use std::path::Path;
     use std::time::Duration;
+
+    /// A method the host's server lacks fails as itself at every call, and the window is told
+    /// once that the server is older than it: the readers that do without an answer say nothing.
+    #[test]
+    fn a_method_the_host_lacks_is_said_once() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, vault_events) = crate::Local::open_at(
+            dir.path(),
+            &dir.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        let (server_in, client_out) = std::io::pipe().unwrap();
+        let (client_in, server_out) = std::io::pipe().unwrap();
+        let server = std::thread::spawn(move || {
+            crate::rpc::serve_local(
+                vault,
+                vault_events,
+                server_in,
+                server_out,
+                crate::rpc::SILENCE,
+            )
+        });
+        let (events, heard) = std::sync::mpsc::channel();
+        let client = Client::new(
+            Box::new(client_out),
+            Box::new(client_in),
+            events.clone(),
+            Box::new(|| {}),
+        );
+        let url = ssh::parse("ssh://box/srv/vault").unwrap();
+        let remote = Remote {
+            ctl: ssh::control_path(&url),
+            root: RwLock::new(url.path.clone()),
+            url,
+            config: Mutex::new(VaultConfig::default()),
+            ghost: Mutex::new(true),
+            words: Mutex::new(true),
+            hellos: Mutex::new(()),
+            client: Mutex::new(Some(Arc::new(client))),
+            docs: Mutex::new(HashMap::new()),
+            unindexed: Mutex::new(BTreeSet::new()),
+            unknown: Mutex::new(BTreeSet::new()),
+            forwards: Mutex::new(Vec::new()),
+            state: Arc::new(Mutex::new(State::Connected)),
+            child: Mutex::new(None),
+            events,
+        };
+        for _ in 0..2 {
+            let e = remote.call::<()>("nonesuch", json!([])).unwrap_err();
+            assert_eq!(e, Error::UnknownMethod("nonesuch".to_string()));
+        }
+        drop(remote);
+        server.join().unwrap();
+        let said: Vec<String> = heard
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Error(said) => Some(said),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            said,
+            ["The host's accent-cli has no method nonesuch: run make server"]
+        );
+    }
 
     /// A renamed file's cached copy goes where the host put the file, into a folder the cache
     /// does not have yet; nothing cached is nothing to move.

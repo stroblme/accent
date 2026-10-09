@@ -196,14 +196,6 @@ pub(super) fn verb(from: &str, to: &str) -> &'static str {
     }
 }
 
-/// Whether the file was already there, from an `anyhow` chain that has wrapped the `io::Error`.
-pub(super) fn already_exists(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| {
-        c.downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::AlreadyExists)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

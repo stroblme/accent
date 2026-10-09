@@ -7,6 +7,8 @@
 use super::changes::Section;
 use super::*;
 use crate::dialogs;
+use accent_api::Error;
+use accent_core::Error as Core;
 
 /// What a refusal does with git's own words, beyond saying them.
 pub(super) enum Fail {
@@ -31,7 +33,7 @@ impl Panel {
         what: String,
         sync: bool,
         on_err: Fail,
-        job: impl FnOnce(&Vault, &Repo) -> anyhow::Result<String> + Send + 'static,
+        job: impl FnOnce(&Vault, &Repo) -> accent_api::Result<String> + Send + 'static,
     ) {
         let spin = sync.then(|| self.sync_slot.clone());
         self.command_then(what, spin, on_err, job, |_| ());
@@ -45,7 +47,7 @@ impl Panel {
         what: String,
         spin: Option<gtk::Stack>,
         on_err: Fail,
-        job: impl FnOnce(&Vault, &Repo) -> anyhow::Result<String> + Send + 'static,
+        job: impl FnOnce(&Vault, &Repo) -> accent_api::Result<String> + Send + 'static,
         then: impl FnOnce(&Rc<Panel>) + 'static,
     ) {
         let repo = {
@@ -98,11 +100,11 @@ impl Panel {
                 }
                 Some(Err(e)) => {
                     let message = match lost(&e) {
-                        true => format!("{e:#}; {ON_THE_HOST}"),
-                        false => format!("{e:#}"),
+                        true => format!("{e}; {ON_THE_HOST}"),
+                        false => e.to_string(),
                     };
                     match on_err {
-                        Fail::AskToForce(name) if git::unmerged(&message) => {
+                        Fail::AskToForce(name) if matches!(e, Error::Core(Core::NotMerged(_))) => {
                             panel.confirm_delete(name)
                         }
                         _ => panel.failed(&what, &message),
@@ -291,11 +293,11 @@ impl Panel {
                     pushing.store(false, Ordering::Relaxed);
                     let synced = vault
                         .git_pull(repo)
-                        .map_err(|e| (lost(&e), why_not(&format!("{e:#}"), "the pull")))
+                        .map_err(|e| (lost(&e), why_not(&e.to_string(), "the pull")))
                         .and_then(|_| {
                             pushing.store(true, Ordering::Relaxed);
                             let pushed = vault.git_push(repo);
-                            pushed.map_err(|e| (lost(&e), why_not(&format!("{e:#}"), "the push")))
+                            pushed.map_err(|e| (lost(&e), why_not(&e.to_string(), "the push")))
                         });
                     if let Err((lost, why)) = synced {
                         gone |= lost;
@@ -305,10 +307,11 @@ impl Panel {
                 match (left.is_empty(), repos.len()) {
                     (true, 1) => Ok("Synced 1 repository".to_string()),
                     (true, n) => Ok(format!("Synced {n} repositories")),
-                    (false, _) if gone => {
-                        Err(anyhow::anyhow!("{}; {ON_THE_HOST}", left.join(", ")))
-                    }
-                    (false, _) => Err(anyhow::anyhow!(left.join(", "))),
+                    (false, _) if gone => Err(Error::Core(Core::Git(format!(
+                        "{}; {ON_THE_HOST}",
+                        left.join(", ")
+                    )))),
+                    (false, _) => Err(Error::Core(Core::Git(left.join(", ")))),
                 }
             },
             |_| (),
@@ -740,7 +743,7 @@ impl Panel {
         self: &Rc<Self>,
         what: &'static str,
         paths: Vec<String>,
-        job: impl FnOnce(&Vault, &Repo, &[String]) -> anyhow::Result<String> + Send + 'static,
+        job: impl FnOnce(&Vault, &Repo, &[String]) -> accent_api::Result<String> + Send + 'static,
     ) {
         if paths.is_empty() {
             return;
@@ -962,9 +965,8 @@ const ON_THE_HOST: &str =
     "the host may still finish it, and the pane shows what it did once the link is back";
 
 /// Whether the link went while `e`'s call was out on the host, rather than before it got there.
-fn lost(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<accent_api::Error>()
-        .is_some_and(|e| matches!(e, accent_api::Error::Lost(_)))
+fn lost(e: &Error) -> bool {
+    matches!(e, Error::Lost(_))
 }
 
 fn files(n: usize) -> String {
@@ -1060,12 +1062,11 @@ mod tests {
 
     #[test]
     fn only_a_link_lost_mid_call_may_still_finish_on_the_host() {
-        use accent_api::Error;
         let closed = || "the connection closed".to_string();
-        assert!(lost(&anyhow::Error::new(Error::Lost(closed()))));
+        assert!(lost(&Error::Lost(closed())));
         // Never asked: the host has nothing to finish.
-        assert!(!lost(&anyhow::Error::new(Error::Offline(closed()))));
-        assert!(!lost(&anyhow::anyhow!("rejected")));
+        assert!(!lost(&Error::Offline(closed())));
+        assert!(!lost(&Error::Core(Core::Git("rejected".to_string()))));
     }
 
     #[test]

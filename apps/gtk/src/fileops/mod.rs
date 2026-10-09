@@ -25,14 +25,15 @@ pub use transfer::download_to;
 pub use transfer::{download, import, upload};
 
 use self::paths::{
-    already_exists, is_markdown, levels, moved_path, moves_to, renamed_part, renamed_path,
-    split_typed, typed_dir, typed_path, verb,
+    is_markdown, levels, moved_path, moves_to, renamed_part, renamed_path, split_typed, typed_dir,
+    typed_path, verb,
 };
 use crate::dialogs::{
     CONFIRM, alert, choose, confirm, focus_entry, form, labelled, name_dialog, name_entry,
 };
 use crate::pathfield::{completions, look_again, path_field};
-use accent_api::{FileKind, FileRow, RenamePlan, Vault};
+use accent_api::{Error, FileKind, FileRow, RenamePlan, Vault};
+use accent_core::Error as Core;
 use accent_core::path::{basename, linked_path, parent_dir};
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -44,13 +45,6 @@ use std::sync::Arc;
 
 /// How many linking notes the rename dialog lists before it starts counting instead.
 const LISTED: usize = 20;
-
-/// The one line of an `anyhow` chain a toast has room for. `{e:#}` writes every layer of context
-/// the call collected — three or four clauses by the time it reaches here — where what the reader
-/// can act on is the root: "permission denied", "no space left on device".
-fn why(e: &anyhow::Error) -> String {
-    e.root_cause().to_string()
-}
 
 /// What a toast adds when a file lands where the tree does not list it, so that one just made or
 /// renamed does not seem to have vanished.
@@ -205,12 +199,14 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
                 let name = name.clone();
                 move || {
                     make_parents(&vault, &rel)?;
-                    vault.create_note(&rel, template.as_deref()).map_err(|e| {
-                        match already_exists(&e) {
-                            true => format!("Cannot create {name}: it already exists"),
-                            false => format!("Cannot create {name}: {}", why(&e)),
-                        }
-                    })
+                    vault
+                        .create_note(&rel, template.as_deref())
+                        .map_err(|e| match e {
+                            Error::Core(Core::AlreadyExists(_)) => {
+                                format!("Cannot create {name}: it already exists")
+                            }
+                            e => format!("Cannot create {name}: {e}"),
+                        })
                 }
             })
             .await
@@ -457,7 +453,9 @@ fn new_from_template_with(ops: &Rc<Ops>, templates: Vec<String>) {
         let (name, vault) = (basename(&template).to_string(), ops.vault.clone());
         glib::spawn_future_local(async move {
             let made = crate::work::attempt(&format!("create a note from {name}"), move || {
-                vault.note_from_template(&template).map_err(|e| why(&e))
+                vault
+                    .note_from_template(&template)
+                    .map_err(|e| e.to_string())
             })
             .await;
             match made {
@@ -528,7 +526,7 @@ fn insert_template_with(ops: &Rc<Ops>, title: &str, insert: Insert, templates: V
             let rendered = crate::work::attempt(&format!("insert {name}"), move || {
                 vault
                     .render_template(&template, &title)
-                    .map_err(|e| why(&e))
+                    .map_err(|e| e.to_string())
             })
             .await;
             match rendered {
@@ -753,7 +751,7 @@ fn plan(ops: &Rc<Ops>, moves: Vec<(String, String)>, verb: &'static str) {
     let (vault, ops, name) = (ops.vault.clone(), ops.clone(), several(&sources(&moves)));
     glib::spawn_future_local(async move {
         let planned = crate::work::attempt(&format!("rename {name}"), move || {
-            vault.plan_moves(&moves).map_err(|e| why(&e))
+            vault.plan_moves(&moves).map_err(|e| e.to_string())
         })
         .await;
         match planned {
@@ -882,7 +880,7 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update: bool, verb: &'static str) {
                 }
                 vault
                     .rename(&plan, update)
-                    .map_err(|e| format!("Cannot rename {name}: {}", why(&e)))
+                    .map_err(|e| format!("Cannot rename {name}: {e}"))
             }
         })
         .await;

@@ -49,7 +49,10 @@ impl App {
             let mut found = Vec::new();
             if let (Some(tab), Some(pos)) = (tab, pos) {
                 lang::flush(tab.clone()).await;
-                found = vault.references(&key, pos).await.unwrap_or_default();
+                found = crate::work::or_empty(
+                    "finding the references",
+                    vault.references(&key, pos).await,
+                );
             }
             // A note's answer is its backlinks already.
             let backlinks = found.is_empty() && !note;
@@ -58,7 +61,7 @@ impl App {
                 found =
                     crate::work::off_thread("backlinks", move || vault.backlink_locations(&asked))
                         .await
-                        .and_then(Result::ok)
+                        .map(|found| crate::work::or_empty("listing the backlinks", found))
                         .unwrap_or_default();
             }
             let Some(app) = weak.upgrade() else { return };

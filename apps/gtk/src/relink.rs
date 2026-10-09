@@ -105,10 +105,7 @@ impl App {
                         app.relinked(&pdf, &message);
                     }
                 }
-                Some(Err(e))
-                    if e.downcast_ref::<accent_api::Error>()
-                        .is_some_and(accent_api::Error::unasked) =>
-                {
+                Some(Err(e)) if e.unasked() => {
                     let mut relinks = pdf.relinks.borrow_mut();
                     relinks.running = false;
                     relinks.queue.push_front((edit, step));

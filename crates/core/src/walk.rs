@@ -54,6 +54,8 @@ const SKIP_DIRS: &[&str] = &[
     ".pytest_cache",
     ".ruff_cache",
     ".tox",
+    // Lean's packages and builds: Mathlib's alone is gigabytes.
+    ".lake",
 ];
 
 /// Files that mark their directory as somebody's dependency or build tree.

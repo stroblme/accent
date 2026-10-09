@@ -44,6 +44,9 @@ pub struct Bar {
     /// clear the other.
     vault_busy: RefCell<Option<String>>,
     transfers: RefCell<Vec<String>>,
+    /// How far the language server has checked the tab in front, which has no answer about the
+    /// lines below meanwhile.
+    checking: RefCell<Option<String>>,
     provider_busy: RefCell<Option<String>>,
     /// Stop while the vault is indexing, Resume while it is paused, nothing otherwise. It sits
     /// beside [`Bar::progress`] and belongs to the vault's line alone: a transfer and the
@@ -121,6 +124,7 @@ impl Bar {
             progress,
             vault_busy: RefCell::new(None),
             transfers: RefCell::new(Vec::new()),
+            checking: RefCell::new(None),
             provider_busy: RefCell::new(None),
             index,
             index_label,
@@ -184,6 +188,13 @@ impl Bar {
         self.show_busy();
     }
 
+    /// The language server is checking the tab in front from 0-based `line` on, or is done with
+    /// it (`None`): "Checking… line 12".
+    pub fn set_checking(&self, line: Option<u32>) {
+        *self.checking.borrow_mut() = line.map(|line| format!("Checking… line {}", line + 1));
+        self.show_busy();
+    }
+
     /// A copy to or from the host has started (`running`) or ended: "Downloading a.pdf…". A file's
     /// size is not asked for, so one file says that it runs rather than how far it has got; a
     /// batch counts its files ([`Bar::retell_transfer`]). A close waiting for git says so here too.
@@ -223,15 +234,21 @@ impl Bar {
 
     /// One line for all of them, and the vault's own work wins: opening a document or reading the
     /// vault is what the reader is waiting for. A copy they asked for comes next, the latest one
-    /// still running, and a suggestion index last, being a convenience nobody asked about.
+    /// still running, then the check of the tab in front, and a suggestion index last, being a
+    /// convenience nobody asked about.
     fn show_busy(&self) {
         let vault = self.vault_busy.borrow();
         let transfers = self.transfers.borrow();
+        let checking = self.checking.borrow();
         let provider = self.provider_busy.borrow();
         let transfer = transfers.last().map(String::as_str);
         set(
             &self.progress,
-            vault.as_deref().or(transfer).or(provider.as_deref()),
+            vault
+                .as_deref()
+                .or(transfer)
+                .or(checking.as_deref())
+                .or(provider.as_deref()),
         );
     }
 

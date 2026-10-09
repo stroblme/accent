@@ -2,6 +2,7 @@
 //! and restores between runs.
 
 use super::*;
+use crate::work::or_empty;
 use accent_api::CodeSymbol;
 use accent_api::git::Sides;
 
@@ -57,10 +58,10 @@ impl App {
             let loaded = crate::work::off_thread("corpus", move || {
                 // Never widened: Go to File has no All toggle, and the tree is where an ignored
                 // file is reached, dimmed but listed.
-                let mut files = vault.file_paths(false).unwrap_or_default();
+                let mut files = or_empty("listing the files", vault.file_paths(false));
                 let ignored = palette::with_ignored(
                     &mut files,
-                    vault.ignored_notes(relist).unwrap_or_default(),
+                    or_empty("listing the ignored notes", vault.ignored_notes(relist)),
                 );
                 let real = files.len();
                 // What this window opened and is gone since: deleted, or renamed where no event
@@ -76,17 +77,15 @@ impl App {
                         .collect()
                 };
                 // A question the vault cannot answer leaves the files alone, and the aliases none.
-                files.extend(vault.missing_notes().unwrap_or_default());
-                let aliases = vault.note_aliases().unwrap_or_default();
+                files.extend(or_empty("listing the missing notes", vault.missing_notes()));
+                let aliases = or_empty("listing the aliases", vault.note_aliases());
                 (
                     (files, real, ignored, gone, aliases),
-                    vault
-                        .tags()
-                        .unwrap_or_default()
+                    or_empty("listing the tags", vault.tags())
                         .into_iter()
                         .map(|(name, _)| name)
                         .collect::<Vec<_>>(),
-                    vault.recent_files(RECENT_FILES).unwrap_or_default(),
+                    or_empty("listing the recent files", vault.recent_files(RECENT_FILES)),
                 )
             })
             .await;
@@ -191,14 +190,9 @@ impl App {
                             vault.find_symbols(&query, palette::MAX_RESULTS)
                         })
                         .await;
-                        done(match found {
-                            Some(Ok(found)) => found,
-                            Some(Err(e)) => {
-                                tracing::debug!("finding symbols: {e:#}");
-                                Vec::new()
-                            }
-                            None => Vec::new(),
-                        });
+                        done(
+                            found.map_or_else(Vec::new, |found| or_empty("finding symbols", found)),
+                        );
                     });
                 }
             }),

@@ -380,8 +380,8 @@ impl Carry {
     fn send(
         &self,
         cut: bool,
-        make_dir: impl Fn(&str) -> std::io::Result<()>,
-        send: impl Fn(&Path, &str) -> std::io::Result<()>,
+        make_dir: impl Fn(&str) -> accent_api::Result<()>,
+        send: impl Fn(&Path, &str) -> accent_api::Result<()>,
     ) -> (usize, Vec<String>) {
         let mut failed = self.unread.clone();
         let under = |rel: &str, failed: &[String]| {
@@ -632,12 +632,12 @@ mod tests {
             |rel| {
                 made.borrow_mut().push(rel.to_string());
                 match rel {
-                    "P/bad" => Err(std::io::Error::other("no")),
+                    "P/bad" => Err(accent_core::Error::Io("no".into()).into()),
                     _ => Ok(()),
                 }
             },
             |_, rel| match rel {
-                "P/c" => Err(std::io::Error::other("no")),
+                "P/c" => Err(accent_core::Error::Io("no".into()).into()),
                 _ => Ok(()),
             },
         );
@@ -661,7 +661,7 @@ mod tests {
             true,
             |_| Ok(()),
             |_, rel| match rel {
-                "P/kept/b" => Err(std::io::Error::other("no")),
+                "P/kept/b" => Err(accent_core::Error::Io("no".into()).into()),
                 _ => Ok(()),
             },
         );

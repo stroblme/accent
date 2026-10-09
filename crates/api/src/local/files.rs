@@ -14,7 +14,7 @@ use super::{Local, Msg};
 use crate::paths::{accent_conflict_name, with_md};
 use crate::{
     Etag, FileEdits, FileKind, KeptLink, Options, PageEdit, Regex, RenamePlan, RenameReport,
-    RepageReport, ReplaceReport, SaveError, UndoReport, fs, locked,
+    RepageReport, ReplaceReport, UndoReport, fs, locked,
 };
 
 /// Most text a Replace All keeps to undo itself with. The pre-images are held in memory, and the
@@ -41,9 +41,8 @@ impl Local {
     /// ponytail: the write runs on the calling thread, because an fsync of a note is well under a
     /// frame on an SSD. If a slow disk ever shows up, move the write to the worker and answer
     /// with an event.
-    pub fn save(&self, rel: &str, text: &str, expected: Option<Etag>) -> Result<Etag, SaveError> {
-        let path = self.resolve(rel).map_err(io::Error::from)?;
-        let etag = fs::write_note(&path, text, expected)?;
+    pub fn save(&self, rel: &str, text: &str, expected: Option<Etag>) -> Result<Etag> {
+        let etag = fs::write_note(&self.resolve(rel)?, text, expected).map_err(named(rel))?;
         self.post(Msg::Saved {
             rel: rel.to_string(),
             etag,
@@ -664,7 +663,9 @@ impl Local {
         for Before { rel, text, etag } in before {
             match self.save(&rel, &text, Some(etag)) {
                 Ok(_) => report.restored.push(rel),
-                Err(SaveError::ChangedOnDisk { .. }) => report.skipped.push(rel),
+                Err(Error::Core(accent_core::Error::ChangedOnDisk { .. })) => {
+                    report.skipped.push(rel)
+                }
                 Err(e) => report.failed.push((rel, e.to_string())),
             }
         }

@@ -1,4 +1,4 @@
-//! The left sidebar: Files / Search / Info / Git / Ports / Outline / Properties in a view
+//! The left sidebar: Files / Search / Info / Git / Ports / Outline / Code / Properties in a view
 //! switcher.
 //!
 //! The pane knows nothing about the vault. The file tree arrives as a finished widget and every
@@ -7,6 +7,7 @@
 //! the Ports pane is built with what forwards a port and nothing else, which is what keeps a
 //! pane from being wired to machinery it never calls.
 
+mod code;
 mod details;
 mod info;
 mod outline;
@@ -21,9 +22,10 @@ pub use ports::Data as PortsData;
 pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
 
+use accent_api::Goals;
 use accent_core::config::InfoPane;
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{glib, pango};
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
@@ -93,6 +95,10 @@ pub struct Sidebar {
     /// The list in `outline_bin` while it holds a document's outline as rows, kept to be refilled
     /// rather than rebuilt while that document is edited or read.
     outline_list: RefCell<Option<outline::List>>,
+    /// The Code pane: what holds at the caret beyond the text, and its page, hidden until the
+    /// window says the tab in front has something for it.
+    code: code::Code,
+    code_page: adw::ViewStackPage,
     /// The Properties pane: the diagram in front's own widget, and the page, hidden while no
     /// diagram is in front.
     properties_bin: adw::Bin,
@@ -266,6 +272,11 @@ impl Sidebar {
         outline_bin.set_child(Some(&outline::empty()));
         stack.add_titled_with_icon(&outline_bin, Some("outline"), "Outline", outline::ICON);
 
+        let code = code::Code::new();
+        stack.add_titled_with_icon(&code.root, Some("code"), "Code", code::ICON);
+        let code_page = stack.page(&code.root);
+        code_page.set_visible(false);
+
         let properties_bin = adw::Bin::builder().vexpand(true).build();
         stack.add_titled_with_icon(
             &properties_bin,
@@ -349,6 +360,8 @@ impl Sidebar {
             details,
             outline_bin,
             outline_list: RefCell::new(None),
+            code,
+            code_page,
             properties_bin,
             properties_page,
         }
@@ -372,6 +385,38 @@ impl Sidebar {
                 self.properties_bin.set_child(gtk::Widget::NONE);
             }
         }
+    }
+
+    /// Show or hide the Code pane, which the window decides: a hidden one on screen gives way to
+    /// the Outline, as the Properties pane does.
+    pub fn set_code_visible(&self, on: bool) {
+        if !on && self.is_showing("code") {
+            self.stack.set_visible_child_name("outline");
+        }
+        self.code_page.set_visible(on);
+    }
+
+    /// Clear the Code pane if what it shows is about another tab than `key`, the one in front,
+    /// and say the file is being checked (`checking`) while no answer has come for it.
+    pub fn sync_code(&self, key: &str, checking: bool) {
+        self.code.sync(key, checking);
+    }
+
+    /// Show the goals at the caret of the tab `key` in the Code pane, in `font`, the editor's at
+    /// the tab's zoom; `None` says there are none.
+    pub fn set_goals(
+        &self,
+        key: &str,
+        goals: Option<&Goals>,
+        font: Option<&pango::FontDescription>,
+    ) {
+        self.code.set(key, goals, font);
+    }
+
+    /// The goals the Code pane shows, for `ACCENT_BENCH_GOALS`.
+    #[cfg(feature = "bench")]
+    pub fn shown_goals(&self) -> Option<Vec<String>> {
+        self.code.goals()
     }
 
     /// Put `divider` back to its default if it is one of the sidebar's own, reporting whether it
@@ -662,7 +707,7 @@ impl Sidebar {
         self.panes.as_ref().map(|panes| panes.tags_view.clone())
     }
 
-    /// Show a pane by name: "files", "search", "info", "git", "ports", "outline" or
+    /// Show a pane by name: "files", "search", "info", "git", "ports", "outline", "code" or
     /// "properties",
     /// focusing its entry where there is one, all it holds selected, as the find bar's Ctrl+F
     /// leaves its box: what is typed next is a new query.
@@ -847,7 +892,7 @@ impl Sidebar {
 fn live(stack: &adw::ViewStack, info: &info::Info, name: &str) -> bool {
     stack.visible_child_name().as_deref() == Some("info")
         && info.root.visible_child_name().as_deref() == Some("sections")
-        && info.section(name).is_some_and(info::Section::is_open)
+        && info.section(name).is_some_and(widgets::Section::is_open)
 }
 
 /// The References section's body: the rows, and the line shown instead when there are none.

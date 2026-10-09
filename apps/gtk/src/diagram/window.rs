@@ -1,7 +1,9 @@
 //! The window's side of a diagram tab: opening one, saving it through the same etag gate a
 //! note's save goes through, what the watcher says about its file, and the diagram commands.
 
-use accent_core::fs::{Digest, Etag, SaveError};
+use accent_api::Error;
+use accent_core::Error as Core;
+use accent_core::fs::{Digest, Etag};
 use accent_drawio::File;
 
 use super::{DiagramTab, Tool};
@@ -16,11 +18,11 @@ enum Parsed {
     Diagram(File, Etag, Digest),
     /// Not something to draw on, and why: a status page's title and sentence.
     Refused(&'static str, String),
-    Failed(std::io::Error),
+    Failed(Error),
 }
 
 /// Read and parse on a worker thread: the file is XML of up to 16 MiB.
-fn parse(read: std::io::Result<accent_core::fs::Read>) -> Parsed {
+fn parse(read: accent_api::Result<accent_core::fs::Read>) -> Parsed {
     match read {
         Ok(accent_core::fs::Read::Text(text)) => parse_text(text),
         Ok(accent_core::fs::Read::Binary { .. }) => Parsed::Refused(
@@ -370,13 +372,13 @@ impl App {
                     }
                 }
                 editor::Landing::Behind(etag) => tab.save.etag.set(Some(etag)),
-                editor::Landing::Failed(SaveError::ChangedOnDisk { .. }) if report => {
+                editor::Landing::Failed(Error::Core(Core::ChangedOnDisk { .. })) if report => {
                     tab.show_changed();
                     if explicit {
                         app.resolve_diagram(tab);
                     }
                 }
-                editor::Landing::Failed(SaveError::Offline) if report => {
+                editor::Landing::Failed(e) if report && e.is_offline() => {
                     app.show_offline();
                     if explicit {
                         app.toast("Not connected, so nothing was saved");
@@ -394,7 +396,7 @@ impl App {
         self: &Rc<Self>,
         tab: &Rc<DiagramTab>,
         expected: Option<Etag>,
-    ) -> Result<(), SaveError> {
+    ) -> Result<(), Error> {
         self.land_diagram(tab, false);
         let (etag, digest) = self.writer(tab)(&tab.text(), expected)?;
         tab.mark_clean(etag);
@@ -406,7 +408,7 @@ impl App {
 
     /// [`write_diagram`](Self::write_diagram) at the tab's own etag, if it has anything to
     /// write.
-    pub(crate) fn flush_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) -> Result<(), SaveError> {
+    pub(crate) fn flush_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) -> Result<(), Error> {
         self.land_diagram(tab, false);
         if !tab.save.modified.get() {
             return Ok(());

@@ -42,3 +42,15 @@ pub(crate) async fn attempt<T: Send + 'static, E: std::fmt::Display + Send + 'st
         None => Err(format!("Cannot {what}: the worker stopped")),
     }
 }
+
+/// A reader's answer, or nothing where it can do without one: a list the palette fills, the tail
+/// of a search. A failure is said in the log rather than read as an empty answer nobody could tell
+/// from a real one, except a call nobody was waiting for any more.
+pub fn or_empty<T: Default>(what: &str, answer: accent_api::Result<T>) -> T {
+    answer.unwrap_or_else(|e| {
+        if e != accent_api::Error::Core(accent_core::Error::Cancelled) {
+            tracing::warn!("{what}: {e}");
+        }
+        T::default()
+    })
+}

@@ -365,7 +365,11 @@ async fn bench_dialogs(app: &Rc<App>) -> Vec<(glib::GString, glib::WeakRef<adw::
     }
     let mut dialogs = vec![bench_cancel(app)];
     if let Some(tab) = app.open_tabs().into_iter().next() {
-        app.ask_unsaved(&tab, &SaveError::Offline, |_, _| {});
+        app.ask_unsaved(
+            &tab,
+            &accent_api::Error::Offline("not connected".to_string()),
+            |_, _| {},
+        );
         dialogs.push(bench_cancel(app));
     }
     dialogs.into_iter().flatten().collect()

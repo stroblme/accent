@@ -41,7 +41,7 @@ pub use accent_core::fs;
 
 pub use accent_core::config::{Config, LspConfig, Session, VaultConfig};
 pub use accent_core::diff::{DiffLine, Op};
-pub use accent_core::fs::{Etag, Read, SaveError, Text};
+pub use accent_core::fs::{Etag, Read, Text};
 // The module as well as its types: the git operations take a `Repo`, not a `Vault`, so callers
 // reach them as `accent_api::git::status(&repo)` after asking the vault which repos there are.
 pub use accent_core::code::SymbolKind;
@@ -55,8 +55,8 @@ pub use accent_core::page_edit::PageEdit;
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
 pub use language::{
-    Call, Completion, Completions, Diagnostic, Fold, Hover, Kind, Location, PdfPages, Pos, Range,
-    Severity, Signature, Support, Symbol, Task, TextEdit, Waits,
+    Call, Completion, Completions, Diagnostic, Fold, Goals, Hover, Kind, Location, PdfPages, Pos,
+    Range, Severity, Signature, Support, Symbol, Task, TextEdit, Waits,
 };
 
 // ---------------------------------------------------------------- public data
@@ -124,6 +124,13 @@ pub enum Event {
         what: String,
         busy: bool,
         message: Option<String>,
+    },
+    /// A language server is checking `rel` from 0-based `line` on, and is done with it at `None`.
+    /// Lean's `$/lean/fileProgress` is the one sender: a file importing Mathlib is minutes of it,
+    /// during which the server has no answer about the lines below `line`.
+    Checking {
+        rel: String,
+        line: Option<u32>,
     },
 }
 

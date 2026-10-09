@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+ This file is part of GtkSourceView
+
+ Authors: Elias Aebi
+ Copyright (C) 2021-2022 Elias Aebi
+
+ GtkSourceView is free software; you can redistribute it and/or
+ modify it under the terms of the GNU Lesser General Public
+ License as published by the Free Software Foundation; either
+ version 2.1 of the License, or (at your option) any later version.
+
+ GtkSourceView is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ Lesser General Public License for more details.
+
+ You should have received a copy of the GNU Lesser General Public License
+ along with this library; if not, see <http://www.gnu.org/licenses/>.
+
+-->
+<!--
+  accent's copy of GtkSourceView 5.20.0's data/language-specs/lean.lang, read ahead of the one
+  GtkSourceView ships (the app prepends its GResource folder to the language manager's search
+  path). Upstream's keywords predate Lean 4. The changes follow vscode-lean4's
+  syntaxes/lean4.json (commit dead846a): the keywords Lean 4 adds, and Mathlib's `lemma`;
+  declaration modifiers and `Prop`, `Type`, `Sort` as types; `sorry` and `admit` as errors; and
+  the `#` commands widened to lean4.json's list. A keyword or modifier after a `.` is a name, as
+  in lean4.json (`Nat.rec`). Everything else is upstream's, unchanged; diff it against a newer
+  upstream file when GtkSourceView moves on.
+-->
+<language id="lean" name="Lean" version="2.0" _section="Source">
+  <metadata>
+    <property name="mimetypes">text/x-lean</property>
+    <property name="globs">*.lean</property>
+    <property name="line-comment-start">--</property>
+    <property name="block-comment-start">/-</property>
+    <property name="block-comment-end">-/</property>
+  </metadata>
+
+  <styles>
+    <style id="comment" name="Comment" map-to="def:comment"/>
+    <style id="attribute" name="Attribute" map-to="def:preprocessor"/>
+    <style id="command" name="Command" map-to="def:preprocessor"/>
+    <style id="keyword" name="Keyword" map-to="def:keyword"/>
+    <style id="modifier" name="Modifier" map-to="def:type"/>
+    <style id="type" name="Type" map-to="def:type"/>
+    <style id="sorry" name="Unfinished Proof" map-to="def:error"/>
+    <style id="string" name="String" map-to="def:string"/>
+    <style id="character" name="Character" map-to="def:character"/>
+    <style id="escaped-character" name="Escaped Character" map-to="def:special-char"/>
+    <style id="numeric" name="Numeric" map-to="def:number"/>
+    <style id="boolean" name="Boolean" map-to="def:boolean"/>
+    <style id="identifier" name="Identifier"/>
+  </styles>
+
+  <definitions>
+    <context id="line-comment" style-ref="comment" end-at-line-end="true" class="comment" class-disabled="no-spell-check">
+      <start>--</start>
+      <include>
+        <context ref="def:in-comment"/>
+      </include>
+    </context>
+
+    <context id="block-comment" style-ref="comment" class="comment" class-disabled="no-spell-check">
+      <start>/-</start>
+      <end>-/</end>
+      <include>
+        <context ref="def:in-comment"/>
+        <context ref="block-comment"/>
+      </include>
+    </context>
+
+    <context id="attribute" style-ref="attribute">
+      <start>@\[</start>
+      <end>\]</end>
+      <include>
+        <context ref="lean"/>
+      </include>
+    </context>
+
+    <context id="command" style-ref="command">
+      <match extended="true">
+        \#(?:
+            check
+          | check_failure
+          | check_simp
+          | check_tactic
+          | check_tactic_failure
+          | discr_tree_key
+          | discr_tree_simp_key
+          | eval
+          | eval!
+          | guard
+          | guard_expr
+          | guard_msgs
+          | print
+          | reduce
+          | synth
+          | version
+          | where
+          | widget
+          | with_exporting
+        )\b
+      </match>
+    </context>
+
+    <context id="keyword" style-ref="keyword">
+      <prefix>(?&lt;!\.)\%[</prefix>
+      <suffix>\%](?!\.)</suffix>
+      <keyword>abbrev</keyword>
+      <keyword>axiom</keyword>
+      <keyword>break</keyword>
+      <keyword>by</keyword>
+      <keyword>calc</keyword>
+      <keyword>catch</keyword>
+      <keyword>class</keyword>
+      <keyword>continue</keyword>
+      <keyword>decreasing_by</keyword>
+      <keyword>def</keyword>
+      <keyword>deriving</keyword>
+      <keyword>do</keyword>
+      <keyword>elab</keyword>
+      <keyword>elab_rules</keyword>
+      <keyword>else</keyword>
+      <keyword>end</keyword>
+      <keyword>example</keyword>
+      <keyword>exists</keyword>
+      <keyword>export</keyword>
+      <keyword>extends</keyword>
+      <keyword>finally</keyword>
+      <keyword>for</keyword>
+      <keyword>forall</keyword>
+      <keyword>from</keyword>
+      <keyword>fun</keyword>
+      <keyword>have</keyword>
+      <keyword>haveI</keyword>
+      <keyword>if</keyword>
+      <keyword>import</keyword>
+      <keyword>in</keyword>
+      <keyword>include</keyword>
+      <keyword>inductive</keyword>
+      <keyword>infix</keyword>
+      <keyword>infixl</keyword>
+      <keyword>infixr</keyword>
+      <keyword>instance</keyword>
+      <keyword>lemma</keyword>
+      <keyword>let</keyword>
+      <keyword>letI</keyword>
+      <keyword>macro</keyword>
+      <keyword>macro_rules</keyword>
+      <keyword>match</keyword>
+      <keyword>mut</keyword>
+      <keyword>mutual</keyword>
+      <keyword>namespace</keyword>
+      <keyword>nofun</keyword>
+      <keyword>nomatch</keyword>
+      <keyword>notation</keyword>
+      <keyword>omit</keyword>
+      <keyword>opaque</keyword>
+      <keyword>open</keyword>
+      <keyword>postfix</keyword>
+      <keyword>prefix</keyword>
+      <keyword>prelude</keyword>
+      <keyword>rec</keyword>
+      <keyword>repeat</keyword>
+      <keyword>return</keyword>
+      <keyword>section</keyword>
+      <keyword>set_option</keyword>
+      <keyword>show</keyword>
+      <keyword>structure</keyword>
+      <keyword>suffices</keyword>
+      <keyword>syntax</keyword>
+      <keyword>termination_by</keyword>
+      <keyword>then</keyword>
+      <keyword>theorem</keyword>
+      <keyword>try</keyword>
+      <keyword>universe</keyword>
+      <keyword>unless</keyword>
+      <keyword>using</keyword>
+      <keyword>variable</keyword>
+      <keyword>where</keyword>
+      <keyword>while</keyword>
+      <keyword>with</keyword>
+      <keyword>λ</keyword>
+    </context>
+
+    <context id="modifier" style-ref="modifier">
+      <prefix>(?&lt;!\.)\%[</prefix>
+      <suffix>\%](?!\.)</suffix>
+      <keyword>local</keyword>
+      <keyword>meta</keyword>
+      <keyword>noncomputable</keyword>
+      <keyword>nonrec</keyword>
+      <keyword>partial</keyword>
+      <keyword>private</keyword>
+      <keyword>protected</keyword>
+      <keyword>public</keyword>
+      <keyword>scoped</keyword>
+      <keyword>unsafe</keyword>
+    </context>
+
+    <context id="type" style-ref="type">
+      <keyword>Prop</keyword>
+      <keyword>Sort</keyword>
+      <keyword>Type</keyword>
+    </context>
+
+    <context id="sorry" style-ref="sorry">
+      <keyword>admit</keyword>
+      <keyword>sorry</keyword>
+    </context>
+
+    <context id="escaped-character" style-ref="escaped-character">
+      <match extended="true">
+        \\(?:
+            \\
+          | \"
+          | \'
+          | n
+          | t
+          | x[0-9a-fA-F]{2}
+        )
+      </match>
+    </context>
+
+    <context id="string" style-ref="string" class="string" class-disabled="no-spell-check">
+      <start>"</start>
+      <end>"</end>
+      <include>
+        <context ref="escaped-character"/>
+      </include>
+    </context>
+
+    <context id="character" style-ref="character" end-at-line-end="true">
+      <start>'</start>
+      <end>'</end>
+      <include>
+        <context ref="escaped-character"/>
+      </include>
+    </context>
+
+    <context id="numeric" style-ref="numeric">
+      <match extended="true">
+          0[bB][01]+
+        | 0[oO][0-7]+
+        | 0[xX][0-9a-fA-F]+
+        | [0-9]+
+      </match>
+    </context>
+
+    <context id="boolean" style-ref="boolean">
+      <keyword>true</keyword>
+      <keyword>false</keyword>
+    </context>
+
+    <context id="identifier" style-ref="identifier">
+      <match extended="true">
+        (?![λΠΣ])[a-zA-Zα-ωΑ-Ωἀ-῾ϊ-ϻ℀-⅏_]
+        (?:(?![λΠΣ])[a-zA-Zα-ωΑ-Ωἀ-῾ϊ-ϻ℀-⅏_0-9'ⁿ₀-₉ₐ-ₜᵢ-ᵪ])*
+        | «[^«»\r\n\t]*»
+      </match>
+    </context>
+
+    <context id="lean" class="no-spell-check">
+      <include>
+        <context ref="line-comment"/>
+        <context ref="block-comment"/>
+        <context ref="attribute"/>
+        <context ref="command"/>
+        <context ref="keyword"/>
+        <context ref="modifier"/>
+        <context ref="type"/>
+        <context ref="sorry"/>
+        <context ref="string"/>
+        <context ref="character"/>
+        <context ref="numeric"/>
+        <context ref="boolean"/>
+        <context ref="identifier"/>
+      </include>
+    </context>
+
+  </definitions>
+</language>

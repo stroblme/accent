@@ -291,6 +291,7 @@ pub fn build_window(
         git: OnceCell::new(),
         excluded: RefCell::new(None),
         references: RefCell::new(None),
+        goals: RefCell::new(None),
         details_stat: RefCell::new(None),
         ops: OnceCell::new(),
         preferences: OnceCell::new(),
@@ -544,18 +545,19 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
                     limit,
                     all,
                     skip,
-                } => sidebar::Answer::MidWord(
-                    vault
-                        .search_mid_word(&text, limit, all, &skip)
-                        .unwrap_or_default(),
-                ),
+                } => sidebar::Answer::MidWord(crate::work::or_empty(
+                    "searching mid-word",
+                    vault.search_mid_word(&text, limit, all, &skip),
+                )),
                 // The ranked query's text, matched the way a plain query with no toggle is
                 // everywhere else: a case-insensitive literal.
-                sidebar::Query::Walk { text, limit, stop } => sidebar::Answer::Walked(
-                    vault
-                        .grep_unindexed(&text, accent_api::Options::default(), limit, &*stop)
-                        .unwrap_or_default(),
-                ),
+                sidebar::Query::Walk { text, limit, stop } => {
+                    let options = accent_api::Options::default();
+                    sidebar::Answer::Walked(crate::work::or_empty(
+                        "searching the unindexed files",
+                        vault.grep_unindexed(&text, options, limit, &*stop),
+                    ))
+                }
             }
         }),
         replace_all: Box::new(glib::clone!(
@@ -795,6 +797,7 @@ fn adopt_sidebar(
             app.follow_outline();
             app.stat_details();
             app.sync_details();
+            app.refresh_goals();
         }
     ));
     // Which sections are open is session state; and the References section, which follows a

@@ -340,9 +340,7 @@ impl App {
                 // The file was renamed while this was on its way, and it goes again below; or the
                 // link went, which the banner says as it does for a note that cannot save, and it
                 // goes again on `Event::Connected`.
-                Some(Err(e)) if renamed || e.kind() == std::io::ErrorKind::NotConnected => {
-                    pdf.lost_upload()
-                }
+                Some(Err(e)) if renamed || e.is_offline() => pdf.lost_upload(),
                 // It did not reach the host at all. Said once, as a refusal is: every stroke after
                 // it fails the same way until one lands, or Retry is pressed.
                 Some(Err(e)) => {

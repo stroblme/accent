@@ -312,6 +312,11 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.unfold", "Unfold", &["<Control><Shift>bracketright"]),
     ("win.fold-all", "Fold All", &[]),
     ("win.unfold-all", "Unfold All", &[]),
+    (
+        "win.lsp-restart-file",
+        "Restart File in Language Server",
+        &[],
+    ),
     ("win.rename", "Rename", &["F2"]),
     // No chord: Delete over a tree row already trashes, from the tree's own key controller, and
     // a chord that reaches a focused editor is the last thing a delete should have.
@@ -694,6 +699,11 @@ impl App {
             "unfold" => self.with_active(Tab::unfold_at_caret),
             "fold-all" => self.with_active(Tab::fold_all),
             "unfold-all" => self.with_active(Tab::unfold_all),
+            "lsp-restart-file" => {
+                if let Some(tab) = self.active() {
+                    lang::reopen(&tab);
+                }
+            }
             // The tab menu names its own page; F2 and the palette mean the tree's selection, and
             // the tab in front where the tree has none.
             "rename" => {

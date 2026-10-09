@@ -7,6 +7,7 @@
 //! taken out. A divider with a shut section beside it lies against that section, which then
 //! shows its header alone.
 
+use super::widgets::Section;
 use crate::widgets::status_page;
 use accent_core::config::InfoPane;
 use adw::prelude::*;
@@ -15,52 +16,6 @@ use std::rc::Rc;
 
 /// The pane's icon, and the one its empty state is drawn with.
 pub(super) const ICON: &str = "dialog-information-symbolic";
-
-/// One section: a header that folds it, with its title and a count, over its body.
-pub(super) struct Section {
-    pub(super) root: gtk::Expander,
-    title: gtk::Label,
-    count: gtk::Label,
-}
-
-impl Section {
-    fn new(title: &str, body: &impl IsA<gtk::Widget>) -> Section {
-        let title = gtk::Label::builder().label(title).xalign(0.0).build();
-        title.add_css_class("caption-heading");
-        let count = gtk::Label::builder().visible(false).build();
-        count.add_css_class("caption");
-        count.add_css_class("dim-label");
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        header.append(&title);
-        header.append(&count);
-        let root = gtk::Expander::builder()
-            .label_widget(&header)
-            .child(body)
-            .expanded(true)
-            .build();
-        root.add_css_class("accent-section");
-        Section { root, title, count }
-    }
-
-    pub(super) fn set_title(&self, title: &str) {
-        self.title.set_text(title);
-    }
-
-    /// How many rows the section holds. `None` and none at all show no number, so neither an
-    /// answer still coming nor an empty one reads as "0".
-    pub(super) fn set_count(&self, n: Option<usize>) {
-        let n = n.filter(|n| *n > 0);
-        self.count.set_visible(n.is_some());
-        if let Some(n) = n {
-            self.count.set_text(&n.to_string());
-        }
-    }
-
-    /// Shown and unfolded.
-    pub(super) fn is_open(&self) -> bool {
-        self.root.is_visible() && self.root.is_expanded()
-    }
-}
 
 /// A share of a divider's height, where the paned's own handlers can reach it.
 type Share = Rc<Cell<Option<f64>>>;

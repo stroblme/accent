@@ -200,6 +200,16 @@ pub struct Hover {
     pub range: Option<Range>,
 }
 
+/// What a proof assistant says holds at a position. Plain text, which the window shows as it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Goals {
+    /// The open goals of the tactic proof there, each as its hypotheses then `⊢ target`;
+    /// `None` outside a tactic proof, empty once the proof is finished.
+    pub tactic: Option<Vec<String>>,
+    /// The type the term there must have.
+    pub expected: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
@@ -261,6 +271,8 @@ pub struct Support {
     /// Ghost text can be had for this document (it is prose and `merl-rt` is installed), so the
     /// UI arms the inline path for this tab while the Ghost Text preference is on.
     pub inline: bool,
+    /// The provider answers [`Vault::goals`]: a proof assistant's server.
+    pub goals: bool,
 }
 
 // -------------------------------------------------------------------- tasks
@@ -373,6 +385,10 @@ pub(crate) trait Language: Send + Sync {
     fn symbols(&self, rel: &str) -> Fut<'_, Vec<Symbol>>;
     fn references(&self, rel: &str, pos: Pos) -> Fut<'_, Vec<Location>>;
     fn folds(&self, rel: &str) -> Fut<'_, Vec<Fold>>;
+    /// What holds at `pos` in a proof; `None` from anything that is not a proof assistant.
+    fn goals(&self, _rel: &str, _pos: Pos) -> Fut<'_, Option<Goals>> {
+        Box::pin(async { Ok(None) })
+    }
     /// Whether the provider wants to be asked before the file or folder at `abs` moves: a
     /// language server's `willRename` filters.
     fn renames(&self, _abs: &Path, _is_dir: bool) -> bool {
@@ -734,7 +750,9 @@ impl Languages {
         waits: Waits,
     ) -> Task<Option<Vec<Call>>> {
         let me = self.clone();
-        let which = language_of(&rel).and_then(|language| server(cfg, language));
+        let language = language_of(&rel);
+        let which = language.and_then(|language| server(cfg, language));
+        let markers = language.map_or(&[][..], markers);
         Task::spawn(async move {
             let (language_id, argv) = match which {
                 Some(Server::External { language_id, argv }) => (language_id, argv),
@@ -747,7 +765,7 @@ impl Languages {
                 .file_name()
                 .map_or_else(|| argv[0].clone(), |n| n.to_string_lossy().into_owned());
             let asked_at = tokio::time::Instant::now();
-            let root = session_root(&me.root, &Local::join(&me.root, &rel)?);
+            let root = session_root(&me.root, &Local::join(&me.root, &rel)?, markers);
             let key = (argv[0].clone(), root.clone());
             me.asked_now(&key, waits.idle);
             let start = external::start(argv, root, me.root.clone(), me.events.clone(), None);
@@ -836,7 +854,8 @@ impl Languages {
                     // One session per (server, project): two crates in one vault get one
                     // server each, and two files in one crate share it.
                     let (root, events) = (me.root.clone(), me.events.clone());
-                    let session_root = session_root(&root, &Local::join(&root, &rel)?);
+                    let abs = Local::join(&root, &rel)?;
+                    let session_root = session_root(&root, &abs, markers(&language));
                     let key = (argv[0].clone(), session_root.clone());
                     let start = external::start(argv, session_root, root, events, None);
                     (
@@ -1009,7 +1028,28 @@ const SERVERS: &[(&str, &str, &[&[&str]])] = &[
     ("latex", "latex", &[&["texlab"]]),
     ("toml", "toml", &[&["taplo", "lsp", "stdio"]]),
     ("go", "go", &[&["gopls"]]),
+    // elan installs `lake` under `~/.elan/bin`, which a desktop session's PATH does not hold.
+    (
+        "lean",
+        "lean4",
+        &[&["lake", "serve"], &["~/.elan/bin/lake", "serve"]],
+    ),
 ];
+
+/// The files that mark a project's root for a language's server, besides `.git`
+/// ([`session_root`]): a Lean project's lakefile often sits below the checkout holding it.
+const ROOTS: &[(&str, &[&str])] = &[(
+    "lean",
+    &["lakefile.toml", "lakefile.lean", "lean-toolchain"],
+)];
+
+/// The root markers of a GtkSourceView language id, none for most.
+fn markers(language: &str) -> &'static [&'static str] {
+    ROOTS
+        .iter()
+        .find(|(id, _)| *id == language)
+        .map_or(&[], |(_, markers)| markers)
+}
 
 const PYTHON: &[&[&str]] = &[&["pyright-langserver", "--stdio"], &["pylsp"]];
 const TYPESCRIPT: &[&[&str]] = &[&["typescript-language-server", "--stdio"]];
@@ -1023,7 +1063,7 @@ pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
         return Some(Server::Notes);
     }
     // A configured command line replaces the built-in alternatives rather than joining them.
-    let alternatives: Vec<Vec<String>> = match configured {
+    let mut alternatives: Vec<Vec<String>> = match configured {
         Some(argv) => vec![argv.clone()],
         None => row?
             .2
@@ -1031,6 +1071,14 @@ pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
             .map(|argv| argv.iter().map(|&a| a.to_string()).collect())
             .collect(),
     };
+    // Read where the server runs, so a remote vault's `~/` is the host's home.
+    if let Some(home) = std::env::var_os("HOME") {
+        for argv in &mut alternatives {
+            argv[0] = home_relative(&argv[0], Path::new(&home))
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
     // The protocol's name for the language, which is not always GtkSourceView's (`js`).
     let language_id = row.map_or(language, |(_, id, _)| id).to_string();
     match alternatives.iter().find(|argv| in_path(&argv[0])) {
@@ -1063,6 +1111,14 @@ fn language_of(rel: &str) -> Option<&'static str> {
     })
 }
 
+/// A command named from the home directory (`~/…`) as the path it names there.
+fn home_relative(arg: &str, home: &Path) -> PathBuf {
+    match arg.strip_prefix("~/") {
+        Some(rest) => home.join(rest),
+        None => PathBuf::from(arg),
+    }
+}
+
 /// Whether an executable can be started: an absolute name is the file itself, a bare one is
 /// looked for the way a shell would.
 fn in_path(exe: &str) -> bool {
@@ -1074,16 +1130,24 @@ fn in_path(exe: &str) -> bool {
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(exe).is_file()))
 }
 
-/// Where a server should be rooted for a file: the nearest checkout at or above it that is still
-/// inside the vault, else the vault itself.
+/// Where a server should be rooted for a file: the nearest checkout or folder holding one of
+/// the language's `markers` at or above it that is still inside the vault, else the vault itself.
 ///
 /// A vault of several projects gets one server per project, which is what makes `rust-analyzer`
 /// see a crate rather than a directory of unrelated ones. A worktree's `.git` is a file, so
 /// existence is the test, not directory-ness.
-pub(crate) fn session_root(vault_root: &Path, abs_file: &Path) -> PathBuf {
-    let mut dir = abs_file.parent();
+///
+/// A file under a `.lake` folder, Lean's packages and builds, is looked up from the folder
+/// holding the outermost one: a package there has a lakefile and a checkout of its own but no
+/// build, so a file Go to Definition opens in it is the project's server's to answer.
+pub(crate) fn session_root(vault_root: &Path, abs_file: &Path, markers: &[&str]) -> PathBuf {
+    let lake = abs_file
+        .ancestors()
+        .filter(|d| d.starts_with(vault_root) && d.ends_with(".lake"))
+        .last();
+    let mut dir = lake.unwrap_or(abs_file).parent();
     while let Some(here) = dir.filter(|d| d.starts_with(vault_root)) {
-        if here.join(".git").exists() {
+        if here.join(".git").exists() || markers.iter().any(|m| here.join(m).exists()) {
             return here.to_path_buf();
         }
         dir = here.parent();
@@ -1229,6 +1293,8 @@ requests! {
     symbols => symbols() -> Vec<Symbol>;
     references => references(pos: Pos) -> Vec<Location>;
     folds => folds() -> Vec<Fold>;
+    /// The proof goals at a position, from a proof assistant's server ([`Support::goals`]).
+    goals => goals(pos: Pos) -> Option<Goals>;
     /// The rest of the line as ghost text, or nothing. Asked on every pause in the typing, so
     /// dropping the task is the normal end of one.
     inline_completion => inline_completion(pos: Pos) -> Option<String>;
@@ -1283,10 +1349,7 @@ fn remote_task_then<T: DeserializeOwned + Send + 'static>(
 fn list_pages(r: &Remote, mut answer: Completions) -> Result<Completions> {
     match answer.pages.take() {
         Some(pages) => {
-            let copy = r
-                .fetch(&pages.rel)
-                .map_err(|e| accent_core::Error::io(&pages.rel, e))?;
-            let outline = notes::pdf_outline(&copy)?;
+            let outline = notes::pdf_outline(&r.fetch(&pages.rel)?)?;
             Ok(pages.answer(outline))
         }
         None => Ok(answer),
@@ -1470,13 +1533,23 @@ mod tests {
     }
 
     #[test]
+    fn a_command_under_home_is_looked_for_there() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            home_relative("~/.elan/bin/lake", home),
+            Path::new("/home/u/.elan/bin/lake")
+        );
+        assert_eq!(home_relative("lake", home), Path::new("lake"));
+    }
+
+    #[test]
     fn a_session_is_rooted_at_the_nearest_checkout() {
         let vault = tempfile::tempdir().unwrap();
         let root = vault.path();
         let crate_dir = root.join("proj/src");
         std::fs::create_dir_all(&crate_dir).unwrap();
         assert_eq!(
-            session_root(root, &crate_dir.join("main.rs")),
+            session_root(root, &crate_dir.join("main.rs"), &[]),
             root,
             "no checkout anywhere: the vault is the project"
         );
@@ -1484,13 +1557,28 @@ mod tests {
         // A worktree's `.git` is a file, and it counts the same as a directory.
         std::fs::write(root.join("proj/.git"), "gitdir: /elsewhere\n").unwrap();
         assert_eq!(
-            session_root(root, &crate_dir.join("main.rs")),
+            session_root(root, &crate_dir.join("main.rs"), &[]),
             root.join("proj")
         );
         assert_eq!(
-            session_root(root, &root.join("loose.rs")),
+            session_root(root, &root.join("loose.rs"), &[]),
             root,
             "a file beside the checkout is not inside it"
+        );
+
+        // A Lean project below the checkout is rooted at its lakefile, and a dependency's file
+        // under its `.lake`, a checkout with a lakefile of its own, at the project.
+        let lean = root.join("proj/lean");
+        let mathlib = lean.join(".lake/packages/mathlib");
+        std::fs::create_dir_all(mathlib.join("Mathlib")).unwrap();
+        std::fs::create_dir(mathlib.join(".git")).unwrap();
+        std::fs::write(lean.join("lakefile.toml"), "").unwrap();
+        std::fs::write(mathlib.join("lakefile.lean"), "").unwrap();
+        let markers = ROOTS[0].1;
+        assert_eq!(session_root(root, &lean.join("A.lean"), markers), lean);
+        assert_eq!(
+            session_root(root, &mathlib.join("Mathlib/X.lean"), markers),
+            lean
         );
     }
 

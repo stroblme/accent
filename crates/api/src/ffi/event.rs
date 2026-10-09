@@ -77,6 +77,7 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         | crate::Event::Disconnected(_)
         | crate::Event::Refused(_)
         | crate::Event::Diagnostics { .. }
-        | crate::Event::Busy { .. } => return None,
+        | crate::Event::Busy { .. }
+        | crate::Event::Checking { .. } => return None,
     })
 }

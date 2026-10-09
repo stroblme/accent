@@ -48,6 +48,7 @@ const CODE_EXT: &[&str] = &[
     "rs", "py", "c", "h", "cc", "cpp", "hpp", "js", "mjs", "jsx", "ts", "tsx", "go", "java", "kt",
     "swift", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "r", "jl", "hs", "ml", "scala", "cs",
     "zig", "sql", "html", "css", "scss", "vue", "svelte", "tex", "vim", "el", "nix", "mk", "cmake",
+    "lean",
 ];
 /// Source files named for the tool that reads them rather than by an extension.
 const CODE_NAMES: &[&str] = &[

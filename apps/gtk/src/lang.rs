@@ -37,6 +37,9 @@ pub type Hook = Rc<dyn Fn(&Rc<Tab>)>;
 pub struct Hooks {
     /// New symbols for this tab: the Outline pane and the sticky title are drawn from them.
     pub on_symbols: Hook,
+    /// What the provider can do is known, or known again: the Code pane shows for one that
+    /// answers goals.
+    pub on_support: Hook,
 }
 
 /// Everything one tab knows about its document on the language layer.
@@ -82,6 +85,9 @@ pub struct State {
     pub(crate) completion: RefCell<Option<Rc<crate::completion::Session>>>,
     /// Whether ghost text is wanted here and whether anything is standing in its way.
     pub ghost: crate::ghost::State,
+    /// The line the server says it is still checking from (`Event::Checking`), `None` once it
+    /// is done and for every server that does not say.
+    pub checking: Cell<Option<u32>>,
 }
 
 impl State {
@@ -196,8 +202,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
         match support {
             Ok(support) => {
                 tracing::debug!("opened {rel} as {id}: {support:?}");
-                *tab.lang.support.borrow_mut() = Some(Rc::new(support));
-                restart(&tab, Duration::ZERO);
+                supported(&tab, support);
             }
             Err(e) => tracing::warn!("cannot open {rel} on the language layer: {e:#}"),
         }
@@ -347,10 +352,26 @@ pub fn retarget(tab: &Rc<Tab>, old_rel: &str) {
         let support = vault.open_document(&rel, &id, text).await;
         let Some(tab) = weak.upgrade() else { return };
         if let Ok(support) = support {
-            *tab.lang.support.borrow_mut() = Some(Rc::new(support));
-            restart(&tab, Duration::ZERO);
+            supported(&tab, support);
         }
     });
+}
+
+/// Keep what the provider said it can do, tell the window, and read what it answers.
+fn supported(tab: &Rc<Tab>, support: Support) {
+    *tab.lang.support.borrow_mut() = Some(Rc::new(support));
+    let hooks = tab.lang.hooks.borrow().clone();
+    if let Some(hooks) = hooks {
+        (hooks.on_support)(tab);
+    }
+    restart(tab, Duration::ZERO);
+}
+
+/// Close the document and open it again with the buffer's text: Lean's Restart File, whose
+/// server reads a file's imports when it is opened, and a restart of a server holding no other
+/// document, since the close shuts an idle session down.
+pub fn reopen(tab: &Rc<Tab>) {
+    retarget(tab, &tab.rel());
 }
 
 /// The server behind this tab was replaced. The reconnect reopened the document with the last
