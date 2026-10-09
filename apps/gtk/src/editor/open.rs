@@ -112,19 +112,7 @@ pub fn open(
     if text.lossy {
         view.set_editable(false);
     }
-    let numbers = line_numbers(&view, &buffer);
-    // Between the numbers and the text: a change bar belongs next to the line it is about.
-    let marks = crate::marks::Renderer::new();
-    marks.set_visible(false);
-    sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left).insert(&marks, 1);
-    // The diagnostic gutter and the messages at the ends of the lines. A note's own diagnostics
-    // are hints, which draw neither, so it keeps a clean margin.
-    view.set_show_line_marks(!flavour.is_note());
-    let annotations = sourceview5::AnnotationProvider::new();
-    view.annotations().add_provider(&annotations);
-    // Outside the change bars, next to the text: a chevron is about the block it opens.
-    let folds = crate::fold::Renderer::new();
-    sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left).insert(&folds, 2);
+    let (numbers, marks, annotations, folds) = gutters(&view, &buffer, flavour);
     // Plain-text cut and copy, and whole-line with nothing selected, whatever the tab holds: an
     // editor where Ctrl+X on no selection does nothing is one that makes the user select the line
     // first.
@@ -132,101 +120,23 @@ pub fn open(
     primary_paste(&view);
     drag::install(&view);
     let paste_link = paste::link_paste(&view, flavour);
-    // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
-    // window the clamp simply stops applying. Its maximum is a share of the editor's own width
-    // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
-    //
-    // `AdwClampScrollable` and not `AdwClamp`, because only the scrollable one lets the view
-    // through to the scrolled window: with a plain clamp GTK inserts a `GtkViewport`, the view's
-    // adjustments are then throwaway ones nothing reads, and every `scroll_to_mark` — GTK's own
-    // caret following included — writes to a dead adjustment while the viewport scrolls to the
-    // focused widget instead (`GtkViewport:scroll-to-focus`, on by default), which is what put a
-    // scrolled note back at the top on any focus change.
-    let clamp = adw::ClampScrollable::builder().child(&view).build();
-
-    let scroller = gtk::ScrolledWindow::builder()
-        .hexpand(true)
-        .vexpand(true)
-        .child(&clamp)
-        .build();
-
-    // How the column learns the editor's width. The view being the scrollable child, the
-    // horizontal adjustment now reports the *column's* width rather than the scroller's, so
-    // feeding it back into `set_clamp` would collapse the column to its floor and then go quiet.
-    // GTK 4 has no signal for "my width changed" — `::size-allocate` is gone and `GtkWidget` has
-    // no width property — and `GtkDrawingArea::resize` is the one public signal that fires on
-    // every allocation, so a zero-sized one laid over the scroller is what reports it. It draws
-    // nothing, takes no input and is invisible to assistive technology.
-    let width = gtk::DrawingArea::builder()
-        .can_target(false)
-        .accessible_role(gtk::AccessibleRole::Presentation)
-        .build();
-    let overlay = gtk::Overlay::builder().child(&scroller).build();
-    overlay.add_overlay(&width);
-
-    // The sticky block title, pinned over the top of the view. The label carries the document
-    // font by name and by class, so it follows both the display-wide rule and this tab's own
-    // zoom; the box under it paints the view's own background, which is what the scrolled text
-    // has to disappear behind.
-    let sticky = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .single_line_mode(true)
-        .margin_top(2)
-        .margin_bottom(2)
-        .margin_end(GUTTER)
-        .build();
-    sticky.add_css_class("accent-doc");
-    sticky.set_widget_name(&view.widget_name());
-    let sticky_bar = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .valign(gtk::Align::Start)
-        .can_target(false)
-        .visible(false)
-        .accessible_role(gtk::AccessibleRole::Presentation)
-        .build();
-    sticky_bar.add_css_class("view");
-    sticky_bar.append(&sticky);
-    // A rule under it, or the pinned line reads as a line of the note that the one below it has
-    // been scrolled halfway behind.
-    sticky_bar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    overlay.add_overlay(&sticky_bar);
-
-    // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a
-    // tab that is built before the config is read still starts in a defined state.
-    let map = crate::minimap::Minimap::new(&view);
-    map.set_vexpand(true);
-    map.set_visible(false);
-    // It goes with the chrome while the user types (`App::hide_chrome`).
-    map.add_css_class("chrome-fade");
-    let document = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    document.append(&overlay);
-    document.append(&map);
+    let Frame {
+        clamp,
+        scroller,
+        width,
+        sticky,
+        sticky_bar,
+        map,
+        document,
+    } = frame(&view);
 
     let banner = adw::Banner::new("");
-    // Made before the find bar's match tag, so it stays under it: a tag added later to the table
-    // outranks an earlier one, and the match tag is only ever raised. See [`Tab::occurrence_tag`].
-    let occurrence_tag = gtk::TextTag::new(Some("occurrence"));
-    buffer.tag_table().add(&occurrence_tag);
-    mute(&buffer, &occurrence_tag);
-    // After the muted hint and before the find bar's match tag, which is the order the three
-    // paint in: see [`Tab::reveal_range`].
-    let reveal_tag = gtk::TextTag::new(Some("reveal"));
-    buffer.tag_table().add(&reveal_tag);
-    matched(&buffer, &reveal_tag);
-    // No colour of its own: the word keeps whatever the style scheme paints it, and gains the
-    // underline that says a Ctrl+click would land somewhere.
-    let follow_tag = gtk::TextTag::new(Some("follow"));
-    follow_tag.set_underline(pango::Underline::Single);
-    buffer.tag_table().add(&follow_tag);
-    // Last of the three. The query matches folded text too, as VS Code finds into folds, and
-    // stepping to a match in a shut block opens it (`Tab::step`).
-    let find_tag = gtk::TextTag::new(Some("find"));
-    buffer.tag_table().add(&find_tag);
-    match_style(&buffer, &find_tag);
-    if let Some(column) = view.downcast_ref::<multicaret::View>() {
-        column.set_find_tag(&find_tag);
-    }
+    let Tags {
+        occurrence_tag,
+        reveal_tag,
+        follow_tag,
+        find_tag,
+    } = tags(&view, &buffer);
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&banner);
@@ -246,7 +156,7 @@ pub fn open(
         comparing: RefCell::new(None),
         overlays: Rc::default(),
         conflicts: crate::conflict::Conflicts::new(&view, &buffer, &scroller),
-        scroller: scroller.clone(),
+        scroller,
         clamp,
         zoom: Cell::new(zoom),
         column: Cell::new(column_width),
@@ -315,8 +225,207 @@ pub fn open(
         tab.show_alert(Alert::ReadOnly);
     }
 
-    // The two gutter icons, and what they say when the pointer rests on one. Installed here
-    // rather than above because the tooltip reads the tab's own diagnostics back.
+    mark_tooltips(&tab);
+    follow_layout(&tab, &width);
+
+    tab.analyse();
+    // `view.color()` only resolves the theme foreground once the widget is mapped. A tab added to
+    // the visible TabView is mapped by `append` above, so restyle now *and* on every later map
+    // (a background tab is only mapped when it is first selected). One hook for the lot: the
+    // spans, the change bars, the diagnostic underlines and the fold chevrons all mix that same
+    // foreground, and `Tab::restyle` is what a theme change already runs.
+    tab.restyle();
+    view.connect_map(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_| tab.restyle()
+    ));
+    folds.connect_toggle(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |line| tab.toggle_fold(line)
+    ));
+
+    connect_buffer(&tab);
+    banner.connect_button_clicked(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_| tab.emit(&tab.on_banner)
+    ));
+    connect_view(&tab);
+
+    tab
+}
+
+/// The gutters [`open`] gives the view: the line numbers, the change bars, the diagnostics and the
+/// fold chevrons.
+fn gutters(
+    view: &sourceview5::View,
+    buffer: &sourceview5::Buffer,
+    flavour: Flavour,
+) -> (
+    sourceview5::GutterRenderer,
+    crate::marks::Renderer,
+    sourceview5::AnnotationProvider,
+    crate::fold::Renderer,
+) {
+    let numbers = line_numbers(view, buffer);
+    // Between the numbers and the text: a change bar belongs next to the line it is about.
+    let marks = crate::marks::Renderer::new();
+    marks.set_visible(false);
+    sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left).insert(&marks, 1);
+    // The diagnostic gutter and the messages at the ends of the lines. A note's own diagnostics
+    // are hints, which draw neither, so it keeps a clean margin.
+    view.set_show_line_marks(!flavour.is_note());
+    let annotations = sourceview5::AnnotationProvider::new();
+    view.annotations().add_provider(&annotations);
+    // Outside the change bars, next to the text: a chevron is about the block it opens.
+    let folds = crate::fold::Renderer::new();
+    sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left).insert(&folds, 2);
+    (numbers, marks, annotations, folds)
+}
+
+/// The page around a tab's view, from [`frame`].
+struct Frame {
+    clamp: adw::ClampScrollable,
+    scroller: gtk::ScrolledWindow,
+    /// Reports the editor's width, which nothing else does; see [`frame`].
+    width: gtk::DrawingArea,
+    sticky: gtk::Label,
+    sticky_bar: gtk::Box,
+    map: crate::minimap::Minimap,
+    /// What holds the rest: the scrolled view under the sticky title, and the minimap beside it.
+    document: gtk::Box,
+}
+
+/// The page around `view`: the clamp that caps its column, the scroller, the sticky block title
+/// over the top of it and the minimap beside it.
+fn frame(view: &sourceview5::View) -> Frame {
+    // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
+    // window the clamp simply stops applying. Its maximum is a share of the editor's own width
+    // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
+    //
+    // `AdwClampScrollable` and not `AdwClamp`, because only the scrollable one lets the view
+    // through to the scrolled window: with a plain clamp GTK inserts a `GtkViewport`, the view's
+    // adjustments are then throwaway ones nothing reads, and every `scroll_to_mark` — GTK's own
+    // caret following included — writes to a dead adjustment while the viewport scrolls to the
+    // focused widget instead (`GtkViewport:scroll-to-focus`, on by default), which is what put a
+    // scrolled note back at the top on any focus change.
+    let clamp = adw::ClampScrollable::builder().child(view).build();
+
+    let scroller = gtk::ScrolledWindow::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .child(&clamp)
+        .build();
+
+    // How the column learns the editor's width. The view being the scrollable child, the
+    // horizontal adjustment now reports the *column's* width rather than the scroller's, so
+    // feeding it back into `set_clamp` would collapse the column to its floor and then go quiet.
+    // GTK 4 has no signal for "my width changed" — `::size-allocate` is gone and `GtkWidget` has
+    // no width property — and `GtkDrawingArea::resize` is the one public signal that fires on
+    // every allocation, so a zero-sized one laid over the scroller is what reports it. It draws
+    // nothing, takes no input and is invisible to assistive technology.
+    let width = gtk::DrawingArea::builder()
+        .can_target(false)
+        .accessible_role(gtk::AccessibleRole::Presentation)
+        .build();
+    let overlay = gtk::Overlay::builder().child(&scroller).build();
+    overlay.add_overlay(&width);
+
+    // The sticky block title, pinned over the top of the view. The label carries the document
+    // font by name and by class, so it follows both the display-wide rule and this tab's own
+    // zoom; the box under it paints the view's own background, which is what the scrolled text
+    // has to disappear behind.
+    let sticky = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .single_line_mode(true)
+        .margin_top(2)
+        .margin_bottom(2)
+        .margin_end(GUTTER)
+        .build();
+    sticky.add_css_class("accent-doc");
+    sticky.set_widget_name(&view.widget_name());
+    let sticky_bar = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .valign(gtk::Align::Start)
+        .can_target(false)
+        .visible(false)
+        .accessible_role(gtk::AccessibleRole::Presentation)
+        .build();
+    sticky_bar.add_css_class("view");
+    sticky_bar.append(&sticky);
+    // A rule under it, or the pinned line reads as a line of the note that the one below it has
+    // been scrolled halfway behind.
+    sticky_bar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    overlay.add_overlay(&sticky_bar);
+
+    // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a
+    // tab that is built before the config is read still starts in a defined state.
+    let map = crate::minimap::Minimap::new(view);
+    map.set_vexpand(true);
+    map.set_visible(false);
+    // It goes with the chrome while the user types (`App::hide_chrome`).
+    map.add_css_class("chrome-fade");
+    let document = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    document.append(&overlay);
+    document.append(&map);
+    Frame {
+        clamp,
+        scroller,
+        width,
+        sticky,
+        sticky_bar,
+        map,
+        document,
+    }
+}
+
+/// The tags a tab paints its own highlights with, from [`tags`].
+struct Tags {
+    occurrence_tag: gtk::TextTag,
+    reveal_tag: gtk::TextTag,
+    follow_tag: gtk::TextTag,
+    find_tag: gtk::TextTag,
+}
+
+/// Add the highlight tags to `buffer`'s table, lowest first.
+fn tags(view: &sourceview5::View, buffer: &sourceview5::Buffer) -> Tags {
+    // Made before the find bar's match tag, so it stays under it: a tag added later to the table
+    // outranks an earlier one, and the match tag is only ever raised. See [`Tab::occurrence_tag`].
+    let occurrence_tag = gtk::TextTag::new(Some("occurrence"));
+    buffer.tag_table().add(&occurrence_tag);
+    mute(buffer, &occurrence_tag);
+    // After the muted hint and before the find bar's match tag, which is the order the three
+    // paint in: see [`Tab::reveal_range`].
+    let reveal_tag = gtk::TextTag::new(Some("reveal"));
+    buffer.tag_table().add(&reveal_tag);
+    matched(buffer, &reveal_tag);
+    // No colour of its own: the word keeps whatever the style scheme paints it, and gains the
+    // underline that says a Ctrl+click would land somewhere.
+    let follow_tag = gtk::TextTag::new(Some("follow"));
+    follow_tag.set_underline(pango::Underline::Single);
+    buffer.tag_table().add(&follow_tag);
+    // Last of the three. The query matches folded text too, as VS Code finds into folds, and
+    // stepping to a match in a shut block opens it (`Tab::step`).
+    let find_tag = gtk::TextTag::new(Some("find"));
+    buffer.tag_table().add(&find_tag);
+    match_style(buffer, &find_tag);
+    if let Some(column) = view.downcast_ref::<multicaret::View>() {
+        column.set_find_tag(&find_tag);
+    }
+    Tags {
+        occurrence_tag,
+        reveal_tag,
+        follow_tag,
+        find_tag,
+    }
+}
+
+/// The two gutter icons, and what they say when the pointer rests on one. Installed once the tab
+/// is built because the tooltip reads the tab's own diagnostics back.
+fn mark_tooltips(tab: &Rc<Tab>) {
     for (category, icon) in [
         (diagnostics::MARK_ERROR, "dialog-error-symbolic"),
         (diagnostics::MARK_WARNING, "dialog-warning-symbolic"),
@@ -334,9 +443,13 @@ pub fn open(
             }
         ));
         // Above the git change bars, which have no icon and nothing to say.
-        view.set_mark_attributes(category, &attributes, 2);
+        tab.view.set_mark_attributes(category, &attributes, 2);
     }
+}
 
+/// What a new width or a scroll redraws: the column cap, the sticky title, the end-of-line
+/// messages and the find bar's matches. `width` is [`Frame::width`].
+fn follow_layout(tab: &Rc<Tab>, width: &gtk::DrawingArea) {
     // The column is a share of the editor's width, so the cap has to be recomputed whenever that
     // width changes: a window resize, a paned drag, the sidebar, a split, the minimap. One hook
     // covers all of them, because the overlaid area is allocated the scroller's own width.
@@ -353,8 +466,8 @@ pub fn open(
     // column width lays them again. The adjustment's page size is that width, the view being the
     // scrollable child. It is notified on every layout the view makes, a keystroke's included,
     // whatever the width did.
-    let width = Cell::new(scroller.hadjustment().page_size());
-    scroller
+    let width = Cell::new(tab.scroller.hadjustment().page_size());
+    tab.scroller
         .hadjustment()
         .connect_page_size_notify(glib::clone!(
             #[weak(rename_to = tab)]
@@ -375,14 +488,16 @@ pub fn open(
 
     // What the top of the view is inside changes on every scroll, and the widget the title has
     // to line up with moves with the clamp, so the bar is recomputed rather than positioned once.
-    scroller.vadjustment().connect_value_changed(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.update_sticky()
-    ));
+    tab.scroller
+        .vadjustment()
+        .connect_value_changed(glib::clone!(
+            #[weak(rename_to = tab)]
+            tab,
+            move |_| tab.update_sticky()
+        ));
     // The find bar paints the matches around what is on screen, so a scroll or a resize that
     // shows other lines has them painted too (`Tab::paint_matches`).
-    let adjustment = scroller.vadjustment();
+    let adjustment = tab.scroller.vadjustment();
     adjustment.connect_value_changed(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
@@ -393,51 +508,36 @@ pub fn open(
         tab,
         move |_| tab.queue_paint()
     ));
+}
 
-    tab.analyse();
-    // `view.color()` only resolves the theme foreground once the widget is mapped. A tab added to
-    // the visible TabView is mapped by `append` above, so restyle now *and* on every later map
-    // (a background tab is only mapped when it is first selected). One hook for the lot: the
-    // spans, the change bars, the diagnostic underlines and the fold chevrons all mix that same
-    // foreground, and `Tab::restyle` is what a theme change already runs.
-    tab.restyle();
-    view.connect_map(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.restyle()
-    ));
-    folds.connect_toggle(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |line| tab.toggle_fold(line)
-    ));
-
+/// What an edit and a caret move drive in the tab.
+fn connect_buffer(tab: &Rc<Tab>) {
     // Weak throughout: the buffer, the controllers and the timeouts all live inside the tab, so a
     // strong capture here would be the cycle that kept every closed tab alive.
-    buffer.connect_changed(glib::clone!(
+    tab.buffer.connect_changed(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
         move |_| tab.on_changed()
     ));
     // Ahead of the edit, while the iters still say where the text it replaces was.
-    buffer.connect_insert_text(glib::clone!(
+    tab.buffer.connect_insert_text(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
         move |_, at, text| tab.shift_diagnostics(at, at, text)
     ));
-    buffer.connect_delete_range(glib::clone!(
+    tab.buffer.connect_delete_range(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
         move |_, from, to| tab.shift_diagnostics(from, to, "")
     ));
-    buffer.connect_cursor_position_notify(glib::clone!(
+    tab.buffer.connect_cursor_position_notify(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
         move |_| tab.on_cursor_moved()
     ));
     // `mark-set` rather than `notify::cursor-position`: a drag that ends where the caret already
     // was moves only the other end of the selection, and both ends make a selection anyway.
-    buffer.connect_mark_set(glib::clone!(
+    tab.buffer.connect_mark_set(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
         move |_, _, mark| {
@@ -450,12 +550,10 @@ pub fn open(
             }
         }
     ));
-    banner.connect_button_clicked(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.emit(&tab.on_banner)
-    ));
+}
 
+/// The view's own controllers: leaving it, a Ctrl+click, and the pointer moving over it.
+fn connect_view(tab: &Rc<Tab>) {
     // Leaving the view is the other autosave trigger: switching tabs or windows mid-sentence
     // should not be the one edit that is lost. It is also where the document settles: the save
     // has just happened, and a provider that re-reads the vault on one is told now rather than
@@ -469,7 +567,7 @@ pub fn open(
             crate::lang::settle(&tab);
         }
     ));
-    view.add_controller(focus);
+    tab.view.add_controller(focus);
 
     let click = gtk::GestureClick::new();
     click.connect_pressed(glib::clone!(
@@ -495,7 +593,7 @@ pub fn open(
             tab.emit(&tab.on_follow);
         }
     ));
-    view.add_controller(click);
+    tab.view.add_controller(click);
 
     // The pointer and the underline only change when the answer does: `follow_hint` compares
     // what it is about to show with what is already showing, so an ordinary drag across the view
@@ -516,7 +614,5 @@ pub fn open(
         tab,
         move |_| tab.clear_follow()
     ));
-    view.add_controller(motion);
-
-    tab
+    tab.view.add_controller(motion);
 }
