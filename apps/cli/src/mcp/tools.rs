@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use accent_api::{Etag, FileKind, Read, SaveError, fs};
+use accent_api::{Error, Etag, FileKind, Read, fs};
 use accent_core::markdown;
 use accent_core::path::linked_path;
 use base64::Engine;
@@ -643,9 +643,9 @@ fn changed(rel: &str, now: Etag) -> String {
     )
 }
 
-fn unsaved(rel: &str, e: SaveError) -> String {
+fn unsaved(rel: &str, e: Error) -> String {
     match e {
-        SaveError::ChangedOnDisk { current } => changed(rel, current),
+        Error::Core(accent_core::Error::ChangedOnDisk { current }) => changed(rel, current),
         e => fail(e),
     }
 }

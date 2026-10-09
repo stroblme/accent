@@ -193,27 +193,11 @@ pub fn for_disk(text: &str, crlf: bool, strip_trailing: bool) -> String {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum SaveError {
-    #[error("file changed on disk since it was read")]
-    ChangedOnDisk { current: Etag },
-    /// The vault is on another machine that is not answering: nothing was written, nothing is
-    /// wrong with the file, and the buffer is still the only copy of the edits.
-    ///
-    /// Never produced here — a save on this machine has a disk to fail against — but it is in
-    /// this enum because there is one save path above it and the difference matters at the top of
-    /// it: a link that is down is a state the window already shows, not a disk error to report.
-    #[error("the vault is not connected")]
-    Offline,
-    #[error(transparent)]
-    Io(#[from] io::Error),
-}
-
 /// Write `text` to `path` atomically, refusing the save if the file changed since `expected`.
 ///
 /// Passing `expected: None` forces the write (the "overwrite anyway" branch in the UI).
 /// Returns the etag of the file just written, ready for the next save.
-pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Etag, SaveError> {
+pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Etag> {
     write_bytes(path, text.as_bytes(), expected)
 }
 
@@ -228,18 +212,19 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
 /// etag, the first lands and the others are refused. Another process (Syncthing, a second accent)
 /// can still replace the file between that check and the rename, and its write is then lost:
 /// Linux has no rename that replaces a file only while it is still the one checked.
-pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<Etag, SaveError> {
+pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<Etag> {
+    let failed = |e| Error::io(path.display(), e);
     // Resolve symlinks first: writing through a link must replace the link *target*, otherwise the
     // rename below would silently turn a symlinked note into a regular file in the vault.
-    let canonical = canonical_target(path)?;
+    let canonical = canonical_target(path).map_err(failed)?;
     let parent = canonical
         .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
+        .ok_or_else(|| Error::Invalid(format!("{} has no parent", path.display())))?;
 
     let existing = std::fs::metadata(&canonical).ok();
-    let mut tmp = temp_file(parent, existing.as_ref())?;
-    tmp.write_all(bytes)?;
-    tmp.as_file().sync_all()?;
+    let mut tmp = temp_file(parent, existing.as_ref()).map_err(failed)?;
+    tmp.write_all(bytes).map_err(failed)?;
+    tmp.as_file().sync_all().map_err(failed)?;
 
     if let Some(m) = &existing {
         // Neither is allowed to fail the save. exFAT, SMB and Android's FUSE `/sdcard` have no
@@ -256,26 +241,21 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
     if let Some(exp) = expected {
         match std::fs::metadata(&canonical) {
             Ok(m) if Etag::from_meta(&m) != exp => {
-                return Err(SaveError::ChangedOnDisk {
+                return Err(Error::ChangedOnDisk {
                     current: Etag::from_meta(&m),
                 });
             }
             Ok(_) => {}
-            Err(_) => {
-                return Err(
-                    io::Error::new(io::ErrorKind::NotFound, "file vanished before save").into(),
-                );
-            }
+            // Gone before the save: nothing is written over a file nobody has seen go.
+            Err(_) => return Err(Error::NotFound(path.display().to_string())),
         }
     }
 
     // ponytail: no directory fsync after the rename. The rename itself is atomic, so a crash can
     // only lose the whole save, never half of it. Add `File::open(parent)?.sync_all()` here if
     // crash-consistency (as opposed to torn-write safety) ever matters.
-    let file = tmp
-        .persist(&canonical)
-        .map_err(|e| SaveError::Io(e.error))?;
-    Ok(Etag::from_meta(&file.metadata()?))
+    let file = tmp.persist(&canonical).map_err(|e| failed(e.error))?;
+    Ok(Etag::from_meta(&file.metadata().map_err(failed)?))
 }
 
 /// A temporary file in `parent` for a save to write into, no more open to others than the file it
@@ -323,7 +303,7 @@ pub fn create_note(path: &Path, text: &str) -> Result<Etag> {
     }
     // AlreadyExists if the name is taken.
     std::fs::File::create_new(path).map_err(|e| Error::io(path.display(), e))?;
-    write_note(path, text, None).map_err(|e| Error::Io(format!("{}: {e}", path.display())))
+    write_note(path, text, None)
 }
 
 /// Move a file or directory, refusing to overwrite an existing target.
@@ -486,7 +466,7 @@ mod tests {
         write_note(&note, "someone else", None).unwrap();
 
         match write_note(&note, "mine", Some(stale)) {
-            Err(SaveError::ChangedOnDisk { current }) => assert_ne!(current, stale),
+            Err(Error::ChangedOnDisk { current }) => assert_ne!(current, stale),
             other => panic!("expected ChangedOnDisk, got {other:?}"),
         }
         assert_eq!(std::fs::read_to_string(&note).unwrap(), "someone else");
@@ -514,7 +494,7 @@ mod tests {
                 .into_iter()
                 .map(|save| match save.join().unwrap() {
                     Ok(_) => 1,
-                    Err(SaveError::ChangedOnDisk { .. }) => 0,
+                    Err(Error::ChangedOnDisk { .. }) => 0,
                     Err(e) => panic!("{e}"),
                 })
                 .sum::<usize>()
@@ -650,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn expected_etag_on_missing_file_is_an_io_error() {
+    fn expected_etag_on_missing_file_is_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let ghost = Etag {
             mtime_ns: 1,
@@ -658,7 +638,7 @@ mod tests {
             ino: 1,
         };
         match write_note(&dir.path().join("Gone.md"), "x", Some(ghost)) {
-            Err(SaveError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
+            Err(Error::NotFound(_)) => {}
             other => panic!("expected NotFound, got {other:?}"),
         }
     }

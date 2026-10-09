@@ -3,6 +3,8 @@
 //! `pdf::window`, beside the window's PDF commands, and Replace All is in `replace`.
 
 use super::*;
+use accent_api::Error;
+use accent_core::Error as Core;
 
 /// Why a tab was opened, which decides whether it stays.
 ///
@@ -195,7 +197,7 @@ impl App {
             }
             // A worker that panicked is one more way for the read to fail, and is said as the others
             // are: the open named in a toast, and whatever was waiting on the tab let go with it.
-            let read = read.unwrap_or_else(|| Err(std::io::Error::other("the worker stopped")));
+            let read = read.unwrap_or_else(|| Err(Core::Io("the worker stopped".into()).into()));
             app.adopt_text(&key, read, flavour, how);
         });
     }
@@ -204,7 +206,7 @@ impl App {
     fn adopt_text(
         self: &Rc<Self>,
         key: &str,
-        read: std::io::Result<accent_core::fs::Read>,
+        read: accent_api::Result<accent_core::fs::Read>,
         flavour: Flavour,
         how: Opened,
     ) {
@@ -425,9 +427,11 @@ impl App {
                 }
                 // A file that never showed goes the way one that never arrived does; one that
                 // did keeps its last contents up.
-                Some(Err(e)) if picture.paintable().is_none() => {
-                    app.gone(image.key(), &image.page, std::io::Error::other(e))
-                }
+                Some(Err(e)) if picture.paintable().is_none() => app.gone(
+                    image.key(),
+                    &image.page,
+                    Core::Invalid(e.to_string()).into(),
+                ),
                 Some(Err(e)) => app.cannot("reload", e),
                 None => app.cannot("reload", "the image worker stopped"),
             }
@@ -461,7 +465,7 @@ impl App {
         self: &Rc<Self>,
         key: &str,
         path: &Path,
-        landed: impl FnOnce(&Rc<App>, std::io::Result<PathBuf>) + 'static,
+        landed: impl FnOnce(&Rc<App>, accent_api::Result<PathBuf>) + 'static,
     ) {
         let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
         let remote = vault.as_ref().is_some_and(|v| v.is_remote());
@@ -497,7 +501,7 @@ impl App {
                 work,
             )
             .await
-            .unwrap_or_else(|| Err(std::io::Error::other("the fetch stopped")));
+            .unwrap_or_else(|| Err(Core::Io("the fetch stopped".into()).into()));
             if let Some(app) = weak.upgrade() {
                 if remote {
                     app.fetching.borrow_mut().remove(&key);
@@ -510,7 +514,7 @@ impl App {
 
     /// A viewer whose bytes never came: its tab goes, the way a note that would not open never
     /// gets one, and the reason is said.
-    pub(crate) fn gone(&self, key: String, page: &adw::TabPage, e: std::io::Error) {
+    pub(crate) fn gone(&self, key: String, page: &adw::TabPage, e: Error) {
         self.close_page(page);
         self.cannot_open(&key, e);
     }
@@ -823,13 +827,13 @@ impl App {
 
     /// A file that would not open. One that is not there reads the same whoever found out: the
     /// session naming a note deleted since, or a link to one never written.
-    pub(crate) fn cannot_open(&self, key: &str, e: std::io::Error) {
+    pub(crate) fn cannot_open(&self, key: &str, e: Error) {
         self.keep_on_landing.borrow_mut().remove(key);
-        match e.kind() {
-            std::io::ErrorKind::NotFound => {
+        match e {
+            Error::Core(Core::NotFound(_)) => {
                 self.cannot(&format!("open {key}"), "not in this vault")
             }
-            _ => self.cannot(&format!("open {key}"), e),
+            e => self.cannot(&format!("open {key}"), e),
         }
     }
 

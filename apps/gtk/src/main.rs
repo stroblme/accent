@@ -77,7 +77,7 @@ mod work;
 mod wrap;
 mod zoom;
 
-use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
+use accent_api::{Config, Etag, Event, Location, Session, Vault, ssh};
 use accent_core::config::{FocusMode, Layout, PdfZoom, ShellPlace};
 use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;

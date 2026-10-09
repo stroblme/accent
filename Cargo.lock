@@ -44,7 +44,6 @@ dependencies = [
  "accent-core",
  "accent-drawio",
  "accent-lsp",
- "anyhow",
  "blake3",
  "chrono",
  "globset",

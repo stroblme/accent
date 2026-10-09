@@ -1019,21 +1019,12 @@ fn branches_are_created_and_deleted_and_git_says_when_work_would_be_lost() {
     checkout(&repo, "main").unwrap();
     let refused = delete_branch(&repo, "work", false).unwrap_err();
     assert_eq!(refused, Error::NotMerged("work".to_string()));
-    assert!(unmerged(&refused.to_string()), "{refused}");
     delete_branch(&repo, "work", true).unwrap();
     assert_eq!(branches(&repo).unwrap().local, ["main"]);
 
     // The checked-out branch is a refusal nothing can force, so it must not read as one.
     let refused = delete_branch(&repo, "main", false).unwrap_err();
     assert!(matches!(refused, Error::Git(_)), "{refused}");
-}
-
-#[test]
-fn unmerged_is_gits_own_wording() {
-    assert!(unmerged("error: the branch 'side' is not fully merged."));
-    assert!(!unmerged(
-        "error: cannot delete branch 'main' used by worktree at '/tmp/v'"
-    ));
 }
 
 #[test]

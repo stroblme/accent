@@ -107,7 +107,9 @@ fn a_remote_vault_connects_indexes_and_answers() {
     // A stale etag has to be refused, or two windows would overwrite each other silently.
     assert!(matches!(
         vault.save("a.md", "no\n", Some(etag)),
-        Err(accent_api::SaveError::ChangedOnDisk { .. })
+        Err(accent_api::Error::Core(
+            accent_core::Error::ChangedOnDisk { .. }
+        ))
     ));
 
     // `fetch` is what the PDF and image readers use: a real file on this machine.

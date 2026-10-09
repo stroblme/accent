@@ -1283,10 +1283,7 @@ fn remote_task_then<T: DeserializeOwned + Send + 'static>(
 fn list_pages(r: &Remote, mut answer: Completions) -> Result<Completions> {
     match answer.pages.take() {
         Some(pages) => {
-            let copy = r
-                .fetch(&pages.rel)
-                .map_err(|e| accent_core::Error::io(&pages.rel, e))?;
-            let outline = notes::pdf_outline(&copy)?;
+            let outline = notes::pdf_outline(&r.fetch(&pages.rel)?)?;
             Ok(pages.answer(outline))
         }
         None => Ok(answer),

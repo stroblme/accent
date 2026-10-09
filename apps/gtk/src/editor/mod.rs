@@ -10,8 +10,10 @@
 //! and closed without `main` reaching inside it.
 
 use crate::{diagnostics, diff, fold, highlight, lang, multicaret, wrap};
+use accent_api::Error;
 use accent_api::{Diagnostic, Fold, Vault};
-use accent_core::fs::{self, Digest, Etag, SaveError};
+use accent_core::Error as Core;
+use accent_core::fs::{self, Digest, Etag};
 use accent_core::markdown::Link;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -142,7 +144,7 @@ pub struct Flight {
     /// A Ctrl+S, which says "Saved" when it lands.
     pub explicit: bool,
     /// The etag the write left, and the digest of what it wrote.
-    pub answer: std::sync::mpsc::Receiver<Result<(Etag, Digest), SaveError>>,
+    pub answer: std::sync::mpsc::Receiver<Result<(Etag, Digest), Error>>,
 }
 
 /// What a save that has just landed means for its tab.
@@ -157,7 +159,7 @@ pub enum Landing {
     /// buffer that is gone and changes nothing.
     Stale,
     /// Refused or failed, for a buffer that still holds its edits.
-    Failed(SaveError),
+    Failed(Error),
 }
 
 /// Decide a [`Landing`] from the tab as the save found it (`started`, `held`) and as it is now
@@ -167,7 +169,7 @@ pub fn landing(
     edits: u64,
     held: Option<Etag>,
     holding: Option<Etag>,
-    written: Result<Etag, SaveError>,
+    written: Result<Etag, Error>,
 ) -> Landing {
     if holding != held {
         return Landing::Stale;
@@ -604,7 +606,7 @@ impl Tab {
     pub fn reload_keep_cursor(
         self: &Rc<Self>,
         vault: Option<Arc<Vault>>,
-        done: impl Fn(&Rc<Tab>, std::io::Result<()>) + 'static,
+        done: impl Fn(&Rc<Tab>, accent_api::Result<()>) + 'static,
     ) {
         // Where the caret and the page are, measured before the read: replacing the buffer empties
         // it, which drops the view to line one, and a scroll to the caret from there parks it
@@ -630,16 +632,10 @@ impl Tab {
                 // It stopped being text while we had it open. The buffer keeps the last readable
                 // version rather than showing the user a screen of replacement characters.
                 Some(Ok(_)) => {
-                    return done(
-                        &tab,
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "not text any more",
-                        )),
-                    );
+                    return done(&tab, Err(Core::Invalid("not text any more".into()).into()));
                 }
                 Some(Err(e)) => return done(&tab, Err(e)),
-                None => return done(&tab, Err(std::io::Error::other("the reader stopped"))),
+                None => return done(&tab, Err(Core::Io("the reader stopped".into()).into())),
             };
             // Typed into while the file was read: the buffer holds the only copy of that, so it
             // asks as a dirty tab does (`App::refresh_tab`) rather than being replaced.
@@ -1490,8 +1486,14 @@ mod tests {
             "a reload put its own etag in meanwhile: the answer is about a buffer that is gone"
         );
         assert!(matches!(
-            landing(5, 7, was, was, Err(SaveError::Offline)),
-            Landing::Failed(SaveError::Offline)
+            landing(
+                5,
+                7,
+                was,
+                was,
+                Err(Error::Offline("not connected".to_string()))
+            ),
+            Landing::Failed(Error::Offline(_))
         ));
     }
 }

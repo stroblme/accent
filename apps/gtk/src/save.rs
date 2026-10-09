@@ -3,6 +3,8 @@
 
 use super::*;
 use crate::editor::Saves;
+use accent_api::Error;
+use accent_core::Error as Core;
 use accent_core::fs::Digest;
 
 impl App {
@@ -156,7 +158,7 @@ impl App {
         let written = flight
             .answer
             .recv()
-            .unwrap_or_else(|_| Err(std::io::Error::other("the save worker panicked").into()));
+            .unwrap_or_else(|_| Err(Core::Io("the save worker panicked".to_string()).into()));
         log_write(&tab.key(), flight.expected, &written);
         let digest = written.as_ref().ok().map(|(_, digest)| *digest);
         let landed = editor::landing(
@@ -181,12 +183,12 @@ impl App {
     }
 
     /// A save that did not land, said the way its kind needs saying.
-    fn refused(self: &Rc<Self>, tab: &Rc<Tab>, e: SaveError, explicit: bool) {
+    fn refused(self: &Rc<Self>, tab: &Rc<Tab>, e: Error, explicit: bool) {
         match e {
             // The etag gate refused: the tab holds the question from now on, whatever asked. It
             // used to be recorded only for an autosave, so a Ctrl+S that was cancelled left a
             // blocked tab with no banner on it.
-            SaveError::ChangedOnDisk { .. } => {
+            Error::Core(Core::ChangedOnDisk { .. }) => {
                 tab.save.disk_changed.set(true);
                 tab.show_alert(Alert::Compare);
                 if explicit {
@@ -198,7 +200,7 @@ impl App {
             // and it has the way back, so an autosave that cannot land every few seconds says
             // nothing further (DESIGN.md, States: a state that persists is a banner, and a toast
             // is a thing that happened and is over).
-            SaveError::Offline => {
+            e if e.is_offline() => {
                 self.show_offline();
                 if explicit {
                     self.toast("Not connected, so nothing was saved");
@@ -233,17 +235,17 @@ impl App {
     pub(crate) fn writer<T: Saves>(
         &self,
         tab: &Rc<T>,
-    ) -> impl FnOnce(&str, Option<Etag>) -> Result<(Etag, Digest), SaveError> + Send + 'static {
+    ) -> impl FnOnce(&str, Option<Etag>) -> Result<(Etag, Digest), Error> + Send + 'static {
         let (rel, path) = (tab.key(), tab.path());
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
         let base = tab.save_state().digest.get();
         move |text, expected| {
             let write = |expected| match &vault {
                 Some(vault) => vault.save(&rel, text, expected),
-                None => accent_core::fs::write_note(&path, text, expected),
+                None => accent_core::fs::write_note(&path, text, expected).map_err(Into::into),
             };
             let mut written = write(expected);
-            if let Err(SaveError::ChangedOnDisk { .. }) = written
+            if let Err(Error::Core(Core::ChangedOnDisk { .. })) = written
                 && let Some(etag) = unchanged(vault.as_deref(), &rel, &path, base)
             {
                 written = write(Some(etag));
@@ -274,11 +276,7 @@ impl App {
     /// Write the buffer before returning, and hand the error back instead of reporting it: a
     /// caller that is about to make the buffer unreachable has to know whether the bytes landed.
     /// A save still on its way lands first, so the two never race for the file.
-    pub fn write_tab(
-        self: &Rc<Self>,
-        tab: &Rc<Tab>,
-        expected: Option<Etag>,
-    ) -> Result<(), SaveError> {
+    pub fn write_tab(self: &Rc<Self>, tab: &Rc<Tab>, expected: Option<Etag>) -> Result<(), Error> {
         self.land_save(tab, false);
         let written = self.writer(tab)(&tab.for_disk(), expected);
         log_write(&tab.rel(), expected, &written);
@@ -321,7 +319,7 @@ impl App {
                         app.toast(said);
                     }
                 }
-                editor::Landing::Failed(SaveError::ChangedOnDisk { .. }) if report => {
+                editor::Landing::Failed(Error::Core(Core::ChangedOnDisk { .. })) if report => {
                     app.toast(&format!("{} changed on disk again", tab.rel()));
                 }
                 editor::Landing::Failed(e) if report => app.cannot("save", e),
@@ -344,7 +342,7 @@ impl App {
     /// [`write_tab`](Self::write_tab) gated on the tab's own etag, as it stands once any save on
     /// its way has landed; a buffer that landing left clean has nothing more to write. For the
     /// paths a buffer leaves by, and for a file about to move with its buffer dirty.
-    pub fn flush_tab(self: &Rc<Self>, tab: &Rc<Tab>) -> Result<(), SaveError> {
+    pub fn flush_tab(self: &Rc<Self>, tab: &Rc<Tab>) -> Result<(), Error> {
         self.land_save(tab, false);
         if !tab.save.modified.get() {
             return Ok(());
@@ -395,7 +393,7 @@ impl App {
                     Some(vault) => vault.stat(&rel)?,
                     None => match Etag::of(&path) {
                         Ok(etag) => Some(etag),
-                        Err(accent_core::Error::NotFound(_)) => None,
+                        Err(Core::NotFound(_)) => None,
                         Err(e) => return Err(e.into()),
                     },
                 };
@@ -408,7 +406,7 @@ impl App {
                 })
             })
             .await
-            .unwrap_or_else(|| Err(std::io::Error::other("the stat worker stopped")));
+            .unwrap_or_else(|| Err(Core::Io("the stat worker stopped".to_string()).into()));
             if let (Some(app), Some(tab)) = (app.upgrade(), watched.upgrade()) {
                 app.compare_disk(&tab, ours, looked, moved);
             }
@@ -422,7 +420,7 @@ impl App {
         self: &Rc<Self>,
         tab: &Rc<T>,
         ours: Option<Etag>,
-        looked: std::io::Result<(Option<Etag>, Option<Etag>)>,
+        looked: accent_api::Result<(Option<Etag>, Option<Etag>)>,
         moved: fn(&Rc<Self>, &Rc<T>),
     ) {
         let save = tab.save_state();
@@ -480,7 +478,7 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |_: &Rc<Tab>, read: std::io::Result<()>| {
+                move |_: &Rc<Tab>, read: accent_api::Result<()>| {
                     if let Err(e) = read {
                         app.cannot("reload", e);
                     }
@@ -529,7 +527,7 @@ impl App {
     pub fn ask_unsaved(
         self: &Rc<Self>,
         tab: &Rc<Tab>,
-        error: &SaveError,
+        error: &Error,
         after: impl Fn(&Rc<Self>, bool) + 'static,
     ) {
         let (discarded, written) = (tab.clone(), tab.clone());
@@ -546,7 +544,7 @@ impl App {
     pub(crate) fn ask_unsaved_diagram(
         self: &Rc<Self>,
         tab: &Rc<crate::diagram::DiagramTab>,
-        error: &SaveError,
+        error: &Error,
         after: impl Fn(&Rc<Self>, bool) + 'static,
     ) {
         let (discarded, written) = (tab.clone(), tab.clone());
@@ -564,13 +562,13 @@ impl App {
     fn ask_unsaved_about(
         self: &Rc<Self>,
         rel: &str,
-        error: &SaveError,
+        error: &Error,
         discard: impl FnOnce() + 'static,
-        overwrite: impl FnOnce(&Rc<Self>) -> Result<(), SaveError> + 'static,
+        overwrite: impl FnOnce(&Rc<Self>) -> Result<(), Error> + 'static,
         after: impl Fn(&Rc<Self>, bool) + 'static,
     ) {
         let body = match error {
-            SaveError::ChangedOnDisk { .. } => {
+            Error::Core(Core::ChangedOnDisk { .. }) => {
                 format!("{rel} changed on disk, so your edits could not be saved.")
             }
             e => format!("{rel} could not be saved: {e}"),
@@ -581,7 +579,7 @@ impl App {
             ("cancel", "Cancel", adw::ResponseAppearance::Default),
             ("discard", "Discard", adw::ResponseAppearance::Destructive),
         ];
-        if !matches!(error, SaveError::Offline) {
+        if !error.is_offline() {
             responses.push(("overwrite", "Overwrite", adw::ResponseAppearance::Default));
         }
         let dialog = dialogs::alert("Unsaved Changes", &body, &responses, "cancel");
@@ -1167,7 +1165,7 @@ fn write_text(
 /// may still be on its way. So the cache copy goes up itself, and comes back down as `to`'s own
 /// cache copy with its stamp, or the next stroke's push would take the host's file for somebody
 /// else's change.
-fn copy_pdf(vault: &Vault, from: &str, local: &Path, to: &str) -> std::io::Result<()> {
+fn copy_pdf(vault: &Vault, from: &str, local: &Path, to: &str) -> accent_api::Result<()> {
     match vault.is_remote() {
         false => vault.copy(from, to),
         true => vault
@@ -1192,7 +1190,7 @@ fn unchanged(vault: Option<&Vault>, rel: &str, path: &Path, base: Option<Digest>
 }
 
 /// One write's outcome, on the `SAVES` target the save path has always logged to.
-fn log_write(rel: &str, expected: Option<Etag>, written: &Result<(Etag, Digest), SaveError>) {
+fn log_write(rel: &str, expected: Option<Etag>, written: &Result<(Etag, Digest), Error>) {
     match written {
         Ok((etag, _)) => tracing::debug!(target: SAVES, rel = %rel, ?expected, ?etag, "wrote"),
         Err(e) => tracing::debug!(target: SAVES, rel = %rel, ?expected, error = %e, "refused"),

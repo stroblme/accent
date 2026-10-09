@@ -916,14 +916,6 @@ pub fn delete_branch(repo: &Repo, name: &str, force: bool) -> Result<(), Error> 
     }
 }
 
-/// Whether git refused a delete because the branch is not fully merged, which is the one refusal
-/// worth offering to force. A string test rather than an [`Error`] variant on purpose: the RPC
-/// boundary flattens every git error into its message, so a variant would stop recognising it on
-/// a remote vault.
-pub fn unmerged(message: &str) -> bool {
-    message.contains("not fully merged")
-}
-
 /// What a merge did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Merge {

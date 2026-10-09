@@ -41,7 +41,7 @@ pub use accent_core::fs;
 
 pub use accent_core::config::{Config, LspConfig, Session, VaultConfig};
 pub use accent_core::diff::{DiffLine, Op};
-pub use accent_core::fs::{Etag, Read, SaveError, Text};
+pub use accent_core::fs::{Etag, Read, Text};
 // The module as well as its types: the git operations take a `Repo`, not a `Vault`, so callers
 // reach them as `accent_api::git::status(&repo)` after asking the vault which repos there are.
 pub use accent_core::code::SymbolKind;

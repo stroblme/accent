@@ -104,6 +104,11 @@ fn keep(dest: &Path, why: String) -> Pushed {
     }
 }
 
+/// A cached copy here that could not be read or written, by its path.
+fn cached(path: &Path, e: std::io::Error) -> Error {
+    accent_core::Error::io(path.display(), e).into()
+}
+
 /// Move a cached file or folder to where the host moved its original, making the folders it goes
 /// into. Nothing cached there is nothing to move, and a move that fails costs the next fetch a
 /// download.
@@ -498,33 +503,27 @@ impl Remote {
     /// A copy written here since it was fetched or pushed is never fetched over: what the pen drew
     /// is in it and nowhere else. It is handed back as it is, for a [`push`](Self::push) to send,
     /// beside the host's file if that has moved on.
-    pub fn fetch(&self, rel: &str) -> std::io::Result<PathBuf> {
+    pub fn fetch(&self, rel: &str) -> Result<PathBuf> {
         self.fetch_with(rel, &|_, _| ())
     }
 
     /// [`fetch`](Self::fetch), telling `progress` the bytes received so far and how many there
     /// are, as they arrive. Nothing is told when the cached copy is current.
-    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
+    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<PathBuf> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
         ) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{rel} is outside the vault"),
-            ));
+            return Err(crate::paths::outside(rel));
         };
-        let stamp = Stamp::hold(&stamp)?;
+        let stamp = Stamp::hold(&stamp).map_err(|e| cached(&dest, e))?;
         let stamped = stamp.read();
         if unsent(&dest, stamped) {
             return Ok(dest);
         }
         let current: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let Some(current) = current else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{rel} is not in the vault"),
-            ));
+            return Err(accent_core::Error::NotFound(rel.to_string()).into());
         };
         // The remote etag against the one the cached copy was written with. Size and mtime are
         // enough here: the inode is the remote's, and it is in the etag we stored.
@@ -533,7 +532,7 @@ impl Remote {
         }
 
         if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir)?;
+            std::fs::create_dir_all(dir).map_err(|e| cached(dir, e))?;
         }
         self.receive(rel, &dest, current.size, progress)?;
         if let Ok(copy) = crate::Etag::of(&dest) {
@@ -561,27 +560,21 @@ impl Remote {
     /// A file no longer on the host — moved or deleted there, while the copy was being written or
     /// was on its way — is `NotFound`, and nothing goes up: under the old name it would come back.
     /// The reader that follows a rename sends it again under the new one.
-    pub fn push(&self, rel: &str) -> std::io::Result<Pushed> {
+    pub fn push(&self, rel: &str) -> Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
         ) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{rel} is outside the vault"),
-            ));
+            return Err(crate::paths::outside(rel));
         };
-        let stamp = Stamp::hold(&stamp)?;
+        let stamp = Stamp::hold(&stamp).map_err(|e| cached(&dest, e))?;
         let stamped = stamp.read();
         if stamped.is_some() && !unsent(&dest, stamped) {
             return Ok(Pushed::Sent);
         }
         let current: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let Some(current) = current else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{rel} was moved or deleted"),
-            ));
+            return Err(accent_core::Error::NotFound(rel.to_string()).into());
         };
         if Some(current) != stamped.map(|s| s.host) {
             return Ok(self.push_beside(&dest, rel));
@@ -650,7 +643,7 @@ impl Remote {
     }
 
     /// The first of `<name> (edited).pdf`, `<name> (edited 2).pdf`, … the host does not hold.
-    fn free_edited_name(&self, rel: &str) -> std::io::Result<String> {
+    fn free_edited_name(&self, rel: &str) -> Result<String> {
         for nth in 1..=EDITED_COPIES {
             let name = edited_name(rel, nth);
             let held: Option<crate::Etag> = self.call("stat", json!([&name]))?;
@@ -658,25 +651,17 @@ impl Remote {
                 return Ok(name);
             }
         }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("{EDITED_COPIES} edited copies of it are already there"),
-        ))
+        Err(accent_core::Error::AlreadyExists(edited_name(rel, EDITED_COPIES)).into())
     }
 
     /// Copy a local file into the vault. The remote watcher indexes it as it lands.
-    pub fn upload(&self, local: &Path, rel: &str) -> std::io::Result<()> {
+    pub fn upload(&self, local: &Path, rel: &str) -> Result<()> {
         self.upload_with(local, rel, &|_, _| ())
     }
 
     /// [`upload`](Self::upload), read and sent a chunk at a time, telling `progress` the bytes
     /// sent so far and how many there are.
-    pub fn upload_with(
-        &self,
-        local: &Path,
-        rel: &str,
-        progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<()> {
+    pub fn upload_with(&self, local: &Path, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<()> {
         self.send(local, rel, false, progress).map(|_| ())
     }
 
@@ -689,9 +674,10 @@ impl Remote {
         rel: &str,
         replace: bool,
         progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<crate::Etag> {
-        let file = std::fs::File::open(local)?;
-        let sent = crate::Etag::from_meta(&file.metadata()?);
+    ) -> Result<crate::Etag> {
+        let unread = |e| accent_core::Error::io(local.display(), e);
+        let file = std::fs::File::open(local).map_err(unread)?;
+        let sent = crate::Etag::from_meta(&file.metadata().map_err(unread)?);
         link::send(
             &self.put_into(rel, sent.size, replace),
             file,
@@ -707,7 +693,7 @@ impl Remote {
     /// embed and the preview at once, not on the host watcher's debounce, which raced the
     /// preview's. Its watcher takes the file in all the same, so a telling that fails is no
     /// failed write.
-    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
+    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
         let size = bytes.len() as u64;
         link::send(&self.put_into(rel, size, false), bytes, size, &|_, _| ())?;
         if let Err(e) = self.call::<()>("wrote", json!([rel])) {
@@ -723,18 +709,13 @@ impl Remote {
     }
 
     /// Copy a file out of the vault to somewhere on this machine.
-    pub fn download(&self, rel: &str, dest: &Path) -> std::io::Result<()> {
+    pub fn download(&self, rel: &str, dest: &Path) -> Result<()> {
         self.download_with(rel, dest, &|_, _| ())
     }
 
     /// [`download`](Self::download), telling `progress` the bytes received so far and how many
     /// there are, as they arrive.
-    pub fn download_with(
-        &self,
-        rel: &str,
-        dest: &Path,
-        progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<()> {
+    pub fn download_with(&self, rel: &str, dest: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
         let size: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let size = size.map_or(0, |etag| etag.size);
         self.receive(rel, dest, size, progress)
@@ -750,7 +731,7 @@ impl Remote {
         dest: &Path,
         total: u64,
         progress: &dyn Fn(u64, u64),
-    ) -> std::io::Result<()> {
+    ) -> Result<()> {
         let mut child = self
             .ssh(&ssh::run(
                 &self.url,
@@ -760,11 +741,12 @@ impl Remote {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(link::no_ssh)?;
         let mut part = dest.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);
-        let received = (|| {
+        let received = (|| -> std::io::Result<()> {
             let mut stdout = child
                 .stdout
                 .take()
@@ -781,13 +763,16 @@ impl Remote {
                 progress(done, total);
             }
         })();
-        let out = child.wait_with_output()?;
-        let finished = received.and_then(|()| match out.status.success() {
-            true => std::fs::rename(&part, dest),
-            false => Err(std::io::Error::other(
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            )),
-        });
+        let out = child.wait_with_output().map_err(link::no_ssh)?;
+        let finished =
+            received
+                .map_err(|e| cached(&part, e))
+                .and_then(|()| match out.status.success() {
+                    true => std::fs::rename(&part, dest).map_err(|e| cached(dest, e)),
+                    false => Err(Error::Remote(
+                        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                    )),
+                });
         if finished.is_err() {
             let _ = std::fs::remove_file(&part);
         }

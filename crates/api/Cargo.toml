@@ -22,7 +22,6 @@ accent-lsp.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 # `template::render` and `template::strftime` take a `NaiveDateTime`, and core re-exports nothing.
