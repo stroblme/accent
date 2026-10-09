@@ -4,8 +4,8 @@ use super::links::{BEST_FILE, resolve_links_of};
 use super::schema::{BATCH, MAX_INDEXED_BODY};
 use super::{Change, Index, Phase, Progress, ReconcileStats};
 use crate::walk::{self, FileKind, ScanOptions};
+use crate::{Error, Result};
 use crate::{markdown, path};
-use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -59,8 +59,8 @@ impl Index {
             dir => match walk::stat_one(root, dir) {
                 Ok(Some(top)) if top.kind == FileKind::Dir => Some(top),
                 Ok(_) => None,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(e).with_context(|| format!("stat {dir}")),
+                Err(Error::NotFound(_)) => None,
+                Err(e) => return Err(e),
             },
         };
         match &top {
@@ -364,11 +364,11 @@ impl Index {
         let meta = match walk::stat_one(root, rel) {
             Ok(Some(meta)) => meta,
             Ok(None) => return Ok(Change::Ignored),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(Error::NotFound(_)) => {
                 self.remove_file_batched(rel)?;
                 return Ok(Change::Removed);
             }
-            Err(e) => return Err(e).with_context(|| format!("stat {rel}")),
+            Err(e) => return Err(e),
         };
 
         let existing: Option<(i64, i64, i64, i64)> = self

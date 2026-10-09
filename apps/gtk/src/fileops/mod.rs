@@ -357,7 +357,8 @@ fn new_drawing_named(ops: &Rc<Ops>, dir: &str, current: &str) {
                         return Err(cannot("it already exists".to_string()));
                     }
                     make_parents(&vault, &rel)?;
-                    let bytes = accent_core::pdf::blank_pdf(size).map_err(|e| cannot(why(&e)))?;
+                    let bytes =
+                        accent_core::pdf::blank_pdf(size).map_err(|e| cannot(e.to_string()))?;
                     vault
                         .write_file(&rel, &bytes)
                         .map_err(|e| cannot(e.to_string()))

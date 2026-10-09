@@ -1,9 +1,9 @@
 //! Listing what the index holds: the lazy tree, the switcher's paths, tags, stats, exclusions.
 
 use super::{FileRow, HeadingHit, Index, Stats};
+use crate::Result;
 use crate::path;
 use crate::walk::FileKind;
-use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 use std::path::Path;
 

@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 pub(super) fn run(root: &Path, args: &[&str], readonly: bool) -> Result<Vec<u8>, Error> {
     let out = command(root, args, readonly)
         .stdin(Stdio::null())
-        .output()?;
+        .output()
+        .map_err(|e| Error::io("git", e))?;
     Ok(checked(out)?.stdout)
 }
 
@@ -234,7 +235,7 @@ pub(super) fn bounded(
         Some(_) => Stdio::piped(),
         None => Stdio::null(),
     };
-    let mut child = cmd.stdin(input).spawn()?;
+    let mut child = cmd.stdin(input).spawn().map_err(|e| Error::io("git", e))?;
     let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
     if let (Some(mut pipe), Some(bytes)) = (child.stdin.take(), stdin) {
         // On a thread too, so a git that stops reading cannot hold the wait below. The pipe
@@ -265,7 +266,7 @@ pub(super) fn bounded(
             Ok(None) => std::thread::sleep(POLL),
             Err(e) => {
                 end(&mut child);
-                break Err(e.into());
+                break Err(Error::io("git", e));
             }
         }
     };

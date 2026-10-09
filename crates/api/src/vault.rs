@@ -252,7 +252,7 @@ impl Vault {
     }
 
     pub fn save_session(&self, s: &Session) -> Result<()> {
-        s.save(&self.key)
+        Ok(s.save(&self.key)?)
     }
 }
 

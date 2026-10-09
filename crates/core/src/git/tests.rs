@@ -1017,14 +1017,15 @@ fn branches_are_created_and_deleted_and_git_says_when_work_would_be_lost() {
     write_file(dir, "b.md", "b\n");
     commit_all(dir, "work moves on");
     checkout(&repo, "main").unwrap();
-    let refused = delete_branch(&repo, "work", false).unwrap_err().to_string();
-    assert!(unmerged(&refused), "{refused}");
+    let refused = delete_branch(&repo, "work", false).unwrap_err();
+    assert_eq!(refused, Error::NotMerged("work".to_string()));
+    assert!(unmerged(&refused.to_string()), "{refused}");
     delete_branch(&repo, "work", true).unwrap();
     assert_eq!(branches(&repo).unwrap().local, ["main"]);
 
     // The checked-out branch is a refusal nothing can force, so it must not read as one.
-    let refused = delete_branch(&repo, "main", false).unwrap_err().to_string();
-    assert!(!unmerged(&refused), "{refused}");
+    let refused = delete_branch(&repo, "main", false).unwrap_err();
+    assert!(matches!(refused, Error::Git(_)), "{refused}");
 }
 
 #[test]

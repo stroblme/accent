@@ -32,7 +32,7 @@ pub(super) struct Before {
 
 impl Local {
     pub fn read(&self, rel: &str) -> io::Result<(String, Etag)> {
-        fs::read_note(&self.resolve(rel)?)
+        Ok(fs::read_note(&self.resolve(rel)?)?)
     }
 
     /// Write a note, then tell the worker about it: the index is correct within a millisecond
@@ -76,7 +76,7 @@ impl Local {
     /// Read any file as text, saying so when it is binary or too big to hold. What a tab opens
     /// with; [`read`](Self::read) is the note-shaped version the rename and conflict paths use.
     pub fn read_text(&self, rel: &str) -> io::Result<fs::Read> {
-        fs::read_text(&self.resolve(rel)?)
+        Ok(fs::read_text(&self.resolve(rel)?)?)
     }
 
     /// The file's etag, or `None` when there is no file there. One `stat`, which is how a tab
@@ -84,8 +84,8 @@ impl Local {
     pub fn stat(&self, rel: &str) -> io::Result<Option<Etag>> {
         match Etag::of(&self.resolve(rel)?) {
             Ok(etag) => Ok(Some(etag)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
+            Err(accent_core::Error::NotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -265,7 +265,7 @@ impl Local {
         for (from, to) in &plan.moves {
             if let Err(e) = self
                 .resolve(from)
-                .and_then(|path| fs::rename(&path, &self.resolve(to)?))
+                .and_then(|path| Ok(fs::rename(&path, &self.resolve(to)?)?))
             {
                 report.not_moved = Some((from.clone(), e.to_string()));
                 break;

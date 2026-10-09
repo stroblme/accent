@@ -95,8 +95,10 @@ impl Watcher {
         root: &Path,
         dirs: &[PathBuf],
         on_event: impl Fn(VaultEvent) + Send + 'static,
-    ) -> anyhow::Result<Watcher> {
+    ) -> crate::Result<Watcher> {
         let dir_count = dirs.len() + 1;
+        let refused =
+            |e: notify::Error| crate::Error::Io(format!("watching {}: {e}", root.display()));
         let handler = move |result: DebounceEventResult| match result {
             Ok(events) => {
                 for event in events {
@@ -133,12 +135,13 @@ impl Watcher {
                 handler,
                 RecommendedCache::new(),
                 config,
-            )?;
-            watch_all(&mut d, root, dirs)?;
+            )
+            .map_err(refused)?;
+            watch_all(&mut d, root, dirs).map_err(refused)?;
             Backend::Poll(d)
         } else {
-            let mut d = new_debouncer(debounce, tick, handler)?;
-            watch_all(&mut d, root, dirs)?;
+            let mut d = new_debouncer(debounce, tick, handler).map_err(refused)?;
+            watch_all(&mut d, root, dirs).map_err(refused)?;
             Backend::Native(d)
         };
 

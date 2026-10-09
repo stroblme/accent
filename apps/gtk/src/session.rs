@@ -598,7 +598,7 @@ impl App {
     fn write_session(&self, session: &Session) {
         let written = match (self.vault(), self.key.borrow().saved_as()) {
             (Some(vault), _) => vault.save_session(session),
-            (None, Some(key)) => session.save(key),
+            (None, Some(key)) => session.save(key).map_err(Into::into),
             (None, None) => Ok(()),
         };
         if let Err(e) = written {

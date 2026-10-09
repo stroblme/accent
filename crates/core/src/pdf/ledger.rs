@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use anyhow::{Result, anyhow};
+use crate::{Error, Result};
 
 use crate::pdf::{self, PageEdit, PdfDoc};
 
@@ -354,7 +354,7 @@ impl Ink {
                 self.note(*page, doc.annotation_count(*page)?);
                 let drawn = kept
                     .as_ref()
-                    .ok_or_else(|| anyhow!("nothing kept of {id}"))?;
+                    .ok_or_else(|| Error::Pdf(format!("nothing kept of {id}")))?;
                 let area = doc.redraw_ink(*page, drawn)?;
                 self.appended(*page, *id);
                 Ok(Walked::Ink(*page, area))
@@ -373,7 +373,7 @@ impl Ink {
     fn locate(&mut self, doc: &PdfDoc, page: usize, id: u32) -> Result<usize> {
         self.note(page, doc.annotation_count(page)?);
         self.index_of(page, id)
-            .ok_or_else(|| anyhow!("stroke {id} is not on page {page}"))
+            .ok_or_else(|| Error::Pdf(format!("stroke {id} is not on page {page}")))
     }
 }
 

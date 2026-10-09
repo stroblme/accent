@@ -32,6 +32,17 @@ impl From<anyhow::Error> for AccentError {
     }
 }
 
+impl From<accent_core::Error> for AccentError {
+    fn from(e: accent_core::Error) -> Self {
+        match e {
+            accent_core::Error::ChangedOnDisk { current } => AccentError::ChangedOnDisk { current },
+            other => AccentError::Failed {
+                reason: other.to_string(),
+            },
+        }
+    }
+}
+
 impl From<SaveError> for AccentError {
     fn from(e: SaveError) -> Self {
         match e {

@@ -20,6 +20,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
+use crate::Error;
 use proc::{bounded, checked, command, network, run};
 use serde::{Deserialize, Serialize};
 
@@ -209,15 +210,6 @@ pub struct Submodule {
     pub describe: Option<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("{0}")]
-    Io(#[from] std::io::Error),
-    /// git ran and refused, with whatever it put on stderr.
-    #[error("{0}")]
-    Git(String),
-}
-
 // ------------------------------------------------------------------- discovery
 
 /// The repository containing `dir`, if any.
@@ -271,7 +263,7 @@ pub fn discover(vault_root: &Path, dirs: &[PathBuf]) -> Vec<Repo> {
         Ok(top) => top,
         // No git binary at all: the whole feature is simply absent, and saying so once beats one
         // failed subprocess per indexed directory.
-        Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(Error::NotFound(_)) => {
             tracing::debug!("no git binary on PATH; the vault has no repositories");
             return Vec::new();
         }
@@ -909,14 +901,19 @@ fn switch(repo: &Repo, args: &[&str]) -> Result<(), Error> {
 }
 
 /// Delete a local branch. `force` is `-D`, which deletes one whose commits are not merged
-/// anywhere; without it git refuses that case and [`unmerged`] recognises the refusal.
+/// anywhere; without it git refuses that case, which comes back as [`Error::NotMerged`].
 pub fn delete_branch(repo: &Repo, name: &str, force: bool) -> Result<(), Error> {
     let flag = match force {
         true => "-D",
         false => "-d",
     };
-    run(&repo.root, &["branch", flag, "--", name], false)?;
-    Ok(())
+    match run(&repo.root, &["branch", flag, "--", name], false) {
+        Err(Error::Git(msg)) if msg.contains("not fully merged") => {
+            Err(Error::NotMerged(name.to_string()))
+        }
+        Err(e) => Err(e),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// Whether git refused a delete because the branch is not fully merged, which is the one refusal
@@ -1126,12 +1123,13 @@ fn write(repo: &Repo, verb: &[&str], paths: &[impl Borrow<str>]) -> Result<(), E
     let args = [verb, &["--pathspec-from-file=-", "--pathspec-file-nul"]].concat();
     let mut child = command(&repo.root, &args, false)
         .stdin(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|e| Error::io("git", e))?;
     let (pipe, list) = (child.stdin.take(), paths.join("\0"));
     // On a thread, so that git's output is read while the list goes in: either pipe may fill.
     // The pipe closing as the thread ends is what tells git the list is complete.
     std::thread::spawn(move || pipe.map(|mut pipe| pipe.write_all(list.as_bytes())));
-    checked(child.wait_with_output()?)?;
+    checked(child.wait_with_output().map_err(|e| Error::io("git", e))?)?;
     Ok(())
 }
 

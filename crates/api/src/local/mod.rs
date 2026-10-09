@@ -262,7 +262,10 @@ impl Local {
     ///
     /// Only these queries are stopped: the git pane's directory list and a Replace All's file list
     /// share the connection and always run to their end.
-    fn supersede<T>(&self, query: impl FnOnce(&Index) -> Result<T>) -> Result<T> {
+    fn supersede<T>(
+        &self,
+        query: impl FnOnce(&Index) -> accent_core::Result<T>,
+    ) -> accent_core::Result<T> {
         let mine = {
             let mut pane = locked(&self.pane);
             // Under the lock, so the query it reaches is still the one holding the connection.
@@ -276,7 +279,7 @@ impl Local {
         {
             let mut pane = locked(&self.pane);
             if pane.0 != mine {
-                anyhow::bail!("superseded by a newer search");
+                return Err(accent_core::Error::Cancelled);
             }
             pane.1 = true;
         }

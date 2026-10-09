@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::os::raw::{c_int, c_ulong};
 
-use anyhow::{Context, Result, anyhow};
+use super::refused;
+use crate::{Error, Result};
 use pdfium_render::prelude::*;
 
 use super::ink::{
@@ -163,7 +164,7 @@ impl PdfDoc {
             let mut a = p
                 .annotations_mut()
                 .create_highlight_annotation()
-                .context("create highlight annotation")?;
+                .map_err(refused("create highlight annotation"))?;
             // The colour first, and never `fill_color`/`stroke_color` as *getters*: both setters
             // fall back to casting the annotation handle to a page-object handle once an
             // appearance stream exists, which is the crash `annotation_color` documents. On a
@@ -171,10 +172,10 @@ impl PdfDoc {
             a.set_stroke_color(PdfColor::new(
                 h.color[0], h.color[1], h.color[2], h.color[3],
             ))
-            .context("highlight colour")?;
+            .map_err(refused("highlight colour"))?;
             // Before the quads: pdfium copies `/Rect` into the appearance stream's bounding box.
             a.set_bounds(bounds.to_pdf(height))
-                .context("highlight bounds")?;
+                .map_err(refused("highlight bounds"))?;
             for q in &h.quads {
                 let [tl, tr, bl, br] = q.quad_corners();
                 let y = |v: f32| height - v;
@@ -189,12 +190,14 @@ impl PdfDoc {
                         br.0,
                         y(br.1),
                     ))
-                    .context("highlight quad")?;
+                    .map_err(refused("highlight quad"))?;
             }
             if let Some(text) = &h.contents {
-                a.set_contents(text).context("highlight contents")?;
+                a.set_contents(text)
+                    .map_err(refused("highlight contents"))?;
             }
-            a.set_is_printed(true).context("highlight print flag")?;
+            a.set_is_printed(true)
+                .map_err(refused("highlight print flag"))?;
             added += 1;
         }
         Ok(added)
@@ -275,7 +278,7 @@ impl PdfDoc {
             multiply,
         } = style;
         let Some(&Seg::Move(first)) = segs.first() else {
-            return Err(anyhow!("an ink path starts with a move"));
+            return Err(Error::Invalid("an ink path starts with a move".to_string()));
         };
         p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
         let height = p.height().value;
@@ -298,14 +301,14 @@ impl PdfDoc {
             Some(PdfPoints::new(width)),
             None,
         )
-        .context("ink path")?;
+        .map_err(refused("ink path"))?;
         path.set_line_cap(PdfPageObjectLineCap::Round)
-            .context("ink line cap")?;
+            .map_err(refused("ink line cap"))?;
         path.set_line_join(PdfPageObjectLineJoin::Round)
-            .context("ink line join")?;
+            .map_err(refused("ink line join"))?;
         if multiply {
             path.set_blend_mode(PdfPageObjectBlendMode::Multiply)
-                .context("ink blend mode")?;
+                .map_err(refused("ink blend mode"))?;
         }
         for seg in &segs[1..] {
             match *seg {
@@ -321,27 +324,29 @@ impl PdfDoc {
                 ),
                 Seg::Close => path.close_path(),
             }
-            .context("ink segment")?;
+            .map_err(refused("ink segment"))?;
         }
 
         let mut ink = p
             .annotations_mut()
             .create_ink_annotation()
-            .context("create ink annotation")?;
-        ink.set_stroke_color(colour).context("ink colour")?;
+            .map_err(refused("create ink annotation"))?;
+        ink.set_stroke_color(colour)
+            .map_err(refused("ink colour"))?;
         // Before the object: pdfium copies `/Rect` into the appearance stream's bounding box, and
         // a box set afterwards would scale what was drawn into it.
         ink.set_bounds(bounds.to_pdf(height))
-            .context("ink bounds")?;
+            .map_err(refused("ink bounds"))?;
         ink.objects_mut()
             .add_object(path.into())
-            .context("ink object")?;
-        ink.set_is_printed(true).context("ink print flag")?;
+            .map_err(refused("ink object"))?;
+        ink.set_is_printed(true)
+            .map_err(refused("ink print flag"))?;
         if let Some(contents) = &extra.contents {
-            ink.set_contents(contents).context("ink note")?;
+            ink.set_contents(contents).map_err(refused("ink note"))?;
         }
         if let Some(author) = &extra.author {
-            ink.set_creator(author).context("ink author")?;
+            ink.set_creator(author).map_err(refused("ink author"))?;
         }
         if !extra.ink_list.is_empty() {
             let last = p.annotations().len().saturating_sub(1);
@@ -455,10 +460,13 @@ impl PdfDoc {
             let a = p
                 .annotations()
                 .get(index as PdfPageAnnotationIndex)
-                .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
-            let (segs, style) = read_ink(&a, height)
-                .ok_or_else(|| anyhow!("annotation {index} of page {page} is not a drawn path"))?;
-            let bounds = Rect::from_pdf(a.bounds().context("ink bounds")?, height);
+                .map_err(|e| Error::Pdf(format!("annotation {index} of page {page}: {e:?}")))?;
+            let (segs, style) = read_ink(&a, height).ok_or_else(|| {
+                Error::Pdf(format!(
+                    "annotation {index} of page {page} is not a drawn path"
+                ))
+            })?;
+            let bounds = Rect::from_pdf(a.bounds().map_err(refused("ink bounds"))?, height);
             let points = flatten(&segs);
             if !cuttable(&a, &segs, &points, bounds) {
                 return Ok(None);
@@ -546,7 +554,9 @@ fn add_ink_list(
     unsafe {
         let annot = bindings.FPDFPage_GetAnnot(bindings.get_handle_from_page(p), index as c_int);
         if annot.is_null() {
-            return Err(anyhow!("no annotation {index} to give an /InkList"));
+            return Err(Error::Pdf(format!(
+                "no annotation {index} to give an /InkList"
+            )));
         }
         let added = strokes.iter().all(|stroke| {
             let points: Vec<FS_POINTF> = (stroke.iter())
@@ -557,7 +567,9 @@ fn add_ink_list(
         bindings.FPDFPage_CloseAnnot(annot);
         match added {
             true => Ok(()),
-            false => Err(anyhow!("pdfium would not write the /InkList")),
+            false => Err(Error::Pdf(
+                "pdfium would not write the /InkList".to_string(),
+            )),
         }
     }
 }
@@ -577,13 +589,16 @@ fn take(p: &mut PdfPage<'_>, page: usize, index: usize) -> Result<(Drawn, Rect)>
         let a = p
             .annotations()
             .get(index as PdfPageAnnotationIndex)
-            .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
+            .map_err(|e| Error::Pdf(format!("annotation {index} of page {page}: {e:?}")))?;
         let was = a
             .bounds()
             .map(|b| Rect::from_pdf(b, height))
             .unwrap_or(Rect::ZERO);
-        let (segs, style) = read_ink(&a, height)
-            .ok_or_else(|| anyhow!("annotation {index} of page {page} is not a drawn path"))?;
+        let (segs, style) = read_ink(&a, height).ok_or_else(|| {
+            Error::Pdf(format!(
+                "annotation {index} of page {page} is not a drawn path"
+            ))
+        })?;
         let ink_list = ink_list(p, index, height);
         let as_read = cuttable(&a, &segs, &flatten(&segs), was) || ink_list.is_empty();
         let segs = match as_read {
@@ -606,10 +621,10 @@ fn take(p: &mut PdfPage<'_>, page: usize, index: usize) -> Result<(Drawn, Rect)>
     let a = p
         .annotations_mut()
         .get(index as PdfPageAnnotationIndex)
-        .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
+        .map_err(|e| Error::Pdf(format!("annotation {index} of page {page}: {e:?}")))?;
     p.annotations_mut()
         .delete_annotation(a)
-        .context("delete annotation")?;
+        .map_err(refused("delete annotation"))?;
     Ok(drawn)
 }
 

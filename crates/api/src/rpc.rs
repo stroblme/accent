@@ -686,7 +686,7 @@ pub(crate) fn io<T: serde::Serialize>(r: std::io::Result<T>) -> Result<Value, Rp
 }
 
 pub(crate) fn git_result<T: serde::Serialize>(
-    r: Result<T, accent_core::git::Error>,
+    r: accent_core::Result<T>,
 ) -> Result<Value, RpcError> {
     ok(r.map_err(RpcError::failed)?)
 }

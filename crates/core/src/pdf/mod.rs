@@ -27,7 +27,7 @@ pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use anyhow::{Result, anyhow};
+use crate::{Error, Result};
 use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -74,12 +74,18 @@ pub(super) fn pdfium() -> Result<&'static Pdfium> {
         })
         .as_ref()
         .ok_or_else(|| {
-            anyhow!(
+            Error::Pdf(format!(
                 "libpdfium not found in {} nor in the system library path \
                  (set ACCENT_PDFIUM_DIR)",
                 library_dir().display()
-            )
+            ))
         })
+}
+
+/// What pdfium refused while doing `what`. Its own `Display` is a `{:#?}` over several lines, so a
+/// message takes the one-line `Debug`.
+pub(super) fn refused(what: impl std::fmt::Display) -> impl FnOnce(PdfiumError) -> Error {
+    move |e| Error::Pdf(format!("{what}: {e:?}"))
 }
 
 /// Whether a usable `libpdfium` was found. Callers that can degrade (and tests) check this first.

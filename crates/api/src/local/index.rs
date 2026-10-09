@@ -46,7 +46,7 @@ impl Local {
         limit: usize,
         include_ignored: bool,
     ) -> Result<Vec<SearchHit>> {
-        self.supersede(|index| index.search(query, limit, include_ignored))
+        Ok(self.supersede(|index| index.search(query, limit, include_ignored))?)
     }
 
     /// The mid-word matches below a ranked search: [`Index::search_mid_word`], on the same
@@ -58,7 +58,7 @@ impl Local {
         include_ignored: bool,
         skip: &[String],
     ) -> Result<Vec<SearchHit>> {
-        self.supersede(|index| index.search_mid_word(query, limit, include_ignored, skip))
+        Ok(self.supersede(|index| index.search_mid_word(query, limit, include_ignored, skip))?)
     }
 
     /// Exact search: one row per match of `query` under `options`, capped at `limit`, plus how
@@ -77,7 +77,7 @@ impl Local {
         include_ignored: bool,
     ) -> Result<(Vec<Match>, usize)> {
         let re = search::pattern(query, options)?;
-        self.supersede(|index| index.grep(&re, limit, include_ignored))
+        Ok(self.supersede(|index| index.grep(&re, limit, include_ignored))?)
     }
 
     /// The same exact search over the files the index does not hold at all: those under a
@@ -185,20 +185,20 @@ impl Local {
     }
 
     pub fn tags(&self) -> Result<Vec<(String, i64)>> {
-        self.index().tags()
+        Ok(self.index().tags()?)
     }
 
     /// What the index holds, counted.
     pub fn stats(&self) -> Result<Stats> {
-        self.index().stats()
+        Ok(self.index().stats()?)
     }
 
     pub fn files_with_tag(&self, tag: &str) -> Result<Vec<FileRow>> {
-        self.index().files_with_tag(tag)
+        Ok(self.index().files_with_tag(tag)?)
     }
 
     pub fn backlinks(&self, rel: &str) -> Result<Vec<Backlink>> {
-        self.index().backlinks(rel)
+        Ok(self.index().backlinks(rel)?)
     }
 
     /// Every link that resolves to `rel`, where it is written, whatever kind of file `rel` is:
@@ -213,15 +213,15 @@ impl Local {
     }
 
     pub fn links_from(&self, rel: &str) -> Result<Vec<OutLink>> {
-        self.index().links_from(rel)
+        Ok(self.index().links_from(rel)?)
     }
 
     pub fn unresolved_links(&self) -> Result<Vec<(String, String, i64)>> {
-        self.index().unresolved_links()
+        Ok(self.index().unresolved_links()?)
     }
 
     pub fn headings_matching(&self, words: &[String], limit: usize) -> Result<Vec<HeadingHit>> {
-        self.index().headings_matching(words, limit)
+        Ok(self.index().headings_matching(words, limit)?)
     }
 
     /// Ranked as [`search`](Self::search) is, on the search connection and superseded with it.
@@ -230,15 +230,15 @@ impl Local {
         words: &[String],
         limit: usize,
     ) -> Result<Vec<(String, Option<String>)>> {
-        self.supersede(|index| index.rank_files(words, limit))
+        Ok(self.supersede(|index| index.rank_files(words, limit))?)
     }
 
     pub fn file_symbols(&self, rel: &str) -> Result<Vec<CodeSymbol>> {
-        self.index().file_symbols(rel)
+        Ok(self.index().file_symbols(rel)?)
     }
 
     pub fn find_symbols(&self, query: &str, limit: usize) -> Result<Vec<CodeSymbol>> {
-        self.index().find_symbols(query, limit)
+        Ok(self.index().find_symbols(query, limit)?)
     }
 
     pub fn symbols_named(
@@ -247,7 +247,7 @@ impl Local {
         near: &str,
         per: usize,
     ) -> Result<Vec<CodeSymbol>> {
-        self.index().symbols_named(names, near, per)
+        Ok(self.index().symbols_named(names, near, per)?)
     }
 
     pub fn symbols_by_words(
@@ -255,16 +255,16 @@ impl Local {
         words: &[String],
         limit: usize,
     ) -> Result<Vec<(CodeSymbol, usize)>> {
-        self.index().symbols_by_words(words, limit)
+        Ok(self.index().symbols_by_words(words, limit)?)
     }
 
     /// Read on the search connection, as a search is: every code body holding the name's words.
     pub fn mentions(&self, name: &str, limit: usize) -> Result<Vec<Mention>> {
-        self.supersede(|index| index.mentions(name, limit))
+        Ok(self.supersede(|index| index.mentions(name, limit))?)
     }
 
     pub(crate) fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {
-        self.index().pdf_links(rel)
+        Ok(self.index().pdf_links(rel)?)
     }
 
     /// Every file the app can open, notes first: what the palette's switcher lists, now that a
@@ -275,7 +275,7 @@ impl Local {
     /// build output stays out of Go to File. The tree still lists an ignored file, dimmed, which
     /// is the way to open one.
     pub fn file_paths(&self, include_ignored: bool) -> Result<Vec<String>> {
-        self.index().file_paths(include_ignored)
+        Ok(self.index().file_paths(include_ignored)?)
     }
 
     /// Hand the index what search leaves out, so every later query can leave it out.
@@ -299,19 +299,19 @@ impl Local {
         self.tx
             .send(Msg::SetExcluded(entries.to_vec(), reply))
             .map_err(|_| anyhow::anyhow!("the vault worker is gone"))?;
-        answer
+        Ok(answer
             .recv()
-            .context("the vault worker stopped before it recorded the exclusion set")?
+            .context("the vault worker stopped before it recorded the exclusion set")??)
     }
 
     pub fn recent_files(&self, limit: usize) -> Result<Vec<String>> {
-        self.index().recent_files(limit)
+        Ok(self.index().recent_files(limit)?)
     }
 
     /// The note a wikilink target points at, or `None` when it dangles and the UI can offer to
     /// create it.
     pub fn resolve_link(&self, target: &str) -> Result<Option<String>> {
-        self.index().resolve_target(target)
+        Ok(self.index().resolve_target(target)?)
     }
 
     /// The notes links name that are not there yet, by the path New File would create each at.
@@ -340,7 +340,7 @@ impl Local {
 
     /// `(alias, note)` for every frontmatter alias in the vault.
     pub fn note_aliases(&self) -> Result<Vec<(String, String)>> {
-        self.index().note_aliases()
+        Ok(self.index().note_aliases()?)
     }
 
     /// `(original, conflict copy)` for every `*.sync-conflict-*` file whose original still exists.

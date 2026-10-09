@@ -97,7 +97,7 @@ pub(crate) enum Msg {
     WatchUnindexed(Vec<String>, bool),
     /// What search leaves out, and where to say it has been written. See
     /// [`Local::set_excluded`]: the worker holds the only writing connection.
-    SetExcluded(Vec<String>, Sender<Result<()>>),
+    SetExcluded(Vec<String>, Sender<accent_core::Result<()>>),
     /// Answered once everything posted before it has reached the index. The one thing the
     /// worker's batching costs a caller is that a write it has just made is not yet readable;
     /// this is how [`Local::settle_index`] waits for it instead of guessing at a delay.
