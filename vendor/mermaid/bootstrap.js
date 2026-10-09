@@ -1,7 +1,7 @@
 // accent's own, not mermaid's: the bootstrap that draws a note's diagrams, which the desktop
 // preview (`apps/gtk/src/preview.rs`) and the Android view (`NoteScreen.kt`) both run, so the two
 // cannot drift. Each caller picks the theme by its page, and the desktop passes `keep` to move its
-// scroll-sync marker out of a fence before the fence goes.
+// scroll-sync marker out of a fence before the fence goes, and to hand its place to the drawing.
 //
 // Each fence becomes a `<pre class="mermaid">` from the code element's `textContent`, which undoes
 // pulldown-cmark's HTML escaping and hands mermaid the source exactly as the author typed it; a
@@ -16,7 +16,7 @@ function accentDiagrams(theme, keep) {
     var pre = document.createElement('pre');
     pre.className = 'mermaid';
     pre.textContent = blocks[i].textContent;
-    if (keep) { keep(fence); }
+    if (keep) { keep(fence, pre); }
     fence.parentElement.replaceChild(pre, fence);
     nodes.push(pre);
   }

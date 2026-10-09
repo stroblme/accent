@@ -90,6 +90,80 @@ window.__accentScrollToLine = function (line) {
 };
 "#;
 
+/// A re-render of the note on the page, put in place of the one there ([`Inner::patch`]): the
+/// blocks at the top level that did not change stay as they are, and with them the scroll, a
+/// selection, the find's match and a drawn diagram in them; the ones between are replaced.
+///
+/// A block is known by the HTML it was put there as, its source-line markers left out, since a
+/// line added above shifts every marker below and changes nothing else; a kept block takes its
+/// markers from the new render. The page's own blocks are taken at `DOMContentLoaded`, before the
+/// mermaid bootstrap at `End` replaces a fence by its drawing ([`MERMAID`] hands the fence's place
+/// over); any other node a script puts at the top level is left where it is.
+///
+/// Answers whether the selection lies wholly before the first change, so that a find's place
+/// among the matches still holds.
+const PATCH_SCRIPT: &str = r#"
+(function () {
+  var keys = new Map(), joined = new Set();
+  var key = function (node) {
+    return node.nodeType === 1 ? node.outerHTML.replace(/ data-line="\d+"/g, '')
+                               : node.nodeType + ':' + node.nodeValue;
+  };
+  var marks = function (nodes) {
+    var out = [];
+    nodes.forEach(function (n) {
+      if (n.nodeType !== 1) { return; }
+      if (n.matches('[data-line]')) { out.push(n); }
+      out.push.apply(out, n.querySelectorAll('[data-line]'));
+    });
+    return out;
+  };
+  document.addEventListener('DOMContentLoaded', function () {
+    document.body.childNodes.forEach(function (n) { keys.set(n, key(n)); });
+  });
+  window.__accentHandOver = function (fence, mark, drawing) {
+    if (!keys.has(fence)) { return; }
+    keys.set(mark || drawing, keys.get(fence));
+    keys.delete(fence);
+    if (mark) { joined.add(drawing); }
+  };
+  window.__accentPatch = function (html) {
+    var runs = [];
+    document.body.childNodes.forEach(function (n) {
+      if (keys.has(n)) { runs.push({ key: keys.get(n), nodes: [n] }); }
+      else if (joined.has(n) && runs.length) { runs[runs.length - 1].nodes.push(n); }
+    });
+    var t = document.createElement('template');
+    t.innerHTML = html;
+    var next = Array.from(t.content.childNodes), fresh = next.map(key);
+    var a = 0, b = 0;
+    while (a < runs.length && a < next.length && runs[a].key === fresh[a]) { a++; }
+    while (b < runs.length - a && b < next.length - a &&
+           runs[runs.length - 1 - b].key === fresh[next.length - 1 - b]) { b++; }
+    var sel = getSelection(), first = a < runs.length ? runs[a].nodes[0] : null;
+    var before = sel.rangeCount > 0 && !sel.isCollapsed &&
+                 (!first || sel.getRangeAt(0).comparePoint(first, 0) === 1);
+    var end = runs.length - b, at = end < runs.length ? runs[end].nodes[0] : null;
+    for (var i = a; i < end; i++) {
+      runs[i].nodes.forEach(function (n) { keys.delete(n); joined.delete(n); n.remove(); });
+    }
+    for (var j = a; j < next.length - b; j++) {
+      keys.set(next[j], fresh[j]);
+      document.body.insertBefore(next[j], at);
+    }
+    for (var k = 1; k <= b; k++) {
+      var page = marks(runs[runs.length - k].nodes), want = marks([next[next.length - k]]);
+      for (var m = 0; m < page.length && m < want.length; m++) {
+        var line = want[m].getAttribute('data-line');
+        if (page[m].getAttribute('data-line') !== line) { page[m].setAttribute('data-line', line); }
+      }
+    }
+    if (window.__accentDraw) { window.__accentDraw(); }
+    return before;
+  };
+})();
+"#;
+
 /// Relay the page's own errors back into this process.
 ///
 /// WebKit's `enable-write-console-messages-to-stdout` writes on the *web process's* stdout, which
@@ -119,22 +193,25 @@ const CONSOLE_SCRIPT: &str = r#"
 /// nothing at runtime, so nothing else in the hardening moves.
 ///
 /// The bootstrap is Android's too (`vendor/mermaid/bootstrap.js`); what is the desktop's alone is
-/// the theme by the page's lightness and the scroll-sync marker each fence carries.
+/// the theme by the page's lightness, the scroll-sync marker each fence carries, and drawing again
+/// the fences a patch brings ([`PATCH_SCRIPT`]).
 const MERMAID: &str = concat!(
     include_str!("../../../vendor/mermaid/mermaid.min.js"),
     "\n",
     include_str!("../../../vendor/mermaid/bootstrap.js"),
     r#"
-(function () {
+window.__accentDraw = function () {
   var rgb = getComputedStyle(document.documentElement).backgroundColor.match(/\d+/g) || [255, 255, 255];
   var luma = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
   // Kept where a print or an export can wait for the diagrams before taking the page.
-  window.__accentDrawn = accentDiagrams(luma < 0.5 ? 'dark' : 'neutral', function (fence) {
+  window.__accentDrawn = accentDiagrams(luma < 0.5 ? 'dark' : 'neutral', function (fence, drawing) {
     // The block's scroll-sync marker sits inside the fence and has to outlive it.
     var mark = fence.querySelector('[data-line]');
     if (mark) { fence.parentElement.insertBefore(mark, fence); }
+    __accentHandOver(fence, mark, drawing);
   });
-})();
+};
+window.__accentDraw();
 "#
 );
 
@@ -156,11 +233,15 @@ struct Inner {
     /// How many renders were asked for: a page back from its worker loads only if it is the
     /// latest, so a long note's render never lands over a shorter one asked for after it.
     renders: Cell<u64>,
+    /// Whether the page up is the latest render's.
     loaded: Cell<bool>,
+    /// The note whose page has finished loading, which a render of it patches ([`Inner::put`]);
+    /// `None` while a page loads, and once WebKit's process or its images are gone.
+    shown: RefCell<Option<String>>,
     /// A line asked for while the page was still loading.
     pending: Cell<Option<u32>>,
-    /// What the find bar is looking for, and under which of its toggles, kept because every
-    /// re-render reloads the page and WebKit's find dies with it.
+    /// What the find bar is looking for, and under which of its toggles, kept because a new
+    /// page drops WebKit's find, and a patch may replace the blocks its matches are in.
     query: RefCell<Option<String>>,
     options: Cell<Options>,
     /// Matches WebKit last counted, and which of them the reader is on (1-based, 0 for none).
@@ -175,29 +256,83 @@ struct Inner {
     /// Whether the count handler is already on WebKit's find controller. The reporter itself is
     /// replaceable, the handler is not: connecting a second one would count every match twice.
     counting: Cell<bool>,
+    /// Whether the count on its way is of a search from the reader's match, which keeps `at`,
+    /// rather than from the top ([`Inner::refind`]).
+    from_match: Cell<bool>,
     /// Whether WebKit's process died under the page since a page last finished loading; see
     /// [`Preview::connect_lost`].
     lost: Cell<bool>,
 }
 
 impl Inner {
-    /// Put `body` on the page as `rel`'s.
-    fn load(&self, rel: &str, body: &str) {
+    /// Put `body` on the page as `rel`'s: patched into the page up when that is `rel`'s and wants
+    /// the scripts it has, loaded as a new page otherwise. Only a load sets the base URI that
+    /// `rel`'s links and images resolve from, and the scripts the page runs.
+    fn put(self: &Rc<Self>, rel: &str, body: &str) {
+        let diagrams = body.contains("language-mermaid");
+        if self.shown.borrow().as_deref() == Some(rel)
+            && diagrams == self.mermaid.borrow().is_some()
+            && !self.view.is_loading()
+        {
+            return self.patch(body);
+        }
         *self.assets.note.borrow_mut() = rel.to_string();
-        self.set_mermaid(body.contains("language-mermaid"));
+        self.shown.take();
+        self.set_mermaid(diagrams);
         self.loaded.set(false);
         self.view.load_html(&document(body), Some(&base_uri(rel)));
     }
 
+    /// Put `body` in place of the page's body ([`PATCH_SCRIPT`]). Nothing about the page's
+    /// loading changes: the network filter stays on it, and only an image the new blocks name
+    /// that WebKit does not hold is asked for, as on a load.
+    fn patch(self: &Rc<Self>, body: &str) {
+        let render = self.renders.get();
+        let args = glib::VariantDict::new(None);
+        args.insert("html", body);
+        let inner = Rc::downgrade(self);
+        self.view.call_async_javascript_function(
+            "return __accentPatch(html);",
+            Some(&args.end()),
+            None,
+            None,
+            gio::Cancellable::NONE,
+            move |result| {
+                let Some(inner) = inner.upgrade() else {
+                    return;
+                };
+                let kept = result.map(|v| v.to_boolean()).unwrap_or_else(|e| {
+                    // The page is the last render's: the next one loads a new page.
+                    tracing::warn!(target: PREVIEW, "cannot patch the page: {e}");
+                    inner.shown.take();
+                    false
+                });
+                if inner.renders.get() == render {
+                    inner.settle(kept);
+                }
+            },
+        );
+    }
+
+    /// The latest render is on the page: scroll where it was asked to, and search it again,
+    /// from the reader's match if the selection on it was `kept` before every change.
+    fn settle(&self, kept: bool) {
+        self.loaded.set(true);
+        if let Some(line) = self.pending.take() {
+            self.scroll(line);
+        }
+        self.refind(kept);
+    }
+
     /// The network filter is in, or could not be: load what waited for it.
-    fn unlock(&self, filter: &Filter) {
+    fn unlock(self: &Rc<Self>, filter: &Filter) {
         let filter = filter
             .as_ref()
             .map(|f| self.content.add_filter(f))
             .map_err(Clone::clone);
         let next = self.gate.borrow_mut().settle(filter);
         if let Some((rel, body)) = next {
-            self.load(&rel, &body);
+            self.put(&rel, &body);
         }
     }
 
@@ -215,7 +350,11 @@ impl Inner {
     /// finished loading silently finds nothing — measured under Xvfb: the same query returns 0
     /// matches issued a second after `load_html` and 3 issued five seconds later — so every route
     /// to a search goes through here and the load handler calls it again.
-    fn refind(&self) {
+    ///
+    /// `from_match` searches from the match the reader is on, the selection, rather than from the
+    /// top: a patch that changed nothing before it leaves every match up to it where it was, so
+    /// the counter's place still holds and only the total is counted again.
+    fn refind(&self, from_match: bool) {
         let query = self.query.borrow();
         let (Some(finder), Some(text)) = (
             self.view.find_controller(),
@@ -226,15 +365,16 @@ impl Inner {
         // WebKit searches forward from whatever is selected, so a query changed after the reader
         // has stepped a few matches would land somewhere in the middle and there would be no
         // saying where. Dropping the selection first makes every fresh search land on match one,
-        // which is what lets the counter say "1 of 12" and mean it. Fire and forget: the script
-        // and the find both go to the web process over the same connection, in this order.
-        self.view.evaluate_javascript(
-            "window.getSelection().removeAllRanges()",
-            None,
-            None,
-            gio::Cancellable::NONE,
-            report_js,
-        );
+        // which is what lets the counter say "1 of 12" and mean it; collapsing it to its start
+        // lands on the match it holds. Fire and forget: the script and the find both go to the
+        // web process over the same connection, in this order.
+        let selection = match from_match {
+            true => "window.getSelection().collapseToStart()",
+            false => "window.getSelection().removeAllRanges()",
+        };
+        self.from_match.set(from_match);
+        self.view
+            .evaluate_javascript(selection, None, None, gio::Cancellable::NONE, report_js);
         // Counting first is the order WebKit's own MiniBrowser uses; `search` reports no total.
         let options = find_options(self.options.get()).bits();
         finder.count_matches(text, options, FIND_LIMIT);
@@ -444,13 +584,15 @@ impl Preview {
         settings.set_enable_back_forward_navigation_gestures(false);
 
         let content = webkit6::UserContentManager::new();
-        content.add_script(&webkit6::UserScript::new(
-            SCROLL_SCRIPT,
-            webkit6::UserContentInjectedFrames::TopFrame,
-            webkit6::UserScriptInjectionTime::Start,
-            &[],
-            &[],
-        ));
+        for script in [SCROLL_SCRIPT, PATCH_SCRIPT] {
+            content.add_script(&webkit6::UserScript::new(
+                script,
+                webkit6::UserContentInjectedFrames::TopFrame,
+                webkit6::UserScriptInjectionTime::Start,
+                &[],
+                &[],
+            ));
+        }
         install_console(&content);
 
         let view = webkit6::WebView::builder()
@@ -473,6 +615,7 @@ impl Preview {
             gate: RefCell::new(Gate::Waiting(None)),
             renders: Cell::new(0),
             loaded: Cell::new(false),
+            shown: RefCell::new(None),
             pending: Cell::new(None),
             query: RefCell::new(None),
             options: Cell::new(Options::default()),
@@ -480,6 +623,7 @@ impl Preview {
             at: Cell::new(0),
             report: RefCell::new(None),
             counting: Cell::new(false),
+            from_match: Cell::new(false),
             lost: Cell::new(false),
         });
         network_filter(glib::clone!(
@@ -493,13 +637,18 @@ impl Preview {
             inner,
             move |_, event| {
                 if event == webkit6::LoadEvent::Finished {
-                    inner.loaded.set(true);
                     inner.lost.set(false);
-                    if let Some(line) = inner.pending.take() {
-                        inner.scroll(line);
-                    }
-                    inner.refind();
+                    *inner.shown.borrow_mut() = Some(inner.assets.note.borrow().clone());
+                    inner.settle(false);
                 }
+            }
+        ));
+        // A new process has none of the page: the next render loads one.
+        inner.view.connect_web_process_terminated(glib::clone!(
+            #[weak]
+            inner,
+            move |_, _| {
+                inner.shown.take();
             }
         ));
 
@@ -532,10 +681,12 @@ impl Preview {
 
     /// Render `text`, resolving relative links as if the note lived at `rel`.
     ///
-    /// Re-rendering starts the page from the top; the caller restores the reading position with
-    /// [`Preview::scroll_to_line`]. `to_html` runs on a worker, a note of a megabyte taking some
-    /// 20 ms, and only the latest render asked for loads. One asked for before the network filter
-    /// is on the view waits for it ([`Gate`]).
+    /// A render of the note on the page patches it, keeping the reading position and what is
+    /// selected wherever their blocks did not change; another note's starts a new page from the
+    /// top, and the caller restores the reading position with [`Preview::scroll_to_line`].
+    /// `to_html` runs on a worker, a note of a megabyte taking some 20 ms, and only the latest
+    /// render asked for lands. One asked for before the network filter is on the view waits for
+    /// it ([`Gate`]).
     pub fn render(&self, rel: &str, text: &str) {
         let render = self.inner.renders.get() + 1;
         self.inner.renders.set(render);
@@ -554,7 +705,7 @@ impl Preview {
             };
             let next = inner.gate.borrow_mut().pass((rel, body));
             if let Some((rel, body)) = next {
-                inner.load(&rel, &body);
+                inner.put(&rel, &body);
             }
         });
     }
@@ -585,9 +736,11 @@ impl Preview {
     }
 
     /// Drop every image WebKit keeps from the page, then `then`, which renders the note again:
-    /// a new look or an inverted image is served only to a page that asks for it once more.
+    /// a new look or an inverted image is served only to a page that asks for it once more, so
+    /// the render loads a new page rather than patching blocks that would keep theirs.
     pub fn forget_images(&self, then: impl FnOnce() + 'static) {
         self.inner.assets.served.borrow_mut().clear();
+        self.inner.shown.take();
         let Some(data) = self.inner.session.website_data_manager() else {
             return then();
         };
@@ -621,6 +774,12 @@ impl Preview {
     #[cfg(feature = "bench")]
     pub fn requests(&self) -> u32 {
         self.inner.assets.requests.get()
+    }
+
+    /// Whether the page up is the latest render's, for a drill timing the renders.
+    #[cfg(feature = "bench")]
+    pub fn settled(&self) -> bool {
+        self.inner.loaded.get()
     }
 
     /// The web view, for a drill that reads the page itself.
@@ -700,8 +859,9 @@ impl Preview {
         if text.is_empty() {
             return self.find_clear();
         }
-        if self.inner.loaded.get() {
-            self.inner.refind();
+        // A page being patched is up to search; one loading is searched once it has loaded.
+        if self.inner.shown.borrow().is_some() {
+            self.inner.refind(false);
         }
     }
 
@@ -745,9 +905,13 @@ impl Preview {
             self.inner,
             move |_, count| {
                 inner.total.set(count);
-                // Every count is preceded by a search that starts from the top, so the reader is
-                // on the first match whenever there is one.
-                inner.at.set((count > 0) as u32);
+                // A search from the top lands on the first match whenever there is one; one from
+                // the reader's match stays on it.
+                let at = match inner.from_match.replace(false) {
+                    true => inner.at.get().min(count),
+                    false => (count > 0) as u32,
+                };
+                inner.at.set(at);
                 inner.say();
             }
         ));

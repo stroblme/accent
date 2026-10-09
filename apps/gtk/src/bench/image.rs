@@ -330,7 +330,7 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 /// image and a pick from its menu.
 ///
 /// `=time:<rel_note>` instead renders the note five times over and prints, for each, how long the
-/// render held the main thread (`render_ms`), until the page had loaded (`shown_ms`), and the
+/// render held the main thread (`render_ms`), until its page was up (`shown_ms`), and the
 /// longest the main loop went without turning from the render until 200 ms past the load
 /// (`stall_ms`), which is how long typing would wait on the preview; then whether, of the note
 /// and a word rendered at once, the word asked for last is what the page shows (`latest`).
@@ -339,7 +339,13 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 /// the note shows, a figure exported again under the preview, and prints the page either side.
 /// `=gone:<rel_note>,<rel_img>[,<rel_to>]` removes `<rel_img>` instead, or renames it to
 /// `<rel_to>`. On a remote vault the file is changed on the host, over ssh.
+///
+/// `=type:<rel_note>[,<word>]` types into the note instead, on a scratch vault, and prints what a
+/// re-render costs and what it keeps (`preview::bench_preview_type`).
 pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
+    if let Some(arg) = rel.strip_prefix("type:") {
+        return bench_preview_type(app, arg);
+    }
     if let Some(arg) = rel.strip_prefix("change:") {
         return change_preview(app, "cp", arg);
     }
@@ -431,8 +437,9 @@ async fn preview_look(app: &Rc<App>, when: &str) {
         return println!("bench preview_look {when} no_preview");
     };
     let started = Instant::now();
+    let settled = || app.preview.borrow().as_ref().is_some_and(|p| p.settled());
     while started.elapsed() < Duration::from_secs(20)
-        && (view.is_loading() || page_images(app).await.iter().any(|i| !i.5))
+        && (view.is_loading() || !settled() || page_images(app).await.iter().any(|i| !i.5))
     {
         glib::timeout_future(Duration::from_millis(20)).await;
     }
@@ -555,16 +562,7 @@ async fn time_preview(app: &Rc<App>) {
         println!("bench preview_look time no_preview");
         return bench_quit(app);
     };
-    let loads = Rc::new(Cell::new(0));
-    view.connect_load_changed(glib::clone!(
-        #[strong]
-        loads,
-        move |_, event| {
-            if event == webkit6::LoadEvent::Finished {
-                loads.set(loads.get() + 1);
-            }
-        }
-    ));
+    let settled = || app.preview.borrow().as_ref().is_some_and(|p| p.settled());
     let bytes = tab.text().len();
     for _ in 0..5 {
         glib::timeout_future(Duration::from_millis(500)).await;
@@ -577,10 +575,10 @@ async fn time_preview(app: &Rc<App>) {
                 glib::ControlFlow::Continue
             }
         });
-        let (t, before) = (Instant::now(), loads.get());
+        let t = Instant::now();
         app.render(&tab);
         let render = ms_since(t);
-        while loads.get() == before && t.elapsed() < Duration::from_secs(20) {
+        while !settled() && t.elapsed() < Duration::from_secs(20) {
             glib::timeout_future(Duration::from_millis(5)).await;
         }
         let shown = ms_since(t);
