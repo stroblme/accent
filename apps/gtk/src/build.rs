@@ -544,18 +544,19 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
                     limit,
                     all,
                     skip,
-                } => sidebar::Answer::MidWord(
-                    vault
-                        .search_mid_word(&text, limit, all, &skip)
-                        .unwrap_or_default(),
-                ),
+                } => sidebar::Answer::MidWord(crate::work::or_empty(
+                    "searching mid-word",
+                    vault.search_mid_word(&text, limit, all, &skip),
+                )),
                 // The ranked query's text, matched the way a plain query with no toggle is
                 // everywhere else: a case-insensitive literal.
-                sidebar::Query::Walk { text, limit, stop } => sidebar::Answer::Walked(
-                    vault
-                        .grep_unindexed(&text, accent_api::Options::default(), limit, &*stop)
-                        .unwrap_or_default(),
-                ),
+                sidebar::Query::Walk { text, limit, stop } => {
+                    let options = accent_api::Options::default();
+                    sidebar::Answer::Walked(crate::work::or_empty(
+                        "searching the unindexed files",
+                        vault.grep_unindexed(&text, options, limit, &*stop),
+                    ))
+                }
             }
         }),
         replace_all: Box::new(glib::clone!(

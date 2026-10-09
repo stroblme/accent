@@ -203,6 +203,8 @@ pub struct Remote {
     /// The unindexed folders the window asked to have watched, which a new server has to be
     /// asked again for the same reason. See [`Vault::watch_unindexed`](crate::Vault::watch_unindexed).
     unindexed: Mutex<BTreeSet<String>>,
+    /// The methods the host's server was found not to have, each said once.
+    unknown: Mutex<BTreeSet<String>>,
     /// The forwards the window started and has not stopped. They live in the ssh master, so a
     /// link that drops takes them with it and the master a reconnect makes has none of them;
     /// [`connect`](Self::connect) puts them back. Nothing outlives the vault: closing it cancels
@@ -229,6 +231,7 @@ impl Remote {
             client: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
             unindexed: Mutex::new(BTreeSet::new()),
+            unknown: Mutex::new(BTreeSet::new()),
             forwards: Mutex::new(Vec::new()),
             state: Arc::new(Mutex::new(State::Connecting)),
             child: Mutex::new(None),
@@ -369,7 +372,21 @@ impl Remote {
         if answer.is_err() && client.is_dead() {
             self.disconnect(&self.lost(), Event::Disconnected);
         }
+        if let Err(Error::UnknownMethod(method)) = &answer {
+            self.unknown(method);
+        }
         answer
+    }
+
+    /// Say once per method that the host's server is older than this window: every call of it
+    /// fails the same way from now on, and a reader that can do without the answer says nothing
+    /// on screen of its own.
+    fn unknown(&self, method: &str) {
+        if self.locked(&self.unknown).insert(method.to_string()) {
+            let _ = self.events.send(Event::Error(format!(
+                "The host's accent-cli has no method {method}: run make server"
+            )));
+        }
     }
 
     /// Tell the server nobody is waiting for that request any more. Nothing to do if it never
@@ -1113,6 +1130,73 @@ mod tests {
     use super::{Stamp, Stamped, carry, edited_name, kept_path, unsent};
     use std::path::Path;
     use std::time::Duration;
+
+    /// A method the host's server lacks fails as itself at every call, and the window is told
+    /// once that the server is older than it: the readers that do without an answer say nothing.
+    #[test]
+    fn a_method_the_host_lacks_is_said_once() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, vault_events) = crate::Local::open_at(
+            dir.path(),
+            &dir.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        let (server_in, client_out) = std::io::pipe().unwrap();
+        let (client_in, server_out) = std::io::pipe().unwrap();
+        let server = std::thread::spawn(move || {
+            crate::rpc::serve_local(
+                vault,
+                vault_events,
+                server_in,
+                server_out,
+                crate::rpc::SILENCE,
+            )
+        });
+        let (events, heard) = std::sync::mpsc::channel();
+        let client = Client::new(
+            Box::new(client_out),
+            Box::new(client_in),
+            events.clone(),
+            Box::new(|| {}),
+        );
+        let url = ssh::parse("ssh://box/srv/vault").unwrap();
+        let remote = Remote {
+            ctl: ssh::control_path(&url),
+            root: RwLock::new(url.path.clone()),
+            url,
+            config: Mutex::new(VaultConfig::default()),
+            ghost: Mutex::new(true),
+            words: Mutex::new(true),
+            hellos: Mutex::new(()),
+            client: Mutex::new(Some(Arc::new(client))),
+            docs: Mutex::new(HashMap::new()),
+            unindexed: Mutex::new(BTreeSet::new()),
+            unknown: Mutex::new(BTreeSet::new()),
+            forwards: Mutex::new(Vec::new()),
+            state: Arc::new(Mutex::new(State::Connected)),
+            child: Mutex::new(None),
+            events,
+        };
+        for _ in 0..2 {
+            let e = remote.call::<()>("nonesuch", json!([])).unwrap_err();
+            assert_eq!(e, Error::UnknownMethod("nonesuch".to_string()));
+        }
+        drop(remote);
+        server.join().unwrap();
+        let said: Vec<String> = heard
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Error(said) => Some(said),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            said,
+            ["The host's accent-cli has no method nonesuch: run make server"]
+        );
+    }
 
     /// A renamed file's cached copy goes where the host put the file, into a folder the cache
     /// does not have yet; nothing cached is nothing to move.
