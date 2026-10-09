@@ -82,6 +82,21 @@ impl App {
         *self.references.borrow_mut() = Some(handle);
     }
 
+    /// Ask the References section again where it follows the caret: a code tab's references are
+    /// about the symbol under it. Only while the section is on screen, since nobody is reading it
+    /// otherwise; so the section coming back on screen asks too, the caret having moved meanwhile.
+    pub fn follow_references(self: &Rc<Self>) {
+        let code = matches!(self.active_doc(), Some(Doc::Text(tab)) if !tab.flavour().is_note());
+        let live = self.sidebar_column.is_visible()
+            && self
+                .sidebar
+                .get()
+                .is_some_and(|s| s.section_live("references"));
+        if code && live {
+            self.refresh_references();
+        }
+    }
+
     /// Put a list of locations in the References section and show it. What a definition with
     /// more than one answer does, rather than the window picking one of them.
     fn show_locations(self: &Rc<Self>, found: &[Location]) {

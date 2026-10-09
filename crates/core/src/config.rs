@@ -31,6 +31,11 @@ forward_keys_to_terminal = false
 theme = "solarized"
 focus_mode = "high"
 
+[recolour]
+images = true
+pdfs = false
+diagrams = true
+
 [shortcuts]
 "win.find-next" = ["F3"]
 "win.about" = []
@@ -130,6 +135,7 @@ pub struct Config {
     pub forward_keys_to_terminal: bool,
     pub theme: Theme,
     pub focus_mode: FocusMode,
+    pub recolour: RecolourConfig,
     /// Accelerator overrides, keyed by full action name ("win.save"). Only what the user changed
     /// is stored, so the built-in table stays the source of truth for everything else; an empty
     /// list means the action is deliberately unbound.
@@ -161,6 +167,27 @@ pub struct SearchConfig {
     /// vault costs nothing. A path, not a glob: `Archive` is the top-level folder of that name,
     /// and `Code/vendor` is the one inside `Code`.
     pub exclude: Vec<String>,
+}
+
+/// Which kinds of file a dark or Solarized theme puts on its paper and ink unasked. A kind
+/// switched off shows its files as they are, and its Invert command recolours one of them
+/// ([`crate::recolour::onto`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecolourConfig {
+    pub images: bool,
+    pub pdfs: bool,
+    pub diagrams: bool,
+}
+
+impl Default for RecolourConfig {
+    fn default() -> Self {
+        RecolourConfig {
+            images: true,
+            pdfs: true,
+            diagrams: true,
+        }
+    }
 }
 
 /// How the PDF drawing tools behave. Global rather than per vault: a pen is a property of the
@@ -251,6 +278,7 @@ impl Default for Config {
             forward_keys_to_terminal: false,
             theme: Theme::System,
             focus_mode: FocusMode::default(),
+            recolour: RecolourConfig::default(),
             shortcuts: BTreeMap::new(),
             search: SearchConfig::default(),
             drawing: DrawingConfig::default(),
@@ -1035,6 +1063,7 @@ daily_template = "DailyNote.md"
         assert!(!c.forward_keys_to_terminal);
         assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.focus_mode, FocusMode::High);
+        assert!(c.recolour.images && !c.recolour.pdfs && c.recolour.diagrams);
         assert_eq!(c.editor_font, None);
         let v = &c.vaults["/home/me/Notes"];
         assert_eq!(v.templates_dir, "Templates");

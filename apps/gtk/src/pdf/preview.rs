@@ -8,7 +8,6 @@ use gtk::glib;
 
 use super::protocol::{Asker, Request};
 use super::tab::PdfTab;
-use super::tab::theme_of;
 use super::{LOWRES_W, Want};
 
 /// How tall a link preview's band is, in the low-resolution page's own pixels. Roughly a quarter
@@ -157,14 +156,13 @@ impl PdfTab {
     /// showing, so the pdfium lock is taken for one 256 px page render at most, and never once
     /// per pointer event.
     fn fill_band(self: &Rc<Self>, page: usize, top: Option<f32>) {
-        let dark = self.view.dark();
-        let ready = self.view.cache().borrow_mut().lowres(page as u32, dark);
+        let theme = self.view.theme();
+        let ready = self.view.cache().borrow_mut().lowres(page as u32, theme);
         let Some(texture) = ready else {
             return self.ask(Request::Tiles {
                 from: Asker::Preview,
                 scale: 1.0,
-                dark,
-                theme: theme_of(dark),
+                theme,
                 wants: vec![Want {
                     page: page as u32,
                     tx: u16::MAX,

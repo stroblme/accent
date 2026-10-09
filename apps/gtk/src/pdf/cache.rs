@@ -1,5 +1,6 @@
 //! The rendered tiles a page is painted from, under a budget, least recently used dropped first.
 
+use accent_core::pdf::Theme;
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use std::collections::HashMap;
@@ -33,7 +34,7 @@ pub struct TileKey {
     pub scale_milli: u32,
     pub tx: u16,
     pub ty: u16,
-    pub dark: bool,
+    pub theme: Theme,
 }
 
 /// Textures already rendered, dropped least-recently-used first once they outgrow their budget.
@@ -46,7 +47,7 @@ pub struct Cache {
     tiles: HashMap<TileKey, (gdk::MemoryTexture, u64)>,
     /// One whole-page thumbnail per page and theme, which is what a page shows before its tiles
     /// arrive and what the thumbnail strip paints, under [`LOWRES_BUDGET`].
-    lowres: HashMap<(u32, bool), (gdk::MemoryTexture, u64)>,
+    lowres: HashMap<(u32, Theme), (gdk::MemoryTexture, u64)>,
     bytes: usize,
     lowres_bytes: usize,
     tick: u64,
@@ -89,18 +90,18 @@ impl Cache {
 
     /// Takes `&mut self` so that painting a page counts as using its stand-in: eviction is by
     /// least recently *painted*, which is what keeps what is on screen off the list.
-    pub fn lowres(&mut self, page: u32, dark: bool) -> Option<gdk::MemoryTexture> {
+    pub fn lowres(&mut self, page: u32, theme: Theme) -> Option<gdk::MemoryTexture> {
         self.tick += 1;
         let tick = self.tick;
-        let (texture, used) = self.lowres.get_mut(&(page, dark))?;
+        let (texture, used) = self.lowres.get_mut(&(page, theme))?;
         *used = tick;
         Some(texture.clone())
     }
 
-    pub fn insert_lowres(&mut self, page: u32, dark: bool, texture: gdk::MemoryTexture) {
+    pub fn insert_lowres(&mut self, page: u32, theme: Theme, texture: gdk::MemoryTexture) {
         self.tick += 1;
         self.lowres_bytes += (texture.width() * texture.height() * 4) as usize;
-        if let Some((old, _)) = self.lowres.insert((page, dark), (texture, self.tick)) {
+        if let Some((old, _)) = self.lowres.insert((page, theme), (texture, self.tick)) {
             self.lowres_bytes -= (old.width() * old.height() * 4) as usize;
         }
         self.lowres_bytes -= drop_oldest(&mut self.lowres, self.lowres_bytes, LOWRES_BUDGET);
@@ -127,8 +128,8 @@ impl Cache {
             .collect();
         self.lowres = std::mem::take(&mut self.lowres)
             .into_iter()
-            .filter_map(|((at, dark), low)| match page(at) {
-                Some(at) => Some(((at, dark), low)),
+            .filter_map(|((at, theme), low)| match page(at) {
+                Some(at) => Some(((at, theme), low)),
                 None => {
                     self.lowres_bytes -= bytes_of(&low.0);
                     None
@@ -160,11 +161,11 @@ impl Cache {
     /// of a page for the 30 ms its replacement takes is invisible, where painting blank paper is
     /// the flash this exists to avoid. Everything else is going spare: nobody is looking at a
     /// render at another zoom, and keeping it would paint the old page after the next one.
-    pub fn forget_page_except(&mut self, page: u32, scale_milli: u32, dark: bool) {
+    pub fn forget_page_except(&mut self, page: u32, scale_milli: u32, theme: Theme) {
         self.generation += 1;
         let (tiles, lowres) = (&mut self.bytes, &mut self.lowres_bytes);
         self.tiles.retain(|key, (texture, _)| {
-            let keep = key.page != page || (key.scale_milli == scale_milli && key.dark == dark);
+            let keep = key.page != page || (key.scale_milli == scale_milli && key.theme == theme);
             if !keep {
                 *tiles -= bytes_of(texture);
             }
@@ -344,7 +345,7 @@ mod tests {
     fn a_changed_page_is_a_new_generation() {
         let mut cache = Cache::default();
         let before = cache.generation();
-        cache.forget_page_except(0, 1000, false);
+        cache.forget_page_except(0, 1000, Theme::Plain);
         assert_ne!(cache.generation(), before);
     }
 }

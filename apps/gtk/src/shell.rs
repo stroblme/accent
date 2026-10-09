@@ -138,6 +138,8 @@ pub struct Landing {
 #[derive(Debug, Default, PartialEq)]
 pub struct Changed {
     pub theme: bool,
+    /// Which kinds of file the theme recolours: a re-render of each, as a theme change is.
+    pub recolour: bool,
     pub font: bool,
     pub vault: bool,
     pub shortcuts: bool,
@@ -147,6 +149,7 @@ impl Changed {
     pub fn between(old: &Config, new: &Config) -> Changed {
         Changed {
             theme: old.theme != new.theme,
+            recolour: old.recolour != new.recolour,
             font: old.editor_font != new.editor_font,
             // Every vault's entries, not this window's: a `hello` too many is harmless.
             vault: old.vaults != new.vaults
@@ -232,6 +235,9 @@ impl Shell {
         // The theme is the display's rather than a window's, so it goes on once.
         if changed.theme {
             theme::apply(config.theme);
+        }
+        if changed.recolour {
+            theme::set_recolour(config.recolour);
         }
         // Cloned out of the borrow: applying a config reaches a long way into each window.
         let apps: Vec<Rc<App>> = self.windows.borrow().clone();

@@ -188,6 +188,7 @@ fn completion_of(
         replace,
         extra_edits: edits_of(item.additional_text_edits, text, enc),
         resolve: resolvable.then(|| raw.clone()),
+        preselect: false,
     })
 }
 

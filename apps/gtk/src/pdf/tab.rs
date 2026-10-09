@@ -88,7 +88,8 @@ pub struct PdfTab {
     /// The imports asked for before the render thread started, a PDF dropped onto a row whose tab
     /// is still opening, which it is handed once it starts.
     pub(super) waiting: RefCell<Vec<Request>>,
-    /// Colours inverted against the system's choice, for a document that renders badly either way.
+    /// Colours inverted against what the theme and Preferences ask, for a document that renders
+    /// badly either way.
     pub(super) inverted: Cell<bool>,
     /// The palette the cached tiles were rendered in, so a theme change can tell that they are
     /// of the old one. See [`PdfTab::restyle`].
@@ -275,7 +276,7 @@ pub fn open(
         tx: RefCell::new(None),
         waiting: RefCell::default(),
         inverted: Cell::new(false),
-        theme: Cell::new(theme_of(adw::StyleManager::default().is_dark())),
+        theme: Cell::new(theme_of(false)),
         failed: Cell::new(false),
         resume: Cell::new(None),
         changed: Cell::new(std::time::Instant::now()),
@@ -471,21 +472,19 @@ impl PdfTab {
         self.ask(Request::Retarget(moved));
     }
 
-    /// Follow the system's light/dark choice, unless this document has been inverted by hand.
+    /// Follow the theme and the PDFs' switch in Preferences, the other way round while this
+    /// document is inverted by hand ([`theme_of`]).
     ///
     /// A page is rendered in the theme's colours rather than recoloured afterwards, so every
-    /// texture in the cache belongs to one palette. Switching between two themes of the same
-    /// darkness — Adwaita to Solarized — leaves `dark` alone and every cached tile wrong, which
-    /// is why the palette itself is what is compared here.
+    /// texture in the cache belongs to one palette, and a new palette lets them all go.
     pub fn restyle(&self) {
-        let dark = adw::StyleManager::default().is_dark() != self.inverted.get();
-        let theme = theme_of(dark);
+        let theme = theme_of(self.inverted.get());
         if self.theme.replace(theme) != theme {
             self.view.forget_textures();
             self.thumbs.forget_textures();
         }
-        self.view.set_dark(dark);
-        self.thumbs.set_dark(dark);
+        self.view.set_theme(theme);
+        self.thumbs.set_theme(theme);
     }
 
     pub fn toggle_invert(&self) {
@@ -1052,11 +1051,12 @@ impl PdfTab {
     }
 }
 
-/// How the pages of a document are coloured under the theme in force.
+/// How the pages of a document are coloured under the theme in force and the PDFs' switch,
+/// `inverted` by the reader or not (`theme::onto`).
 ///
 /// Must be called on the main thread: `theme.rs` holds the chosen theme in thread-local state.
-pub(super) fn theme_of(dark: bool) -> pdf::Theme {
-    match crate::theme::page_colours(dark) {
+fn theme_of(inverted: bool) -> pdf::Theme {
+    match crate::theme::onto(crate::theme::recolour().pdfs, inverted) {
         Some((paper, ink)) => pdf::Theme::Recolour { paper, ink },
         None => pdf::Theme::Plain,
     }

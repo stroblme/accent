@@ -89,6 +89,8 @@ impl App {
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.set_zoom(zoom);
         }
+        // The goals are set in the editor's font at this zoom when they land.
+        self.refresh_goals();
         self.refresh_zoom();
         self.save_session_soon();
     }

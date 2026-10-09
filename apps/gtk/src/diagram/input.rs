@@ -22,8 +22,10 @@ impl DiagramTab {
         secondary.connect_pressed(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            // Every entry edits, and a presented page is read only.
+            // Every entry edits, and a presented page is read only. The press gives the canvas
+            // the keyboard, as any press on a PDF page does, so the keys act on what the menu did.
             move |_, _, x, y| {
+                tab.view.grab_focus();
                 if tab.presenting.get().is_none() {
                     tab.menu_at(x, y);
                 }

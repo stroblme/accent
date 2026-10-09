@@ -113,8 +113,9 @@ pub(super) enum Step {
 
 /// Which [`Step`] a press asks for, from the popup's selection and its number of rows.
 ///
-/// Nothing is selected until an arrow picks a row; Up from the first row goes back to none.
-/// Return and Tab accept a selected row and are the editor's otherwise.
+/// Nothing is selected until an arrow picks a row, but for a Lean abbreviation typed out in full
+/// ([`accent_api::Completion::preselect`]); Up from the first row goes back to none. Return and
+/// Tab accept a selected row and are the editor's otherwise.
 pub(super) fn step(
     key: gdk::Key,
     state: gdk::ModifierType,

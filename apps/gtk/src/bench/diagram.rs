@@ -399,7 +399,7 @@ fn look(app: &Rc<App>, rel: &str, dir: &Path) {
                 };
                 let fill_a = on_page(124.0, 115.0);
                 let dark = adw::StyleManager::default().is_dark() != inverted;
-                let want = match crate::theme::page_colours(dark) {
+                let want = match crate::theme::onto(crate::theme::recolour().diagrams, inverted) {
                     Some((p, i)) => {
                         let [r, g, b, _] =
                             accent_core::recolour::recolour_pixel([0xda, 0xe8, 0xfc, 255], p, i);

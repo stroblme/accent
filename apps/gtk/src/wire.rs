@@ -533,7 +533,10 @@ pub fn wire_window(app: &Rc<App>) {
         app,
         move |_| {
             app.save_session_soon();
+            // What follows the caret only while on screen catches up as the sidebar comes up.
             app.follow_outline();
+            app.follow_references();
+            app.refresh_goals();
         }
     ));
 
@@ -901,7 +904,11 @@ fn bar_menu(app: &Rc<App>, host: &impl IsA<gtk::Widget>, menu: &gio::Menu) {
 /// Right-click and Menu open the file-operations menu; Delete trashes. A key controller on the
 /// tree, not a global accelerator, so Delete cannot fire while the user is typing.
 pub fn wire_tree(app: &Rc<App>) {
-    let Some(list) = app.tree.get().map(|tree| tree.view().clone()) else {
+    let Some((list, host)) = app
+        .tree
+        .get()
+        .map(|tree| (tree.view().clone(), tree.widget().clone()))
+    else {
         return;
     };
 
@@ -914,23 +921,22 @@ pub fn wire_tree(app: &Rc<App>) {
         move |gesture, _, x, y| {
             let Some(tree) = app.tree.get() else { return };
             gesture.set_state(gtk::EventSequenceState::Claimed);
-            // No row under the pointer is the blank area below the last one, and that gets a menu
-            // too: it is where a note is created in the vault root. A row inside a dependency tree
-            // gets none: nothing in that menu may happen inside somebody else's tree. A gitignored
-            // folder is the reader's own and gets the whole menu like any other row.
-            let row = tree.row_at(x, y);
+            // No row under the pointer is the vault root — the blank area below the last row, an
+            // empty vault's page, the vault's name — and that gets a menu too: it is where a note
+            // is created in the vault root. A row inside a dependency tree gets none: nothing in
+            // that menu may happen inside somebody else's tree. A gitignored folder is the
+            // reader's own and gets the whole menu like any other row.
+            //
+            // The press is in the coordinates of the host box the menu hangs off, and the row is
+            // found in the list's, which move as it scrolls.
+            let row = tree
+                .widget()
+                .compute_point(tree.view(), &gtk::graphene::Point::new(x as f32, y as f32))
+                .and_then(|at| tree.row_at(at.x().into(), at.y().into()));
             if row.as_ref().is_some_and(|row| row.dependency) {
                 return;
             }
-            // The menu hangs off the host box, so the click has to be translated out of the
-            // list's coordinates or it would point at the wrong row once the list is scrolled.
-            let Some(at) = tree.view().compute_point(
-                tree.widget(),
-                &gtk::graphene::Point::new(x as f32, y as f32),
-            ) else {
-                return;
-            };
-            let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+            let anchor = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
             // A right-click on a marked row is about the whole set; one anywhere else is the
             // reader pointing at a single file, and forgets the marks the way a plain click does.
             let marked = marks_under(tree, row.as_ref());
@@ -941,7 +947,8 @@ pub fn wire_tree(app: &Rc<App>) {
             }
         }
     ));
-    list.add_controller(click);
+    // On the host rather than the list: an empty vault shows its page in the list's place.
+    host.add_controller(click);
 
     let keys = gtk::EventControllerKey::new();
     keys.connect_key_pressed(glib::clone!(

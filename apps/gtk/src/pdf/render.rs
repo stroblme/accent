@@ -179,7 +179,6 @@ fn render_loop(
                 Request::Tiles {
                     from,
                     scale,
-                    dark,
                     theme,
                     wants,
                 } => {
@@ -190,7 +189,6 @@ fn render_loop(
                                 let rest = Request::Tiles {
                                     from,
                                     scale,
-                                    dark,
                                     theme,
                                     wants: wants[at..].to_vec(),
                                 };
@@ -200,7 +198,7 @@ fn render_loop(
                             Err(TryRecvError::Disconnected) => return None,
                             Err(TryRecvError::Empty) => {}
                         }
-                        render_want(&doc, view, scale, dark, theme, wants[at]);
+                        render_want(&doc, view, scale, theme, wants[at]);
                         at += 1;
                     }
                 }
@@ -667,7 +665,6 @@ fn render_want(
     doc: &PdfDoc,
     view: &glib::SendWeakRef<PdfView>,
     scale: f32,
-    dark: bool,
     theme: pdf::Theme,
     want: Want,
 ) {
@@ -682,7 +679,7 @@ fn render_want(
                 &view.clone(),
                 Reply::Lowres {
                     page: want.page,
-                    dark,
+                    theme,
                     image,
                 },
             );
@@ -706,7 +703,7 @@ fn render_want(
             scale_milli: (scale * 1000.0).round() as u32,
             tx: want.tx,
             ty: want.ty,
-            dark,
+            theme,
         };
         send(view, Reply::Tile(key, image));
     }
@@ -778,7 +775,6 @@ mod tests {
         Request::Tiles {
             from,
             scale: 1.0,
-            dark: false,
             theme: pdf::Theme::Plain,
             wants: vec![want],
         }

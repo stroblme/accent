@@ -17,6 +17,7 @@
 //! Everything else is typed into the text as ever, list helpers and paired brackets included,
 //! and narrows the list on the way.
 
+mod abbrev;
 mod apply;
 mod popup;
 mod rank;
@@ -29,7 +30,7 @@ use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
-use accent_api::{Completion, Completions, Kind, Pos, TextEdit};
+use accent_api::{Completion, Completions, Kind, Pos, Range, TextEdit};
 use accent_core::fuzzy::Corpus;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -156,6 +157,9 @@ pub(crate) struct Session {
     /// A look at the caret is queued for the next idle: a keystroke edits the buffer and moves
     /// the caret, and one look covers both.
     queued: Cell<bool>,
+    /// The selected row was picked by [`Completion::preselect`], not by an arrow: typing on
+    /// picks again rather than keeping it.
+    preselected: Cell<bool>,
 }
 
 impl Session {
@@ -191,6 +195,7 @@ impl Session {
                 accepting: RefCell::default(),
                 preedit: Cell::new(false),
                 queued: Cell::new(false),
+                preselected: Cell::new(false),
             }
         });
         session.watch();
@@ -444,12 +449,20 @@ impl Session {
                 }
             })
             .collect();
-        let keep = selected.and_then(|label| {
+        // A row asking to be preselected is, once what was typed is its filter exactly (a Lean
+        // abbreviation typed out, so Tab writes it); otherwise the row the arrows picked stays.
+        let exact = shown.rows.iter().position(|&i| {
+            shown.items[i].completion.preselect && candidates[i].filter == candidates[i].typed
+        });
+        let arrowed = selected.filter(|_| !self.preselected.get());
+        let keep = exact.or_else(|| {
+            let label = arrowed?;
             shown
                 .rows
                 .iter()
                 .position(|&i| shown.items[i].completion.label == label)
         });
+        self.preselected.set(exact.is_some());
         let start = starts[shown.rows[0]];
         drop(guard);
         match self.rect_at(start) {
@@ -507,6 +520,7 @@ impl Session {
         }
         self.asked_at.set(None);
         self.shown.replace(None);
+        self.preselected.set(false);
         self.put_away();
     }
 
@@ -537,6 +551,7 @@ impl Session {
         let past = column.then_some(glib::Propagation::Proceed);
         match rank::step(key, state, self.popup.selected(), self.popup.len()) {
             rank::Step::Select(row) => {
+                self.preselected.set(false);
                 self.popup.select(row);
                 Some(glib::Propagation::Stop)
             }
@@ -766,6 +781,9 @@ struct TabSource(Weak<Tab>);
 impl Source for TabSource {
     fn fetch(&self, at: Pos, trigger: Option<char>) -> Reply<Completions> {
         let tab = self.0.upgrade();
+        if let Some(answer) = tab.as_deref().and_then(|tab| abbreviations(tab, at)) {
+            return Box::pin(async move { answer });
+        }
         Box::pin(async move {
             let Some((tab, vault)) = tab.and_then(|tab| Some((tab.clone(), tab.lang.vault()?)))
             else {
@@ -840,6 +858,21 @@ impl Source for TabSource {
     }
 }
 
+/// The Lean abbreviation being typed before `at`, answered from the table ([`abbrev`]) instead of
+/// the server, which has nothing to say after a backslash.
+fn abbreviations(tab: &Tab, at: Pos) -> Option<Completions> {
+    if lang::language_id(tab) != abbrev::LANGUAGE {
+        return None;
+    }
+    let before = line_prefix(&tab.buffer, &lang::iter_at(&tab.buffer, at));
+    let typed = abbrev::typed(&before)?;
+    let start = Pos {
+        line: at.line,
+        character: at.character - typed.chars().count() as u32,
+    };
+    Some(abbrev::rows(typed, Range { start, end: at }))
+}
+
 /// Give a tab its popup, asking its vault. Called by [`lang::attach`], which is what decides
 /// that this tab has a vault to ask at all.
 pub fn install(tab: &Rc<Tab>) {
@@ -877,12 +910,17 @@ fn typed(tab: &Rc<Tab>) {
     if !tab.view.is_focus() || tab.ghost_view().is_some_and(|view| view.has_carets()) {
         return;
     }
-    let triggers = tab
+    let language = lang::language_id(tab);
+    let mut triggers = tab
         .lang
         .support()
         .map(|s| s.completion_triggers.clone())
         .unwrap_or_default();
-    let min_word = match accent_api::language::is_prose(&lang::language_id(tab)) {
+    // A Lean abbreviation opens on its backslash, which the server does not ask for.
+    if language == abbrev::LANGUAGE {
+        triggers.push('\\');
+    }
+    let min_word = match accent_api::language::is_prose(&language) {
         true => 2,
         false => 1,
     };

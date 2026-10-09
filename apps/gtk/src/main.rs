@@ -1052,6 +1052,16 @@ impl App {
         for diff in self.diffs() {
             diff.restyle();
         }
+        self.recolour_files();
+        for term in self.terminals() {
+            term.restyle();
+        }
+    }
+
+    /// Show the PDFs, the diagrams and the images, in their tabs and in the preview, in the
+    /// colours the theme and Preferences ask for now: part of a restyle, and all a recolouring
+    /// switch redoes.
+    fn recolour_files(self: &Rc<Self>) {
         // A PDF is rendered in the theme's colours rather than recoloured, so this is a re-render
         // of whatever is on screen.
         for pdf in self.pdfs() {
@@ -1068,9 +1078,6 @@ impl App {
         // The images a note shows are served in the look, so a new one is a new page.
         if self.preview.borrow().as_ref().is_some_and(|p| p.restyle()) {
             self.reshow_preview_images();
-        }
-        for term in self.terminals() {
-            term.restyle();
         }
     }
 
@@ -1600,6 +1607,8 @@ impl App {
         // notify handler that usually restyles never fires here.
         if changed.theme {
             self.restyle_all();
+        } else if changed.recolour {
+            self.recolour_files();
         }
     }
 

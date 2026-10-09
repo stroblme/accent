@@ -15,6 +15,7 @@ pub fn build_window(
     install_icons();
     install_chrome_css();
     theme::apply(shell.config.borrow().theme);
+    theme::set_recolour(shell.config.borrow().recolour);
 
     // No root is a window opened on a file or on shells: no index to build and no watcher to run.
     // A root that is an `ssh://` address is a vault on another machine — it opens the same way and
@@ -795,6 +796,7 @@ fn adopt_sidebar(
         app,
         move || {
             app.follow_outline();
+            app.follow_references();
             app.stat_details();
             app.sync_details();
             app.refresh_goals();
@@ -1126,8 +1128,9 @@ pub(crate) fn install_icons() {
             tracing::warn!("icons: {e}");
             return;
         }
-        // Ahead of GtkSourceView's own, so our `latex.lang` is the one read (the first file of an
-        // id wins), and before any tab asks for a language: the path cannot change once read.
+        // Ahead of GtkSourceView's own, so our `latex.lang` and `lean.lang` are the ones read (the
+        // first file of an id wins), and before any tab asks for a language: the path cannot change
+        // once read.
         sourceview5::LanguageManager::default()
             .prepend_search_path("resource:///io/github/stroblme/Accent/language-specs/");
         let Some(display) = gdk::Display::default() else {

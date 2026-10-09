@@ -5,7 +5,7 @@
 //! the shared config, the vault it is editing and one callback, which is what lets `main` wire it
 //! up without a cycle.
 
-use accent_core::config::{Config, FocusMode, Theme, VaultConfig};
+use accent_core::config::{Config, FocusMode, RecolourConfig, Theme, VaultConfig};
 use adw::prelude::*;
 use gtk::{gio, pango};
 use std::cell::{Cell, RefCell};
@@ -152,6 +152,7 @@ fn fill(
 
     let page = adw::PreferencesPage::new();
     page.add(&appearance_group(config, &save));
+    page.add(&recolour_group(config, &save));
     page.add(&editor_group(config, &save));
     page.add(&files_group(config, &save));
     page.add(&git_group(config, &save));
@@ -214,6 +215,49 @@ fn appearance_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::P
         }
     });
     group.add(&focus);
+    group
+}
+
+/// A switch for each kind of file a dark or Solarized theme recolours. Off, a kind's files show as
+/// they are, and its Invert command recolours one of them instead.
+fn recolour_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("Recolour to the Theme")
+        .description(
+            "Show these in the colours of a dark or Solarized theme. Invert Colours does the \
+             opposite for a single file.",
+        )
+        .build();
+    type Switch = fn(&mut RecolourConfig) -> &mut bool;
+    let rows: [(&str, Option<&str>, Switch); 3] = [
+        (
+            "Images",
+            Some("Scans, plots and screenshots; photos stay as they are"),
+            |k| &mut k.images,
+        ),
+        ("PDFs", None, |k| &mut k.pdfs),
+        ("Diagrams", Some("On the canvas and in notes"), |k| {
+            &mut k.diagrams
+        }),
+    ];
+    let mut kinds = config.borrow().recolour;
+    for (title, subtitle, switch) in rows {
+        let row = adw::SwitchRow::builder()
+            .title(title)
+            .active(*switch(&mut kinds))
+            .build();
+        if let Some(subtitle) = subtitle {
+            row.set_subtitle(subtitle);
+        }
+        row.connect_active_notify({
+            let (config, save) = (config.clone(), save.clone());
+            move |r| {
+                *switch(&mut config.borrow_mut().recolour) = r.is_active();
+                save();
+            }
+        });
+        group.add(&row);
+    }
     group
 }
 

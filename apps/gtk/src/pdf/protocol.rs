@@ -31,7 +31,7 @@ pub enum Reply {
     Tile(TileKey, accent_core::pdf::RgbaImage),
     Lowres {
         page: u32,
-        dark: bool,
+        theme: pdf::Theme,
         image: accent_core::pdf::RgbaImage,
     },
     Links(usize, Vec<accent_core::pdf::Link>),
@@ -124,7 +124,6 @@ pub enum Request {
     Tiles {
         from: Asker,
         scale: f32,
-        dark: bool,
         theme: pdf::Theme,
         wants: Vec<Want>,
     },

@@ -1,0 +1,11 @@
+accent's Lean abbreviations
+
+abbreviations.json is a verbatim copy of lean4-unicode-input/src/abbreviations.json from
+vscode-lean4, Lean 4's Visual Studio Code extension:
+
+    https://github.com/leanprover/vscode-lean4
+    commit dead846a035f42dc13beb7619ac779538e6ddf6e (2026-09-30)
+    Licensed under the Apache License, Version 2.0 (see LICENSE-APACHE, the project's own copy).
+
+accent reads it into its completion popup (apps/gtk/src/completion/abbrev.rs), where `\alpha`
+offers `α`. Update it by copying a newer upstream file over it and recording the commit here.

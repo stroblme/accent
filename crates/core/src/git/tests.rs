@@ -799,6 +799,12 @@ fn show_reads_head_index_and_reports_missing() {
         None,
         "untracked on disk"
     );
+    write_file(dir, ".gitignore", "x\n");
+    assert_eq!(
+        show(&repo, "", ".gitignore").unwrap(),
+        None,
+        "untracked, a name git takes for pathspec magic after a bare colon"
+    );
     // git words a commit it does not have as it words a file the commit lacks, so a commit read
     // in the wrong repository came back as two empty sides.
     assert!(

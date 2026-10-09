@@ -1079,6 +1079,7 @@ fn empty_item() -> Completion {
         replace: Range::default(),
         extra_edits: Vec::new(),
         resolve: None,
+        preselect: false,
     }
 }
 

@@ -15,6 +15,7 @@ mod gesture;
 mod paint;
 mod scroll;
 
+use accent_core::pdf::Theme;
 use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib};
@@ -151,17 +152,17 @@ impl PdfView {
         }
     }
 
-    /// Paint for a dark theme. The rendering itself inverts, so this changes which tiles are
-    /// wanted rather than how they are drawn.
-    pub fn set_dark(&self, dark: bool) {
-        if self.imp().dark.replace(dark) != dark {
+    /// Paint the pages in `theme`'s colours. The rendering itself recolours, so this changes
+    /// which tiles are wanted rather than how they are drawn.
+    pub fn set_theme(&self, theme: Theme) {
+        if self.imp().theme.replace(theme) != theme {
             self.imp().paper.set(None);
             self.queue_draw();
         }
     }
 
-    pub fn dark(&self) -> bool {
-        self.imp().dark.get()
+    pub fn theme(&self) -> Theme {
+        self.imp().theme.get()
     }
 
     /// Take a rendered tile. Ignored if the document has moved on from the scale it was for.
@@ -178,13 +179,15 @@ impl PdfView {
         self.queue_draw();
     }
 
-    pub fn insert_lowres(&self, page: u32, dark: bool, texture: gdk::MemoryTexture) {
-        self.cache().borrow_mut().insert_lowres(page, dark, texture);
+    pub fn insert_lowres(&self, page: u32, theme: Theme, texture: gdk::MemoryTexture) {
+        self.cache()
+            .borrow_mut()
+            .insert_lowres(page, theme, texture);
         self.queue_draw();
     }
 
     /// Called with the tiles this view wants and does not have, visible ones first.
-    pub fn connect_wants(&self, f: impl Fn(&PdfView, f32, bool, Vec<Want>) + 'static) {
+    pub fn connect_wants(&self, f: impl Fn(&PdfView, f32, Theme, Vec<Want>) + 'static) {
         *self.imp().on_wants.borrow_mut() = Some(Box::new(f));
     }
 
@@ -201,8 +204,8 @@ impl PdfView {
                 let bytes = image.data.len();
                 self.insert_tile(key, texture(image), bytes);
             }
-            Reply::Lowres { page, dark, image } => {
-                self.insert_lowres(page, dark, texture(image));
+            Reply::Lowres { page, theme, image } => {
+                self.insert_lowres(page, theme, texture(image));
                 let handler = self.imp().on_lowres.borrow();
                 if let Some(f) = handler.as_ref() {
                     f(page);
@@ -221,7 +224,7 @@ impl PdfView {
     pub fn forget_textures(&self) {
         self.cache().borrow_mut().clear();
         self.imp().asked.borrow_mut().clear();
-        // A palette this dark that is not the palette it was: the paper moved with it.
+        // A palette that is not the palette it was: the paper moved with it.
         self.imp().paper.set(None);
         self.queue_draw();
     }
@@ -481,10 +484,10 @@ impl PdfView {
     /// Deliberately not an eviction. What is on screen keeps being painted until its replacement
     /// arrives, so a stroke costs one re-render and no blank page in between.
     pub fn refresh_page(&self, page: usize, area: accent_core::pdf::Rect) {
-        let (scale_milli, dark) = self.stamp();
+        let (scale_milli, theme) = self.stamp();
         self.cache()
             .borrow_mut()
-            .forget_page_except(page as u32, scale_milli, dark);
+            .forget_page_except(page as u32, scale_milli, theme);
         // Widened where a stroke is already on the page: a box that only just reaches a tile
         // edge should still take that tile, and a point-sized change none at all is no change.
         let area = area.grow(1.0);
@@ -497,9 +500,9 @@ impl PdfView {
 
     /// The scale and colour scheme the page is being painted at, which is what a cached tile is
     /// keyed by. One definition, shared by the snapshot and by [`PdfView::refresh_page`].
-    fn stamp(&self) -> (u32, bool) {
+    fn stamp(&self) -> (u32, Theme) {
         let scale = self.imp().layout.borrow().scale * self.scale_factor().max(1) as f32;
-        ((scale * 1000.0).round() as u32, self.imp().dark.get())
+        ((scale * 1000.0).round() as u32, self.imp().theme.get())
     }
 
     /// The one match to draw more strongly than the rest.
@@ -593,7 +596,7 @@ mod imp {
         view.imp().notice_page();
     }
 
-    type Wants = Box<dyn Fn(&super::PdfView, f32, bool, Vec<Want>)>;
+    type Wants = Box<dyn Fn(&super::PdfView, f32, Theme, Vec<Want>)>;
     type Coords = Box<dyn Fn(&super::PdfView, f64, f64)>;
     type Click = Box<dyn Fn(&super::PdfView, f64, f64, gdk::ModifierType)>;
     type Page = Box<dyn Fn(usize)>;
@@ -623,7 +626,7 @@ mod imp {
         pub layout: RefCell<super::Layout>,
         pub cache: OnceCell<std::rc::Rc<RefCell<Cache>>>,
         pub zoom: Cell<PdfZoom>,
-        pub dark: Cell<bool>,
+        pub theme: Cell<Theme>,
         pub thumbnails: Cell<bool>,
         pub marks: RefCell<HashMap<usize, Vec<accent_core::pdf::Rect>>>,
         /// Where the note links that highlight this document land, per page, each with the index
@@ -679,7 +682,7 @@ mod imp {
         /// goes through here — a zoom step, a fit mode, a resize, a theme change, entering
         /// presentation mode, a stroke or an erase on a part of the page the last change also
         /// touched — and without it the page keeps painting its old render and never asks again.
-        pub asked_for: Cell<(u32, bool, u64)>,
+        pub asked_for: Cell<(u32, Theme, u64)>,
         /// What the last frame found missing, asked for or not: what a drill waits to see empty.
         #[cfg(feature = "bench")]
         pub unrendered: RefCell<Vec<Want>>,
@@ -718,7 +721,7 @@ mod imp {
                 layout: RefCell::new(super::Layout::default()),
                 cache: OnceCell::new(),
                 zoom: Cell::new(PdfZoom::default()),
-                dark: Cell::new(false),
+                theme: Cell::new(Theme::Plain),
                 thumbnails: Cell::new(false),
                 marks: RefCell::new(HashMap::new()),
                 highlights: RefCell::new(HashMap::new()),
@@ -740,7 +743,7 @@ mod imp {
                 current_mark: Cell::new(None),
                 drop_gap: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
-                asked_for: Cell::new((0, false, 0)),
+                asked_for: Cell::new((0, Theme::Plain, 0)),
                 #[cfg(feature = "bench")]
                 unrendered: RefCell::new(Vec::new()),
                 #[cfg(feature = "bench")]
@@ -789,7 +792,7 @@ mod imp {
             if let Some(colour) = self.paper.get() {
                 return colour;
             }
-            let colour = super::paint::paper(self.dark.get());
+            let colour = super::paint::paper(self.theme.get());
             self.paper.set(Some(colour));
             colour
         }

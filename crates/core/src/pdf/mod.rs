@@ -262,7 +262,7 @@ pub struct RgbaImage {
 }
 
 /// How a page is recoloured on its way to the screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Theme {
     /// Exactly as the document defines it.
     Plain,

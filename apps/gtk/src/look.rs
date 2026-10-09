@@ -1,6 +1,7 @@
 //! How an image is shown under the theme: recoloured onto the page's paper and ink when it reads
 //! as a document, as it is when it does not, and onto the other half's page once the reader
-//! inverts it, as a PDF page is.
+//! inverts it, as a PDF page is. With images left alone in Preferences, every image shows as it
+//! is and an inverted one goes onto the theme's page.
 //!
 //! The image tab and the preview both come through here, so a figure looks the same in either.
 //! The decision is [`Look::palette`], snapshotted on the main thread where the theme lives; the
@@ -29,15 +30,21 @@ pub struct Look {
     theme: Option<Page>,
     /// The other half's page, which an inverted image goes onto, as an inverted PDF page does.
     opposite: Option<Page>,
+    /// Whether the theme recolours images, and the diagrams a note embeds, unasked (Preferences).
+    images: bool,
+    diagrams: bool,
 }
 
 impl Look {
     /// The look now. On the main thread only: `theme.rs` keeps the choice there.
     pub fn now() -> Look {
         let dark = adw::StyleManager::default().is_dark();
+        let kinds = theme::recolour();
         Look {
             theme: theme::page_colours(dark),
             opposite: theme::page_colours(!dark),
+            images: kinds.images,
+            diagrams: kinds.diagrams,
         }
     }
 
@@ -47,19 +54,26 @@ impl Look {
         Look {
             theme: None,
             opposite: None,
+            images: false,
+            diagrams: false,
         }
     }
 
     /// The paper and ink to recolour an image onto, or `None` to show it as it is.
     ///
-    /// The PDF's rule (`PdfTab::restyle`): the theme recolours a document and leaves a photo
-    /// alone, and an inverted image, whatever it shows, is recoloured as the other half of the
-    /// theme would — so under Dark, whose other half is Light, it is shown as it is.
+    /// The rule every recoloured file follows (`accent_core::recolour::onto`), with one say of the
+    /// image's own: the theme's recolouring takes a document and leaves a photo alone, while an
+    /// inverted image goes where the rule says whatever it shows — with images recoloured, under
+    /// Dark, whose other half is Light, it shows as it is.
     pub fn palette(&self, document: bool, inverted: bool) -> Option<Page> {
-        match inverted {
-            true => self.opposite,
-            false => self.theme.filter(|_| document),
-        }
+        let own = self.theme.filter(|_| document || inverted);
+        recolour::onto(self.images, inverted, own, self.opposite)
+    }
+
+    /// [`Self::palette`] for a diagram a note embeds, under the diagrams' switch: the canvas's
+    /// rule (`DiagramTab::restyle`).
+    fn diagram(&self, inverted: bool) -> Option<Page> {
+        recolour::onto(self.diagrams, inverted, self.theme, self.opposite)
     }
 
     /// Whether an image recoloured onto `page` has its transparent parts filled with the paper:
@@ -231,10 +245,10 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
 }
 
 /// [`serve`] for an SVG's text rather than its file: a diagram embedded in a note, drawn for it
-/// (`diagram::embed`), goes through the filter as an SVG image does.
+/// (`diagram::embed`), goes through the filter as an SVG image does, under the diagrams' switch.
 pub fn serve_svg(text: &str, look: Look, inverted: bool) -> Served {
     let svg = look
-        .palette(true, inverted)
+        .diagram(inverted)
         .and_then(|page| filtered(text, page, look.fills(page)))
         .unwrap_or_else(|| text.to_string());
     Served::Bytes(glib::Bytes::from_owned(svg.into_bytes()), "image/svg+xml")
@@ -509,14 +523,25 @@ pub(crate) mod tests {
         let light = Look {
             theme: None,
             opposite: Some(DARK),
+            images: true,
+            diagrams: true,
         };
         let dark = Look {
             theme: Some(DARK),
             opposite: None,
+            images: true,
+            diagrams: true,
         };
         let cream = Look {
             theme: Some(CREAM),
             opposite: Some(NIGHT),
+            images: true,
+            diagrams: true,
+        };
+        // Images left alone: none recoloured, and an inverted one, photo or not, on the theme's.
+        let off = Look {
+            images: false,
+            ..dark
         };
         // (look, document, inverted) -> (palette, filled)
         let table = [
@@ -530,6 +555,8 @@ pub(crate) mod tests {
             (dark, true, true, None),
             (cream, true, false, Some((CREAM, false))),
             (cream, false, true, Some((NIGHT, true))),
+            (off, true, false, None),
+            (off, false, true, Some((DARK, false))),
         ];
         for (look, document, inverted, want) in table {
             let got = look.palette(document, inverted).map(|p| (p, look.fills(p)));

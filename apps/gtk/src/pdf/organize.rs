@@ -206,7 +206,7 @@ impl PdfTab {
                     .thumbs
                     .cache()
                     .borrow_mut()
-                    .lowres(page as u32, tab.thumbs.dark());
+                    .lowres(page as u32, tab.thumbs.theme());
                 if let Some(low) = low {
                     let grip = |at: f32, of: f32, size: i32| (at / of * size as f32) as i32;
                     let (gx, gy) = (grip(px, w, low.width()), grip(py, h, low.height()));

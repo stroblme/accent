@@ -948,18 +948,8 @@ impl App {
                 if app.is_active(tab) && tab.caret_moved() {
                     app.follow_outline();
                 }
-                // A code tab's references are about the symbol under the caret, so they follow
-                // it — but only while the section is on screen, since nobody is reading it
-                // otherwise.
-                if !tab.flavour().is_note()
-                    && app.is_active(tab)
-                    && app.sidebar_column.is_visible()
-                    && app
-                        .sidebar
-                        .get()
-                        .is_some_and(|s| s.section_live("references"))
-                {
-                    app.refresh_references();
+                if app.is_active(tab) {
+                    app.follow_references();
                 }
                 // The goals are about the caret too, typing included: a tactic typed changes them.
                 if app.is_active(tab) && tab.lang.support().is_some_and(|s| s.goals) {

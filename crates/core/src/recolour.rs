@@ -6,13 +6,32 @@
 //! stays vector and carries the same remap as a filter ([`recolour_svg`], from
 //! [`colour_matrix`]).
 //!
-//! [`classify`] decides which images are documents: a scan, plot, diagram or screenshot of text
-//! is mostly light, near-neutral paper in a handful of colours, and a photo is neither. Decoding
-//! stays with each app's own decoder; everything here takes straight-alpha RGBA8.
+//! [`onto`] decides which page a file goes onto, from whether its kind is recoloured and whether
+//! the reader inverted it. [`classify`] decides which images are documents: a scan, plot, diagram
+//! or screenshot of text is mostly light, near-neutral paper in a handful of colours, and a photo
+//! is neither. Decoding stays with each app's own decoder; everything here takes straight-alpha
+//! RGBA8.
 
 /// Rec. 709 luma weights, taken on the sRGB values as they are rather than on linear light: the
 /// ramp needs an order from ink to paper, not a measurement.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+
+/// A page's paper and ink, the two ends of the ramp a file is put on.
+pub type Page = ([u8; 3], [u8; 3]);
+
+/// The page a file is shown on, or `None` to show it as it is. `own` is the page of the theme's
+/// half on screen and `other` the other half's, `None` for a half that leaves files alone (Light).
+///
+/// `auto` is whether the file's kind is recoloured unasked (Preferences). If it is, the file goes
+/// onto the theme's page and an inverted one onto the other half's; if not, the file shows as it
+/// is and an inverted one goes onto the theme's page.
+pub fn onto(auto: bool, inverted: bool, own: Option<Page>, other: Option<Page>) -> Option<Page> {
+    match (auto, inverted) {
+        (true, false) | (false, true) => own,
+        (true, true) => other,
+        (false, false) => None,
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // The remap
@@ -317,6 +336,24 @@ mod tests {
     const SOLARIZED_LIGHT: ([u8; 3], [u8; 3]) = ([0xfd, 0xf6, 0xe3], [0x65, 0x7b, 0x83]);
     const SOLARIZED_DARK: ([u8; 3], [u8; 3]) = ([0x00, 0x2b, 0x36], [0x83, 0x94, 0x96]);
     const PALETTES: [([u8; 3], [u8; 3]); 3] = [ADWAITA_DARK, SOLARIZED_LIGHT, SOLARIZED_DARK];
+
+    /// Inverting flips whether a file is recoloured: onto the other half's page where its kind is
+    /// recoloured, onto the theme's own where it is left alone. Light leaves it alone unless it
+    /// is inverted with its kind recoloured.
+    #[test]
+    fn inverting_recolours_a_kind_left_alone_onto_the_theme() {
+        let (own, other) = (Some(SOLARIZED_DARK), Some(SOLARIZED_LIGHT));
+        assert_eq!(onto(true, false, own, other), own);
+        assert_eq!(onto(true, true, own, other), other);
+        assert_eq!(onto(false, false, own, other), None);
+        assert_eq!(onto(false, true, own, other), own);
+
+        let light = (None, Some(ADWAITA_DARK));
+        assert_eq!(onto(true, false, light.0, light.1), None);
+        assert_eq!(onto(true, true, light.0, light.1), light.1);
+        assert_eq!(onto(false, false, light.0, light.1), None);
+        assert_eq!(onto(false, true, light.0, light.1), None);
+    }
 
     /// Exactly, not within a step: white paper that lands a shade off the window's own colour
     /// is a seam around every page.

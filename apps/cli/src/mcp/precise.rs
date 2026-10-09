@@ -143,8 +143,11 @@ fn file<'f>(files: &'f mut Files, s: &Shared, rel: &str) -> Option<&'f (String, 
     files
         .entry(rel.to_string())
         .or_insert_with(|| {
+            if !s.shown(rel) {
+                return None;
+            }
             let text = s.text(rel).ok()?.text;
-            Some((text, s.vault.file_symbols(rel).ok()?)).filter(|_| s.shown(rel))
+            Some((text, s.vault.file_symbols(rel).ok()?))
         })
         .as_ref()
 }

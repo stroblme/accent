@@ -7,7 +7,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 
 use super::protocol::{Asker, Request};
-use super::tab::{PAGE_ACTIONS, PdfTab, theme_of};
+use super::tab::{PAGE_ACTIONS, PdfTab};
 use super::{self as pdfview, PdfView};
 
 impl PdfTab {
@@ -131,15 +131,14 @@ impl PdfTab {
         view.connect_wants(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |view, scale, dark, wants| {
+            move |view, scale, theme, wants| {
                 tab.ask(Request::Tiles {
                     from: match *view == tab.thumbs {
                         true => Asker::Strip,
                         false => Asker::Reader,
                     },
                     scale,
-                    dark,
-                    theme: theme_of(dark),
+                    theme,
                     wants,
                 });
             }

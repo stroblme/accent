@@ -3,6 +3,7 @@
 //! tool holds and the search's marks — the line a dropped PDF's pages would go in at, and the
 //! tiles still wanted, asked for once per change.
 
+use accent_core::pdf::Theme;
 use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, graphene, gsk};
@@ -28,7 +29,7 @@ impl imp::PdfView {
         }
         let (ox, oy) = obj.scroll_offset();
         let (vw, vh) = (f64::from(obj.width()), f64::from(obj.height()));
-        let dark = self.dark.get();
+        let theme = self.theme.get();
         let sf = obj.scale_factor().max(1);
         let device_scale = layout.scale * sf as f32;
         let scale_milli = (device_scale * 1000.0).round() as u32;
@@ -62,7 +63,7 @@ impl imp::PdfView {
             snapshot.append_color(&self.paper(), &bounds);
 
             let page = index as u32;
-            let low = cache.borrow_mut().lowres(page, dark);
+            let low = cache.borrow_mut().lowres(page, theme);
             // A tile within reach has not arrived, which asks for the stand-in, and one on
             // screen has not, which paints it.
             let (mut missing, mut blank) = (false, false);
@@ -77,7 +78,7 @@ impl imp::PdfView {
                     scale_milli,
                     tx: tx as u16,
                     ty: ty as u16,
-                    dark,
+                    theme,
                 };
                 // A page whose content changed becomes the set of tiles that are out of date,
                 // once, here — this is where what is actually on screen is known. Every tile
@@ -224,7 +225,7 @@ impl imp::PdfView {
                 // The tool's own style, as the render will leave it: what the hand sees
                 // must not change colour when the tile lands.
                 let style = obj.ink_style(stroke.tool);
-                let colour = as_rendered(style, dark, self.paper());
+                let colour = as_rendered(style, theme, self.paper());
                 let stroke_style = gsk::Stroke::new(style.width * layout.scale);
                 stroke_style.set_line_cap(gsk::LineCap::Round);
                 stroke_style.set_line_join(gsk::LineJoin::Round);
@@ -309,7 +310,7 @@ impl imp::PdfView {
         // must not re-send the same list. The scale, the scheme and the cache's generation
         // are part of "the same", because the same tiles at another scale, or after the page
         // changed, are a different render.
-        let stamp = (scale_milli, dark, cache.borrow().generation());
+        let stamp = (scale_milli, theme, cache.borrow().generation());
         wanted.append(&mut ahead);
         #[cfg(feature = "bench")]
         self.unrendered.replace(wanted.clone());
@@ -320,7 +321,7 @@ impl imp::PdfView {
             *self.asked.borrow_mut() = wanted.clone();
             let handler = self.on_wants.borrow();
             if let Some(f) = handler.as_ref() {
-                f(&obj, device_scale, dark, wanted);
+                f(&obj, device_scale, theme, wanted);
             }
         }
     }
@@ -335,14 +336,14 @@ impl imp::PdfView {
 ///
 /// The multiply is against the paper, which is what the stroke covers nearly all of; over a
 /// letter it darkens a shade more than this, which is a pixel or two of the stroke's own width.
-fn as_rendered(style: accent_core::pdf::InkStyle, dark: bool, paper: gdk::RGBA) -> gdk::RGBA {
+fn as_rendered(style: accent_core::pdf::InkStyle, theme: Theme, paper: gdk::RGBA) -> gdk::RGBA {
     let [r, g, b, a] = style.rgba;
-    let rgb = match crate::theme::page_colours(dark) {
-        Some((page, ink)) => {
+    let rgb = match theme {
+        Theme::Recolour { paper: page, ink } => {
             let px = accent_core::recolour::recolour_pixel([r, g, b, 255], page, ink);
             [px[0], px[1], px[2]]
         }
-        None => [r, g, b],
+        Theme::Plain => [r, g, b],
     };
     let colour = theme::rgba(rgb, f32::from(a) / 255.0);
     match style.multiply {
@@ -379,10 +380,10 @@ fn touches(area: accent_core::pdf::Rect, scale: f32, tx: u16, ty: u16) -> bool {
 }
 
 /// The colour a page's paper is drawn in before its tiles arrive, matching what the renderer will
-/// produce so nothing flashes when they do.
-pub(super) fn paper(dark: bool) -> gdk::RGBA {
-    match crate::theme::view_bg(dark).parse::<gdk::RGBA>() {
-        Ok(colour) => colour,
-        Err(_) => gdk::RGBA::WHITE,
+/// produce so nothing flashes when they do: the theme's paper, or a plain page's white.
+pub(super) fn paper(theme: Theme) -> gdk::RGBA {
+    match theme {
+        Theme::Recolour { paper, .. } => crate::theme::rgba(paper, 1.0),
+        Theme::Plain => gdk::RGBA::WHITE,
     }
 }

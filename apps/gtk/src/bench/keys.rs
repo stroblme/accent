@@ -534,6 +534,7 @@ async fn bench_popup_keys(view: &multicaret::View) {
         replace: Range { start: at, end: at },
         extra_edits: Vec::new(),
         resolve: None,
+        preselect: false,
     };
     let mut alpha = item("alpha", "alpha($1)", true);
     alpha.extra_edits.push(TextEdit {
@@ -1003,6 +1004,7 @@ fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
         },
         extra_edits: Vec::new(),
         resolve: None,
+        preselect: false,
     };
     let (app, tab) = (app.clone(), tab.clone());
     glib::timeout_add_local_once(Duration::from_millis(600), move || {

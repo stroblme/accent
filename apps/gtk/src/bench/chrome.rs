@@ -235,6 +235,7 @@ pub(super) fn bench_chrome_keys(app: &Rc<App>, rels: &str) {
                 replace: accent_api::Range::default(),
                 extra_edits: Vec::new(),
                 resolve: None,
+                preselect: false,
             }]);
         }
         println!("bench chrome_keys popup_up={}", tab.popup_shown());

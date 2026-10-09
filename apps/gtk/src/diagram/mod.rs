@@ -71,8 +71,8 @@ pub struct DiagramTab {
     ring_shown: Cell<bool>,
     /// Where the diagram was left while presentation shows it, `None` otherwise.
     presenting: Cell<Option<DiagramPlace>>,
-    /// Invert Diagram Colours: painted as the other half of the theme would, as an inverted PDF
-    /// is. This tab's alone, and kept nowhere.
+    /// Invert Diagram Colours: painted the other way round from what the theme and Preferences
+    /// ask, as an inverted PDF is. This tab's alone, and kept nowhere.
     inverted: Cell<bool>,
     editor: RefCell<Editor>,
     page_index: Cell<usize>,
@@ -473,13 +473,13 @@ impl DiagramTab {
         }
     }
 
-    /// Paint the page in the theme's colours, the other half's while inverted: the PDF's rule
-    /// (`PdfTab::restyle`). Only the canvas changes; the file, the model and the Properties pane
-    /// keep the file's colours, so the tab never becomes dirty.
+    /// Paint the page in the colours the theme and the diagrams' switch in Preferences ask for,
+    /// the other way round while inverted: the PDF's rule (`theme::onto`). Only the canvas
+    /// changes; the file, the model and the Properties pane keep the file's colours, so the tab
+    /// never becomes dirty.
     pub fn restyle(&self) {
-        let dark = adw::StyleManager::default().is_dark() != self.inverted.get();
-        self.view
-            .set_tint(paint::Tint::onto(crate::theme::page_colours(dark)));
+        let page = crate::theme::onto(crate::theme::recolour().diagrams, self.inverted.get());
+        self.view.set_tint(paint::Tint::onto(page));
     }
 
     pub fn toggle_invert(&self) {

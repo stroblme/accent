@@ -151,6 +151,11 @@ pub(crate) fn row_text(item: &gtk::ListItem) -> Option<String> {
 /// has no path to the action group on the host, so unparenting there drops whatever the click
 /// just asked for: it is what made the status bar's Fit Height do nothing. The idle runs once the
 /// click is over.
+///
+/// The keyboard goes back on `closed`, before the item's action runs, to the widget that had it:
+/// GTK hands it from the closing menu to a widget above the host (over a diagram, the pane's
+/// `GtkPaned`), which no document's keys reach, so a diagram's Ctrl+Z after its menu's Paste did
+/// nothing. An action that moves the keyboard on, such as Edit Label, still does.
 pub(crate) fn popup_menu(
     host: &impl IsA<gtk::Widget>,
     menu: &gio::Menu,
@@ -160,7 +165,11 @@ pub(crate) fn popup_menu(
     popover.set_parent(host);
     popover.set_has_arrow(false);
     popover.set_pointing_to(anchor.as_ref());
-    popover.connect_closed(|p| {
+    let had = host.root().and_then(|r| r.focus()).map(|w| w.downgrade());
+    popover.connect_closed(move |p| {
+        if let Some(had) = had.as_ref().and_then(|w| w.upgrade()) {
+            had.grab_focus();
+        }
         let p = p.clone();
         glib::idle_add_local_once(move || p.unparent());
     });

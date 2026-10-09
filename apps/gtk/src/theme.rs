@@ -12,7 +12,8 @@
 //! borders keep coming from GNOME, so DESIGN.md's one-accent rule holds in every theme and the
 //! seven system accents all still work.
 
-use accent_core::config::Theme;
+use accent_core::config::{RecolourConfig, Theme};
+pub use accent_core::recolour::Page;
 use gtk::gdk;
 use std::cell::{Cell, RefCell};
 
@@ -82,6 +83,14 @@ thread_local! {
     static PROVIDER: RefCell<Option<(gtk::CssProvider, bool)>> = const { RefCell::new(None) };
     /// What the user picked, for `refresh` and for the two lookups below.
     static CHOICE: Cell<Theme> = const { Cell::new(Theme::System) };
+    /// Which kinds of file the theme recolours unasked, as Preferences says ([`onto`]).
+    static RECOLOUR: Cell<RecolourConfig> = const {
+        Cell::new(RecolourConfig {
+            images: true,
+            pdfs: true,
+            diagrams: true,
+        })
+    };
 }
 
 /// Put `theme` on screen: the colour scheme libadwaita understands, plus our own variables when
@@ -181,9 +190,6 @@ pub fn terminal_palette(dark: bool) -> &'static [&'static str; 16] {
     }
 }
 
-/// A page's paper and ink, the two ends of the ramp `accent_core::recolour` puts it on.
-pub type Page = ([u8; 3], [u8; 3]);
-
 /// The paper and ink a PDF page or a document-like image is recoloured onto, or `None` to leave
 /// it exactly as the file defines it.
 ///
@@ -198,6 +204,24 @@ pub fn page_colours(dark: bool) -> Option<Page> {
         (_, true) => Some((rgb(VIEW_DARK), rgb(VIEW_DARK_TEXT))),
         (_, false) => None,
     }
+}
+
+/// Put Preferences' recolouring switches in force.
+pub fn set_recolour(kinds: RecolourConfig) {
+    RECOLOUR.set(kinds);
+}
+
+/// Which kinds of file the theme recolours unasked.
+pub fn recolour() -> RecolourConfig {
+    RECOLOUR.get()
+}
+
+/// The page a file is shown on under the half on screen, or `None` to show it as it is: `auto`
+/// is whether its kind is recoloured ([`recolour`]) and `inverted` whether the reader inverted it
+/// (`accent_core::recolour::onto`). The image loader takes the same two pages into its look.
+pub fn onto(auto: bool, inverted: bool) -> Option<Page> {
+    let dark = is_dark();
+    accent_core::recolour::onto(auto, inverted, page_colours(dark), page_colours(!dark))
 }
 
 /// How strongly what the reader is doing to a PDF page is painted over it: a note's highlight,

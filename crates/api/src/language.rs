@@ -156,6 +156,11 @@ pub struct Completion {
     pub extra_edits: Vec<TextEdit>,
     /// The item as the server sent it, when it can still be resolved for more; opaque to the UI.
     pub resolve: Option<serde_json::Value>,
+    /// Selected as the list opens once what was typed is its filter exactly: a Lean abbreviation
+    /// typed out (`\to`), so Tab writes it. Set by the window's abbreviations only; a server's own
+    /// `preselect` is not read, as Return would stop meaning a new line in code.
+    #[serde(default)]
+    pub preselect: bool,
 }
 
 /// A completion answer. `incomplete` is the server saying it stopped at a cap: the list has to

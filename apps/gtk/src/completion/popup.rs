@@ -62,6 +62,9 @@ pub(super) struct Popup {
     widest: Rc<Cell<i32>>,
     /// The frame callback measuring the rows as laid out, while one is waiting for a frame.
     measure: Rc<RefCell<Option<gtk::TickCallbackId>>>,
+    /// Told that the selection moved, unless `quiet`: [`Popup::show`] tells it once itself.
+    selected: Rc<dyn Fn()>,
+    quiet: Rc<Cell<bool>>,
 }
 
 impl Popup {
@@ -79,7 +82,14 @@ impl Popup {
             .autoselect(false)
             .can_unselect(true)
             .build();
-        selection.connect_selected_notify(move |_| selected());
+        let selected: Rc<dyn Fn()> = Rc::new(selected);
+        let quiet = Rc::new(Cell::new(false));
+        let (told, hush) = (selected.clone(), quiet.clone());
+        selection.connect_selected_notify(move |_| {
+            if !hush.get() {
+                told();
+            }
+        });
         let list = gtk::ListView::builder()
             .model(&selection)
             .factory(&factory(Rc::new(accept), font.clone()))
@@ -142,6 +152,8 @@ impl Popup {
             font,
             widest: Rc::default(),
             measure: Rc::default(),
+            selected,
+            quiet,
         }
     }
 
@@ -168,8 +180,18 @@ impl Popup {
         let icons = rows.iter().any(|row| row.icon.is_some());
         let objects: Vec<glib::BoxedAnyObject> =
             rows.into_iter().map(glib::BoxedAnyObject::new).collect();
+        // Replacing the rows drops the selection, and hearing so would put the documentation away
+        // and bring it back in one turn: presented at two sizes in a turn, the popover can be laid
+        // out at the first while needing the second, which GTK answers by popping it down
+        // (ISSUES.md). So the selection is told once, where it ends up.
+        let before = self.selected();
+        self.quiet.set(true);
         self.store.splice(0, self.store.n_items(), &objects);
         self.select(selected);
+        self.quiet.set(false);
+        if before.is_some() || selected.is_some() {
+            (self.selected)();
+        }
         let inset = CONTENTS_PADDING + ROW_PADDING + if icons { ICON_ROOM } else { 0 };
         self.popover.set_offset(-inset, 0);
         self.popover.set_pointing_to(Some(&at));
@@ -206,7 +228,9 @@ impl Popup {
             let Some(row) = list.first_child().filter(|row| row.height() > 0) else {
                 return glib::ControlFlow::Continue;
             };
-            let (_, tall, _, _) = row.measure(gtk::Orientation::Vertical, row.width());
+            // At no width: a row is one line whatever its width, and the width it was given can
+            // be less than a row just bound to it needs, which GTK warns about.
+            let (_, tall, _, _) = row.measure(gtk::Orientation::Vertical, -1);
             let mut changed = set_tall(&rows, &doc, tall * MAX_ROWS as i32);
             if rows.width() > widest.get() {
                 widest.set(rows.width());

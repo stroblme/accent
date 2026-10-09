@@ -734,7 +734,10 @@ impl Blob {
 pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Blob>, Error> {
     let stage = matches!(rev, ":1" | ":2" | ":3");
     let object = match rev {
-        "" => format!(":{path}"),
+        // Stage 0 spelled out: git takes a `:` followed by anything but a letter or a digit for
+        // pathspec magic, so a `:.gitignore` the index lacks fails as an unknown revision rather
+        // than as a path that is not in the index.
+        "" => format!(":0:{path}"),
         _ if stage => format!("{rev}:{path}"),
         rev => format!("{rev}^{{commit}}:{path}"),
     };

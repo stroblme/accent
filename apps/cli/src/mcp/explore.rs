@@ -558,6 +558,8 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
     let mut lines = f.lines.clone();
     lines.extend(f.headings.iter().map(|&b| line_of(b)));
     let all: Vec<&str> = text.lines().collect();
+    // The whole file is one run of lines, and the list of runs below holds just it.
+    #[allow(clippy::single_range_in_vec_init)]
     let ranges = match (whole, symbols.is_empty()) {
         (true, _) => vec![1..=all.len().max(1)],
         (false, true) => shown_lines(all.len(), &heads, &lines),
@@ -748,6 +750,8 @@ mod tests {
 
     /// A short section is shown whole, a long one around the line, and neighbours merge.
     #[test]
+    // A section's lines are a range, and a list of one of them is what some cases expect.
+    #[allow(clippy::single_range_in_vec_init)]
     fn sections_are_shown_whole_or_around_the_line() {
         let found: BTreeSet<usize> = [5, 6].into();
         assert_eq!(shown_lines(20, &[1, 4, 10], &found), [4..=9]);
