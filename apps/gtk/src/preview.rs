@@ -15,8 +15,9 @@ use accent_core::markdown::{self, percent_decode};
 use accent_core::path::parent_dir;
 use accent_core::search::Options;
 use gtk::{gdk, gio, glib, pango};
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -267,20 +268,23 @@ struct Inner {
 impl Inner {
     /// Put `body` on the page as `rel`'s: patched into the page up when that is `rel`'s and wants
     /// the scripts it has, loaded as a new page otherwise. Only a load sets the base URI that
-    /// `rel`'s links and images resolve from, and the scripts the page runs.
+    /// `rel`'s links and images resolve from, and the scripts the page runs. Either way an image
+    /// that changed under the page is named at an address of its own ([`versioned`]).
     fn put(self: &Rc<Self>, rel: &str, body: &str) {
+        let base = base_uri(rel);
+        let body = versioned(body, &base, &self.assets.versions.borrow());
         let diagrams = body.contains("language-mermaid");
         if self.shown.borrow().as_deref() == Some(rel)
             && diagrams == self.mermaid.borrow().is_some()
             && !self.view.is_loading()
         {
-            return self.patch(body);
+            return self.patch(&body);
         }
         *self.assets.note.borrow_mut() = rel.to_string();
         self.shown.take();
         self.set_mermaid(diagrams);
         self.loaded.set(false);
-        self.view.load_html(&document(body), Some(&base_uri(rel)));
+        self.view.load_html(&document(&body), Some(&base));
     }
 
     /// Put `body` in place of the page's body ([`PATCH_SCRIPT`]). Nothing about the page's
@@ -476,9 +480,12 @@ struct Assets {
     /// image it was served before.
     #[cfg(feature = "bench")]
     requests: Cell<u32>,
-    /// The keys served since WebKit's memory cache was last cleared, whose bytes it may answer a
-    /// render with even after the file has changed.
-    served: RefCell<HashSet<String>>,
+    /// The keys served since WebKit's memory cache was last cleared, each with the paths the page
+    /// asked for it at: WebKit may answer a render with their bytes even after the file changed.
+    served: RefCell<HashMap<String, HashSet<String>>>,
+    /// How many times the file a path names changed under the page, which asks for it with `v=`
+    /// that many ([`versioned`]).
+    versions: RefCell<HashMap<String, u32>>,
     /// A page for print or export ([`Preview::for_paper`]): white paper, images as their files.
     paper: bool,
     /// The key of the note on the page: a loose one's images are read beside it
@@ -554,6 +561,7 @@ impl Preview {
             #[cfg(feature = "bench")]
             requests: Cell::new(0),
             served: RefCell::default(),
+            versions: RefCell::default(),
             paper,
             note: RefCell::default(),
             web,
@@ -736,8 +744,8 @@ impl Preview {
     }
 
     /// Drop every image WebKit keeps from the page, then `then`, which renders the note again:
-    /// a new look or an inverted image is served only to a page that asks for it once more, so
-    /// the render loads a new page rather than patching blocks that would keep theirs.
+    /// a new look is served only to a page that asks for its images once more, so the render
+    /// loads a new page rather than patching blocks that would keep theirs.
     pub fn forget_images(&self, then: impl FnOnce() + 'static) {
         self.inner.assets.served.borrow_mut().clear();
         self.inner.shown.take();
@@ -761,13 +769,29 @@ impl Preview {
         );
     }
 
-    /// Whether WebKit may still hold `key`'s bytes as they were when it was served, or those of a
-    /// file under the folder `key`, so a change, a removal or a rename of it wants
-    /// [`Preview::forget_images`].
-    pub fn holds(&self, key: &str) -> bool {
+    /// Have the page ask again for `key`'s file, or for every file under the folder `key`, which
+    /// changed, went, moved or was inverted: WebKit answers an address it was served with the
+    /// bytes it kept, so the next render names the file at an address of its own ([`versioned`])
+    /// and asks for nothing else again. Says whether the page was served any.
+    pub fn forget_image(&self, key: &str) -> bool {
         let folder = format!("{key}/");
-        let served = self.inner.assets.served.borrow();
-        served.contains(key) || served.iter().any(|k| k.starts_with(&folder))
+        let mut versions = self.inner.assets.versions.borrow_mut();
+        let mut found = false;
+        self.inner
+            .assets
+            .served
+            .borrow_mut()
+            .retain(|served, paths| {
+                if served != key && !served.starts_with(&folder) {
+                    return true;
+                }
+                for path in paths.drain() {
+                    *versions.entry(path).or_default() += 1;
+                }
+                found = true;
+                false
+            });
+        found
     }
 
     /// How many requests the page has made so far.
@@ -1199,6 +1223,7 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     let Some(("file", rel)) = accent_uri(&uri) else {
         return deny(request, "not a vault file");
     };
+    let asked = rel.clone();
     let page = diagram_page(&uri);
     // The look and the inverted set live on this thread; the worker gets a copy of each.
     let (resolve, request) = (assets.resolve.clone(), request.clone());
@@ -1219,7 +1244,8 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
         });
         let answer = answer.await;
         if let Some(Some((key, ..))) = &answer {
-            assets.served.borrow_mut().insert(key.clone());
+            let mut served = assets.served.borrow_mut();
+            served.entry(key.clone()).or_default().insert(asked);
         }
         let (path, served) = match answer {
             Some(Some((_, path, Some(served), _))) => (path, served),
@@ -1358,6 +1384,62 @@ fn base_uri(rel: &str) -> String {
             "accent://file/{}/",
             glib::Uri::escape_string(dir, Some("/"), false)
         ),
+    }
+}
+
+/// `body` with every image address whose file changed under the page asking for it with `v=` its
+/// version ([`Preview::forget_image`]): WebKit keeps what it was served by address, so an address
+/// of its own is what has one image asked for again. An address is matched by the path it names,
+/// resolved from `base` as the page resolves it; one written without quotes keeps its address.
+fn versioned<'a>(body: &'a str, base: &str, versions: &HashMap<String, u32>) -> Cow<'a, str> {
+    if versions.is_empty() {
+        return Cow::Borrowed(body);
+    }
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find("src=") {
+        let (head, tail) = rest.split_at(at + "src=".len());
+        out.push_str(head);
+        rest = tail;
+        let attribute = head[..at].ends_with(|c: char| c.is_ascii_whitespace());
+        let Some(quote) = tail
+            .chars()
+            .next()
+            .filter(|q| attribute && matches!(q, '"' | '\''))
+        else {
+            continue;
+        };
+        let Some(end) = tail[1..].find(quote) else {
+            continue;
+        };
+        let src = &tail[1..1 + end];
+        let Some(version) = version(src, base, versions) else {
+            continue;
+        };
+        let (address, fragment) = src
+            .split_once('#')
+            .map_or((src, None), |(a, f)| (a, Some(f)));
+        let join = if address.contains('?') { "&amp;" } else { "?" };
+        out.push(quote);
+        out.push_str(&format!("{address}{join}v={version}"));
+        if let Some(fragment) = fragment {
+            out.push('#');
+            out.push_str(fragment);
+        }
+        rest = &tail[1 + end..];
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+/// How many times the file `src` names on a page based at `base` changed under the page, if it
+/// did.
+fn version(src: &str, base: &str, versions: &HashMap<String, u32>) -> Option<u32> {
+    let src = src.replace("&amp;", "&");
+    let uri = glib::Uri::resolve_relative(Some(base), &src, glib::UriFlags::NONE).ok()?;
+    match accent_uri(&uri)? {
+        ("file", path) => versions.get(&path).copied(),
+        _ => None,
     }
 }
 
@@ -1783,6 +1865,35 @@ mod tests {
         assert!(shown.contains("no store") && !shown.contains("example.com"));
         let (_, shown) = gate.pass(page("<p>four</p>")).unwrap();
         assert!(!shown.contains("four"));
+    }
+
+    /// An image whose file changed under the page is asked for at an address of its own, found by
+    /// the path it names however the note writes it; every other address stays as it is.
+    #[test]
+    fn a_changed_image_gets_an_address_of_its_own() {
+        let versions = HashMap::from([
+            ("Notes/a b.png".to_string(), 2),
+            ("x.drawio".to_string(), 1),
+        ]);
+        let base = "accent://file/Notes/";
+        let body = concat!(
+            r#"<img src="a%20b.png" alt="a" /><img src="accent://file/Notes/a%20b.png">"#,
+            r#"<img src="accent://file/x.drawio?page=P"><img src='../Notes/a%20b.png#f'>"#,
+            r#"<img data-src="a%20b.png"><img src="c.png"><p>src="a%20b.png"</p>"#,
+        );
+        assert_eq!(
+            versioned(body, base, &versions),
+            concat!(
+                r#"<img src="a%20b.png?v=2" alt="a" /><img src="accent://file/Notes/a%20b.png?v=2">"#,
+                r#"<img src="accent://file/x.drawio?page=P&amp;v=1"><img src='../Notes/a%20b.png?v=2#f'>"#,
+                r#"<img data-src="a%20b.png"><img src="c.png"><p>src="a%20b.png"</p>"#,
+            )
+        );
+        // Nothing changed is the page as `to_html` wrote it, not a copy.
+        assert!(matches!(
+            versioned(body, base, &HashMap::new()),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]

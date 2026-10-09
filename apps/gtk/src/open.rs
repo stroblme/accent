@@ -446,7 +446,7 @@ impl App {
         for image in self.images().iter().filter(|image| image.key() == key) {
             self.show_image(image, None);
         }
-        self.reshow_preview_images();
+        self.reshow_preview_image(key);
     }
 
     /// Hand `landed` the path on *this* machine holding `key`'s bytes, for the readers that cannot

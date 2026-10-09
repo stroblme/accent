@@ -545,11 +545,17 @@ impl App {
         })
     }
 
-    /// Serve the preview's images again if it was served `rel`, or a file under it, which has
-    /// changed, gone or moved: WebKit would answer the next render with what it holds.
+    /// Serve `rel` to the preview again, or every file under it, if it was served: it changed,
+    /// went, moved or was inverted, and WebKit would answer the next render with what it holds.
+    /// The render asks for it alone again (`Preview::forget_image`).
     pub fn reshow_preview_image(self: &Rc<Self>, rel: &str) {
-        if self.preview.borrow().as_ref().is_some_and(|p| p.holds(rel)) {
-            self.reshow_preview_images();
+        let forgot = self
+            .preview
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| p.forget_image(rel));
+        if forgot && let Some(tab) = self.active().filter(|_| self.shows_preview()) {
+            self.render(&tab);
         }
     }
 
