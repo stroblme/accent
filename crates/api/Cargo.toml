@@ -12,7 +12,7 @@ default = []
 pdf = ["accent-core/pdf"]
 # The uniffi bindings Android calls this crate through. Off for every desktop build, so
 # `cargo build` never compiles uniffi and the façade stays what it was.
-android = ["pdf", "dep:uniffi", "dep:thiserror"]
+android = ["pdf", "dep:uniffi"]
 
 [dependencies]
 accent-core.workspace = true
@@ -23,6 +23,7 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 # `template::render` and `template::strftime` take a `NaiveDateTime`, and core re-exports nothing.
 chrono.workspace = true
@@ -34,7 +35,6 @@ globset = "0.4"
 # The Android bindings. `crates/api` is the façade Android calls, so the annotations live here;
 # the cdylib that carries them is `android/ffi`, which a desktop build never touches.
 uniffi = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

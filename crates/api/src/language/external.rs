@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use crate::{Error, Result};
 use serde_json::{Value, json};
 
 use accent_lsp::types::{
@@ -26,8 +26,8 @@ use accent_lsp::types::{
 use accent_lsp::{Client, Notifications, from_uri, to_uri};
 
 use super::{
-    Call, Completion, Completions, Fold, Fut, Hover, Language, Location, NotYet, Pos, Signature,
-    Support, Symbol,
+    Call, Completion, Completions, Fold, Fut, Hover, Language, Location, Pos, Signature, Support,
+    Symbol,
 };
 use crate::{Event, FileEdits, Local, locked};
 use map::{
@@ -89,8 +89,8 @@ pub(crate) async fn start(
     busy_as: Option<&'static str>,
 ) -> Result<Arc<dyn Language>> {
     let name = argv.first().cloned().unwrap_or_default();
-    let (client, notifications) =
-        Client::spawn(&argv, &root).map_err(|e| anyhow::anyhow!("cannot start {name}: {e}"))?;
+    let (client, notifications) = Client::spawn(&argv, &root)
+        .map_err(|e| Error::Language(format!("cannot start {name}: {e}")))?;
     let caps = client.initialize(&root).await?;
     let encoding = Encoding::parse(caps.position_encoding.as_deref());
     tracing::debug!("{name} started in {} ({encoding:?})", root.display());
@@ -234,10 +234,10 @@ impl Drop for Shown<'_> {
     }
 }
 
-/// A server's refusal as [`NotYet`], to be asked again; anything else as it is.
-fn not_yet(e: accent_lsp::Error) -> anyhow::Error {
+/// A server's refusal as [`Error::NotYet`], to be asked again; anything else as it is.
+fn not_yet(e: accent_lsp::Error) -> Error {
     match e {
-        accent_lsp::Error::Response { message, .. } => NotYet(message).into(),
+        accent_lsp::Error::Response { message, .. } => Error::NotYet(message),
         e => e.into(),
     }
 }
@@ -262,7 +262,7 @@ impl External {
         locked(&self.docs)
             .get(rel)
             .map(|d| d.text.clone())
-            .ok_or_else(|| anyhow::anyhow!("{rel} is not open"))
+            .ok_or_else(|| Error::Language(format!("{rel} is not open")))
     }
 
     fn uri(&self, rel: &str) -> Result<String> {
@@ -417,7 +417,7 @@ impl External {
                 tracing::debug!("{method}: the document had already changed");
                 Ok(R::default())
             }
-            Err(e) => Err(anyhow::anyhow!("{method}: {e}")),
+            Err(e) => Err(Error::Language(format!("{method}: {e}"))),
         }
     }
 }
@@ -450,7 +450,7 @@ impl Language for External {
             let mut docs = locked(&self.docs);
             let doc = docs
                 .get_mut(rel)
-                .ok_or_else(|| anyhow::anyhow!("{rel} is not open"))?;
+                .ok_or_else(|| Error::Language(format!("{rel} is not open")))?;
             doc.version += 1;
             doc.text = text.clone();
             doc.version
@@ -664,11 +664,14 @@ impl Language for External {
     ) -> Fut<'_, Option<Vec<Call>>> {
         let (rel, language_id) = (rel.to_string(), language_id.to_string());
         Box::pin(async move {
-            anyhow::ensure!(on(&self.caps.call_hierarchy_provider), "no call hierarchy");
+            if !on(&self.caps.call_hierarchy_provider) {
+                return Err(Error::Language("no call hierarchy".to_string()));
+            }
             let open = self.text_of(&rel).ok();
             let text = match &open {
                 Some(text) => text.clone(),
-                None => std::fs::read_to_string(Local::join(&self.root, &rel)?)?,
+                None => std::fs::read_to_string(Local::join(&self.root, &rel)?)
+                    .map_err(|e| accent_core::Error::io(&rel, e))?,
             };
             let uri = self.uri(&rel)?;
             let far = match self.hierarchy(&uri, &text, pos, incoming).await {
@@ -683,7 +686,7 @@ impl Language for External {
             let Some(far) = far.map_err(not_yet)? else {
                 return match self.found_one.load(Ordering::Relaxed) {
                     true => Ok(None),
-                    false => Err(NotYet("no declaration found yet".to_string()).into()),
+                    false => Err(Error::NotYet("no declaration found yet".to_string())),
                 };
             };
             self.found_one.store(true, Ordering::Relaxed);

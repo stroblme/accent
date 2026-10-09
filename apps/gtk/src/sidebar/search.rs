@@ -999,7 +999,7 @@ impl Search {
 }
 
 /// A [`Key`] as the worker thread needs it.
-fn compile(key: &Key) -> Result<Query, search::Error> {
+fn compile(key: &Key) -> accent_core::Result<Query> {
     match key.grep {
         true => {
             compile_regex(key)?;
@@ -1013,7 +1013,7 @@ fn compile(key: &Key) -> Result<Query, search::Error> {
     }
 }
 
-fn compile_regex(key: &Key) -> Result<Regex, search::Error> {
+fn compile_regex(key: &Key) -> accent_core::Result<Regex> {
     search::pattern(&key.text, key.options)
 }
 

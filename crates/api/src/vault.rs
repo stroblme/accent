@@ -240,8 +240,8 @@ impl Vault {
     /// pass to a remote command — never something to open. Use [`fetch`](Self::fetch) for that.
     pub fn resolve(&self, rel: &str) -> io::Result<PathBuf> {
         match &self.backend {
-            Backend::Local(v) => v.resolve(rel),
-            Backend::Remote(_) => Local::join(&self.root(), rel),
+            Backend::Local(v) => Ok(v.resolve(rel)?),
+            Backend::Remote(_) => Ok(Local::join(&self.root(), rel)?),
         }
     }
 
@@ -322,8 +322,8 @@ macro_rules! methods {
     (@err git) => { remote_err };
 
     // The call itself: on this machine, and on the host answering for it.
-    (@here $v:ident io $name:ident ($($a:tt)*)) => { $v.$name($($a)*) };
-    (@here $v:ident any $name:ident ($($a:tt)*)) => { $v.$name($($a)*) };
+    (@here $v:ident io $name:ident ($($a:tt)*)) => { Ok($v.$name($($a)*)?) };
+    (@here $v:ident any $name:ident ($($a:tt)*)) => { Ok($v.$name($($a)*)?) };
     (@here $v:ident git $name:ident $core:ident ($($a:tt)*)) => {
         git::$core($($a)*).map_err(anyhow::Error::from)
     };
@@ -566,9 +566,10 @@ impl Vault {
     /// a remote vault's copy downloads. A local file is already here, so it tells nothing.
     pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> io::Result<PathBuf> {
         match &self.backend {
-            Backend::Local(v) => v
-                .resolve(rel)
-                .and_then(|path| std::fs::metadata(&path).map(|_| path)),
+            Backend::Local(v) => {
+                let path = v.resolve(rel)?;
+                std::fs::metadata(&path).map(|_| path)
+            }
             Backend::Remote(r) => r.fetch_with(rel, progress),
         }
     }
@@ -596,7 +597,7 @@ impl Vault {
     /// travel as an upload's do, over ssh rather than in the protocol.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> io::Result<()> {
         match &self.backend {
-            Backend::Local(v) => v.write_file(rel, bytes),
+            Backend::Local(v) => Ok(v.write_file(rel, bytes)?),
             Backend::Remote(r) => r.write_file(rel, bytes),
         }
     }
@@ -625,7 +626,7 @@ impl Vault {
     /// out.
     pub fn create_note(&self, rel: &str, template: Option<&str>) -> Result<(String, Vec<usize>)> {
         match &self.backend {
-            Backend::Local(v) => v.create_note(rel, template),
+            Backend::Local(v) => Ok(v.create_note(rel, template)?),
             Backend::Remote(r) => r
                 .call("create_note", json!([rel, template]))
                 .map_err(remote_err),
@@ -653,7 +654,7 @@ impl Vault {
             return Ok(Vec::new());
         }
         match &self.backend {
-            Backend::Local(v) => v.grep_unindexed(query, options, limit, stop),
+            Backend::Local(v) => Ok(v.grep_unindexed(query, options, limit, stop)?),
             Backend::Remote(r) => r
                 .call("grep_unindexed", json!([query, options, limit]))
                 .map_err(remote_err),

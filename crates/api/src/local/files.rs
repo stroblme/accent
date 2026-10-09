@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 
-use anyhow::{Context, Result};
+use crate::{Error, Result};
 
 use accent_core::path::{basename, stem};
 use accent_core::{markdown, search, template};
@@ -31,8 +31,8 @@ pub(super) struct Before {
 }
 
 impl Local {
-    pub fn read(&self, rel: &str) -> io::Result<(String, Etag)> {
-        Ok(fs::read_note(&self.resolve(rel)?)?)
+    pub fn read(&self, rel: &str) -> Result<(String, Etag)> {
+        fs::read_note(&self.resolve(rel)?).map_err(named(rel))
     }
 
     /// Write a note, then tell the worker about it: the index is correct within a millisecond
@@ -42,7 +42,8 @@ impl Local {
     /// frame on an SSD. If a slow disk ever shows up, move the write to the worker and answer
     /// with an event.
     pub fn save(&self, rel: &str, text: &str, expected: Option<Etag>) -> Result<Etag, SaveError> {
-        let etag = fs::write_note(&self.resolve(rel)?, text, expected)?;
+        let path = self.resolve(rel).map_err(io::Error::from)?;
+        let etag = fs::write_note(&path, text, expected)?;
         self.post(Msg::Saved {
             rel: rel.to_string(),
             etag,
@@ -52,8 +53,8 @@ impl Local {
 
     /// Write `bytes` to a file nothing holds yet, an image pasted into a note, and tell the worker
     /// as [`save`](Self::save) does: an embed of it resolves at once, not a watcher debounce later.
-    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> io::Result<()> {
-        fs::write_bytes(&self.resolve(rel)?, bytes, None).map_err(io::Error::other)?;
+    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
+        fs::write_bytes(&self.resolve(rel)?, bytes, None)?;
         self.post(Msg::Update {
             rel: rel.to_string(),
             own: true,
@@ -64,7 +65,7 @@ impl Local {
     /// Tell the worker `rel` was written behind its back, as [`write_file`](Self::write_file)
     /// does for its own: what a remote vault's `write_file` asks once its bytes are on the host,
     /// which they reach over ssh rather than through here.
-    pub fn wrote(&self, rel: &str) -> io::Result<()> {
+    pub fn wrote(&self, rel: &str) -> Result<()> {
         self.resolve(rel)?;
         self.post(Msg::Update {
             rel: rel.to_string(),
@@ -75,13 +76,13 @@ impl Local {
 
     /// Read any file as text, saying so when it is binary or too big to hold. What a tab opens
     /// with; [`read`](Self::read) is the note-shaped version the rename and conflict paths use.
-    pub fn read_text(&self, rel: &str) -> io::Result<fs::Read> {
-        Ok(fs::read_text(&self.resolve(rel)?)?)
+    pub fn read_text(&self, rel: &str) -> Result<fs::Read> {
+        fs::read_text(&self.resolve(rel)?).map_err(named(rel))
     }
 
     /// The file's etag, or `None` when there is no file there. One `stat`, which is how a tab
     /// asks "did this change under me" and how the app asks "does this path exist".
-    pub fn stat(&self, rel: &str) -> io::Result<Option<Etag>> {
+    pub fn stat(&self, rel: &str) -> Result<Option<Etag>> {
         match Etag::of(&self.resolve(rel)?) {
             Ok(etag) => Ok(Some(etag)),
             Err(accent_core::Error::NotFound(_)) => Ok(None),
@@ -95,12 +96,13 @@ impl Local {
     /// another machine, where there is no session bus to ask and no trash to ask it about. The
     /// UI is what makes that difference visible, by confirming the way it already confirms a
     /// delete the trash could not take.
-    pub fn delete(&self, rel: &str) -> io::Result<()> {
+    pub fn delete(&self, rel: &str) -> Result<()> {
         let path = self.resolve(rel)?;
         match path.is_dir() {
-            true => std::fs::remove_dir_all(&path)?,
-            false => std::fs::remove_file(&path)?,
+            true => std::fs::remove_dir_all(&path),
+            false => std::fs::remove_file(&path),
         }
+        .map_err(|e| accent_core::Error::io(rel, e))?;
         self.post(Msg::Update {
             rel: rel.to_string(),
             own: true,
@@ -116,12 +118,15 @@ impl Local {
         for rel in &tried {
             let path = self.resolve(rel)?;
             if path.is_file() {
-                let (text, _) =
-                    fs::read_note(&path).with_context(|| format!("reading template {rel}"))?;
+                let (text, _) = fs::read_note(&path).map_err(named(rel))?;
                 return Ok(text);
             }
         }
-        anyhow::bail!("no template {name}: looked at {}", tried.join(" and "))
+        Err(accent_core::Error::NotFound(format!(
+            "the template {name} (looked at {})",
+            tried.join(" and ")
+        ))
+        .into())
     }
 
     /// A template's text as a note called `title` would get it: the body with every placeholder
@@ -145,7 +150,7 @@ impl Local {
             Some(t) => self.render_template(t, &stem(&rel))?,
             None => (String::new(), Vec::new()),
         };
-        fs::create_note(&self.resolve(&rel)?, &text).with_context(|| format!("creating {rel}"))?;
+        fs::create_note(&self.resolve(&rel)?, &text).map_err(named(&rel))?;
         self.post(Msg::Update {
             rel: rel.clone(),
             own: true,
@@ -153,8 +158,8 @@ impl Local {
         Ok((rel, cursor))
     }
 
-    pub fn create_dir(&self, rel: &str) -> io::Result<()> {
-        std::fs::create_dir_all(self.resolve(rel)?)?;
+    pub fn create_dir(&self, rel: &str) -> Result<()> {
+        std::fs::create_dir_all(self.resolve(rel)?).map_err(|e| accent_core::Error::io(rel, e))?;
         // ponytail: only the deepest component is indexed straight away; intermediate levels of a
         // nested path wait for the watcher or the next reconcile. Post one update per component
         // if the tree ever looks wrong right after "New folder".
@@ -170,14 +175,13 @@ impl Local {
     /// Vault-relative on both ends, so on a remote vault this runs where the files are and an
     /// in-vault paste costs no bytes over the link. It never overwrites: the caller picks a name
     /// nothing holds yet, which is what makes a paste beside its source a "(copy)".
-    pub fn copy(&self, from: &str, to: &str) -> io::Result<()> {
+    pub fn copy(&self, from: &str, to: &str) -> Result<()> {
         let (src, dest) = (self.resolve(from)?, self.resolve(to)?);
         match src.is_dir() {
-            true => copy_tree(&src, &dest)?,
-            false => {
-                std::fs::copy(&src, &dest)?;
-            }
+            true => copy_tree(&src, &dest),
+            false => std::fs::copy(&src, &dest).map(|_| ()),
         }
+        .map_err(|e| accent_core::Error::io(from, e))?;
         self.post(Msg::Update {
             rel: to.to_string(),
             own: true,
@@ -226,7 +230,7 @@ impl Local {
         let kinds = moves
             .iter()
             .map(|(from, to)| Ok((from.clone(), to.clone(), self.resolve(from)?.is_dir())))
-            .collect::<io::Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?;
         let (imports, asked) = self.lang.will_rename(&kinds);
         let mut unchecked: Vec<String> = files
             .keys()
@@ -323,13 +327,15 @@ impl Local {
         edits.sort_by_key(|(start, ..)| std::cmp::Reverse(*start));
         let mut end = text.len();
         for (start, stop, with) in &edits {
-            anyhow::ensure!(
-                start <= stop
-                    && *stop <= end
-                    && text.is_char_boundary(*start)
-                    && text.is_char_boundary(*stop),
-                "the language server's edits overlap"
-            );
+            let fits = start <= stop
+                && *stop <= end
+                && text.is_char_boundary(*start)
+                && text.is_char_boundary(*stop);
+            if !fits {
+                return Err(Error::Language(
+                    "the language server's edits overlap".to_string(),
+                ));
+            }
             text.replace_range(*start..*stop, with);
             end = *start;
         }
@@ -624,7 +630,8 @@ impl Local {
         };
         let (matches, rewritten) = match accent_core::path::holds_diagram(rel, &text) {
             true => {
-                let mut file = accent_drawio::File::from_bytes(text.as_bytes())?;
+                let mut file = accent_drawio::File::from_bytes(text.as_bytes())
+                    .map_err(|e| accent_core::Error::Invalid(format!("{rel}: {e}")))?;
                 let mut matches = 0;
                 accent_drawio::text::edit_labels(&mut file, |label| {
                     let found = re.find_iter(label).count();
@@ -675,8 +682,7 @@ impl Local {
     /// deleting it belongs in the system trash. Keeping mine needs no call here at all, it is
     /// just trashing the copy.
     pub fn adopt_conflict(&self, original: &str, conflict: &str) -> Result<Etag> {
-        let (text, _) = fs::read_note(&self.resolve(conflict)?)
-            .with_context(|| format!("reading {conflict}"))?;
+        let (text, _) = fs::read_note(&self.resolve(conflict)?).map_err(named(conflict))?;
         let target = self.resolve(original)?;
         let keep = target.with_file_name(accent_conflict_name(
             basename(original),
@@ -684,11 +690,9 @@ impl Local {
         ));
         // ponytail: a second adopt within the same second overwrites the first copy, because the
         // name only carries whole seconds. Add a counter suffix if that ever costs anyone a note.
-        std::fs::copy(&target, &keep)
-            .with_context(|| format!("keeping {original} as {}", keep.display()))?;
-        let etag = Etag::of(&target).with_context(|| format!("stat {original}"))?;
-        let written = fs::write_note(&target, &text, Some(etag))
-            .with_context(|| format!("writing {original}"))?;
+        std::fs::copy(&target, &keep).map_err(|e| accent_core::Error::io(original, e))?;
+        let etag = Etag::of(&target).map_err(named(original))?;
+        let written = fs::write_note(&target, &text, Some(etag))?;
         self.post(Msg::Update {
             rel: original.to_string(),
             own: true,
@@ -765,6 +769,21 @@ fn imports_by_path(rel: &str) -> bool {
 fn is_under(rel: &str, dir: &str) -> bool {
     rel.strip_prefix(dir)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// A core file error naming `rel`, the path the vault speaks in, where it named the absolute path
+/// the core was handed.
+fn named(rel: &str) -> impl FnOnce(accent_core::Error) -> Error + '_ {
+    move |e| {
+        match e {
+            accent_core::Error::NotFound(_) => accent_core::Error::NotFound(rel.to_string()),
+            accent_core::Error::AlreadyExists(_) => {
+                accent_core::Error::AlreadyExists(rel.to_string())
+            }
+            e => e,
+        }
+        .into()
+    }
 }
 
 /// `cp -r`: `std::fs` copies one file, and a pasted folder is the one caller that needs the rest.

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 pub mod ffi;
 #[cfg(feature = "android")]
 uniffi::setup_scaffolding!();
+mod error;
 pub mod language;
 pub mod link;
 mod local;
@@ -31,6 +32,7 @@ mod worker;
 #[cfg(test)]
 mod tests;
 
+pub use error::{Error, Result};
 pub(crate) use local::Local;
 pub use paths::conflict_original_rel;
 pub use vault::Vault;

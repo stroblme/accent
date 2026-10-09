@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::channel;
 
-use anyhow::{Context, Result};
+use crate::Result;
 
 use accent_core::index::Index;
 use accent_core::walk::{self, FileKind};
@@ -208,7 +208,8 @@ impl Local {
     pub fn backlink_locations(&self, rel: &str) -> Result<Vec<Location>> {
         let rows = self.index().backlinks(rel)?;
         Ok(notes::placed(rows, |src| {
-            Ok(std::fs::read_to_string(Local::join(&self.root, src)?)?)
+            std::fs::read_to_string(Local::join(&self.root, src)?)
+                .map_err(|e| accent_core::Error::io(src, e).into())
         }))
     }
 
@@ -295,13 +296,12 @@ impl Local {
     /// progress rather than of the walk: the worker writes the set for the rows already there and
     /// again once the walk is over (`Worker::reconcile`).
     pub fn set_excluded(&self, entries: &[String]) -> Result<()> {
+        let gone = || accent_core::Error::Index("the vault worker stopped".to_string());
         let (reply, answer) = channel();
         self.tx
             .send(Msg::SetExcluded(entries.to_vec(), reply))
-            .map_err(|_| anyhow::anyhow!("the vault worker is gone"))?;
-        Ok(answer
-            .recv()
-            .context("the vault worker stopped before it recorded the exclusion set")??)
+            .map_err(|_| gone())?;
+        Ok(answer.recv().map_err(|_| gone())??)
     }
 
     pub fn recent_files(&self, limit: usize) -> Result<Vec<String>> {

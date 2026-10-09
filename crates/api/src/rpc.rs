@@ -477,7 +477,7 @@ pub fn serve(
         Ok(opened) => opened,
         Err(e) => {
             refuse(&e, input, output);
-            return Err(e);
+            return Err(e.into());
         }
     };
     serve_local(vault, events, input, output, SILENCE);
@@ -486,7 +486,7 @@ pub fn serve(
 
 /// Answer the first request — the client's `hello` — with why there is no vault to serve.
 /// Exiting alone would only close the pipe, and the window would say the link closed.
-fn refuse(e: &anyhow::Error, input: impl Read, mut output: impl Write) {
+fn refuse(e: &crate::Error, input: impl Read, mut output: impl Write) {
     for line in BufReader::new(input).lines().map_while(Result::ok) {
         // The client's pings come without an id, and one may arrive before the `hello`.
         let id = serde_json::from_str::<Value>(&line)
@@ -494,7 +494,7 @@ fn refuse(e: &anyhow::Error, input: impl Read, mut output: impl Write) {
             .and_then(|msg| msg.get("id").cloned());
         if let Some(id) = id {
             let answer = json!({"jsonrpc": "2.0", "id": id, "error": {
-                "code": REFUSED, "message": format!("{e:#}"),
+                "code": REFUSED, "message": e.to_string(),
             }});
             let _ = writeln!(output, "{answer}").and_then(|()| output.flush());
             return;
@@ -674,14 +674,14 @@ pub(crate) fn ok<T: serde::Serialize>(value: T) -> Result<Value, RpcError> {
 }
 
 /// An `anyhow` failure, formatted the way the app would have shown it locally.
-pub(crate) fn any<T: serde::Serialize>(r: anyhow::Result<T>) -> Result<Value, RpcError> {
-    ok(r.map_err(|e| RpcError::failed(format!("{e:#}")))?)
+pub(crate) fn any<T: serde::Serialize>(r: crate::Result<T>) -> Result<Value, RpcError> {
+    ok(r.map_err(RpcError::failed)?)
 }
 
-pub(crate) fn io<T: serde::Serialize>(r: std::io::Result<T>) -> Result<Value, RpcError> {
+pub(crate) fn io<T: serde::Serialize>(r: crate::Result<T>) -> Result<Value, RpcError> {
     match r {
         Ok(v) => ok(v),
-        Err(e) => Err(io_failure(&e)),
+        Err(e) => Err(io_failure(&e.into())),
     }
 }
 
@@ -771,7 +771,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
 /// The registration is what makes cancellation real on the far side: aborting the task drops the
 /// future, which is what sends `$/cancelRequest` to the language server underneath it. A vault
 /// that is not being served registers nothing and simply waits.
-pub(crate) fn block<T>(task: crate::Task<T>) -> anyhow::Result<T> {
+pub(crate) fn block<T>(task: crate::Task<T>) -> crate::Result<T> {
     let serving = SERVING.with_borrow(Clone::clone);
     if let Some((id, live)) = &serving {
         locked(live).insert(*id, task.abort_handle());

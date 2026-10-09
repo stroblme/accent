@@ -5,14 +5,13 @@
 //! `accent-cli serve` answers with on a remote host — the rpc dispatch calls exactly these
 //! methods. The file operations are in [`files`], the index reads in [`index`].
 
-use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use anyhow::Result;
+use crate::Result;
 
 use accent_core::index::{Index, InterruptHandle};
 
@@ -89,7 +88,9 @@ impl Local {
             .canonicalize()
             .ok()
             .filter(|r| r.is_dir())
-            .ok_or_else(|| anyhow::anyhow!("{} is not a folder", root.display()))?;
+            .ok_or_else(|| {
+                accent_core::Error::Invalid(format!("{} is not a folder", root.display()))
+            })?;
         // The reader opens first because it is the connection that may drop and recreate the
         // schema; the worker's must never see the database half-built.
         let index = Index::open(db)?;
@@ -157,7 +158,7 @@ impl Local {
 
     /// Ask for a walk of the folder `dir` alone, which the reader suspects the index has fallen
     /// behind on. A plain vault-relative path: the walk starts where it names.
-    pub fn rescan_dir(&self, dir: &str) -> io::Result<()> {
+    pub fn rescan_dir(&self, dir: &str) -> Result<()> {
         if !Path::new(dir)
             .components()
             .all(|c| matches!(c, Component::Normal(_)))
@@ -207,7 +208,7 @@ impl Local {
     /// The test is deliberately lexical and never `canonicalize`s: a vault links external
     /// directories in on purpose, so resolving would reject the very paths the walk indexed and
     /// a note reached through a directory symlink has to stay openable.
-    pub fn resolve(&self, rel: &str) -> io::Result<PathBuf> {
+    pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
         Local::join(&self.root, rel)
     }
 
@@ -216,9 +217,12 @@ impl Local {
     /// the root. Readers follow such a link, since a vault links folders in on purpose; a rewrite
     /// that nobody aimed at the file must not reach through one into `~/.bashrc`. One
     /// `canonicalize` per file written.
-    pub(crate) fn resolve_inside(&self, rel: &str) -> io::Result<PathBuf> {
+    pub(crate) fn resolve_inside(&self, rel: &str) -> Result<PathBuf> {
         let path = self.resolve(rel)?;
-        match path.canonicalize()?.starts_with(&self.root) {
+        let real = path
+            .canonicalize()
+            .map_err(|e| accent_core::Error::io(rel, e))?;
+        match real.starts_with(&self.root) {
             true => Ok(path),
             false => Err(outside(rel)),
         }
@@ -226,7 +230,7 @@ impl Local {
 
     /// [`resolve`](Self::resolve) against any root, so a remote vault can do the same arithmetic
     /// with the root the server reported.
-    pub fn join(root: &Path, rel: &str) -> io::Result<PathBuf> {
+    pub fn join(root: &Path, rel: &str) -> Result<PathBuf> {
         let mut out = root.to_path_buf();
         for part in Path::new(rel).components() {
             match part {

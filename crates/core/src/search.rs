@@ -6,7 +6,7 @@
 //! booleans three times over.
 
 use regex::RegexBuilder;
-pub use regex::{Error, NoExpand, Regex};
+pub use regex::{NoExpand, Regex};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
@@ -31,7 +31,7 @@ impl Options {
 ///
 /// The word wrapper is a non-capturing group, so `\b` binds to the whole alternation and the
 /// group numbers a replacement refers to stay the ones the user typed.
-pub fn pattern(query: &str, options: Options) -> Result<Regex, Error> {
+pub fn pattern(query: &str, options: Options) -> crate::Result<Regex> {
     let body = match options.regex {
         true => query.to_string(),
         false => regex::escape(query),
@@ -43,6 +43,7 @@ pub fn pattern(query: &str, options: Options) -> Result<Regex, Error> {
     RegexBuilder::new(&body)
         .case_insensitive(!options.case)
         .build()
+        .map_err(|e| crate::Error::Invalid(e.to_string()))
 }
 
 /// Where `re` matches in `text`, first to last, as character offsets rather than bytes: what a

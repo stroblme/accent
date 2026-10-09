@@ -2,9 +2,7 @@
 //! in [`accent_core::path`]: what a template's target is called, what a conflict copy is called,
 //! and which of them are worth offering the user.
 
-use std::io;
-
-use anyhow::Result;
+use crate::Result;
 
 use accent_core::index::Index;
 use accent_core::path::{basename, parent_dir};
@@ -62,9 +60,6 @@ pub(crate) fn accent_conflict_name(name: &str, now: chrono::NaiveDateTime) -> St
     )
 }
 
-pub(crate) fn outside(rel: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("{rel} is outside the vault"),
-    )
+pub(crate) fn outside(rel: &str) -> crate::Error {
+    accent_core::Error::Invalid(format!("{rel} is outside the vault")).into()
 }

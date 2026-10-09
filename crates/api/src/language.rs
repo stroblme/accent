@@ -21,16 +21,16 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use crate::{Error, Result};
 use accent_core::index::Index;
 use accent_core::markdown;
-use anyhow::Result;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::local::Ignored;
 use crate::remote::Remote;
-use crate::vault::{Backend, remote_err};
+use crate::vault::Backend;
 use crate::{Event, FileEdits, Local, LspConfig, Vault, locked};
 
 pub(crate) mod external;
@@ -283,7 +283,7 @@ impl<T> Future for Task<T> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.handle).poll(cx) {
             Poll::Ready(Ok(r)) => Poll::Ready(r),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(anyhow::anyhow!("{e}"))),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e.into())),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -385,7 +385,7 @@ pub(crate) trait Language: Send + Sync {
     }
     /// The calls into the declaration whose name is at `pos` (`incoming`), or out of it, as the
     /// file is on disk unless it is open; `None` where the provider knows no declaration, and
-    /// [`NotYet`] where it cannot tell yet.
+    /// [`Error::NotYet`] where it cannot tell yet.
     fn calls(
         &self,
         _rel: &str,
@@ -572,11 +572,12 @@ impl Languages {
             root.to_string_lossy().into_owned(),
         ];
         let start = async {
-            anyhow::ensure!(self.ghost.load(Ordering::Relaxed), "Ghost Text is off");
-            anyhow::ensure!(
-                self.ghost_may_start(Instant::now()),
-                "{GHOST} keeps exiting"
-            );
+            if !self.ghost.load(Ordering::Relaxed) {
+                return Err(Error::Language("Ghost Text is off".to_string()));
+            }
+            if !self.ghost_may_start(Instant::now()) {
+                return Err(Error::Language(format!("{GHOST} keeps exiting")));
+            }
             external::start(
                 argv,
                 root.clone(),
@@ -640,7 +641,7 @@ impl Languages {
         locked(&self.docs)
             .get(rel)
             .map(|(_, provider, _)| provider.clone())
-            .ok_or_else(|| anyhow::anyhow!("{rel} is not open"))
+            .ok_or_else(|| Error::Language(format!("{rel} is not open")))
     }
 
     /// Stop every provider and forget every document.
@@ -737,8 +738,10 @@ impl Languages {
         Task::spawn(async move {
             let (language_id, argv) = match which {
                 Some(Server::External { language_id, argv }) => (language_id, argv),
-                Some(Server::Missing(name)) => anyhow::bail!("{name} is not installed"),
-                _ => anyhow::bail!("no language server for {rel}"),
+                Some(Server::Missing(name)) => {
+                    return Err(Error::Language(format!("{name} is not installed")));
+                }
+                _ => return Err(Error::Language(format!("no language server for {rel}"))),
             };
             let name = Path::new(&argv[0])
                 .file_name()
@@ -755,7 +758,7 @@ impl Languages {
             });
             let Ok(session) = tokio::time::timeout_at(asked_at + waits.starting, starting).await
             else {
-                anyhow::bail!("{name} not ready");
+                return Err(Error::NotYet(format!("{name} not ready")));
             };
             let session = session??;
             // Whether it said it cannot tell yet, which a wait that runs out is then put down to.
@@ -769,8 +772,8 @@ impl Languages {
                 let asked = session.calls(&rel, &language_id, pos, incoming);
                 match tokio::time::timeout_at(deadline, asked).await {
                     Ok(Ok(found)) => return Ok(found),
-                    Ok(Err(e)) if e.downcast_ref::<NotYet>().is_none() => {
-                        anyhow::bail!("{name}: {e:#}")
+                    Ok(Err(e)) if !matches!(e, Error::NotYet(_)) => {
+                        return Err(Error::Language(format!("{name}: {e}")));
                     }
                     Ok(Err(e)) => {
                         tracing::debug!("{name} is not ready for {rel}: {e}");
@@ -779,10 +782,13 @@ impl Languages {
                     Err(_) => {}
                 }
                 if tokio::time::Instant::now() + AGAIN >= deadline {
-                    match loading {
-                        true => anyhow::bail!("{name} not ready"),
-                        false => anyhow::bail!("{name} did not answer within {}s", wait.as_secs()),
-                    }
+                    return Err(match loading {
+                        true => Error::NotYet(format!("{name} not ready")),
+                        false => Error::Language(format!(
+                            "{name} did not answer within {}s",
+                            wait.as_secs()
+                        )),
+                    });
                 }
                 tokio::time::sleep(AGAIN).await;
             }
@@ -969,19 +975,6 @@ async fn stop_when_idle(me: std::sync::Weak<Languages>, key: Key, idle: Duration
     }
 }
 
-/// A server's answer that it cannot answer yet, still loading its project: what
-/// [`Languages::calls`] asks again past.
-#[derive(Debug)]
-pub(crate) struct NotYet(pub(crate) String);
-
-impl std::fmt::Display for NotYet {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for NotYet {}
-
 /// Starts of the ghost session a vault allows within [`GHOST_WINDOW`]: the first, and two more
 /// after it exits.
 const GHOST_STARTS: usize = 3;
@@ -1147,7 +1140,9 @@ impl Vault {
                 v.lang
                     .calls(rel.to_string(), pos, incoming, &v.config().lsp, waits)
             }
-            Backend::Remote(_) => Task::spawn(async { anyhow::bail!("not on a remote vault") }),
+            Backend::Remote(_) => {
+                Task::spawn(async { Err(Error::Language("not on a remote vault".to_string())) })
+            }
         }
     }
 }
@@ -1275,9 +1270,7 @@ fn remote_task_then<T: DeserializeOwned + Send + 'static>(
     Task::blocking({
         let (r, asked) = (r.clone(), asked.clone());
         move || {
-            let answer = r
-                .call_tracked(method, params, &asked, crate::rpc::DEADLINE)
-                .map_err(remote_err)?;
+            let answer = r.call_tracked(method, params, &asked, crate::rpc::DEADLINE)?;
             then(&r, answer)
         }
     })
@@ -1290,7 +1283,10 @@ fn remote_task_then<T: DeserializeOwned + Send + 'static>(
 fn list_pages(r: &Remote, mut answer: Completions) -> Result<Completions> {
     match answer.pages.take() {
         Some(pages) => {
-            let outline = notes::pdf_outline(&r.fetch(&pages.rel)?)?;
+            let copy = r
+                .fetch(&pages.rel)
+                .map_err(|e| accent_core::Error::io(&pages.rel, e))?;
+            let outline = notes::pdf_outline(&copy)?;
             Ok(pages.answer(outline))
         }
         None => Ok(answer),
