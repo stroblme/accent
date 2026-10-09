@@ -112,6 +112,15 @@ fn a_remote_vault_connects_indexes_and_answers() {
         ))
     ));
 
+    // A method the host's server lacks is an error of its own, never an empty answer.
+    let remote = vault.remote().unwrap();
+    assert_eq!(
+        remote
+            .call::<()>("nonesuch", serde_json::json!([]))
+            .unwrap_err(),
+        accent_api::Error::UnknownMethod("nonesuch".to_string())
+    );
+
     // `fetch` is what the PDF and image readers use: a real file on this machine.
     let local = vault.fetch("a.md").unwrap();
     assert_eq!(std::fs::read_to_string(&local).unwrap(), "hello again\n");
