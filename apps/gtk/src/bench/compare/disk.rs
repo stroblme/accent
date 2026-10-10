@@ -750,6 +750,7 @@ pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         };
         settled(&compare).await;
+        scroll_to(&compare, 0.5).await;
         let buttons = overlaid(view, "⋯");
         if let Some((y, button)) = buttons.get(buttons.len() / 2).cloned() {
             centre(&compare, view, y).await;
@@ -956,13 +957,14 @@ async fn painted(views: &[gtk::TextView; 2], act: impl FnOnce()) -> String {
     )
 }
 
-/// Scroll the button of the hidden run `pick` on `view` (the middle one for `None`) halfway down
-/// the view, as far as the view goes, press it as a pointer does, the focus and then `clicked`, and
-/// say where the scroll and the lines above and under the button were before and after, and how far
-/// the scroll strayed meanwhile.
+/// Scroll the button of the hidden run `pick` on `view` (the middle one for `None`, the first for
+/// 0) halfway down the view, as far as the view goes, press it as a pointer does, the focus and
+/// then `clicked`, and say where the scroll and the lines above and under the button were before
+/// and after, and how far the scroll strayed meanwhile.
 async fn bench_gap(compare: &diff::Compare, view: &gtk::TextView, pick: Option<usize>) -> String {
     settled(compare).await;
     let adj = compare.vadjustment();
+    scroll_to(compare, if pick == Some(0) { 0.0 } else { 0.5 }).await;
     let buttons = overlaid(view, "⋯");
     let Some((top, button)) = buttons.get(pick.unwrap_or(buttons.len() / 2)).cloned() else {
         return format!("buttons={}", buttons.len());
@@ -1032,6 +1034,14 @@ pub(super) fn overlaid(view: &gtk::TextView, label: &str) -> Vec<(i32, gtk::Butt
     buttons
 }
 
+/// Scroll the comparison `at` of the way down and give it the time to lay the buttons there:
+/// only those near the view are laid.
+pub(super) async fn scroll_to(compare: &diff::Compare, at: f64) {
+    let adj = compare.vadjustment();
+    adj.set_value((adj.upper() - adj.page_size()) * at);
+    glib::timeout_future(Duration::from_millis(500)).await;
+}
+
 /// Scroll the comparison so buffer `y` of `view` is halfway down it, as far as it goes.
 pub(super) async fn centre(compare: &diff::Compare, view: &gtk::TextView, y: i32) {
     let (adj, seen) = (compare.vadjustment(), view.visible_rect());
@@ -1044,11 +1054,12 @@ pub(super) async fn centre(compare: &diff::Compare, view: &gtk::TextView, y: i32
 /// its start. Prints `bench compare_press aim <x> <y>` over the middle "⋯" button of the editor's
 /// column, for `build-aux/xtest.py :N "move <x> <y>; focus; down; up"`, and once the run has
 /// opened (`acted=true`), the editor's caret line and the widget with the keyboard; then the same
-/// over the middle hunk's Take and then its Keep Both, in the strip between the columns, with the
-/// other column's caret offset, and the strip as laid when each is aimed at (`strip`, see
-/// `Compare::strip`). The claim is `caret_line=0` and `theirs_caret=0` throughout, the keyboard
-/// staying where it was: the press reached the text view under the button too, which put that
-/// column's caret under the pointer and gave it the keyboard. Waits ten seconds for each press.
+/// over the middle Take and then the middle Keep Both of those laid near the view, in the strip
+/// between the columns, with the other column's caret offset, and the strip as laid when each is
+/// aimed at (`strip`, see `Compare::strip`). The claim is `caret_line=0` and `theirs_caret=0`
+/// throughout, the keyboard staying where it was: the press reached the text view under the
+/// button too, which put that column's caret under the pointer and gave it the keyboard. Waits
+/// ten seconds for each press.
 /// Writes the note, so point it at a scratch vault.
 pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
@@ -1105,7 +1116,10 @@ pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
             // The opening, and then the run the first press opened, let go of the view first.
             settled(&compare).await;
             let buttons = match what {
-                "gap" => overlaid(mine, label),
+                "gap" => {
+                    scroll_to(&compare, 0.5).await;
+                    overlaid(mine, label)
+                }
                 _ => compare.strip_buttons(label),
             };
             let Some((top, button)) = buttons.get(buttons.len() / 2).cloned() else {

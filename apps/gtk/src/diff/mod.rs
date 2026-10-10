@@ -755,11 +755,11 @@ impl Compare {
     /// edit, where they are longer than [`ON_THE_SPOT`] together, that is done on a worker: the
     /// columns lay nothing until it answers, the rows staying as they were laid, and are laid
     /// then; an answer for texts that changed while it was out is dropped, the lay that change
-    /// asks for diffing them again. The first lay diffs here, before the columns are shown: over
-    /// shown columns, the thousands of buttons a long file's hidden runs and hunks carry held the
-    /// main loop for 8.3 s, where the whole first lay takes 1.5 s (120,000 rows of CSV,
-    /// 2026-10-08). So does a side read again ([`Compare::set_side`]). A diff made here refines
-    /// what the main loop can spare and leaves the rest to a worker ([`Compare::diff_here`]).
+    /// asks for diffing them again. The first lay diffs here, before the columns are shown: laid
+    /// from a worker over shown columns, 120,000 rows changed throughout held the main loop for
+    /// 11–16 s, where the whole first lay here takes under 2 s (2026-10-10). So does a side read
+    /// again ([`Compare::set_side`]). A diff made here refines what the main loop can spare and
+    /// leaves the rest to a worker ([`Compare::diff_here`]).
     fn lay(&self, opening: bool) {
         let edits = self.edits.get();
         if !self.current() {
@@ -973,21 +973,6 @@ impl Compare {
             hidden.push((gap, key));
         }
 
-        for pane in &self.columns.panes {
-            pane.pool.unclaim();
-        }
-        let mut overlays = Vec::new();
-        for (gap, key) in &hidden {
-            for side in [Side::Old, Side::New] {
-                let pane = self.pane(side);
-                let widget = pane.pool.claim(&pane.view, *key, gap.len());
-                overlays.push((side.idx(), widget, gap.start));
-            }
-        }
-        for pane in &self.columns.panes {
-            pane.pool.hide_unclaimed();
-        }
-
         // Each connector joins a hunk's lines on the left to its lines on the right, and its
         // buttons are handed the hunk's index.
         let hunks = diff::hunks(&lines, &rows);
@@ -1017,9 +1002,8 @@ impl Compare {
                         .any(|side| side.of(row).is_some_and(|i| lines[i].op != Op::Equal))
                 })
                 .collect(),
-            hidden: hidden.iter().map(|(gap, _)| gap.clone()).collect(),
+            hidden: hidden.clone(),
             first: hunks.first().map(|hunk| hunk.start),
-            overlays,
         };
         // Let go before the columns are laid and `laid` runs, either of which may lay again.
         drop((lines, rows, starts));
@@ -1170,14 +1154,14 @@ impl Compare {
 
     // --- for the bench and the tests ----------------------------------------------------------
 
-    /// (rows, hunks, hidden runs, buttons) on screen right now.
+    /// (rows, hunks, hidden runs, buttons laid) right now.
     pub fn counts(&self) -> (usize, usize, usize, usize) {
         let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
         (
             rows.len(),
             diff::hunks(&lines, &rows).len(),
             self.hidden.borrow().len(),
-            self.columns.rows.borrow().overlays.len() + self.columns.links.shown(),
+            self.columns.buttons(),
         )
     }
 

@@ -68,7 +68,7 @@ pub(super) fn bench_loose(app: &Rc<App>, pdf: &str) {
                 let key = app.root().join(&image).to_string_lossy().into_owned();
                 let doc = shown.doc_for(&key)?;
                 let Doc::Image(viewer) = doc else { return None };
-                let (_, texture) = viewer.image.borrow().clone()?;
+                let texture = viewer.image.borrow().clone()?.1?;
                 Some(format!("{}x{}", texture.width(), texture.height()))
             };
             println!("bench loose_image before size={:?}", size());

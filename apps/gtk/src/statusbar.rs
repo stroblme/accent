@@ -44,8 +44,9 @@ pub struct Bar {
     /// clear the other.
     vault_busy: RefCell<Option<String>>,
     transfers: RefCell<Vec<String>>,
-    /// How far the language server has checked the tab in front, which has no answer about the
-    /// lines below meanwhile.
+    /// The language server the tab in front waits on, once its start has taken a second, and
+    /// how far it has checked the tab after, which has no answer about the lines below meanwhile.
+    starting: RefCell<Option<String>>,
     checking: RefCell<Option<String>>,
     provider_busy: RefCell<Option<String>>,
     /// Stop while the vault is indexing, Resume while it is paused, nothing otherwise. It sits
@@ -124,6 +125,7 @@ impl Bar {
             progress,
             vault_busy: RefCell::new(None),
             transfers: RefCell::new(Vec::new()),
+            starting: RefCell::new(None),
             checking: RefCell::new(None),
             provider_busy: RefCell::new(None),
             index,
@@ -188,6 +190,13 @@ impl Bar {
         self.show_busy();
     }
 
+    /// The language server named `server` is starting for the tab in front, or is not (`None`):
+    /// "Starting lake…".
+    pub fn set_starting(&self, server: Option<&str>) {
+        *self.starting.borrow_mut() = server.map(|server| format!("Starting {server}…"));
+        self.show_busy();
+    }
+
     /// The language server is checking the tab in front from 0-based `line` on, or is done with
     /// it (`None`): "Checking… line 12".
     pub fn set_checking(&self, line: Option<u32>) {
@@ -234,11 +243,12 @@ impl Bar {
 
     /// One line for all of them, and the vault's own work wins: opening a document or reading the
     /// vault is what the reader is waiting for. A copy they asked for comes next, the latest one
-    /// still running, then the check of the tab in front, and a suggestion index last, being a
-    /// convenience nobody asked about.
+    /// still running, then the start of the tab in front's server and its check, and a suggestion
+    /// index last, being a convenience nobody asked about.
     fn show_busy(&self) {
         let vault = self.vault_busy.borrow();
         let transfers = self.transfers.borrow();
+        let starting = self.starting.borrow();
         let checking = self.checking.borrow();
         let provider = self.provider_busy.borrow();
         let transfer = transfers.last().map(String::as_str);
@@ -247,6 +257,7 @@ impl Bar {
             vault
                 .as_deref()
                 .or(transfer)
+                .or(starting.as_deref())
                 .or(checking.as_deref())
                 .or(provider.as_deref()),
         );

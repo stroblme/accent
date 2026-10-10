@@ -29,8 +29,9 @@ pub struct Viewer {
     /// has one: a status page draws at a size nobody chose.
     pub zoom: Cell<Option<f64>>,
     /// An image's file on this machine and the texture it was decoded to, so a restyle recolours
-    /// without reading it again. `None` while it is being read, and on a status page.
-    pub image: RefCell<Option<(PathBuf, gdk::Texture)>>,
+    /// without reading it again (none for an SVG: `look::Shown`). `None` while it is being read,
+    /// and on a status page.
+    pub image: RefCell<Option<(PathBuf, Option<gdk::Texture>)>>,
     /// The look, inversion, display scale and drawn zoom (`look::drawn_zoom`) the image was last
     /// asked to be shown under, so a restyle that changes none of them does nothing.
     pub look: Cell<Option<(Look, bool, i32, f64)>>,

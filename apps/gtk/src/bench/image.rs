@@ -300,11 +300,15 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
             )
         })
         .unwrap_or_else(|| "-".to_string());
-    let recoloured = texture.as_ref() != Some(&original);
+    // An SVG keeps no plain drawing to compare with: recoloured where the look asks for it.
+    let recoloured = match &original {
+        Some(original) => texture.as_ref() != Some(original),
+        None => Look::now().palette(true, inverted).is_some(),
+    };
     let pixels = texture.map_or((0, 0), |t| (t.width(), t.height()));
     let t = Instant::now();
-    let zoom = crate::look::drawn_zoom(&path, image.zoom.get());
-    let _ = crate::look::show(&path, Some(original), Look::now(), inverted, scale, zoom);
+    let zoom = crate::look::drawn_zoom(&path, image.zoom.get(), image.size.get(), scale);
+    let _ = crate::look::show(&path, original, Look::now(), inverted, scale, zoom);
     println!(
         "bench image_look {rel} theme={theme:?} dark={} inverted={inverted} {verdict} \
          recoloured={recoloured} size={}x{} pixels={}x{} px(2,2)={px} type={} ms={:.1}",

@@ -440,21 +440,6 @@ impl Merge {
             hidden.push((gap, key));
         }
 
-        // A hidden run's button in every column.
-        for pane in &self.columns.panes {
-            pane.pool.unclaim();
-        }
-        let mut overlays = Vec::new();
-        for (c, pane) in self.columns.panes.iter().enumerate() {
-            for (gap, key) in &hidden {
-                let widget = pane.pool.claim(&pane.view, *key, gap.len());
-                overlays.push((c, widget, gap.start));
-            }
-        }
-        for pane in &self.columns.panes {
-            pane.pool.hide_unclaimed();
-        }
-
         // Each connector joins the rows of its run the side has lines in to those the file has,
         // a run cut where a block starts, so every block has a band of its own, which carries its
         // buttons.
@@ -508,8 +493,7 @@ impl Merge {
             starts: starts.to_vec(),
             first: diff::hunks_of(&changed).first().map(|hunk| hunk.start),
             changed,
-            hidden: hidden.iter().map(|(gap, _)| gap.clone()).collect(),
-            overlays,
+            hidden: hidden.clone(),
         };
         *self.lines.borrow_mut() = lines;
         *self.starts.borrow_mut() = starts;
@@ -571,7 +555,7 @@ impl Merge {
         self.columns.settled()
     }
 
-    /// (rows, conflict blocks, hidden runs, buttons) on screen right now.
+    /// (rows, conflict blocks, hidden runs, buttons laid) right now.
     pub fn counts(&self) -> (usize, usize, usize, usize) {
         let blocks = conflict::blocks(&self.text(MID)).len();
         let rows = self.columns.rows.borrow();
@@ -579,7 +563,7 @@ impl Merge {
             rows.changed.len(),
             blocks,
             rows.hidden.len(),
-            rows.overlays.len() + self.columns.links.shown(),
+            self.columns.buttons(),
         )
     }
 

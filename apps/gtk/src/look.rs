@@ -89,10 +89,11 @@ impl Look {
     }
 }
 
-/// What an image tab shows: the file as decoded, kept so a restyle need not read it again, and
-/// that texture under the look it was asked for.
+/// What an image tab shows: the file as decoded, and that texture under the look it was asked for.
 pub struct Shown {
-    pub original: gdk::Texture,
+    /// A raster's decoding, kept so a restyle need not read it again; `None` for an SVG, which a
+    /// restyle draws again from its text, so it is held only as shown.
+    pub original: Option<gdk::Texture>,
     pub texture: gdk::Texture,
     /// The size an SVG is shown at, its own, which its texture has more pixels than: it is drawn
     /// at the display's scale and at a zoom past 100 %. `None` for a raster, which has only its
@@ -111,11 +112,12 @@ impl Shown {
 }
 
 /// The zoom an image is drawn at while its picture is zoomed to `zoom`, `None` being fitted: an
-/// SVG's past 100 %, so a deep zoom stays sharp. A raster has only its own pixels, and anything
-/// fitted or zoomed out is drawn at its own size and shown smaller.
-pub fn drawn_zoom(path: &Path, zoom: Option<f64>) -> f64 {
+/// SVG's past 100 %, so a deep zoom stays sharp, as far as [`MAX_ZOOMED`] lets one of `size`
+/// (its own, once known) go at `scale`. A raster has only its own pixels, and anything fitted or
+/// zoomed out is drawn at its own size and shown smaller.
+pub fn drawn_zoom(path: &Path, zoom: Option<f64>, size: Option<(i32, i32)>, scale: i32) -> f64 {
     match (svg(path), zoom) {
-        (true, Some(zoom)) => zoom.max(1.0),
+        (true, Some(zoom)) => size.map_or(zoom.max(1.0), |size| capped(zoom, size, scale)),
         _ => 1.0,
     }
 }
@@ -141,14 +143,15 @@ pub fn show(
     let texture = recoloured(path, look, inverted, || Some(original.clone()))
         .map_or_else(|| original.clone(), |t| t.upcast());
     Ok(Shown {
-        original,
+        original: Some(original),
         texture,
         size: None,
     })
 }
 
 /// [`show`] for an SVG, drawn again from its text every time, at the display's scale as GTK draws
-/// one: it is recoloured as a vector, through a filter, and a drawing costs little.
+/// one: it is recoloured as a vector, through a filter, and a drawing costs little. The plain
+/// drawing is made only where it is the one shown: another at a deep zoom is 64 MB more.
 fn show_svg(
     path: &Path,
     look: Look,
@@ -156,15 +159,19 @@ fn show_svg(
     scale: i32,
     zoom: f64,
 ) -> Result<Shown, glib::Error> {
-    let (text, _) = gio::File::for_path(path).load_bytes(gio::Cancellable::NONE)?;
-    let (original, size) = rasterise(&text, scale, zoom)?;
-    let texture = look
+    let recoloured = look
         .palette(true, inverted)
         .and_then(|page| svg_filtered(path, page, look.fills(page)))
-        .and_then(|svg| rasterise(&svg, scale, zoom).ok())
-        .map_or_else(|| original.clone(), |(texture, _)| texture);
+        .and_then(|svg| rasterise(&svg, scale, zoom).ok());
+    let (texture, size) = match recoloured {
+        Some(drawn) => drawn,
+        None => {
+            let (text, _) = gio::File::for_path(path).load_bytes(gio::Cancellable::NONE)?;
+            rasterise(&text, scale, zoom)?
+        }
+    };
     Ok(Shown {
-        original,
+        original: None,
         texture,
         size: Some(size),
     })
@@ -175,6 +182,12 @@ fn show_svg(
 /// size; the display's scale alone is never cut.
 const MAX_ZOOMED: f64 = 16e6;
 
+/// `zoom`, at least 1, as far as [`MAX_ZOOMED`] lets a drawing of `size` go at `scale`.
+fn capped(zoom: f64, (width, height): (i32, i32), scale: i32) -> f64 {
+    let pixels = f64::from(width) * f64::from(height) * f64::from(scale * scale);
+    zoom.min((MAX_ZOOMED / pixels).sqrt()).max(1.0)
+}
+
 /// An SVG drawn at `scale` times its own size, through gdk-pixbuf, as GTK draws a picture's, and
 /// `zoom` times that as far as [`MAX_ZOOMED`] goes; with that own size.
 fn rasterise(svg: &[u8], scale: i32, zoom: f64) -> Result<(gdk::Texture, (i32, i32)), glib::Error> {
@@ -183,12 +196,9 @@ fn rasterise(svg: &[u8], scale: i32, zoom: f64) -> Result<(gdk::Texture, (i32, i
     let own = size.clone();
     loader.connect_size_prepared(move |loader, w, h| {
         own.set((w, h));
-        let (w, h, scale) = (f64::from(w), f64::from(h), f64::from(scale));
-        let zoom = zoom
-            .min((MAX_ZOOMED / (w * h * scale * scale)).sqrt())
-            .max(1.0);
-        let times = scale * zoom;
-        loader.set_size((w * times).round() as i32, (h * times).round() as i32);
+        let times = f64::from(scale) * capped(zoom, (w, h), scale);
+        let (w, h) = (f64::from(w) * times, f64::from(h) * times);
+        loader.set_size(w.round() as i32, h.round() as i32);
     });
     loader.write(svg)?;
     loader.close()?;

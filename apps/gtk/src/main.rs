@@ -963,6 +963,10 @@ impl App {
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
+        let starting = self
+            .active()
+            .and_then(|tab| tab.lang.starting.borrow().clone());
+        self.statusbar.set_starting(starting.as_deref());
         self.statusbar
             .set_checking(self.active().and_then(|tab| tab.lang.checking.get()));
         // The count of what is wrong with a document is also the switch that keeps it out of the

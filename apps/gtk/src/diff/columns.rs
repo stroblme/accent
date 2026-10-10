@@ -55,13 +55,11 @@ pub(super) struct Rows {
     pub(super) starts: Vec<Vec<i32>>,
     /// Per row, whether it is a change: the blank that levels it goes under a changed line.
     pub(super) changed: Vec<bool>,
-    /// The rows hidden right now.
-    pub(super) hidden: Vec<Range<usize>>,
+    /// The rows hidden right now, each run with the key its buttons open it by: one in every
+    /// column, centred in the blank space the run leaves.
+    pub(super) hidden: Vec<(Range<usize>, usize)>,
     /// The first hunk's first row, where a comparison opens.
     pub(super) first: Option<usize>,
-    /// The buttons that open the hidden runs, by column, each centred in the blank space its run
-    /// left at this row.
-    pub(super) overlays: Vec<(usize, gtk::Widget, usize)>,
 }
 
 /// What a relayout measured: every row's natural height per column (`None` where the column has
@@ -119,6 +117,10 @@ pub(super) struct Columns {
     /// The frame clock's handlers that hold a kept line, while one is kept.
     hooks: Rc<RefCell<Vec<glib::SignalHandlerId>>>,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
+    /// Where in the grid the buttons were last laid for (see [`Columns::lay_buttons`]), and
+    /// whether they are waiting to be laid again for where the view has moved since.
+    laid_for: Cell<(i32, i32)>,
+    following: Cell<bool>,
 }
 
 impl Drop for Columns {
@@ -159,6 +161,24 @@ fn split(roots: &[&gtk::Widget]) -> gtk::Paned {
     paned.set_resize_end_child(true);
     paned.set_shrink_end_child(false);
     paned
+}
+
+/// Where in the grid the buttons are laid for a view `height` tall whose top is at `y`: a page
+/// above and a page below it, so a scroll of less than half a page lays none.
+fn near(y: i32, height: i32) -> (i32, i32) {
+    (y - height, y + 2 * height)
+}
+
+/// The items of `items`, sorted down the page, that reach into `lo..hi`, `span` saying where each
+/// starts and ends.
+pub(super) fn reaching<T>(
+    items: &[T],
+    span: impl Fn(&T) -> (i32, i32),
+    lo: i32,
+    hi: i32,
+) -> Range<usize> {
+    let first = items.partition_point(|item| span(item).1 <= lo);
+    first..items.partition_point(|item| span(item).0 < hi).max(first)
 }
 
 /// The reader scrolling anywhere in `root` — a wheel turn, a page key, Ctrl+Home or Ctrl+End, a
@@ -290,6 +310,8 @@ impl Columns {
             stepped: Cell::new(false),
             hooks: Rc::default(),
             handlers: RefCell::new(Vec::new()),
+            laid_for: Cell::new((0, 0)),
+            following: Cell::new(false),
         });
 
         // Weak throughout: every handler below is connected to something the comparison owns,
@@ -327,11 +349,19 @@ impl Columns {
             }
         });
         connect(vadj.clone().upcast(), id);
-        // The strips follow the rows on screen.
+        // The strips follow the rows on screen, and the buttons the view.
         let w = weak.clone();
         let id = vadj.connect_value_changed(move |_| {
             if let Some(c) = w.upgrade() {
                 c.links.relaid();
+                c.follow_view();
+            }
+        });
+        connect(vadj.clone().upcast(), id);
+        let w = weak.clone();
+        let id = vadj.connect_page_size_notify(move |_| {
+            if let Some(c) = w.upgrade() {
+                c.follow_view();
             }
         });
         connect(vadj.clone().upcast(), id);
@@ -616,10 +646,9 @@ impl Columns {
             for tag in pads {
                 pane.buffer.remove_tag(&tag, &start, &end);
             }
-            pane.pool.unclaim();
-            pane.pool.hide_unclaimed();
+            pane.pool.claim(&pane.view, &[]);
         }
-        self.rows.borrow_mut().overlays.clear();
+        self.rows.borrow_mut().hidden.clear();
         if let Some(id) = self.pending.borrow_mut().take() {
             id.remove();
         }
@@ -683,6 +712,66 @@ impl Columns {
         self.bottoms[column].set((page + blank, blank));
     }
 
+    /// Lay the buttons — a hidden run's in every column, a band's in its strip — on the rows
+    /// [`near`] the view, and hide the rest: a long file's thousands, laid and placed all at once,
+    /// held the main loop for seconds.
+    fn lay_buttons(&self) {
+        let (rows, grid) = (self.rows.borrow(), self.grid.borrow());
+        // Nothing laid yet.
+        if grid.tops.len() != rows.changed.len() {
+            return;
+        }
+        let seen = self.panes[0].view.visible_rect();
+        let (lo, hi) = near(seen.y(), seen.height());
+        let span = |(gap, _): &(Range<usize>, usize)| {
+            let top = grid.tops[gap.start];
+            (top, top + GAP_PX)
+        };
+        let runs = &rows.hidden[reaching(&rows.hidden, span, lo, hi)];
+        let keyed: Vec<(usize, usize)> = runs.iter().map(|(gap, key)| (*key, gap.len())).collect();
+        for pane in &self.panes {
+            let width = pane.view.visible_rect().width();
+            for (widget, (gap, _)) in pane.pool.claim(&pane.view, &keyed).iter().zip(runs) {
+                // Buffer coordinates, which start at the first paragraph — the view's top margin
+                // is outside them — and scroll with the text.
+                let (_, wanted, _, _) = widget.measure(gtk::Orientation::Horizontal, -1);
+                let (_, height, _, _) = widget.measure(gtk::Orientation::Vertical, -1);
+                let (x, y) = (
+                    (width - wanted) / 2,
+                    grid.tops[gap.start] + (GAP_PX - height) / 2,
+                );
+                pane.view.move_overlay(widget, x.max(0), y);
+            }
+        }
+        drop((rows, grid));
+        self.laid_for.set((lo, hi));
+        self.links.claim(self, lo, hi);
+    }
+
+    /// Lay the buttons again once the view has come within half a page of the edge of what they
+    /// were laid for, from an idle, as the strips' are placed (see [`Links::relaid`]): the view
+    /// moves inside GTK's own layout too.
+    fn follow_view(&self) {
+        let seen = self.panes[0].view.visible_rect();
+        let ((lo, hi), half) = (self.laid_for.get(), seen.height() / 2);
+        let covered = lo <= seen.y() - half && seen.y() + seen.height() + half <= hi;
+        if covered || self.following.replace(true) {
+            return;
+        }
+        let weak = self.weak.clone();
+        glib::idle_add_local_once(move || {
+            if let Some(c) = weak.upgrade() {
+                c.following.set(false);
+                c.lay_buttons();
+            }
+        });
+    }
+
+    /// How many buttons are laid, over the columns and in the strips.
+    pub(super) fn buttons(&self) -> usize {
+        self.panes.iter().map(|p| p.pool.shown()).sum::<usize>() + self.links.shown()
+    }
+
     pub(super) fn schedule_relayout(&self) {
         if self.pending.borrow().is_some() {
             return;
@@ -721,7 +810,7 @@ impl Columns {
         }
         let count = rows.changed.len();
         let mut hidden = vec![false; count];
-        for gap in &rows.hidden {
+        for (gap, _) in &rows.hidden {
             hidden[gap.clone()].fill(true);
         }
         let is_hidden = |r: usize| hidden[r];
@@ -758,7 +847,7 @@ impl Columns {
             })
             .collect();
         let mut extra = vec![0; count];
-        for gap in &rows.hidden {
+        for (gap, _) in &rows.hidden {
             extra[gap.start] += GAP_PX;
         }
         let (pads, tops) = padding(&heights, &extra, &rows.changed);
@@ -800,16 +889,6 @@ impl Columns {
             }
         }
 
-        // Buffer coordinates, which start at the first paragraph — the view's top margin is
-        // outside them — and scroll with the text.
-        for (c, widget, row) in rows.overlays.iter() {
-            let view = &self.panes[*c].view;
-            let width = view.visible_rect().width();
-            let (_, wanted, _, _) = widget.measure(gtk::Orientation::Horizontal, -1);
-            let (_, height, _, _) = widget.measure(gtk::Orientation::Vertical, -1);
-            let (x, y) = ((width - wanted) / 2, tops[*row] + (GAP_PX - height) / 2);
-            view.move_overlay(widget, x.max(0), y);
-        }
         let end = tops.last().map_or(0, |top| {
             let last = |c: &Vec<Option<i32>>| c[count - 1].unwrap_or(0);
             top + heights.iter().map(last).max().unwrap_or(0) + extra[count - 1]
@@ -826,6 +905,7 @@ impl Columns {
             tops,
             end,
         };
+        self.lay_buttons();
         // The strips follow the rows, and a pass that moved none leaves them be, as it leaves
         // the rows.
         if moved {
@@ -884,6 +964,22 @@ impl Columns {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buttons_are_laid_on_what_reaches_a_page_either_side_of_the_view() {
+        assert_eq!(near(1000, 600), (400, 2200));
+        // Runs 28 px tall down the page.
+        let tops = [0, 100, 200, 300, 400];
+        let span = |&top: &i32| (top, top + 28);
+        assert_eq!(
+            reaching(&tops, span, 110, 310),
+            1..4,
+            "partly inside counts"
+        );
+        assert_eq!(reaching(&tops, span, 128, 300), 2..3, "touching does not");
+        assert_eq!(reaching(&tops, span, 500, 900), 5..5);
+        assert_eq!(reaching(&[] as &[i32], span, 0, 900), 0..0);
+    }
 
     #[test]
     fn page_keys_and_control_home_or_end_are_the_reader_scrolling() {

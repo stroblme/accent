@@ -638,15 +638,14 @@ pub fn apply_csv(buffer: &sourceview5::Buffer) {
 /// A cell as a pass tags it: its characters and its column.
 type Tagged = (i32, i32, usize);
 
-/// A buffer's column colouring, kept from one pass to the next so that a pass after an edit
-/// re-tags only the cells the edit can have moved: tagging all of them took 1–2.5 s a pass at
-/// 120,000 rows (2026-10-08). A file that ends without a row terminator still has its last cell
-/// tagged, and an empty buffer yields no cells at all.
+/// A buffer's column colouring, kept from one pass to the next so that a pass after an edit reads
+/// and re-tags only the records the edit can have changed: tagging every cell took 1–2.5 s a pass
+/// at 120,000 rows (2026-10-08), and reading them all 50 ms (2026-10-10). A file that ends
+/// without a row terminator still has its last cell tagged, and an empty buffer yields no cells.
 #[derive(Default)]
 pub struct Csv {
-    /// The cells the last pass left tagged and the length of the text they are in, `None` before
-    /// the first pass.
-    tagged: RefCell<Option<(Vec<Tagged>, i32)>>,
+    /// The records the last pass read, `None` before the first pass.
+    rows: RefCell<Option<Rows>>,
     /// How many characters lie before the first edit since that pass, and after the last one.
     edited: Cell<Option<(i32, i32)>>,
 }
@@ -671,57 +670,103 @@ impl Csv {
         self.edited.set(Some((b.min(before), a.min(after))));
     }
 
-    /// Tag every cell with its column's tag: all of them on the first pass, and after that the
-    /// ones [`kept`] cannot vouch for, with what lies between them cleared first.
+    /// Tag every cell with its column's tag: all of them on the first pass, and after that those
+    /// of the records from the one the first edit is in until the read is back in step with the
+    /// last pass's ([`Rows::resume`]), with what those records held cleared first.
     pub fn apply(&self, buffer: &sourceview5::Buffer) {
-        let edited = self.edited.take();
-        let mut tagged = self.tagged.borrow_mut();
-        if tagged.is_some() && edited.is_none() {
-            return;
-        }
-        let (start, end) = buffer.bounds();
-        let text = buffer.text(&start, &end, true);
-        let offsets = Offsets::new(&text);
-        let cells: Vec<Tagged> = csv::columns(&text)
-            .into_iter()
-            .map(|cell| {
-                let at = |byte| offsets.char_of(byte);
-                (at(cell.range.start), at(cell.range.end), cell.column)
-            })
-            .collect();
-        let total = end.offset();
-        let (head, tail) = match (tagged.take(), edited) {
-            (Some((old, was)), Some((before, after))) => {
-                kept(&old, &cells, total - was, before, total - after)
-            }
-            _ => (0, 0),
+        let mut rows = self.rows.borrow_mut();
+        let (before, after) = match (rows.is_some(), self.edited.take()) {
+            (true, None) => return,
+            (true, Some(edited)) => edited,
+            // The first pass reads it all, as an edit over all of it would.
+            (false, _) => (0, 0),
         };
-        let from = head.checked_sub(1).map_or(0, |i| cells[i].1);
-        let to = cells.get(cells.len() - tail).map_or(total, |cell| cell.0);
+        let old = rows.take().unwrap_or_default();
+        let total = buffer.char_count();
+        let (from, end) = (old.start_before(before), total - after);
         let iter = |offset| buffer.iter_at_offset(offset);
+        // To the line after the last edit, where an edit inside a record is back in step; four
+        // times as many lines each time the read is not, a quote opened or closed running on.
+        let mut lines = 1;
+        let (cells, to, delim) = loop {
+            let mut until = iter(end);
+            until.forward_lines(lines);
+            let read = old.resume(&buffer.text(&iter(from), &until, true), from, end, total);
+            if read.1.is_some() || until.is_end() {
+                break read;
+            }
+            lines *= 4;
+        };
+        let to = to.unwrap_or(total);
         for name in CSV_TAG_NAMES {
             buffer.remove_tag_by_name(name, &iter(from), &iter(to));
         }
-        for &(s, e, column) in &cells[head..cells.len() - tail] {
+        for &(s, e, column) in &cells {
             buffer.apply_tag_by_name(CSV_TAG_NAMES[column % CSV_COLUMNS], &iter(s), &iter(e));
         }
-        *tagged = Some((cells, total));
+        *rows = Some(old.spliced(&cells, from, to, total, delim));
     }
 }
 
-/// How many of `cells` at the start and at the end still carry the tags a pass gave them as
-/// `old`, in a text `shift` characters shorter: those wholly before `before`, where the edits
-/// since began, or wholly after `after`, where they ended, that parse as they did. Tags move with
-/// the text around them, but text typed at the end of a cell takes its tag, so a cell touching an
-/// edit is not one of them.
-fn kept(old: &[Tagged], cells: &[Tagged], shift: i32, before: i32, after: i32) -> (usize, usize) {
-    let head = (old.iter().zip(cells))
-        .take_while(|(was, cell)| was == cell && cell.1 < before)
-        .count();
-    let tail = (old[head..].iter().rev().zip(cells[head..].iter().rev()))
-        .take_while(|(was, cell)| (was.0 + shift, was.1 + shift, was.2) == **cell && cell.0 > after)
-        .count();
-    (head, tail)
+/// Where each record of a text starts, in characters, the delimiter it was read with and the
+/// text's length. The read is outside quotes at every record start, so it can begin at any.
+#[derive(Default)]
+struct Rows {
+    starts: Vec<i32>,
+    delim: u8,
+    len: i32,
+}
+
+impl Rows {
+    /// The last record start at or before `offset`: an edit there leaves the text before it, and
+    /// so the read up to it, as they were.
+    fn start_before(&self, offset: i32) -> i32 {
+        let i = self.starts.partition_point(|&s| s <= offset);
+        i.checked_sub(1).map_or(0, |i| self.starts[i])
+    }
+
+    /// The cells of `text`, which begins at the record start `from` of the text these rows are
+    /// of once edited to `len` characters, up to the first record start at or past `end`, where
+    /// the edits end, that these rows have too: the text after it is theirs, so the read after
+    /// it would be. With that start, `None` where there is none, and the delimiter, sniffed
+    /// again where `text` is the file's start.
+    fn resume(&self, text: &str, from: i32, end: i32, len: i32) -> (Vec<Tagged>, Option<i32>, u8) {
+        let offsets = Offsets::new(text);
+        let at = |byte| from + offsets.char_of(byte);
+        let delim = match from {
+            0 => csv::delimiter(text),
+            _ => self.delim,
+        };
+        let shift = len - self.len;
+        let (cells, stop) = csv::columns_until(text, delim, |byte| {
+            let start = at(byte);
+            delim == self.delim
+                && start >= end
+                && self.starts.binary_search(&(start - shift)).is_ok()
+        });
+        let cells = (cells.into_iter())
+            .map(|cell| (at(cell.range.start), at(cell.range.end), cell.column))
+            .collect();
+        (cells, stop.map(at), delim)
+    }
+
+    /// These rows with the records from `from` to `to` read again as `cells`, in a text now `len`
+    /// characters long and read with `delim`.
+    fn spliced(mut self, cells: &[Tagged], from: i32, to: i32, len: i32, delim: u8) -> Rows {
+        let shift = len - self.len;
+        let first = self.starts.partition_point(|&s| s < from);
+        let last = self.starts.partition_point(|&s| s < to - shift);
+        for start in &mut self.starts[last..] {
+            *start += shift;
+        }
+        let read = cells.iter().filter(|cell| cell.2 == 0).map(|cell| cell.0);
+        self.starts.splice(first..last, read);
+        Rows {
+            starts: self.starts,
+            delim,
+            len,
+        }
+    }
 }
 
 /// Give the column tags their colours, derived from the current accent. Call it where [`restyle`]
@@ -764,25 +809,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_csv_pass_re_tags_only_the_cells_an_edit_reached() {
-        let cells = |text: &str| -> Vec<Tagged> {
-            (csv::columns(text).into_iter())
-                .map(|c| (c.range.start as i32, c.range.end as i32, c.column))
-                .collect()
-        };
-        let old = cells("a,b\nc,d\ne,f\n");
-        // A "d" typed after "d": that cell and nothing else.
-        let new = cells("a,b\nc,dd\ne,f\n");
-        assert_eq!(kept(&old, &new, 1, 7, 8), (3, 2));
-        // "x," typed before "d": the rest of its row moves a column on, the next row does not.
-        let new = cells("a,b\nc,x,d\ne,f\n");
-        assert_eq!(kept(&old, &new, 2, 6, 8), (3, 2));
-        // An opening quote runs on to the end: nothing after it parses as before.
-        let new = cells("a,b\n\"c,d\ne,f\n");
-        assert_eq!(kept(&old, &new, 1, 4, 5), (2, 0));
-        // Text typed at the end of "b" takes its tag, so "b" goes again though it parses the same.
-        let new = cells("a,b\n\nc,d\ne,f\n");
-        assert_eq!(kept(&old, &new, 1, 3, 4).0, 1);
+    fn a_csv_pass_reads_from_the_edited_record_until_it_is_in_step_again() {
+        let old = "a,b\nc,d\ne,f\n";
+        let (cells, _, delim) = Rows::default().resume(old, 0, 0, 12);
+        let rows = Rows::default().spliced(&cells, 0, 12, 12, delim);
+        // A quote opened before "c" runs on past the edit: every record after it is read again.
+        let new = "a,b\n\"c,d\ne,f\n";
+        assert_eq!(rows.start_before(4), 4);
+        assert_eq!(
+            rows.resume(&new[4..], 4, 5, 13),
+            (vec![(4, 13, 0)], None, b',')
+        );
+        // A "d" typed after "d": its record alone, the next one starting where it did.
+        let new = "a,b\nc,dd\ne,f\n";
+        assert_eq!(rows.start_before(7), 4);
+        let read = rows.resume(&new[4..], 4, 8, 13);
+        assert_eq!(read, (vec![(4, 5, 0), (6, 8, 1)], Some(9), b','));
+        assert_eq!(rows.spliced(&read.0, 4, 9, 13, b',').starts, [0, 4, 9]);
     }
 
     #[test]

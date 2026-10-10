@@ -761,6 +761,7 @@ fn gap_hides(tab: &Tab, n: i32) -> bool {
 /// the last for anything past it), its row halfway down the view, and say which lines it opened.
 async fn open_run(tab: &Tab, compare: &diff::Compare, pick: Option<usize>) -> Option<(i32, i32)> {
     let view = tab.view.upcast_ref::<gtk::TextView>();
+    disk::scroll_to(compare, if pick.is_some() { 1.0 } else { 0.5 }).await;
     let buttons = disk::overlaid(view, "⋯");
     let at = pick
         .unwrap_or(buttons.len() / 2)

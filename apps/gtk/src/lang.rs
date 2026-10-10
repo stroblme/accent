@@ -16,7 +16,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +30,11 @@ const REFRESH: Duration = Duration::from_millis(300);
 /// fraction of a millisecond.
 const GHOST: Duration = Duration::from_millis(100);
 
+/// How long a document waits on its language server before the status bar says the server is
+/// starting: a cold `lake serve` can take a minute, where rust-analyzer's or clangd's handshake is
+/// over in a fraction of a second and would only flash the line.
+const SLOW_START: Duration = Duration::from_secs(1);
+
 /// A callback the window registered, in the shape `editor.rs` uses for its own.
 pub type Hook = Rc<dyn Fn(&Rc<Tab>)>;
 
@@ -40,6 +45,9 @@ pub struct Hooks {
     /// What the provider can do is known, or known again: the Code pane shows for one that
     /// answers goals.
     pub on_support: Hook,
+    /// The document has waited [`SLOW_START`] on its server, or no longer waits: see
+    /// [`State::starting`].
+    pub on_starting: Hook,
 }
 
 /// Everything one tab knows about its document on the language layer.
@@ -88,6 +96,9 @@ pub struct State {
     /// The line the server says it is still checking from (`Event::Checking`), `None` once it
     /// is done and for every server that does not say.
     pub checking: Cell<Option<u32>>,
+    /// The language server the document waits on to open, by name, once that has taken
+    /// [`SLOW_START`]; `None` before and once it answers or fails.
+    pub starting: RefCell<Option<String>>,
 }
 
 impl State {
@@ -197,7 +208,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
     let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
     let weak = Rc::downgrade(tab);
     glib::spawn_future_local(async move {
-        let support = vault.open_document(&rel, &id, text).await;
+        let support = open(&weak, &vault, &rel, &id, text).await;
         let Some(tab) = weak.upgrade() else { return };
         match support {
             Ok(support) => {
@@ -349,12 +360,52 @@ pub fn retarget(tab: &Rc<Tab>, old_rel: &str) {
     let weak = Rc::downgrade(tab);
     glib::spawn_future_local(async move {
         let _ = vault.close_document(&old).await;
-        let support = vault.open_document(&rel, &id, text).await;
+        let support = open(&weak, &vault, &rel, &id, text).await;
         let Some(tab) = weak.upgrade() else { return };
         if let Ok(support) = support {
             supported(&tab, support);
         }
     });
+}
+
+/// Open the document on `vault`, the tab saying which server it waits on once that has taken
+/// [`SLOW_START`] (DESIGN.md, Status bar) and no longer once it answers or fails.
+async fn open(
+    tab: &Weak<Tab>,
+    vault: &Vault,
+    rel: &str,
+    id: &str,
+    text: String,
+) -> accent_api::Result<Support> {
+    let saying = vault.server_name(id).map(|server| {
+        let tab = tab.clone();
+        glib::spawn_future_local(async move {
+            glib::timeout_future(SLOW_START).await;
+            if let Some(tab) = tab.upgrade() {
+                set_starting(&tab, Some(server));
+            }
+        })
+    });
+    let opened = vault.open_document(rel, id, text).await;
+    if let Some(saying) = saying {
+        saying.abort();
+    }
+    if let Some(tab) = tab.upgrade() {
+        set_starting(&tab, None);
+    }
+    opened
+}
+
+/// Say that the document waits on `server`, or does not, and tell the window if that changed.
+fn set_starting(tab: &Rc<Tab>, server: Option<String>) {
+    if *tab.lang.starting.borrow() == server {
+        return;
+    }
+    tab.lang.starting.replace(server);
+    let hooks = tab.lang.hooks.borrow().clone();
+    if let Some(hooks) = hooks {
+        (hooks.on_starting)(tab);
+    }
 }
 
 /// Keep what the provider said it can do, tell the window, and read what it answers.

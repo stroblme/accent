@@ -152,6 +152,10 @@ pub(super) struct Info {
     /// over it anyway: it stays until another tab comes to the front.
     shown_for: RefCell<String>,
     tags_forced: Cell<bool>,
+    /// Whether Details was open before a shell came to the front, which unfolds it there, being
+    /// the only section shown: the fold the session keeps, and the one a file gets back. `None`
+    /// while no shell is in front.
+    details_kept: Cell<Option<bool>>,
 }
 
 impl Info {
@@ -187,6 +191,7 @@ impl Info {
             vault: vault.is_some(),
             shown_for: RefCell::default(),
             tags_forced: Cell::new(false),
+            details_kept: Cell::new(None),
         });
         // A paned has its height once the pane is on screen, which is where the dividers placed
         // before then go.
@@ -243,7 +248,8 @@ impl Info {
     /// Show what applies to the tab `key` (empty for none): the sections for a file, the Tags
     /// section over a note, Details alone over a shell, and a status page for neither.
     pub(super) fn sync(&self, key: &str, file: bool, shell: bool, note: bool) {
-        if *self.shown_for.borrow() != key {
+        let fronted = *self.shown_for.borrow() != key;
+        if fronted {
             self.shown_for.replace(key.to_string());
             self.tags_forced.set(false);
         }
@@ -256,6 +262,20 @@ impl Info {
                 true => "sections",
                 false => "nothing",
             });
+        // Details is all a shell shows, so a shell coming to the front opens it, and whatever
+        // comes next gets back the fold it had. Kept first: the unfold saves the session.
+        match (shell, self.details_kept.get()) {
+            (true, kept) if fronted => {
+                let open = self.details.root.is_expanded();
+                self.details_kept.set(kept.or(Some(open)));
+                self.details.root.set_expanded(true);
+            }
+            (false, Some(kept)) => {
+                self.details_kept.set(None);
+                self.details.root.set_expanded(kept);
+            }
+            _ => {}
+        }
         self.fit();
     }
 
@@ -289,7 +309,10 @@ impl Info {
         InfoPane {
             references: self.references.root.is_expanded(),
             tags: self.tags.root.is_expanded(),
-            details: self.details.root.is_expanded(),
+            details: self
+                .details_kept
+                .get()
+                .unwrap_or_else(|| self.details.root.is_expanded()),
             dividers: self.dividers.each_ref().map(|divider| divider.share.get()),
         }
     }
@@ -333,7 +356,11 @@ impl Info {
         }
         self.references.root.set_expanded(saved.references);
         self.tags.root.set_expanded(saved.tags);
-        self.details.root.set_expanded(saved.details);
+        // A shell restored in front keeps Details open; the stored fold waits for a file.
+        match self.details_kept.get() {
+            Some(_) => self.details_kept.set(Some(saved.details)),
+            None => self.details.root.set_expanded(saved.details),
+        }
         self.fit();
     }
 }

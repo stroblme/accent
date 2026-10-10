@@ -11,8 +11,23 @@ struct Slot {
     button: gtk::Button,
     /// The key of the hidden run the button opens.
     key: Rc<Cell<usize>>,
-    /// Whether the refresh under way has handed this slot out.
-    claimed: Cell<bool>,
+}
+
+/// Which slot each of `wanted` goes to, `had` naming what each slot shows now (`None`, hidden):
+/// the one showing it already, or else a spare one, shown ones before hidden ones, and new ones
+/// past the end once those run out. So a button stays with what it shows while that is wanted,
+/// and is shown or hidden only as the number wanted changes: a keystroke lays every button again,
+/// and a scroll lays those near the view.
+pub(super) fn hand_out<K: PartialEq>(had: &[Option<K>], wanted: &[K]) -> Vec<usize> {
+    let kept: Vec<Option<usize>> = (wanted.iter())
+        .map(|key| had.iter().position(|h| h.as_ref() == Some(key)))
+        .collect();
+    let spare = (0..had.len()).filter(|&i| had[i].is_some() && !kept.contains(&Some(i)));
+    let hidden = (0..had.len()).filter(|&i| had[i].is_none());
+    let mut spare = spare.chain(hidden).chain(had.len()..);
+    kept.iter()
+        .filter_map(|k| k.or_else(|| spare.next()))
+        .collect()
 }
 
 /// The "⋯ N unchanged lines" buttons laid over one view, kept for reuse.
@@ -22,10 +37,6 @@ struct Slot {
 /// a button that is not needed is hidden, and the next refresh picks it up again. The pool is
 /// owned by the pane and not by the comparison, because the editor's view outlives every
 /// comparison it hosts and the buttons parented to it have to as well.
-///
-/// A refresh hands the buttons out again in order, [`Pool::unclaim`] to [`Pool::hide_unclaimed`],
-/// so the button a run had is the one it gets back, and one still wanted is never hidden in
-/// between: a keystroke re-diffs, and must not take every button off and put it back.
 #[derive(Default)]
 pub struct Pool {
     /// What the comparison laid over the view right now does with a press, asked at the press:
@@ -35,44 +46,43 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// A shown button for the hidden run keyed `key`, `rows` long: the first one this refresh has
-    /// not handed out yet, or a new one laid over `view`.
+    /// A shown button for each of `runs`, `(key, rows)` the hidden run keyed `key`, `rows` long,
+    /// in order, laid over `view` where the pool has too few, and every other button hidden: see
+    /// [`hand_out`].
     pub(super) fn claim(
         self: &Rc<Self>,
         view: &sourceview5::View,
-        key: usize,
-        rows: usize,
-    ) -> gtk::Widget {
+        runs: &[(usize, usize)],
+    ) -> Vec<gtk::Widget> {
         let mut slots = self.slots.borrow_mut();
-        let at = match slots.iter().position(|slot| !slot.claimed.get()) {
-            Some(at) => at,
-            None => {
-                slots.push(self.build(view));
-                slots.len() - 1
-            }
-        };
-        let slot = &slots[at];
-        slot.button.set_label(&format!("⋯ {rows} unchanged lines"));
-        slot.key.set(key);
-        slot.claimed.set(true);
-        slot.button.set_visible(true);
-        slot.button.clone().upcast()
-    }
-
-    /// Every button up for claiming again. None is hidden yet.
-    pub(super) fn unclaim(&self) {
-        for slot in self.slots.borrow().iter() {
-            slot.claimed.set(false);
+        let had: Vec<Option<usize>> = (slots.iter())
+            .map(|slot| slot.button.is_visible().then(|| slot.key.get()))
+            .collect();
+        let keys: Vec<usize> = runs.iter().map(|&(key, _)| key).collect();
+        let given = hand_out(&had, &keys);
+        while slots.len() < given.iter().map(|&at| at + 1).max().unwrap_or(0) {
+            slots.push(self.build(view));
         }
-    }
-
-    /// Hide every button nothing has claimed since [`Pool::unclaim`].
-    pub(super) fn hide_unclaimed(&self) {
-        for slot in self.slots.borrow().iter() {
-            if !slot.claimed.get() {
+        for (at, slot) in slots.iter().enumerate() {
+            if !given.contains(&at) {
                 slot.button.set_visible(false);
             }
         }
+        (given.iter().zip(runs))
+            .map(|(&at, &(key, rows))| {
+                let slot = &slots[at];
+                slot.button.set_label(&format!("⋯ {rows} unchanged lines"));
+                slot.key.set(key);
+                slot.button.set_visible(true);
+                slot.button.clone().upcast()
+            })
+            .collect()
+    }
+
+    /// How many buttons are shown.
+    pub(super) fn shown(&self) -> usize {
+        let slots = self.slots.borrow();
+        slots.iter().filter(|slot| slot.button.is_visible()).count()
     }
 
     /// A new button laid over `view`. Its press runs the comparison's [`Pool::act`] as it is at
@@ -92,10 +102,24 @@ impl Pool {
             }
         });
         view.add_overlay(&button, 0, 0);
-        Slot {
-            button,
-            key,
-            claimed: Cell::new(false),
-        }
+        Slot { button, key }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_button_stays_with_what_it_shows() {
+        let had = [Some(10), Some(20), None, Some(30)];
+        assert_eq!(hand_out(&had, &[20, 30]), [1, 3], "kept, the rest hidden");
+        assert_eq!(
+            hand_out(&had, &[20, 30, 40]),
+            [1, 3, 0],
+            "a newcomer takes the one let go of, which stays shown"
+        );
+        assert_eq!(hand_out(&had, &[10, 20, 30, 40, 50]), [0, 1, 3, 2, 4]);
+        assert!(hand_out::<usize>(&[], &[]).is_empty());
     }
 }

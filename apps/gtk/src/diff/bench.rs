@@ -276,7 +276,7 @@ impl Columns {
         let rows = self.rows.borrow();
         // Where GTK draws row `r`, in the drawing's pixels: in the first column with a line there.
         let drawn = |r: usize| -> Option<i32> {
-            if rows.hidden.iter().any(|gap| gap.contains(&r)) {
+            if rows.hidden.iter().any(|(gap, _)| gap.contains(&r)) {
                 return None;
             }
             (0..self.panes.len()).find_map(|c| {

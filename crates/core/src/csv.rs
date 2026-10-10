@@ -47,10 +47,20 @@ pub fn delimiter(text: &str) -> u8 {
 /// delimiter or newline inside quotes ends neither the cell nor the row. An empty field still
 /// yields a cell with an empty range, so column positions stay aligned across rows.
 pub fn columns(text: &str) -> Vec<Cell> {
-    let delim = delimiter(text);
+    columns_until(text, delimiter(text), |_| false).0
+}
+
+/// [`columns`] of `text` read from a record start with `delim`, as far as the first later record
+/// start `stop` takes (by its byte offset): the cells before it, and where it is. `None` where it
+/// took none, with every cell to the end. A record start is never inside quotes, so a read begun
+/// at one is what a read of the whole text does from there.
+pub fn columns_until(
+    text: &str,
+    delim: u8,
+    mut stop: impl FnMut(usize) -> bool,
+) -> (Vec<Cell>, Option<usize>) {
     let bytes = text.as_bytes();
     let mut cells = Vec::new();
-    let mut push = |range: Range<usize>, column: usize| cells.push(Cell { range, column });
     let (mut start, mut column, mut quoted, mut i) = (0, 0, false, 0);
     // Every byte we branch on is ASCII, and a UTF-8 continuation byte is never ASCII, so the
     // ranges this produces always land on character boundaries.
@@ -67,7 +77,10 @@ pub fn columns(text: &str) -> Vec<Cell> {
         } else if b == b'"' {
             quoted = true;
         } else if b == delim {
-            push(start..i, column);
+            cells.push(Cell {
+                range: start..i,
+                column,
+            });
             start = i + 1;
             column += 1;
         } else if b == b'\n' {
@@ -77,18 +90,27 @@ pub fn columns(text: &str) -> Vec<Cell> {
             } else {
                 i
             };
-            push(start..end, column);
+            cells.push(Cell {
+                range: start..end,
+                column,
+            });
             start = i + 1;
             column = 0;
+            if stop(start) {
+                return (cells, Some(start));
+            }
         }
         i += 1;
     }
     // The last row only has a trailing cell if the text did not end on a row terminator; after a
     // delimiter it does, even when the field behind it is empty.
     if start < bytes.len() || column > 0 {
-        push(start..bytes.len(), column);
+        cells.push(Cell {
+            range: start..bytes.len(),
+            column,
+        });
     }
-    cells
+    (cells, None)
 }
 
 #[cfg(test)]

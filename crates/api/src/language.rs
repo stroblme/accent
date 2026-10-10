@@ -1096,6 +1096,33 @@ pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
     }
 }
 
+/// The program that answers for `language` as a status line names it ("lake"): the configured
+/// command line's, or the table's. Read from the config alone, not the PATH, which is the host's
+/// on a remote vault: `None` for a note, which the index answers, a language with no server, and
+/// one whose built-in choices are different programs (Python's pyright or pylsp).
+fn server_name(cfg: &LspConfig, language: &str) -> Option<String> {
+    let name = |program: &str| {
+        Path::new(program)
+            .file_name()
+            .map_or_else(|| program.to_string(), |n| n.to_string_lossy().into_owned())
+    };
+    let mut names: Vec<String> = match cfg.servers.get(language).filter(|argv| !argv.is_empty()) {
+        Some(argv) => vec![name(&argv[0])],
+        None => SERVERS
+            .iter()
+            .find(|(id, ..)| *id == language)?
+            .2
+            .iter()
+            .map(|argv| name(argv[0]))
+            .collect(),
+    };
+    names.dedup();
+    match names.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
 /// The GtkSourceView language id the app gives a code file, which a server is chosen by: the
 /// languages the index reads declarations in.
 fn language_of(rel: &str) -> Option<&'static str> {
@@ -1185,6 +1212,12 @@ impl Vault {
                 |_, answer| Ok(answer),
             ),
         }
+    }
+
+    /// The language server a document in `language` waits on while it opens, by the name of
+    /// its program ("lake"), where the config says which one that is.
+    pub fn server_name(&self, language: &str) -> Option<String> {
+        server_name(&self.config().lsp, language)
     }
 
     /// The user closed the tab. Spelled out because it forgets the document rather than telling
@@ -1544,6 +1577,17 @@ mod tests {
             Some(Server::Notes)
         ));
         assert!(server(&LspConfig::default(), "brainfuck").is_none());
+    }
+
+    /// What a status line calls the server a document waits on.
+    #[test]
+    fn a_server_is_named_by_its_program() {
+        let none = LspConfig::default();
+        assert_eq!(server_name(&none, "lean").as_deref(), Some("lake"));
+        assert_eq!(server_name(&none, "python3"), None, "pyright or pylsp");
+        assert_eq!(server_name(&none, "markdown"), None);
+        let mine = configured("python3", &["/opt/bin/pylsp", "-v"]);
+        assert_eq!(server_name(&mine, "python3").as_deref(), Some("pylsp"));
     }
 
     #[test]

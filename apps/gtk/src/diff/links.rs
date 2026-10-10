@@ -6,7 +6,8 @@
 //! in at. A band's buttons — a hunk's, a conflict block's — sit at its top, one to a half of the
 //! strip.
 //!
-//! Drawn from the grid the last relayout laid ([`Columns`]), again on every relayout and scroll.
+//! Drawn from the grid the last relayout laid ([`Columns`]), again on every relayout and scroll,
+//! the buttons laid only on the bands near the view ([`Links::claim`]).
 
 use adw::prelude::*;
 use gtk::{gdk, graphene};
@@ -15,7 +16,8 @@ use std::ops::Range;
 use std::rc::{Rc, Weak};
 
 use super::Pane;
-use super::columns::Columns;
+use super::columns::{Columns, reaching};
+use super::pool::hand_out;
 
 /// The room each of `n` columns gives up for the strips: an outer column all of it to its one
 /// strip, a middle one half to either of its two, so their text stays equally wide. Either way a
@@ -79,7 +81,8 @@ pub(super) struct Links {
     tints: RefCell<Vec<[(gdk::RGBA, gdk::RGBA); 2]>>,
     /// Per strip, the button each half carries on every band with a key, if any.
     dress: RefCell<Vec<[Option<Dress>; 2]>>,
-    /// The buttons, handed out to the bands in order on every lay, the ones left over hidden.
+    /// The buttons, handed out to the bands near the view on every lay and as the view moves on,
+    /// the ones left over hidden.
     slots: RefCell<Vec<Slot>>,
     /// What the host does with a press, asked at the press.
     act: Rc<RefCell<Option<Act>>>,
@@ -162,37 +165,72 @@ impl Links {
         *self.act.borrow_mut() = Some(act);
     }
 
-    /// Each strip's bands, left to right, and the buttons on those with a key.
+    /// Each strip's bands, left to right, each with the key a press on its buttons is handed, if
+    /// it has buttons: laid by [`Links::claim`].
     pub(super) fn set_runs(&self, runs: Vec<Vec<Band>>) {
-        {
-            let dress = self.dress.borrow();
-            let mut slots = self.slots.borrow_mut();
-            let mut n = 0;
-            for (i, strip) in runs.iter().enumerate() {
-                for (k, (_, key)) in strip.iter().enumerate() {
-                    for (h, look) in dress[i].iter().enumerate() {
-                        let (Some(key), Some(look)) = (*key, *look) else {
-                            continue;
-                        };
-                        if n == slots.len() {
-                            slots.push(self.slot());
-                        }
-                        let slot = &slots[n];
-                        slot.at.set((i, k, h, key));
-                        if slot.dress.replace(Some(look)) != Some(look) {
-                            dress_button(&slot.button, look);
-                        }
-                        slot.button.set_visible(true);
-                        n += 1;
+        *self.runs.borrow_mut() = runs;
+        self.relaid();
+    }
+
+    /// Hand the buttons out to the bands with a key that reach into `lo..hi` of the grid
+    /// `columns` laid last, in its pixels, and hide the rest (see [`hand_out`]): a long file's
+    /// thousands of hunks held the main loop for seconds with a button each laid and placed.
+    pub(super) fn claim(&self, columns: &Columns, lo: i32, hi: i32) {
+        let (runs, dress, grid) = (
+            self.runs.borrow(),
+            self.dress.borrow(),
+            columns.grid.borrow(),
+        );
+        let y = |row: usize| grid.tops.get(row).copied().unwrap_or(grid.end);
+        let span = |(run, _): &Band| {
+            let (top, bottom) = (run[0].start.min(run[1].start), run[0].end.max(run[1].end));
+            (y(top), y(bottom))
+        };
+        // Each button wanted, `(strip, key, half)`, with its band and what it shows.
+        let mut wanted = Vec::new();
+        for (i, strip) in runs.iter().enumerate() {
+            for k in reaching(strip, span, lo, hi) {
+                let Some(key) = strip[k].1 else {
+                    continue;
+                };
+                for (h, look) in dress[i].iter().enumerate() {
+                    if let Some(look) = *look {
+                        wanted.push(((i, key, h), k, look));
                     }
                 }
             }
-            for slot in &slots[n..] {
+        }
+        let mut slots = self.slots.borrow_mut();
+        let had: Vec<Option<(usize, usize, usize)>> = (slots.iter())
+            .map(|slot| {
+                let (i, _, h, key) = slot.at.get();
+                slot.button.is_visible().then_some((i, key, h))
+            })
+            .collect();
+        let ids: Vec<(usize, usize, usize)> = wanted.iter().map(|(id, ..)| *id).collect();
+        let given = hand_out(&had, &ids);
+        while slots.len() < given.iter().map(|&n| n + 1).max().unwrap_or(0) {
+            slots.push(self.slot());
+        }
+        let mut moved = false;
+        for (n, slot) in slots.iter().enumerate() {
+            if !given.contains(&n) && slot.button.is_visible() {
                 slot.button.set_visible(false);
+                moved = true;
             }
         }
-        *self.runs.borrow_mut() = runs;
-        self.relaid();
+        for (&n, &((i, key, h), k, look)) in given.iter().zip(&wanted) {
+            let slot = &slots[n];
+            moved |= slot.at.replace((i, k, h, key)) != (i, k, h, key) || !slot.button.is_visible();
+            if slot.dress.replace(Some(look)) != Some(look) {
+                dress_button(&slot.button, look);
+            }
+            slot.button.set_visible(true);
+        }
+        drop((slots, runs, dress, grid));
+        if moved {
+            self.relaid();
+        }
     }
 
     /// A new strip button, over the strips.
@@ -223,7 +261,7 @@ impl Links {
     /// [`button_y`] has it, and off the overlay, which clips it away, while its band is not laid.
     /// `None` leaves the drawing over all of the overlay.
     fn place(&self, columns: &Columns, widget: &gtk::Widget) -> Option<gdk::Rectangle> {
-        // ponytail: a search per button per allocation, fine at the hunks a note has.
+        // ponytail: a search per button per allocation, over the few near the view.
         let slots = self.slots.borrow();
         let slot = slots
             .iter()

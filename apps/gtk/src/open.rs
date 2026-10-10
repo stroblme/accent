@@ -380,16 +380,17 @@ impl App {
                 (path, None)
             }
             None => match image.image.borrow().clone() {
-                Some((path, texture)) => (path, Some(texture)),
+                Some(read) => read,
                 // Still being read, under a look its landing will find is not this one.
                 None => return,
             },
         };
+        let scale = picture_of(&image.page).map_or(1, |p| p.scale_factor());
         let wanted = (
             look::Look::now(),
             self.inverted_images.borrow().contains(&image.key()),
-            picture_of(&image.page).map_or(1, |p| p.scale_factor()),
-            look::drawn_zoom(&path, image.zoom.get()),
+            scale,
+            look::drawn_zoom(&path, image.zoom.get(), image.size.get(), scale),
         );
         if !reading && image.look.get() == Some(wanted) {
             return;
@@ -419,7 +420,7 @@ impl App {
                     // old percentage. Asked again of this one, so the zoom means the same thing
                     // either side of a reload.
                     zoom::set_image_zoom(&picture, image.zoom.get());
-                    let own = (shown.original.width(), shown.original.height());
+                    let own = (shown.texture.width(), shown.texture.height());
                     image.size.set(Some(shown.size.unwrap_or(own)));
                     app.sync_details();
                     *image.image.borrow_mut() = Some((path, shown.original));
@@ -1021,6 +1022,16 @@ impl App {
                     move |tab: &Rc<Tab>| {
                         if app.is_active(tab) {
                             app.sync_code_pane();
+                        }
+                    }
+                )),
+                on_starting: Rc::new(glib::clone!(
+                    #[weak(rename_to = app)]
+                    self,
+                    move |tab: &Rc<Tab>| {
+                        if app.is_active(tab) {
+                            app.statusbar
+                                .set_starting(tab.lang.starting.borrow().as_deref());
                         }
                     }
                 )),
