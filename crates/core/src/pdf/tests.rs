@@ -997,6 +997,75 @@ fn a_foreign_stroke_is_cut_along_its_ink_list() {
     }
 }
 
+/// When the history ends, a stroke of another editor's an erase hid goes for good, with its
+/// popup, and the saved file holds neither; one whose erase was taken back stays, and so does
+/// ours.
+#[test]
+fn a_purge_deletes_what_an_erase_hid_and_nothing_else() {
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(true)) else {
+        return;
+    };
+    let style = InkStyle {
+        width: 2.0,
+        rgba: [0, 0, 255, 255],
+        multiply: false,
+    };
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], style)
+        .unwrap();
+    let mut ink = Ink::default();
+    let erase = |ink: &mut Ink, doc: &mut PdfDoc| {
+        let (id, _) = (ink.named(doc, 0).into_iter())
+            .find(|(_, shape)| shape.index == 0)
+            .unwrap();
+        let at = ink.index_of(0, id).unwrap();
+        let (was, _) = doc.take_ink(0, at).unwrap();
+        ink.erased(0, at, was, Vec::new(), false);
+    };
+    erase(&mut ink, &mut doc);
+    ink.walk(&mut doc, false);
+    ink.purge(&mut doc).unwrap();
+    assert_eq!(doc.annotation_count(0).unwrap(), 3, "shown again, so kept");
+    assert!(!ink.dirty);
+
+    erase(&mut ink, &mut doc);
+    ink.purge(&mut doc).unwrap();
+    assert!(ink.dirty);
+    assert_eq!(ink.history(), (false, false));
+    assert_eq!(
+        doc.annotation_count(0).unwrap(),
+        1,
+        "the stroke and its popup"
+    );
+    assert_eq!(doc.inks(0).unwrap()[0].style, style);
+    let saved = String::from_utf8_lossy(&doc.save().unwrap()).into_owned();
+    assert!(!saved.contains("two lines") && !saved.contains("/Popup"));
+}
+
+/// pdfium makes the popup of an annotation with a note anew, as objects nothing refers to,
+/// every time it renders the page; a save leaves them out, and the file draws as it did. (The
+/// first render gives the fixture's highlight, which has none, an appearance stream of its own,
+/// which is in the file from then on.)
+#[test]
+fn renders_leave_nothing_in_a_save() {
+    let Some((dir, doc)) = open_tiny_with(true) else {
+        return;
+    };
+    let drawn = doc.render_page(0, 2.0, Theme::Plain).unwrap();
+    let once = doc.save().unwrap().len();
+    for _ in 0..10 {
+        doc.render_tile(0, 2.0, 0, 0, 100, 100, Theme::Plain)
+            .unwrap();
+    }
+    assert_eq!(doc.save().unwrap().len(), once);
+    let reopened = reopen(&dir, &doc);
+    let again = reopened.render_page(0, 2.0, Theme::Plain).unwrap();
+    assert!(again.data == drawn.data, "drawn as it was");
+    assert_eq!(
+        reopened.highlights_on(0).unwrap(),
+        doc.highlights_on(0).unwrap()
+    );
+}
+
 /// Another editor's stroke whose paths differ in colour is not cut: its pieces could not all be
 /// drawn as it was. A cut leaves it alone.
 #[test]

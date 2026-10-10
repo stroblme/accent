@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::refused;
 use crate::{Error, Result};
@@ -22,6 +23,9 @@ pub struct PdfDoc {
     /// A second handle on the file pdfium reads the document from, and what that file looked
     /// like when it was opened; `None` for a document read from bytes. See [`PdfDoc::intact`].
     file: Option<(File, Etag)>,
+    /// Whether a page has been rendered with an annotation carrying a note on it, which leaves
+    /// objects behind that [`PdfDoc::save`] has to keep out of the file.
+    popups: AtomicBool,
 }
 
 impl Drop for PdfDoc {
@@ -51,6 +55,7 @@ impl PdfDoc {
         Ok(PdfDoc {
             doc: Some(doc),
             file: Some((kept, read)),
+            popups: AtomicBool::new(false),
         })
     }
 
@@ -79,6 +84,7 @@ impl PdfDoc {
         Ok(PdfDoc {
             doc: Some(doc),
             file: None,
+            popups: AtomicBool::new(false),
         })
     }
 
@@ -137,6 +143,7 @@ impl PdfDoc {
         let (width, height, mut data) = {
             let _guard = lock();
             let p = self.page(page)?;
+            self.note_popups(&p);
             let config = PdfRenderConfig::new()
                 .scale_page_by_factor(scale)
                 .render_annotations(true);
@@ -183,6 +190,7 @@ impl PdfDoc {
         let (width, height, mut data) = {
             let _guard = lock();
             let p = self.page(page)?;
+            self.note_popups(&p);
             let page_w = (p.width().value * scale).round() as i32;
             let page_h = (p.height().value * scale).round() as i32;
             let (w, h) = (w.min(page_w - x), h.min(page_h - y));
@@ -261,6 +269,13 @@ impl PdfDoc {
 
     /// The document as it now stands, annotations included.
     ///
+    /// Saved twice once a page with a note on it has been rendered: pdfium makes that note's
+    /// popup appearance afresh, as new objects, every time it renders the page, and a save writes
+    /// every new object, referenced or not, but of a file's own objects only those something
+    /// refers to. Read back, the first save's objects are all the file's own, so the second
+    /// leaves those popups out (ISSUES.md). It costs about a save again: 85 then 106 ms for an
+    /// 80 MB file (2026-10-10).
+    ///
     // ponytail: `FPDF_SaveAsCopy` rewrites the whole file under the global pdfium lock (80 to
     // 140 ms for a 100 MB scanned PDF, 25 to 50 ms for a 6 MB one of 383 pages of text) and loses
     // whatever incremental history the file had. `FPDF_INCREMENTAL` is no cheaper way out: pdfium
@@ -269,7 +284,27 @@ impl PdfDoc {
     // grows by what was read again in every session that saves (measured 2026-09-30).
     pub fn save(&self) -> Result<Vec<u8>> {
         let _guard = lock();
-        self.doc().save_to_bytes().map_err(refused("save pdf"))
+        let bytes = self.doc().save_to_bytes().map_err(refused("save pdf"))?;
+        if !self.popups.load(Ordering::Relaxed) {
+            return Ok(bytes);
+        }
+        let saved = pdfium()?
+            .load_pdf_from_byte_vec(bytes, None)
+            .map_err(refused("read the saved pdf"))?;
+        let bytes = saved.save_to_bytes().map_err(refused("save pdf"));
+        // Closed here, under the lock, like every other document.
+        drop(saved);
+        bytes
+    }
+
+    /// Remember that `p` is being rendered with an annotation carrying a note on it, which makes
+    /// pdfium generate that note's popup (see [`PdfDoc::save`]). The caller holds the lock.
+    fn note_popups(&self, p: &PdfPage<'_>) {
+        if !self.popups.load(Ordering::Relaxed) {
+            let noted =
+                (p.annotations().iter()).any(|a| a.contents().is_some_and(|c| !c.is_empty()));
+            self.popups.store(noted, Ordering::Relaxed);
+        }
     }
 
     /// The `/Link` annotations on one page, in document order. Links whose target we cannot

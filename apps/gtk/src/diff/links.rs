@@ -91,10 +91,12 @@ pub(super) struct Links {
 }
 
 /// Where a band's buttons go down its strip, `h` tall: at the band's top, held at the top of the
-/// text while the band is beside it, and carried off with the band's bottom. `top` and `bottom`
-/// are the band's, over both its ends; `text` is where the text starts below the title rows.
-fn button_y(top: i32, bottom: i32, text: i32, h: i32) -> i32 {
-    top.max(text).min(bottom.max(top + h) - h)
+/// text while the band is beside it, and gone once its bottom is under them, before they would be
+/// carried off over the columns' title rows, which the strip's overlay spans too. `top` and
+/// `bottom` are the band's, over both its ends; `text` is where the text starts below the titles.
+fn button_y(top: i32, bottom: i32, text: i32, h: i32) -> Option<i32> {
+    let y = top.max(text).min(bottom.max(top + h) - h);
+    (y >= text).then_some(y)
 }
 
 impl Links {
@@ -258,7 +260,8 @@ impl Links {
     }
 
     /// Where `widget` goes, if it is a strip button: centred in its half of its strip, down it as
-    /// [`button_y`] has it, and off the overlay, which clips it away, while its band is not laid.
+    /// [`button_y`] has it, and off the overlay, which clips it away, while its band is not laid
+    /// or [`button_y`] has it gone.
     /// `None` leaves the drawing over all of the overlay.
     fn place(&self, columns: &Columns, widget: &gtk::Widget) -> Option<gdk::Rectangle> {
         // ponytail: a search per button per allocation, over the few near the view.
@@ -270,19 +273,20 @@ impl Links {
         let w = widget.measure(gtk::Orientation::Horizontal, -1).1;
         let height = widget.measure(gtk::Orientation::Vertical, -1).1;
         let runs = self.runs.borrow();
+        let text = self.text_top(i, columns);
         let laid = runs
             .get(i)
             .and_then(|strip| strip.get(k))
             .and_then(|(run, _)| {
                 let [(a0, a1), (b0, b1)] = end(i, run, columns, &self.area)?;
-                Some((a0.min(b0), a1.max(b1), self.span(i)?))
+                let y = button_y(a0.min(b0), a1.max(b1), text, height)?;
+                Some((y, self.span(i)?))
             });
-        let Some((top, bottom, (x0, x1))) = laid else {
+        let Some((y, (x0, x1))) = laid else {
             return Some(gdk::Rectangle::new(-2 * w, -2 * height, w, height));
         };
         let half = (x1 - x0) / 2.0;
         let x = x0 + half * (h as f64 + 0.5) - f64::from(w) / 2.0;
-        let y = button_y(top, bottom, self.text_top(i, columns), height);
         Some(gdk::Rectangle::new(x.round() as i32, y, w, height))
     }
 
@@ -516,22 +520,31 @@ mod tests {
     #[test]
     fn a_button_rides_its_band_and_holds_at_the_top_of_the_text() {
         let (text, h) = (30, 20);
-        assert_eq!(button_y(100, 200, text, h), 100, "at the band's top");
+        assert_eq!(button_y(100, 200, text, h), Some(100), "at the band's top");
         assert_eq!(
             button_y(10, 200, text, h),
-            30,
+            Some(30),
             "held while the band is beside the text"
         );
         assert_eq!(
-            button_y(-100, 40, text, h),
-            20,
-            "carried off with the band's bottom"
+            button_y(-100, 50, text, h),
+            Some(30),
+            "until the band's bottom reaches it"
+        );
+        assert_eq!(
+            button_y(-100, 49, text, h),
+            None,
+            "then gone, before it reaches the title rows"
         );
         assert_eq!(
             button_y(100, 105, text, h),
-            100,
+            Some(100),
             "a band shorter than the button"
         );
-        assert_eq!(button_y(20, 25, text, h), 20, "which goes with its top");
+        assert_eq!(
+            button_y(20, 25, text, h),
+            None,
+            "gone too at the top of the text"
+        );
     }
 }

@@ -211,6 +211,37 @@ impl Ink {
         }
     }
 
+    /// The history ends — the tab closes — so the strokes of another editor's an erase hid,
+    /// which no Undo will show again now, are deleted for good, with their popups, and the
+    /// history and the names go with them. Only strokes this session hid: one the file already
+    /// had hidden is no step here. Nothing reaches the disk: the caller saves, as after a stroke.
+    pub fn purge(&mut self, doc: &mut PdfDoc) -> Result<()> {
+        let hidden: Vec<u32> = (self.done.iter().flatten())
+            .filter_map(|step| match step {
+                Step::Erased {
+                    id,
+                    kept: Some(was),
+                    ..
+                } if was.hidden => Some(*id),
+                _ => None,
+            })
+            .collect();
+        self.done.clear();
+        self.undone.clear();
+        // The names go as well: a popup goes with its stroke, and they did not mirror it.
+        for (page, slots) in std::mem::take(&mut self.ids) {
+            let doomed: Vec<usize> = (slots.iter().enumerate())
+                .filter(|(_, slot)| slot.is_some_and(|id| hidden.contains(&id)))
+                .map(|(index, _)| index)
+                .collect();
+            if !doomed.is_empty() {
+                doc.delete_inks(page, &doomed)?;
+                self.dirty = true;
+            }
+        }
+        Ok(())
+    }
+
     /// Put a page in, take one out or move one, as a step of its own: Undo takes it back as it
     /// takes back a stroke. A delete first keeps the whole document ([`PdfDoc::snapshot`]), so
     /// its Undo brings the page back as itself, with its ink and with what points at it. Nothing

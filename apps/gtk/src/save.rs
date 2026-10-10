@@ -1021,7 +1021,7 @@ impl App {
             }
             // No edit count: the strokes are all in the file once it is flushed.
             Doc::Pdf(pdf) => {
-                pdf.flush_blocking();
+                pdf.flush_blocking(false);
                 (Contents::File(pdf.path()), 0)
             }
             Doc::Image(_) => (Contents::Copy, 0),

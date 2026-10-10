@@ -26,10 +26,10 @@ impl PdfTab {
 
     /// The same as the tab closes, holding the tab until the write is done: its answer is what
     /// sends a remote vault's copy back to the host (`connect_saved`), and a tab already gone
-    /// would never hear it.
+    /// would never hear it. What an erase hid goes first, the history ending ([`Request::Close`]).
     pub fn flush_closing(self: &Rc<Self>) {
         let (tx, rx) = channel();
-        self.ask(Request::Save(Some(tx)));
+        self.ask(Request::Close(Some(tx)));
         let tab = self.clone();
         glib::spawn_future_local(async move {
             while let Err(std::sync::mpsc::TryRecvError::Empty) = rx.try_recv() {
@@ -42,13 +42,17 @@ impl PdfTab {
     }
 
     /// The same, but wait for it — the window is closing and the process is about to end, so a
-    /// write still on the render thread's queue would go with it.
+    /// write still on the render thread's queue would go with it. With `last`, the history ends
+    /// here, as when the tab closes.
     ///
     // ponytail: up to a second of the main loop, and only on the way out. The thread answers as
     // soon as it finishes whatever tile it is on, so in practice this is a few milliseconds.
-    pub fn flush_blocking(self: &Rc<Self>) {
+    pub fn flush_blocking(self: &Rc<Self>, last: bool) {
         let (tx, rx) = channel();
-        self.ask(Request::Save(Some(tx)));
+        self.ask(match last {
+            true => Request::Close(Some(tx)),
+            false => Request::Save(Some(tx)),
+        });
         let _ = rx.recv_timeout(std::time::Duration::from_secs(1));
     }
 

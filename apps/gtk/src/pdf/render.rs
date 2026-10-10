@@ -166,7 +166,7 @@ fn render_loop(
             // runs, for the etag gate to refuse it out loud.
             let exempt = matches!(
                 current,
-                Request::Reload | Request::Retarget(_) | Request::Save(_)
+                Request::Reload | Request::Retarget(_) | Request::Save(_) | Request::Close(_)
             );
             if !exempt && !doc.intact() {
                 if !changed {
@@ -446,6 +446,12 @@ fn render_loop(
                             }
                         }
                     }
+                }
+                Request::Close(ack) => {
+                    if let Err(e) = ink.purge(&mut doc) {
+                        tracing::warn!("deleting the strokes erases hid: {e:#}");
+                    }
+                    queue.push(Request::Save(ack));
                 }
                 Request::Save(ack) => {
                     if !ink.dirty {

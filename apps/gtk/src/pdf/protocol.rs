@@ -210,6 +210,10 @@ pub enum Request {
     /// Write the drawn-on document out, if anything was drawn since the last time. The channel,
     /// where there is one, is told when that is done — which is what the window close waits on.
     Save(Option<Sender<()>>),
+    /// The tab is going, and the history with it: what this session's erases hid of another
+    /// editor's ink, which no Undo will show again, is deleted for good, and the document is
+    /// written out as `Save` writes it.
+    Close(Option<Sender<()>>),
     Reload,
     /// A rename landed: read and write this path from now on. The document itself is untouched —
     /// a rename moves no bytes — so nothing is re-opened and no tile is thrown away.

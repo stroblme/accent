@@ -381,6 +381,33 @@ impl PdfDoc {
         ))
     }
 
+    /// Delete the `/Ink` annotations at `indices` of a page for good, with the popups they have:
+    /// what [`PdfDoc::take_ink`] hid for an Undo that will not come now.
+    pub fn delete_inks(&mut self, page: usize, indices: &[usize]) -> Result<()> {
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        let mut doomed = Vec::new();
+        for &index in indices {
+            if annotation(&p, page, index)?.annotation_type() != PdfPageAnnotationType::Ink {
+                return Err(not_drawn(page, index));
+            }
+            doomed.extend([Some(index), popup_of(&p, index)].into_iter().flatten());
+        }
+        // Every place found before any goes, and the last first, so each still holds.
+        doomed.sort_unstable();
+        doomed.dedup();
+        for index in doomed.into_iter().rev() {
+            let a = (p.annotations_mut())
+                .get(index as PdfPageAnnotationIndex)
+                .map_err(|e| Error::Pdf(format!("annotation {index} of page {page}: {e:?}")))?;
+            (p.annotations_mut())
+                .delete_annotation(a)
+                .map_err(refused("delete annotation"))?;
+        }
+        Ok(())
+    }
+
     /// Every `/Ink` annotation on a page with the points of its drawn path, for the eraser to
     /// aim at. The index is the annotation's place in `/Annots`, which is what deletes it.
     pub fn ink_paths(&self, page: usize) -> Result<Vec<InkPath>> {
@@ -635,6 +662,34 @@ pub(super) fn ink_list(p: &PdfPage<'_>, index: usize, height: f32) -> Vec<Vec<(f
             .collect();
         bindings.FPDFPage_CloseAnnot(annot);
         strokes
+    }
+}
+
+/// Where in `/Annots` the popup of the annotation at `index` of a loaded page sits, if it has
+/// one there. The caller holds the lock.
+///
+/// Raw calls, because pdfium-render wraps neither `/Popup` nor the annotation handle.
+fn popup_of(p: &PdfPage<'_>, index: usize) -> Option<usize> {
+    let bindings = p.bindings();
+    // SAFETY: as in `ink_list`; both annotation handles are only read, and closed before
+    // returning.
+    unsafe {
+        let page = bindings.get_handle_from_page(p);
+        let annot = bindings.FPDFPage_GetAnnot(page, index as c_int);
+        if annot.is_null() {
+            return None;
+        }
+        let popup = bindings.FPDFAnnot_GetLinkedAnnot(annot, "Popup");
+        let at = match popup.is_null() {
+            true => -1,
+            false => {
+                let at = bindings.FPDFPage_GetAnnotIndex(page, popup);
+                bindings.FPDFPage_CloseAnnot(popup);
+                at
+            }
+        };
+        bindings.FPDFPage_CloseAnnot(annot);
+        usize::try_from(at).ok()
     }
 }
 

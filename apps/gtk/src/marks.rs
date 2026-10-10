@@ -8,8 +8,8 @@
 //! pass (`accent_core::diff::line_ops`), so a line the diff paints green is a line the gutter marks
 //! green.
 //!
-//! Beside them, in the same column, a bar in the warning's amber marks the lines a language server
-//! has still to check (`Event::Checking`), as VS Code's Lean extension does in orange.
+//! Beside them, in the same column, a bar in the accent at half alpha marks the lines a language
+//! server has still to check (`Event::Checking`), as VS Code's Lean extension does in orange.
 
 use std::ops::Range;
 
@@ -23,6 +23,9 @@ use accent_core::diff::{DiffLine, Op};
 /// Width of the mark column, and of the bar inside it. The checking bar takes the rest.
 const WIDTH: i32 = 6;
 const BAR: f32 = 3.0;
+/// The checking bar's share of the accent: a rewritten line's bar is the accent itself, and the
+/// two touch where a line is both.
+const CHECKING_ALPHA: f32 = 0.5;
 /// A deletion has no line of its own, so it is a wedge between two lines rather than a bar.
 const WEDGE: f32 = 2.0;
 
@@ -128,14 +131,15 @@ impl Renderer {
 
     /// Take the colours from the theme, the way every other painted thing here does: the diff's
     /// own green and red mixed with the resolved foreground, the accent for a rewrite, and the
-    /// warning's amber for a line still being checked.
+    /// accent at [`CHECKING_ALPHA`] for a line still being checked.
     pub fn restyle(&self, view: &impl IsA<gtk::Widget>) {
         let fg = view.as_ref().color();
+        let accent = adw::StyleManager::default().accent_color_rgba();
         self.imp().colours.set([
             crate::diff::tint(crate::diff::ADDED_HUE, fg, 1.0),
             crate::diff::tint(crate::diff::REMOVED_HUE, fg, 1.0),
-            adw::StyleManager::default().accent_color_rgba(),
-            crate::diff::tint(crate::diff::WARNING_HUE, fg, 1.0),
+            accent,
+            crate::theme::at(accent, CHECKING_ALPHA),
         ]);
         self.queue_draw();
     }
