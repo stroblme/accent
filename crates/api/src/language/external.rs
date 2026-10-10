@@ -11,6 +11,7 @@
 pub(super) mod map;
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -163,10 +164,7 @@ async fn forward_notifications(
                 let mut due = checking
                     .iter_mut()
                     .filter_map(|(rel, check)| Some((rel.clone(), check.due(now)?)));
-                if due.any(|(rel, line)| {
-                    let line = Some(line);
-                    events.send(Event::Checking { rel, line }).is_err()
-                }) {
+                if due.any(|(rel, lines)| events.send(Event::Checking { rel, lines }).is_err()) {
                     break;
                 }
                 continue;
@@ -213,7 +211,7 @@ async fn forward_notifications(
                 }
             }
             "$/lean/fileProgress" => {
-                let Some(line) = checking_of(&n.params) else {
+                let Some(lines) = checking_of(&n.params) else {
                     continue;
                 };
                 let uri = n
@@ -224,18 +222,19 @@ async fn forward_notifications(
                     continue;
                 };
                 // The end of a check goes on at once, and only for a check the UI was told of.
-                let line = match line {
-                    Some(line) => {
-                        let check = checking
-                            .entry(rel.clone())
-                            .or_insert(Check { line, sent: None });
-                        check.line = line;
-                        check.due(Instant::now()).map(Some)
+                let lines = match lines.is_empty() {
+                    false => {
+                        let check = checking.entry(rel.clone()).or_insert(Check {
+                            lines: Vec::new(),
+                            sent: None,
+                        });
+                        check.lines = lines;
+                        check.due(Instant::now())
                     }
-                    None => checking.remove(&rel).map(|_| None),
+                    true => checking.remove(&rel).map(|_| Vec::new()),
                 };
-                if let Some(line) = line
-                    && events.send(Event::Checking { rel, line }).is_err()
+                if let Some(lines) = lines
+                    && events.send(Event::Checking { rel, lines }).is_err()
                 {
                     break;
                 }
@@ -265,7 +264,10 @@ async fn forward_notifications(
     }
     // Nor will it finish checking a file it was in the middle of.
     for rel in checking.into_keys() {
-        let _ = events.send(Event::Checking { rel, line: None });
+        let _ = events.send(Event::Checking {
+            rel,
+            lines: Vec::new(),
+        });
     }
 }
 
@@ -319,54 +321,69 @@ fn progress_of(params: &Value) -> Option<(bool, Option<String>)> {
     Some((busy, message.filter(|_| busy).map(str::to_string)))
 }
 
-/// The least time between two lines of a file's check sent on as `Event::Checking`. Lean says
+/// The least time between two states of a file's check sent on as `Event::Checking`. Lean says
 /// where it is a dozen times a line (3 660 notifications, 301 lines, for a 600-line file), and
-/// over an ssh link each line sent on is a message; ten a second still reads as moving.
+/// over an ssh link each state sent on is a message; ten a second still reads as moving.
 const CHECKING_EVERY: Duration = Duration::from_millis(100);
 
 /// How far a server's check of one file has got, and what the UI was last told of it.
 struct Check {
-    /// The line the server last said it is checking from.
-    line: u32,
-    /// The line last sent on, and when.
-    sent: Option<(u32, Instant)>,
+    /// The lines the server last said it has still to check.
+    lines: Vec<Range<u32>>,
+    /// The lines last sent on, and when.
+    sent: Option<(Vec<Range<u32>>, Instant)>,
 }
 
 impl Check {
-    /// The line to send on at `now`: one the UI has not been told, at least [`CHECKING_EVERY`]
-    /// after the last. Otherwise it is held back until then ([`Check::held`]), so the UI still
-    /// ends on the line the check sits on.
-    fn due(&mut self, now: Instant) -> Option<u32> {
-        let ready = match self.sent {
-            Some((line, at)) => line != self.line && now >= at + CHECKING_EVERY,
+    /// The lines to send on at `now`: ones the UI has not been told, at least [`CHECKING_EVERY`]
+    /// after the last. Otherwise they are held back until then ([`Check::held`]), so the UI
+    /// still ends on where the check sits.
+    fn due(&mut self, now: Instant) -> Option<Vec<Range<u32>>> {
+        let ready = match &self.sent {
+            Some((lines, at)) => *lines != self.lines && now >= *at + CHECKING_EVERY,
             None => true,
         };
         ready.then(|| {
-            self.sent = Some((self.line, now));
-            self.line
+            self.sent = Some((self.lines.clone(), now));
+            self.lines.clone()
         })
     }
 
-    /// When the line held back is due, if one is.
+    /// When the lines held back are due, if some are.
     fn held(&self) -> Option<Instant> {
         self.sent
-            .filter(|&(line, _)| line != self.line)
-            .map(|(_, at)| at + CHECKING_EVERY)
+            .as_ref()
+            .filter(|(lines, _)| *lines != self.lines)
+            .map(|(_, at)| *at + CHECKING_EVERY)
     }
 }
 
-/// Where Lean's `$/lean/fileProgress` says a file is still being checked: the start line of the
-/// first range in progress (`kind` 1, or none given), and `None` once only a fatal error (`kind`
-/// 2) or nothing is left. `None` for a notification that does not read.
-fn checking_of(params: &Value) -> Option<Option<u32>> {
+/// The lines Lean's `$/lean/fileProgress` says are still being checked: its ranges in progress
+/// (`kind` 1, or none given) as whole lines, in order, those that overlap or touch made one.
+/// Empty once only a fatal error (`kind` 2) or nothing is left; `None` for a notification that
+/// does not read.
+fn checking_of(params: &Value) -> Option<Vec<Range<u32>>> {
     let processing = params.get("processing")?.as_array()?;
-    Some(
-        processing
-            .iter()
-            .filter(|p| p.get("kind").and_then(Value::as_u64).unwrap_or(1) == 1)
-            .find_map(|p| p.pointer("/range/start/line")?.as_u64())
-            .map(|line| line as u32),
-    )
+    let line = |p: &Value, at: &str| Some(p.pointer(at)?.as_u64()? as u32);
+    let mut ranges: Vec<Range<u32>> = processing
+        .iter()
+        .filter(|p| p.get("kind").and_then(Value::as_u64).unwrap_or(1) == 1)
+        .filter_map(|p| {
+            let start = line(p, "/range/start/line")?;
+            // The end is exclusive: a range ending at the start of a line leaves that line out.
+            let end = line(p, "/range/end/line")? + u32::from(line(p, "/range/end/character")? > 0);
+            Some(start..end.max(start + 1))
+        })
+        .collect();
+    ranges.sort_by_key(|r| r.start);
+    let mut lines: Vec<Range<u32>> = Vec::with_capacity(ranges.len());
+    for r in ranges {
+        match lines.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => lines.push(r),
+        }
+    }
+    Some(lines)
 }
 
 /// Lean's answer to `$/lean/plainGoal`, its `rendered` Markdown left out.
@@ -928,50 +945,55 @@ mod tests {
         assert_eq!(progress_of(&value(json!({"kind": "other"}))), None);
     }
 
-    /// Lean's `$/lean/fileProgress`: the first range still being checked, and nothing once all
-    /// that is left is a fatal error or no range at all.
+    /// Lean's `$/lean/fileProgress`: the lines still being checked, a range ending at the start
+    /// of a line leaving it out, ranges that overlap or touch made one, and nothing once all that
+    /// is left is a fatal error or no range at all.
     #[test]
-    fn lean_says_where_it_is_still_checking() {
+    fn lean_says_which_lines_it_is_still_checking() {
         let progress = |processing: Value| {
             json!({"textDocument": {"uri": "file:///v/A.lean", "version": 1},
                    "processing": processing})
         };
-        let from = |line: u32| json!({"start": {"line": line, "character": 0}, "end": {"line": 99, "character": 0}});
+        let range = |from: u32, to: u32, character: u32| {
+            json!({"start": {"line": from, "character": 0},
+                   "end": {"line": to, "character": character}})
+        };
+        // Lean 4.34 on a file of fourteen lines: declarations in flight on 5–8, 10 and 12–13.
         assert_eq!(
             checking_of(&progress(json!([
-                {"range": from(4), "kind": 2},
-                {"range": from(7), "kind": 1},
+                {"range": range(12, 14, 0), "kind": 1},
+                {"range": range(5, 5, 30), "kind": 1},
+                {"range": range(5, 5, 30), "kind": 1},
+                {"range": range(6, 6, 30)},
+                {"range": range(7, 8, 30), "kind": 1},
+                {"range": range(10, 10, 9), "kind": 1},
+                {"range": range(2, 3, 0), "kind": 2},
             ]))),
-            Some(Some(7))
+            Some(vec![5..9, 10..11, 12..14])
         );
+        assert_eq!(checking_of(&progress(json!([]))), Some(vec![]));
         assert_eq!(
-            checking_of(&progress(json!([{"range": from(3)}]))),
-            Some(Some(3)),
-            "no kind is processing"
-        );
-        assert_eq!(checking_of(&progress(json!([]))), Some(None));
-        assert_eq!(
-            checking_of(&progress(json!([{"range": from(4), "kind": 2}]))),
-            Some(None)
+            checking_of(&progress(json!([{"range": range(4, 9, 0), "kind": 2}]))),
+            Some(vec![])
         );
     }
 
-    /// A check's first line goes on at once; one said within the interval after waits for its
-    /// end, and what goes on then is the last line said.
+    /// A check's first state goes on at once; one said within the interval after waits for its
+    /// end, and what goes on then is the last state said.
     #[test]
-    fn a_checking_line_goes_on_at_most_once_an_interval() {
+    fn a_check_goes_on_at_most_once_an_interval() {
         let start = Instant::now();
         let mut check = Check {
-            line: 3,
+            lines: vec![3..4, 6..20],
             sent: None,
         };
-        assert_eq!(check.due(start), Some(3));
+        assert_eq!(check.due(start), Some(vec![3..4, 6..20]));
         assert_eq!(check.held(), None);
-        check.line = 5;
+        check.lines = vec![6..7, 8..20];
         assert_eq!(check.due(start + CHECKING_EVERY / 2), None);
-        check.line = 7;
+        check.lines = vec![8..9, 10..20];
         assert_eq!(check.held(), Some(start + CHECKING_EVERY));
-        assert_eq!(check.due(start + CHECKING_EVERY), Some(7));
+        assert_eq!(check.due(start + CHECKING_EVERY), Some(vec![8..9, 10..20]));
         assert_eq!(check.held(), None);
         assert_eq!(check.due(start + 3 * CHECKING_EVERY), None, "nothing new");
     }
@@ -1294,8 +1316,10 @@ mod tests {
             .block_on(vault.open_document("T.lean", "lean", proof.to_string()))
             .unwrap();
         assert!(support.goals, "Lean answers goals");
-        let checked =
-            |e: &Event| matches!(e, Event::Checking { rel, line: None } if rel == "T.lean");
+        let checked = |e: &Event| match e {
+            Event::Checking { rel, lines } => rel == "T.lean" && lines.is_empty(),
+            _ => false,
+        };
         let budget = std::time::Duration::from_secs(60);
         assert!(crate::tests::wait_for(&events, checked, budget).is_some());
 

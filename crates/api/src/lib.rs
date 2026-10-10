@@ -125,12 +125,13 @@ pub enum Event {
         busy: bool,
         message: Option<String>,
     },
-    /// A language server is checking `rel` from 0-based `line` on, and is done with it at `None`.
-    /// Lean's `$/lean/fileProgress` is the one sender: a file importing Mathlib is minutes of it,
-    /// during which the server has no answer about the lines below `line`.
+    /// A language server is checking `rel`: `lines` are the 0-based lines it has still to check,
+    /// in order and apart, and none once it is done. Lean's `$/lean/fileProgress` is the one
+    /// sender: a file importing Mathlib is minutes of it, during which the server has no answer
+    /// about those lines. Lean checks declarations in parallel, so a check is several ranges.
     Checking {
         rel: String,
-        line: Option<u32>,
+        lines: Vec<std::ops::Range<u32>>,
     },
 }
 

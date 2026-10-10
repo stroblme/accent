@@ -38,7 +38,7 @@ pub enum Step {
         id: u32,
         kept: Option<pdf::Drawn>,
     },
-    /// A stroke was erased, and this is what it drew.
+    /// A stroke was erased, and this is what puts it back.
     Erased {
         page: usize,
         id: u32,
@@ -171,9 +171,10 @@ impl Ink {
         );
     }
 
-    /// The stroke at `index` was erased — `was` being what it drew — and `left` drawn in its
+    /// The stroke at `index` was erased — `was` being what puts it back — and `left` drawn in its
     /// place under the names given: what a partial eraser leaves of it, nothing for a whole one.
-    /// Undo takes the pieces off and puts the stroke back as one step.
+    /// Undo takes the pieces off and puts the stroke back as one step. Another editor's stroke
+    /// was only hidden, and keeps its place.
     pub fn erased(
         &mut self,
         page: usize,
@@ -182,7 +183,7 @@ impl Ink {
         left: Vec<(u32, pdf::Drawn)>,
         joined: bool,
     ) {
-        let id = self.removed(page, index);
+        let id = self.taken(page, index, &was);
         let kept = Some(was);
         self.record(Step::Erased { page, id, kept }, joined);
         for (id, piece) in left {
@@ -192,10 +193,22 @@ impl Ink {
         }
     }
 
-    /// The stroke at `index` was moved by `matrix`, which drew it again at the end of `page`.
-    pub fn moved(&mut self, page: usize, index: usize, matrix: pdf::Matrix) {
-        let id = self.requeued(page, index);
+    /// The stroke at `index` was moved by `matrix`, which drew it again at the end of `page`
+    /// unless it `stayed` where it was, as another editor's does.
+    pub fn moved(&mut self, page: usize, index: usize, matrix: pdf::Matrix, stayed: bool) {
+        let id = match stayed {
+            true => self.id_at(page, index).unwrap_or_else(fresh_id),
+            false => self.requeued(page, index),
+        };
         self.record(Step::Moved { page, id, matrix }, false);
+    }
+
+    /// The stroke at `index` was taken off as `was` says: deleted, or hidden where it is. Its id.
+    fn taken(&mut self, page: usize, index: usize, was: &pdf::Drawn) -> u32 {
+        match was.hidden {
+            true => self.id_at(page, index).unwrap_or_else(fresh_id),
+            false => self.removed(page, index),
+        }
     }
 
     /// Put a page in, take one out or move one, as a step of its own: Undo takes it back as it
@@ -345,8 +358,10 @@ impl Ink {
                     true => *matrix,
                     false => pdf::invert(*matrix),
                 };
-                let area = doc.transform_ink(*page, index, m)?;
-                self.requeued(*page, index);
+                let (area, stayed) = doc.transform_ink(*page, index, m)?;
+                if !stayed {
+                    self.requeued(*page, index);
+                }
                 Ok(Walked::Ink(*page, area))
             }
             // Drawing forwards puts a stroke on, and so does erasing backwards.
@@ -355,6 +370,10 @@ impl Ink {
                 let drawn = kept
                     .as_ref()
                     .ok_or_else(|| Error::Pdf(format!("nothing kept of {id}")))?;
+                if drawn.hidden {
+                    let index = self.locate(doc, *page, *id)?;
+                    return Ok(Walked::Ink(*page, doc.show_ink(*page, index)?));
+                }
                 let area = doc.redraw_ink(*page, drawn)?;
                 self.appended(*page, *id);
                 Ok(Walked::Ink(*page, area))
@@ -362,7 +381,7 @@ impl Ink {
             (Step::Drawn { page, id, kept }, false) | (Step::Erased { page, id, kept }, true) => {
                 let index = self.locate(doc, *page, *id)?;
                 let (drawn, area) = doc.take_ink(*page, index)?;
-                self.removed(*page, index);
+                self.taken(*page, index, &drawn);
                 *kept = Some(drawn);
                 Ok(Walked::Ink(*page, area))
             }
@@ -395,7 +414,7 @@ mod tests {
         assert_eq!(ink.id_at(0, 0), Some(a), "asked again, the same name");
 
         // `a` is moved, which puts it at the end; then `c` is erased.
-        ink.moved(0, 0, pdf::IDENTITY);
+        ink.moved(0, 0, pdf::IDENTITY, false);
         assert_eq!((ink.index_of(0, a), ink.index_of(0, c)), (Some(2), Some(1)));
         ink.removed(0, 1);
         assert_eq!((ink.index_of(0, a), ink.index_of(0, c)), (Some(1), None));
@@ -446,8 +465,8 @@ mod tests {
         ink.drew(0, 1);
         let at = ink.index_of(0, newest(&ink, 0)).unwrap();
         let down = [1.0, 0.0, 0.0, 1.0, 0.0, 10.0];
-        doc.transform_ink(0, at, down).unwrap();
-        ink.moved(0, at, down);
+        let (_, stayed) = doc.transform_ink(0, at, down).unwrap();
+        ink.moved(0, at, down, stayed);
         assert_eq!(lines(&doc), [20, 50]);
         // One drag takes both, so the eraser's list names the file's own too.
         let named: Vec<u32> = ink.named(&doc, 0).iter().map(|(id, _)| *id).collect();

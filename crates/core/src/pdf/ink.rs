@@ -40,45 +40,27 @@ pub(super) enum Seg {
     Close,
 }
 
-/// A stroke's path and style as they were read back off its page: what
-/// [`PdfDoc::redraw_ink`](super::PdfDoc::redraw_ink) needs to draw it again once the annotation
-/// is gone.
+/// A stroke taken off its page, and what puts it back: one of ours is deleted, and
+/// [`PdfDoc::redraw_ink`](super::PdfDoc::redraw_ink) draws its path again; another editor's is
+/// hidden where it is, and [`PdfDoc::show_ink`](super::PdfDoc::show_ink) shows it again there.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Drawn {
     pub(super) segs: Vec<Seg>,
     pub(super) style: InkStyle,
-    pub(super) extra: Extra,
-}
-
-/// What another editor's stroke carries besides what it draws, which a stroke drawn again puts
-/// back: the strokes of its `/InkList`, in top-left page points, its note (`/Contents`) and its
-/// author (`/T`). Nothing, for ours and for the pieces a cut leaves.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub(super) struct Extra {
-    pub(super) ink_list: Vec<Vec<(f32, f32)>>,
-    pub(super) contents: Option<String>,
-    pub(super) author: Option<String>,
-}
-
-impl Extra {
-    /// The same under `m`: the `/InkList` goes with the stroke.
-    pub(super) fn transformed(&self, m: Matrix) -> Extra {
-        Extra {
-            ink_list: (self.ink_list.iter())
-                .map(|stroke| stroke.iter().map(|&p| apply(m, p)).collect())
-                .collect(),
-            ..self.clone()
-        }
-    }
+    /// Hidden in place (`/F` Hidden) rather than deleted: nothing but its own dictionary draws
+    /// another editor's stroke as it was, appearance stream, popup and dates included, and pdfium
+    /// cannot put a dictionary back into `/Annots` once it has left.
+    pub(super) hidden: bool,
 }
 
 impl Drawn {
-    /// The same stroke along another path, drawn straight from point to point: a piece of it.
+    /// The same stroke along another path, drawn straight from point to point: a piece of it,
+    /// and one of ours.
     pub(super) fn along(&self, points: &[(f32, f32)]) -> Drawn {
         Drawn {
             segs: polyline(points),
             style: self.style,
-            extra: Extra::default(),
+            hidden: false,
         }
     }
 }
@@ -215,8 +197,8 @@ const CRUMB: f32 = 1.0;
 /// as keep it within [`FLAT`] of itself, and a close goes back to where the sub-path began.
 ///
 // ponytail: one polyline, so a second sub-path is joined to the first by a segment nobody drew.
-// Our paths have one sub-path; another editor's multi-stroke `/Ink` gains a false edge, and is
-// not cut (see `InkShape::cuttable`).
+// Our paths have one sub-path; another editor's multi-stroke `/Ink` is hit and cut by its
+// `/InkList`, stroke by stroke, and only one without that gains a false edge.
 pub(super) fn flatten(segs: &[Seg]) -> Vec<(f32, f32)> {
     let mut out = Vec::new();
     let mut start = None;

@@ -490,11 +490,23 @@ impl Tab {
     pub fn set_head(&self, head: Option<String>) {
         let showing = head.is_some();
         *self.head.borrow_mut() = head;
-        self.marks.set_visible(showing);
+        self.marks.set_visible(showing || self.marks.checked());
         match showing {
             true => self.update_marks(),
             false => self.marks.set_marks(Vec::new()),
         }
+    }
+
+    /// Mark the lines the language server has still to check in the change bars' column, none
+    /// once it is done (`Event::Checking`).
+    pub fn set_checking(&self, lines: Vec<std::ops::Range<u32>>) {
+        self.marks.set_checking(lines);
+    }
+
+    /// The lines the gutter marks as still being checked.
+    #[cfg(feature = "bench")]
+    pub fn checking(&self) -> Vec<std::ops::Range<u32>> {
+        self.marks.checking()
     }
 
     /// The GtkSourceView language this tab was given, by its display name ("Rust", "Makefile").

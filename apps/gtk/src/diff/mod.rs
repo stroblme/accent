@@ -1060,7 +1060,7 @@ impl Compare {
                 self.columns
                     .top_line(self.editable.unwrap_or(Side::New).idx())
             };
-            self.columns.hold(self.columns.caret_line().or_else(top));
+            self.columns.hold(self.columns.caret_line(false).or_else(top));
         }
         if !self.unfold.is_active() {
             self.opened.borrow_mut().clear();

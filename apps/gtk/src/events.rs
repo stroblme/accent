@@ -404,10 +404,12 @@ impl App {
                 self.connection_refused(&why);
             }
             Event::Error(message) => self.toast(&message),
-            // Every tab of the file holds the line, so a switch to one shows it.
-            Event::Checking { rel, line } => {
+            // Every tab of the file holds the check, so a switch to one shows it.
+            Event::Checking { rel, lines } => {
+                let line = lines.first().map(|lines| lines.start);
                 for tab in self.open_tabs().iter().filter(|tab| tab.rel() == rel) {
                     tab.lang.checking.set(line);
+                    tab.set_checking(lines.clone());
                     if self.is_active(tab) {
                         self.statusbar.set_checking(line);
                         // What was asked while it checked may have gone unanswered; and

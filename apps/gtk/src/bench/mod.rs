@@ -500,8 +500,9 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_GOALS=<rel>:<line>:<col>[:<line>:<col>]` puts the caret there in a Lean file and
 /// prints the goals the Code pane shows, and with a second place those it asks for as the sidebar
-/// comes back after the caret moved there unseen (`goals::bench_goals`). It needs elan's Lean, so
-/// `make drills` does not run it.
+/// comes back after the caret moved there unseen (`goals::bench_goals`), the lines the gutter
+/// marks as still being checked as they change. It needs elan's Lean, so `make drills` does not
+/// run it.
 ///
 /// `ACCENT_BENCH_REPLACE=1` writes a note holding one unique word, presses the Search pane's
 /// Replace All on it and prints what the pane lists before and after the rewrite.

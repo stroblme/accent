@@ -277,6 +277,17 @@ fn gutters(
     // The diagnostic gutter and the messages at the ends of the lines. A note's own diagnostics
     // are hints, which draw neither, so it keeps a clean margin.
     view.set_show_line_marks(!flavour.is_note());
+    // GtkSourceView's own renderer for them, which the call above makes: its icons go beside the
+    // line's first row, as the numbers and the chevrons do, rather than in the middle of a cell
+    // that also holds the blank a comparison pads the line with.
+    let gutter = sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left);
+    let mut child = gutter.first_child();
+    while let Some(widget) = child {
+        if let Some(icons) = widget.downcast_ref::<sourceview5::GutterRendererPixbuf>() {
+            icons.set_alignment_mode(sourceview5::GutterRendererAlignmentMode::First);
+        }
+        child = widget.next_sibling();
+    }
     let annotations = sourceview5::AnnotationProvider::new();
     view.annotations().add_provider(&annotations);
     // Outside the change bars, next to the text: a chevron is about the block it opens.

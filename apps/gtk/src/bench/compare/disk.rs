@@ -702,13 +702,14 @@ fn top(view: &gtk::TextView) -> String {
 /// hides them all again, the one opened by hand too, the line at the top staying where it was
 /// in every frame painted meanwhile (`away=0/…`, see [`painted`]). Then with the caret on a change
 /// two thirds down the view, under a hidden run, where the caret's line stays instead, in every
-/// frame but for the padding above it settling (`caret … caret="line 220"@361->"line 220"@361
-/// strayed=20`, the most it was off in a frame painted meanwhile), and the divider between
-/// the columns dragged, the line at the top staying (`editor resize`, see [`bench_resize`]). Then
-/// at the start of the file, where the first run opens downwards from the top of the view and
-/// collapses again under it (`start on … top="line 17 "@24->"line 1 w"@24`), the blobs' toggle
-/// and divider, and last the two blobs read again three lines longer at the top, as the Git pane's
-/// refresh reads them (`reread`). Writes the note, so point it at a scratch vault.
+/// frame (`caret … caret="line 220"@361->"line 220"@361 strayed=0`, the most it was off in a
+/// frame painted meanwhile; 20 while it was held by its row, the padding above it settling),
+/// and the divider between the columns dragged, the line at the top staying (`editor resize`,
+/// see [`bench_resize`]). Then at the start of the file, where the first run opens downwards
+/// from the top of the view and collapses again under it
+/// (`start on … top="line 17 "@24->"line 1 w"@24`), the blobs' toggle and divider, and last the
+/// two blobs read again three lines longer at the top, as the Git pane's refresh reads them
+/// (`reread`). Writes the note, so point it at a scratch vault.
 pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1165,16 +1166,19 @@ pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
 /// and, for `map`, the minimap, switched on for that round, for `build-aux/xtest.py :N`:
 /// `wheel` `"move <x> <y>; focus; scroll -3"`, `page` `"move <x> <y>; focus; down; up; key
 /// Page_Down"` (a click first, Page Down starting from the caret, which the opening put on the
-/// first hunk), `bar` and `map` `"move <x> <y>; sleep 0.1; down; move <x> <y+100>; up"` and `end`
-/// `"move <x> <y>; focus; key ctrl+End"`. Each prints whether the comparison still kept its view
-/// when the scroll came (`kept=true`, the case this is about); where the input left the scroll and
-/// the line at the top of the editor's column, by where its text starts (`asked`, after a key once
-/// GTK has laid out the lines it scrolls to, which is where Ctrl+End scrolls); the same once the
-/// comparison has settled (`got`); and whether that is the line the drill's own scroll ended on,
-/// the first hunk's (`back`). The claim is `back=false` and `got` the line `asked` for the
-/// reader's: the line the input left at the top is held there until the rows are laid. Animations
-/// are off, so a key scrolls at once. Waits ten seconds for each. Writes the note, so point it at
-/// a scratch vault.
+/// first hunk), `bar` and `map` `"move <x> <y>; sleep 0.1; down; move <x> <y+100>; up"`, and `end`
+/// and `end_animated` `"move <x> <y>; focus; key ctrl+End"`. Each prints whether the comparison
+/// still kept its view when the scroll came (`kept=true`, the case this is about); where the input
+/// left the scroll and the line at the top of the editor's column, by where its text starts
+/// (`asked`, after a key once GTK has laid out the lines it scrolls to, which is where Ctrl+End
+/// scrolls); the same once the comparison has settled (`got`); and whether that is the line the
+/// drill's own scroll ended on, the first hunk's (`back`). The claim is `back=false` and `got` the
+/// line `asked` for the reader's: the line the input left at the top is held there until the rows
+/// are laid. Ctrl+End holds the caret's line instead, so the `end` rounds print whether the caret
+/// is on screen once settled (`caret_shown=true` the claim, the view at the end). Animations are
+/// off, so a key scrolls at once, but in `end_animated`, where GTK animates the scroll to where it
+/// estimates the caret is. Waits ten seconds for each. Writes the note, so point it at a scratch
+/// vault.
 pub(in crate::bench) fn bench_compare_reader(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1198,13 +1202,22 @@ pub(in crate::bench) fn bench_compare_reader(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         }
         tab.set_text(&text(true));
-        // A page key's scroll made at once rather than over the frames after it.
-        if let Some(settings) = gtk::Settings::default() {
-            settings.set_gtk_enable_animations(false);
-        }
         // Where the comparison ends up when only its own scrolls move it: the drill's round.
         let mut opens = None;
-        for what in ["drill", "wheel", "page", "bar", "map", "end"] {
+        for what in [
+            "drill",
+            "wheel",
+            "page",
+            "bar",
+            "map",
+            "end",
+            "end_animated",
+        ] {
+            // A key's scroll made at once rather than over the frames after it, but in the round
+            // that has GTK animate it.
+            if let Some(settings) = gtk::Settings::default() {
+                settings.set_gtk_enable_animations(what == "end_animated");
+            }
             tab.leave_compare();
             tab.set_minimap(what == "map");
             if let Some(adj) = tab.view.vadjustment() {
@@ -1352,12 +1365,18 @@ async fn reader(
     let Some((value, at)) = asked.take() else {
         return ("input=none".to_string(), String::new());
     };
-    let said = format!(
+    let mut said = format!(
         "kept={} asked={value}/{at} got={}/{}",
         kept.get().unwrap_or(false),
         adj.value(),
         text_top(&view)
     );
+    if what.starts_with("end") {
+        let caret = view.iter_location(&tab.buffer.iter_at_mark(&tab.buffer.get_insert()));
+        let seen = view.visible_rect();
+        let shown = caret.y() >= seen.y() && caret.y() + caret.height() <= seen.y() + seen.height();
+        said.push_str(&format!(" caret_shown={shown}"));
+    }
     (said, text_top(&view))
 }
 

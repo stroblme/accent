@@ -9,8 +9,7 @@ use crate::{Error, Result};
 use pdfium_render::prelude::*;
 
 use super::ink::{
-    Drawn, Extra, Seg, catmull_rom, cut, flatten, points_of, polyline, segments_of, thin,
-    transformed,
+    Drawn, Seg, apply, catmull_rom, cut, flatten, points_of, segments_of, thin, transformed,
 };
 use super::text::{line_top, same_quads, selection_quads};
 use super::{
@@ -246,7 +245,7 @@ impl PdfDoc {
         }
         let _guard = lock();
         let mut p = self.page(page)?;
-        self.put_ink(&mut p, &segs, style, &Extra::default())
+        self.put_ink(&mut p, &segs, style)
     }
 
     /// Draw a line, a rectangle or a circle as an `/Ink` annotation, exactly as the pen draws.
@@ -259,19 +258,12 @@ impl PdfDoc {
     pub fn add_shape(&mut self, page: usize, shape: Shape, style: InkStyle) -> Result<Rect> {
         let _guard = lock();
         let mut p = self.page(page)?;
-        self.put_ink(&mut p, &segments_of(shape), style, &Extra::default())
+        self.put_ink(&mut p, &segments_of(shape), style)
     }
 
-    /// The tail every ink writer shares: the path, then the annotation around it with what
-    /// `extra` puts back, and the box the two of them cover. The caller holds the lock, and
-    /// `segs` starts with a `Move`.
-    fn put_ink(
-        &self,
-        p: &mut PdfPage<'_>,
-        segs: &[Seg],
-        style: InkStyle,
-        extra: &Extra,
-    ) -> Result<Rect> {
+    /// The tail every ink writer shares: the path, then the annotation around it, and the box the
+    /// two of them cover. The caller holds the lock, and `segs` starts with a `Move`.
+    fn put_ink(&self, p: &mut PdfPage<'_>, segs: &[Seg], style: InkStyle) -> Result<Rect> {
         let InkStyle {
             width,
             rgba,
@@ -342,16 +334,6 @@ impl PdfDoc {
             .map_err(refused("ink object"))?;
         ink.set_is_printed(true)
             .map_err(refused("ink print flag"))?;
-        if let Some(contents) = &extra.contents {
-            ink.set_contents(contents).map_err(refused("ink note"))?;
-        }
-        if let Some(author) = &extra.author {
-            ink.set_creator(author).map_err(refused("ink author"))?;
-        }
-        if !extra.ink_list.is_empty() {
-            let last = p.annotations().len().saturating_sub(1);
-            add_ink_list(p, last, height, &extra.ink_list)?;
-        }
         Ok(bounds)
     }
 
@@ -361,10 +343,11 @@ impl PdfDoc {
         Ok(self.page(page)?.annotations().len())
     }
 
-    /// Take one `/Ink` annotation off a page by its index in `/Annots`, keeping what it drew so
-    /// [`PdfDoc::redraw_ink`] can put it back — which is all an erase is, and all its undo is.
-    /// The box it left comes back with it. Any other kind of annotation is refused, so an index
-    /// that has gone stale cannot take a link or a highlight.
+    /// Take one `/Ink` annotation off a page by its index in `/Annots` — which is all an erase is,
+    /// and all its undo is — and say what box it left. One of ours is deleted, what it drew kept
+    /// for [`PdfDoc::redraw_ink`]; another editor's is hidden where it is, for
+    /// [`PdfDoc::show_ink`] to show again as it was (see [`Drawn`]). Any other kind of
+    /// annotation is refused, so an index that has gone stale cannot take a link or a highlight.
     pub fn take_ink(&mut self, page: usize, index: usize) -> Result<(Drawn, Rect)> {
         let _guard = lock();
         let mut p = self.page(page)?;
@@ -372,12 +355,30 @@ impl PdfDoc {
         take(&mut p, page, index)
     }
 
-    /// Draw a stroke [`PdfDoc::take_ink`] took off again, at the end of the page's `/Annots`,
-    /// and say what box it covers.
+    /// Draw one of our strokes [`PdfDoc::take_ink`] deleted again, at the end of the page's
+    /// `/Annots`, and say what box it covers.
     pub fn redraw_ink(&mut self, page: usize, drawn: &Drawn) -> Result<Rect> {
         let _guard = lock();
         let mut p = self.page(page)?;
-        self.put_ink(&mut p, &drawn.segs, drawn.style, &drawn.extra)
+        self.put_ink(&mut p, &drawn.segs, drawn.style)
+    }
+
+    /// Show the stroke [`PdfDoc::take_ink`] hid at `index` again, as it was, and say what box it
+    /// covers.
+    pub fn show_ink(&mut self, page: usize, index: usize) -> Result<Rect> {
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        let height = p.height().value;
+        let mut a = annotation(&p, page, index)?;
+        if a.annotation_type() != PdfPageAnnotationType::Ink {
+            return Err(not_drawn(page, index));
+        }
+        a.set_is_hidden(false).map_err(refused("show ink"))?;
+        Ok(Rect::from_pdf(
+            a.bounds().map_err(refused("ink bounds"))?,
+            height,
+        ))
     }
 
     /// Every `/Ink` annotation on a page with the points of its drawn path, for the eraser to
@@ -392,40 +393,33 @@ impl PdfDoc {
 
     /// Every `/Ink` annotation on a page, flattened, with its box and style: what the Adjust tool
     /// takes hold of. Curves are sampled, so a circle's rim answers to the pointer and not the
-    /// control polygon around it.
+    /// control polygon around it. A hidden one, which an erase of another editor's stroke
+    /// leaves, is not there.
     ///
-    /// Another editor's stroke that its appearance stream draws in a space of its own, or in
-    /// several paths, is found by its `/InkList` instead, which is in the page's own points and
-    /// holds every stroke; the appearance stream's `/Matrix` and `/BBox`, which would place what
-    /// it draws, are not to be had through pdfium.
+    /// Another editor's stroke is found by its `/InkList`, which is in the page's own points and
+    /// holds every stroke, rather than by what its appearance stream draws: that may be in a
+    /// space of its own, whose `/Matrix` and `/BBox` pdfium does not hand out, and is once Adjust
+    /// has moved it (`transform_ink`).
     ///
     // ponytail: one polyline through every stroke of the `/InkList`, so the gap between two
     // strokes answers to the pointer too, as `flatten` joins two sub-paths.
     pub fn inks(&self, page: usize) -> Result<Vec<InkShape>> {
         let _guard = lock();
         let p = self.page(page)?;
-        let height = p.height().value;
         Ok(p.annotations()
             .iter()
             .enumerate()
             .filter_map(|(index, a)| {
-                let (segs, style) = read_ink(&a, height)?;
-                let bounds = Rect::from_pdf(a.bounds().ok()?, height);
-                let points = flatten(&segs);
-                let cuttable = cuttable(&a, &segs, &points, bounds);
-                let points = match cuttable {
-                    true => points,
-                    false => ink_list(&p, index, height).concat(),
-                };
+                let read = read(&p, &a, index)?;
                 Some(InkShape {
                     index,
-                    cuttable,
-                    points: match points.is_empty() {
-                        true => flatten(&segs),
-                        false => points,
+                    cuttable: read.cuttable,
+                    points: match read.strokes.is_empty() {
+                        true => flatten(&read.segs),
+                        false => read.strokes.concat(),
                     },
-                    bounds,
-                    style,
+                    bounds: read.bounds,
+                    style: read.style,
                 })
             })
             .collect())
@@ -433,9 +427,10 @@ impl PdfDoc {
 
     /// Cut one `/Ink` annotation by the pointer's path from `from` to `to`: take away whatever of
     /// it lies within `radius` of that path — measured to the stroke's painted edge, so nothing of
-    /// it is left under the eraser — and write each run that is left as an `/Ink` of its own at
+    /// it is left under the eraser — and write each run that is left as an `/Ink` of our own at
     /// the end of `/Annots`, in the same colour, width and opacity, straight between the
-    /// stroke's flattened points. The original goes.
+    /// stroke's flattened points, or another editor's `/InkList` points. The original is taken
+    /// as [`PdfDoc::take_ink`] takes it.
     ///
     /// `None`, and nothing touched, when the path came nowhere near it or it is not
     /// [`InkShape::cuttable`].
@@ -455,63 +450,165 @@ impl PdfDoc {
         let _guard = lock();
         let mut p = self.page(page)?;
         p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
-        let height = p.height().value;
-        let runs = {
-            let a = p
-                .annotations()
-                .get(index as PdfPageAnnotationIndex)
-                .map_err(|e| Error::Pdf(format!("annotation {index} of page {page}: {e:?}")))?;
-            let (segs, style) = read_ink(&a, height).ok_or_else(|| {
-                Error::Pdf(format!(
-                    "annotation {index} of page {page} is not a drawn path"
-                ))
-            })?;
-            let bounds = Rect::from_pdf(a.bounds().map_err(refused("ink bounds"))?, height);
-            let points = flatten(&segs);
-            if !cuttable(&a, &segs, &points, bounds) {
+        let (strokes, reach) = {
+            let read = read(&p, &annotation(&p, page, index)?, index)
+                .ok_or_else(|| not_drawn(page, index))?;
+            if !read.cuttable {
                 return Ok(None);
             }
-            match cut(&points, from, to, radius + style.width / 2.0) {
-                Some(runs) => runs,
-                None => return Ok(None),
+            let reach = radius + read.style.width / 2.0;
+            match read.ours {
+                true => (vec![flatten(&read.segs)], reach),
+                false => (read.strokes, reach),
             }
         };
+        // A stroke of an `/InkList` the path missed is left whole, as a piece of its own.
+        let mut touched = false;
+        let mut runs = Vec::new();
+        for stroke in strokes {
+            match cut(&stroke, from, to, reach) {
+                Some(left) => {
+                    touched = true;
+                    runs.extend(left);
+                }
+                None => runs.push(stroke),
+            }
+        }
+        if !touched {
+            return Ok(None);
+        }
         let (was, mut area) = take(&mut p, page, index)?;
         let mut left = Vec::with_capacity(runs.len());
         for run in runs {
             let piece = was.along(&run);
-            area = area.union(self.put_ink(&mut p, &piece.segs, piece.style, &piece.extra)?);
+            area = area.union(self.put_ink(&mut p, &piece.segs, piece.style)?);
             left.push(piece);
         }
         Ok(Some(Cut { was, left, area }))
     }
 
-    /// Move or resize one `/Ink` annotation by an affine map over its page. The annotation is
-    /// deleted and drawn again, so it comes back at the end of `/Annots`.
+    /// Move or resize one `/Ink` annotation by an affine map over its page, and say what box the
+    /// move covers — where the stroke was and where it went — and whether it kept its place in
+    /// `/Annots`.
     ///
-    // ponytail: deleted and re-created rather than transformed in place, because pdfium only
-    // ever grows an appearance stream's `/BBox` when `/Rect` changes: shrinking a box scales
-    // what was drawn into it instead of moving it.
-    /// The box the move covers — where the stroke was and where it went — comes back.
-    pub fn transform_ink(&mut self, page: usize, index: usize, m: Matrix) -> Result<Rect> {
+    /// One of ours is deleted and drawn again along the moved path, at the end of `/Annots`, so
+    /// its line keeps its width. Another editor's keeps its place and all it carries: only its
+    /// `/Rect` moves, which every reader fits its appearance stream into, so the stroke moves and
+    /// scales as a picture would, its line included, and its `/InkList` with it.
+    pub fn transform_ink(&mut self, page: usize, index: usize, m: Matrix) -> Result<(Rect, bool)> {
         let _guard = lock();
         let mut p = self.page(page)?;
         p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
-        let (drawn, was) = take(&mut p, page, index)?;
-        let segs = transformed(&drawn.segs, m);
-        let now = self.put_ink(&mut p, &segs, drawn.style, &drawn.extra.transformed(m))?;
-        Ok(was.union(now))
+        let read =
+            read(&p, &annotation(&p, page, index)?, index).ok_or_else(|| not_drawn(page, index))?;
+        if read.ours {
+            let (drawn, was) = take(&mut p, page, index)?;
+            let now = self.put_ink(&mut p, &transformed(&drawn.segs, m), drawn.style)?;
+            return Ok((was.union(now), false));
+        }
+        let was = read.bounds;
+        let now = Rect::from_corners(
+            apply(m, (was.left, was.top)),
+            apply(m, (was.right, was.bottom)),
+        );
+        let strokes: Vec<Vec<(f32, f32)>> = (read.strokes.iter())
+            .map(|stroke| stroke.iter().map(|&q| apply(m, q)).collect())
+            .collect();
+        place(&p, index, now, &strokes)?;
+        Ok((was.union(now), true))
     }
 }
 
-/// Whether what `read_ink` made of an annotation is all it draws, where it draws it — see
-/// [`InkShape::cuttable`]. The path lying inside `/Rect` is what says its space is the page's:
-/// an appearance stream fitted onto the page from a box of its own reads back in that box.
-fn cuttable(a: &PdfPageAnnotation<'_>, segs: &[Seg], points: &[(f32, f32)], bounds: Rect) -> bool {
-    let one_path = a.objects().len() == 1;
-    let one_stroke = segs.iter().skip(1).all(|s| !matches!(s, Seg::Move(_)));
+/// One `/Ink` annotation as it was read off its page.
+struct Read {
+    /// What its appearance stream draws, every path of it, in the stream's own space; for ours
+    /// that is the page's.
+    segs: Vec<Seg>,
+    /// How its first path is drawn, its width in page points.
+    style: InkStyle,
+    bounds: Rect,
+    /// Its `/InkList`, in top-left page points: where it shows. Empty for ours.
+    strokes: Vec<Vec<(f32, f32)>>,
+    /// One of ours: one path of one stroke inside its `/Rect`, without an `/InkList`, a note or an
+    /// author, which `segs` and `style` are all there is to, so it can be drawn again from them.
+    /// Anything else is another editor's, and only its own dictionary draws it as it was.
+    ours: bool,
+    /// See [`InkShape::cuttable`]: one of ours, or another editor's with an `/InkList` to cut by,
+    /// every path drawn alike.
+    cuttable: bool,
+}
+
+/// The annotation `a`, at `index` of a loaded page, as [`Read`]; `None` for a hidden one, any
+/// other kind of annotation, or one without a path. The caller holds the lock.
+fn read(p: &PdfPage<'_>, a: &PdfPageAnnotation<'_>, index: usize) -> Option<Read> {
+    if a.is_hidden() {
+        return None;
+    }
+    let height = p.height().value;
+    let (segs, mut style) = read_ink(a, height)?;
+    let bounds = Rect::from_pdf(a.bounds().ok()?, height);
+    let strokes = ink_list(p, index, height);
+    let points = flatten(&segs);
     let inside = bounds.grow(1.0);
-    one_path && one_stroke && points.iter().all(|&p| inside.contains(p))
+    let ours = strokes.is_empty()
+        && a.contents().is_none()
+        && a.creator().is_none()
+        && a.objects().len() == 1
+        && segs.iter().skip(1).all(|s| !matches!(s, Seg::Move(_)))
+        && points.iter().all(|&q| inside.contains(q));
+    if !strokes.is_empty() {
+        style.width *= scale(&points, &strokes);
+    }
+    let cuttable = ours || (!strokes.is_empty() && one_style(a));
+    Some(Read {
+        segs,
+        style,
+        bounds,
+        strokes,
+        ours,
+        cuttable,
+    })
+}
+
+/// How many page points a unit of an appearance stream's own space covers: the extent of its
+/// `/InkList`, in page points, over the extent of what the stream draws, the same strokes. 1 for
+/// a stroke drawn in the page's own space; other once Adjust has resized it.
+fn scale(drawn: &[(f32, f32)], strokes: &[Vec<(f32, f32)>]) -> f32 {
+    let reach = |points: &mut dyn Iterator<Item = &(f32, f32)>| {
+        (points.map(|&q| Rect::from_corners(q, q)))
+            .reduce(Rect::union)
+            .map_or(0.0, |r| r.width().hypot(r.height()))
+    };
+    let (drawn, listed) = (
+        reach(&mut drawn.iter()),
+        reach(&mut strokes.iter().flatten()),
+    );
+    match drawn > 0.01 && listed > 0.01 {
+        true => listed / drawn,
+        false => 1.0,
+    }
+}
+
+/// Whether every path an annotation's appearance stream draws is drawn alike, so a piece cut from
+/// it can be drawn as it was.
+fn one_style(a: &PdfPageAnnotation<'_>) -> bool {
+    let mut styles = (a.objects().iter()).map(|o| o.as_path_object().and_then(style_of));
+    let first = styles.next().flatten();
+    first.is_some() && styles.all(|s| s == first)
+}
+
+/// The annotation at `index` of a loaded page.
+fn annotation<'a>(p: &'a PdfPage<'_>, page: usize, index: usize) -> Result<PdfPageAnnotation<'a>> {
+    (p.annotations())
+        .get(index as PdfPageAnnotationIndex)
+        .map_err(|e| Error::Pdf(format!("annotation {index} of page {page}: {e:?}")))
+}
+
+/// The refusal of an annotation that is no ink stroke to take or move.
+fn not_drawn(page: usize, index: usize) -> Error {
+    Error::Pdf(format!(
+        "annotation {index} of page {page} is not a drawn path"
+    ))
 }
 
 /// The strokes of the `/InkList` of the annotation at `index` of a loaded page, in top-left page
@@ -541,91 +638,72 @@ pub(super) fn ink_list(p: &PdfPage<'_>, index: usize, height: f32) -> Vec<Vec<(f
     }
 }
 
-/// Give the annotation at `index` of a loaded page these `/InkList` strokes, in top-left page
-/// points. The caller holds the lock.
-fn add_ink_list(
-    p: &PdfPage<'_>,
-    index: usize,
-    height: f32,
-    strokes: &[Vec<(f32, f32)>],
-) -> Result<()> {
+/// Put the annotation at `index` of a loaded page where `rect` and `strokes` say, in top-left
+/// page points, and change nothing else of it: its `/Rect`, which every reader fits its
+/// appearance stream into, and its `/InkList`, unless it has none. The caller holds the lock.
+///
+/// Raw calls, because pdfium-render wraps no `/InkList`, and its `set_bounds` stamps `/M` too.
+fn place(p: &PdfPage<'_>, index: usize, rect: Rect, strokes: &[Vec<(f32, f32)>]) -> Result<()> {
+    let height = p.height().value;
     let bindings = p.bindings();
     // SAFETY: as in `ink_list`; each buffer outlives its call, and its length is what is passed.
     unsafe {
         let annot = bindings.FPDFPage_GetAnnot(bindings.get_handle_from_page(p), index as c_int);
         if annot.is_null() {
-            return Err(Error::Pdf(format!(
-                "no annotation {index} to give an /InkList"
-            )));
+            return Err(Error::Pdf(format!("no annotation {index} to move")));
         }
-        let added = strokes.iter().all(|stroke| {
-            let points: Vec<FS_POINTF> = (stroke.iter())
-                .map(|&(x, y)| FS_POINTF { x, y: height - y })
-                .collect();
-            bindings.FPDFAnnot_AddInkStroke(annot, points.as_ptr(), points.len() as _) >= 0
-        });
+        let r = rect.to_pdf(height);
+        let r = FS_RECTF {
+            left: r.left().value,
+            top: r.top().value,
+            right: r.right().value,
+            bottom: r.bottom().value,
+        };
+        let placed = bindings.is_true(bindings.FPDFAnnot_SetRect(annot, &r))
+            && (strokes.is_empty() || bindings.is_true(bindings.FPDFAnnot_RemoveInkList(annot)))
+            && strokes.iter().all(|stroke| {
+                let points: Vec<FS_POINTF> = (stroke.iter())
+                    .map(|&(x, y)| FS_POINTF { x, y: height - y })
+                    .collect();
+                bindings.FPDFAnnot_AddInkStroke(annot, points.as_ptr(), points.len() as _) >= 0
+            });
         bindings.FPDFPage_CloseAnnot(annot);
-        match added {
+        match placed {
             true => Ok(()),
-            false => Err(Error::Pdf(
-                "pdfium would not write the /InkList".to_string(),
-            )),
+            false => Err(Error::Pdf(format!(
+                "pdfium would not move annotation {index}"
+            ))),
         }
     }
 }
 
-/// Take the `/Ink` annotation at `index` off a loaded page: what it drew, and the box it left.
-/// Another editor's stroke is kept with its `/InkList`, note and author, and one drawn in a
-/// space of its own, or in several paths, as its `/InkList`'s strokes, which are where it showed
-/// ([`PdfDoc::inks`]). The caller holds the lock.
-///
-// ponytail: such a stroke comes back as straight lines through its `/InkList`, in the colour and
-// width of its first path, rather than as its own appearance stream, which pdfium hands out
-// without the `/Matrix`, `/BBox` and resources that place and paint it; and keys other than the
-// three above (a popup, dates, an `/IT`) do not come back.
+/// Take the `/Ink` annotation at `index` off a loaded page, as [`PdfDoc::take_ink`] does, and
+/// say what box it left. The caller holds the lock.
 fn take(p: &mut PdfPage<'_>, page: usize, index: usize) -> Result<(Drawn, Rect)> {
-    let height = p.height().value;
-    let drawn = {
-        let a = p
-            .annotations()
-            .get(index as PdfPageAnnotationIndex)
-            .map_err(|e| Error::Pdf(format!("annotation {index} of page {page}: {e:?}")))?;
-        let was = a
-            .bounds()
-            .map(|b| Rect::from_pdf(b, height))
-            .unwrap_or(Rect::ZERO);
-        let (segs, style) = read_ink(&a, height).ok_or_else(|| {
-            Error::Pdf(format!(
-                "annotation {index} of page {page} is not a drawn path"
-            ))
-        })?;
-        let ink_list = ink_list(p, index, height);
-        let as_read = cuttable(&a, &segs, &flatten(&segs), was) || ink_list.is_empty();
-        let segs = match as_read {
-            true => segs,
-            false => ink_list
-                .iter()
-                .flat_map(|stroke| polyline(stroke))
-                .collect(),
+    let (drawn, was) = {
+        let read =
+            read(p, &annotation(p, page, index)?, index).ok_or_else(|| not_drawn(page, index))?;
+        let drawn = Drawn {
+            segs: read.segs,
+            style: read.style,
+            hidden: !read.ours,
         };
-        let extra = Extra {
-            ink_list,
-            contents: a.contents(),
-            author: a.creator(),
-        };
-        (Drawn { segs, style, extra }, was)
+        (drawn, read.bounds)
     };
     // Through `annotations_mut` rather than `annotations`: the annotation has to carry the
     // document's lifetime for `delete_annotation` to take it, and the shared accessor hands back
     // one borrowed from `p` instead.
-    let a = p
+    let mut a = p
         .annotations_mut()
         .get(index as PdfPageAnnotationIndex)
         .map_err(|e| Error::Pdf(format!("annotation {index} of page {page}: {e:?}")))?;
-    p.annotations_mut()
-        .delete_annotation(a)
-        .map_err(refused("delete annotation"))?;
-    Ok(drawn)
+    match drawn.hidden {
+        true => a.set_is_hidden(true).map_err(refused("hide ink"))?,
+        false => (p.annotations_mut())
+            .delete_annotation(a)
+            .map_err(refused("delete annotation"))?,
+    }
+    Ok((drawn, was))
 }
 
 /// The colour an annotation is drawn in.
@@ -690,16 +768,23 @@ fn annotation_color(a: &PdfPageAnnotation<'_>) -> Option<PdfColor> {
     a.stroke_color().ok()
 }
 
-/// An `/Ink` annotation's path and style, read back out of its appearance stream; `None` for
-/// any other annotation, or one without a path. pdfium reports a cubic as three consecutive
-/// Bézier points — two controls, then the end.
+/// An `/Ink` annotation's paths and the style of the first, read back out of its appearance
+/// stream; `None` for any other annotation, or one without a path. pdfium reports a cubic as
+/// three consecutive Bézier points — two controls, then the end.
 fn read_ink(a: &PdfPageAnnotation<'_>, height: f32) -> Option<(Vec<Seg>, InkStyle)> {
     if a.annotation_type() != PdfPageAnnotationType::Ink {
         return None;
     }
-    a.objects().iter().find_map(|o| {
-        let path = o.as_path_object()?;
-        let mut segs = Vec::new();
+    let mut segs = Vec::new();
+    let mut style = None;
+    for o in a.objects().iter() {
+        let Some(path) = o.as_path_object() else {
+            continue;
+        };
+        let Some(drawn) = style_of(path) else {
+            continue;
+        };
+        style = style.or(Some(drawn));
         let mut controls = Vec::new();
         for s in path.segments().iter() {
             let p = (s.x().value, height - s.y().value);
@@ -719,16 +804,19 @@ fn read_ink(a: &PdfPageAnnotation<'_>, height: f32) -> Option<(Vec<Seg>, InkStyl
                 segs.push(Seg::Close);
             }
         }
-        // The page-object getters, never the annotation's own: those cast the handle into a
-        // page object once an appearance stream exists (see `annotation_color`).
-        let c = path.stroke_color().ok()?;
-        let style = InkStyle {
-            width: path.stroke_width().ok()?.value,
-            rgba: [c.red(), c.green(), c.blue(), c.alpha()],
-            // ponytail: pdfium-render has no blend-mode getter, and a translucent stroke of ours
-            // is the highlighter, so alpha stands in for `/Multiply`.
-            multiply: c.alpha() < 255,
-        };
-        Some((segs, style))
+    }
+    Some((segs, style?))
+}
+
+/// How a path is drawn. The page-object getters, never the annotation's own: those cast the
+/// handle into a page object once an appearance stream exists (see `annotation_color`).
+fn style_of(path: &PdfPagePathObject<'_>) -> Option<InkStyle> {
+    let c = path.stroke_color().ok()?;
+    Some(InkStyle {
+        width: path.stroke_width().ok()?.value,
+        rgba: [c.red(), c.green(), c.blue(), c.alpha()],
+        // ponytail: pdfium-render has no blend-mode getter, and a translucent stroke of ours is
+        // the highlighter, so alpha stands in for `/Multiply`.
+        multiply: c.alpha() < 255,
     })
 }

@@ -40,9 +40,10 @@ pub(super) enum Keep {
     /// [`Columns::top_line`] and [`Columns::hold_line`].
     Line(usize, usize, i32),
     /// Line `.1` of column `.0`, its text `.2` pixels below the top of the view where GTK draws
-    /// it: the line the reader's scroll left at the top ([`Columns::let_go`]). Held as a
-    /// [`Keep::Line`] is, but by its text, which a blank laid again above it does not move, and
-    /// let go where it is once the rows are laid rather than put back from the grid.
+    /// it: the line the reader's scroll left at the top ([`Columns::let_go`]), or the caret's
+    /// ([`Columns::caret_line`]). Held as a [`Keep::Line`] is, but by its text, which a blank laid
+    /// again above it does not move, and let go where it is once the rows are laid rather than
+    /// put back from the grid.
     Read(usize, usize, i32),
 }
 
@@ -184,11 +185,11 @@ pub(super) fn reaching<T>(
 /// The reader scrolling anywhere in `root` — a wheel turn, a page key, Ctrl+Home or Ctrl+End, a
 /// press on a scrollbar or the minimap — ends whatever [`Columns::keep`] holds, which would
 /// otherwise take the scroll back once the rows are laid, and has the line it leaves at the top
-/// held instead ([`Columns::let_go`]): after the wheel turn, after the key once GTK's first
-/// layout of the lines has made the scroll a key only queues while they are not laid out, and
-/// once the press is let go. Heard in the capture phase, ahead of the scroll the input makes; the
-/// comparison's own scrolls set the adjustment and pass none of these. The root is the
-/// comparison's own, so the controllers go with it.
+/// held instead, the caret's for Ctrl+Home and Ctrl+End ([`Columns::let_go`]): after the wheel
+/// turn, after the key once GTK's first layout of the lines has made the scroll a key only queues
+/// while they are not laid out, and once the press is let go. Heard in the capture phase, ahead
+/// of the scroll the input makes; the comparison's own scrolls set the adjustment and pass none of
+/// these. The root is the comparison's own, so the controllers go with it.
 fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
     let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -199,7 +200,7 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
             .current_event_state()
             .contains(gdk::ModifierType::CONTROL_MASK);
         if let Some(c) = w.upgrade().filter(|_| !zoom) {
-            c.let_go(Some(glib::Priority::HIGH));
+            c.let_go(Some(glib::Priority::HIGH), false);
         }
         glib::Propagation::Proceed
     });
@@ -209,7 +210,10 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
     let w = columns.clone();
     keys.connect_key_pressed(move |_, key, _, state| {
         if let Some(c) = w.upgrade().filter(|_| scrolls(key, state)) {
-            c.let_go(Some(glib::Priority::from(gtk::PRIORITY_RESIZE as i32)));
+            let resize = glib::Priority::from(gtk::PRIORITY_RESIZE as i32);
+            // Control is down for Ctrl+Home or Ctrl+End alone, which go to the caret.
+            let caret = state.contains(gdk::ModifierType::CONTROL_MASK);
+            c.let_go(Some(resize), caret);
         }
         glib::Propagation::Proceed
     });
@@ -230,7 +234,7 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
             .widget()
             .and_then(|w| w.pick(x, y, gtk::PickFlags::DEFAULT));
         if let Some(c) = w.upgrade().filter(|_| picked.is_some_and(bar)) {
-            drag.set(c.let_go(None));
+            drag.set(c.let_go(None, false));
         }
     });
     root.add_controller(press);
@@ -242,7 +246,7 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
             && dragged.take()
             && let Some(c) = w.upgrade()
         {
-            c.hold_after(glib::Priority::HIGH);
+            c.hold_after(glib::Priority::HIGH, false);
         }
         glib::Propagation::Proceed
     });
@@ -429,23 +433,24 @@ impl Columns {
         self.keep.set(Some(Keep::Scroll(value)));
     }
 
-    /// The editor's caret line, and how far below the top of the view its row starts, while that
-    /// row starts on screen.
-    pub(super) fn caret_line(&self) -> Option<Keep> {
+    /// The editor's caret line, and how far below the top of the view its text starts, while
+    /// that is on screen, or with `edge` at the edge of the view it is beyond, where a scroll to it
+    /// is headed: held by its text, as the reader's line is ([`Keep::Read`]), which the padding
+    /// laid again above it does not move.
+    pub(super) fn caret_line(&self, edge: bool) -> Option<Keep> {
         let mine = self.editable?;
-        let buffer = &self.panes[mine].buffer;
-        let n = buffer.iter_at_mark(&buffer.get_insert()).line() as usize + 1;
-        let (rows, grid) = (self.rows.borrow(), self.grid.borrow());
-        let row = rows
-            .lines
-            .get(mine)?
-            .iter()
-            .position(|&line| line == Some(n))?;
-        let seen = self.panes[0].view.visible_rect();
-        let at = grid.tops.get(row)? - seen.y();
+        let (buffer, view) = (&self.panes[mine].buffer, &self.panes[mine].view);
+        let mut line = buffer.iter_at_mark(&buffer.get_insert());
+        line.set_line_offset(0);
+        let (seen, text) = (view.visible_rect(), view.iter_location(&line));
+        let at = match edge {
+            true => (text.y() - seen.y()).clamp(0, (seen.height() - text.height()).max(0)),
+            false => text.y() - seen.y(),
+        };
+        let n = line.line() as usize + 1;
         (0..seen.height())
             .contains(&at)
-            .then_some(Keep::Line(mine, n, at))
+            .then_some(Keep::Read(mine, n, at))
     }
 
     /// A new width rewraps every line, and each view keeps its own top line in place as GTK lays
@@ -519,24 +524,32 @@ impl Columns {
 
     /// The reader's input has ended what the view was kept at, if anything (`let_go_on_input`);
     /// and once the input has made its scroll, at `after`, the line it left at the top is held
-    /// instead until the rows are laid: left to GTK, each column keeps its own top line as it
-    /// lays out the lines above, all on the one scroll they share. Nothing kept, nothing to hold:
-    /// the rows were laid already. Whether something was kept.
-    fn let_go(&self, after: Option<glib::Priority>) -> bool {
+    /// instead until the rows are laid, or with `caret` the caret's: left to GTK, each column
+    /// keeps its own top line as it lays out the lines above, all on the one scroll they share.
+    /// Nothing kept, nothing to hold: the rows were laid already. Whether something was kept.
+    fn let_go(&self, after: Option<glib::Priority>, caret: bool) -> bool {
         let kept = self.keep.take().is_some();
         if let (true, Some(after)) = (kept, after) {
-            self.hold_after(after);
+            self.hold_after(after, caret);
         }
         kept
     }
 
-    /// Hold the line at the top of the view, at `after`, until the rows are laid: see
-    /// [`Columns::let_go`].
-    fn hold_after(&self, after: glib::Priority) {
+    /// Hold the line at the top of the view, or with `caret` the caret's, at `after`, until the
+    /// rows are laid: see [`Columns::let_go`]. The caret's line is held where Ctrl+Home or
+    /// Ctrl+End scrolls it to, and put there at once: held by the top line, the lines laid out
+    /// above it meanwhile left the caret below the view, and a scroll GTK animates to where it
+    /// estimated the caret was ended a few hundred lines short of the end.
+    fn hold_after(&self, after: glib::Priority, caret: bool) {
         let w = self.weak.clone();
         glib::idle_add_local_full(after, move || {
             if let Some(c) = w.upgrade() {
-                c.hold(Some(c.line_on_top(c.editable.unwrap_or(c.panes.len() - 1))));
+                let top = || c.line_on_top(c.editable.unwrap_or(c.panes.len() - 1));
+                let caret = caret.then(|| c.caret_line(true)).flatten();
+                c.hold(Some(caret.unwrap_or_else(top)));
+                if caret.is_some() {
+                    c.hold_kept();
+                }
                 c.settling.set(SETTLE);
                 c.schedule_relayout();
             }
@@ -923,18 +936,26 @@ impl Columns {
         // GTK had not laid some line out yet: ask again once it has. So too while the view waits
         // to be put somewhere for a pass that moved nothing: padding GTK has not laid out yet is
         // not in where the scroll puts a line, and each view keeps its top line where it was as it
-        // catches up.
+        // catches up. At idle priority, below GTK's own layout idles: a pass measures every line
+        // GTK has not reached in a layout of its own, 10 s of them once 120,000 rows were shown,
+        // and asked again on a timer it left GTK only the moments between passes to catch up in,
+        // the main loop held for minutes.
         let unsettled = estimated.get() || (self.keep.get().is_some() && repadded);
         let exhausted = self.settling.get() == 0;
         if unsettled && !exhausted && self.pending.borrow().is_none() {
             self.settling.set(self.settling.get() - 1);
             let weak = self.weak.clone();
-            let id = glib::timeout_add_local_once(SETTLE_AFTER, move || {
-                if let Some(c) = weak.upgrade() {
-                    *c.pending.borrow_mut() = None;
-                    c.relayout();
-                }
-            });
+            let id = glib::timeout_add_local_full(
+                SETTLE_AFTER,
+                glib::Priority::DEFAULT_IDLE,
+                move || {
+                    if let Some(c) = weak.upgrade() {
+                        *c.pending.borrow_mut() = None;
+                        c.relayout();
+                    }
+                    glib::ControlFlow::Break
+                },
+            );
             *self.pending.borrow_mut() = Some(id);
         }
         // Once every row is measured and laid as the grid has it, or GTK has been asked as often

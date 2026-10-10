@@ -8,7 +8,8 @@ use super::*;
 /// goal's last line>`, `none` where it shows no goals, and how long the answer took. With a second
 /// place it then hides the sidebar, moves the caret there, which asks nothing while the pane is
 /// out of sight, and shows the sidebar again, printing what the pane asks for as it comes back
-/// (`bench goals shown …`).
+/// (`bench goals shown …`). Meanwhile it prints the lines the gutter marks as still being checked
+/// each time they change, 1-based, and quits once the check is done ([`watch_checking`]).
 pub(super) fn bench_goals(app: &Rc<App>, arg: &str) {
     let (rel, places) = arg.split_once(':').unwrap_or((arg, ""));
     let places: Option<Vec<accent_api::Pos>> = places
@@ -27,6 +28,7 @@ pub(super) fn bench_goals(app: &Rc<App>, arg: &str) {
         return bench_quit(app);
     };
     app.open_path(rel);
+    let watching = glib::spawn_future_local(watch_checking(app.clone()));
     let app = app.clone();
     glib::spawn_future_local(async move {
         let sidebar = app.sidebar.get().expect("a sidebar");
@@ -56,8 +58,38 @@ pub(super) fn bench_goals(app: &Rc<App>, arg: &str) {
             app.sidebar_column.set_visible(true);
             say("goals shown", goals_after(sidebar, goals).await.as_deref());
         }
+        let _ = watching.await;
         bench_quit(&app);
     });
+}
+
+/// `bench checking <ms> 6-9,11,13-14` each time the active tab's gutter marks other lines as
+/// still being checked, and `bench checking <ms> done` once a check it saw is over, waited for up
+/// to a minute.
+async fn watch_checking(app: Rc<App>) {
+    let started = Instant::now();
+    let mut shown = Vec::new();
+    while started.elapsed() < Duration::from_secs(60) {
+        glib::timeout_future(Duration::from_millis(20)).await;
+        let lines = app.active().map(|tab| tab.checking()).unwrap_or_default();
+        if lines == shown {
+            continue;
+        }
+        let ms = ms_since(started);
+        if lines.is_empty() {
+            println!("bench checking {ms:.0} done");
+            return;
+        }
+        let ranges: Vec<String> = lines
+            .iter()
+            .map(|r| match r.len() {
+                1 => format!("{}", r.end),
+                _ => format!("{}-{}", r.start + 1, r.end),
+            })
+            .collect();
+        println!("bench checking {ms:.0} {}", ranges.join(","));
+        shown = lines;
+    }
 }
 
 /// The goals the pane shows once they are other than `before`, waited for up to a minute.

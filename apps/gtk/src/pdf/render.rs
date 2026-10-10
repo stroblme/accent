@@ -325,8 +325,8 @@ fn render_loop(
                         .ok_or_else(|| anyhow!("stroke {id} is gone"))
                         .and_then(|index| Ok((index, doc.transform_ink(page, index, matrix)?)));
                     match moved {
-                        Ok((index, area)) => {
-                            ink.moved(page, index, matrix);
+                        Ok((index, (area, stayed))) => {
+                            ink.moved(page, index, matrix, stayed);
                             ink.dirty = true;
                             send(view, Reply::PageChanged(page, area));
                         }

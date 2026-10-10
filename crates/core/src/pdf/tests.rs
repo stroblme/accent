@@ -84,24 +84,30 @@ fn pdf_of(objs: &[String]) -> Vec<u8> {
 }
 
 /// One 200 x 100 pt page carrying an `/Ink` the way another editor may write one: two strokes,
-/// with a note and an author, whose appearance stream draws them as two paths — a line from
-/// (10, 10) to (40, 40), and one from (15, 40) to (45, 10) — in a box of its own, `[0 0 50 50]`,
-/// which the viewer fits onto the annotation's `/Rect` at (100, 20). Read back, the lines are in
-/// that box's space and nowhere near where they show; the `/InkList` has them where they do.
-fn foreign_ink_pdf() -> Vec<u8> {
-    let stream = "1 0 0 RG 2 w 10 10 m 40 40 l S 15 40 m 45 10 l S";
+/// with a note, an author, a date, an intent and a popup, whose appearance stream draws them as
+/// two paths, red and then blue (both red without `two_colours`) — a line from (10, 10) to
+/// (40, 40), and one from (15, 40) to (45, 10) — in a space of its own: its `/BBox` is
+/// `[0 0 50 50]` and its `/Matrix` turns it a quarter round, and the viewer fits that onto the
+/// annotation's `/Rect` at (100, 20). Read back, the lines are in that space and nowhere near
+/// where they show; the `/InkList` has them where they do, bottom-left page origin: the red one
+/// from (140, 30) to (110, 60), the blue one from (110, 35) to (140, 65).
+fn foreign_ink_pdf(two_colours: bool) -> Vec<u8> {
+    let blue = if two_colours { "0 0 1 RG " } else { "" };
+    let stream = format!("1 0 0 RG 2 w 10 10 m 40 40 l S {blue}15 40 m 45 10 l S");
     pdf_of(&[
         "<</Type/Catalog/Pages 2 0 R>>".to_string(),
         "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
-        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Annots[4 0 R]>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Annots[4 0 R 6 0 R]>>".to_string(),
         "<</Type/Annot/Subtype/Ink/Rect[100 20 150 70]/C[1 0 0]\
-         /InkList[[110 30 140 60][115 60 145 30]]/Contents(two lines)/T(Ada)\
-         /AP<</N 5 0 R>>/F 4>>"
+         /InkList[[140 30 110 60][110 35 140 65]]/Contents(two lines)/T(Ada)\
+         /M(D:20260930120000Z)/IT/InkHighlight/Popup 6 0 R/AP<</N 5 0 R>>/F 4>>"
             .to_string(),
         format!(
-            "<</Type/XObject/Subtype/Form/BBox[0 0 50 50]/Length {}>>stream\n{stream}\nendstream",
+            "<</Type/XObject/Subtype/Form/BBox[0 0 50 50]/Matrix[0 1 -1 0 50 0]\
+             /Length {}>>stream\n{stream}\nendstream",
             stream.len()
         ),
+        "<</Type/Annot/Subtype/Popup/Rect[150 50 200 100]/Parent 4 0 R>>".to_string(),
     ])
 }
 
@@ -830,11 +836,11 @@ fn a_cut_line_comes_back_in_two() {
 /// which is in the page's own points, and not where its appearance stream draws it.
 #[test]
 fn ink_drawn_in_its_own_space_is_hit_where_it_shows() {
-    let Some((_dir, doc)) = open_pdf(&foreign_ink_pdf()) else {
+    let Some((_dir, doc)) = open_pdf(&foreign_ink_pdf(true)) else {
         return;
     };
     let inks = doc.inks(0).unwrap();
-    // The `/InkList` runs from (110, 30) to (140, 60), bottom-left page origin.
+    // Across both lines where they show, and above them.
     assert!(
         swept(&inks[0].points, (100.0, 55.0), (150.0, 55.0), 2.0),
         "{:?}",
@@ -843,64 +849,169 @@ fn ink_drawn_in_its_own_space_is_hit_where_it_shows() {
     assert!(!swept(&inks[0].points, (0.0, 75.0), (60.0, 75.0), 4.0));
 }
 
-/// Another editor's stroke taken off — an erase — and drawn again — its undo — comes back with
-/// its `/InkList`, its note and its author, every stroke of it where it showed, and so it stays
-/// through a save.
+/// The bytes of object `num` in a saved file: its dictionary, and its stream if it has one.
+fn object(file: &[u8], num: u32) -> &[u8] {
+    let head = format!("\n{num} 0 obj");
+    let start = (file.windows(head.len()))
+        .position(|w| w == head.as_bytes())
+        .unwrap_or_else(|| panic!("no object {num}"));
+    let end = start
+        + file[start..]
+            .windows(6)
+            .position(|w| w == b"endobj")
+            .unwrap();
+    &file[start..end]
+}
+
+/// Which of red, green and blue stands out at a point of a page rendered at 4 px per point,
+/// top-left page origin, if any does: none on the white paper.
+fn hue_at(page: &RgbaImage, (x, y): (f32, f32)) -> Option<usize> {
+    let at = ((y * 4.0) as usize * page.width as usize + (x * 4.0) as usize) * 4;
+    let px = &page.data[at..at + 3];
+    let low = px.iter().min().copied().unwrap_or(0);
+    (0..3).find(|&c| px[c] > low.saturating_add(100))
+}
+
+/// A quarter of the way along each line of `foreign_ink_pdf` where it shows, top-left page
+/// origin, with the channel it is drawn in: red, then blue. Clear of where the two cross.
+const MARKS: [((f32, f32), usize); 2] = [((132.5, 62.5), 0), ((117.5, 57.5), 2)];
+
+/// Another editor's stroke erased is hidden where it is, and Undo shows it again as it was: its
+/// dictionary — popup, date and intent included — its appearance stream with its `/Matrix` and
+/// `/BBox`, and its popup are the bytes they were, and the page is drawn as it was. Redo hides
+/// it again.
 #[test]
-fn a_foreign_stroke_taken_off_and_drawn_again_comes_back_whole() {
-    let Some((dir, mut doc)) = open_pdf(&foreign_ink_pdf()) else {
+fn a_foreign_stroke_erased_and_undone_is_the_same_stroke() {
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(true)) else {
         return;
     };
-    let (drawn, _) = doc.take_ink(0, 0).unwrap();
-    assert_eq!(doc.annotation_count(0).unwrap(), 0);
-    doc.redraw_ink(0, &drawn).unwrap();
-    let doc = reopen(&dir, &doc);
-    {
-        let p = doc.page(0).unwrap();
-        let a = p.annotations().get(0).unwrap();
-        assert_eq!(a.contents().as_deref(), Some("two lines"));
-        assert_eq!(a.creator().as_deref(), Some("Ada"));
-        let strokes = super::annot::ink_list(&p, 0, 100.0);
-        assert_eq!(
-            strokes,
-            [
-                vec![(110.0, 70.0), (140.0, 40.0)],
-                vec![(115.0, 40.0), (145.0, 70.0)]
-            ]
-        );
+    let saved = doc.save().unwrap();
+    let drawn = doc.render_page(0, 4.0, Theme::Plain).unwrap();
+    assert!(
+        MARKS
+            .iter()
+            .all(|&(at, hue)| hue_at(&drawn, at) == Some(hue))
+    );
+    let mut ink = Ink::default();
+    let (id, shape) = ink.named(&doc, 0).remove(0);
+    assert!(!shape.cuttable, "its paths differ in colour");
+    let at = ink.index_of(0, id).unwrap();
+    let (was, _) = doc.take_ink(0, at).unwrap();
+    ink.erased(0, at, was, Vec::new(), false);
+    assert!(doc.inks(0).unwrap().is_empty());
+    assert_eq!(doc.annotation_count(0).unwrap(), 2, "hidden, not deleted");
+    let erased = doc.render_page(0, 4.0, Theme::Plain).unwrap();
+    assert!(MARKS.iter().all(|&(at, _)| hue_at(&erased, at).is_none()));
+
+    ink.walk(&mut doc, false);
+    let again = doc.save().unwrap();
+    for num in [4, 5, 6] {
+        assert_eq!(object(&again, num), object(&saved, num), "object {num}");
     }
+    let back = doc.render_page(0, 4.0, Theme::Plain).unwrap();
+    assert!(back.data == drawn.data, "drawn as it was");
+    ink.walk(&mut doc, true);
+    assert!(doc.inks(0).unwrap().is_empty());
+}
+
+/// Another editor's stroke moved with Adjust keeps its place, its appearance stream and every key
+/// but its `/Rect` and `/InkList`, which the map moves; the viewer fits the stream into the moved
+/// `/Rect`, so its red and blue lines show where the map put them, still turned as they were.
+/// Undo moves it back to the very bytes it had.
+#[test]
+fn a_foreign_stroke_moves_by_its_rect_alone() {
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(true)) else {
+        return;
+    };
+    let saved = doc.save().unwrap();
+    // Halved, and moved right and down.
+    let m = [0.5, 0.0, 0.0, 0.5, 60.0, 20.0];
+    let mut ink = Ink::default();
+    let (id, before) = ink.named(&doc, 0).remove(0);
+    let at = ink.index_of(0, id).unwrap();
+    let (_, stayed) = doc.transform_ink(0, at, m).unwrap();
+    ink.moved(0, at, m, stayed);
+    assert!(stayed);
+    assert_eq!(doc.annotation_count(0).unwrap(), 2);
+    let after = doc.inks(0).unwrap().remove(0);
+    let moved: Vec<(f32, f32)> = before.points.iter().map(|&q| apply(m, q)).collect();
+    assert_eq!((after.index, after.points), (at, moved));
+    let want = Rect::from_corners((110.0, 35.0), (135.0, 60.0));
+    assert_eq!(after.bounds, want);
+
+    let page = doc.render_page(0, 4.0, Theme::Plain).unwrap();
+    for (at, hue) in MARKS {
+        assert_eq!(hue_at(&page, apply(m, at)), Some(hue), "{at:?} moved");
+    }
+    assert_eq!(hue_at(&page, MARKS[0].0), None, "nothing left where it was");
+    // Only `/Rect` and `/InkList` differ.
+    let moved = doc.save().unwrap();
+    assert_eq!(object(&moved, 5), object(&saved, 5));
+    let keys = |file: &[u8]| {
+        let text = String::from_utf8_lossy(object(file, 4)).into_owned();
+        let rect = text.find("/Rect").unwrap();
+        let list = text.find("/InkList").unwrap();
+        let skip = |at: usize, end: &str| at + text[at..].find(end).unwrap() + end.len();
+        let (list_end, rect_end) = (skip(list, "]]"), skip(rect, "]"));
+        [&text[..list], &text[list_end..rect], &text[rect_end..]].concat()
+    };
+    assert_eq!(keys(&moved), keys(&saved));
+    assert_ne!(object(&moved, 4), object(&saved, 4));
+
+    ink.walk(&mut doc, false);
+    assert_eq!(object(&doc.save().unwrap(), 4), object(&saved, 4));
+}
+
+/// Another editor's stroke of one colour is cut along its `/InkList`, where it shows: each line
+/// the pass crossed is left as two pieces of ours in its colour and width, the original is
+/// hidden, and Undo shows it again as it was.
+#[test]
+fn a_foreign_stroke_is_cut_along_its_ink_list() {
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(false)) else {
+        return;
+    };
+    let saved = doc.save().unwrap();
+    let mut ink = Ink::default();
+    let (id, shape) = ink.named(&doc, 0).remove(0);
+    assert!(shape.cuttable);
+    let at = ink.index_of(0, id).unwrap();
+    // Across both lines, between the marks and where they cross.
+    let cut = doc.cut_ink(0, at, (100.0, 50.0), (150.0, 50.0), 2.0);
+    let cut = cut.unwrap().expect("the pass crossed both lines");
+    assert!(cut.was.hidden);
+    assert_eq!(cut.left.len(), 4);
+    let left = cut.left.into_iter().map(|piece| (fresh_id(), piece));
+    ink.erased(0, at, cut.was, left.collect(), false);
     let inks = doc.inks(0).unwrap();
-    for (from, to) in [
-        ((100.0, 55.0), (150.0, 55.0)),
-        ((130.0, 30.0), (130.0, 80.0)),
-    ] {
-        assert!(
-            swept(&inks[0].points, from, to, 2.0),
-            "{:?}",
-            inks[0].points
-        );
+    assert_eq!(inks.len(), 4);
+    for piece in &inks {
+        assert_eq!(piece.style.rgba, [255, 0, 0, 255]);
+        assert!((piece.style.width - 2.0).abs() < 0.01, "{:?}", piece.style);
+    }
+
+    ink.walk(&mut doc, false);
+    assert_eq!(doc.annotation_count(0).unwrap(), 2);
+    let again = doc.save().unwrap();
+    for num in [4, 5, 6] {
+        assert_eq!(object(&again, num), object(&saved, num), "object {num}");
     }
 }
 
-/// Ink drawn in a space of its own is read there, so a cut would draw its pieces somewhere else:
-/// it is not cuttable, and a cut leaves it alone.
+/// Another editor's stroke whose paths differ in colour is not cut: its pieces could not all be
+/// drawn as it was. A cut leaves it alone.
 #[test]
-fn ink_drawn_in_its_own_space_is_not_cut() {
-    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf()) else {
+fn a_foreign_stroke_of_two_colours_is_not_cut() {
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(true)) else {
         return;
     };
     let inks = doc.inks(0).unwrap();
     assert_eq!(inks.len(), 1, "{inks:?}");
-    assert!(
-        !inks[0].cuttable,
-        "{:?} is outside {:?}",
-        inks[0].points, inks[0].bounds
-    );
-    // Straight across the line where it shows, which a cuttable stroke would lose a piece to.
-    assert!(swept(&inks[0].points, (100.0, 55.0), (150.0, 55.0), 4.0));
-    let cut = doc.cut_ink(0, inks[0].index, (100.0, 55.0), (150.0, 55.0), 4.0);
+    assert!(!inks[0].cuttable);
+    // Straight across both lines where they show, which a cuttable stroke would lose pieces to.
+    assert!(swept(&inks[0].points, (100.0, 50.0), (150.0, 50.0), 4.0));
+    let cut = doc.cut_ink(0, inks[0].index, (100.0, 50.0), (150.0, 50.0), 4.0);
     assert!(cut.unwrap().is_none());
-    assert_eq!(doc.annotation_count(0).unwrap(), 1);
+    assert_eq!(doc.annotation_count(0).unwrap(), 2);
 }
 
 /// What `take_ink` keeps is enough for `redraw_ink` to draw the same stroke again, which is what

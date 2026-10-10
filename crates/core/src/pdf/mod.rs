@@ -238,10 +238,10 @@ pub struct InkShape {
     pub points: Vec<(f32, f32)>,
     pub bounds: Rect,
     pub style: InkStyle,
-    /// Whether what was read is all it draws, where it draws it: one path of one stroke, inside
-    /// its `/Rect`. Ours always is. Another editor's may hold several paths, or draw in a space of
-    /// its own that its appearance stream maps onto the page — and a cut redraws what was read,
-    /// so it would lose the rest or put the pieces somewhere else. Only these are cut.
+    /// Whether the partial eraser cuts it: ours, along its path, and another editor's along its
+    /// `/InkList` when every path it draws is drawn alike, so the pieces, drawn as ours, look as
+    /// it did. One without an `/InkList`, which may draw in a space of its own, or whose paths
+    /// differ in colour or width, is taken whole.
     pub cuttable: bool,
 }
 
