@@ -80,6 +80,16 @@ impl Compare {
         &self.columns.paned
     }
 
+    /// Show All Unchanged Lines.
+    pub fn unfold(&self) -> &gtk::ToggleButton {
+        &self.unfold
+    }
+
+    /// What the relayout passes did since the last call: see `Columns::passes`.
+    pub fn passes(&self) -> String {
+        self.columns.passes()
+    }
+
     /// The shared vertical scrollbar, for the bench to read and to move as a reader would.
     pub fn vadjustment(&self) -> gtk::Adjustment {
         self.columns.panes[0].scroller.vadjustment()
@@ -119,15 +129,32 @@ impl Compare {
             return None;
         }
         let height = self.columns.panes[0].view.visible_rect().height();
-        let y = |r: usize, side: Side| {
+        let start = |r: usize, side: Side| {
             let n = side.number(&lines[side.of(&rows[r])?])?;
+            Some(starts[side.idx()][n - 1])
+        };
+        let y = |r: usize, side: Side| {
             let pane = self.pane(side);
-            let at = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
+            let at = pane.buffer.iter_at_offset(start(r, side)?);
             Some(pane.view.iter_location(&at).y() - pane.view.visible_rect().y())
+        };
+        // The characters on screen in each column: a row with no line starting there is not
+        // asked about, asking GTK where every row is laying the whole text out.
+        let shown = [Side::Old, Side::New].map(|side| {
+            let view = &self.pane(side).view;
+            let seen = view.visible_rect();
+            let mut end = view.line_at_y(seen.y() + seen.height()).0;
+            end.forward_line();
+            view.line_at_y(seen.y()).0.offset()..end.offset()
+        });
+        let on_screen = |r: usize| {
+            [Side::Old, Side::New]
+                .into_iter()
+                .any(|side| start(r, side).is_some_and(|at| shown[side.idx()].contains(&at)))
         };
         let (mut count, mut first) = (0, String::new());
         for r in 0..rows.len() {
-            if self.hides_row(r) {
+            if !on_screen(r) || self.hides_row(r) {
                 continue;
             }
             let (Some(old), Some(new)) = (y(r, Side::Old), y(r, Side::New)) else {

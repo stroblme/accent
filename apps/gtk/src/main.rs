@@ -1331,7 +1331,19 @@ impl App {
         // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
         sidebar.set_git_visible(git.has_repos());
         self.sync_excluded(git);
+        self.sync_tints(git);
         self.after_git_changed(git);
+    }
+
+    /// What the Files tree tints: git's changes, or none while Preferences says not to.
+    fn sync_tints(&self, git: &git::Panel) {
+        let Some(tree) = self.tree.get() else {
+            return;
+        };
+        tree.set_changed(match self.config.borrow().git_tint {
+            true => git.changed(),
+            false => Vec::new(),
+        });
     }
 
     /// What search leaves out: git's answer and the `[search] exclude` list, as one set. This is
@@ -1608,6 +1620,7 @@ impl App {
             if self.excluded.borrow().is_some() {
                 self.sync_excluded(git);
             }
+            self.sync_tints(git);
         }
         if let Some(tree) = self.tree.get() {
             tree.set_show_hidden(config.show_hidden);

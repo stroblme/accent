@@ -750,6 +750,21 @@ impl Panel {
         self.state.borrow().ignored.clone()
     }
 
+    /// Every changed file across every repository the vault touches, vault-relative, with what
+    /// the Files tree tints it as. A nested repository, which its parent lists as one untracked
+    /// `dir/`, is left to its own status, so each file takes its own repository's word.
+    pub fn changed(&self) -> Vec<(String, crate::tree::Change)> {
+        let state = self.state.borrow();
+        let root = self.hooks.vault.root();
+        let mut changed = Vec::new();
+        for (repo, status) in state.repos.iter().zip(&state.statuses) {
+            for entry in status.entries.iter().filter(|e| !own_repository(&e.path)) {
+                changed.push((vault_key(&root, repo, &entry.path), tint(entry)));
+            }
+        }
+        changed
+    }
+
     /// The repository `key` lives in and its path inside it. The longest root wins, so a file in
     /// a nested repository is that repository's and not the vault's.
     pub fn repo_of(&self, key: &str) -> Option<(Repo, String)> {
@@ -1391,6 +1406,16 @@ fn ignored_key(vault_root: &Path, repo: &Repo, path: &str) -> String {
     match path.ends_with('/') {
         true => key + "/",
         false => key,
+    }
+}
+
+/// What the Files tree tints a changed file as: new to git, untracked or only added to the index,
+/// or anything else, staged or not. A conflict is a change like any other: the Git pane gives it
+/// no colour of its own.
+fn tint(entry: &Entry) -> crate::tree::Change {
+    match entry.x {
+        '?' | 'A' if !entry.unmerged => crate::tree::Change::Added,
+        _ => crate::tree::Change::Modified,
     }
 }
 

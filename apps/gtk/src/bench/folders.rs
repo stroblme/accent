@@ -314,6 +314,34 @@ pub(super) fn drawn_rows(view: &gtk::ListView) -> Vec<(String, bool)> {
     rows
 }
 
+/// Every row the list has a widget bound to whose name carries a git tint, as its path, the class
+/// and the colour GTK resolved it to, which is what proves the stylesheet's mix rather than the
+/// class alone.
+pub(super) fn drawn_tints(view: &gtk::ListView) -> Vec<(String, &'static str, String)> {
+    let mut rows: Vec<_> = tree::expanders(view)
+        .into_iter()
+        .filter_map(|expander| {
+            let rel = tree::decode(expander.list_row()?.item().as_ref()?)?.rel;
+            let label = expander.child()?.last_child()?;
+            let class = ["git-modified", "git-added"]
+                .into_iter()
+                .find(|class| label.has_css_class(class))?;
+            let c = label.color();
+            let byte = |v: f32| (v * 255.0).round() as u8;
+            let rgba = format!(
+                "{} {} {} {:.2}",
+                byte(c.red()),
+                byte(c.green()),
+                byte(c.blue()),
+                c.alpha()
+            );
+            Some((rel, class, rgba))
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
 /// The rows drawn with the Ctrl+click mark on them, which is what the factory binds off the
 /// marked set.
 fn marked_rows(view: &gtk::ListView) -> Vec<String> {

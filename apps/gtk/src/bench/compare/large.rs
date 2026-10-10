@@ -32,9 +32,11 @@ fn variant(text: &str, seed: usize, every: bool) -> String {
 }
 
 /// Run `act` and wait until `compare` has laid what it asked for, with a tick asked of the main
-/// loop every millisecond: how long `act` itself took, how long until the rows were laid, and the
-/// longest the main loop went without turning, from `act` until a while after.
-async fn held(compare: &diff::Compare, act: impl FnOnce()) -> (f64, f64, f64) {
+/// loop every millisecond: how long `act` itself took, how long until the rows were laid, the
+/// longest the main loop went without turning, from `act` until a while after, how long until the
+/// rows on screen were level for good (`Compare::uneven`, looked at every 20 ms), and what the
+/// relayout passes did since the last step (`Compare::passes`).
+async fn held(compare: &diff::Compare, act: impl FnOnce()) -> (f64, f64, f64, f64, String) {
     let (worst, last) = (Rc::new(Cell::new(0.0)), Rc::new(Cell::new(Instant::now())));
     let beat = glib::timeout_add_local(Duration::from_millis(1), {
         let (worst, last) = (worst.clone(), last.clone());
@@ -48,18 +50,28 @@ async fn held(compare: &diff::Compare, act: impl FnOnce()) -> (f64, f64, f64) {
     let t = Instant::now();
     act();
     let call = ms_since(t);
+    // When rows on screen were last seen uneven.
+    let mut level = 0.0;
+    let mut look = || {
+        if compare.uneven().is_some_and(|(n, _)| n > 0) {
+            level = ms_since(t);
+        }
+    };
     // The editor re-reads a long text on its debounce, not on the keystroke.
-    glib::timeout_future(Duration::from_millis(250)).await;
-    for _ in 0..1500 {
-        if compare.settled() {
+    for step in 0..4513 {
+        look();
+        if step >= 13 && compare.settled() {
             break;
         }
         glib::timeout_future(Duration::from_millis(20)).await;
     }
     let settle = ms_since(t);
-    glib::timeout_future(Duration::from_millis(300)).await;
+    for _ in 0..15 {
+        look();
+        glib::timeout_future(Duration::from_millis(20)).await;
+    }
     beat.remove();
-    (call, settle, worst.get())
+    (call, settle, worst.get(), level, compare.passes())
 }
 
 /// Whether every cell of a CSV buffer carries its column's tag and nothing else carries one, as
@@ -113,10 +125,13 @@ fn spread(values: &mut [f64]) -> (f64, f64) {
 
 /// `ACCENT_BENCH_COMPARE=large:<rel>`: compares `<rel>` in its tab with a copy changed throughout
 /// ([`variant`]; `=large:every:<rel>`, on every line), then lays the diff again five times, types
-/// three characters into a changed line and takes them out again, and re-reads the other side
-/// twice. Each step prints how long its own call held the main loop (`call_ms`), how long until
-/// the rows were laid (`settle_ms`) and the longest the main loop went without turning meanwhile
-/// (`held_ms`), and once open how many stretches of the editor's text are emphasised; the last
+/// three characters into a changed line and takes them out again, re-reads the other side twice,
+/// drags the divider 200 px and back, and presses Show All Unchanged Lines and lets it go. Each
+/// step prints how long its own call held the main loop (`call_ms`), how long until the rows were
+/// laid (`settle_ms`), the longest the main loop went without turning meanwhile (`held_ms`), when
+/// the rows on screen were last seen uneven (`level_ms`, 0 for never) and what the relayout passes
+/// did (`Compare::passes`), and once open how many stretches of the
+/// editor's text are emphasised; the last
 /// line, the median and the worst of `held_ms` per kind of step, and for a
 /// CSV whether its cells carry the column tags a pass over all of it gives them. The file is
 /// saved after the typing, as it was, so point it at a scratch copy.
@@ -155,19 +170,19 @@ pub(in crate::bench) fn bench_compare_large(app: &Rc<App>, rel: &str) {
             "Large",
         );
         let call = ms_since(t);
-        let (_, settle, worst) = held(&compare, || {}).await;
+        let (_, settle, worst, level, passes) = held(&compare, || {}).await;
         let (settle, worst) = (settle + call, worst.max(call));
         println!(
-            "bench compare_large open lines={lines} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} {} emphasised={}",
+            "bench compare_large open lines={lines} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} level_ms={level:.0} {} emphasised={} {passes}",
             bench_compare_line(&compare),
             tagged(&tab.buffer, "diff-added-emph")
         );
         let mut kinds: Vec<(&str, Vec<f64>)> = vec![("open", vec![worst])];
         let mut relay = Vec::new();
         for round in 0..5 {
-            let (call, settle, worst) = held(&compare, || compare.refresh()).await;
+            let (call, settle, worst, level, passes) = held(&compare, || compare.refresh()).await;
             println!(
-                "bench compare_large relay round={round} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1}"
+                "bench compare_large relay round={round} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} level_ms={level:.0} {passes}"
             );
             relay.push(worst);
         }
@@ -190,9 +205,9 @@ pub(in crate::bench) fn bench_compare_large(app: &Rc<App>, rel: &str) {
                     tab.buffer.delete(&mut start, &mut end);
                 }
             };
-            let (call, settle, worst) = held(&compare, key).await;
+            let (call, settle, worst, level, passes) = held(&compare, key).await;
             println!(
-                "bench compare_large type round={round} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1}"
+                "bench compare_large type round={round} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} level_ms={level:.0} {passes}"
             );
             typed.push(worst);
         }
@@ -203,15 +218,39 @@ pub(in crate::bench) fn bench_compare_large(app: &Rc<App>, rel: &str) {
         let mut reread = Vec::new();
         for round in 1..3 {
             let other = variant(&text, round, every);
-            let (call, settle, worst) =
+            let (call, settle, worst, level, passes) =
                 held(&compare, || compare.set_side(diff::Side::Old, &other)).await;
             println!(
-                "bench compare_large reread round={round} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} {}",
+                "bench compare_large reread round={round} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} level_ms={level:.0} {} {passes}",
                 bench_compare_line(&compare)
             );
             reread.push(worst);
         }
         kinds.push(("reread", reread));
+        let mut dragged = Vec::new();
+        for by in [-200, 200] {
+            let paned = compare.paned();
+            let (call, settle, worst, level, passes) =
+                held(&compare, || paned.set_position(paned.position() + by)).await;
+            println!(
+                "bench compare_large drag by={by} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} level_ms={level:.0} {} {passes}",
+                bench_compare_line(&compare)
+            );
+            dragged.push(worst);
+        }
+        kinds.push(("drag", dragged));
+        let mut all = Vec::new();
+        for on in [true, false] {
+            let toggle = compare.unfold();
+            let (call, settle, worst, level, passes) =
+                held(&compare, || toggle.set_active(on)).await;
+            println!(
+                "bench compare_large all on={on} call_ms={call:.1} settle_ms={settle:.0} held_ms={worst:.1} level_ms={level:.0} {} {passes}",
+                bench_compare_line(&compare)
+            );
+            all.push(worst);
+        }
+        kinds.push(("all", all));
         let summary: Vec<String> = kinds
             .iter_mut()
             .map(|(kind, held)| {

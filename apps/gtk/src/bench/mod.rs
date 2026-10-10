@@ -536,7 +536,8 @@ use tags::bench_tags;
 /// `search::bench_seed`).
 ///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
-/// Show Hidden Files off and on again, printing them after each.
+/// Show Hidden Files off and on again, printing them after each; then the rows git tints and what
+/// they resolve to, with Colour Changed Files on, off and on again.
 ///
 /// `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…` opens those folders in the Files tree as clicks would and
 /// prints what it lists under each; `=race:<dir>`, `=renew:<dir>`, `=again:<dir>` and

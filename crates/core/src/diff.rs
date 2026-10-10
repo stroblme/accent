@@ -133,6 +133,21 @@ pub fn line_ops(old: &str, new: &str) -> Vec<DiffLine> {
     lines
 }
 
+/// What turns `old` into `new` with the lines the two share left alone: each stretch of `old`'s
+/// lines that differs (0-based, numbered as [`lines`] numbers them), in order, with the text that
+/// takes its place, line endings included. What a pane read again replaces, so that the lines it
+/// keeps keep their layout.
+pub fn replaced(old: &str, new: &str) -> Vec<(Range<usize>, String)> {
+    let diff = TextDiff::from_lines(old, new);
+    (diff.ops().iter())
+        .filter(|op| op.tag() != DiffTag::Equal)
+        .map(|op| {
+            let text = op.new_range().filter_map(|i| diff.new_slice(i)).collect();
+            (op.old_range(), text)
+        })
+        .collect()
+}
+
 /// [`line_ops`] with each line's text as its own text has it, line ending included: what
 /// [`apply_lines`] puts back together.
 fn changes(old: &str, new: &str) -> Vec<DiffLine> {
@@ -880,6 +895,25 @@ mod tests {
         );
         assert_eq!(gaps_of(&three.changed(), 3), [0..6, 13..20]);
         assert_eq!(hunks_of(&three.changed()), vec![9..10]);
+    }
+
+    #[test]
+    fn a_text_read_again_replaces_only_the_lines_that_differ() {
+        let old = "a\nb\nc\nd\ne";
+        let new = "a\nB\nc\nd\nx\ne\nf";
+        let stretches = replaced(old, new);
+        // Put back together from the end, as a buffer is edited, it reads `new`.
+        let mut lines: Vec<String> = old.split_inclusive('\n').map(String::from).collect();
+        for (range, text) in stretches.iter().rev() {
+            lines.splice(range.clone(), [text.clone()]);
+        }
+        assert_eq!(lines.concat(), new);
+        // The lines both have are in none of the stretches.
+        for kept in [0, 2, 3] {
+            assert!(stretches.iter().all(|(range, _)| !range.contains(&kept)));
+        }
+        assert_eq!(stretches[0], (1..2, "B\n".to_string()));
+        assert!(replaced(old, old).is_empty());
     }
 
     #[test]

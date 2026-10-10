@@ -86,6 +86,9 @@ pub struct Tree {
     /// What git ignores, shared with the row factory so binding a row is still two setters and a
     /// set lookup rather than a question for the index.
     ignored: Rc<RefCell<Ignored>>,
+    /// What git says changed, rolled up onto the folders above it ([`roll_up`]), shared with the
+    /// factory the same way.
+    changed: Rc<RefCell<HashMap<String, Change>>>,
     /// The rows a Cut is waiting to move, shared with the factory the same way.
     cut: Rc<RefCell<HashSet<String>>>,
     /// The marked rows, which are the set the context menu acts on when the right-click lands on
@@ -117,6 +120,17 @@ impl Tree {
             return;
         }
         *self.ignored.borrow_mut() = ignored;
+        rebind(&self.view);
+    }
+
+    /// Tell the tree what git says changed, file by file, and redraw the rows on screen the way
+    /// [`set_ignored`](Self::set_ignored) does. Empty takes every tint off.
+    pub fn set_changed(&self, files: Vec<(String, Change)>) {
+        let changed = roll_up(files);
+        if *self.changed.borrow() == changed {
+            return;
+        }
+        *self.changed.borrow_mut() = changed;
         rebind(&self.view);
     }
 
@@ -415,6 +429,51 @@ impl Ignored {
     }
 }
 
+/// What git says of a changed row, which tints its name (`build::install_chrome_css`) in the
+/// colours the editor's change bars use. Ordered so that a folder takes the stronger of what is
+/// under it: a modified file outweighs a new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Change {
+    /// A file git does not have yet, untracked or only added to the index: the green of an added
+    /// line.
+    Added,
+    /// Any other change, in the index or the worktree, a conflict included: the accent of a
+    /// rewritten line.
+    Modified,
+}
+
+impl Change {
+    const ALL: [Change; 2] = [Change::Added, Change::Modified];
+
+    fn class(self) -> &'static str {
+        match self {
+            Change::Added => "git-added",
+            Change::Modified => "git-modified",
+        }
+    }
+}
+
+/// Every changed path and every folder above one, each with the strongest change at or under it,
+/// so a shut folder still says there is something inside. Built from the changed paths alone,
+/// each walking up its own folders until one already says as much: a deep tree costs what
+/// changed in it, never a walk of what it holds.
+fn roll_up(files: Vec<(String, Change)>) -> HashMap<String, Change> {
+    let mut map: HashMap<String, Change> = HashMap::new();
+    for (rel, change) in files {
+        let mut at = rel.as_str();
+        while let Some((dir, _)) = at.rsplit_once('/') {
+            if map.get(dir).is_some_and(|held| *held >= change) {
+                break;
+            }
+            map.insert(dir.to_string(), change);
+            at = dir;
+        }
+        let held = map.entry(rel).or_insert(change);
+        *held = (*held).max(change);
+    }
+    map
+}
+
 /// Every directory above `rel`, outermost first: `a/b/c.md` yields `a` then `a/b`.
 fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
     rel.match_indices('/').map(|(at, _)| &rel[..at])
@@ -677,6 +736,7 @@ pub fn build(
     let asked = Asked::default();
     let show_hidden = ShowHidden::new(Cell::new(show_hidden));
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
+    let changed: Rc<RefCell<HashMap<String, Change>>> = Rc::default();
     let cut: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
     let marked: Rc<RefCell<Marks>> = Rc::new(RefCell::new(Marks::new()));
     let start = Start::default();
@@ -698,6 +758,7 @@ pub fn build(
         Some(String::new())
     }));
     let bind_ignored = ignored.clone();
+    let bind_changed = changed.clone();
     let bind_cut = cut.clone();
     let (bind_marked, bind_start) = (marked.clone(), start.clone());
     let drag_marked = marked.clone();
@@ -740,6 +801,7 @@ pub fn build(
                 expander,
                 item,
                 &bind_ignored,
+                &bind_changed,
                 &bind_cut,
                 &bind_marked,
                 &bind_start,
@@ -803,6 +865,7 @@ pub fn build(
         show_hidden,
         landed,
         ignored,
+        changed,
         cut,
         marked,
         start,
@@ -971,6 +1034,7 @@ fn bind_row(
     expander: &gtk::TreeExpander,
     item: &gtk::ListItem,
     ignored: &RefCell<Ignored>,
+    changed: &RefCell<HashMap<String, Change>>,
     cut: &RefCell<HashSet<String>>,
     marked: &RefCell<Marks>,
     start: &RefCell<Option<String>>,
@@ -1010,6 +1074,11 @@ fn bind_row(
         || cut.borrow().contains(&item.rel);
     for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
         set_class(widget, "dim-label", dim);
+    }
+    // The name alone, as VS Code tints it: the icon is the kind of file, not its state.
+    let change = changed.borrow().get(&item.rel).copied();
+    for each in Change::ALL {
+        set_class(&label, each.class(), change == Some(each));
     }
     // On the expander rather than on the label: a mark is about the row, not about its name,
     // and the expander is the one widget here that spans the whole of it (`file-tree` in
@@ -1349,5 +1418,25 @@ mod tests {
         // A directory whose name merely starts the same is a different directory.
         assert!(!set.has("builder/x"));
         assert!(!Ignored::default().has("build/x"));
+    }
+
+    #[test]
+    fn a_folder_takes_the_strongest_change_under_it() {
+        use Change::{Added, Modified};
+        let map = roll_up(vec![
+            ("a/b/new.md".into(), Added),
+            ("a/b/c/edited.md".into(), Modified),
+            ("a/d/new.md".into(), Added),
+            ("top.md".into(), Modified),
+        ]);
+        let at = |rel: &str| map.get(rel).copied();
+        assert_eq!(at("a/b/new.md"), Some(Added));
+        assert_eq!(at("a/d"), Some(Added));
+        // Modified outweighs new, whichever came first.
+        assert_eq!(at("a/b"), Some(Modified));
+        assert_eq!(at("a"), Some(Modified));
+        assert_eq!(at("top.md"), Some(Modified));
+        assert_eq!(at("a/e"), None);
+        assert_eq!(map.len(), 8);
     }
 }

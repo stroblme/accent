@@ -1041,29 +1041,70 @@ fn a_purge_deletes_what_an_erase_hid_and_nothing_else() {
     assert!(!saved.contains("two lines") && !saved.contains("/Popup"));
 }
 
-/// pdfium makes the popup of an annotation with a note anew, as objects nothing refers to,
-/// every time it renders the page; a save leaves them out, and the file draws as it did. (The
-/// first render gives the fixture's highlight, which has none, an appearance stream of its own,
-/// which is in the file from then on.)
+/// Rendering writes into the document: pdfium generates an appearance stream for an annotation
+/// that has none — the fixture's highlight, another reader's — with a key of its own beside it,
+/// and makes the popup of every annotation with a note anew each time, as objects nothing refers
+/// to. A save leaves all of it out: the highlight is saved as it was read, and the file as it
+/// would have been unrendered; and it still draws.
 #[test]
 fn renders_leave_nothing_in_a_save() {
     let Some((dir, doc)) = open_tiny_with(true) else {
         return;
     };
-    let drawn = doc.render_page(0, 2.0, Theme::Plain).unwrap();
-    let once = doc.save().unwrap().len();
+    let unrendered = doc.save().unwrap();
+    // Inside the highlight, above the line of text it covers.
+    let yellow = |page: &RgbaImage| {
+        let at = (38 * 2 * page.width as usize + 100 * 2) * 4;
+        let px = &page.data[at..at + 3];
+        px[0] > 200 && px[1] > 200 && px[2] < 100
+    };
+    assert!(yellow(&doc.render_page(0, 2.0, Theme::Plain).unwrap()));
     for _ in 0..10 {
         doc.render_tile(0, 2.0, 0, 0, 100, 100, Theme::Plain)
             .unwrap();
     }
-    assert_eq!(doc.save().unwrap().len(), once);
+    assert!(yellow(&doc.render_page(0, 2.0, Theme::Plain).unwrap()));
+    let saved = doc.save().unwrap();
+    assert_eq!(object(&saved, 6), object(&unrendered, 6));
+    assert_eq!(saved.len(), unrendered.len());
+    let text = String::from_utf8_lossy(&saved).into_owned();
+    assert!(!text.contains("PDFIUM_HasGeneratedAP"), "{text}");
     let reopened = reopen(&dir, &doc);
-    let again = reopened.render_page(0, 2.0, Theme::Plain).unwrap();
-    assert!(again.data == drawn.data, "drawn as it was");
-    assert_eq!(
-        reopened.highlights_on(0).unwrap(),
-        doc.highlights_on(0).unwrap()
-    );
+    assert!(yellow(&reopened.render_page(0, 2.0, Theme::Plain).unwrap()));
+}
+
+/// Our own highlight has its appearance stream in the file at once, saved before anything has
+/// rendered it, and keeps it once something has.
+#[test]
+fn an_exported_highlight_is_saved_with_its_appearance() {
+    let Some((_dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    let quads = vec![Rect {
+        left: 18.0,
+        top: 36.0,
+        right: 140.0,
+        bottom: 64.0,
+    }];
+    let highlight = Highlight {
+        page: 0,
+        quads,
+        color: [255, 255, 0, 255],
+        contents: Some("Hello accent".to_string()),
+    };
+    doc.add_highlights(&[highlight]).unwrap();
+    let ours = |file: Vec<u8>| {
+        let text = String::from_utf8_lossy(&file).into_owned();
+        let line = text
+            .lines()
+            .find(|l| l.contains("/Subtype/Highlight"))
+            .unwrap();
+        line.contains("/AP<<")
+    };
+    assert!(ours(doc.save().unwrap()));
+    doc.render_tile(0, 2.0, 0, 0, 100, 100, Theme::Plain)
+        .unwrap();
+    assert!(ours(doc.save().unwrap()));
 }
 
 /// Another editor's stroke whose paths differ in colour is not cut: its pieces could not all be

@@ -14,8 +14,11 @@ use std::ops::Range;
 use std::rc::{Rc, Weak};
 
 use super::Pane;
+use super::heights::{Height, Known, listen};
 use super::links::Links;
-use super::pad::{UNMEASURED, carried_all, is_pad, measure, pad, padding, reclaim, unmeasured};
+use super::pad::{
+    UNMEASURED, carried, carried_all, is_pad, measure, one_line, pad, padding, reclaim, unmeasured,
+};
 use crate::editor;
 
 /// Where the first hunk lands when a comparison opens, as a fraction of the view's height. A
@@ -28,6 +31,10 @@ const GAP_PX: i32 = 28;
 /// waits between asking: GTK validates a screenful per idle, so a few are enough for any note.
 const SETTLE: u8 = 10;
 const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_millis(100);
+/// The least time a pass gives to measuring and padding lines before it leaves the rest to a pass
+/// at idle: see [`Columns::relayout`]. Room for a run of a few hundred lines opened, which 8 ms
+/// split over passes on a busy machine, a row left off level for two frames.
+const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Where the view is kept until the rows are laid: see [`Columns::keep`].
 #[derive(Clone, Copy)]
@@ -77,6 +84,21 @@ pub(super) struct Grid {
     pub(super) end: i32,
 }
 
+/// What the relayout passes did since the bench last read them ([`Columns::passes`]): how many
+/// ran and what asked for each, the lines measured as [`super::pad::MEASURED`] counts them, the
+/// lines re-padded, the columns read again whole for not adding up, and the milliseconds spent
+/// reading the padding, measuring, padding and in the longest pass.
+#[cfg(feature = "bench")]
+#[derive(Default)]
+pub(super) struct Passes {
+    asked: Vec<(&'static str, u32)>,
+    /// What asked for the pass to come.
+    why: &'static str,
+    repadded: u64,
+    recounted: u64,
+    ms: [f64; 4],
+}
+
 pub(super) struct Columns {
     weak: Weak<Columns>,
     pub(super) panes: Vec<Pane>,
@@ -89,6 +111,8 @@ pub(super) struct Columns {
     pub(super) rows: RefCell<Rows>,
     /// The grid the last relayout laid down, kept for the bench's checks.
     pub(super) grid: RefCell<Grid>,
+    /// Per column, its lines' heights as the last passes left them: see [`Columns::relayout`].
+    known: Vec<Rc<Known>>,
     pub(super) pending: RefCell<Option<glib::SourceId>>,
     /// How many more times a relayout that had to estimate a height may ask GTK again. Reset
     /// by every refresh; a bound, because a line GTK never validates would otherwise be asked
@@ -122,6 +146,8 @@ pub(super) struct Columns {
     /// whether they are waiting to be laid again for where the view has moved since.
     laid_for: Cell<(i32, i32)>,
     following: Cell<bool>,
+    #[cfg(feature = "bench")]
+    pub(super) passes: RefCell<Passes>,
 }
 
 impl Drop for Columns {
@@ -304,6 +330,7 @@ impl Columns {
             links,
             rows: RefCell::new(Rows::default()),
             grid: RefCell::new(Grid::default()),
+            known: (0..n).map(|_| Rc::default()).collect(),
             pending: RefCell::new(None),
             settling: Cell::new(0),
             waiting: Cell::new(false),
@@ -316,6 +343,11 @@ impl Columns {
             handlers: RefCell::new(Vec::new()),
             laid_for: Cell::new((0, 0)),
             following: Cell::new(false),
+            #[cfg(feature = "bench")]
+            passes: RefCell::new(Passes {
+                why: "idle",
+                ..Passes::default()
+            }),
         });
 
         // Weak throughout: every handler below is connected to something the comparison owns,
@@ -338,6 +370,7 @@ impl Columns {
                 if width.replace(hadj.page_size()) != hadj.page_size() {
                     c.rewrapped();
                 }
+                c.ask("alloc");
                 c.schedule_relayout();
             });
             connect(hadj.upcast(), id);
@@ -349,6 +382,7 @@ impl Columns {
         let vadj = this.own[0].clone();
         let id = vadj.connect_upper_notify(move |_| {
             if let Some(c) = w.upgrade() {
+                c.ask("upper");
                 c.schedule_relayout();
             }
         });
@@ -399,6 +433,11 @@ impl Columns {
             let id = buffer.connect_delete_range(unmeasured);
             connect(buffer.upcast(), id);
         }
+        for (pane, known) in this.panes.iter().zip(&this.known) {
+            for (object, id) in listen(&pane.buffer, known) {
+                connect(object, id);
+            }
+        }
         this
     }
 
@@ -412,7 +451,7 @@ impl Columns {
         self.waiting.set(false);
         *self.rows.borrow_mut() = rows;
         self.settling.set(SETTLE);
-        self.relayout();
+        self.relayout(false);
     }
 
     /// Lay nothing until the host lays its rows again: they are for texts that have changed, and
@@ -551,6 +590,7 @@ impl Columns {
                     c.hold_kept();
                 }
                 c.settling.set(SETTLE);
+                c.ask("hold");
                 c.schedule_relayout();
             }
             glib::ControlFlow::Break
@@ -570,10 +610,21 @@ impl Columns {
 
     /// Where the reader is, as a line of `column`: the one in the row at the top of the view, or in
     /// the nearest row above it that has one, and how far below the top of the view its row starts.
+    ///
+    /// While a line is kept for rows not laid yet ([`Keep::Line`]), the view is where that line
+    /// puts it in the rows laid since: a tab of two texts reads both again one after the other,
+    /// and the second read kept whatever line the first had left at the scroll meanwhile.
     pub(super) fn top_line(&self, column: usize) -> Option<Keep> {
         let (rows, grid) = (self.rows.borrow(), self.grid.borrow());
         let lines = rows.lines.get(column)?;
-        let seen = self.panes[0].view.visible_rect().y();
+        let kept = match self.keep.get() {
+            Some(Keep::Line(c, n, at)) => (rows.lines.get(c))
+                .and_then(|lines| lines.iter().position(|&line| line == Some(n)))
+                .and_then(|r| grid.tops.get(r))
+                .map(|top| top - at),
+            _ => None,
+        };
+        let seen = kept.unwrap_or_else(|| self.panes[0].view.visible_rect().y());
         let top = grid.tops.partition_point(|&y| y <= seen).max(1);
         let (row, n) = lines[..top.min(lines.len())]
             .iter()
@@ -597,8 +648,10 @@ impl Columns {
     /// laid. GTK lays out the lines that opened, hid or grew above it a few at a time, and keeps
     /// each view's own top line in place as it does, all on the one scroll they share; a scroll
     /// held where it was showed the lines above for as long as that took. The line starts where
-    /// its paragraph does, the blank above it included, or with `text` where its text does: the
-    /// reader's line ([`Keep::Read`]) stays where it was seen however the blank above it is laid.
+    /// its row does, below the blank above it, which levels the rows before it ([`Keep::Line`],
+    /// read off the rows), or with `text` where its text does: the reader's line ([`Keep::Read`])
+    /// stays where it was seen however the blank above it is laid. Held at the blank's top, a
+    /// line kept in a column that has one stood that much too low until the rows were laid.
     fn hold_line(&self, column: usize, n: usize, at: i32, text: bool) {
         let pane = &self.panes[column];
         let Some(line) = pane.buffer.iter_at_line(n as i32 - 1) else {
@@ -606,7 +659,7 @@ impl Columns {
         };
         let y = match text {
             true => pane.view.iter_location(&line).y(),
-            false => pane.view.line_yrange(&line).0,
+            false => pane.view.line_yrange(&line).0 + carried(&pane.view, &line).0,
         };
         let adj = &self.own[0];
         let value = adj.value() + f64::from(y - pane.view.visible_rect().y() - at);
@@ -785,6 +838,68 @@ impl Columns {
         self.panes.iter().map(|p| p.pool.shown()).sum::<usize>() + self.links.shown()
     }
 
+    /// Name what asks for the next pass, for the bench's counters: the first to ask, where a pass
+    /// is already on its way.
+    fn ask(&self, _why: &'static str) {
+        #[cfg(feature = "bench")]
+        if self.pending.borrow().is_none() {
+            self.passes.borrow_mut().why = _why;
+        }
+    }
+
+    /// What the passes since the last call did, see [`Passes`], and nothing again from here on.
+    #[cfg(feature = "bench")]
+    pub(super) fn passes(&self) -> String {
+        let why = self.passes.borrow().why;
+        let Passes {
+            asked,
+            repadded,
+            recounted,
+            ms,
+            ..
+        } = self.passes.replace(Passes {
+            why,
+            ..Passes::default()
+        });
+        let measured = super::pad::MEASURED.take();
+        let asked: Vec<String> = asked.iter().map(|(why, n)| format!("{why}:{n}")).collect();
+        format!(
+            "passes={} gtk={} own={}/{}/{} repadded={repadded} recounted={recounted} \
+             ms={:.0}/{:.0}/{:.0}/{:.0}",
+            asked.join(","),
+            measured[0],
+            measured[1],
+            measured[2],
+            measured[3],
+            ms[0],
+            ms[1],
+            ms[2],
+            ms[3]
+        )
+    }
+
+    /// Count a pass `why` asked for that read the padding by `read`, measured by `measured`,
+    /// padded by `padded`, having started at `start`.
+    #[cfg(feature = "bench")]
+    fn count_pass(
+        &self,
+        why: &'static str,
+        [start, read, measured, padded]: [std::time::Instant; 4],
+        repadded: usize,
+    ) {
+        let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1e3;
+        let mut passes = self.passes.borrow_mut();
+        match passes.asked.iter_mut().find(|(w, _)| *w == why) {
+            Some((_, n)) => *n += 1,
+            None => passes.asked.push((why, 1)),
+        }
+        passes.repadded += repadded as u64;
+        passes.ms[0] += ms(start, read);
+        passes.ms[1] += ms(read, measured);
+        passes.ms[2] += ms(measured, padded);
+        passes.ms[3] = passes.ms[3].max(ms(start, std::time::Instant::now()));
+    }
+
     pub(super) fn schedule_relayout(&self) {
         if self.pending.borrow().is_some() {
             return;
@@ -793,20 +908,44 @@ impl Columns {
         let id = glib::idle_add_local_once(move || {
             if let Some(c) = weak.upgrade() {
                 *c.pending.borrow_mut() = None;
-                c.relayout();
+                c.relayout(true);
             }
         });
         *self.pending.borrow_mut() = Some(id);
     }
 
-    /// Measure every row in every column and pad the shorter ones, then put the buttons where the
+    /// Measure the rows in every column and pad the shorter ones, then put the buttons where the
     /// rows now are. Idempotent: a row whose padding has not changed is left alone, so a pass
     /// that finds nothing to do invalidates nothing and the layout settles.
     ///
-    /// ponytail: every visible row is laid out on every pass, which is a Pango layout per
-    /// paragraph — fine at the few hundred rows a note has, and debounced by the editor above
-    /// that. Measuring only the rows an edit touched is the upgrade if a long note shows it.
-    fn relayout(&self) {
+    /// Only the lines something has changed since are measured ([`Known`]): the rest keep their
+    /// figures, which a pass over 120,000 rows read again for 20 ms to 3 s on every lay and
+    /// keystroke, and in layouts of its own for seconds after one (2026-10-10). A line's figure is
+    /// GTK's once GTK has laid the line out; until then — its text, its tags or the column's
+    /// layout changed, its padding moved, shown again — it is pending. A `fresh` pass, run from an
+    /// idle, comes after GTK's own layout idles, so GTK's figure for a pending line is current. A
+    /// pass a lay runs comes before them: there a pending line keeps the figure it had, as an
+    /// estimate, and is asked about again. A line with no figure at all is measured as
+    /// [`measure`] does, in a layout of its own where GTK has none yet.
+    ///
+    /// GTK can still hold a line at a height from before after its idles, though — the first pass
+    /// over a new comparison found the companion's first line at the old height, GTK laying it
+    /// out again only once the pass had re-padded other lines — and a change may go unheard. So
+    /// a fresh pass checks that each column adds up to what GTK has laid out, and reads the whole
+    /// column again where it does not.
+    ///
+    /// A pass measures and pads for half as long as reading the padding took, or [`SLICE`], the
+    /// rows within a page of the view first, then those above them, which put them where they are:
+    /// a line left over keeps the figure it had, or stands at [`one_line`], and keeps its padding,
+    /// and a pass at idle goes on from there. Showing all of 120,000 rows measured 220,000 lines in
+    /// layouts of their own and re-padded 96,000 in one pass of 15 s (2026-10-10); left over, GTK
+    /// lays them out in its own idles, which come first, and the passes after read its figures.
+    fn relayout(&self, fresh: bool) {
+        #[cfg(feature = "bench")]
+        let why = match fresh {
+            true => std::mem::replace(&mut self.passes.borrow_mut().why, "idle"),
+            false => "lay",
+        };
         if self.waiting.get() || !self.panes.iter().all(|p| p.view.is_mapped()) {
             return;
         }
@@ -827,6 +966,7 @@ impl Columns {
             hidden[gap.clone()].fill(true);
         }
         let is_hidden = |r: usize| hidden[r];
+        let start = std::time::Instant::now();
         // What each column's lines carry now, per row, read once for the measuring and the padding
         // below and ahead of any change: padding a line touches none of the others.
         let had: Vec<Vec<Option<(i32, i32)>>> = (self.panes.iter().enumerate())
@@ -840,25 +980,125 @@ impl Columns {
                     .collect()
             })
             .collect();
-        let estimated = Cell::new(false);
-        let heights: Vec<Vec<Option<i32>>> = (self.panes.iter().enumerate())
-            .map(|(c, pane)| {
-                let st = &rows.starts[c];
-                (0..count)
-                    .map(|r| {
-                        if is_hidden(r) {
-                            return None;
-                        }
-                        let n = rows.lines[c][r]?;
-                        let (above, below) = had[c][r]?;
-                        let (height, estimate) =
-                            measure(&pane.view, &pane.buffer, st[n - 1], st[n], above + below);
-                        estimated.set(estimated.get() || estimate);
-                        Some(height)
-                    })
-                    .collect()
-            })
+        #[cfg(feature = "bench")]
+        let read = std::time::Instant::now();
+        // Whether each column's figures can be used: see `Known::ready`.
+        let kept: Vec<bool> = (self.panes.iter().zip(&self.known))
+            .zip(&rows.starts)
+            .map(|((pane, known), st)| known.ready(&pane.view, &pane.buffer, st))
             .collect();
+        let mut known: Vec<_> = self.known.iter().map(|k| k.lines.borrow_mut()).collect();
+        let one: Vec<i32> = self.panes.iter().map(|p| one_line(&p.view)).collect();
+        let mut heights = vec![vec![None; count]; self.panes.len()];
+        // Per column, whether a figure is an estimate.
+        let mut guessed = vec![false; self.panes.len()];
+        // Row by row, those within a page of the view as the last pass laid them first, then the
+        // ones above them, which put them where they are, then the rest.
+        let (near_from, near_to) = {
+            let (grid, seen) = (self.grid.borrow(), self.panes[0].view.visible_rect());
+            let (lo, hi) = near(seen.y(), seen.height());
+            match grid.tops.len() == count {
+                true => (
+                    grid.tops.partition_point(|&y| y < lo).saturating_sub(1),
+                    grid.tops.partition_point(|&y| y < hi),
+                ),
+                false => (0, 0),
+            }
+        };
+        let order = || {
+            (near_from..near_to)
+                .chain(0..near_from)
+                .chain(near_to..count)
+        };
+        // Half of it for measuring, the rest for padding, which measuring the whole of it left no
+        // time to. Reading the padding is most of a pass over 120,000 padded rows: with `SLICE`
+        // alone, the passes after Show All Unchanged Lines did little else, and with all of it
+        // they held the main loop for twice as long.
+        let budget = SLICE.max(start.elapsed() / 2);
+        let until = std::time::Instant::now() + budget;
+        let measured_by = until - budget / 2;
+        let (mut late, mut sliced) = (false, false);
+        for r in order() {
+            for (c, pane) in self.panes.iter().enumerate() {
+                let Some(n) = rows.lines[c][r] else {
+                    continue;
+                };
+                let st = &rows.starts[c];
+                let figure = kept[c].then(|| &mut known[c][n - 1]);
+                if is_hidden(r) {
+                    // Asked about again once it is shown.
+                    if let Some(f) = figure {
+                        *f = f.pending();
+                    }
+                    continue;
+                }
+                let Some((above, below)) = had[c][r] else {
+                    continue;
+                };
+                let (height, estimate) = match figure.as_deref().copied() {
+                    Some(Height::Laid(px)) => (px, false),
+                    Some(Height::Pending(px)) if !fresh => (px, true),
+                    // Left for a later pass, a figure from before or one line standing in.
+                    Some(Height::Pending(px)) if late => {
+                        sliced = true;
+                        (px, true)
+                    }
+                    Some(Height::Unknown) if late => {
+                        sliced = true;
+                        guessed[c] = true;
+                        heights[c][r] = Some(one[c]);
+                        continue;
+                    }
+                    _ => {
+                        let measured = measure(
+                            &pane.view,
+                            &pane.buffer,
+                            st[n - 1],
+                            st[n],
+                            above + below,
+                            fresh && kept[c],
+                        );
+                        late = std::time::Instant::now() > measured_by;
+                        measured
+                    }
+                };
+                if let Some(figure) = figure {
+                    *figure = Height::of(height, estimate);
+                }
+                guessed[c] |= estimate;
+                heights[c][r] = Some(height);
+            }
+        }
+        for (c, pane) in self.panes.iter().enumerate() {
+            // With the padding its lines carry, the column adds up to what GTK has laid out down
+            // to its last row's line, or some figure is out of date — a change no signal told of,
+            // a line GTK had not laid out since: then every line is read again, once GTK has laid
+            // them out. The buffer's empty last line is no row of the diff's.
+            let last = rows.lines[c].iter().rev().find_map(|line| *line);
+            let bottom = last.and_then(|n| pane.buffer.iter_at_line(n as i32 - 1));
+            let (Some(bottom), true) = (bottom, fresh && kept[c] && !guessed[c]) else {
+                continue;
+            };
+            let (y, h) = pane.view.line_yrange(&bottom);
+            let sum: i32 = (heights[c].iter().zip(&had[c]))
+                .map(|pair| match pair {
+                    (Some(h), Some((above, below))) => h + above + below,
+                    _ => 0,
+                })
+                .sum();
+            if sum != y + h {
+                known[c].iter_mut().for_each(|h| *h = h.pending());
+                guessed[c] = true;
+                #[cfg(feature = "bench")]
+                {
+                    self.passes.borrow_mut().recounted += 1;
+                }
+            }
+        }
+        drop(known);
+        let estimated = guessed.contains(&true);
+        #[cfg(feature = "bench")]
+        let measured = std::time::Instant::now();
         let mut extra = vec![0; count];
         for (gap, _) in &rows.hidden {
             extra[gap.start] += GAP_PX;
@@ -877,21 +1117,26 @@ impl Columns {
             self.set_bottom(c, pages[c], blank.max(0));
         }
 
-        let mut repadded = false;
-        for (c, pane) in self.panes.iter().enumerate() {
-            let st = &rows.starts[c];
-            let now = &pads[c];
-            // Every line in this column, hidden ones included, so a row that is hidden now or was
-            // the last one before an edit does not keep what it carried then.
-            for (r, line) in rows.lines[c].iter().enumerate() {
-                let Some(n) = *line else {
+        // Every line, hidden ones included, so a row that is hidden now or was the last one before
+        // an edit does not keep what it carried then; in the same order, and those not near the
+        // view only while the pass has time. One left over is laid out with what it carried until
+        // a later pass, the rows under it off level meanwhile, and a hidden one not at all.
+        let mut repadded = 0;
+        for r in order() {
+            for (c, pane) in self.panes.iter().enumerate() {
+                let Some(n) = rows.lines[c][r] else {
                     continue;
                 };
+                let (st, now) = (&rows.starts[c], &pads[c]);
                 // Read ahead of any change, so only a line whose padding moves is touched.
                 if had[c][r] == Some((now.above[r], now.below[r])) {
                     continue;
                 }
-                repadded |= pad(
+                if !(near_from..near_to).contains(&r) && std::time::Instant::now() > until {
+                    sliced = true;
+                    continue;
+                }
+                let moved = pad(
                     &pane.view,
                     &pane.buffer,
                     st[n - 1],
@@ -899,8 +1144,15 @@ impl Columns {
                     now.above[r],
                     now.below[r],
                 );
+                // GTK has the line to lay out again with its new padding.
+                if moved && kept[c] {
+                    self.known[c].touch(n - 1);
+                }
+                repadded += usize::from(moved);
             }
         }
+        #[cfg(feature = "bench")]
+        let padded = std::time::Instant::now();
 
         let end = tops.last().map_or(0, |top| {
             let last = |c: &Vec<Option<i32>>| c[count - 1].unwrap_or(0);
@@ -928,7 +1180,7 @@ impl Columns {
         // from an idle of its own and repaints it once it has, so one column could reach the
         // screen a frame ahead of another: a keystroke's own line in the editor a frame after
         // the padding that answers it beside it.
-        if repadded {
+        if repadded > 0 {
             for pane in &self.panes {
                 pane.view.queue_allocate();
             }
@@ -940,9 +1192,13 @@ impl Columns {
         // GTK has not reached in a layout of its own, 10 s of them once 120,000 rows were shown,
         // and asked again on a timer it left GTK only the moments between passes to catch up in,
         // the main loop held for minutes.
-        let unsettled = estimated.get() || (self.keep.get().is_some() && repadded);
+        let unsettled = estimated || sliced || (self.keep.get().is_some() && repadded > 0);
         let exhausted = self.settling.get() == 0;
-        if unsettled && !exhausted && self.pending.borrow().is_none() {
+        // What this pass left over goes on at once, and does not count as asking GTK again.
+        if sliced {
+            self.ask("slice");
+            self.schedule_relayout();
+        } else if unsettled && !exhausted && self.pending.borrow().is_none() {
             self.settling.set(self.settling.get() - 1);
             let weak = self.weak.clone();
             let id = glib::timeout_add_local_full(
@@ -951,7 +1207,8 @@ impl Columns {
                 move || {
                     if let Some(c) = weak.upgrade() {
                         *c.pending.borrow_mut() = None;
-                        c.relayout();
+                        c.ask("retry");
+                        c.relayout(true);
                     }
                     glib::ControlFlow::Break
                 },
@@ -963,6 +1220,8 @@ impl Columns {
         // comparison again.
         let keep = self.keep.get().filter(|_| !unsettled || exhausted);
         drop(rows);
+        #[cfg(feature = "bench")]
+        self.count_pass(why, [start, read, measured, padded], repadded);
         match keep {
             Some(Keep::FirstHunk) => self.reveal_first_hunk(),
             // Held all along: the rows above the run have not moved, and the reader's line is

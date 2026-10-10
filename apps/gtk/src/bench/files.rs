@@ -1,7 +1,7 @@
 //! Drills over files: the Files pane's rows, copy and paste, New from Template, the path fields,
 //! Save As and closing a window. The tree's own drills are in [`super::folders`].
 
-use super::folders::drawn_rows;
+use super::folders::{drawn_rows, drawn_tints};
 use super::*;
 
 /// What New from Template would list: every template, and the destination each one names today.
@@ -396,9 +396,20 @@ fn bench_cancel(app: &App) -> Option<(glib::GString, glib::WeakRef<adw::AlertDia
 /// the palette do, and print them after each. The headless image has no pointer, so this is how
 /// "dot-named rows are dimmed, `.git` is never there, and the toggle takes them away and brings
 /// them back" is seen rather than claimed.
+///
+/// Then the git tints: the rows tinted once git has answered, with the colour each resolved to and
+/// what the editor's gutter would draw in its place, then again with Colour Changed Files turned
+/// off and on the way every surface that writes a preference does ([`App::config_changed`]).
 pub(super) fn bench_hidden(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
+        // The first git answer, which is what the tints and the ignored dims come from.
+        for _ in 0..100 {
+            if app.excluded.borrow().is_some() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
         for step in 0..3 {
             if step > 0 {
                 let _ = WidgetExt::activate_action(&app.window, "win.show-hidden-files", None);
@@ -415,6 +426,22 @@ pub(super) fn bench_hidden(app: &Rc<App>) {
                 for (rel, dim) in drawn_rows(tree.view()) {
                     println!("bench tree_row {rel} dim={}", u8::from(dim));
                 }
+            }
+        }
+        let Some(tree) = app.tree.get() else {
+            return bench_quit(&app);
+        };
+        let fg = tree.view().color();
+        let gutter = crate::diff::tint(crate::diff::ADDED_HUE, fg, 1.0);
+        let accent = adw::StyleManager::default().accent_color_rgba();
+        println!("bench tint_gutter added={gutter} modified={accent}");
+        for on in [true, false, true] {
+            app.config.borrow_mut().git_tint = on;
+            app.config_changed();
+            glib::timeout_future(Duration::from_millis(200)).await;
+            println!("bench git_tint {on}");
+            for (rel, class, rgba) in drawn_tints(tree.view()) {
+                println!("bench tree_tint {rel} {class} {rgba}");
             }
         }
         bench_quit(&app);

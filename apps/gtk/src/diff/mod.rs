@@ -26,6 +26,7 @@ use crate::editor::{self, Flavour};
 #[cfg(feature = "bench")]
 mod bench;
 mod columns;
+mod heights;
 mod links;
 pub mod merge;
 mod pad;
@@ -319,6 +320,20 @@ pub(crate) fn tint(hue: (f32, f32, f32), fg: gdk::RGBA, alpha: f32) -> gdk::RGBA
     )
 }
 
+/// [`tint`] at full alpha as a GTK CSS colour, for a widget's text: the same mix with the colour
+/// the widget inherits, its alpha dropped as `tint` drops it, which GTK resolves per widget and
+/// again on every theme change.
+pub(crate) fn css_tint(hue: (f32, f32, f32)) -> String {
+    let byte = |v: f32| (v * 255.0).round();
+    format!(
+        "color-mix(in srgb, rgb({} {} {}) {}%, rgb(from currentColor r g b / 1))",
+        byte(hue.0),
+        byte(hue.1),
+        byte(hue.2),
+        (HUE_MIX * 100.0).round()
+    )
+}
+
 /// Re-derive the row backgrounds from the resolved theme foreground. Once the view is mapped
 /// and again on every `notify::dark`, exactly as `highlight::restyle` does for the editor.
 fn restyle_tags(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
@@ -554,14 +569,19 @@ impl Compare {
 
     /// Replace the text of a pane that is not the user's, and lay the diff over both again. The
     /// same text again is nothing to do: a refresh lands on every save.
+    ///
+    /// Only the lines that differ are replaced, as one step nothing can undo, as `set_text` was:
+    /// the rest keep their layout, which GTK and the columns otherwise worked out again for every
+    /// line. A line replaced by a line keeps its newline, so the lines below keep their place, and
+    /// is marked for GTK to lay out again ([`UNMEASURED`]), its old height being the old text's.
     pub fn set_side(&self, side: Side, text: &str) {
         debug_assert_ne!(
             self.editable,
             Some(side),
             "the editor's buffer is read, never set"
         );
-        let text = normalise(text);
-        if self.text(side) == text {
+        let (old, text) = (self.text(side), normalise(text));
+        if old == text {
             return;
         }
         // The rows are numbered anew under the reader, so their place is kept as a line of the
@@ -570,8 +590,33 @@ impl Compare {
             let top = self.columns.top_line(side.other().idx());
             self.columns.keep.set(top);
         }
-        let pane = self.pane(side);
-        pane.buffer.set_text(&text);
+        let (pane, starts) = (self.pane(side), line_starts(&old));
+        let buffer = &pane.buffer;
+        // The hidden runs first, which the refresh below lays again anyway: every edit has
+        // `fold::whole_lines` walk them all.
+        self.clear_marks(side);
+        buffer.begin_irreversible_action();
+        for (lines, mut new) in diff::replaced(&old, &text).into_iter().rev() {
+            let (at, mut to) = (
+                starts[lines.start],
+                buffer.iter_at_offset(starts[lines.end]),
+            );
+            let mut end = to;
+            if new.ends_with('\n')
+                && end.backward_char()
+                && end.char() == '\n'
+                && end.offset() >= at
+            {
+                to = end;
+                new.pop();
+            }
+            let mut from = buffer.iter_at_offset(at);
+            buffer.delete(&mut from, &mut to);
+            buffer.insert(&mut from, &new);
+            pad::unmeasured(buffer, &buffer.iter_at_offset(at), &from);
+        }
+        buffer.end_irreversible_action();
+        debug_assert_eq!(self.text(side), text);
         editor::style_companion(pane.flavour, &pane.buffer, &pane.view);
         // Diffed here, not on a worker however long the texts: the next re-read keeps its line by
         // these rows, the Git pane reading both sides of a staged change one after the other.

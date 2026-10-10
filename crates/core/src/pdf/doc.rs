@@ -5,7 +5,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::refused;
+use super::{annot, refused};
 use crate::{Error, Result};
 use pdfium_render::prelude::*;
 
@@ -23,9 +23,9 @@ pub struct PdfDoc {
     /// A second handle on the file pdfium reads the document from, and what that file looked
     /// like when it was opened; `None` for a document read from bytes. See [`PdfDoc::intact`].
     file: Option<(File, Etag)>,
-    /// Whether a page has been rendered with an annotation carrying a note on it, which leaves
-    /// objects behind that [`PdfDoc::save`] has to keep out of the file.
-    popups: AtomicBool,
+    /// Whether a render has left something of pdfium's own in the document that
+    /// [`PdfDoc::save`] has to keep out of the file (see [`PdfDoc::drawn`]).
+    stray: AtomicBool,
 }
 
 impl Drop for PdfDoc {
@@ -55,7 +55,7 @@ impl PdfDoc {
         Ok(PdfDoc {
             doc: Some(doc),
             file: Some((kept, read)),
-            popups: AtomicBool::new(false),
+            stray: AtomicBool::new(false),
         })
     }
 
@@ -84,7 +84,7 @@ impl PdfDoc {
         Ok(PdfDoc {
             doc: Some(doc),
             file: None,
-            popups: AtomicBool::new(false),
+            stray: AtomicBool::new(false),
         })
     }
 
@@ -143,12 +143,11 @@ impl PdfDoc {
         let (width, height, mut data) = {
             let _guard = lock();
             let p = self.page(page)?;
-            self.note_popups(&p);
             let config = PdfRenderConfig::new()
                 .scale_page_by_factor(scale)
                 .render_annotations(true);
-            let bitmap = p
-                .render_with_config(&config)
+            let bitmap = self
+                .drawn(&p, 0, || p.render_with_config(&config))
                 .map_err(|e| Error::Pdf(format!("render page {page}: {e:?}")))?;
             (
                 bitmap.width() as u32,
@@ -190,7 +189,6 @@ impl PdfDoc {
         let (width, height, mut data) = {
             let _guard = lock();
             let p = self.page(page)?;
-            self.note_popups(&p);
             let page_w = (p.width().value * scale).round() as i32;
             let page_h = (p.height().value * scale).round() as i32;
             let (w, h) = (w.min(page_w - x), h.min(page_h - y));
@@ -206,8 +204,10 @@ impl PdfDoc {
                 .render_annotations(true);
             let mut bitmap = PdfBitmap::empty(w, h, PdfBitmapFormat::BGRA)
                 .map_err(|e| Error::Pdf(format!("tile bitmap {w}x{h}: {e:?}")))?;
-            p.render_into_bitmap_with_config(&mut bitmap, &config)
-                .map_err(|e| Error::Pdf(format!("render tile of page {page}: {e:?}")))?;
+            self.drawn(&p, 0, || {
+                p.render_into_bitmap_with_config(&mut bitmap, &config)
+            })
+            .map_err(|e| Error::Pdf(format!("render tile of page {page}: {e:?}")))?;
             (w as u32, h as u32, bitmap.as_rgba_bytes())
         };
         if let Theme::Recolour { paper, ink } = theme {
@@ -269,12 +269,12 @@ impl PdfDoc {
 
     /// The document as it now stands, annotations included.
     ///
-    /// Saved twice once a page with a note on it has been rendered: pdfium makes that note's
-    /// popup appearance afresh, as new objects, every time it renders the page, and a save writes
-    /// every new object, referenced or not, but of a file's own objects only those something
-    /// refers to. Read back, the first save's objects are all the file's own, so the second
-    /// leaves those popups out (ISSUES.md). It costs about a save again: 85 then 106 ms for an
-    /// 80 MB file (2026-10-10).
+    /// Saved twice once a render has left something of pdfium's own in the document
+    /// ([`PdfDoc::drawn`]): read back, every object the first save wrote is the file's own, and of
+    /// those pdfium writes only what something refers to, so the popups and appearances a render
+    /// made and nothing refers to any more stay out. The key `drawn` turned into a placeholder is
+    /// blanked in the first output, so it is not read back at all (ISSUES.md). It costs about a
+    /// save again: 85 then 106 ms for an 80 MB file (2026-10-10).
     ///
     // ponytail: `FPDF_SaveAsCopy` rewrites the whole file under the global pdfium lock (80 to
     // 140 ms for a 100 MB scanned PDF, 25 to 50 ms for a 6 MB one of 383 pages of text) and loses
@@ -284,10 +284,11 @@ impl PdfDoc {
     // grows by what was read again in every session that saves (measured 2026-09-30).
     pub fn save(&self) -> Result<Vec<u8>> {
         let _guard = lock();
-        let bytes = self.doc().save_to_bytes().map_err(refused("save pdf"))?;
-        if !self.popups.load(Ordering::Relaxed) {
+        let mut bytes = self.doc().save_to_bytes().map_err(refused("save pdf"))?;
+        if !self.stray.load(Ordering::Relaxed) {
             return Ok(bytes);
         }
+        annot::blank_taken_back(&mut bytes);
         let saved = pdfium()?
             .load_pdf_from_byte_vec(bytes, None)
             .map_err(refused("read the saved pdf"))?;
@@ -297,14 +298,24 @@ impl PdfDoc {
         bytes
     }
 
-    /// Remember that `p` is being rendered with an annotation carrying a note on it, which makes
-    /// pdfium generate that note's popup (see [`PdfDoc::save`]). The caller holds the lock.
-    fn note_popups(&self, p: &PdfPage<'_>) {
-        if !self.popups.load(Ordering::Relaxed) {
-            let noted =
-                (p.annotations().iter()).any(|a| a.contents().is_some_and(|c| !c.is_empty()));
-            self.popups.store(noted, Ordering::Relaxed);
+    /// Render `p` through `draw` with its annotations, and take back what pdfium writes into the
+    /// document doing so, which is not ours to write: the appearance stream it generates, with
+    /// its key `PDFIUM_HasGeneratedAP`, for an annotation that has none — another reader's sticky
+    /// note, say — except the last `ours` of the page, which are ours and keep theirs. The
+    /// popup it makes anew for every annotation with a note stays, referred to by nothing; both
+    /// are for [`PdfDoc::save`] to leave out. The caller holds the lock.
+    pub(super) fn drawn<T>(&self, p: &PdfPage<'_>, ours: usize, draw: impl FnOnce() -> T) -> T {
+        let noted = !self.stray.load(Ordering::Relaxed)
+            && (p.annotations().iter()).any(|a| a.contents().is_some_and(|c| !c.is_empty()));
+        let count = p.annotations().len();
+        let bare: Vec<(usize, bool)> = (annot::bare(p).into_iter())
+            .filter(|&(index, _)| index + ours < count)
+            .collect();
+        let drawn = draw();
+        if annot::unbare(p, &bare) || noted {
+            self.stray.store(true, Ordering::Relaxed);
         }
+        drawn
     }
 
     /// The `/Link` annotations on one page, in document order. Links whose target we cannot

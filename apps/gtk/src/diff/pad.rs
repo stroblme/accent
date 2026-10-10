@@ -95,12 +95,16 @@ pub(super) fn padding(
 /// off by the change. Read as it was, the relayout run on a keystroke itself padded the other
 /// column for the old text, and a relayout run before GTK had laid out a re-padded paragraph
 /// moved its padding by the change again on every pass.
+///
+/// Not in a `fresh` pass, one run after GTK's own layout idles: GTK has laid every line out again
+/// by then, so its figure is the line's as it is, and the mark goes.
 pub(super) fn measure(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
     from: i32,
     to: i32,
     padded: i32,
+    fresh: bool,
 ) -> (i32, bool) {
     let first = buffer.iter_at_offset(from);
     let last = buffer.iter_at_offset((to - 1).max(from));
@@ -110,7 +114,18 @@ pub(super) fn measure(
         .tag_table()
         .lookup(UNMEASURED)
         .filter(|tag| first.has_tag(tag));
-    if let (Some(laid), None) = (laid, &unmeasured) {
+    let trusted = unmeasured.is_none() || fresh;
+    #[cfg(feature = "bench")]
+    tally(match (laid, trusted) {
+        (Some(_), true) => 0,
+        _ if height == 0 => 1,
+        (Some(_), false) => 2,
+        _ => 3,
+    });
+    if let (Some(laid), true) = (laid, trusted) {
+        if let Some(tag) = unmeasured {
+            unmark(buffer, &tag, first, to);
+        }
         return (laid, false);
     }
     let (a, b) = (view.iter_location(&first), view.iter_location(&last));
@@ -118,13 +133,42 @@ pub(super) fn measure(
     let own = b.y() + b.height() - a.y() + margins;
     match (laid, unmeasured) {
         (Some(laid), Some(tag)) if (laid - own).abs() <= 1 => {
-            let mut start = first;
-            start.backward_char();
-            buffer.remove_tag(&tag, &start, &buffer.iter_at_offset(to));
+            unmark(buffer, &tag, first, to);
             (laid, false)
         }
         _ => (own, true),
     }
+}
+
+/// The height of one line in `view`'s own font, its spacing included: what a line no pass has
+/// measured yet stands at until one does.
+pub(super) fn one_line(view: &sourceview5::View) -> i32 {
+    let (_, height) = view.create_pango_layout(Some("X")).pixel_size();
+    height + view.pixels_above_lines() + view.pixels_below_lines()
+}
+
+/// Take [`UNMEASURED`] off the line starting at `first`, the newline before it included.
+fn unmark(buffer: &sourceview5::Buffer, tag: &gtk::TextTag, first: gtk::TextIter, to: i32) {
+    let mut start = first;
+    start.backward_char();
+    buffer.remove_tag(tag, &start, &buffer.iter_at_offset(to));
+}
+
+#[cfg(feature = "bench")]
+thread_local! {
+    /// The lines [`measure`] was asked for, by how it answered: GTK's figure, or a layout of its
+    /// own because GTK had none, because the line was [`UNMEASURED`], or because it is several
+    /// (U+2029). The bench's counters read and reset it.
+    pub(super) static MEASURED: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+#[cfg(feature = "bench")]
+fn tally(how: usize) {
+    MEASURED.with(|counts| {
+        let mut now = counts.get();
+        now[how] += 1;
+        counts.set(now);
+    });
 }
 
 /// Mark the lines `from..to` touches [`UNMEASURED`], from the newline before the first of them,

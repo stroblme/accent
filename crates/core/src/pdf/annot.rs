@@ -130,6 +130,7 @@ impl PdfDoc {
     pub fn add_highlights(&mut self, highlights: &[Highlight]) -> Result<usize> {
         let _guard = lock();
         let mut added = 0;
+        let mut ours: HashMap<usize, usize> = HashMap::new();
         // What each page already carries, read once for that page and kept up to date as this
         // call adds to it. Asking the page again per highlight walked its `/Annots` array for
         // every one of them, which on a page with many is quadratic.
@@ -137,8 +138,8 @@ impl PdfDoc {
         for h in highlights {
             let mut p = self.page(h.page)?;
             // Manual: under the default every annotation added re-serialises the *page's* content
-            // stream, which we never touch. The annotation's own appearance stream is written by
-            // pdfium either way.
+            // stream, which we never touch. The annotation's own appearance stream is pdfium's,
+            // below.
             p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
             let existing = match known.entry(h.page) {
                 Entry::Occupied(found) => found.into_mut(),
@@ -198,6 +199,18 @@ impl PdfDoc {
             a.set_is_printed(true)
                 .map_err(refused("highlight print flag"))?;
             added += 1;
+            *ours.entry(h.page).or_default() += 1;
+        }
+        // pdfium gives a highlight its appearance stream only as it renders it: a render of each
+        // page, as small as one can be, gives ours theirs now, so the file has it however soon it
+        // is saved, and nothing else on the page keeps what the render wrote (`drawn`).
+        for (&page, &ours) in &ours {
+            let p = self.page(page)?;
+            let dot = PdfRenderConfig::new()
+                .set_target_size(1, 1)
+                .render_annotations(true);
+            self.drawn(&p, ours, || p.render_with_config(&dot))
+                .map_err(refused("draw highlights"))?;
         }
         Ok(added)
     }
@@ -662,6 +675,84 @@ pub(super) fn ink_list(p: &PdfPage<'_>, index: usize, height: f32) -> Vec<Vec<(f
             .collect();
         bindings.FPDFPage_CloseAnnot(annot);
         strokes
+    }
+}
+
+/// The key pdfium sets beside an appearance stream it generated.
+const GENERATED: &str = "PDFIUM_HasGeneratedAP";
+
+/// What [`unbare`] sets `GENERATED` to where pdfium added it, there being no call that takes a
+/// key out, and what [`blank_taken_back`] then finds in the saved file.
+const TAKEN_BACK: &str = "accent";
+
+/// pdfium's `FPDF_ANNOT_APPEARANCEMODE_NORMAL` and `FPDF_OBJECT_BOOLEAN`, which pdfium-render
+/// does not export.
+const NORMAL: FPDF_ANNOT_APPEARANCEMODE = 0;
+const BOOLEAN: FPDF_OBJECT_TYPE = 1;
+
+/// The annotations of a loaded page without an appearance stream, which pdfium generates into
+/// their dictionaries as it renders them: the place of each, and whether `GENERATED` is already
+/// there as the file's own. The caller holds the lock.
+pub(super) fn bare(p: &PdfPage<'_>) -> Vec<(usize, bool)> {
+    let bindings = p.bindings();
+    // SAFETY: as in `ink_list`; each annotation handle is only read, and closed before the next.
+    unsafe {
+        let page = bindings.get_handle_from_page(p);
+        (0..bindings.FPDFPage_GetAnnotCount(page))
+            .filter_map(|index| {
+                let annot = bindings.FPDFPage_GetAnnot(page, index);
+                if annot.is_null() {
+                    return None;
+                }
+                let bare = (!bindings.is_true(bindings.FPDFAnnot_HasKey(annot, "AP"))).then(|| {
+                    let own = bindings.FPDFAnnot_GetValueType(annot, GENERATED);
+                    (index as usize, own == BOOLEAN)
+                });
+                bindings.FPDFPage_CloseAnnot(annot);
+                bare
+            })
+            .collect()
+    }
+}
+
+/// Take back from the annotations [`bare`] found what pdfium generated into them as it rendered
+/// them: the appearance stream, which goes, and `GENERATED`, which becomes `TAKEN_BACK` unless it
+/// was the file's own. Whether there was any. The caller holds the lock.
+///
+/// Raw calls, because pdfium-render can neither take an appearance stream away nor say whether
+/// an annotation has one.
+pub(super) fn unbare(p: &PdfPage<'_>, bare: &[(usize, bool)]) -> bool {
+    let bindings = p.bindings();
+    let mut generated = false;
+    // SAFETY: as in `ink_list`; each annotation handle is closed before the next, and a null
+    // appearance is pdfium's documented way of taking one away.
+    unsafe {
+        let page = bindings.get_handle_from_page(p);
+        for &(index, own) in bare {
+            let annot = bindings.FPDFPage_GetAnnot(page, index as c_int);
+            if annot.is_null() {
+                continue;
+            }
+            if bindings.is_true(bindings.FPDFAnnot_HasKey(annot, "AP")) {
+                generated = true;
+                bindings.FPDFAnnot_SetAP(annot, NORMAL, std::ptr::null());
+                if !own {
+                    bindings.FPDFAnnot_SetStringValue_str(annot, GENERATED, TAKEN_BACK);
+                }
+            }
+            bindings.FPDFPage_CloseAnnot(annot);
+        }
+    }
+    generated
+}
+
+/// Blank out every `GENERATED` key [`unbare`] made `TAKEN_BACK` in a file pdfium just saved,
+/// keeping its length so every offset in it still holds: read back, the key is not there.
+pub(super) fn blank_taken_back(file: &mut [u8]) {
+    let key = format!("/{GENERATED}({TAKEN_BACK})");
+    let found: Vec<usize> = memchr::memmem::find_iter(file, key.as_bytes()).collect();
+    for at in found {
+        file[at..at + key.len()].fill(b' ');
     }
 }
 

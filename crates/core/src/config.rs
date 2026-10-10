@@ -25,6 +25,7 @@ minimap = false
 line_numbers = false
 git_tree = true
 show_hidden = false
+git_tint = false
 column_width = 50
 indent_width = 4
 forward_keys_to_terminal = false
@@ -121,6 +122,10 @@ pub struct Config {
     /// List dot-named files and folders in the Files pane, dimmed. On by default: `.gitignore`
     /// and `.python-version` are files people edit. `.git` and `.trash` are never listed.
     pub show_hidden: bool,
+    /// Tint the Files pane's names by what git says of them: a changed file and the folders above
+    /// it in the accent, a new one in green. On by default, as VS Code does; ignored rows are
+    /// dimmed either way.
+    pub git_tint: bool,
     /// How much of the editor's width the document column may fill, as a percentage. 50 is what
     /// the fixed 800 px cap came to on a maximised window; the editor floors it so a narrow
     /// window keeps a readable line.
@@ -273,6 +278,7 @@ impl Default for Config {
             line_numbers: false,
             git_tree: true,
             show_hidden: true,
+            git_tint: true,
             column_width: 50,
             indent_width: 4,
             forward_keys_to_terminal: false,
@@ -1058,6 +1064,7 @@ daily_template = "DailyNote.md"
         assert!(!c.line_numbers);
         assert!(c.git_tree);
         assert!(!c.show_hidden);
+        assert!(!c.git_tint);
         assert_eq!(c.column_width, 50);
         assert_eq!(c.indent_width, 4);
         assert!(!c.forward_keys_to_terminal);
@@ -1162,6 +1169,7 @@ daily_template = "DailyNote.md"
         let c = with_xdg(tmp.path(), Config::load);
         assert!(c.spellcheck);
         assert!(c.show_hidden);
+        assert!(c.git_tint);
         assert_eq!(c.focus_mode, FocusMode::Medium);
         assert!(c.recent_vaults.is_empty());
         assert!(!config_path_exists(tmp.path()));

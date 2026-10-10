@@ -494,6 +494,20 @@ fn files_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefer
     });
     group.add(&hidden);
 
+    let tint = adw::SwitchRow::builder()
+        .title("Colour Changed Files")
+        .subtitle("Modified files and their folders in the accent colour, new ones in green")
+        .active(config.borrow().git_tint)
+        .build();
+    tint.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().git_tint = r.is_active();
+            save();
+        }
+    });
+    group.add(&tint);
+
     group
 }
 

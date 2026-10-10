@@ -1172,6 +1172,8 @@ fn install_chrome_css() {
              .file-tree > row > treeexpander {{ padding: 0 8px; border-radius: 9px; }} \
              .file-tree > row > treeexpander.accent-marked {{ \
                background-color: color-mix(in srgb, var(--accent-bg-color) 25%, transparent); }} \
+             .file-tree label.git-modified {{ color: var(--accent-color); }} \
+             .file-tree label.git-added {{ color: {added}; }} \
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
@@ -1235,6 +1237,7 @@ fn install_chrome_css() {
              expander:checked {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }} \
              dropdown arrow {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }}",
             away = fade::FLOOR,
+            added = crate::diff::css_tint(crate::diff::ADDED_HUE),
             inset = crate::completion::CONTENTS_PADDING,
             row = crate::completion::ROW_PADDING,
             row_y = crate::completion::ROW_PADDING_Y,
