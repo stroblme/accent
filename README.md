@@ -19,7 +19,7 @@ Accent is an opinionated text editor for code, markdown notes, and PDFs with an 
 - Work with Git history, diff-views, terminal sessions, and on remote hosts over SSH.
 - Available on Linux (Gnome) with an Android companion app
 
-Some other cool featurs involve (but are not limited to):
+Some other cool features involve (but are not limited to):
 - Focus mode, which fades out everything that is not around the caret
 - Persistent terminal sessions a la `tmux`; no panic when closing a window with an actively running shell
 - Automatic light and dark theme with a solarized option for both
@@ -42,7 +42,9 @@ Accent is open source under GPL-3.0-or-later and still evolving.
 
 ## Get started
 
-Each [release](https://github.com/stroblme/accent/releases) carries a Flatpak bundle for the desktop and signed APKs for Android:
+### Desktop
+
+A Flatpak bundle is shipped with each [release](https://github.com/stroblme/accent/releases):
 
 ```sh
 flatpak install --user accent-<version>-x86_64.flatpak
@@ -51,28 +53,38 @@ flatpak install --user accent-<version>-x86_64.flatpak
 To build from source on Linux, install the [desktop requirements](#desktop-requirements), then run:
 
 ```sh
-make requirements    # check local dependencies
-make pdfium          # optional, for PDFs
-make all             # build the GTK app and accent-cli
-target/release/accent /path/to/notes
+make requirements	# check local dependencies
+make pdfium     	    # optional, for PDFs
+make all        	    # build the GTK app and accent-cli
+make install			# install the app user-wide
 ```
 
-You can also launch `target/release/accent` without a path and choose a folder in the app. `accent --help` lists the other launch forms: a file such as a PDF, a remote vault, a terminal. `make server` builds the static helper remote vaults upload, for x86_64 and aarch64 hosts; it needs [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild) and zig.
+If you run `accent` from a terminal, you can also provide a path to a file or folder to open it directly.
 
 `accent-cli mcp` serves a vault to an AI agent over the Model Context Protocol: search, read, backlinks, tags, links and PDF highlights, and edits to a note or one of its sections, each checked against the version the agent read. It shares the app's index and works with the app closed; `--read-only` leaves out the tools that write. For Claude Code:
 
+In addition to the `accent` command, an `accent-cli` command provides a remote-ssh server functionality and can be used as an MCP server through:
+ 
 ```sh
 claude mcp add accent -- /path/to/accent-cli mcp --vault /path/to/notes
 ```
 
-For Android, install a JDK, the Android SDK and NDK, then build a debug APK:
+This provides an agent with search, read, backlinks, tags, links and PDF highlights, and edits to a note or one of its sections.
+As it shares the `accent`'s index, the mcp server can be used in a similar way as [Codegraph](https://github.com/colbymchenry/codegraph) to help your agent getting information faster and with less tokens.
+
+### Android
+
+For Android, you can use [Obtainium](https://obtainium.imranr.dev/) to retrieve the `.apk` from the releases.
+
+To build it from source, install a JDK, the Android SDK and NDK, then build a debug APK:
 
 ```sh
 make android-tools
 make apk
 ```
 
-The Android app lives in [`android/`](android/) and uses the same Rust core through UniFFI.
+Note that the Android companion app is still in a very early version; please be gentle.
+
 
 ### Desktop requirements
 
@@ -98,4 +110,8 @@ sudo pacman -S --needed base-devel gtk4 libadwaita gtksourceview5 webkitgtk-6.0 
 
 </details>
 
-Accent takes cues from [Apostrophe](https://github.com/ApostropheEditor/Apostrophe), [Obsidian](https://obsidian.md/), and [VSCodium](https://vscodium.com/). Icons come from [Tabler](https://github.com/tabler/tabler-icons).
+
+## Credits
+
+Accent is inspired by awesome software projects like [Apostrophe](https://github.com/ApostropheEditor/Apostrophe), [Obsidian](https://obsidian.md/), and [VSCodium](https://vscodium.com/). 
+Icons come from [Tabler](https://github.com/tabler/tabler-icons).

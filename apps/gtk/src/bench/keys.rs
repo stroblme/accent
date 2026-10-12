@@ -1286,7 +1286,11 @@ fn bench_held() -> String {
     let Some(cli) = crate::terminal::cli() else {
         return "no-accent-cli".to_string();
     };
-    match std::process::Command::new(cli).arg("held").output() {
+    match std::process::Command::new(&cli[0])
+        .args(&cli[1..])
+        .arg("held")
+        .output()
+    {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
             .lines()
             .count()

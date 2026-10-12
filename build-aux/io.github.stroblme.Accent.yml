@@ -16,6 +16,9 @@ finish-args:
   # narrower --filesystem= can express "wherever the symlink target happens to live", so the app
   # needs the host filesystem.
   - --filesystem=host
+  # Host commands (`flatpak-spawn --host`): a terminal tab's shell is the host's, held there by
+  # the static accent-cli below (`terminal::host_cli`). Without it, the sandbox's shell.
+  - --talk-name=org.freedesktop.Flatpak
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin

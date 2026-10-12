@@ -284,10 +284,11 @@ impl Shell {
     /// Command to list held shells locally or through the host master. `None` without `accent-cli`.
     fn held(&self) -> Option<Vec<String>> {
         match self {
-            Shell::Local(_) => Some(vec![
-                cli()?.to_string_lossy().into_owned(),
-                "held".to_string(),
-            ]),
+            Shell::Local(_) => {
+                let mut argv = cli()?;
+                argv.push("held".to_string());
+                Some(argv)
+            }
             Shell::Remote { at, link, .. } => {
                 let server = ssh::server_path(&accent_api::link::server().ok()?.hash);
                 Some(ssh::run(
@@ -303,8 +304,9 @@ impl Shell {
     fn clip(&self, id: &str) -> Option<Vec<String>> {
         match self {
             Shell::Local(_) => {
-                let cli = cli()?.to_string_lossy().into_owned();
-                Some(vec![cli, "clip".to_string(), id.to_string()])
+                let mut argv = cli()?;
+                argv.extend(["clip".to_string(), id.to_string()]);
+                Some(argv)
             }
             Shell::Remote { at, link, .. } => {
                 let server = ssh::server_path(&accent_api::link::server().ok()?.hash);
@@ -549,16 +551,15 @@ pub fn on_reconnect(term: &Rc<Term>, reconnect: impl Fn(&Rc<Term>) + 'static) {
 /// new tabs wait for two stable frames.
 fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
     let (cwd, argv) = match (shell, cli()) {
-        (Shell::Local(cwd), Some(cli)) => (
-            None,
-            vec![
-                cli.to_string_lossy().into_owned(),
+        (Shell::Local(cwd), Some(mut argv)) => {
+            argv.extend([
                 "attach".to_string(),
                 "--cwd".to_string(),
                 cwd.to_string_lossy().into_owned(),
                 id.to_string(),
-            ],
-        ),
+            ]);
+            (None, argv)
+        }
         (Shell::Local(cwd), None) => (Some(cwd.clone()), vec![user_shell()]),
         // ssh decides where it lands, and a cwd on this machine means nothing to it.
         (Shell::Remote { argv, .. }, _) => (None, argv.clone()),
@@ -932,11 +933,49 @@ fn id(key: &str) -> &str {
     key.strip_prefix(KEY).unwrap_or(key)
 }
 
-/// Find the holder `accent-cli` beside this executable in build or installation directories.
-/// The static remote upload binary is located separately by `ssh::server_binary`.
-pub fn cli() -> Option<PathBuf> {
+/// The command that runs the holder's `accent-cli`: the one beside this executable in a build or
+/// an installation, or in the Flatpak the one [`host_cli`] runs on the host. The static remote
+/// upload binary is located separately by `ssh::server_binary`.
+pub fn cli() -> Option<Vec<String>> {
+    if let Ok(info) = std::fs::read_to_string("/.flatpak-info") {
+        return host_cli(&info);
+    }
     let cli = std::env::current_exe().ok()?.with_file_name("accent-cli");
-    cli.is_file().then_some(cli)
+    cli.is_file()
+        .then(|| vec![cli.to_string_lossy().into_owned()])
+}
+
+/// In the Flatpak a shell is the host's, as a remote vault's is its host's: one in the sandbox
+/// would see the runtime instead of the user's tools. `flatpak-spawn --host` runs the static
+/// `accent-cli` the Flatpak ships for this machine, by its path on the host (`/.flatpak-info`'s
+/// `app-path` is `/app` there), so the holder and its shells live outside the sandbox. Only while
+/// the app may talk to `org.freedesktop.Flatpak`, which a user can revoke; then a shell is the
+/// sandbox's and unheld. The holder starts a shell with the client's environment, which on the
+/// host lacks what VTE gives the processes it starts, so that is passed on.
+fn host_cli(info: &str) -> Option<Vec<String>> {
+    let file = glib::KeyFile::new();
+    file.load_from_data(info, glib::KeyFileFlags::NONE).ok()?;
+    let policy = file
+        .string("Session Bus Policy", "org.freedesktop.Flatpak")
+        .ok()?;
+    if !matches!(policy.as_str(), "talk" | "own") {
+        return None;
+    }
+    let app = file.string("Instance", "app-path").ok()?;
+    // SAFETY: plain getters of constants compiled into libvte.
+    let vte = unsafe {
+        vte_sys::vte_get_major_version() * 10000
+            + vte_sys::vte_get_minor_version() * 100
+            + vte_sys::vte_get_micro_version()
+    };
+    Some(vec![
+        "flatpak-spawn".to_string(),
+        "--host".to_string(),
+        "--env=TERM=xterm-256color".to_string(),
+        "--env=COLORTERM=truecolor".to_string(),
+        format!("--env=VTE_VERSION={vte}"),
+        format!("{app}/lib/accent/accent-cli-{}", std::env::consts::ARCH),
+    ])
 }
 
 /// End shell `key` held at `at`, locally or through the host's master.
@@ -951,9 +990,9 @@ pub fn end(key: &str, at: &str) {
         }
         return;
     }
-    if let Some(cli) = cli() {
-        let cli = cli.to_string_lossy().into_owned();
-        run_kill(vec![cli, "kill".to_string(), id(key).to_string()], None);
+    if let Some(mut argv) = cli() {
+        argv.extend(["kill".to_string(), id(key).to_string()]);
+        run_kill(argv, None);
     }
 }
 
@@ -970,11 +1009,12 @@ pub fn end_stored(key: &Path) {
 /// Run once before the first window so current shells cannot be mistaken for orphans between
 /// holder startup and tab attachment. Read sessions only when the holder lists shells.
 pub fn sweep() {
-    let Some(cli) = cli() else {
+    let Some(mut argv) = cli() else {
         return;
     };
-    let held = match std::process::Command::new(cli).arg("held").output() {
-        Ok(out) if out.status.success() && !out.stdout.is_empty() => out.stdout,
+    argv.push("held".to_string());
+    let held = match output(&argv) {
+        Ok(out) if !out.is_empty() => out,
         _ => return,
     };
     // A session that cannot be read may be the one that names them.
@@ -1083,6 +1123,30 @@ mod tests {
         assert!(!crate::doc::is_loose_key(&key));
         // A note that merely starts the same way is still a note.
         assert!(!is_key("terminal:notes.md"));
+    }
+
+    /// In the Flatpak a shell is the host's, through the static accent-cli the Flatpak ships, as
+    /// long as the app may still run host commands.
+    #[test]
+    fn a_flatpak_holds_its_shells_on_the_host() {
+        let info = "[Application]\nname=io.github.stroblme.Accent\n\n\
+            [Instance]\napp-path=/var/lib/flatpak/app/io.github.stroblme.Accent/current/active/files\n\n\
+            [Session Bus Policy]\norg.freedesktop.Flatpak=talk\n";
+        let cli = host_cli(info).unwrap();
+        assert_eq!(cli[..2], ["flatpak-spawn", "--host"]);
+        assert!(
+            cli.contains(&"--env=TERM=xterm-256color".to_string()),
+            "{cli:?}"
+        );
+        assert_eq!(
+            cli.last().unwrap(),
+            &format!(
+                "/var/lib/flatpak/app/io.github.stroblme.Accent/current/active/files/lib/accent/accent-cli-{}",
+                std::env::consts::ARCH
+            )
+        );
+        // Revoked (Flatseal, `flatpak override`): the sandbox's own shell, unheld.
+        assert_eq!(host_cli(&info.replace("=talk", "=none")), None);
     }
 
     #[test]

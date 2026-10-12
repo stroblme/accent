@@ -147,14 +147,31 @@ fn forward(to: &Arc<Mutex<Option<UnixStream>>>, winch: libc::sigset_t) {
             }
         }
     });
+    // SIGWINCH goes to the terminal's foreground process group, which is ours when a terminal or
+    // ssh started us. Run through `flatpak-spawn --host` it is not: we are in a session of our
+    // own on the host and hear of no resize, so there we look at the size instead.
+    // SAFETY: both only read this process's and the descriptor's state.
+    let told = unsafe { libc::tcgetpgrp(0) == libc::getpgrp() };
     let size_to = to.clone();
     thread::spawn(move || {
-        let mut signal = 0;
-        // SAFETY: `winch` is an initialised set, and `signal` a place for the answer.
-        while unsafe { libc::sigwait(&winch, &mut signal) } == 0 {
-            let (rows, cols) = winsize();
-            if let Some(conn) = lock(&size_to).as_mut() {
-                let _ = protocol::write_frame(conn, RESIZE, &protocol::size(rows, cols));
+        let mut sent = winsize();
+        loop {
+            if told {
+                let mut signal = 0;
+                // SAFETY: `winch` is an initialised set, and `signal` a place for the answer.
+                if unsafe { libc::sigwait(&winch, &mut signal) } != 0 {
+                    return;
+                }
+            } else {
+                // ponytail: ten looks a second per Flatpak tab; a resize is up to 100 ms late.
+                thread::sleep(Duration::from_millis(100));
+            }
+            let size = winsize();
+            if size != sent {
+                sent = size;
+                if let Some(conn) = lock(&size_to).as_mut() {
+                    let _ = protocol::write_frame(conn, RESIZE, &protocol::size(size.0, size.1));
+                }
             }
         }
     });

@@ -1136,11 +1136,15 @@ impl App {
     fn open_shell(self: &Rc<Self>, key: String, shell: terminal::Shell, how: Opened) {
         use vte4::TerminalExt as _;
         // Said once per window, the first time a shell here could have been held and was not.
+        // The Flatpak ships accent-cli, so there it means host commands were revoked.
         if matches!(shell, terminal::Shell::Local(_))
             && terminal::cli().is_none()
             && !self.told_unheld.replace(true)
         {
-            self.toast("accent-cli is not installed; shells will not persist");
+            self.toast(match Path::new("/.flatpak-info").exists() {
+                true => "Host commands are not allowed; shells run sandboxed and will not persist",
+                false => "accent-cli is not installed; shells will not persist",
+            });
         }
         let term = terminal::open(&self.tabs_for(&key), &shell, key);
         // A new shell is part of the session, as a new tab is; a restored one is in it already.
