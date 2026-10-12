@@ -1,0 +1,59 @@
+--- a/Code/analyze.py
++++ b/Code/analyze.py
+@@ -34,13 +34,19 @@
+     return groups
+ 
+ 
++def drop_outliers(values, spread=3.0):
++    """`values` without the runs further than `spread` deviations from their median."""
++    if len(values) < 3:
++        return values
++    centre, scale = statistics.median(values), statistics.stdev(values)
++    return [v for v in values if abs(v - centre) <= spread * scale]
++
++
+ def bootstrap(values, resamples=RESAMPLES, level=LEVEL, seed=SEED):
+     """A percentile bootstrap interval for the mean of `values`."""
+     rng = random.Random(seed)
+-    means = sorted(
+-        statistics.fmean(rng.choices(values, k=len(values)))
+-        for _ in range(resamples)
+-    )
++    k = len(values)
++    means = sorted(statistics.fmean(rng.choices(values, k=k)) for _ in range(resamples))
+     tail = (1 - level) / 2
+     return means[int(tail * resamples)], means[int((1 - tail) * resamples) - 1]
+ 
+@@ -49,6 +55,7 @@
+     """One row per backend: how many runs, their mean and its interval."""
+     rows = []
+     for backend, values in sorted(groups.items()):
++        values = drop_outliers(values)
+         low, high = bootstrap(values)
+         rows.append(
+             {
+@@ -57,7 +64,7 @@
+                 "mean": statistics.fmean(values),
+                 "low": low,
+                 "high": high,
+-                "stdev": statistics.stdev(values) if len(values) > 1 else 0.0,
++                "median": statistics.median(values),
+             }
+         )
+     return rows
+@@ -65,12 +72,12 @@
+ 
+ def print_table(rows, out=sys.stdout):
+     """The summary as a Markdown table, which the notes paste as it is."""
+-    out.write("| backend | runs | mean | 95 % interval | stdev |\n")
+-    out.write("| ------- | ---- | ---- | ------------- | ----- |\n")
++    out.write("| backend | runs | mean | 95 % interval | median |\n")
++    out.write("| ------- | ---- | ---- | ------------- | ------ |\n")
+     for r in rows:
+         out.write(
+             f"| {r['backend']} | {r['runs']} | {r['mean']:.3f} "
+-            f"| {r['low']:.3f} to {r['high']:.3f} | {r['stdev']:.3f} |\n"
++            f"| {r['low']:.3f} to {r['high']:.3f} | {r['median']:.3f} |\n"
+         )
+ 
+ 

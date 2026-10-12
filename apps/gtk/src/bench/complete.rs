@@ -160,7 +160,10 @@ async fn bench_complete_code(app: &Rc<App>, rel: &str, typed: &str) {
 }
 
 /// The tab at `rel` once it is open on the language layer, with the keyboard, and its session.
-async fn bench_complete_open(app: &Rc<App>, rel: &str) -> Option<(Rc<Tab>, Rc<Session>)> {
+pub(super) async fn bench_complete_open(
+    app: &Rc<App>,
+    rel: &str,
+) -> Option<(Rc<Tab>, Rc<Session>)> {
     app.open_path(rel);
     for _ in 0..300 {
         let tab = app.open_tabs().into_iter().find(|tab| tab.rel() == rel);
@@ -201,7 +204,7 @@ fn bench_rows(session: &Rc<Session>) -> (Vec<String>, Option<u32>) {
 }
 
 /// Run a character through editor key handlers before inserting it if unhandled.
-fn bench_char(tab: &Rc<Tab>, c: char) {
+pub(super) fn bench_char(tab: &Rc<Tab>, c: char) {
     let name = match c {
         '[' => "bracketleft".to_string(),
         '#' => "numbersign".to_string(),
@@ -231,7 +234,7 @@ async fn bench_key(tab: &Rc<Tab>, session: &Rc<Session>, step: &str, key: gdk::K
 }
 
 /// Wait for pending requests and one further frame before probing settled output.
-async fn bench_settle(session: &Rc<Session>) {
+pub(super) async fn bench_settle(session: &Rc<Session>) {
     glib::timeout_future(Duration::from_millis(30)).await;
     for _ in 0..500 {
         if session.settled() {

@@ -33,6 +33,7 @@ mod preview;
 mod replace;
 mod scroll;
 mod search;
+mod shots;
 mod start;
 mod style;
 mod suggest;
@@ -266,6 +267,8 @@ use tags::bench_tags;
 ///   `focus:<rel>`, `open:<rel>`: tab selection/focus/open during restore;
 ///   `quit`: quit during remote startup. Reuse scratch state for restoration.
 /// - `ACCENT_BENCH_MINIMAP=<round>:<rel>`: minimap probes (`minimap::bench_minimap`).
+/// - `ACCENT_BENCH_SHOT=<n>:<dir>`: README screenshot `n`, light and dark, into `<dir>`. Only
+///   on the vault and launch `build-aux/screenshots.sh` makes (`make screenshots`).
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let minimap = std::env::var("ACCENT_BENCH_MINIMAP").ok();
@@ -321,6 +324,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let scroll = std::env::var("ACCENT_BENCH_SCROLL").ok();
     let moving = std::env::var("ACCENT_BENCH_MOVE").ok();
     let unfold = std::env::var("ACCENT_BENCH_UNFOLD").ok();
+    let shot = std::env::var("ACCENT_BENCH_SHOT").ok();
     if expand.is_none()
         && unfold.is_none()
         && scroll.is_none()
@@ -375,6 +379,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !close
         && !hidden
         && minimap.is_none()
+        && shot.is_none()
     {
         return;
     }
@@ -385,6 +390,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if let Some(arg) = shot {
+            return shots::bench_shot(&app, &arg);
+        }
         if let Some(rels) = panes {
             return bench_panes(&app, &rels);
         }

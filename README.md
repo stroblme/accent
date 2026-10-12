@@ -56,6 +56,8 @@ For a native install into `~/.local` (GNOME 49 or newer: Fedora 43+, openSUSE Tu
 curl -fsSL https://raw.githubusercontent.com/stroblme/accent/main/install.sh | bash
 ```
 
+To remove it again, add `-s -- --uninstall` after `bash`.
+
 To build from source by hand, run:
 
 ```sh

@@ -25,18 +25,30 @@ main() {
         echo "accent builds with make: install it with your package manager, then run this again."
         exit 1
     fi
-    local ref=${ACCENT_REF:-}
-    if [ -z "$ref" ]; then
-        # The newest version tag; each one is a release.
-        ref=$(curl -fsSL "https://api.github.com/repos/$REPO/tags?per_page=100" |
-            sed -n 's/.*"name": *"\(v[0-9][^"]*\)".*/\1/p' | sort -V | tail -n 1)
-    fi
     # On disk rather than in /tmp: a release build takes several gigabytes.
     local cache=${XDG_CACHE_HOME:-$HOME/.cache}
     mkdir -p "$cache"
     work=$(mktemp -d "$cache/accent-install.XXXXXX")
     trap 'rm -rf "$work"' EXIT
 
+    case ${1:-} in
+    "") ;;
+    --uninstall)
+        # The newest Makefile names every file a recent version installs.
+        curl -fsSL "https://raw.githubusercontent.com/$REPO/${ACCENT_REF:-main}/Makefile" -o "$work/Makefile"
+        make --no-print-directory -C "$work" uninstall
+        return ;;
+    *)
+        echo "Usage: install.sh [--uninstall]"
+        exit 1 ;;
+    esac
+
+    local ref=${ACCENT_REF:-}
+    if [ -z "$ref" ]; then
+        # The newest version tag; each one is a release.
+        ref=$(curl -fsSL "https://api.github.com/repos/$REPO/tags?per_page=100" |
+            sed -n 's/.*"name": *"\(v[0-9][^"]*\)".*/\1/p' | sort -V | tail -n 1)
+    fi
     echo "Building accent $ref"
     mkdir "$work/accent"
     curl -fsSL "https://github.com/$REPO/archive/$ref.tar.gz" |

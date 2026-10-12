@@ -3,6 +3,8 @@
 `ACCENT_BENCH_COMPLETE=code:` drives the popup against, so the drill does not depend on a real
 server's ranking, its indexing or its version. With `--calls FILE` it also answers a call
 hierarchy from that file, which `apps/cli/tests/mcp.rs` holds `explore`'s `precise` mode against.
+With `--inline TEXT` it suggests TEXT as ghost text wherever it is asked, standing in for merl-rt
+in `make screenshots`.
 
 `.` triggers it and it can resolve: `alpha` is a snippet with a stop, `beta` a plain word, and
 `gamma` resolves to its documentation and an `#include` at the top of the file, which is what a
@@ -32,6 +34,7 @@ inbox, pending = b"", []
 CALLS = json.load(open(sys.argv[sys.argv.index("--calls") + 1])) if "--calls" in sys.argv else None
 LOADING = [int(sys.argv[sys.argv.index("--loading") + 1]) if "--loading" in sys.argv else 0]
 ROOT = [""]
+INLINE = sys.argv[sys.argv.index("--inline") + 1] if "--inline" in sys.argv else None
 
 
 def declared(rel, line, name):
@@ -78,7 +81,8 @@ def answer(message):
         send({"id": id, "result": {"capabilities": {
             "textDocumentSync": 1,
             "completionProvider": {"triggerCharacters": ["."], "resolveProvider": True},
-            "callHierarchyProvider": CALLS is not None}}})
+            "callHierarchyProvider": CALLS is not None,
+            "inlineCompletionProvider": INLINE is not None}}})
     elif method == "textDocument/prepareCallHierarchy" and LOADING[0] > 0:
         LOADING[0] -= 1
         send({"id": id, "error": {"code": -32801, "message": "content modified"}})
@@ -94,6 +98,8 @@ def answer(message):
         send({"id": id, "result": calls(method.split("/")[1][:8], message["params"]["item"]["data"])})
     elif method == "textDocument/completion":
         pending.append((time.monotonic() + DELAY, id))
+    elif method == "textDocument/inlineCompletion":
+        send({"id": id, "result": {"items": [{"insertText": INLINE}]}})
     elif method == "completionItem/resolve":
         item = dict(message["params"])
         if item.get("data") == "gamma":

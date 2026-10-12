@@ -120,6 +120,7 @@ modules:
         path: ..
         # target/ alone is several GB and would be copied into the build dir on every run.
         skip:
+          - .codegraph
           - .flatpak-builder
           - .git
           - build-aux/build

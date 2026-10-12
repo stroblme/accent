@@ -82,7 +82,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke drills xvfb vault validate icons flatpak cargo-sources pdfium server \
         help requirements install-requirements android android-check android-test android-tools apk apk-release \
-        pdfium-android bindings
+        pdfium-android bindings screenshots
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -347,6 +347,14 @@ drills: gtk-bench xvfb
 		ACCENT_BENCH_COMPLETE=code:complete.c timeout 60 $(TARGET_DIR)/accent "$$0"' \
 		"$$xdg/vault" >"$$xdg/complete" && \
 	grep '^bench ' "$$xdg/complete" | diff -u apps/gtk/src/bench/complete.expected -
+
+## screenshots: regenerate docs/screenshot-1..4.png (light and dark of each; needs magick, htop, Xvfb)
+#
+# On a vault and repository of their own, made afresh each run; build-aux/screenshots.sh says how.
+screenshots: core gtk-bench pdfium
+	rm -rf target/screenshots
+	$(MAKE) vault VAULT=target/screenshots/testvault
+	build-aux/screenshots.sh $(TARGET_DIR)
 
 ## server: build the static accent-cli that gets uploaded to a remote host, for x86_64 and aarch64
 #

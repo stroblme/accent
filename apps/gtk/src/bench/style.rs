@@ -1020,7 +1020,7 @@ pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
 
 /// What `read` says as `widget`'s next frame paints: what that frame shows, whatever runs after
 /// it. A frame whose paint never comes says so.
-async fn bench_painted(
+pub(super) async fn bench_painted(
     widget: &impl IsA<gtk::Widget>,
     read: impl Fn() -> String + 'static,
 ) -> String {

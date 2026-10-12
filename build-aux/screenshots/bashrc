@@ -1,0 +1,7 @@
+# The shell in screenshot 3, which build-aux/screenshots.sh puts in its scratch home: a prompt
+# with nothing of the machine in it, the tab titled by the directory or by the command running,
+# and no history written.
+PS1='\[\e[1;34m\]\w\[\e[0m\] \$ '
+PROMPT_COMMAND='printf "\e]0;%s\a" "${PWD/#$HOME/\~}"'
+trap 'printf "\e]0;%s\a" "${BASH_COMMAND%% *}"' DEBUG
+unset HISTFILE
