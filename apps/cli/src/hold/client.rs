@@ -16,14 +16,14 @@ use std::thread;
 use std::time::Duration;
 
 /// Relay this terminal to held shell `id`, starting the holder, and the shell in `cwd` (default:
-/// here), if need be. Returns the exit status for `attach`: the shell's when it ended, 0 when the
-/// terminal was taken over by another, [`FAILED`] when there was nothing to attach to.
-pub fn attach(id: &str, cwd: Option<PathBuf>) -> i32 {
+/// here) for `owner`, if need be. Returns the exit status for `attach`: the shell's when it ended,
+/// 0 when the terminal was taken over by another, [`FAILED`] when there was nothing to attach to.
+pub fn attach(id: &str, cwd: Option<PathBuf>, owner: &str) -> i32 {
     // Absolute: the holder runs in `/`.
     let cwd = std::path::absolute(cwd.unwrap_or_else(|| ".".into())).unwrap_or_default();
     let winch = block_winch();
     let saved = raw();
-    let code = relay(id, &cwd, winch);
+    let code = relay(id, &cwd, owner, winch);
     if let Some(saved) = saved {
         // SAFETY: `saved` is the mode `tcgetattr` gave for this descriptor.
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
@@ -59,7 +59,7 @@ fn holder() -> io::Result<Option<UnixStream>> {
 /// that ends without either is attached again: the holder may have exited as this one connected,
 /// dropped this terminal for leaving output unread, or crashed (then a fresh shell starts in the
 /// same place). Three such rounds without a byte of output, and it gives up.
-fn relay(id: &str, cwd: &Path, winch: libc::sigset_t) -> i32 {
+fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t) -> i32 {
     let to = Arc::new(Mutex::new(None));
     let mut out = io::stdout().lock();
     let mut copies = clip::Scanner::default();
@@ -76,6 +76,7 @@ fn relay(id: &str, cwd: &Path, winch: libc::sigset_t) -> i32 {
         let hello = Hello {
             id: id.into(),
             cwd: cwd.into(),
+            owner: owner.into(),
             rows,
             cols,
             env: std::env::vars_os().collect(),

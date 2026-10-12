@@ -50,9 +50,16 @@ A Flatpak bundle is shipped with each [release](https://github.com/stroblme/acce
 flatpak install --user accent-<version>-x86_64.flatpak
 ```
 
-To build from source on Linux, install the [desktop requirements](#desktop-requirements), then run:
+For a native install into `~/.local` (GNOME 49 or newer: Fedora 43+, openSUSE Tumbleweed, Debian testing, Ubuntu 26.04+, Arch), go for the following:
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/stroblme/accent/main/install.sh | bash
+```
+
+To build from source by hand, run:
+
+```sh
+make install-requirements	# install the build requirements (openSUSE, Fedora, Debian, Ubuntu, Arch)
 make requirements	# check local dependencies
 make pdfium     	    # optional, for PDFs
 make all        	    # build the GTK app and accent-cli
@@ -84,32 +91,6 @@ make apk
 ```
 
 Note that the Android companion app is still in a very early version; please be gentle.
-
-
-### Desktop requirements
-
-The desktop build needs [Rust](https://rustup.rs) ≥ 1.95, a C compiler, pkg-config, and development files for GTK ≥ 4.18, libadwaita ≥ 1.7, GtkSourceView ≥ 5.18, WebKitGTK 6.0, VTE for GTK 4 ≥ 0.78, and libspelling. `make requirements` reports what is missing and installs nothing. Git, SSH, [Merl](https://github.com/stroblme/merl), and language servers enable their corresponding features.
-
-<details>
-<summary>Package examples for Linux distributions</summary>
-
-```sh
-# openSUSE Tumbleweed
-sudo zypper install gcc pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel \
-  gtksourceview5-devel webkitgtk4-devel vte-devel libspelling-devel git-core openssh-clients curl
-# Fedora 43+
-sudo dnf install gcc pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel \
-  gtksourceview5-devel webkitgtk6.0-devel vte291-gtk4-devel libspelling-devel git openssh-clients curl
-# Debian testing, Ubuntu 26.04+
-sudo apt install build-essential pkgconf libgio-2.0-dev-bin libgtk-4-dev libadwaita-1-dev \
-  libgtksourceview-5-dev libwebkitgtk-6.0-dev libvte-2.91-gtk4-dev libspelling-1-dev git openssh-client curl
-# Arch
-sudo pacman -S --needed base-devel gtk4 libadwaita gtksourceview5 webkitgtk-6.0 vte4 libspelling \
-  git openssh curl
-```
-
-</details>
-
 
 ## Credits
 

@@ -25,8 +25,8 @@ pub const FAILED: i32 = 254;
 
 // Versioned: a holder speaking an older wire keeps running past an upgrade, so a new one must not
 // try to talk to it. Bump only when the protocol changes.
-const SOCKET: &str = "hold-1.sock";
-const LOCK: &str = "hold-1.lock";
+const SOCKET: &str = "hold-2.sock";
+const LOCK: &str = "hold-2.lock";
 
 /// `$TMPDIR/accent-<uid>`, made if missing, and refused unless it is a directory only we can use:
 /// `/tmp` is shared, and whoever owns this directory can put a socket of theirs in our place.

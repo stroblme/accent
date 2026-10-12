@@ -146,6 +146,10 @@ enum Cmd {
         /// Where a new shell starts. Defaults to the current directory.
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Who a new shell is for, as `held` lists it: accent passes its state directory, so that
+        /// its startup sweep ends only shells its own sessions could name.
+        #[arg(long, default_value = "")]
+        owner: String,
         id: String,
     },
     /// End a held shell and everything running in it.
@@ -276,7 +280,9 @@ fn main() -> Result<()> {
         // Logging goes to stderr: stdout is the protocol.
         Cmd::Mcp { common, read_only } => mcp::run(&common.vault, &common.db_path(), read_only)?,
         Cmd::Hold => hold::daemon::run()?,
-        Cmd::Attach { cwd, id } => std::process::exit(hold::client::attach(&id, cwd)),
+        Cmd::Attach { cwd, owner, id } => {
+            std::process::exit(hold::client::attach(&id, cwd, &owner))
+        }
         Cmd::Kill { id } => hold::client::kill(&id)?,
         Cmd::Held => hold::client::held()?,
         Cmd::Clip { id } => hold::clip::take(&id)?,

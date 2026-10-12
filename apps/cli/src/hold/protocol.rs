@@ -74,12 +74,15 @@ pub fn parse_size(bytes: &[u8]) -> Option<(u16, u16)> {
     (rows > 0 && cols > 0).then_some((rows, cols))
 }
 
-/// What a terminal says when it attaches: which shell, and for one that has to be started, where
-/// and with which environment. `rows u16 | cols u16 | id \0 cwd \0 (KEY=VALUE \0)*`.
+/// What a terminal says when it attaches: which shell, and for one that has to be started, where,
+/// for whom and with which environment. `rows u16 | cols u16 | id \0 cwd \0 owner \0
+/// (KEY=VALUE \0)*`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     pub id: String,
     pub cwd: PathBuf,
+    /// Who starts the shell, as `held` lists it: the app's state directory, empty for none.
+    pub owner: String,
     pub rows: u16,
     pub cols: u16,
     pub env: Vec<(OsString, OsString)>,
@@ -88,7 +91,11 @@ pub struct Hello {
 impl Hello {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = size(self.rows, self.cols).to_vec();
-        for part in [self.id.as_bytes(), self.cwd.as_os_str().as_bytes()] {
+        for part in [
+            self.id.as_bytes(),
+            self.cwd.as_os_str().as_bytes(),
+            self.owner.as_bytes(),
+        ] {
             out.extend(part);
             out.push(0);
         }
@@ -108,6 +115,7 @@ impl Hello {
         let mut parts = bytes[4..].split(|&b| b == 0);
         let id = String::from_utf8(parts.next()?.to_vec()).ok()?;
         let cwd = PathBuf::from(OsStr::from_bytes(parts.next()?));
+        let owner = String::from_utf8(parts.next()?.to_vec()).ok()?;
         let env = parts
             .filter_map(|var| {
                 let eq = var.iter().position(|&b| b == b'=')?;
@@ -121,6 +129,7 @@ impl Hello {
         Some(Hello {
             id,
             cwd,
+            owner,
             rows,
             cols,
             env,
@@ -158,6 +167,7 @@ mod tests {
         let hello = Hello {
             id: "0123456789abcdef".into(),
             cwd: "/home/me/a dir".into(),
+            owner: "/home/me/.local/state".into(),
             rows: 24,
             cols: 80,
             env: vec![

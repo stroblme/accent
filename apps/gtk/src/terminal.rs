@@ -12,7 +12,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -556,6 +555,8 @@ fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
                 "attach".to_string(),
                 "--cwd".to_string(),
                 cwd.to_string_lossy().into_owned(),
+                "--owner".to_string(),
+                owner(),
                 id.to_string(),
             ]);
             (None, argv)
@@ -1025,35 +1026,30 @@ pub fn sweep() {
         .into_iter()
         .flat_map(|s| s.open.into_iter().chain(s.terminals.into_keys()))
         .collect();
-    for key in orphans(&String::from_utf8_lossy(&held), &named, same_state) {
+    for key in orphans(&String::from_utf8_lossy(&held), &named, &owner()) {
         tracing::info!("ending the held shell {key}, which no session names");
         end(&key, "");
     }
 }
 
-/// Select orphaned shells from `held` for [`sweep`]: unattached Accent IDs started under
-/// this state directory and absent from `named` sessions. Leave other instances and manual attaches alone.
-fn orphans(held: &str, named: &HashSet<String>, ours: impl Fn(u64) -> bool) -> Vec<String> {
+/// Select orphaned shells from `held` for [`sweep`]: unattached Accent IDs started by `owner`
+/// and absent from `named` sessions. Leave other instances and manual attaches alone.
+fn orphans(held: &str, named: &HashSet<String>, owner: &str) -> Vec<String> {
     held.lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|shell| shell["attached"] == false)
-        .filter(|shell| shell["pid"].as_u64().is_some_and(&ours))
+        .filter(|shell| shell["attached"] == false && shell["owner"] == owner)
         .filter_map(|shell| Some(format!("{KEY}{}", shell["id"].as_str()?)))
         .filter(|key| is_key(key) && !named.contains(key))
         .collect()
 }
 
-/// Check `pid`'s startup `XDG_STATE_HOME` against this process before sweeping shells.
-/// Drills can share a holder through TMPDIR while using unrelated session state.
-fn same_state(pid: u64) -> bool {
-    let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
-        return false;
-    };
-    let theirs = environ
-        .split(|&b| b == 0)
-        .find_map(|var| var.strip_prefix(b"XDG_STATE_HOME="));
-    let ours = std::env::var_os("XDG_STATE_HOME");
-    theirs == ours.as_deref().map(OsStrExt::as_bytes)
+/// Who this app's shells are for, as the holder keeps it: the state directory its sessions live
+/// in. A native app's and the Flatpak's differ, as a drill's scratch one does, so neither sweeps
+/// shells the other's sessions name; they may share one holder, the Flatpak's being the host's.
+fn owner() -> String {
+    accent_core::config::xdg("XDG_STATE_HOME", ".local/state")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Run a shell kill off the main thread so Close Tab never waits on a holder or host.
@@ -1182,25 +1178,27 @@ mod tests {
         assert_eq!(dir_of("https://box/home/me", "box"), None);
     }
 
-    /// What the startup sweep ends: accent's own shells, that no terminal has, that were started
-    /// under this state directory, and that no session names.
+    /// What the startup sweep ends: accent's own shells, that no terminal has, that this state
+    /// directory started, and that no session names.
     #[test]
     fn a_held_shell_no_session_names_is_an_orphan() {
         let held = [
-            r#"{"attached":false,"cwd":"/","id":"00000000000000a1","pid":1,"title":""}"#,
+            r#"{"attached":false,"id":"00000000000000a1","owner":"/home/me/.local/state"}"#,
             // Named by a session, so it comes back when that session is opened.
-            r#"{"attached":false,"cwd":"/","id":"00000000000000a2","pid":2,"title":""}"#,
+            r#"{"attached":false,"id":"00000000000000a2","owner":"/home/me/.local/state"}"#,
             // In a terminal right now: another instance of accent on the same holder.
-            r#"{"attached":true,"cwd":"/","id":"00000000000000a3","pid":3,"title":""}"#,
+            r#"{"attached":true,"id":"00000000000000a3","owner":"/home/me/.local/state"}"#,
             // Not an id accent chose: an `accent-cli attach` typed by hand.
-            r#"{"attached":false,"cwd":"/","id":"demo","pid":4,"title":""}"#,
-            // Started under another state directory, whose sessions are not read here.
-            r#"{"attached":false,"cwd":"/","id":"00000000000000a5","pid":5,"title":""}"#,
+            r#"{"attached":false,"id":"demo","owner":"/home/me/.local/state"}"#,
+            // Another state directory's (the Flatpak's, a drill's), whose sessions are not read here.
+            r#"{"attached":false,"id":"00000000000000a5","owner":"/home/me/.var/app/x/.local/state"}"#,
+            // Started by no app: a remote attach, or one typed by hand.
+            r#"{"attached":false,"id":"00000000000000a6","owner":""}"#,
         ]
         .join("\n");
         let named = HashSet::from(["terminal:00000000000000a2".to_string()]);
         assert_eq!(
-            orphans(&held, &named, |pid| pid != 5),
+            orphans(&held, &named, "/home/me/.local/state"),
             ["terminal:00000000000000a1"]
         );
     }

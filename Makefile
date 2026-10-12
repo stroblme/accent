@@ -81,7 +81,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 .DEFAULT_GOAL := all
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke drills xvfb vault validate icons flatpak cargo-sources pdfium server \
-        help requirements android android-check android-test android-tools apk apk-release \
+        help requirements install-requirements android android-check android-test android-tools apk apk-release \
         pdfium-android bindings
 
 ## all: build everything, core plus the desktop app
@@ -103,7 +103,7 @@ gtk-bench:
 
 ## requirements: check what building and running the desktop app needs (installs nothing)
 #
-# One line per missing item; README.md's Requirements names the packages per distro. The library
+# One line per missing item; `install-requirements` installs them per distro. The library
 # floors are what the binding features in apps/gtk/Cargo.toml ask pkg-config for (`v4_18` is
 # gtk4 >= 4.18), and Rust's is the workspace's `rust-version` in Cargo.toml.
 # An optional item only warns: the app runs without it and lacks the feature it names.
@@ -130,7 +130,32 @@ requirements:
 		echo "optional: cargo-zigbuild and zig, for make server, which remote vaults need"; \
 	command -v merl-rt >/dev/null || echo "optional: merl-rt, for ghost text"; \
 	if test $$missing = 0; then echo "All requirements met."; \
-	else echo "README.md, Requirements, lists the packages per distro."; exit 1; fi
+	else echo "make install-requirements installs them on openSUSE, Fedora, Debian, Ubuntu and Arch."; exit 1; fi
+
+# What `requirements` checks for, as each distribution packages it, plus git, ssh and curl. The one
+# list README.md, install.sh and CI rely on. GNOME 49 or newer is what has the versions above.
+PKGS_suse   := gcc make pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel gtksourceview5-devel \
+               webkitgtk4-devel vte-devel libspelling-devel git-core openssh-clients curl
+PKGS_fedora := gcc make pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel gtksourceview5-devel \
+               webkitgtk6.0-devel vte291-gtk4-devel libspelling-devel git openssh-clients curl
+PKGS_debian := build-essential pkgconf libgio-2.0-dev-bin libgtk-4-dev libadwaita-1-dev \
+               libgtksourceview-5-dev libwebkitgtk-6.0-dev libvte-2.91-gtk4-dev libspelling-1-dev \
+               git openssh-client curl
+PKGS_arch   := base-devel gtk4 libadwaita gtksourceview5 webkitgtk-6.0 vte4 libspelling git openssh curl
+# Root (a CI container) installs directly; anyone else through sudo.
+SUDO := $(if $(filter 0,$(shell id -u)),,sudo)
+
+## install-requirements: install the desktop requirements with the distribution's package manager
+#
+# Without asking: install.sh runs this with no terminal on stdin.
+install-requirements:
+	@. /etc/os-release; case " $$ID $$ID_LIKE " in \
+	*suse*) $(SUDO) zypper --non-interactive install $(PKGS_suse) ;; \
+	*" fedora "*) $(SUDO) dnf install -y $(PKGS_fedora) ;; \
+	*" debian "* | *" ubuntu "*) $(SUDO) apt-get update && $(SUDO) apt-get install -y $(PKGS_debian) ;; \
+	*" arch "*) $(SUDO) pacman -S --needed --noconfirm $(PKGS_arch) ;; \
+	*) echo "No package list for $$ID: make requirements names what is missing."; exit 1 ;; \
+	esac
 
 ## test: run the whole workspace test suite, desktop app included
 test:

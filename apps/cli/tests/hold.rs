@@ -13,6 +13,8 @@ const HELLO: u8 = b'h';
 const INPUT: u8 = b'i';
 const OUTPUT: u8 = b'o';
 const EXIT: u8 = b'x';
+/// Who the test's shells are for, as an app's state directory would be.
+const OWNER: &str = "/home/me/.local/state";
 
 /// A `TMPDIR` of our own, so the holder under test never meets the one of whoever runs the tests,
 /// and a holder that outlives a failed test is ended with it.
@@ -54,20 +56,21 @@ impl Holder {
         Some(holder)
     }
 
-    /// `$TMPDIR/accent-<uid>/hold-1.sock`; the scratch dir is ours, so its owner is our uid.
+    /// `$TMPDIR/accent-<uid>/hold-2.sock`; the scratch dir is ours, so its owner is our uid.
     fn socket(&self) -> PathBuf {
         let uid = std::fs::metadata(&self.tmp).unwrap().uid();
-        self.tmp.join(format!("accent-{uid}/hold-1.sock"))
+        self.tmp.join(format!("accent-{uid}/hold-2.sock"))
     }
 
-    /// Attach to shell `id` the way `attach` does, with a small, known environment.
+    /// Attach to shell `id` the way `attach` does, for [`OWNER`], with a small, known environment.
     fn hello(&self, id: &str, shell: &str) -> UnixStream {
         let conn = UnixStream::connect(self.socket()).unwrap();
         conn.set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         let mut hello = vec![0, 24, 0, 80];
         let shell = format!("SHELL={shell}");
-        for part in [id, self.tmp.to_str().unwrap(), &shell, "PATH=/usr/bin:/bin"] {
+        let tmp = self.tmp.to_str().unwrap();
+        for part in [id, tmp, OWNER, &shell, "PATH=/usr/bin:/bin"] {
             hello.extend(part.as_bytes());
             hello.push(0);
         }
@@ -167,6 +170,7 @@ fn a_detached_shell_is_redrawn_on_reattach_and_ends_on_kill() {
     let held: serde_json::Value = serde_json::from_slice(&held.stdout).unwrap();
     assert_eq!(held["id"], "t2");
     assert_eq!(held["attached"], true);
+    assert_eq!(held["owner"], OWNER);
     let cwd = std::fs::canonicalize(&holder.tmp).unwrap();
     assert_eq!(held["cwd"], cwd.to_str().unwrap());
 

@@ -63,6 +63,8 @@ struct Shell {
     /// What was started, and when, in seconds since the epoch: for `held`.
     program: PathBuf,
     started: u64,
+    /// Who started it ([`Hello::owner`]), for `held`.
+    owner: String,
     master: File,
     screen: Mutex<Screen>,
 }
@@ -195,6 +197,7 @@ impl Daemon {
             started: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_secs()),
+            owner: hello.owner.clone(),
             master,
             screen: Mutex::new(Screen {
                 parser: screen::parser(hello.rows, hello.cols),
@@ -297,7 +300,8 @@ impl Daemon {
     }
 
     /// One JSON object per line and shell: its id, pid, working directory, title, whether a
-    /// terminal is attached, the program started and when, and what runs in its foreground.
+    /// terminal is attached, the program started, when and for whom, and what runs in its
+    /// foreground.
     fn list(&self) -> Vec<u8> {
         // Copied out first, so the `screen` locks below are never taken under `shells`.
         let shells: Vec<_> = lock(&self.shells)
@@ -321,6 +325,7 @@ impl Daemon {
                 "attached": attached,
                 "shell": shell.program.to_string_lossy(),
                 "started": shell.started,
+                "owner": shell.owner,
                 "running": shell.foreground(),
             });
             out.extend(line.to_string().into_bytes());

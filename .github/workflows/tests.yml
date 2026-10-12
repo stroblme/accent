@@ -45,14 +45,12 @@ jobs:
     container: fedora:44
     steps:
       # Before checkout: the base image has no git, so actions/checkout would fall back to the API.
-      # make, tar and curl are for `make pdfium`; the image already carries tar and the full curl.
-      # dbus-daemon is for `make smoke`'s dbus-run-session.
-      - run: >
-          dnf install -y git gcc make tar curl gtk4-devel libadwaita-devel
-          gtksourceview5-devel webkitgtk6.0-devel libspelling-devel vte291-gtk4-devel
-          xorg-x11-server-Xvfb dbus-daemon
-          dejavu-sans-fonts
+      # make runs the next step; tar is for `make pdfium` (the image already carries it); the rest
+      # is the headless run's: dbus-daemon for `make smoke`'s dbus-run-session.
+      - run: dnf install -y git make tar xorg-x11-server-Xvfb dbus-daemon dejavu-sans-fonts
       - uses: actions/checkout@v7
+      # The build requirements, from the Makefile's one list; as root, without sudo.
+      - run: make install-requirements
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
