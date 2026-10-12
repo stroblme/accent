@@ -1,30 +1,18 @@
-//! Vault walk: symlink rules, (dev, ino) dedup, Syncthing temp/conflict filtering.
+//! Vault traversal with symlink deduplication and Syncthing filtering.
 //!
-//! Obsidian's *rules* (not its behaviour): a directory symlink is followed once, loops are
-//! skipped, a symlink whose target lands inside the vault root (or inside a symlink target we
-//! already accepted) is skipped and reported, file symlinks are followed and de-duplicated by
-//! `(dev, ino)` so the same inode reached by two paths yields one [`FileMeta`] plus an alias.
+//! Follow directory symlinks once, rejecting loops and targets already reachable inside the
+//! vault or an accepted target. Deduplicate file inodes by `(dev, ino)`, retaining alternate
+//! paths as aliases.
 //!
-//! Ignore files differ inside and outside the vault, so the walk runs in two kinds of pass.
-//! The **vault tree** honours no ignore file *for files*: a notes vault routinely gitignores
-//! `*.md` on purpose, and that must not hide the user's notes. What git ignores file by file is
-//! left out of *queries* instead ([`crate::index::Index::set_excluded`]), which is the only place
-//! it can be done without the walk having to guess. A gitignored **directory** is a different
-//! animal — an `mlruns/`, a `node_modules/`, a `.venv/`, somebody's build output — and the walk
-//! does not enter one ([`dir_ignores`]); its contents reach the file tree a level at a time when
-//! the reader opens the row ([`unindexed_children`]). A **symlink target** is somebody else's
-//! tree — usually a code repo — so it honours its own `.gitignore`/`.ignore` whole, files
-//! included, which is what keeps `.venv`, `target` and friends out.
-//! Each pass therefore walks with `follow_links(false)` and hands accepted directory symlinks
-//! back as new passes; nested symlinks under a target obey exactly the same rules.
+//! The vault pass indexes individually ignored files so ignored markdown remains available;
+//! query exclusions handle them later. Git-ignored directories are skipped and listed lazily
+//! through [`unindexed_children`]. External symlink passes honour their own `.gitignore` and
+//! `.ignore`, including files. Accepted directory links become separate passes with
+//! `follow_links(false)`.
 //!
-//! Inside the vault that leaves dependency trees nobody gitignored, because the user never wrote
-//! an ignore file at all: a `.venv` or a `target/` dropped next to the notes. Those are skipped by
-//! their own **marker file** ([`DEPENDENCY_MARKERS`]) rather than by name, so one rule covers
-//! cargo, `python -m venv`, and every other tool that follows the `CACHEDIR.TAG` convention.
-//!
-//! ponytail: unix-only (`MetadataExt` for dev/ino/mtime_nsec). Targets are Linux + Android;
-//! a Windows port would need a `cfg` branch using `FileIndex`/`VolumeSerialNumber`.
+//! [`DEPENDENCY_MARKERS`] also excludes unignored cache and virtual-environment trees without an
+//! ecosystem-specific name list. Unix metadata is required; supported targets are Linux and
+//! Android.
 
 use ignore::{IncrementalIgnore, WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
@@ -58,37 +46,22 @@ const SKIP_DIRS: &[&str] = &[
     ".lake",
 ];
 
-/// Files that mark their directory as somebody's dependency or build tree.
-///
-/// `CACHEDIR.TAG` is the cross-tool cache marker (`tar --exclude-caches`, borg, restic); cargo
-/// writes one into every `target/`. `pyvenv.cfg` is the PEP 405 virtualenv root marker, written
-/// by `python -m venv` and by virtualenv ≥ 20. Between them they cover the two trees that
-/// actually blow up a vault, with no per-ecosystem name list to maintain.
+/// Dependency/build-tree markers. Cargo uses the cross-tool `CACHEDIR.TAG`; PEP 405 environments
+/// use `pyvenv.cfg`. Both avoid large dependency walks without per-ecosystem directory names.
 const DEPENDENCY_MARKERS: &[&str] = &["CACHEDIR.TAG", "pyvenv.cfg"];
 
-/// Does this directory carry a marker saying nobody's notes live in it?
-///
-/// ponytail: presence is enough. `CACHEDIR.TAG` also fixes its first line to a signature, but
-/// checking it would cost an open per directory instead of a stat, and a file of that exact name
-/// that is not a cache tag has never been seen in the wild.
+/// Whether a dependency marker exists. Presence alone avoids opening a tag file for every
+/// directory; the `CACHEDIR.TAG` signature is not validated.
 fn is_dependency_tree(dir: &Path) -> bool {
     DEPENDENCY_MARKERS.iter().any(|m| dir.join(m).exists())
 }
 
-/// A matcher for the vault's own ignore files, asked about **directories only**.
+/// Match vault ignore rules for directories only, retaining individually ignored notes.
+/// [`IncrementalIgnore`] applies `.gitignore` and `.git/info/exclude` one path at a time; global
+/// exclusions and ripgrep's `.ignore` are not vault rules.
 ///
-/// `ignore`'s own walker cannot do this: turning its gitignore on hides ignored files too, and a
-/// vault that gitignores `*.md` would lose its notes. [`IncrementalIgnore`] is the same matcher
-/// stack asked one path at a time, so the rule can be applied to directories and to nothing else.
-///
-/// `.gitignore` and `.git/info/exclude` only. Not the machine's global excludes file — that is a
-/// preference of the person, not a fact about the project — and not `.ignore`, which is
-/// ripgrep's file and not git's.
-///
-/// ponytail: a fresh matcher per call, and callers that ask about one path ([`stat_one`]) build
-/// one per path. It reads an ignore file per directory on the way down and caches nothing across
-/// calls, which is a handful of failed `open`s for a watcher event. Holding one per vault would
-/// have to be invalidated whenever a `.gitignore` is edited, which is the harder half.
+/// Matchers are rebuilt per call, avoiding a cache that would need invalidation on ignore-file
+/// edits.
 fn dir_ignores(root: &Path) -> IncrementalIgnore {
     let mut b = WalkBuilder::new(root);
     b.hidden(false)
@@ -213,12 +186,8 @@ pub struct ScanOptions {
     /// Honour `.gitignore`/`.ignore` inside directory-symlink targets. On by default: those
     /// are external trees (code repos) whose build output nobody wants in a note index.
     pub target_gitignore: bool,
-    /// Skip directories carrying a [`DEPENDENCY_MARKERS`] file. On by default: one virtualenv
-    /// measured on the author's machine is 105 456 files in 12 390 directories, which is both
-    /// an index nobody wants and 9 % of the kernel's inotify watch budget.
-    ///
-    /// ponytail: if someone really keeps notes under a `CACHEDIR.TAG`, this becomes a per-vault
-    /// preference; until then the file tree still lists such a tree and Search's All reaches it.
+    /// Skip [`DEPENDENCY_MARKERS`] trees by default to bound index size and inotify use. They
+    /// remain visible in the file tree and reachable through Search's All mode.
     pub skip_dependency_trees: bool,
     /// Walk [`SKIP_DIRS`] and marked dependency trees anyway. Off by default, and never turned on
     /// for the index: this is the Search pane's All toggle reaching, for one query, the trees the
@@ -377,26 +346,12 @@ fn is_unindexed(root: &Path, rel: &str, ignores: &mut IncrementalIgnore) -> Opti
     in_ignored_dir(ignores, rel, true).then_some(Unindexed::Ignored)
 }
 
-/// The children of the directory `rel` that `held` — the index's own listing of it — does not
-/// name, as `(rel_path, kind)`.
+/// Return unindexed children absent from `held`, as `(rel_path, kind)`, for lazy file-tree
+/// expansion. Lists skipped directories beside indexed siblings, or their contents when `rel` is
+/// already inside one, without storing or watching them.
 ///
-/// The file tree shows every folder in the vault, the ones the index deliberately does not walk
-/// included: a listing that silently leaves `node_modules` out is a listing nobody can trust.
-/// Those trees stay out of the index, the watcher and every query all the same — nothing here is
-/// stored — so the only place their contents can come from is a `read_dir`, one level at a time,
-/// when the reader opens the row.
-///
-/// Two kinds of row come back: the refused directories themselves — a `node_modules`, a marked
-/// dependency tree, a directory git ignores — listed beside their indexed siblings, and, where
-/// `rel` is already inside one, everything in it. [`ALWAYS_SKIP_DIRS`],
-/// Syncthing's temporaries and our own save temporaries are refused at every depth, exactly as
-/// [`scan`] refuses them, so `.git` and `.trash` are out of reach here too.
-///
-/// `held` is both the thing that keeps a row from being listed twice and what keeps this cheap:
-/// deciding whether a directory is a dependency tree costs a stat per [`DEPENDENCY_MARKERS`]
-/// entry, and a directory the index already holds cannot be one, so it is never asked. On the
-/// test vault's 2 400-directory `Resources/library/storage` that is the difference between 4 800
-/// stats per expansion and none.
+/// Always omit [`ALWAYS_SKIP_DIRS`], Syncthing temporaries and save temporaries. `held` prevents
+/// duplicate rows and avoids dependency-marker stats for already-indexed directories.
 pub fn unindexed_children(
     root: &Path,
     rel: &str,
@@ -587,19 +542,11 @@ pub fn scan_until(
     }
 }
 
-/// Hand every file [`scan`] would list to `on_file`, on the walking threads, as it is found.
+/// Visit files on walking threads as they are found, allowing callers to read them in parallel.
+/// Return `false` from `on_file` to stop the walk and discard queued passes.
 ///
-/// [`scan`] answers with a [`FileMeta`] per file and nothing else, so a caller that then *reads*
-/// those files does it afterwards, one at a time, however many cores are idle: that is what
-/// [`crate::index::Index::matches_in`]'s caller in the search pane was paying for. Here the work
-/// happens inside the walk instead. `on_file` returns `false` to stop it — [`WalkState::Quit`] on
-/// the thread that said so, and the passes still queued are dropped — which is how a filled row
-/// budget stops a walk it no longer needs.
-///
-/// Two things [`scan`] does are not on offer, both because they are whole-result operations that
-/// cannot exist while the walk is still running: the `(dev, ino)` dedup, so a file reachable by
-/// two paths is handed over twice, and any order at all. A caller that needs either sorts what it
-/// kept, which is cheap exactly when the caller keeps few rows.
+/// Unlike [`scan`], results are neither ordered nor deduplicated by `(dev, ino)`; callers
+/// needing either must process their retained results.
 pub fn visit(root: &Path, opts: &ScanOptions, on_file: &(dyn Fn(FileMeta) -> bool + Send + Sync)) {
     walk_passes(root, "", &[], opts, &|f| match on_file(f) {
         true => WalkState::Continue,
@@ -673,9 +620,8 @@ struct Pass {
     prefix: String,
     /// Honour the ignore files whole, files included.
     gitignore: bool,
-    /// Honour them for directories only: the vault's rule, where hiding a file would hide a note.
-    /// Never set on a symlink target — that tree either honours its ignore files whole or has
-    /// been told to ignore them, and a half rule in between is nobody's ask.
+    /// Apply ignores to directories only so vault notes remain indexed. Symlink targets instead
+    /// honour all ignore rules or none.
     dir_gitignore: bool,
 }
 

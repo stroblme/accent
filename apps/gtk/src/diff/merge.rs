@@ -1,13 +1,8 @@
-//! A file git left unmerged, in three columns: a side of the conflict, the file itself with git's
-//! markers in it, and the other side. The middle column is the tab's own editor, where the merge
-//! is made; the side columns are read-only, each showing one of the conflict's stages — Current,
-//! Base or Incoming, from the title row — and tinted where it differs from the file. A strip
-//! between each side and the file joins the two, and each conflict block's band in it carries the
-//! buttons that take its sides (`Conflicts::accept`).
+//! Three-column Git conflict resolution with the editable file between read-only sides.
 //!
-//! The rows are [`diff::align3`]'s, laid out by [`Columns`] as a comparison's are: one scroll,
-//! padding that keeps each row level, unchanged runs hidden behind a button, the reader's line
-//! kept where it is.
+//! Each side selects Current, Base or Incoming and highlights differences from the file.
+//! Connector bands carry [`Conflicts::accept`] buttons. [`diff::align3`] and [`Columns`]
+//! provide shared scrolling, aligned padding, hidden unchanged runs and stable reading positions.
 
 use accent_core::conflict::{self, Take};
 use accent_core::diff::{self, DiffLine, Op};
@@ -44,12 +39,12 @@ pub struct Merge {
     shown: [Cell<usize>; 2],
     /// The title row's choice of stage, left and right.
     pickers: [gtk::DropDown; 2],
-    /// Per row, the line each column shows there: [`Three`]'s rows.
+    /// Per row, the line each column shows there: [`diff::Three`]'s rows.
     lines: RefCell<Vec<[Option<usize>; 3]>>,
     /// Per column, where each line of its text starts, in characters.
     starts: RefCell<[Vec<i32>; 3]>,
-    /// The rows hidden right now, each with the key it can be opened by: its first line in the
-    /// left column, which typing in the middle does not renumber.
+    /// Hidden runs keyed by first left-column line, stable while editing
+    /// the middle column.
     hidden: RefCell<Vec<(Range<usize>, usize)>>,
     /// Lines of the left column the reader asked to see, as a comparison keeps them.
     opened: RefCell<HashSet<usize>>,
@@ -64,9 +59,9 @@ pub struct Merge {
 }
 
 impl Merge {
-    /// `left` and `right` read-only columns over the stages `CURRENT` and `INCOMING` of
-    /// `stages`, `mid` the editor's column; `titles` name each stage in the pickers. `conflicts` is
-    /// the editor's, its band off while the merge is up.
+    /// Build read-only `left`/`right` from `CURRENT`/`INCOMING`, with `mid` as
+    /// the editor and `titles` in stage pickers. Hide the editor's normal
+    /// conflict band while the merge presents `conflicts`.
     pub fn new(
         [left, mid, right]: [Pane; 3],
         stages: [String; 3],
@@ -242,8 +237,8 @@ impl Merge {
         self.refresh();
     }
 
-    /// Take a side of the `i`th conflict block, from a button in `column`'s half of a strip: the
-    /// side that column shows, or both from the middle.
+    /// Accept the stage shown by `column` for conflict `i`, or both sides
+    /// from a middle-column button.
     fn accept(&self, i: usize, column: usize) {
         let take = match column {
             MID => Take::Both,
@@ -271,8 +266,8 @@ impl Merge {
         self.refresh();
     }
 
-    /// The run hiding `offset` in the middle column opened, as a jump into it opens it: `true`
-    /// when one was. See `Compare::open_hiding`.
+    /// Reveal the run hiding middle-column `offset` and report whether one
+    /// opened ([`super::Compare::open_hiding`]).
     pub fn open_hiding(&self, offset: i32) -> bool {
         let key = {
             let (lines, starts, hidden) = (
@@ -296,8 +291,8 @@ impl Merge {
         true
     }
 
-    /// Every run opened, as Show All Unchanged Lines goes down, or hidden again as it comes up,
-    /// the caret's line kept where it is: see `Compare::toggle_all`.
+    /// Toggle all unchanged runs while retaining the caret line's viewport
+    /// position ([`super::Compare::toggle_all`]).
     fn toggle_all(&self) {
         if !self.columns.opening() {
             let top = || self.columns.top_line(MID);
@@ -310,8 +305,8 @@ impl Merge {
         self.refresh();
     }
 
-    /// Diff the side columns against the file and lay the rows. With `opening`, the caret goes to
-    /// the first conflict block, or the first change where there is none.
+    /// Diff side stages against the file and align rows. When `opening`,
+    /// jump to the first conflict or, without conflicts, the first change.
     fn lay(&self, opening: bool) {
         let texts = [0, 1, 2].map(|c| self.text(c));
         let three = diff::align3(&texts[0], &texts[1], &texts[2]);
@@ -505,8 +500,8 @@ impl Merge {
         }
     }
 
-    /// The side columns' tints from the resolved theme, as the conflict blocks' in the middle
-    /// column are (`conflict::tints`), each in the tint of the stage it shows.
+    /// Apply resolved-theme stage tints, matching middle-column conflict
+    /// blocks (`conflict::tints`).
     pub fn restyle(&self) {
         let page = crate::highlight::page(adw::StyleManager::default().is_dark());
         for (side, column) in [0, 2].into_iter().enumerate() {
@@ -547,7 +542,7 @@ impl Merge {
 
 #[cfg(feature = "bench")]
 impl Merge {
-    /// How many rows some column lays out off the grid: 0 is the claim.
+    /// Count rows outside the alignment grid; expected zero.
     pub fn misaligned(&self) -> usize {
         self.columns.misaligned()
     }
@@ -578,9 +573,9 @@ impl Merge {
         self.columns.strip()
     }
 
-    /// Each connector's ends, as `(top, bottom)` on its strip's left and on its right, by strip,
-    /// in the drawing's pixels, and how many of those ends are not where GTK draws the line of the
-    /// row they stand on: 0 is the claim, what [`Merge::misaligned`] is to the rows.
+    /// Connector endpoints as `(top, bottom)` for each strip side in drawing
+    /// pixels, plus count differing from GTK row positions. Expected zero,
+    /// as with [`Merge::misaligned`] for rows.
     pub fn links(&self) -> (Vec<Vec<super::links::Ends>>, usize) {
         self.columns.links_check()
     }

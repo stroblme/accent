@@ -1,18 +1,8 @@
-//! A vault on another machine, reached over one ssh connection.
-//!
-//! The shape is Zed's and VS Code's: a headless copy of this very binary runs on the host as
-//! `accent-cli serve`, and the window talks to it over the ssh session's stdio. Everything that
-//! needs the files — the index, the watcher, search, git — runs there; the window keeps only what
-//! belongs to the machine the person is sitting at, which is the session and the settings.
-//!
-//! Connecting takes seconds and may ask for a passphrase, so it never blocks the caller. Opening
-//! returns at once and the work happens on a thread that reports through the same [`Event`]
-//! channel the local worker uses, which is why a remote vault paints its window as fast as a
-//! local one.
-//!
-//! Nothing here parses ssh's output or drives a pty. The system `ssh` binary owns authentication,
-//! `~/.ssh/config`, ProxyJump and the agent; a passphrase prompt comes back to us through
-//! `SSH_ASKPASS`, which the app answers with a dialog.
+//! Remote vaults over one system-SSH connection. `accent-cli serve` runs
+//! indexing, watching, search and git beside the files; window sessions and
+//! settings stay local. Opening returns immediately while a connection thread
+//! reports through the shared [`Event`] channel. System SSH handles config,
+//! ProxyJump, the agent and authentication; `SSH_ASKPASS` routes prompts to dialogs.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Read, Write};
@@ -54,24 +44,21 @@ pub enum State {
 pub enum Pushed {
     /// The bytes are on the host, and the copy is stamped with what the host says now.
     Sent,
-    /// The host's file moved on since the copy was fetched, so it was left as it is and what had
-    /// been written went up *beside* it under this name in the vault: a conflict copy the tree
-    /// lists, and either of the two can be deleted. The cached copy is that file's now, so the
-    /// reader moves onto it, as onto a renamed file, and draws on there.
+    /// The host changed since fetch. Upload edits beside the original under
+    /// this vault name, preserving both versions. The cached copy and reader
+    /// move to the conflict file, which the tree lists for comparison or deletion.
     Conflict(String),
     /// Neither could go to the host, so what was written is only on this machine — at this path,
     /// for this reason.
     Kept(PathBuf, String),
 }
 
-/// How many `(edited)` copies of one document the host may already hold before a refusal gives up
-/// and keeps the bytes here instead. Each one costs a `stat` round trip to rule out, and twenty
-/// unread copies of the same document is a reader with a different problem.
+/// Maximum conflict-name probes before keeping bytes locally. Each occupied
+/// name costs a `stat` round trip, so bound repeated conflicts.
 const EDITED_COPIES: usize = 20;
 
-/// `notes/doc.pdf` -> `notes/doc (edited).pdf`, and `notes/doc (edited 2).pdf` for the next one:
-/// where a copy the host would not take over the original goes instead, whether it was drawn on
-/// or had pages moved, put in or taken out.
+/// Conflict destination: `notes/doc.pdf` becomes `notes/doc (edited).pdf`,
+/// then `notes/doc (edited 2).pdf`, for ink or page edits refused over the original.
 pub fn edited_name(rel: &str, nth: usize) -> String {
     let (stem, ext) = match rel.rsplit_once('.') {
         // A dot in a directory's name is not this file's extension.
@@ -84,10 +71,8 @@ pub fn edited_name(rel: &str, nth: usize) -> String {
     }
 }
 
-/// Where a cached copy is put when the host will not take it anywhere: beside itself, under a
-/// name no fetch writes over, keeping the extension so it still opens in whatever reads that
-/// kind. The last resort only — a refusal the host accepts a copy of lands in the vault, where
-/// the reader can reach it.
+/// Last-resort local copy beside the cache, with its extension preserved
+/// and a name no fetch overwrites. Prefer a vault conflict copy when upload succeeds.
 fn kept_path(dest: &Path) -> PathBuf {
     match dest.extension() {
         Some(ext) => dest.with_extension(format!("kept.{}", ext.to_string_lossy())),
@@ -109,9 +94,8 @@ fn cached(path: &Path, e: std::io::Error) -> Error {
     accent_core::Error::io(path.display(), e).into()
 }
 
-/// Move a cached file or folder to where the host moved its original, making the folders it goes
-/// into. Nothing cached there is nothing to move, and a move that fails costs the next fetch a
-/// download.
+/// Move a cached file or folder with its host original, creating destination
+/// folders. Missing caches are ignored; failure requires a later download.
 fn carry(from: &Path, to: &Path) {
     if !from.exists() {
         return;
@@ -125,27 +109,23 @@ fn carry(from: &Path, to: &Path) {
     }
 }
 
-/// What a cached copy was when it was last fetched or pushed: the host's etag then, and the
-/// copy's own. A copy whose own etag has moved since was written here — the pen, a page edit —
-/// and holds what the host has not had.
+/// Host and local etags at the last fetch or push. A changed local etag
+/// identifies unsent pen or page edits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 struct Stamped {
     host: crate::Etag,
     copy: crate::Etag,
 }
 
-/// Whether the copy at `dest` was written here since `stamped`, so its bytes are on this machine
-/// only. A copy never stamped is taken as fetched: there is nothing to tell it by.
+/// Whether `dest` changed locally since `stamped`. An unstamped copy is
+/// treated as fetched because no prior state is available.
 fn unsent(dest: &Path, stamped: Option<Stamped>) -> bool {
     stamped.is_some_and(|s| crate::Etag::of(dest).is_ok_and(|now| now != s.copy))
 }
 
-/// The stamp of one cached copy, locked for as long as this is held: see [`Stamped`].
-///
-/// A fetch and a push each hold it from the `stat` that decides what to do until the stamp is
-/// written, so two of one file take turns. Two fetches racing on a burst of watcher events could
-/// otherwise land the older bytes under the newer stamp, and the fetch the host's report of a push
-/// sets off could pull the pushed bytes back over a page still being drawn on.
+/// Lock one cached file's stamp ([`Stamped`]) through stat, transfer and update.
+/// Serialize fetches and pushes so old bytes cannot acquire a newer stamp
+/// and watcher-triggered fetches cannot overwrite locally edited pages.
 struct Stamp(std::fs::File);
 
 impl Stamp {
@@ -180,35 +160,29 @@ impl Stamp {
 pub struct Remote {
     url: Url,
     ctl: PathBuf,
-    /// The vault root as the server canonicalised it. Empty until `hello` answers, which is why
-    /// it is behind a lock: every path the UI shows is relative to this.
+    /// Server-canonicalized root, empty until `hello` replies. Locked because
+    /// connection setup updates the base used by UI paths.
     root: RwLock<PathBuf>,
     config: Mutex<VaultConfig>,
-    /// Ghost text is a global preference rather than a per-vault one, so it travels beside the
-    /// config on `hello` instead of inside it, and a reconnect carries it again. So do word
-    /// suggestions.
+    /// Global ghost-text and word preferences, sent alongside vault config
+    /// in each `hello`, including reconnects.
     ghost: Mutex<bool>,
     words: Mutex<bool>,
     /// Held while a preference change's `hello` is read and sent ([`Remote::send_hello`]).
     hellos: Mutex<()>,
     client: Mutex<Option<Arc<Client>>>,
-    /// The documents the window has open, as the server was last told about them: the language
-    /// they were opened as, and the text they were last sent with.
-    ///
-    /// A reconnect reaches a `serve` that has never heard of them, so every `change_document`,
-    /// `completion` or `hover` about a tab that is still open would come back "not open" until
-    /// that tab was closed and opened again. Kept here rather than in the façade because this is
-    /// the only place that knows a connection has been replaced.
+    /// Open documents with their language and last sent text. Replay on reconnect
+    /// so the fresh server can answer existing tabs without reopening them.
+    /// Stored here because only `Remote` knows the connection was replaced.
     docs: Mutex<HashMap<String, (String, String)>>,
     /// The unindexed folders the window asked to have watched, which a new server has to be
     /// asked again for the same reason. See [`Vault::watch_unindexed`](crate::Vault::watch_unindexed).
     unindexed: Mutex<BTreeSet<String>>,
     /// The methods the host's server was found not to have, each said once.
     unknown: Mutex<BTreeSet<String>>,
-    /// The forwards the window started and has not stopped. They live in the ssh master, so a
-    /// link that drops takes them with it and the master a reconnect makes has none of them;
-    /// [`connect`](Self::connect) puts them back. Nothing outlives the vault: closing it cancels
-    /// every one still here.
+    /// Active forwards to restore after reconnect. They belong to the SSH master;
+    /// [`connect`](Self::connect) recreates them on a replacement master, and
+    /// vault close cancels them all.
     forwards: Mutex<Vec<Forward>>,
     /// Shared with the rpc reader thread, which is the first to know the link has gone.
     state: Arc<Mutex<State>>,
@@ -280,12 +254,9 @@ impl Remote {
         }
     }
 
-    /// Tell the server the preferences as they now stand, from a thread of its own: the setters
-    /// above are the main loop's, and a `hello` is a round trip. Recorded there in the order they
-    /// were made, they are sent one `hello` at a time, each reading the values when its turn
-    /// comes, so the last to reach the host carries the latest: Ghost Text switched off and
-    /// straight on again ends on. One sent while the vault is still connecting fails, and the
-    /// connection, once made, sends one more for it ([`Self::start`]).
+    /// Send current preferences in a worker-thread `hello` to avoid a main-loop
+    /// round trip. Serialize sends and read values at send time so the last send
+    /// carries the latest state. [`Self::start`] resends changes made during connection.
     fn send_hello(self: &Arc<Self>) {
         let remote = self.clone();
         let _ = std::thread::Builder::new()
@@ -311,9 +282,8 @@ impl Remote {
         self.retry(false);
     }
 
-    /// The same, for an attempt nobody asked for: the window's own retries after a dropped link.
-    /// It never prompts, so a key that wants a passphrase fails it instead of raising a dialog;
-    /// the attempt that may ask is [`reconnect`](Self::reconnect).
+    /// Reconnect without prompting for automatic retries. Passphrase-required
+    /// keys fail quietly; explicit [`reconnect`](Self::reconnect) may prompt.
     pub fn reconnect_quietly(self: &Arc<Self>) {
         self.retry(true);
     }
@@ -330,8 +300,8 @@ impl Remote {
 
     // ------------------------------------------------------------- calling
 
-    /// Ask the server. Waits while a connection is still being made, so the first paint of a
-    /// window does not have to be ordered against it.
+    /// Ask the connected server, returning immediately with an error while
+    /// connection setup is still in progress.
     pub fn call<T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
@@ -378,9 +348,8 @@ impl Remote {
         answer
     }
 
-    /// Say once per method that the host's server is older than this window: every call of it
-    /// fails the same way from now on, and a reader that can do without the answer says nothing
-    /// on screen of its own.
+    /// Report each unsupported host method once. Every call still returns its
+    /// error, while readers that can omit the result need no separate message.
     fn unknown(&self, method: &str) {
         if self.locked(&self.unknown).insert(method.to_string()) {
             let _ = self.events.send(Event::Error(format!(
@@ -400,10 +369,8 @@ impl Remote {
         }
     }
 
-    /// Keep what the server would have to be told again, so a new one can be.
-    ///
-    /// Recorded whether or not the call lands: a document opened while the link was down is one
-    /// the window has open, and the reconnect is exactly when the server has to hear about it.
+    /// Remember document and watch state for reconnect, even if the call fails.
+    /// A document opened offline still needs to be registered on the next server.
     fn remember(&self, method: &str, params: &serde_json::Value) {
         if method.ends_with("watch_unindexed") {
             let dirs: Vec<String> = params
@@ -445,12 +412,9 @@ impl Remote {
         }
     }
 
-    /// Tell a freshly started server about the documents the window still has open, and the
-    /// folders it is watching.
-    ///
-    /// [`REOPENING`] at a time: the server answers every request on a thread of its own, so eight
-    /// tabs cost the reconnect one round trip rather than eight, and a hundred cost thirteen
-    /// rather than a hundred threads on each end.
+    /// Replay open documents and watched folders to a fresh server. Send
+    /// [`REOPENING`] requests concurrently, reducing round trips without creating
+    /// a thread for every tab at once.
     fn reopen(&self, client: &Client) {
         let unindexed: Vec<String> = self.locked(&self.unindexed).iter().cloned().collect();
         if !unindexed.is_empty()
@@ -489,14 +453,8 @@ impl Remote {
         });
     }
 
-    /// The client, or why there is not one.
-    ///
-    /// A call made while the link is still being established is refused on the spot rather than
-    /// made to wait for it. The wait used to be up to [`crate::rpc::DEADLINE`], and the caller is
-    /// as often as not the GTK main loop, so a slow host froze the window it had just opened — and
-    /// an upload longer than the deadline made every call fail anyway, saying "not connected"
-    /// about a connection that was still being made. The UI hears [`Event::Connected`] and asks
-    /// again; there is nothing here worth blocking a frame for.
+    /// Get the client or fail immediately. Do not wait during connection setup:
+    /// callers may run on the GTK main loop. The UI retries after [`Event::Connected`].
     fn wait_for_client(&self) -> Result<Arc<Client>> {
         match &*self.locked(&self.state) {
             State::Connecting => return Err(Error::Offline("still connecting".to_string())),
@@ -511,21 +469,15 @@ impl Remote {
 
     // -------------------------------------------------------------- files
 
-    /// A local path holding this file's current bytes, downloading it when what we have is stale.
-    ///
-    /// This is how the PDF viewer, the image tab and the preview's assets reach a remote vault:
-    /// they need a real file, and the protocol deliberately carries no bytes. The etag decides —
-    /// same as on disk, no transfer.
-    ///
-    /// A copy written here since it was fetched or pushed is never fetched over: what the pen drew
-    /// is in it and nowhere else. It is handed back as it is, for a [`push`](Self::push) to send,
-    /// beside the host's file if that has moved on.
+    /// Return a local file for PDF, image and preview readers, downloading stale
+    /// copies by host etag. Preserve copies edited since fetch or push: their
+    /// unsent bytes must survive until [`push`](Self::push), including conflicts.
     pub fn fetch(&self, rel: &str) -> Result<PathBuf> {
         self.fetch_with(rel, &|_, _| ())
     }
 
-    /// [`fetch`](Self::fetch), telling `progress` the bytes received so far and how many there
-    /// are, as they arrive. Nothing is told when the cached copy is current.
+    /// [`fetch`](Self::fetch) with received and total byte counts during transfer.
+    /// Current cached copies report no progress.
     pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<PathBuf> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
@@ -565,22 +517,13 @@ impl Remote {
         Ok(dest)
     }
 
-    /// Put a cached copy back on the host: the other half of [`fetch`](Self::fetch), for the
-    /// readers that write into the file they were handed rather than through the vault — the PDF
-    /// pen, the page edits, Export Highlights.
-    ///
-    /// A copy not written since it was fetched or last pushed has nothing to send, and costs no
-    /// round trip. Otherwise the host's etag is checked against the one the copy was fetched at,
-    /// because the copy was drawn on without the host knowing: a file that moved under it is a
-    /// conflict for the reader to settle, not one to overwrite. On a match the copy goes up and
-    /// the stamp is written again from what the host says afterwards and what was sent, so the
-    /// fetch that follows the host's own watcher event does not pull our bytes back over a page
-    /// that is still being drawn on, and a save that landed during the upload is still unsent. On
-    /// a mismatch it goes [beside](Self::push_beside) the original instead.
-    ///
-    /// A file no longer on the host — moved or deleted there, while the copy was being written or
-    /// was on its way — is `NotFound`, and nothing goes up: under the old name it would come back.
-    /// The reader that follows a rename sends it again under the new one.
+    /// Push local PDF edits back to the host. Unchanged copies need no round trip.
+    /// Check the fetched host etag before replacing; conflicts upload
+    /// [beside](Self::push_beside) the original. After success, stamp both the
+    /// current host state and the bytes sent, preventing watcher refetches from
+    /// overwriting later local edits and keeping edits made during upload unsent.
+    /// Return `NotFound` for a moved or deleted host file rather than recreating
+    /// it under its old name; readers following a rename retry at the new path.
     pub fn push(&self, rel: &str) -> Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
@@ -607,11 +550,9 @@ impl Remote {
         Ok(Pushed::Sent)
     }
 
-    /// The cached copy of `from`, its stamp and the page edits waiting on it go to `to`, where the
-    /// host has just moved the file or folder. A rename keeps the host's etag, so the copy is as
-    /// current under the new name as under the old: a reader that follows the rename reads it
-    /// there, and its next push finds the stamp rather than taking the renamed file for somebody
-    /// else's change.
+    /// Move the cached file or folder, stamp and pending page edits from `from`
+    /// to `to` after a host rename. The host etag remains valid, so subsequent
+    /// pushes do not mistake the rename for an external edit.
     pub fn moved(&self, from: &str, to: &str) {
         for place in [ssh::cache_path, ssh::stamp_path, ssh::relink_path] {
             if let (Some(from), Some(to)) = (place(&self.url, from), place(&self.url, to)) {
@@ -620,17 +561,11 @@ impl Remote {
         }
     }
 
-    /// The refusal's other half: the written-on copy goes up as `<name> (edited).pdf` in the same
-    /// folder, the way a note's conflict copy lands in the vault, and the original is not touched.
-    /// It is then a file like any other — the tree lists it, it opens and it syncs — so the reader
-    /// can hold the two against each other and delete one, where a copy left in the ssh cache was
-    /// reachable only through the text of a toast. The cached copy goes with it, under its name
-    /// and its stamp, as a rename carries one: the reader moves onto it and draws on there, and
-    /// the original is fetched afresh when it is opened again.
-    ///
-    /// A second conflict takes the next free number rather than writing over `(edited)`, whose
-    /// changes nobody has looked at yet. If not even the copy can go up, the bytes stay here — the
-    /// one place a `.kept.pdf` still appears — and the toast says so.
+    /// Upload a conflict as `<name> (edited).pdf` beside the unchanged original.
+    /// Move the cache and stamp to the new name so the reader continues there
+    /// and the original is fetched afresh when reopened. Choose a free numbered
+    /// name to preserve earlier conflicts. If upload fails, retain a local
+    /// `.kept.pdf` copy and report it.
     fn push_beside(&self, dest: &Path, rel: &str) -> Pushed {
         let sent = self.free_edited_name(rel).and_then(|name| {
             let copy = self.send(dest, &name, false, &|_, _| ())?;
@@ -645,9 +580,9 @@ impl Remote {
         }
     }
 
-    /// The cached copy at `dest`, which went up to `name` as it was at `copy`, becomes `name`'s.
-    /// A copy whose host etag cannot be had is left unstamped, which costs its next push another
-    /// copy beside it rather than anything drawn.
+    /// Adopt `dest` as `name`'s cache after uploading its `copy` state. Leave it
+    /// unstamped if the host etag cannot be read, preserving edits at the cost
+    /// of another conflict copy on the next push.
     fn adopt(&self, dest: &Path, name: &str, copy: crate::Etag) {
         let (Some(to), Some(stamp)) = (
             ssh::cache_path(&self.url, name),
@@ -687,9 +622,9 @@ impl Remote {
         self.send(local, rel, false, progress).map(|_| ())
     }
 
-    /// A local file to `rel` on the host, replacing only a file still there when `replace` is
-    /// set: see [`ssh::put_cmd`]. Answers with the etag of the file that was sent, which a save
-    /// renaming another over `local` meanwhile does not change.
+    /// Send a local file to host `rel`. With `replace`, require the destination
+    /// to remain present ([`ssh::put_cmd`]). Return the etag of the bytes sent,
+    /// unaffected by a concurrent save replacing `local`.
     fn send(
         &self,
         local: &Path,
@@ -709,12 +644,9 @@ impl Remote {
         Ok(sent)
     }
 
-    /// Write `bytes` to `rel` over the master, the way an upload goes: the host's shell creates a
-    /// new file with the mode its umask gives a new note there. The host's index is then told, as
-    /// a local write tells its own, so an image pasted into a note is found by its name for the
-    /// embed and the preview at once, not on the host watcher's debounce, which raced the
-    /// preview's. Its watcher takes the file in all the same, so a telling that fails is no
-    /// failed write.
+    /// Create `rel` from `bytes` over the master using the host umask. Notify the
+    /// host index immediately so pasted embeds resolve before watcher debounce.
+    /// Notification failure does not fail the write; the watcher still indexes it.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
         let size = bytes.len() as u64;
         link::send(&self.put_into(rel, size, false), bytes, size, &|_, _| ())?;
@@ -743,10 +675,9 @@ impl Remote {
         self.receive(rel, dest, size, progress)
     }
 
-    /// Stream `rel` from the host into `dest` a chunk at a time, so a large file is never held
-    /// whole here, telling `progress` the bytes so far of `total`. The bytes go to a `.part` file
-    /// beside `dest` that takes its name once whole: a transfer cut off leaves the last good copy,
-    /// and a reader holding the old one open keeps reading what it opened.
+    /// Stream host `rel` into `dest` in chunks, reporting bytes of `total`.
+    /// Write a neighboring `.part` file and rename only when complete, preserving
+    /// the last good copy on interruption and existing readers' open files.
     fn receive(
         &self,
         rel: &str,
@@ -812,8 +743,7 @@ impl Remote {
         link::command(argv)
     }
 
-    /// Ask ssh to start forwarding a port, either way, over the master that is already open.
-    /// Nothing is spawned: the running master takes the instruction and keeps it.
+    /// Start a forward on the existing master without spawning another process.
     pub fn forward(&self, f: Forward) -> Result<()> {
         self.control(ssh::forward(&self.url, &self.ctl, f))?;
         let mut forwards = self.locked(&self.forwards);
@@ -823,8 +753,8 @@ impl Remote {
         Ok(())
     }
 
-    /// Stop a forward. It is forgotten whatever ssh answers: a master that has died took the
-    /// forward with it, and a reconnect must not bring back one the window stopped.
+    /// Stop and forget a forward even if SSH fails: a dead master has already
+    /// lost it, and reconnect must not restore an explicitly stopped forward.
     pub fn cancel_forward(&self, f: Forward) -> Result<()> {
         self.locked(&self.forwards).retain(|kept| *kept != f);
         self.control(ssh::cancel(&self.url, &self.ctl, f))
@@ -835,11 +765,10 @@ impl Remote {
         self.locked(&self.forwards).clone()
     }
 
-    /// Put the forwards back on the master [`connect`](Self::connect) found or made. A master that
-    /// survived the drop still holds them and answers OK to a forward it already has, so this is
-    /// the same call either way. One that will not come back — its port taken meanwhile — is said
-    /// and dropped, not fatal and not tried again: the vault is up, and the Ports pane, which
-    /// lists [`forwards`](Self::forwards), shows what is.
+    /// Restore forwards on the master found or made by [`connect`](Self::connect).
+    /// Surviving masters accept existing forwards. Report and drop failed restores
+    /// without failing the vault or retrying, so [`forwards`](Self::forwards)
+    /// reflects what the Ports pane can use.
     fn restore_forwards(&self) {
         let forwards = self.forwards();
         if forwards.is_empty() {
@@ -931,12 +860,10 @@ impl Remote {
         format!("Lost the connection to {}", self.url.host)
     }
 
-    /// What the rpc reader runs when the server's output ends unasked.
-    ///
-    /// It holds the state and the channel rather than the `Remote`, which would then never close:
-    /// the reader ends only once the close has ended `serve`. Only a connection that was up can be
-    /// lost: one still being made fails its own `hello`
-    /// and says why, or is found dead where [`start`](Self::start) would have said it was up.
+    /// Handle unsolicited server EOF. Capture state and events rather than
+    /// `Remote` to avoid retaining the owner whose close ends the reader.
+    /// Only established connections report loss; startup failures report
+    /// through `hello` or [`start`](Self::start).
     fn on_lost(&self) -> Box<dyn FnOnce() + Send> {
         let (state, events, why) = (self.state.clone(), self.events.clone(), self.lost());
         Box::new(move || {
@@ -1013,16 +940,10 @@ impl Remote {
 }
 
 impl Drop for Remote {
-    /// Close the server, reap the ssh process, and cancel every forward, but leave the master.
-    ///
-    /// The master stays up for its ControlPersist minute on purpose, after the app has exited
-    /// too, so reopening the vault within it skips the handshake and any passphrase. Nothing of
-    /// the vault's rides it meanwhile: `serve` has had its EOF, and the forwards are cancelled one
-    /// by one, because a master that is only lingering still holds every forward it was given.
-    ///
-    /// On a thread of its own, which [`finish_closing`] joins: the last holder is usually a window
-    /// closing on the GTK main loop, and the close is a second's wait for a wedged server and an
-    /// ssh process per forward, 120–140 ms with one forward on a 60 ms link.
+    /// Close `serve`, reap SSH and cancel forwards, leaving the master for its
+    /// ControlPersist minute so quick reopens reuse authentication. Run cleanup
+    /// on a thread joined by [`finish_closing`] to avoid blocking the GTK main loop
+    /// on child timeouts and per-forward SSH commands.
     fn drop(&mut self) {
         let (client, child) = (
             self.locked(&self.client).take(),
@@ -1054,25 +975,18 @@ impl Drop for Remote {
 /// The closes of [`Remote`]s still running on their threads.
 static CLOSING: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
 
-/// Wait for every remote vault dropped so far to have closed: for the app's way out, which would
-/// otherwise end the process before the forwards were cancelled and leave them on the lingering
-/// master for its minute.
+/// Join pending remote closes before app exit, ensuring cancelled forwards
+/// do not survive on lingering masters.
 pub fn finish_closing() {
     for handle in std::mem::take(&mut *crate::locked(&CLOSING)) {
         let _ = handle.join();
     }
 }
 
-/// Let go of the server a connection had: the rpc client, and the ssh process carrying it.
-///
-/// Both a vault closing and a reconnect come through here, which is what stops a retry leaving a
-/// zombie ssh and a reader thread behind for every attempt.
-///
-/// The order is what keeps a close finite. The writer goes first, so `serve` sees EOF and exits of
-/// its own accord; the child is given a second to follow and killed if it does not — a `Child`
-/// that is never waited for being the zombie this phase exists to avoid. Only then is the reader
-/// thread joined, because it ends when ssh's stdout closes, and a wedged ssh would otherwise hold
-/// the join for the fifteen seconds of a ServerAlive timeout, or forever.
+/// Tear down RPC and its SSH child for both close and reconnect, preventing
+/// leaked processes and readers. Close the writer first so `serve` sees EOF;
+/// give the child one second, then kill and reap it. Join the reader only
+/// after stdout closes, avoiding an indefinite wait on a wedged SSH process.
 fn teardown(client: Option<Arc<Client>>, child: Option<Child>) {
     if let Some(client) = &client {
         client.close();
@@ -1115,8 +1029,7 @@ fn control(argv: &[String]) -> Result<()> {
     }
 }
 
-/// Read a child's stderr into the log rather than letting it fill its pipe, which would wedge the
-/// process it belongs to.
+/// Drain child stderr into the log so a full pipe cannot block the process.
 fn drain(stream: impl Read + Send + 'static) {
     let _ = std::thread::Builder::new()
         .name("accent-ssh-log".to_string())

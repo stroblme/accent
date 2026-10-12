@@ -103,24 +103,17 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
         .collect()
 }
 
-/// Render a note to an HTML fragment for the preview pane (wikilinks become `<a href="accent://…">`).
+/// Render preview HTML with `accent://` wikilinks and percent-encoded `accent://tag/<tag>`
+/// links. Tag classes distinguish their styling.
 ///
-/// A `#tag` becomes `<a href="accent://tag/<tag>" class="tag">`, the tag percent-encoded, which the
-/// app follows to the tag's notes; the class lets the page draw it as a tag rather than a link.
+/// Block `data-line` markers synchronise preview scrolling with the editor. Heading IDs use
+/// [`slugs`]; links naming heading text are rewritten to those IDs. [`block_ids`] appear as
+/// `^id` anchors on markers and are hidden from rendered text.
 ///
-/// Each block opens with an empty `<span data-line="N">`, so the preview can scroll to the line
-/// the editor's cursor is on, and each heading gets its [`slugs`] anchor as its `id`, so an
-/// in-note `[text](#slug)` scrolls there; `[text](#My%20Section)`, naming the heading by its text,
-/// is pointed at that `id`. A block with a [`block_ids`] id carries it on that
-/// span, as `^id`, which is how `[text](#^id)` names it, and the `^id` itself is not shown.
-///
-/// A conflict block git left in the note ([`conflict::blocks`]) is shown as its sides, each in a
-/// `<div class="conflict-current">` (`-base`, `-incoming`) captioned with its marker's label, and
-/// with no marker shown: read as markdown, `=======` would make the current side a heading and
-/// `>>>>>>>` a quote. The note is cut at the blocks and every stretch parsed on its own, so each
-/// side is the markdown it says whatever the other leaves open, and every line marker is the
-/// note's own. Each stretch is given the note's [`definitions`], so a reference link or a
-/// footnote finds its definition across a block's edge.
+/// Render conflict sides in labelled `conflict-current`, `-base` and `-incoming` boxes without
+/// git markers, which markdown would otherwise misinterpret. Each stretch is parsed
+/// independently with the whole note's [`definitions`], retaining source line numbers and
+/// cross-stretch reference links and footnotes.
 pub fn to_html(text: &str) -> String {
     let mut page = Page {
         defs: definitions(text),

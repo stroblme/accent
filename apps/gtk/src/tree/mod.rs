@@ -24,37 +24,29 @@ use drag::{Append, Import, Move, import_target, move_content, move_target};
 use listing::{Asked, ShowHidden, Watches, children_model, fill, watch_unindexed};
 pub use listing::{decode, dot_named};
 
-/// The style class a row a Ctrl+click has marked carries, defined in `build::install_chrome_css`.
+/// CSS class for Ctrl-click marked rows (`build::install_chrome_css`).
 const MARKED: &str = "accent-marked";
 
-/// The rows a Ctrl+click or a Shift+click has marked, by path, each with whether it is a folder.
+/// Marked paths and folder flags from Ctrl+click or Shift+click.
 ///
-/// A marked folder stands for everything under it, shut or open, so nothing under one is ever in
-/// the set as well ([`fileops::topmost`](crate::fileops::topmost)): its rows are drawn marked when
-/// it is opened, and a batch acts on the set exactly as it is. A folder shut with thousands of
-/// files in it is one entry, not thousands.
+/// Folders represent their descendants, so [`fileops::topmost`](crate::fileops::topmost)
+/// removes nested entries. This keeps large collapsed-folder selections compact.
 type Marks = BTreeMap<String, bool>;
 
 /// One row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    /// `d` for a directory, `f` for a file — see [`encode`](listing::encode).
+    /// `d` for a directory, `f` for a file — see `listing::encode`.
     pub kind: char,
     /// Vault-relative path.
     pub rel: String,
-    /// Whether the index holds this row.
-    ///
-    /// False inside every tree the walk refuses, whichever kind: those are read off the disk and
-    /// nothing else in the app knows they are there — they are not searched and not stored — so
-    /// the row is dimmed the way a gitignored one is.
+    /// Whether the index holds the row. Disk-only skipped-tree rows remain
+    /// unsearchable and dim like gitignored files.
     pub indexed: bool,
-    /// Whether the row is inside one of the **dependency** trees — a `node_modules`, a `.venv`, a
-    /// cargo `target/` — rather than a folder the reader gitignored.
+    /// Whether a row belongs to a dependency tree such as node_modules, .venv or cargo target.
     ///
-    /// Both are listed, because a file tree that leaves a folder out is one nobody can trust, but
-    /// only this one is refused every edit: it is somebody else's tree, opened to look at. A
-    /// gitignored folder is the reader's own — a build output, an `mlruns/` — and being out of
-    /// the index stops it being *searched*, not edited. Implies `!indexed`.
+    /// Dependency files are visible but read-only because they are externally managed. Ordinary
+    /// gitignored folders remain editable; being unindexed affects search only. Implies `!indexed`.
     pub dependency: bool,
 }
 
@@ -64,12 +56,10 @@ impl Row {
     }
 }
 
-/// The lazy tree, plus the per-directory child models it has already built.
+/// Lazy tree with cached child models for listed directories.
 ///
-/// The cache is not an optimisation of last resort, it is what makes binding a row free:
-/// `GtkTreeExpander::set_list_row` asks `gtk_tree_list_row_is_expandable()`, which calls the
-/// `TreeListModel` create-func and *throws the model away again*. Without the cache every row
-/// scrolling into view ran a fresh `list_dir` query.
+/// GtkTreeExpander probes expandability by creating and discarding child models. Caching
+/// prevents each row bind or scroll from issuing another listing.
 pub struct Tree {
     host: gtk::Box,
     view: gtk::ListView,
@@ -83,37 +73,31 @@ pub struct Tree {
     show_hidden: ShowHidden,
     /// The root's [`Landed`](listing::Landed), which tells the empty page the host has answered.
     landed: Rc<dyn Fn()>,
-    /// What git ignores, shared with the row factory so binding a row is still two setters and a
-    /// set lookup rather than a question for the index.
+    /// Shared ignored-path set so row binding uses setters and lookup,
+    /// without querying the index.
     ignored: Rc<RefCell<Ignored>>,
-    /// What git says changed, rolled up onto the folders above it ([`roll_up`]), shared with the
-    /// factory the same way.
+    /// Changed paths rolled up to ancestors ([`roll_up`]), shared with the factory.
     changed: Rc<RefCell<HashMap<String, Change>>>,
     /// The rows a Cut is waiting to move, shared with the factory the same way.
     cut: Rc<RefCell<HashSet<String>>>,
-    /// The marked rows, which are the set the context menu acts on when the right-click lands on
-    /// one of them. Sorted, so the menu and the toasts name them in path order. Shared with the
-    /// factory like [`cut`](Self::cut): a marked row scrolled out of view and back has to come
-    /// back marked.
+    /// Sorted marked rows used by context menus and toasts. Share with the
+    /// factory so recycled rows restore marks, as with [`cut`](Self::cut).
     marked: Rc<RefCell<Marks>>,
-    /// The row a Shift+click would range from, drawn marked while Shift is held over the list and
-    /// nothing is marked yet. See [`track_pointer`].
+    /// Shift range anchor, temporarily marked while Shift hovers an otherwise
+    /// unmarked list ([`track_pointer`]).
     start: Start,
-    /// The open file, which the selection follows. Shared with the pointer-leave handler: the
-    /// list selects rows on hover (see `build`), so the selection has to be put back whenever
-    /// the pointer goes away again.
+    /// Open-file highlight, restored on pointer leave after temporary hover
+    /// selection (`build`).
     active: Rc<RefCell<Option<String>>>,
-    /// The row a context menu is open over, which outranks [`active`](Self::active) for as long
-    /// as it is. See [`pin`](Self::pin).
+    /// Context-menu target, temporarily taking precedence over
+    /// [`active`](Self::active) ([`pin`](Self::pin)).
     pinned: Rc<RefCell<Option<String>>>,
 }
 
 impl Tree {
-    /// Tell the tree what git ignores, and redraw the rows on screen.
-    ///
-    /// The factory is reset rather than the model spliced: a splice recreates every
-    /// `GtkTreeListRow` and collapses the directories the reader had opened, while re-binding
-    /// only touches the handful of rows actually visible.
+    /// Refresh ignored-row styles by resetting the factory, not splicing
+    /// the model. Rebind only visible rows without recreating expanded
+    /// `GtkTreeListRow`s and collapsing folders.
     pub fn set_ignored(&self, ignored: HashSet<String>) {
         let ignored = Ignored::new(ignored);
         if *self.ignored.borrow() == ignored {
@@ -123,8 +107,8 @@ impl Tree {
         rebind(&self.view);
     }
 
-    /// Tell the tree what git says changed, file by file, and redraw the rows on screen the way
-    /// [`set_ignored`](Self::set_ignored) does. Empty takes every tint off.
+    /// Refresh git tints as [`set_ignored`](Self::set_ignored) refreshes styles.
+    /// Empty changes clear all tints.
     pub fn set_changed(&self, files: Vec<(String, Change)>) {
         let changed = roll_up(files);
         if *self.changed.borrow() == changed {
@@ -134,12 +118,9 @@ impl Tree {
         rebind(&self.view);
     }
 
-    /// Dim the rows a Cut is waiting on, and undim the rest. The same `dim-label` an ignored row
-    /// takes: "this is on its way somewhere" and "search does not reach this" look alike, and one
-    /// signal per row is enough to read (`connect_bind`).
+    /// Dim pending Cut rows and restore the rest using the ignored-row `dim-label` style.
     ///
-    /// Reset the same way [`set_ignored`](Self::set_ignored) is, and for the same reason: a splice
-    /// would collapse every folder the reader had opened.
+    /// Rebind as [`set_ignored`](Self::set_ignored) does; splicing would collapse expanded folders.
     pub fn set_cut(&self, cut: HashSet<String>) {
         if *self.cut.borrow() == cut {
             return;
@@ -148,8 +129,8 @@ impl Tree {
         rebind(&self.view);
     }
 
-    /// The marked rows, each with whether it is a directory, in path order. None is inside
-    /// another, a marked folder standing for what it holds.
+    /// Return sorted topmost marked rows with directory flags; marked
+    /// folders represent their descendants.
     pub fn marked(&self) -> Vec<(String, bool)> {
         self.marked
             .borrow()
@@ -175,9 +156,8 @@ impl Tree {
         redraw_marks(&self.view, &marked, None);
     }
 
-    /// What a Shift+click on the row `to` does with `from` as the last row clicked without Shift:
-    /// mark every row between them, replacing the marks, or with Ctrl held too (`add`) adding
-    /// to them.
+    /// Mark the inclusive range from `from` to `to`, replacing marks or
+    /// adding with Ctrl (`add`). `from` is the last non-Shift click.
     #[cfg(feature = "bench")]
     pub fn mark_range(&self, from: &str, to: &str, add: bool) {
         let mut marked = self.marked.borrow_mut();
@@ -185,8 +165,8 @@ impl Tree {
         redraw_marks(&self.view, &marked, None);
     }
 
-    /// Forget every mark, and say whether there was one to forget — which is what lets Escape
-    /// fall through to the rest of the window when the tree has nothing marked.
+    /// Clear marks and report whether any existed, allowing Escape to
+    /// fall through when the tree has no selection to dismiss.
     pub fn clear_marks(&self) -> bool {
         let mut marked = self.marked.borrow_mut();
         if marked.is_empty() {
@@ -205,9 +185,8 @@ impl Tree {
         }
     }
 
-    /// Show or hide the dot-named rows. Every level already listed is listed again, since a
-    /// hidden row was never put in the store; a change of nothing costs nothing, because every
-    /// preference edit arrives here.
+    /// Toggle hidden rows and relist cached levels because excluded names
+    /// are absent from stores. Ignore unchanged preferences.
     pub fn set_show_hidden(&self, on: bool) {
         if self.show_hidden.replace(on) != on {
             self.refresh();
@@ -228,18 +207,17 @@ impl Tree {
         &self.model
     }
 
-    /// Re-read the root and every level that has already been expanded, after a full reconcile
-    /// changed everything at once. The cached models are refilled rather than dropped: dropping
-    /// them would leave the rows that are still expanded showing a listing nothing refreshes.
+    /// Refill root and previously expanded cached models after reconciliation.
+    /// Retain model identities so expanded rows keep receiving updates.
     pub fn refresh(&self) {
         let mut dirs: Vec<String> = vec![String::new()];
         dirs.extend(self.cache.borrow().keys().cloned());
         self.invalidate(&dirs);
     }
 
-    /// Reload on a folder's menu: list `dir` and every folder open under it again, and say
-    /// whether the index holds `dir`. Only a folder it holds is listed out of the index; one it
-    /// does not walk is read off the disk, and so is all that is under it.
+    /// Reload `dir` and expanded descendants, returning whether `dir` is
+    /// indexed. Indexed folders read the index; skipped folders and their
+    /// children read disk.
     pub fn reload(&self, dir: &str) -> bool {
         let dirs: Vec<String> = self
             .cache
@@ -255,8 +233,8 @@ impl Tree {
             .is_some_and(|row| row.indexed)
     }
 
-    /// Refill only these directories' cached child models ("" is the root). A background reindex
-    /// touches a handful of directories, not the whole tree.
+    /// Refill only changed cached directories (`""` for root), avoiding
+    /// whole-tree refresh during incremental indexing.
     pub fn invalidate(&self, dirs: &[String]) {
         // Looked up first, so no cache borrow is live while `fill` reaches into the index. A
         // directory that was never expanded has no model to refill: it is filled on first expand.
@@ -338,11 +316,9 @@ impl Tree {
         row_at(&self.view, x, y)
     }
 
-    /// Move the selection onto the open file, or off every row when nothing is open.
-    ///
-    /// Only among the rows the tree already has: a path whose folders are still shut is not
-    /// expanded to, and the list is not scrolled. Which tab is in front should not move the tree
-    /// under the reader — Reveal in Sidebar is the gesture that does.
+    /// Highlight the open file among existing rows without expansion or
+    /// scrolling. Tab changes preserve tree position; Reveal in Sidebar
+    /// explicitly moves it.
     pub fn set_active(&self, rel: Option<&str>) {
         *self.active.borrow_mut() = rel.map(str::to_string);
         // Remembered but not applied while a menu holds the highlight: a note opening behind the
@@ -352,13 +328,10 @@ impl Tree {
         }
     }
 
-    /// Hold the highlight on `rel`, the row a context menu has just been opened over, or let it
-    /// go again with `None`, which puts it back on the open file.
+    /// Pin highlight to context-menu row `rel`; `None` restores the open-file highlight.
     ///
-    /// The list selects rows on hover (`single-click-activate`, see [`build`]), and the popover
-    /// taking the pointer is a *leave* as far as the list is concerned — so without this the
-    /// highlight slid back onto whatever file was open the moment the menu appeared, leaving the
-    /// menu pointing at one row while another was lit.
+    /// Hover selection sees a popover as pointer leave. Pinning keeps the highlight on the menu's
+    /// target instead of reverting while the menu is open.
     pub fn pin(&self, rel: Option<&str>) {
         *self.pinned.borrow_mut() = rel.map(str::to_string);
         let row = rel
@@ -367,8 +340,8 @@ impl Tree {
         select(&self.view, row.as_deref());
     }
 
-    /// Expand everything above `rel`, then select it and scroll it into view. False when the path
-    /// is not in the tree at all, so a caller can say so rather than silently doing nothing.
+    /// Expand ancestors, select `rel` and scroll to it. Return false for
+    /// missing paths so callers can report failure.
     pub fn reveal(&self, rel: &str) -> bool {
         for dir in ancestors(rel) {
             match find_row(&self.model, dir) {
@@ -388,13 +361,10 @@ impl Tree {
     }
 }
 
-/// What search leaves out, in the two shapes git reports it: a wholly ignored directory as one
-/// entry with a trailing slash, everything under it ignored with it, and a partly ignored
-/// directory's files listed one by one.
+/// Separate ignored directories and individual files when Git status arrives.
 ///
-/// Split into the two sets when it arrives rather than asked in git's own spelling on every bind:
-/// the old shape built `format!("{rel}/")` for the row and one more for each of its ancestors,
-/// which is a handful of allocations per row on a path the reader is only scrolling past.
+/// Directory entries end in `/` and exclude descendants. Splitting once avoids formatting
+/// paths and ancestors for every visible row bind.
 #[derive(Default, PartialEq, Eq)]
 pub struct Ignored {
     files: HashSet<String>,
@@ -429,16 +399,13 @@ impl Ignored {
     }
 }
 
-/// What git says of a changed row, which tints its name (`build::install_chrome_css`) in the
-/// colours the editor's change bars use. Ordered so that a folder takes the stronger of what is
-/// under it: a modified file outweighs a new one.
+/// Git change tint ordered by strength, matching editor change bars.
+/// Folders inherit the strongest descendant: modified outranks added.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Change {
-    /// A file git does not have yet, untracked or only added to the index: the green of an added
-    /// line.
+    /// Untracked or newly staged file, using added-line green.
     Added,
-    /// Any other change, in the index or the worktree, a conflict included: the accent of a
-    /// rewritten line.
+    /// Other worktree/index changes, including conflicts, using modified-line accent.
     Modified,
 }
 
@@ -453,10 +420,9 @@ impl Change {
     }
 }
 
-/// Every changed path and every folder above one, each with the strongest change at or under it,
-/// so a shut folder still says there is something inside. Built from the changed paths alone,
-/// each walking up its own folders until one already says as much: a deep tree costs what
-/// changed in it, never a walk of what it holds.
+/// Roll each changed path's strongest tint onto ancestors so collapsed
+/// folders indicate changes. Stop at already-equivalent ancestors;
+/// work scales with changed paths, not a full-tree scan.
 fn roll_up(files: Vec<(String, Change)>) -> HashMap<String, Change> {
     let mut map: HashMap<String, Change> = HashMap::new();
     for (rel, change) in files {
@@ -495,8 +461,8 @@ fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<Row> {
 /// See [`Tree::start`].
 type Start = Rc<RefCell<Option<String>>>;
 
-/// The row a Shift+click ranges from: the last row clicked without Shift while it is in the list,
-/// else the open file's row. Never one in a dependency tree, which is never marked.
+/// Shift anchor: last non-Shift clicked row still listed, otherwise the
+/// open-file row. Dependency rows cannot be marked.
 fn start_of(
     model: &gtk::TreeListModel,
     anchor: Option<String>,
@@ -514,20 +480,17 @@ fn is_marked(marks: &Marks, rel: &str) -> bool {
         && (marks.contains_key(rel) || ancestors(rel).any(|dir| marks.contains_key(dir)))
 }
 
-/// Add rows to the marks, keeping only the top-most: what a folder being marked already takes
-/// along is not marked again.
+/// Add topmost marks only, omitting descendants represented by marked folders.
 fn add_marks(marks: &mut Marks, rows: impl IntoIterator<Item = (String, bool)>) {
     marks.extend(rows);
     let all: Vec<(String, bool)> = std::mem::take(marks).into_iter().collect();
     marks.extend(crate::fileops::topmost(&all));
 }
 
-/// A Ctrl+click on `row`: its mark on, or off again.
+/// Toggle `row`'s mark on Ctrl+click.
 ///
-/// Off inside a marked folder, that folder gives way to what it holds, level by level down to
-/// the row, which alone is left out: the rest of the folder stays marked. The levels are the
-/// tree's own listings, which every folder above a row on screen has; what they leave out — a
-/// dot-named file while Show Hidden Files is off — is then no longer marked.
+/// Unmarking inside a marked folder expands its selection into sibling entries down to the
+/// excluded row. Use visible tree listings, so currently hidden names also leave the set.
 fn toggle(marks: &mut Marks, row: &Row, cache: &RefCell<HashMap<String, gio::ListStore>>) {
     if !is_marked(marks, &row.rel) {
         return add_marks(marks, [(row.rel.clone(), row.is_dir())]);
@@ -556,8 +519,7 @@ fn toggle(marks: &mut Marks, row: &Row, cache: &RefCell<HashMap<String, gio::Lis
     }
 }
 
-/// The rows the tree lists in `dir`, as it has them, leaving out the dependency trees: those are
-/// never marked.
+/// Current listed children of `dir`, excluding unmarkable dependency trees.
 fn listed(cache: &RefCell<HashMap<String, gio::ListStore>>, dir: &str) -> Vec<(String, bool)> {
     let Some(store) = cache.borrow().get(dir).cloned() else {
         return Vec::new();
@@ -569,8 +531,8 @@ fn listed(cache: &RefCell<HashMap<String, gio::ListStore>>, dir: &str) -> Vec<(S
         .collect()
 }
 
-/// A Shift+click: every row from `from` to `to`, both included, in the order the tree lists them,
-/// replacing the marks or added to them. A shut folder in between is marked whole.
+/// Mark inclusive tree-order range `from..to`, replacing or adding.
+/// Collapsed folders in the range represent their whole contents.
 fn mark_range(marks: &mut Marks, model: &gtk::TreeListModel, from: &str, to: &str, add: bool) {
     let at = |rel| find_row(model, rel).map(|row| row.position());
     let (Some(a), Some(b)) = (at(from), at(to)) else {
@@ -588,13 +550,10 @@ fn mark_range(marks: &mut Marks, model: &gtk::TreeListModel, from: &str, to: &st
     add_marks(marks, rows);
 }
 
-/// Put the mark on the rows on screen that carry it and take it off the rest.
+/// Update visible row marks directly without recreating widgets.
 ///
-/// Written straight onto the row widgets rather than through [`rebind`]: a factory reset recreates
-/// every row widget, and the press that clears the marks is one the list still has to answer —
-/// with the widget pulled out from under it the note under a plain click stopped opening
-/// (`ACCENT_BENCH_MENU=press:<rel>` and an XTEST click, 2026-09-14). The factory reads the set on
-/// every bind all the same, which is what brings a mark back with a row scrolled out of view.
+/// A factory reset during a click removes its target before activation. The factory still
+/// reads marks on bind so recycled rows regain their state.
 fn redraw_marks(view: &gtk::ListView, marked: &Marks, start: Option<&str>) {
     for expander in expanders(view) {
         let rel = expander
@@ -611,8 +570,7 @@ fn redraw_marks(view: &gtk::ListView, marked: &Marks, start: Option<&str>) {
     }
 }
 
-/// The row widgets the list has on screen, which is where anything a bind writes can be read back
-/// off or written again. Used by the drills as well.
+/// Visible row widgets for reading or updating bound state, including drills.
 pub fn expanders(view: &gtk::ListView) -> Vec<gtk::TreeExpander> {
     let mut found = Vec::new();
     let mut todo = vec![view.clone().upcast::<gtk::Widget>()];
@@ -633,20 +591,18 @@ pub fn expanders(view: &gtk::ListView) -> Vec<gtk::TreeExpander> {
     found
 }
 
-/// Redraw the rows on screen against the state the factory reads on every bind — what git
-/// ignores, what a Cut is waiting on.
+/// Rebind visible rows after ignored or pending-Cut state changes.
 ///
-/// The factory is reset rather than the model spliced: a splice recreates every `GtkTreeListRow`
-/// and collapses the directories the reader had opened, while re-binding only touches the handful
-/// of rows actually visible.
+/// Reset the factory rather than splice models, preserving expanded GtkTreeListRows while
+/// updating only visible widgets.
 fn rebind(view: &gtk::ListView) {
     let factory = view.factory();
     view.set_factory(None::<&gtk::ListItemFactory>);
     view.set_factory(factory.as_ref());
 }
 
-/// Put the selection on `rel`'s row, or on no row at all. Cheap when it is already there, which
-/// is what keeps it out of the way of the pointer selecting rows as it crosses the list.
+/// Select `rel` or clear selection, skipping unchanged state so pointer
+/// hover remains responsive.
 fn select(view: &gtk::ListView, rel: Option<&str>) {
     let Some(selection) = view.model().and_downcast::<gtk::SingleSelection>() else {
         return;
@@ -662,12 +618,10 @@ fn select(view: &gtk::ListView, rel: Option<&str>) {
     }
 }
 
-/// The row holding `rel`, or `None` while its parent is still collapsed.
+/// Find the visible model row for `rel`, or `None` while its parent is collapsed.
 ///
-/// ponytail: a linear scan of the rows the model currently has, which is every *visible* row and
-/// not the whole vault. `reveal` runs it once per path segment, so revealing a note five levels
-/// deep in a 2 400-row expansion is six scans of a few thousand items. Build a rel-path to row
-/// index alongside the child-model cache if that ever shows up in a profile.
+/// A linear scan covers expanded rows rather than the whole vault; revealing a nested path
+/// repeats it per segment.
 pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRow> {
     (0..model.n_items()).find_map(|i| {
         let row = model.item(i).and_downcast::<gtk::TreeListRow>()?;
@@ -676,16 +630,10 @@ pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRo
     })
 }
 
-/// The row above the tree naming the vault, and the drop zone for "put it in the vault root".
+/// Build the always-visible vault label and root drop zone above the tree.
 ///
-/// The blank area below the last row is the other one, and a tree scrolled deep in a large vault
-/// has none, which is what this is for: it is always on screen. A label rather than a list row,
-/// because it stands for what the whole listing is of — there is nothing to open or expand.
-/// The row is as tall as the controls the other panes open with, so the three sit in one band:
-/// 6 px of margin and then 34 px of row, which is the Search pane's entry (`search.rs`, margin 6
-/// on a `GtkSearchEntry` whose Adwaita minimum is 34) and the Git pane's branch chooser (`git.rs`,
-/// the same margin on a `GtkDropDown` of the same minimum). A label alone measured 20 px, which
-/// put the vault name six pixels above both of them.
+/// Scrolled trees may have no blank area for root drops. A label has nothing to expand;
+/// 6 px margin and a 34 px row align it with Search and Git controls.
 fn root_row(label: &str) -> gtk::Box {
     let row = gtk::Box::builder()
         .spacing(6)
@@ -714,13 +662,11 @@ fn root_row(label: &str) -> gtk::Box {
     row
 }
 
-/// Build the tree. `show_hidden` is Show Hidden Files as the window opens. `on_activate` is called
-/// with the rel_path of an activated non-directory row and `false`, and again with `true` when the
-/// click turns out to be a double click, `on_drag` with `true` while a row is being dragged out of
-/// the tree and `false` when it is over, so the panes can put their drop zones up for the duration,
-/// `on_move` with each path a drag carried and the path it was dropped onto, `on_import` with
-/// the files another application dropped in, the folder they go into and whether the drag was a
-/// move, and `on_append` with a PDF dropped onto another PDF's row and that row's path.
+/// Build the tree with `show_hidden` and activation, drag, move, import and PDF-append hooks.
+///
+/// `on_activate` receives the file key and double-click flag. `on_drag` tracks outgoing drags;
+/// `on_move` receives paths and destination; `on_import` receives local files, folder and
+/// move flag; `on_append` receives the dropped PDF and target PDF key.
 #[allow(clippy::too_many_arguments)]
 pub fn build(
     vault: Arc<Vault>,
@@ -874,8 +820,7 @@ pub fn build(
     }
 }
 
-/// The lazy model over `root`: a folder's children are its listing out of `cache`, made and
-/// filled the first time its row asks.
+/// Lazy child model from `cache`, created and populated when first requested.
 fn tree_model(
     root: &gio::ListStore,
     vault: &Arc<Vault>,
@@ -908,9 +853,8 @@ fn tree_model(
     })
 }
 
-/// One row widget, made once and bound to row after row: an icon and a name in an expander,
-/// which lists a folder again each time it is opened (`relist`), names the row's full path on
-/// hover, drags the row out and takes drops into its folder.
+/// Reusable icon/name expander row: relist folders on opening, show
+/// full-path tooltips and support outgoing drags and folder drops.
 fn setup_row(
     relist: &Rc<dyn Fn(&str)>,
     root_label: &str,
@@ -981,15 +925,10 @@ fn setup_row(
     expander
 }
 
-/// What drags a row out of the tree.
+/// Drag row paths as pane-opening strings and separate tree-move payloads.
 ///
-/// A row can be dragged into a pane, which opens the note there, onto a pane's edge, which
-/// splits it, or back into the tree, which moves the file. The two travel as two content
-/// types (see `move_content`) and the payload is the path either way, which is what every
-/// drop handler wants and what survives the row being recycled under the drag.
-///
-/// `MOVE` beside `COPY` so the pointer says which of the two is about to happen. The panes
-/// ask for both and GTK's drop target settles a tie on `COPY`, so what they do is unchanged.
+/// Paths survive widget recycling. Panes open or split; tree targets move files. Offer COPY
+/// and MOVE so pointers reflect targets, while pane ties still choose COPY.
 fn drag_source(marked: &Rc<RefCell<Marks>>, dragging: &Rc<dyn Fn(bool)>) -> gtk::DragSource {
     let source = gtk::DragSource::builder()
         .actions(gdk::DragAction::COPY | gdk::DragAction::MOVE)
@@ -1028,8 +967,8 @@ fn drag_source(marked: &Rc<RefCell<Marks>>, dragging: &Rc<dyn Fn(bool)>) -> gtk:
     source
 }
 
-/// Show `item`'s row in `expander`. Widget lookups and two setters only: no database access on
-/// the bind path.
+/// Bind `item` through widget lookups and setters only, keeping database
+/// access off the scroll/bind path.
 fn bind_row(
     expander: &gtk::TreeExpander,
     item: &gtk::ListItem,
@@ -1093,17 +1032,12 @@ fn bind_row(
     );
 }
 
-/// The gesture that marks rows.
+/// Handle marked-row selection before list activation.
 ///
-/// Ctrl+click marks a row instead of opening it, and Shift+click marks every row from the last
-/// one clicked without Shift to this one, replacing the marks — or with Ctrl held as well,
-/// adding to them. That is the only multiple selection the tree has: the context menu acts on
-/// the whole set when the right-click lands on one of them, Delete trashes it and a drag of one
-/// of its rows carries it. The gesture runs in the capture phase and claims those presses, so
-/// the list never sees them and neither a note opens nor a folder toggles. A click with
-/// nothing held is the reader saying "this one", so it forgets the set again — and so does a
-/// click on the blank area below the last row. Rows in a dependency tree are never marked:
-/// nothing the menu offers may happen inside somebody else's tree.
+/// Ctrl toggles marks; Shift replaces with the anchor range, or adds with Ctrl. Context
+/// menus, Delete and drags act on the set. Capture claiming prevents opening or toggling
+/// rows; plain clicks and blank-area clicks clear marks. Dependency rows cannot be marked
+/// because batch operations must not edit them.
 fn marking(
     model: &gtk::TreeListModel,
     cache: &Rc<RefCell<HashMap<String, gio::ListStore>>>,
@@ -1214,13 +1148,10 @@ fn click_opens(
     });
 }
 
-/// Keep the highlight where it belongs as the pointer crosses the list and the rows change under
-/// it, and draw where a Shift+click would range from while Shift is held.
+/// Restore open-file highlighting on pointer leave and show the Shift range anchor.
 ///
-/// `single-click-activate` is GTK's "activated on single click **and selected on hover**", so
-/// the selection is what the pointer leaves behind as it crosses the list — and it is also
-/// the highlight that says which file is open. The two are the same thing, so the open file's
-/// row is put back the moment the pointer goes away, instead of a row nobody chose staying lit.
+/// GTK's single-click mode also selects on hover. Reset that temporary selection so a row
+/// never activated cannot remain highlighted as the open file.
 fn track_pointer(
     view: &gtk::ListView,
     model: &gtk::TreeListModel,
@@ -1317,15 +1248,10 @@ fn track_pointer(
     view.add_controller(motion);
 }
 
-/// The list in its scroller, in a stack with the pages it gives way to while it has no rows, and
-/// what tells the stack the root's listing has landed.
+/// Show the tree or its empty/loading state according to the root listing.
 ///
-/// A vault with nothing in it gets the sentence every other pane's emptiness gets, rather than
-/// a blank column that reads as a tree that failed to load (DESIGN.md, States). Driven by the
-/// root store, which is filled from a worker thread and so is empty for a frame either way.
-/// A remote vault is not known to be empty until its root has been listed: until then the host
-/// has not answered, or refused, and the tree says what it is waiting for, as the document
-/// column does.
+/// An empty result needs an explicit message, while a pending remote listing is not yet
+/// known to be empty. Worker completion distinguishes these states.
 fn body_stack(
     view: &gtk::ListView,
     vault: &Vault,

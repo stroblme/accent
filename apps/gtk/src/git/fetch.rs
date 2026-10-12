@@ -2,24 +2,14 @@
 
 use super::*;
 
-/// How often the selected repository's remote is fetched while the window has the focus. VS
-/// Code's `git.autofetchPeriod` default, and for its reason: it is often enough that a colleague's
-/// push shows up in the history within a coffee break, and rare enough that a laptop on a phone
-/// tether is not woken by us. Only while the window is focused, so a window left open behind
-/// others stops talking to the network at all.
+/// Autofetch interval for the focused window, matching VS Code's default. Bounds network
+/// activity while keeping upstream history reasonably current; unfocused windows skip fetches.
 const AUTOFETCH: Duration = Duration::from_secs(300);
 
 impl Panel {
-    /// Fetch the selected repository's remote, off the main thread, and refresh once it lands.
-    ///
-    /// The selected repository only. `git::discover` finds every repository a vault touches and
-    /// fetching all of them would put one network round trip per repository on a timer, for rows
-    /// nobody is looking at; this is the one the pane and the status bar are speaking for.
-    ///
-    /// A failure interrupts nobody — no toast, no dialog, no badge. A fetch nobody asked for that
-    /// fails every five minutes because the laptop is on a train would otherwise be a notification
-    /// every five minutes. It is not silent either: [`Panel::sync_state`] puts it on the Sync
-    /// button's tooltip, beside the counts a failed fetch is the reason for.
+    /// Fetch only the selected repository off the main thread, then refresh. Avoid timer-driven
+    /// network work for repositories not being viewed. Failures appear in the Sync tooltip
+    /// rather than interrupting the user with notifications.
     pub(super) fn autofetch(self: &Rc<Self>) {
         // Nor while a sync runs: its pull fetches anyway, and two fetches race for the same refs.
         if self.fetch_busy.get() || self.sync_busy.get() {
@@ -102,13 +92,9 @@ impl Panel {
     }
 }
 
-/// What one refresh reads. Every repository's status, because the ignored set spans them all, and
-/// the history and submodules of the selected one only.
-///
-/// The fields git may refuse to answer are `Option`, and `None` means "could not ask" rather than
-/// "there are none": the pane keeps what the last refresh learned instead of drawing an empty
-/// answer it was never given. A hiccup on a remote vault would otherwise take the branch list
-/// down to HEAD alone, or hide the pane outright.
+/// Refresh results: all repository statuses, plus selected history and submodules. Optional
+/// fields distinguish unavailable answers from empty results, allowing the pane to retain prior
+/// data during failures.
 pub(super) struct Fetched {
     /// Which repository this was asked about. A chooser moved while the read was in flight makes
     /// the answer somebody else's: `apply` drops it rather than storing one repository's history

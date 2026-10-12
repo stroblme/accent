@@ -1,5 +1,4 @@
-//! Drills over a draw.io diagram: an edit round trip through the model, the save and the disk,
-//! and pictures of every page as the canvas paints them.
+//! Probe diagram edit/save round trips and canvas rendering.
 
 use super::*;
 use accent_core::config::Theme;
@@ -63,18 +62,17 @@ const LAYERED: &str = r#"<mxfile host="accent">
 </mxfile>
 "#;
 
-/// `ACCENT_BENCH_DIAGRAM=<rel>` edits the diagram at `rel` (written from a sample first when
-/// there is none) and prints each step; `=shot:<rel>:<dir>` paints every page of it into
-/// `<dir>/page-N.png` and prints how long each took; `=hold:<rel>[:<tool>]` prints where the
-/// sample's shapes are on the screen and stays up for ten seconds, for an XTEST pointer to work
-/// on (`build-aux/xtest.py`), then prints what the model holds; `=preview:<rel>` times the
-/// frames of a move on the page of `rel` with the most cells: none moving, the shape with the
-/// most edges on it moving live, and everything on the page moving as a box;
-/// `=present:<rel>,<pdf>` is presentation over both (`present`); `=look:<rel>:<dir>` walks
-/// the sample through the themes (`look`); `=export:<rel>:<dir>` exports and prints it into
-/// `<dir>` (`export`); `=props:<rel>` works the Properties pane's Position, Size and Style
-/// groups (`props`), `=layers:<rel>` its Layers group over a slide template (`layers`), and
-/// `=web:<rel>:<url>` a picture linked from the web (`web`).
+/// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram, creating a sample if absent.
+/// Modes:
+///
+/// - `=shot:<rel>:<dir>` renders `<dir>/page-N.png` and prints per-page time.
+/// - `=hold:<rel>[:<tool>]` reports screen targets, waits 10 s for XTEST input, then
+///   prints the model.
+/// - `=preview:<rel>` times no-drag, most-connected-shape live drag and whole-page
+///   box drag on the largest page.
+/// - `=present:<rel>,<pdf>`, `=look:<rel>:<dir>`, `=export:<rel>:<dir>`, `=props:<rel>`,
+///   `=layers:<rel>` and `=web:<rel>:<url>` probe presentation, recolouring, output,
+///   Properties, Layers and web images through the corresponding helpers.
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     if let Some((rel, url)) = arg.strip_prefix("web:").and_then(|a| a.split_once(':')) {
         return web(app, rel, url);
@@ -189,12 +187,9 @@ fn picture(widget: &gtk::Widget) -> Option<gdk::Texture> {
     Some(renderer.render_texture(&node, Some(&viewport)))
 }
 
-/// Under Dark, Export as PDF…, PNG… and SVG… of the sample (written to `rel` when there is none)
-/// into `<dir>` under the names the chooser offers, as each does once the chooser has answered,
-/// and Print… sent to `<dir>/print.pdf` by the print system's Export: printed for each, its pages
-/// and their sizes, the PNG's commonest pixel (its paper: white, the file's, not the theme's) and
-/// whether the SVG draws; then the SVG a note's `![[rel]]` and `![[rel#Two]]` show, and how long
-/// each took.
+/// Export the sample under Dark as PDF, PNG and SVG, and print to `<dir>/print.pdf`.
+/// Probe page counts/sizes, white file-paper pixels and SVG drawing, then time note
+/// embeds of the first and `Two` pages. Create the sample at `rel` if absent.
 fn export(app: &Rc<App>, rel: &str, dir: &Path) {
     use crate::diagram::export::{export_to, offered_name, operation};
     use crate::export::Export;
@@ -333,12 +328,10 @@ fn exported(path: &Path) -> String {
     )
 }
 
-/// Walk the sample (written to `rel` when there is none) through Light, Dark and Solarized, each
-/// also inverted (Invert Diagram Colours), painting page 1 into `<dir>/look-<theme>[-inverted].png`
-/// and printing: the paper, a pixel of shape `a`'s fill and what the remap wants of `#dae8fc`, the
-/// pixel of formula `m` farthest from the paper, the Properties pane's Fill for `a`, whether the
-/// model and the file are as they were, and whether the tab is dirty. On a page with its page
-/// view off the paper is read at the canvas's corner.
+/// Render the sample under Light, Dark and Solarized with/without inversion as
+/// `<dir>/look-<theme>[-inverted].png`. Compare paper/fill/formula pixels with the
+/// remap while checking Properties, model and file colours stay unchanged and clean.
+/// Without Page View, sample paper at the canvas corner.
 fn look(app: &Rc<App>, rel: &str, dir: &Path) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -548,11 +541,9 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
     });
 }
 
-/// The Properties pane over the sample (written to `rel` when there is none): shape `a`'s
-/// Position and Size rows before and after a nudge, X and Width changed in one burst and taken
-/// back by one undo, the Position group's buttons away and then out while the pointer is on it,
-/// Copy Position read back off the clipboard and pasted onto `b`, `a`'s style pasted onto `b`,
-/// and a size pasted from a clipboard holding a style, with the toast each says.
+/// Probe Properties on the sample: position/size after nudging, burst edits as one
+/// undo, hover-revealed buttons, Copy/Paste Position and Style, and wrong-type paste
+/// toasts. Create the sample at `rel` if absent.
 fn props(app: &Rc<App>, rel: &str) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -678,8 +669,7 @@ fn props(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// How many of the entry rows under `pane` show AdwEntryRow's pencil, of how many there are:
-/// none should, a press on the row editing it already.
+/// Count visible AdwEntryRow pencils; expect none because clicking a row already starts editing.
 fn pencils(pane: &gtk::Widget) -> String {
     let (mut rows, mut shown) = (0, 0);
     let mut todo = vec![pane.clone()];
@@ -696,14 +686,10 @@ fn pencils(pane: &gtk::Widget) -> String {
     format!("{shown}/{rows}")
 }
 
-/// The Properties pane's Layers group over a slide template (written to `rel` when there is
-/// none): the template's shape not picked on its locked layer and picked once it is unlocked,
-/// let go of when it is locked again; the Content layer hidden, its shape and edge undrawn; a
-/// layer added on top and current, a paste landing in it, Content picked and a paste landing
-/// there; the new layer moved down, Content renamed, and the template's layer deleted with its
-/// shape and the edge from it, as one step; then the lock and the hiding written to the file.
-/// Every entry row of the pane is counted for a pencil showing. Then, through XTEST, a click on
-/// the layer that is not current, a double click on it, and a name typed and entered, undone.
+/// Probe template Layers: locked-cell selection, hiding content, adding/selecting
+/// insertion layers, pasting, reordering, renaming and deletion with dependent edges
+/// as one undo step. Save locks/visibility and require no entry pencils. XTEST clicks,
+/// double-click rename and undo exercise real input. Create the template if absent.
 fn layers(app: &Rc<App>, rel: &str) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -954,12 +940,9 @@ fn layers(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// A diagram of one picture linked from `url` (written to `rel` when there is none), opened:
-/// whether the web banner is out, the canvas's pixel at the picture's middle, whether the picture
-/// is downloaded and how many pictures a note's embed of the diagram draws; then, while the
-/// banner is out, the same once Load is pressed and the download has landed, and the session
-/// saved. Run twice on one scratch home, the second time with the server down: the banner stays
-/// in and the picture is drawn from the download.
+/// Probe a web-image diagram before/after Load: banner, canvas pixel, download state,
+/// note-embed images and saved permission. Run twice with the same scratch home,
+/// server offline on the second run; permission and cached drawing must persist.
 fn web(app: &Rc<App>, rel: &str, url: &str) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -1242,13 +1225,10 @@ fn preview(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// The PDF at `pdf` with the pen in hand, presented and left, printing its ring and tool each
-/// time as `bench diagram present pdf_<when>`; then the diagram at `rel` (the two-page sample when
-/// there is none), zoomed in with Add Rectangle in hand, presented and left by real keys, a drag
-/// and a double click over shape `a` while presented, which select and change nothing, and its
-/// pages turned by key and wheel in and out of presentation. `bench diagram xtest <steps>` asks
-/// for those (`build-aux/xtest.py :N "<steps>"`), and every change of what the diagram shows
-/// prints as `bench diagram present <state>`.
+/// Probe PDF and diagram presentation entry/exit with active tools, ring state and
+/// zoom. Real keys, drags and double-clicks must not edit presented diagrams; test
+/// page keys/wheel inside and outside presentation. `bench diagram xtest <steps>`
+/// requests input and `bench diagram present <state>` reports results.
 fn present(app: &Rc<App>, rel: &str, pdf: &str) {
     let path = app.root().join(rel);
     if !path.exists() {

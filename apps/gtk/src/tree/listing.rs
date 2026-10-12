@@ -1,14 +1,12 @@
-//! What the tree lists: a directory's rows asked of the vault and spliced into the store that
-//! holds them, each row encoded as one string, and the child models a folder's row expands into.
+//! Asynchronous directory listings encoded as strings and spliced into
+//! cached stores, preserving expandable row identity.
 
 use super::*;
 
-/// ponytail: rows are `gtk::StringObject`s holding `"<kind><state><rel_path>"` instead of a custom
-/// GObject with typed properties. Saves ~40 lines of subclass boilerplate; if the tree ever needs
-/// more per-row state (git status, unsaved marker) define a real `FileItem` GObject then.
+/// Encode rows as `GtkStringObject`s containing `"<kind><state><rel_path>"`.
 ///
-/// `kind` is `d` or `f`; `state` is `i` for a row the index holds, `g` for one left out because
-/// git ignores its folder, and `x` for one inside a dependency tree ([`Row::dependency`]).
+/// This avoids a custom GObject subclass for the current small state. `kind` is `d` or `f`;
+/// `state` is indexed `i`, gitignored `g` or dependency-tree `x` ([`Row::dependency`]).
 fn encode(kind: FileKind, rel: &str, indexed: bool, dependency: bool) -> String {
     // What a file is — its icon, what it opens as — is read off its name, so a directory is the
     // one thing the row has to carry.
@@ -28,7 +26,7 @@ pub fn decode(item: &glib::Object) -> Option<Row> {
     decode_str(&item.downcast_ref::<gtk::StringObject>()?.string())
 }
 
-/// The pure half of [`decode`], so the encoding is a test rather than a running window.
+/// Pure row decoding for testing the encoding without a GTK window.
 fn decode_str(s: &str) -> Option<Row> {
     let mut cs = s.chars();
     let kind = cs.next()?;
@@ -41,13 +39,10 @@ fn decode_str(s: &str) -> Option<Row> {
     })
 }
 
-/// Whether the tree leaves a listed row out: a Syncthing conflict always, and a dot-named one
-/// while Show Hidden Files (`show_hidden`) is off.
+/// Hide Syncthing conflicts and indexed dot names when `show_hidden` is off.
 ///
-/// A row the index does not hold is never left out: it is one of the skipped trees, which the walk
-/// has already filtered, and hiding the dot-named ones would hide `.venv` and four of the six names
-/// in `SKIP_DIRS`. `.git` and `.trash` never get this far whatever the toggle says, because
-/// neither the index nor that listing ever holds them (`walk::ALWAYS_SKIP_DIRS`).
+/// Keep unindexed skipped trees visible, including `.venv`; hiding them would conceal folders
+/// the tree deliberately lists. `.git` and `.trash` are excluded upstream regardless.
 pub fn hidden(row_kind: FileKind, rel: &str, indexed: bool, show_hidden: bool) -> bool {
     indexed
         && (row_kind == FileKind::Conflict
@@ -60,28 +55,23 @@ pub fn dot_named(rel: &str) -> bool {
     rel.split('/').any(|c| c.starts_with('.'))
 }
 
-/// How many listings of each directory ("" is the root) one tree has asked for.
+/// Per-directory request counters, with `""` naming the root.
 ///
-/// Two listings of one directory can be on their way at once — the refresh after a reconnect and
-/// the file that was just made, or two reindexes in a row — and over a link they need not land in
-/// the order they were asked. Only the newest one is spliced in: an older one landing after it
-/// would put back the rows it no longer has.
+/// Concurrent listings can return out of order over a link. Apply only the newest so stale
+/// responses cannot restore removed rows.
 pub(super) type Asked = Rc<RefCell<HashMap<String, u64>>>;
 
-/// Show Hidden Files, shared by every listing the tree asks for. Read when a listing lands rather
-/// than when it is asked for, so one still on its way after a toggle is filtered by the new value.
+/// Shared Show Hidden Files preference, read when responses land so
+/// in-flight listings honor toggles made after the request.
 pub(super) type ShowHidden = Rc<Cell<bool>>;
 
 /// Run when a listing of the root lands, whether or not it changed the store.
 pub(super) type Landed = Option<Rc<dyn Fn()>>;
 
-/// Bring `store` in step with the direct children of `prefix`.
+/// Update `store` with direct children of `prefix` on a worker, then call `landed`.
 ///
-/// The listing is asked for on a worker thread and spliced in when it lands, so the store this
-/// returns to is empty for a frame or two. That is what lets a vault on another machine expand a
-/// directory without the click waiting for a round trip; on a local vault the index answers in
-/// well under a frame and nobody sees the gap. `list_dir` already returns directories first, then
-/// names case-insensitively. `landed` runs once the listing is in.
+/// The store may remain empty briefly so remote expansion never blocks on a round trip.
+/// `list_dir` already sorts directories first and names case-insensitively.
 pub(super) fn fill(
     store: &gio::ListStore,
     vault: &Arc<Vault>,
@@ -157,12 +147,10 @@ fn current(store: &gio::ListStore) -> Vec<String> {
         .collect()
 }
 
-/// The one span `old` and `new` differ in, as (start, rows to remove, rows to insert), or `None`
-/// when they are already the same.
+/// Return the differing span of `old` and `new` as start, removed rows and inserted rows.
 ///
-/// A row's expanded children hang off the *object* in the store, so a blanket splice collapses
-/// every expanded directory and jumps the scroll position. Trimming the equal head and tail means
-/// a reindex that changed nothing splices nothing, and one added or removed file touches one row.
+/// Trim equal prefixes and suffixes to retain row objects, whose identity owns expanded
+/// children and scroll state. Equal listings return `None`.
 fn changed_span(old: &[String], new: &[String]) -> Option<(usize, usize, usize)> {
     let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
     let tail = old[head..]
@@ -177,28 +165,16 @@ fn changed_span(old: &[String], new: &[String]) -> Option<(usize, usize, usize)>
     }
 }
 
-/// The folders the index does not walk whose listings the tree keeps, which the vault watches for
-/// it.
+/// Unindexed folders whose cached listings the vault watches for changes.
 pub(super) type Watches = Rc<RefCell<HashSet<String>>>;
 
-/// Keep `dir`'s listing in step with the disk for as long as the tree holds it.
+/// Watch unindexed `dir` while the tree retains its listing.
 ///
-/// The index never walks a gitignored folder, so nothing in the vault's own watch set reports a
-/// file written into one: a build filling the folder whose row is open, or a training run writing
-/// into an `mlruns/`, showed nothing new until the row was collapsed and opened again. One watch
-/// per such folder answers for exactly the listings the tree keeps — a child model is built and
-/// cached the first time its row is bound and lives as long as the window, so the watch has the
-/// same lifetime as the rows it keeps honest, and collapsing one throws neither away. The listing
-/// it stands beside is already paid for, which is what makes this the cheap answer rather than a
-/// budget of its own.
-///
-/// The vault's own watcher keeps it, one level deep, where the files are: on the host for a remote
-/// vault, which is the one place they can be watched from. Its news is
-/// [`Event::UnindexedChanged`](accent_api::Event::UnindexedChanged), which lists the folder again,
-/// once per debounced burst rather than per file.
-///
-/// The dependency trees get none: a `node_modules` is opened to look at, and 40 000 files is the
-/// one tree this must not start watching.
+/// Gitignored folders need one-level watches to show external build output without reopening.
+/// Child models and watches last with the window, even when collapsed. The vault watches
+/// where files live, including remote hosts; debounced
+/// [`Event::UnindexedChanged`](accent_api::Event::UnindexedChanged) refreshes listings.
+/// Dependency trees such as node_modules remain unwatched to avoid huge watch sets.
 pub(super) fn watch_unindexed(watches: &Watches, vault: &Arc<Vault>, dir: &str) {
     if !watches.borrow_mut().insert(dir.to_string()) {
         return;

@@ -1,12 +1,8 @@
-//! Focus mode's line fade: at High the text away from the caret recedes, further the further it
-//! is, the way Apostrophe's focus mode leaves only the sentence being written at full strength.
+//! Fade lines away from the caret at High focus mode without changing text styles.
 //!
-//! A veil rather than text tags. `GtkTextTag` has no opacity, a `foreground-rgba` would flatten a
-//! note's link colours and a code tab's syntax colours into one grey, and re-tagging the buffer
-//! each time the fade comes and goes is the tag churn measured at 10–21 ms on a long note.
-//! So the view paints a band of its own background over each visible line, above the text, and
-//! the buffer is never touched: the cost is one rectangle per line on screen, whatever the note's
-//! length.
+//! Text tags have no opacity; replacing foreground colours would erase syntax and link
+//! colours, and retagging long notes is costly. Painting background veils instead costs
+//! one rectangle per visible line, independent of document length.
 
 use crate::multicaret;
 use gtk::prelude::*;
@@ -34,12 +30,10 @@ pub fn distance(line: i32, span: &RangeInclusive<i32>) -> i32 {
     (span.start() - line).max(line - span.end()).max(0)
 }
 
-/// Veil every line of `view` on screen by its distance from the carets, `strength` of the way in.
-/// Called from the view's `AboveText` layer, which draws in buffer coordinates.
+/// Veil visible lines of `view` by their distance from the carets and `strength`.
 ///
-/// Each band is as wide as the text window, so it covers the page gutters and the heading
-/// markers that hang in the left one, and stops at the line-number gutter, which is a window of
-/// its own.
+/// Draw in buffer coordinates from `AboveText`. Bands cover page gutters and hanging
+/// heading markers but stop at the separate line-number window.
 pub fn paint(view: &multicaret::View, snapshot: &gtk::Snapshot, strength: f32) {
     let span = span(view);
     let veil = veil(view.upcast_ref());
@@ -71,9 +65,7 @@ pub fn paint(view: &multicaret::View, snapshot: &gtk::Snapshot, strength: f32) {
     }
 }
 
-/// How much of a line the veil takes at full strength: what [`alpha`] leaves of it, and nothing
-/// of a line holding a find-bar match, so a search left open stays readable while the rest of
-/// the text recedes.
+/// Compute veil opacity, leaving find-match lines fully visible so active searches remain readable.
 fn cover(line: i32, span: &RangeInclusive<i32>, found: &[RangeInclusive<i32>]) -> f32 {
     if found.iter().any(|lines| lines.contains(&line)) {
         return 0.0;
@@ -81,9 +73,7 @@ fn cover(line: i32, span: &RangeInclusive<i32>, found: &[RangeInclusive<i32>]) -
     1.0 - alpha(distance(line, span))
 }
 
-/// The lines from `at` down to `bottom` holding a match of the find bar's query, first to
-/// last: the runs of its match tag, which is on nothing while its highlight is off. One match is
-/// all a line needs, so the walk goes on from the line after each.
+/// Collect visible find-match lines between `at` and `bottom`, advancing once per matching line.
 fn found(view: &multicaret::View, mut at: gtk::TextIter, bottom: i32) -> Vec<RangeInclusive<i32>> {
     let Some(tag) = view.find_tag() else {
         return Vec::new();
@@ -104,9 +94,8 @@ fn found(view: &multicaret::View, mut at: gtk::TextIter, bottom: i32) -> Vec<Ran
     lines
 }
 
-/// The lines the carets and their selections cover, first to last: every caret *and* every
-/// anchor, so a selection made upwards at a column does not run into veiled lines. Or what the
-/// view was told to follow instead (`multicaret::View::fade_from`).
+/// Collect every caret and selection-anchor line, or the explicit `multicaret::View::fade_from` span.
+/// Include upward selections so their lines remain unveiled.
 pub(crate) fn span(view: &multicaret::View) -> RangeInclusive<i32> {
     if let Some(span) = view.fade_followed() {
         return span;
@@ -120,9 +109,7 @@ pub(crate) fn span(view: &multicaret::View) -> RangeInclusive<i32> {
     lines().min().unwrap_or(0)..=lines().max().unwrap_or(0)
 }
 
-/// What the view's background is painted in, which is what a veiled line recedes into: the
-/// theme's view background for a note (`textview.accent-doc`, build.rs), the style scheme's own
-/// for code and CSV.
+/// Resolve the background the veil fades into: note theme background or code/CSV scheme background.
 fn veil(view: &sourceview5::View) -> gdk::RGBA {
     let dark = adw::StyleManager::default().is_dark();
     let page = gdk::RGBA::parse(crate::theme::view_bg(dark)).unwrap_or(gdk::RGBA::TRANSPARENT);

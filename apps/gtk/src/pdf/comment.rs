@@ -39,11 +39,8 @@ impl PdfTab {
         ));
     }
 
-    /// What the tooltip shows at a point of the reading view, and the area of the page it holds
-    /// over. Nothing while a popover is pinned: it says the same, and a tooltip would cover it.
-    ///
-    /// GTK asks again on every motion, so the content is built once for the comments it shows
-    /// and handed back while the pointer stays on them.
+    /// Tooltip content and page area under the pointer. Suppress it while a popover is pinned;
+    /// cache widgets for the same comments because GTK queries on every motion.
     fn tip(&self, x: f64, y: f64) -> Option<(gtk::Widget, gdk::Rectangle)> {
         if self.pinned.borrow().is_some() {
             return None;

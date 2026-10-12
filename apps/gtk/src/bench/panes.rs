@@ -2,12 +2,8 @@
 
 use super::*;
 
-/// Open the two notes `rels` names in one pane, then split the second one off to the right, move
-/// it back, and ask for a move where there is no pane to move into.
-///
-/// What is printed is the **geometry** of the pane holding that tab, not its index: panes are
-/// kept in the order they were made, which is not the order they are drawn in, so only the
-/// rectangle says a tab really changed side.
+/// Split the second of two notes right, move it back, then try moving without a neighbour.
+/// Report pane geometry rather than creation-order indices to prove the tab changed position.
 pub(super) fn bench_panes(app: &Rc<App>, rels: &str) {
     let Some((a, b)) = rels.split_once(',') else {
         return bench_quit(app);
@@ -295,10 +291,9 @@ fn bench_layout_waiting(app: &Rc<App>, arg: &str) {
     });
 }
 
-/// See `ACCENT_BENCH_LAYOUT` above. However fast the reads are, the pick comes between two tabs
-/// landing: the restore's work waiting on each tab is wrapped before any lands, and the first
-/// landing after which `<rel>` is in its pane — behind another tab to be picked, in front to be
-/// given the keyboard — with a tab still to come does it.
+/// See `ACCENT_BENCH_LAYOUT` above. Interpose the pick between restored tabs landing: wrap all
+/// pending work first, then act once `<rel>` reaches its pane with at least one tab still
+/// pending.
 pub(super) fn bench_layout_pick(app: &Rc<App>, arg: &str) {
     let Some((how, rel)) = arg.split_once(':') else {
         return bench_quit(app);

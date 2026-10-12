@@ -4,29 +4,19 @@ use super::*;
 use accent_core::search::Options;
 use webkit6::prelude::*;
 
-/// Keys typed for the cost, at the 2.5 a second of steady typing: each one past the 300 ms
-/// debounce, so each a re-render of its own.
+/// Type 2.5 keys/s, each beyond the 300 ms debounce so every key causes a render.
 const KEYS: usize = 12;
 const EVERY: Duration = Duration::from_millis(400);
 
-/// `ACCENT_BENCH_PREVIEW_LOOK=type:<rel_note>[,<word>]` puts the caret at the end of a paragraph
-/// halfway down the note, with the preview beside it, and prints:
+/// `ACCENT_BENCH_PREVIEW_LOOK=type:<rel_note>[,<word>]` types halfway down a scratch
+/// note in Split view and probes:
 ///
-/// - `cost`: [`KEYS`] keys typed there, what the web process spent on them (`web_cpu_ms`, all its
-///   threads, per render too) and how long each render took from being asked for to its page
-///   being up (`latency_ms`, median and worst); `shown` whether the page holds what was typed.
-/// - `select`: a paragraph below the caret selected, one more key typed, and the page either side
-///   (scroll, selection, whether it is still one, diagrams drawn, fences still to draw, diagrams
-///   kept from before), with the least scroll seen while the render landed (`min_scroll`): 0 is
-///   a page thrown away.
-/// - `find`: `<word>` (default `readout`) searched for and stepped to its third match, one more
-///   key typed, and the readout and the selection either side.
-/// - `lines`: lines added at the caret, and whether the page's source-line markers are then
-///   those of a fresh render.
-/// - `lost`: WebKit's process killed under the page and a key typed, and whether the page then
-///   shows it.
-///
-/// It types into the note, so a scratch vault only.
+/// - `cost`: total/per-render `web_cpu_ms`, median/worst `latency_ms`, and `shown` text.
+/// - `select`: retained scroll, selection and diagrams after typing; `min_scroll=0`
+///   signals that the page was discarded.
+/// - `find`: retained readout/selection at the third match of `word` (default `readout`).
+/// - `lines`: source-line markers after inserted lines versus a fresh render.
+/// - `lost`: recovery after killing WebKit and typing again.
 pub(super) fn bench_preview_type(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_PREVIEW_LOOK=type:");
     let (rel, word) = arg.split_once(',').unwrap_or((arg, "readout"));

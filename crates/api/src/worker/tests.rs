@@ -10,9 +10,8 @@ use std::sync::atomic::AtomicU8;
 use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
-/// Stop is a pause the worker remembers: what it wrote stays, every other reason to walk is
-/// refused until someone asks, and the walk that follows finishes the job. Enough files that
-/// the flag, set the moment `open` returns, reaches a walk that is still going.
+/// Verify pause retains rows and ignores other scan triggers until resume
+/// finishes indexing. Enough files keep the walk active when `open` returns.
 #[test]
 fn a_stopped_vault_keeps_its_index_and_waits_to_be_resumed() {
     let root = tempfile::tempdir().unwrap();
@@ -85,8 +84,8 @@ fn closing_a_vault_mid_walk_stops_the_walk_and_the_next_open_finishes_it() {
     assert_eq!(vault.file_paths(false).unwrap().len(), notes);
 }
 
-/// A change a walk takes in before the watcher reports it reads as no change to the watcher,
-/// so the walk itself tells whoever has the file open. Unwatched: only the walk can say it.
+/// Verify scans report edits before watcher echoes. Without watching,
+/// only the scan can notify the open tab.
 #[test]
 fn a_file_a_walk_finds_changed_is_reported_as_changed() {
     let root = tempfile::tempdir().unwrap();
@@ -151,9 +150,8 @@ fn external_write_to_a_code_file_emits_file_changed() {
     );
 }
 
-/// The watch set is one watch per directory, built from the index, so a subdirectory that was
-/// already there when the vault opened has to be in it — that is the everyday case of editing
-/// a note in another editor.
+/// Verify watches include subdirectories already present at vault open,
+/// so external note edits reach the UI.
 #[test]
 fn an_edit_in_a_pre_existing_subdirectory_reaches_the_ui() {
     let root = tempfile::tempdir().unwrap();
@@ -170,8 +168,7 @@ fn an_edit_in_a_pre_existing_subdirectory_reaches_the_ui() {
     );
 }
 
-/// A folder removed and made again under its old name is a new directory, whose watch the set
-/// still naming the path must not stand in for: what is written into it has to be seen.
+/// Verify recreating a folder renews its inode watch, even at the same path.
 #[test]
 fn a_folder_removed_and_made_again_is_watched_again() {
     let root = tempfile::tempdir().unwrap();
@@ -198,9 +195,8 @@ fn a_folder_removed_and_made_again_is_watched_again() {
     );
 }
 
-/// The same, removed and made again inside one watcher batch, which the debouncer reports as
-/// the folder's removal and creation and nothing about what it held: what it held goes, as
-/// for a removal across two batches, and the new folder is watched.
+/// Verify remove/recreate in one debounce batch drops old indexed contents
+/// and watches the new folder despite no child events.
 #[test]
 fn a_folder_removed_and_made_again_in_one_batch_drops_what_it_held() {
     let root = tempfile::tempdir().unwrap();
@@ -304,9 +300,8 @@ fn an_empty_ignored_folder_made_in_an_indexed_one_reports_its_parent() {
     );
 }
 
-/// A linked-in folder is watched through its vault path — `inotify_add_watch` resolves the
-/// link — which is what keeps "symlinked folders handled" true now that the watch set is a
-/// list of directories rather than a recursive watch plus the resolved targets.
+/// Verify linked folders are watched through vault paths; inotify follows
+/// the symlink when installing directory watches.
 #[test]
 fn an_edit_inside_a_symlinked_directory_reaches_the_ui() {
     let outside = tempfile::tempdir().unwrap();
@@ -353,12 +348,9 @@ fn own_save_updates_the_index_without_a_file_changed_event() {
     );
 }
 
-/// Two vaults on one index, as the app and `accent-cli mcp` are: a write through one is taken
-/// into the index by its own worker, so the other's watcher finds the row already up to date and
-/// must still tell its window — the edited note to its tab, the new one to the tree — while each
-/// one's own saves stay quiet in it. The two save different notes: the watcher may say a change
-/// twice, and a late repeat of the other's would read as an echo of one's own. Depends on real
-/// inotify events.
+/// Verify two workers sharing an index still report each other's writes
+/// when rows are already current, while own saves stay quiet. Save different
+/// notes to avoid late echoes being mistaken for own writes. Requires inotify.
 #[test]
 fn a_write_through_another_vault_on_the_same_index_reaches_this_one() {
     let root = tempfile::tempdir().unwrap();
@@ -412,10 +404,9 @@ fn a_write_through_another_vault_on_the_same_index_reaches_this_one() {
     );
 }
 
-/// A late echo of another process's change can reach the worker in the same batch as this
-/// vault's own save of that file, the save already on disk: the save stays quiet, and the next
-/// change of the other process's is still news. Unwatched, the messages are the test's own; the
-/// walk of `sub` keeps the worker busy while the two are posted, so they arrive together.
+/// Verify an own save suppresses a late external echo in the same batch
+/// without hiding subsequent external edits. An unwatched `sub` scan
+/// holds the worker while test messages queue together.
 #[test]
 fn an_own_save_stays_quiet_behind_a_late_echo_of_another_change() {
     let root = tempfile::tempdir().unwrap();
@@ -522,9 +513,8 @@ fn a_conflict_copy_emits_conflict_and_stays_out_of_search() {
     );
 }
 
-/// notify reports a temp-plus-rename over a note it has the inode of as `Remove` + `Create`,
-/// which is what an external `sed -i` (or another accent) looks like. A note that is still
-/// on disk must never reach the UI as a removal, or the app closes the tab it is open in.
+/// Verify temp-plus-rename `Remove`/`Create` events do not report a note
+/// removed while it remains on disk, which would close its tab.
 #[test]
 fn an_external_atomic_rewrite_is_a_change_not_a_removal() {
     let f = Fixture::open(VaultConfig::default());
@@ -685,10 +675,8 @@ fn dropping_the_vault_stops_the_worker() {
     }
 }
 
-/// A commit made anywhere but in the app — a shell, another editor, a script — has to reach
-/// the git pane, and `.git` is the one tree the walk deliberately never enters. The watcher
-/// takes the repositories from `repos()` and reports them as their own kind of event, so a
-/// commit never looks like a hundred files appearing in the vault.
+/// Verify external commits emit git events from explicitly watched repo
+/// paths, without indexing `.git` or reporting its files as vault changes.
 #[test]
 fn a_commit_outside_the_app_reports_as_a_git_change() {
     if std::process::Command::new("git")
@@ -750,10 +738,9 @@ fn a_commit_outside_the_app_reports_as_a_git_change() {
     assert_eq!(crate::git::status(repo).unwrap().branch.ahead, 0);
 }
 
-/// A `.gitignore` decides which directories the walk enters, so editing one has to walk the
-/// vault again: the tree it starts ignoring leaves the index, and the one it stops ignoring
-/// comes back. Asked of the index rather than of an event, because a reconcile the writes
-/// themselves set off would answer a wait for one.
+/// Verify `.gitignore` edits remove newly ignored trees and index newly
+/// unignored ones. Query index state, since unrelated reconciliation
+/// events could satisfy an event wait.
 #[test]
 fn editing_a_gitignore_walks_the_vault_again() {
     let f = Fixture::open(VaultConfig::default());
@@ -879,9 +866,8 @@ fn a_file_said_to_be_written_is_indexed_without_a_watcher() {
     assert!(vault.wrote("../elsewhere.png").is_err());
 }
 
-/// A `.gitignore` open in a tab is saved a second after each pause in the typing, and each
-/// save used to walk the whole vault: the saves inside [`WALK_FLOOR`](super::WALK_FLOOR) of
-/// the last walk are one walk at its end, and the first save after it walks at once.
+/// Verify `.gitignore` saves within [`WALK_FLOOR`](super::WALK_FLOOR)
+/// coalesce into a scan at its end, with later saves scanning immediately.
 #[test]
 fn saves_of_a_gitignore_inside_the_floor_are_one_walk() {
     let root = tempfile::tempdir().unwrap();
@@ -944,10 +930,8 @@ fn saves_of_a_gitignore_inside_the_floor_are_one_walk() {
     worker.join().unwrap();
 }
 
-/// A new watch set must not lose what the old one had seen and not yet reported. The window's
-/// first `repos()` lands about a second after a git vault opens and changes the set, and a
-/// note written just before it was never indexed: the debouncer holding its event for 300 ms
-/// was dropped with the old watcher.
+/// Verify watch-set changes retain pending debounced events, so `repos()`
+/// refresh cannot discard a note edit waiting to be indexed.
 #[test]
 fn a_write_just_before_the_watch_set_changes_is_still_indexed() {
     let root = tempfile::tempdir().unwrap();
@@ -985,9 +969,8 @@ fn a_write_just_before_the_watch_set_changes_is_still_indexed() {
     worker.join().unwrap();
 }
 
-/// A gitignored folder the tree lists is watched one level deep once asked, on a host as much
-/// as here, and what happens inside it re-lists it and nothing else: no index row, and no walk
-/// for a directory moved in whole. Removed and made anew, it is watched again.
+/// Verify unindexed-folder watches refresh direct-child listings without
+/// indexing or recursive scans, and renew after folder recreation.
 #[test]
 fn a_watched_unindexed_folder_is_relisted_and_never_indexed() {
     let root = tempfile::tempdir().unwrap();
@@ -1059,10 +1042,9 @@ fn a_watched_unindexed_folder_is_relisted_and_never_indexed() {
     worker.join().unwrap();
 }
 
-/// A first index of a large vault takes seconds, and some of what reaches the inbox meanwhile
-/// cannot wait that long: a commit made in a terminal, and a `set_excluded` whose caller is
-/// blocked on the answer — over ssh, against a 10 s deadline. Both are posted before the
-/// worker starts, so they are certainly read while its first walk is in progress.
+/// Verify git events and exclusion replies are processed during the first
+/// large scan, avoiding a blocked caller's remote deadline. Queue both
+/// before the worker starts to ensure they arrive during scanning.
 #[test]
 fn the_inbox_is_read_between_the_batches_of_a_walk() {
     let root = tempfile::tempdir().unwrap();

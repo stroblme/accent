@@ -837,10 +837,8 @@ pub fn wire_window(app: &Rc<App>) {
     ));
 }
 
-/// Escape as the window hears it first, ahead of everything: the way out of presentation, where
-/// there is no chrome to bring back, and nothing else on that press — the find bar or a
-/// comparison waits for the next one. Otherwise it brings the chrome back and goes on to whatever
-/// wants it. Says whether the press was used up.
+/// Consume Escape to leave presentation before other handlers. Otherwise reveal
+/// chrome and let focused handlers continue. Return whether the event was consumed.
 pub fn escape_first(app: &Rc<App>) -> bool {
     if app.presenting.get().is_none() {
         app.show_chrome();
@@ -858,9 +856,8 @@ fn ends_presenting(app: &App, event: &gdk::Event) -> bool {
         .any(|trigger| trigger.trigger(event, false) == gdk::KeyMatch::Exact)
 }
 
-/// An Escape nothing closer to the focus wanted: the active pane's find bar goes first, then the
-/// comparison its tab is hosting, one per press, as the Stop Comparing button would. A diff tab of
-/// its own has no such button and is left alone. Says whether there was anything to put away.
+/// Handle unclaimed Escape: close Find, then the hosted comparison, one per press.
+/// Standalone diff tabs stay open. Return whether anything closed.
 pub fn dismiss(app: &App) -> bool {
     let pane = app.pane();
     if pane.find.is_open() {
@@ -888,9 +885,8 @@ fn fit_menu(app: &Rc<App>) {
     bar_menu(app, app.statusbar.zoom(), &menu);
 }
 
-/// A menu off one of the status bar's controls, opening upwards, the bar being the window's
-/// bottom edge. Over a presented document the bar stays up under it, and once it closes the
-/// pointer says again whether the bar stays (`App::hover_status`).
+/// Open status menus upward. Keep the presentation status bar visible while open;
+/// recheck pointer hover on close (`App::hover_status`).
 fn bar_menu(app: &Rc<App>, host: &impl IsA<gtk::Widget>, menu: &gio::Menu) {
     let popover = crate::widgets::popup_menu(host, menu, None);
     popover.set_position(gtk::PositionType::Top);
@@ -1033,11 +1029,8 @@ pub fn choice_row(theirs: &gtk::Button, mine: &gtk::Button) -> gtk::Widget {
     row.upcast()
 }
 
-/// A conflict pane's label: the file, and when it was last written.
-///
-/// The two sides of a sync conflict are one note twice, and which of them is called Mine is
-/// decided by which one kept the original name — that is Syncthing's decision, not ours, and the
-/// copy it renames can be the newer of the two. The time is the only thing here that says so.
+/// Label conflict versions with filename and mtime. Syncthing chooses which keeps
+/// the original name, so Mine is not necessarily newer; show time to distinguish them.
 pub fn written_at(rel: &str, etag: &Etag) -> String {
     match glib::DateTime::from_unix_local(etag.mtime_ns / 1_000_000_000)
         .and_then(|when| when.format("%d %b %H:%M"))
@@ -1047,13 +1040,10 @@ pub fn written_at(rel: &str, etag: &Etag) -> String {
     }
 }
 
-/// Hold the tree's row highlight on the row `popover` was opened over, and let it go when the
-/// menu closes.
+/// Pin the tree highlight to the row beneath `popover` until its menu closes.
 ///
-/// The list selects rows on hover, and a popover taking the pointer is a leave as far as the list
-/// is concerned, so without this the highlight went back to the open file the moment the menu
-/// appeared and the menu was left pointing at a row nothing lit. `None` is the blank area below
-/// the last row, which pins nothing: there is no row there to hold it on.
+/// A popover takes the pointer, which otherwise restores the open-file highlight and loses
+/// the menu's target. `None` means blank space and pins no row.
 fn pin_row(app: &Rc<App>, popover: &gtk::PopoverMenu, rel: Option<&str>) {
     let Some(tree) = app.tree.get() else { return };
     tree.pin(rel);
@@ -1068,9 +1058,7 @@ fn pin_row(app: &Rc<App>, popover: &gtk::PopoverMenu, rel: Option<&str>) {
     ));
 }
 
-/// The marked rows a menu opened over `row` acts on: the whole set when the click landed on one
-/// of its rows — a row inside a marked folder included — and nothing otherwise: a click anywhere
-/// else forgets them, which is what a plain left click does too.
+/// Use the marked set when right-clicking it or a marked descendant; otherwise clear it.
 fn marks_under(tree: &tree::Tree, row: Option<&tree::Row>) -> Vec<(String, bool)> {
     if row.is_some_and(|row| tree.is_marked(&row.rel)) {
         return tree.marked();
@@ -1103,9 +1091,8 @@ fn row_anchor(list: &gtk::ListView, host: &gtk::Widget) -> gdk::Rectangle {
 /// What the status bar says while a close waits for git.
 const CLOSING_AFTER_GIT: &str = "Closing when git has finished…";
 
-/// Closing while git rewrites the working tree: ask, and close once it has finished — or stay,
-/// under git's own failure, where it did not go through (DESIGN.md, States). There is no answer
-/// that stops git, since stopping it is what would leave the repository half-updated.
+/// Confirm close during a working-tree rewrite, then wait for completion; keep the
+/// window on failure. Do not offer cancellation that could leave git half-finished.
 fn close_after_git(app: &Rc<App>, git: &Rc<git::Panel>) {
     let dialog = dialogs::alert(
         "Git Is Updating Files",

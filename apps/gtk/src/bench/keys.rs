@@ -6,15 +6,10 @@ use crate::completion;
 use accent_api::{Completion, Kind, Pos, Range, TextEdit};
 use vte4::TerminalExt as _;
 
-/// Drive the key semantics [`multicaret::View`] corrects — the wordwise deletes, logical-line
-/// Up/Down, and the same chords at a column of carets — through the very signals the key bindings
-/// emit, and print what the buffer and the carets came out as.
-///
-/// A view of its own in a window of its own, so nothing is written into a vault and the drills do
-/// not depend on a document being open. It needs a display, which is why this is a bench hook and
-/// not a unit test, but it needs no key press and no pointer: the signals are actions, and
-/// [`multicaret::View::press`] is the key controller's own handler. `make drills` holds what it
-/// prints against `keys.expected` beside this file, line for line, and fails on any difference.
+/// Drive word deletion, logical-line movement and multicaret semantics through binding signals
+/// and [`multicaret::View::press`]. Use an isolated view/window, requiring a display but no
+/// input or vault writes. `make drills` compares every printed buffer/caret result with
+/// `keys.expected`.
 pub(super) fn bench_keys(app: &Rc<App>) {
     let view = multicaret::View::new();
     // The drills are about the code flavours, which is where the logical-line moves are wanted.
@@ -1058,16 +1053,12 @@ fn caret_prefix(tab: &Rc<Tab>) -> String {
     editor::line_prefix(&tab.buffer, &editor::caret(&tab.buffer)).to_string()
 }
 
-/// A shell focused in a window that does not have the keyboard must not narrow the application's
-/// accelerator table, and one in the window that does must. Under Xvfb no window is ever
-/// activated, so the active one is the last added: a second window is opened first and the shell
-/// then opens in this one, which is the state after switching windows away from a shell. Closing
-/// the second window hands the keyboard back through the same `active-window` notify a real
-/// switch goes through. Prints what `Ctrl+S` activates: `["win.save"]`, then `[]`.
+/// Check shell accelerator capture belongs only to the active window. Under Xvfb, activate by
+/// closing the second window through `active-window` notification. Expected Ctrl+S:
+/// `["win.save"]` then `[]`.
 ///
-/// Then what the shell leaves the window, captured and with Forward All Keys switched on under
-/// it: `Ctrl+E` and `Ctrl+W` stay the window's (`["win.palette-files"]`, `["win.close-tab"]`)
-/// and then go to the shell (`[]`), and Copy in Terminal stays the window's either way.
+/// Forward All Keys changes Ctrl+E/Ctrl+W from window actions to `[]`; Copy in Terminal remains
+/// a window action.
 pub(super) fn bench_shell_keys(app: &Rc<App>) {
     let Some(gtk_app) = app.window.application().and_downcast::<adw::Application>() else {
         return bench_quit(app);
@@ -1206,20 +1197,13 @@ fn bench_term_save(app: &Rc<App>) {
     });
 }
 
-/// `ACCENT_BENCH_HOLD=open|back`: a shell outliving its window. Run twice on one scratch state,
-/// `open` first. `open` sends a `cd` and a marker into the window's shell and quits the way
-/// Ctrl+Q does, which writes the session and leaves the shell held; `back` prints what the
-/// restore brought back — the key, where the shell is, whether the marker came back on its
-/// screen, how many of its rows the replay filled and whether it has the keyboard — then closes
-/// the tab and prints how many shells the holder still has. Expected: the same key twice,
-/// `at=/tmp`, `replayed=true`, as many `lines` as `rows`, `focused=true`, `held=0`. Under
-/// `SHELL=/bin/bash`, whose `vte.sh` reports the directory.
+/// `ACCENT_BENCH_HOLD=open|back` uses two launches on one scratch state with `SHELL=/bin/bash`.
+/// Open sets a directory and marker, then quits while retaining the shell. Back reports restored
+/// key, directory, replay, rows and focus, then closes the tab. Expected same key, `at=/tmp`,
+/// `replayed=true`, `lines=rows`, `focused=true`, `held=0`.
 ///
-/// `=early` closes new shells before their `attach` can have had them started: in the same tick,
-/// and a few milliseconds in, while the attach waits for the holder it started. Expected
-/// `held=0`. Against a vault, whose window opens no shell of its own, so the first one also starts
-/// the holder: with one already up (a holder waits ten seconds before it leaves) the same tick
-/// proves nothing.
+/// `=early` closes shells in the same tick and shortly after attach starts; expected `held=0`.
+/// Use a vault window and no existing holder so the race includes holder startup.
 pub(super) fn bench_hold(app: &Rc<App>, step: &str) {
     if step == "early" {
         return bench_hold_early(app);

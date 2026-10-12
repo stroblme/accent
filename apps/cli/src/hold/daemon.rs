@@ -1,13 +1,11 @@
-//! The holder: one process per user and machine that owns every held shell.
+//! One holder process per user and machine owns the held shells.
 //!
-//! Threads and blocking I/O: one thread accepts, one serves each connection, one pumps each
-//! shell's output. A shell's `screen` lock guards its screen model, its terminal and its exit
-//! status together, which is what makes a replay exact: every chunk of output is either in the
-//! replay or sent live after it, never both. No thread holds two locks at once.
+//! Blocking threads accept connections, serve terminals and pump shell output. One `screen` lock
+//! covers model, terminal and exit status, ensuring output is replayed or sent live exactly
+//! once. Threads never hold two locks together.
 //!
-//! Backpressure is the shell's: a terminal that reads slowly slows the shell down, which is right
-//! over ssh. One that reads nothing for [`STALL`] is dropped, so a dead link never leaves a shell
-//! blocked on its pty for longer (TCP alone takes about 15 minutes to notice one).
+//! Slow readers apply backpressure to the shell; readers stalled for [`STALL`] are disconnected
+//! so dead links cannot block its pty indefinitely.
 
 use super::protocol::{self, DETACHED, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT, RESIZE};
 use super::{FAILED, LOCK, SOCKET, lock, screen};
@@ -38,10 +36,8 @@ const IDLE_MS: i32 = 1000;
 const GRACE: Duration = Duration::from_secs(1);
 /// The largest read from a pty, and the largest piece of a replay.
 const CHUNK: usize = 64 * 1024;
-/// How long a holder that holds no shell waits for a terminal before it leaves. The `attach` that
-/// starts a holder connects within two seconds or gives up (`client::connect`), and says HELLO at
-/// once, so five times that with nobody connecting means it died first. Short enough that a
-/// holder left that way is gone before anyone lists what is held.
+/// Idle timeout before the first shell starts. Allows more than `client::connect`'s two-second
+/// connection window, then removes a holder whose attaching client died.
 const WAIT: Duration = Duration::from_secs(10);
 
 /// Tells attached terminals apart, so that one leaving does not detach the one that took over.
@@ -54,10 +50,8 @@ struct Daemon {
     seen: Mutex<Instant>,
 }
 
-/// The shells held, by id, and the ids a kill named before any shell had them, under one lock so
-/// that a kill and the HELLO that would start the same shell are settled in one order or the
-/// other. Close Tab can land between a tab's `attach` connecting and its HELLO: the kill then
-/// finds nothing to end, and the HELLO must start nothing, or the shell is held for nobody.
+/// Held shells and pre-creation kills under one lock. Ordering kill and HELLO together prevents
+/// a late attach from creating a shell after Close Tab.
 #[derive(Default)]
 struct Shells {
     live: HashMap<String, Arc<Shell>>,
@@ -433,10 +427,8 @@ impl Shell {
     }
 }
 
-/// A new pty pair. Both ends are opened `O_NOCTTY`, so the holder never gets a controlling
-/// terminal (and with it a hangup), and close-on-exec, which std does and `openpty` would not: a
-/// master that leaked into another shell would keep its pty open after the holder closed it, and
-/// the shell on it would never get its hangup.
+/// Open a pty pair with `O_NOCTTY` to avoid controlling-terminal hangups and close-on-exec to
+/// prevent leaked masters from keeping other shells alive.
 fn open_pty() -> io::Result<(File, File)> {
     let open = |path: &Path| {
         OpenOptions::new()

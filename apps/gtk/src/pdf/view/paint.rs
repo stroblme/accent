@@ -327,15 +327,9 @@ impl imp::PdfView {
     }
 }
 
-/// The colour a stroke will have once the tile carrying it arrives.
-///
-/// Two things happen to it on the way: every pixel of a page is put on the theme's paper–ink ramp
-/// (see `accent_core::recolour::recolour_pixel`), and a highlighter multiplies into the page rather
-/// than covering it. Painting the live stroke in its raw colour instead is why a highlighter used
-/// to jump to another shade on dark and Solarized the moment the render landed.
-///
-/// The multiply is against the paper, which is what the stroke covers nearly all of; over a
-/// letter it darkens a shade more than this, which is a pixel or two of the stroke's own width.
+/// Overlay colour matching the eventual rendered stroke. Apply the theme's paper/ink ramp and
+/// highlighter multiplication so colour does not jump when tiles arrive. Approximate
+/// multiplication against paper; ink beneath the stroke can darken it slightly.
 fn as_rendered(style: accent_core::pdf::InkStyle, theme: Theme, paper: gdk::RGBA) -> gdk::RGBA {
     let [r, g, b, a] = style.rgba;
     let rgb = match theme {

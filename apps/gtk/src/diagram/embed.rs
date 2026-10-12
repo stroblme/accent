@@ -1,10 +1,8 @@
-//! A diagram embedded in a note (`![[x.drawio]]`, `![[x.drawio#Page]]`): the page drawn as an
-//! SVG by [`render`], its drawing alone in the file's own colours, which the preview then serves
-//! as it serves an SVG image (`look::serve_svg`).
+//! Render note diagram embeds (`![[x.drawio]]`, `![[x.drawio#Page]]`) as SVG drawing
+//! bounds in file colours, then serve through `look::serve_svg`.
 //!
-//! Drawn on the main thread, where GTK and the typesetter live; the file is read on a worker. A
-//! drawing is kept by the file and page until the file changes, so a render of the note, a theme
-//! change and a second note embedding it draw nothing again.
+//! Read on a worker and draw on the GTK main thread. Cache by file version and page
+//! so note renders, theme changes and repeated embeds avoid redundant drawing.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

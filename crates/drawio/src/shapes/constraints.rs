@@ -31,8 +31,8 @@ const fn fixed(x: f64, y: f64) -> Constraint {
     at(x, y, 0.0, 0.0)
 }
 
-/// The connection points of vertex `shape`, `w` by `h` as it faces east. A shape of no table of
-/// its own, a stencil among them, takes the rectangle's.
+/// Connection points for an east-facing `shape` of size `w` by `h`. Shapes without
+/// a table, including stencils, use rectangle points.
 // ponytail: a stencil's own points (`<connections>`) need the stencil; the rectangle's stand in.
 pub fn constraints(shape: &str, style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
     let table: &[Constraint] = match shape {

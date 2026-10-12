@@ -1,46 +1,25 @@
-//! A `sourceview5::View` that can hold extra carets: VS Code's Add Cursor Above / Below, Select
-//! All Occurrences and box selection by `Shift+Alt` drag, and JetBrains' Add Caret at Next
-//! Occurrence.
+//! A `sourceview5::View` with secondary carets, occurrence selection and box selection.
 //!
-//! GtkTextView has exactly one insert mark and no notion of a second one, so each secondary caret
-//! is a pair of plain right-gravity `TextMark`s, the caret and the anchor its selection was
-//! started from, which this widget draws itself and replays edits at. The primary caret stays
-//! GTK's, its insert mark and selection bound, which is what keeps selection, IME, spellcheck and
-//! the scroll machinery working normally the rest of the time.
+//! GtkTextView supports one insert mark. Secondary carets use right-gravity marks for caret
+//! and anchor, while GTK retains the primary caret for normal selection, IME and scrolling.
+//! The view draws extra carets and replays supported edits and motions at each one.
 //!
-//! It is also where this view's key semantics are corrected, because a `TextViewImpl` is the one
-//! place the single-caret and the multi-caret case both pass through: `Ctrl+Delete` takes a run of
-//! whitespace before it takes a word, and Up, Down, Home and End work on a line of the document
-//! rather than on a row of the screen.
+//! A shared `TextViewImpl` also corrects single- and multi-caret motions: Ctrl+Delete removes
+//! whitespace before a word, and Up, Down, Home and End follow document lines.
 //!
-//! What it deliberately does not do:
+//! Clicks and external caret moves clear secondaries; Shift+Alt drag creates a box. Dead
+//! keys end the column so IME preedit can reach the primary. All carets share custom blinking
+//! while secondaries exist because GTK's blink phase is inaccessible.
 //!
-//! * no caret added by a click: any click, selection or find-bar jump moves the primary caret,
-//!   which drops the secondaries, and the one way to a column by pointer is a box ([`box_drag`]);
-//! * while secondaries exist the key controller runs ahead of the input method, so dead keys and
-//!   CJK preedit go to the primary caret only, once the secondaries are cleared;
-//! * while a column of carets exists this widget paints every caret, the primary one included,
-//!   because GTK's blink phase cannot be read and two blinks out of step read worse than one:
-//!   GTK's own caret goes transparent (`main::install_chrome_css`) and comes back with the column;
-//! * no completion popup unasked while a column is up, as no ghost text (`completion/`):
-//!   `Ctrl+Space` still opens one at the primary, and what is typed or accepted while it is up
-//!   goes to the primary alone, which ends the column.
+//! Automatic completion and ghost text are suppressed during multi-caret editing. Explicit
+//! Ctrl+Space completes at the primary only, ending the column on typing or acceptance.
 //!
-//! It also paints the ghost text (`ghost.rs`): a suggestion is not in the buffer, so there is
-//! nothing to give it a text tag, and this widget is already the one drawing over the text. Focus
-//! mode's line fade (`fade.rs`) is drawn here for the same reason.
+//! Printable text, Return, Tab, deletion and supported motions replay at every caret;
+//! Shift extends each selection, overlapping selections merge, and paste reaches every caret.
+//! Undo and Redo restore caret state with the text; each multi-caret edit is one user action.
+//! Unbound keys retain the column; external edits, moves and Escape end it.
 //!
-//! Mirrored at every caret: printable characters, Return, Tab, Backspace, Delete, the arrow, Home,
-//! End, Page Up and Page Down motions, and the four wordwise chords `Ctrl+Left`, `Ctrl+Right`,
-//! `Ctrl+Delete` and `Ctrl+Backspace`, so a column of carets can be moved and edited as one. Shift
-//! with a motion extends each caret's own selection, which an edit then takes; carets whose
-//! selections overlap become one ([`merge`]). A paste goes to every caret, and Undo and Redo put
-//! the carets and their selections back with the text. Every other key goes to GTK, as in VS Code:
-//! a modifier on its own or a chord nothing binds leaves the column up, and a caret move or an edit
-//! this widget did not make ends it (`constructed`), which is what `Ctrl+A`, `Ctrl+Home` and a
-//! click come down to. Escape ends it too, keeping the primary's selection, and so does a dead key
-//! ([`ends_column`]). One undo step covers a whole multi-caret edit, because each one runs inside a
-//! single `begin_user_action`.
+//! The view also paints ghost text and focus-mode veils, neither of which belongs in the buffer.
 
 use crate::editor::{caret, line_end, line_prefix};
 use gtk::glib::translate::IntoGlib;
@@ -79,9 +58,8 @@ enum Motion {
     PageDown,
 }
 
-/// A caret's selection as character offsets: where it was started from and where the caret is.
-/// A caret with nothing selected has both in one place. Public only because the undo record in
-/// `imp` holds it.
+/// Selection anchor and caret as character offsets, equal when empty.
+/// Public for the undo record in `imp`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Span {
     anchor: i32,
@@ -102,11 +80,10 @@ impl Span {
     }
 }
 
-/// The carets left once overlapping selections are one, by VS Code's rule: two selections merge
-/// where they overlap, and a caret with nothing selected merges with a selection it only touches.
-/// Of each group, the caret added first survives, the primary (`spans[0]`) before all. It comes
-/// back with its index and the union of the group, in its own direction; one that had nothing
-/// selected keeps its caret at the end of the union it sat at, or the far end.
+/// Merge overlapping selections and empty carets touching selections;
+/// merely adjacent nonempty selections remain separate. Keep the earliest
+/// caret (primary first), returning its index and union in its direction.
+/// Empty survivors retain their union endpoint where possible.
 fn merge(spans: &[Span]) -> Vec<(usize, Span)> {
     let mut order: Vec<usize> = (0..spans.len()).collect();
     order.sort_by_key(|&i| (spans[i].start(), spans[i].end()));
@@ -148,10 +125,9 @@ fn merge(spans: &[Span]) -> Vec<(usize, Span)> {
         .collect()
 }
 
-/// Where a motion without Shift sets off from on a caret with a selection, by VS Code's rule, and
-/// whether it goes on from there: Left and Right only collapse the selection, to its start or its
-/// end; Up and Page Up leave from its start, Down and Page Down from its end; any other motion
-/// from the caret.
+/// Without Shift, Left/Right collapse to selection start/end only;
+/// Up/Page Up move from its start, Down/Page Down from its end.
+/// Other motions start from the caret (VS Code semantics).
 fn departure(motion: Motion, span: Span) -> (i32, bool) {
     if span.is_empty() {
         return (span.caret, true);
@@ -165,10 +141,9 @@ fn departure(motion: Motion, span: Span) -> (i32, bool) {
     }
 }
 
-/// Whether `key` ends a column of carets instead of going to it: Escape, and a key that starts a
-/// sequence the input method finishes — a dead key, Compose, GTK's `Ctrl+Shift+U` — because the
-/// keys after it have to reach the input method and a column would take them first. A modifier
-/// on its own is not one: AltGr is how `@` is typed.
+/// End the column on Escape or IME-sequence starts (dead keys, Compose,
+/// Ctrl+Shift+U), allowing following keys to reach the input method.
+/// Standalone modifiers retain the column, including AltGr for `@`.
 fn ends_column(key: gdk::Key, state: gdk::ModifierType) -> bool {
     let unicode_entry = state
         .contains(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
@@ -195,10 +170,9 @@ fn undo_or_redo(key: gdk::Key, state: gdk::ModifierType) -> Option<bool> {
     }
 }
 
-/// What each of `carets` carets gets from a paste of `text`, top to bottom: a line each where the
-/// text has exactly one line per caret, the whole of it at each otherwise. VS Code's
-/// `editor.multiCursorPaste: "spread"`, and what puts a copy from the same column back line by
-/// line; the trailing newline a copy of whole lines ends in does not count as a line.
+/// Spread paste one line per caret when counts match; otherwise paste
+/// all text at each caret (VS Code "spread"). Ignore a trailing newline
+/// from whole-line copies when counting lines.
 fn spread(text: &str, carets: usize) -> Vec<&str> {
     let lines: Vec<&str> = text.lines().collect();
     match carets > 1 && lines.len() == carets {
@@ -207,12 +181,10 @@ fn spread(text: &str, carets: usize) -> Vec<&str> {
     }
 }
 
-/// The edit `key` with `state` held stands for, or `None` for a key this widget does not mirror.
+/// Map `key` and `state` to a mirrored edit, or `None` for GTK handling.
 ///
-/// Ctrl has a table of its own — the four chords a column of carets is worth moving as one — and
-/// Alt has none, so every other combination is left to GTK. `Shift+Delete` is left to GTK too: it
-/// is its Cut binding, which a single caret and VS Code both answer with, and the column's own cut
-/// (`editor::lines`) is what the signal then reaches.
+/// Only supported Ctrl motions have mappings; Alt combinations remain GTK's. Shift+Delete
+/// also stays GTK Cut, whose signal reaches the column-aware `editor::lines` handler.
 fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
     if state.contains(gdk::ModifierType::ALT_MASK) {
         return None;
@@ -248,9 +220,8 @@ fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
     }
 }
 
-/// Where a caret aiming at column `goal` lands on a line `len` characters long, and the goal it
-/// keeps. The goal outliving the landing is what brings the caret back to its own column after a
-/// trip across a shorter line.
+/// Clamp a vertical destination to `len` while retaining `goal`, restoring
+/// the desired column after crossing short lines.
 fn vertical_step(goal: Option<i32>, column: i32, len: i32) -> (i32, i32) {
     let goal = goal.unwrap_or(column);
     (goal.min(len), goal)
@@ -272,11 +243,9 @@ fn tab_insert(column: usize, width: usize, spaces: bool) -> String {
     }
 }
 
-/// Every occurrence of `needle` in `text`, left to right, none overlapping the one before, as
-/// character ranges, which is what a buffer counts in. Literal and case-sensitive: VS Code's Add
-/// Selection to Next Find Match by default. With `whole`, only one standing as a word of its own,
-/// with no letter, digit or underscore either side: what VS Code matches a word taken from under
-/// the caret as.
+/// Find nonoverlapping literal, case-sensitive `needle` occurrences as
+/// character ranges. With `whole`, reject adjacent letters, digits or
+/// underscores, matching VS Code current-word selection semantics.
 fn occurrences<'a>(
     text: &'a str,
     needle: &'a str,
@@ -298,10 +267,9 @@ fn occurrences<'a>(
         })
 }
 
-/// The next occurrence of `needle` in `text` that starts at or after `from`, or failing that the
-/// first from the top, as the search wraps at the end of the buffer. One that overlaps a range in
-/// `taken`, a selection some caret already holds, is passed over, so `None` means every
-/// occurrence is taken. `whole` as for [`occurrences`].
+/// Find the next untaken occurrence at/after `from`, wrapping to the top.
+/// Skip overlaps with `taken`; `None` means all are taken. `whole`
+/// follows [`occurrences`].
 fn next_occurrence(
     text: &str,
     needle: &str,
@@ -335,8 +303,8 @@ fn spaces_behind(head: &str) -> Option<usize> {
     (run > 0).then_some(run)
 }
 
-/// The range a wordwise delete takes at `at` while it is on whitespace. Bounded by the line: a
-/// newline is a word boundary, not whitespace to swallow.
+/// Whitespace word-delete range at `at`, bounded to the line because
+/// a newline is a word boundary.
 fn space_range(
     buffer: &gtk::TextBuffer,
     at: &gtk::TextIter,
@@ -374,13 +342,10 @@ fn word_range(
     }
 }
 
-/// What the text tags at `iter` do to a glyph, as Pango attributes: the size, the weight, the
-/// slant and the face. Read from the character *before* the caret, which is the one the caret is
-/// writing after — at the end of a heading line the character after it is the newline, which the
-/// heading's own span does not cover.
+/// Convert effective glyph tags to Pango size, weight, slant and family attributes.
 ///
-/// The tags arrive in ascending priority, and a later attribute of the same kind wins, so the
-/// answer is the tag that would win on the character itself.
+/// Read the character before the caret so heading-end styling is not lost at an untagged
+/// newline. Ascending tag priority lets later attributes override earlier ones.
 fn tag_attributes(iter: &gtk::TextIter) -> pango::AttrList {
     let attrs = pango::AttrList::new();
     let mut probe = *iter;
@@ -407,9 +372,8 @@ fn tag_attributes(iter: &gtk::TextIter) -> pango::AttrList {
     attrs
 }
 
-/// The alpha a caret is painted at `elapsed` µs into a blink of period `period` µs: solid for the
-/// first two thirds, then down to nothing and back over the last third. Ramped rather than
-/// snapped, which is what GTK4 does with the primary caret this stands in for.
+/// Caret alpha at `elapsed` µs within `period` µs: solid for two-thirds,
+/// then fade out and back, matching GTK4 primary-caret blinking.
 fn blink_alpha(elapsed: i64, period: i64) -> f32 {
     let phase = elapsed.rem_euclid(period) as f32 / period as f32;
     match phase < 2.0 / 3.0 {
@@ -418,8 +382,7 @@ fn blink_alpha(elapsed: i64, period: i64) -> f32 {
     }
 }
 
-/// How much of the text colour ghost text keeps. Enough to read, little enough that it is never
-/// mistaken for what the document says.
+/// Ghost-text opacity, keeping suggestions readable but distinct from saved text.
 const GHOST_ALPHA: f32 = 0.45;
 
 /// The class whose CSS (`main::install_chrome_css`) makes GTK's own caret transparent, so this
@@ -430,10 +393,8 @@ mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
 
-    /// A secondary caret: the mark that rides the text, the anchor its selection was started
-    /// from, and the column vertical movement aims for, which is what a caret keeps while it
-    /// crosses a shorter line. `below` is which way Add Caret Above / Below grew the column with
-    /// it, `true` for below, and `None` for a caret made any other way.
+    /// Secondary caret marks, anchor and retained vertical goal. `below`
+    /// records Add Caret direction (`true` below), or `None` for other origins.
     pub struct Caret {
         pub mark: gtk::TextMark,
         pub anchor: gtk::TextMark,
@@ -442,8 +403,8 @@ mod imp {
     }
 
     impl Caret {
-        /// A caret at `at` whose selection runs from `from`. Both marks have right gravity, as
-        /// GTK's own two do, so text typed where both sit carries both along.
+        /// Create caret/anchor marks with right gravity so typing at their
+        /// shared position carries both along, as with GTK's primary.
         pub fn new(buffer: &gtk::TextBuffer, from: &gtk::TextIter, at: &gtk::TextIter) -> Self {
             Caret {
                 mark: buffer.create_mark(None, at, false),
@@ -459,9 +420,8 @@ mod imp {
         }
     }
 
-    /// Every caret's selection, the primary's first, either side of one undo step the column
-    /// made, and the buffer's character count on either side of it, which is what says which of
-    /// GTK's own steps the text has come back to.
+    /// Primary-first carets before/after an undo step, with buffer character
+    /// counts identifying the corresponding GTK history state.
     pub struct Step {
         pub before: Vec<Span>,
         pub after: Vec<Span>,
@@ -472,32 +432,29 @@ mod imp {
     pub struct View {
         /// The secondary carets, whose marks ride along with the text.
         pub carets: RefCell<Vec<Caret>>,
-        /// The column's own record of the undo steps it made, newest last, and of those undone,
-        /// for Redo: GTK's history keeps one caret per step, and puts it on the first caret the
-        /// step edited. `None` stands for a step from before the column, with nothing to put
-        /// back. A new column starts with both empty.
+        /// Column undo/redo records, newest last, supplementing GTK's one-caret
+        /// history. `None` denotes an older step without column state.
+        /// New columns start with empty stacks.
         pub undo: RefCell<Vec<Option<Step>>>,
         pub redo: RefCell<Vec<Option<Step>>>,
         /// The suggestion painted after the caret, if one is showing.
         pub ghost: RefCell<Option<String>>,
-        /// Set while this widget edits the buffer or moves a caret itself, so the `mark-set` and
-        /// `changed` hooks do not read that as someone else's and drop every caret mid-edit.
+        /// Programmatic-edit guard so mark/change hooks do not discard carets
+        /// as if external movement occurred.
         pub busy: Cell<bool>,
-        /// The primary caret's goal column, the counterpart of [`Caret::goal`]. Dropped by any
-        /// other movement, any edit and any caret move this widget did not make.
+        /// Primary goal column, like [`Caret::goal`], cleared by edits or
+        /// non-column movement.
         pub goal: Cell<Option<i32>>,
-        /// Whether the primary selection is a word taken from under the caret
-        /// ([`super::View::match_whole_words`]), whose occurrences are whole words. Dropped with
-        /// the goal by any caret move this widget did not make.
+        /// Whole-word matching for a selected current word
+        /// ([`super::View::match_whole_words`]), cleared by external caret movement.
         pub whole_words: Cell<bool>,
         /// The frame time the blink phase last restarted at, so every caret fades together and a
         /// caret being typed at is solid.
         pub blinked_at: Cell<i64>,
         /// The tick callback that repaints the blink, while there is one to repaint.
         pub blink: RefCell<Option<gtk::TickCallbackId>>,
-        /// Whether Up and Down move by a line of the document rather than by a row of the
-        /// screen. What a column of carets asks for in code; in wrapped prose one Down would be
-        /// a whole paragraph, which can be several screens.
+        /// Document-line vertical movement for code. Wrapped prose keeps display
+        /// rows because one paragraph may span several screens.
         pub logical_lines: Cell<bool>,
         /// Focus mode's line fade (`fade.rs`): whether it is wanted, how far in it is from 0 to
         /// 1, the frame time and strength its ramp started from, and the tick running the ramp.
@@ -583,10 +540,9 @@ mod imp {
     }
 
     impl WidgetImpl for View {
-        /// GtkSourceView's gutters and annotations ask GTK for the iter at the screen's top and
-        /// bottom rows as the view is drawn, which aborts on some lines (`fold::aborts_at`): lines
-        /// hidden but not yet measured again by GTK, which it does in an idle of its own. Such a
-        /// frame is left undrawn and the next one asked for.
+        /// Skip frames where gutter iter lookup would abort on newly hidden,
+        /// unvalidated lines ([`crate::fold::aborts_at`]). Request another frame after
+        /// GTK's idle measurement.
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let obj = self.obj();
             let visible = obj.visible_rect();
@@ -658,9 +614,9 @@ mod imp {
             }
         }
 
-        /// `Ctrl+Delete` and `Ctrl+Backspace` take a run of whitespace on its own, and only the
-        /// next press takes the word past it. GTK's word boundaries step straight over the run to
-        /// the far side of the word, which is a whole indent lost to one keystroke.
+        /// Delete whitespace separately for Ctrl+Delete/Backspace. GTK word
+        /// boundaries would cross the indent and consume the following word
+        /// in one press.
         fn delete_from_cursor(&self, type_: gtk::DeleteType, count: i32) {
             let obj = self.obj();
             let buffer = obj.buffer();
@@ -701,10 +657,9 @@ mod imp {
             );
         }
 
-        /// Up and Down move by a line of the document where the view asked for it, and Home and
-        /// End go to that line's ends: a wrapped line of code is one line to move through, not a
-        /// screenful of rows. `Pages` and everything else keep GTK's display-based behaviour,
-        /// which is what they are for, but for a caret GTK leaves on a hidden line.
+        /// Use document lines for requested Up/Down/Home/End code movement.
+        /// Retain GTK display paging and other motions, correcting carets
+        /// left on hidden lines.
         fn move_cursor(&self, step: gtk::MovementStep, count: i32, extend: bool) {
             match step {
                 gtk::MovementStep::DisplayLines if self.logical_lines.get() => {
@@ -755,16 +710,15 @@ impl View {
         Self::default()
     }
 
-    /// Make Up and Down step a line of the document rather than a row of the screen. Set for the
-    /// code flavours, where a wrapped line is one statement and the column is what the key is
-    /// asked for; prose keeps GTK's own behaviour, where a paragraph is a line and stepping over
-    /// one would be several screens.
+    /// Use document-line Up/Down for code so wrapped statements remain one
+    /// vertical step. Prose retains GTK display rows to avoid skipping
+    /// whole wrapped paragraphs.
     pub fn set_logical_lines(&self, on: bool) {
         self.imp().logical_lines.set(on);
     }
 
-    /// Paint `text` after the caret, or nothing. The suggestion never enters the buffer, so it
-    /// costs no undo step, no save and no `changed`.
+    /// Paint ghost text without inserting into the buffer, preserving undo,
+    /// save contents and `changed` state.
     pub fn set_ghost(&self, text: Option<String>) {
         let mut ghost = self.imp().ghost.borrow_mut();
         if *ghost == text {
@@ -780,9 +734,8 @@ impl View {
         self.imp().ghost.borrow().clone()
     }
 
-    /// Bring focus mode's line fade in or take it away, over the chrome's own transition. It
-    /// jumps where animations are off, as the chrome does, and where the view is not realised
-    /// and has no frame clock to ramp on.
+    /// Animate line fade with the chrome transition; jump when animations
+    /// are disabled or the unrealized view lacks a frame clock.
     pub fn set_fade(&self, on: bool) {
         let imp = self.imp();
         if imp.fade_on.replace(on) == on {
@@ -818,8 +771,8 @@ impl View {
         *imp.fade_tick.borrow_mut() = Some(id);
     }
 
-    /// Measure the line fade from the lines `follows` names rather than from this view's carets:
-    /// a comparison column beside the editor, whose own caret nobody moves.
+    /// Anchor fade to `follows` lines for read-only comparison peers whose
+    /// carets do not move.
     pub fn fade_from(&self, follows: impl Fn() -> Option<std::ops::RangeInclusive<i32>> + 'static) {
         self.imp().fade_follows.replace(Some(Box::new(follows)));
     }
@@ -850,17 +803,11 @@ impl View {
         self.imp().find_tag.borrow().clone()
     }
 
-    /// Put a caret one line below (or above) the outermost caret in that direction, so repeating
-    /// the action grows the column away from the primary caret. Where the caret added last grew
-    /// the column the other way, it is taken back instead, as JetBrains' Clone Caret does, so the
-    /// opposite key undoes the column one caret at a time and adds again from the primary.
+    /// Add a caret above or below the outermost caret, or remove the last opposite addition.
     ///
-    /// With the primary's selection on one line the column is a box grown from it: each caret
-    /// added selects the same columns of its line, cut short where the line is, as
-    /// [`Self::select_box`] cuts one short.
-    ///
-    /// It goes by the lines of the text, a hidden one included, which it opens (`fold::reveal`)
-    /// and answers the offset of, so the tab can lay out what came back into sight.
+    /// Repeated actions grow away from the primary; reversing them unwinds the column first.
+    /// A single-line primary selection extends as a box with columns clipped to each line.
+    /// Hidden lines are revealed through `fold::reveal`; return their offset for relayout.
     pub fn add_caret(&self, below: bool) -> Option<i32> {
         // Out of the cell before the marks go: `delete_mark` emits `mark-deleted`.
         let newest = self
@@ -915,9 +862,9 @@ impl View {
             .then(|| (anchor.line_offset(), at.line_offset()))
     }
 
-    /// Add a caret selecting the next occurrence of the primary selection after the caret added
-    /// last, JetBrains' `Alt+J`: the search wraps at the end of the buffer and passes over what a
-    /// caret already holds. Where there is none left, nothing moves.
+    /// Add a caret for the next primary-selection occurrence (Alt+J),
+    /// wrapping and skipping existing selections. Leave state unchanged
+    /// when no occurrence remains.
     pub fn add_next_occurrence(&self) {
         let buffer = self.buffer();
         let Some((start, end)) = buffer.selection_bounds() else {
@@ -942,17 +889,14 @@ impl View {
         }
     }
 
-    /// Have the occurrences of the primary selection matched as whole words from here until the
-    /// selection is moved by hand: it is the word under the caret, which the tab has just selected
-    /// for Add Caret at Next Occurrence or Select All Occurrences, and VS Code then passes over
-    /// `foo` inside `foo_bar`.
+    /// Match the selected current word as whole words until manual movement,
+    /// excluding `foo` inside `foo_bar` for occurrence commands.
     pub fn match_whole_words(&self) {
         self.imp().whole_words.set(true);
     }
 
-    /// Add a caret selecting every occurrence of the primary selection that no caret holds yet,
-    /// VS Code's `Ctrl+Shift+L`. One pass over the text, where repeating
-    /// [`Self::add_next_occurrence`] would read the whole buffer again for each.
+    /// Select all remaining occurrences (Ctrl+Shift+L) in one text scan,
+    /// avoiding a full buffer read per repeated [`Self::add_next_occurrence`].
     pub fn select_all_occurrences(&self) {
         let buffer = self.buffer();
         let Some((start, end)) = buffer.selection_bounds() else {
@@ -989,8 +933,8 @@ impl View {
         self.imp().carets.borrow_mut().push(caret);
     }
 
-    /// A new column: the steps an earlier one recorded are not its to put back, and a popup
-    /// still up at the primary caret would take the keys meant for all of them.
+    /// Start a new column with fresh undo records and dismiss completion
+    /// so its popup cannot consume keys intended for all carets.
     fn start_column(&self) {
         self.imp().undo.take();
         self.imp().redo.take();
@@ -1004,12 +948,11 @@ impl View {
         *self.imp().column_started.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Box selection, what a `Shift+Alt` drag makes: a caret on every line of the document from
-    /// the one at `from` to the one at `to`, both in buffer coordinates, selecting what lies
-    /// between their two x positions on that line. A line ending short of the box gets an empty
-    /// caret at its end and one ending inside it is selected to its end, as nothing is padded;
-    /// a wrapped line gets one caret, on its row nearest `from`. The caret at `from` is the
-    /// primary and the one at `to` the newest, and the box replaces whatever column there was.
+    /// Replace the column with a box between `from` and `to` in buffer coordinates.
+    ///
+    /// Each document line gets one caret selecting between x positions, clipped without padding.
+    /// Short lines get an end caret; wrapped lines use the row nearest `from`. The starting
+    /// caret stays primary and the ending caret is newest.
     pub(crate) fn select_box(&self, from: (i32, i32), to: (i32, i32)) {
         let buffer = self.buffer();
         let first = self.line_at_y(from.1).0.line();
@@ -1047,8 +990,8 @@ impl View {
         self.scroll_mark_onscreen(&newest.unwrap_or_else(|| buffer.get_insert()));
     }
 
-    /// Paint the column after carets were added or taken back: GTK's caret hands the blink over
-    /// while there is one, and takes it back once there is none.
+    /// Repaint after column changes, transferring blink ownership from GTK
+    /// while extra carets exist and returning it afterwards.
     fn show_column(&self) {
         match self.has_carets() {
             true => self.blink_on(),
@@ -1057,8 +1000,8 @@ impl View {
         self.queue_draw();
     }
 
-    /// How long the blink has been running and the period it runs at, or `None` once it has
-    /// settled: blinking switched off, or GTK's blink timeout passed with the carets left solid.
+    /// Return blink elapsed time and period, or `None` after disabled blinking
+    /// or GTK timeout leaves carets solid.
     fn blink_phase(&self) -> Option<(i64, i64)> {
         let settings = self.settings();
         let elapsed = self.frame_clock()?.frame_time() - self.imp().blinked_at.get();
@@ -1067,8 +1010,8 @@ impl View {
             .then(|| (elapsed, settings.gtk_cursor_blink_time() as i64 * 1_000))
     }
 
-    /// Take the blink over and restart its phase, so a caret is solid the moment it is typed at
-    /// the way GTK's own is. The tick callback stops itself once the phase has settled.
+    /// Restart the shared blink phase solid on typing, as GTK does.
+    /// The tick stops when blinking settles.
     fn blink_on(&self) {
         let imp = self.imp();
         self.add_css_class(CARETS_CLASS);
@@ -1119,10 +1062,10 @@ impl View {
         self.queue_draw();
     }
 
-    /// Run `hide`, which hides text, keeping a column of carets up: each caret it hides comes out
-    /// to the end of the line above, where `fold::shown` puts one a move left in hidden text, and
-    /// carets meeting there merge, as VS Code keeps its cursors when a region folds over them. A
-    /// caret `hide` moves itself (`fold::fold` brings the primary out) is not a click ending it.
+    /// Run `hide` while retaining the column. Move hidden carets to the
+    /// preceding visible line end via `fold::shown`, then merge converged
+    /// carets. Treat `hide`'s own primary movement as folding, not a click
+    /// that ends the column.
     pub fn keeping_carets(&self, hide: impl FnOnce()) {
         if !self.has_carets() {
             return hide();
@@ -1202,8 +1145,8 @@ impl View {
             .collect()
     }
 
-    /// Every caret's line and column, the primary one first. Where the carets are is otherwise
-    /// only visible on screen, so this is what a headless check reads them from.
+    /// Return primary-first line/column positions for headless checks
+    /// that cannot inspect painted carets.
     pub(crate) fn caret_positions(&self) -> Vec<(i32, i32)> {
         let buffer = self.buffer();
         let at = |mark: &gtk::TextMark| {
@@ -1221,10 +1164,9 @@ impl View {
         positions
     }
 
-    /// Paint the other carets' selections the way GTK paints the primary's: in its colour, under
-    /// the text, a band per screen row, carried on to the edge of the text where the selection
-    /// goes on past a row's end. Rows below the screen are not walked, so selecting a long file
-    /// costs what is visible.
+    /// Paint secondary selections like GTK's primary, beneath text and
+    /// through row ends for continuing selections. Visit visible rows only
+    /// so long selections cost viewport work.
     fn paint_selections(&self, snapshot: &gtk::Snapshot) {
         let buffer = self.buffer();
         let spans: Vec<Span> = self.spans()[1..]
@@ -1279,8 +1221,8 @@ impl View {
         }
     }
 
-    /// The colour GTK paints the primary caret's selection in, for the other carets' to match:
-    /// the style scheme's own where it names one (Solarized), and otherwise libadwaita's.
+    /// Match GTK selection colour: use the scheme's override when present
+    /// (for example, Solarized), otherwise libadwaita's.
     pub(crate) fn selection_colour(&self) -> gdk::RGBA {
         use sourceview5::prelude::BufferExt as _;
         let scheme = self
@@ -1309,15 +1251,11 @@ impl View {
     }
 }
 
-/// Box selection by `Shift+Alt` and a drag of the primary button, VS Code's chord for it
-/// ([`View::select_box`]). In the capture phase and claimed at the press, so GTK's own click and
-/// drag never see the sequence and the press is not a Shift+click extending the selection; a press
-/// without the chord is let go at once. The box is measured from where the press was in the
-/// buffer, so a scroll during the drag leaves its first corner where it was.
+/// Claim Shift+Alt primary drags for box selection ([`View::select_box`]).
 ///
-/// Resting past the view's top or bottom edge, the box goes on growing that way: every
-/// [`SCAN`] the box is drawn again to the pointer, and `select_box` brings the line under it on
-/// screen, so the view scrolls on, the faster the further past the edge, as GTK's own drag does.
+/// Capture claiming prevents GTK Shift+click and drag handling. Keep the origin in buffer
+/// coordinates across scrolling. Every [`SCAN`] redraws towards the pointer and scrolls
+/// faster as it moves farther beyond the view's vertical edges.
 fn box_drag(view: &View) {
     use std::{cell::Cell, rc::Rc};
     let drag = gtk::GestureDrag::builder()

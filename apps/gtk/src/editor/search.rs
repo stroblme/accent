@@ -1,8 +1,6 @@
-//! Finding, replacing and going somewhere: the find bar's query over the tab's own text, the
-//! muted highlight over every other occurrence of the selection, and the caret and scroll moves
-//! that follow a match.
+//! Buffer-local find, replace, occurrence highlighting and match navigation.
 //!
-//! The widgets live in `find.rs`, one bar per window. What is here is what belongs to one buffer.
+//! Widgets live in `find.rs`, one bar per pane; tabs keep their own query and matches.
 
 use super::{Tab, caret, line_end};
 use crate::{fold, lang, multicaret};
@@ -19,9 +17,8 @@ use std::rc::Rc;
 
 /// How much of the find bar's match colour an occurrence of the selection keeps.
 const OCCURRENCE_WEIGHT: f32 = 0.35;
-/// Occurrences past this many are left unpainted. A selection with more than this in one note is
-/// a word too common for the hint to say anything about, and tagging every one of them is the
-/// tag churn a full re-style is already dominated by.
+/// Maximum painted occurrences, avoiding tag churn for selections too
+/// common to provide a useful hint.
 const OCCURRENCE_CAP: usize = 500;
 
 /// The background the style scheme paints a find-bar match in, which is the one colour both
@@ -34,9 +31,8 @@ fn search_match_colour(buffer: &sourceview5::Buffer) -> Option<gdk::RGBA> {
         .and_then(|colour| gdk::RGBA::parse(&colour).ok())
 }
 
-/// Paint `tag` in the muted twin of the scheme's own `search-match` colour: the same hue at a
-/// third of its weight, so an occurrence of the selection reads as a hint while a find-bar match
-/// still reads as a hit. Derived rather than named, so the pair keeps its order in every scheme.
+/// Paint a muted `search-match` colour at one-third weight so occurrences
+/// remain weaker than find hits in every theme.
 pub(super) fn mute(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
     let Some(mut colour) = search_match_colour(buffer) else {
         return;
@@ -45,8 +41,7 @@ pub(super) fn mute(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
     tag.set_background_rgba(Some(&colour));
 }
 
-/// Paint `tag` with every property of the scheme's own `search-match` style, as GtkSourceView's
-/// search context painted its matches, for the find bar's matches.
+/// Apply all properties of the scheme's `search-match` style for find hits.
 pub(super) fn match_style(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
     if let Some(style) = buffer
         .style_scheme()
@@ -56,21 +51,18 @@ pub(super) fn match_style(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
     }
 }
 
-/// Paint `tag` in the scheme's own `search-match` colour at full weight, for the reveal a jump
-/// leaves behind: being sent somewhere and finding a match there are the same thing to a reader,
-/// so they are the same colour. Derived rather than named, so it follows a theme switch.
+/// Paint jump reveals at full `search-match` weight, matching find hits
+/// and following theme changes.
 pub(super) fn matched(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
     if let Some(colour) = search_match_colour(buffer) {
         tag.set_background_rgba(Some(&colour));
     }
 }
 
-/// Where in `text` the first `#name` is written, as the byte range including the marker, or
-/// `None` for a tag the note does not carry. The note is parsed rather than searched, so a `#tag`
-/// inside a code span or a URL is not one, and a tag listed in the frontmatter is.
+/// Return the byte range of the first exact `#name`, including its marker, or `None`.
 ///
-/// Matched exactly, because that is how the index groups the names the Tags section lists: a
-/// note writing both `#Rust` and `#rust` offers the section two rows, and each opens onto its own.
+/// Parse the note to exclude code and URLs while including frontmatter tags. Exact matching
+/// agrees with the index's case-sensitive tag groups.
 fn tag_range(text: &str, name: &str) -> Option<Range<usize>> {
     let found = markdown::analyze(text)
         .tags
@@ -82,12 +74,10 @@ fn tag_range(text: &str, name: &str) -> Option<Range<usize>> {
 /// How many lines above and below the ones on screen the find bar's matches are painted in.
 const PAINT_MARGIN: i32 = 100;
 
-/// The find bar's query over one buffer: what it asks, where that matches, and whether the
-/// matches are painted. The query is the tab's rather than the bar's, so a note opened from a
-/// search hit keeps it after the bar is pointed elsewhere.
+/// Tab-owned query, matches and highlight state, independent of the current find bar target.
 ///
-/// Matched by `accent_core::search`, the Search pane's own matcher, over the whole text, folded
-/// blocks included: a query and its three toggles find in a note what they find across the vault.
+/// Use `accent_core::search` over all text, including folds, so toggles agree with vault search.
+/// Search-result queries remain on tabs after the bar retargets.
 #[derive(Default)]
 pub(super) struct Find {
     query: String,
@@ -104,9 +94,9 @@ pub(super) struct Find {
     queued: bool,
 }
 
-/// The match a step lands on from the selection `at`: forward, the first at or after its start
-/// (`from_current`, so growing the query keeps the match in view) or else past its end; back, the
-/// last before its start. Either end wraps round to the other, as the bar always has.
+/// Choose the next match from selection `at`, wrapping at both ends.
+/// Forward starts at the current start with `from_current`, otherwise
+/// after its end; backward chooses the last match before its start.
 fn next_match(
     matches: &[Range<i32>],
     at: Range<i32>,
@@ -142,8 +132,7 @@ impl Tab {
         self.set_find(&query, options);
     }
 
-    /// Match `text` under `options` again, paint it where the highlight is on, and say so to the
-    /// bar pointed at this tab.
+    /// Rematch under `options`, repaint if enabled and notify the targeted bar.
     fn set_find(&self, text: &str, options: Options) {
         {
             let mut find = self.find.borrow_mut();
@@ -183,9 +172,8 @@ impl Tab {
         self.find.borrow().highlight
     }
 
-    /// Called whenever the query has been matched again, with whether the query itself changed —
-    /// a jump handing it new text among the ways — rather than the text under it or the lines
-    /// on screen. One callback, and the bar last pointed at this tab sets it.
+    /// Notify the last bar targeting this tab after rematching. The flag
+    /// means query changes, not buffer edits or viewport changes.
     pub fn connect_found(&self, f: impl Fn(bool) + 'static) {
         *self.on_found.borrow_mut() = Some(Rc::new(f));
     }
@@ -215,12 +203,10 @@ impl Tab {
         Ref::map(self.find.borrow(), |find| &find.matches)
     }
 
-    /// Put the match tag on the matches in and around the lines on screen while the highlight is
-    /// on, and on nothing otherwise. A match of no width has nothing to paint.
+    /// Paint nonempty matches only within [`PAINT_MARGIN`] of visible lines, or clear highlighting.
     ///
-    /// Only around the lines on screen, [`PAINT_MARGIN`] either way, and painted again as the view
-    /// scrolls: a tag on each of a hundred thousand matches in a long file took seconds to put on
-    /// and seconds again after every keystroke, where a screenful takes no time at all.
+    /// Refresh on scroll. Restricting tags avoids seconds of tag churn for hundreds of thousands
+    /// of matches in long files.
     fn paint_matches(&self) {
         let (start, end) = self.buffer.bounds();
         self.buffer.remove_tag(&self.find_tag, &start, &end);
@@ -255,16 +241,14 @@ impl Tab {
         }
     }
 
-    /// The text changed under the query: its matches are out of date. A painted query is matched
-    /// again and painted from an idle, as it is when the view scrolls ([`Tab::queue_paint`]).
-    /// An unpainted one waits for the step that needs it.
+    /// Invalidate matches after edits. Rematch painted queries from an idle
+    /// ([`Tab::queue_paint`]); defer unpainted queries until navigation needs them.
     pub(super) fn find_edited(self: &Rc<Self>) {
         self.find.borrow_mut().stale = true;
         self.queue_paint();
     }
 
-    /// Paint the matches again from an idle ahead of the next frame, where the highlight is on,
-    /// so a run of edits — a Replace All is one per match — or of scroll steps is painted once.
+    /// Coalesce edits and scrolls into one idle repaint before the next frame.
     pub(super) fn queue_paint(self: &Rc<Self>) {
         let mut find = self.find.borrow_mut();
         if !find.highlight || std::mem::replace(&mut find.queued, true) {
@@ -287,32 +271,24 @@ impl Tab {
         );
     }
 
-    /// What is selected, or nothing when nothing is. The three readers below are this plus the
-    /// rule each of them applies to it.
+    /// Current selection, or none; callers add their own eligibility rules.
     fn selection_text(&self) -> Option<String> {
         let (start, end) = self.buffer.selection_bounds()?;
         Some(self.buffer.text(&start, &end, false).to_string())
     }
 
-    /// The selection, when it is worth showing every other occurrence of: two or more characters
-    /// on one line. One character is in almost every line, and a selection that spans lines is a
-    /// block being moved rather than a word being looked at.
+    /// Use single-line selections of at least two characters for occurrence
+    /// hints. One character is too common; multiline selections represent blocks.
     fn selected_occurrence(&self) -> Option<String> {
         self.selection_text()
             .filter(|s| s.chars().count() >= 2 && !s.contains('\n'))
     }
 
-    /// Point the muted highlight at what is selected now: every *other* occurrence of it in this
-    /// note, matched the way the find bar matches — without regard to case — and capped at
-    /// [`OCCURRENCE_CAP`].
+    /// Highlight other case-insensitive occurrences of the selection, capped at [`OCCURRENCE_CAP`].
     ///
-    /// The selected ranges themselves are left untagged. Tagging them was invisible only in
-    /// theory: a selection is painted *under* the tag backgrounds, so the muted colour showed
-    /// through, and the primary's selection and the other carets' — painted by two different
-    /// mechanisms — took it differently, so a column read as three shades of one selection.
-    ///
-    /// Nothing is re-tagged when the selection says what it said last time, which is what makes
-    /// this cheap enough to run on every caret move.
+    /// Leave selected ranges untagged: tag backgrounds paint above GTK selection and would
+    /// colour primary and secondary selections differently. Reuse unchanged text matches so
+    /// caret movement remains cheap.
     pub(super) fn highlight_occurrences(&self) {
         let query = self.selected_occurrence();
         if *self.occurrence_query.borrow() == query {
@@ -339,8 +315,7 @@ impl Tab {
         }
     }
 
-    /// What is selected right now, as character offsets: every caret's range where the tab holds
-    /// a column of them, the primary's alone otherwise.
+    /// Current selected character ranges for all column carets, or the primary alone.
     fn selected_ranges(&self) -> Vec<(i32, i32)> {
         let offsets = |(start, end): (gtk::TextIter, gtk::TextIter)| (start.offset(), end.offset());
         match self.view.downcast_ref::<multicaret::View>() {
@@ -364,9 +339,8 @@ impl Tab {
         )
     }
 
-    /// The two match backgrounds, the find bar's first: what `ACCENT_BENCH_OCCUR` prints to show
-    /// the hint really is the weaker of the pair. The find bar's tag is painted in the scheme's
-    /// `search-match` style ([`match_style`]), so its colour is that style's.
+    /// Find and occurrence backgrounds for `ACCENT_BENCH_OCCUR`, verifying
+    /// the hint is weaker. Find colour comes from [`match_style`].
     #[cfg(feature = "bench")]
     pub fn match_colours(&self) -> (Option<String>, Option<String>) {
         let text = |colour: gdk::RGBA| colour.to_str().to_string();
@@ -382,16 +356,15 @@ impl Tab {
             .filter(|s| !s.is_empty() && !s.contains('\n'))
     }
 
-    /// The selection as the sidebar search takes it. Its first line only: the box is one line
-    /// high, and a whole paragraph pasted into it matches nothing anyway.
+    /// First selection line for the single-line sidebar search box.
     pub fn selected_search(&self) -> Option<String> {
         let selected = self.selection_text()?;
         let first = selected.lines().next().unwrap_or_default().to_string();
         (!first.is_empty()).then_some(first)
     }
 
-    /// Move to the next or previous match. `from_current` searches from the start of the current
-    /// selection, so growing the query keeps the match the user is looking at.
+    /// Step between matches. `from_current` starts at the selection start
+    /// so refining the query keeps the current match visible.
     pub fn step(&self, forward: bool, from_current: bool) {
         let insert = caret(&self.buffer);
         let (start, end) = self.buffer.selection_bounds().unwrap_or((insert, insert));
@@ -414,8 +387,7 @@ impl Tab {
         }
     }
 
-    /// Replace the selection when it is a match, then step to the next one. A selection that is
-    /// not itself a match is the "nothing to do" case.
+    /// Replace a selected match and advance; do nothing for other selections.
     pub fn replace_current(&self, with: &str) {
         if let Some((mut s, mut e)) = self.buffer.selection_bounds() {
             let at = s.offset() as usize..e.offset() as usize;
@@ -427,8 +399,7 @@ impl Tab {
         self.step(true, false);
     }
 
-    /// Replace every match, as one undo step, from the last to the first so the offsets of the
-    /// ones before are still where they were.
+    /// Replace all matches in one undo step, back to front to preserve offsets.
     pub fn replace_all(&self, with: &str) {
         let all = self.replacements(with);
         self.buffer.begin_user_action();
@@ -440,8 +411,7 @@ impl Tab {
         self.buffer.end_user_action();
     }
 
-    /// Every match with what `with` makes of it: `$1` expanded under Regular Expression and
-    /// taken as written otherwise, as Replace All in the Search pane writes it.
+    /// Build replacements, expanding `$1` only in regex mode, as vault Replace All does.
     fn replacements(&self, with: &str) -> Vec<(Range<usize>, String)> {
         let find = self.find.borrow();
         match &find.re {
@@ -450,9 +420,9 @@ impl Tab {
         }
     }
 
-    /// Put `with` where `s..e` is, as one undo step, leaving `s` and `e` round it. A match in a
-    /// shut block stays shut: GTK puts text inserted where a hidden run begins outside the run,
-    /// so a replacement at the top of a fold would otherwise show on its own under the header.
+    /// Replace `s..e` in one undo step and leave both iters around the result.
+    /// Preserve hidden-fold tags where GTK would otherwise expose inserted
+    /// text at a hidden run's start.
     fn replace_range(&self, s: &mut gtk::TextIter, e: &mut gtk::TextIter, with: &str) {
         let hidden = fold::hiding(self.text_buffer(), s);
         let from = s.offset();
@@ -496,22 +466,18 @@ impl Tab {
         self.buffer.line_count()
     }
 
-    /// The one way the caret is sent somewhere: open whatever fold is hiding the destination,
-    /// put the caret there, scroll it to `align` down the view and take the focus.
-    ///
-    /// Every jump goes through here — an outline row, a search hit, a go-to line, a definition —
-    /// so none of them can land inside a folded block and leave the window looking unchanged.
+    /// Reveal folds, place the caret, scroll to `align` and focus the view.
+    /// Route all jumps here so outline, search and definition targets cannot
+    /// remain invisibly inside folded text.
     pub fn jump_to(&self, iter: &gtk::TextIter, align: f64) {
         let opened = self.reveal_select(iter, iter);
         self.scroll_to_caret(align, opened);
         self.view.grab_focus();
     }
 
-    /// Select `start..end`, opening whatever hides it first, and say whether anything opened:
-    /// lines GTK has yet to measure. A comparison opens the run it is in on both sides, as the
-    /// run's button does, where `fold::reveal` opened it on the editor's side alone, under the
-    /// other side's "unchanged lines" button; and so the run stays open through the edits made
-    /// there, which leave no caret in it to keep it open around.
+    /// Select `start..end` and report whether hidden lines opened. In a
+    /// comparison, reveal the run on both sides and retain that open state
+    /// through edits, rather than revealing only the editor under its peer's button.
     fn reveal_select(&self, start: &gtk::TextIter, end: &gtk::TextIter) -> bool {
         let opened = fold::reveal(self.text_buffer(), start);
         self.buffer.select_range(start, end);
@@ -521,8 +487,8 @@ impl Tab {
         opened
     }
 
-    /// What `fold::reveal` opening the text at `offset` asks of the tab: the lines that came back
-    /// out want their end-of-line messages back, and a comparison's run opens on both sides.
+    /// After fold reveal at `offset`, restore line diagnostics and open
+    /// any comparison run on both sides.
     pub(super) fn revealed_at(&self, offset: i32) {
         self.paint_diagnostics();
         if let Some(hosted) = self.hosted()
@@ -532,19 +498,11 @@ impl Tab {
         }
     }
 
-    /// Scroll the caret to `align` down the view, once the view can say where the caret is.
+    /// Scroll the caret to `align` after allocation and line measurement settle.
     ///
-    /// A tab that has just opened cannot yet: GTK flushes a queued `scroll_to_mark` from an idle
-    /// that runs before the view's first allocation, against a height of 0, and it measures lines
-    /// lazily, so until the lines above the caret are measured the caret sits too high and the
-    /// animated scroll heads for that spot. Either way the view settles short of the caret. So a
-    /// jump into a tab that is still opening waits for a frame in which the view has a size, then
-    /// for a default idle, which GLib runs only once GTK's measuring idle
-    /// (`GTK_TEXT_VIEW_PRIORITY_VALIDATE`, a higher priority) has measured every line.
-    ///
-    /// `measuring` is the same wait for a view that does have a size: a fold just opened, whose
-    /// lines had no height until GTK measures them, and the caret below them sits as high up as
-    /// the fold was.
+    /// New tabs can process scroll idles before allocation or lazy measurement, stopping short.
+    /// Wait for an allocated frame, then a default idle after GTK's higher-priority validation.
+    /// `measuring` also waits after revealing folds whose lines previously had no height.
     pub(crate) fn scroll_to_caret(&self, align: f64, measuring: bool) {
         self.when_measured(measuring, move |view| {
             view.scroll_to_mark(&view.buffer().get_insert(), 0.0, true, 0.0, align)
@@ -581,9 +539,8 @@ impl Tab {
         self.jump_to(&lang::iter_at(&self.buffer, pos), 0.25);
     }
 
-    /// Put the caret on the heading `anchor` names, by slug or by text as a link writes it, or on
-    /// the block a `^id` marks, and say whether the note has it: one it does not have leaves the
-    /// caret where it was.
+    /// Jump to a heading slug/text or `^id` block and report whether it exists.
+    /// Missing anchors leave the caret unchanged.
     pub fn goto_heading(&self, anchor: &str) -> bool {
         let text = self.text();
         let Some(at) = markdown::anchor_range(&text, anchor) else {
@@ -593,14 +550,10 @@ impl Tab {
         true
     }
 
-    /// Jump to a character range, select it and reveal it: what a search result and a tag row
-    /// open a note onto.
+    /// Select and reveal a character range from a search or tag result.
     ///
-    /// The reveal is what the reader is shown, not the find bar. Handing the bar the matched text
-    /// *and painting it* used to be how this was marked, and it marked too much for too long:
-    /// every other occurrence in the note lit up as well, and none of it went away until the bar
-    /// was opened and closed again. The query alone is kept, unpainted, because `F3` is worth
-    /// having over the text the row pointed at and a query nothing paints costs nothing to look at.
+    /// Keep the find query for F3 without painting all matches. A temporary reveal marks only
+    /// the destination, avoiding persistent highlights on unrelated occurrences.
     pub fn goto_range(&self, chars: Range<usize>) {
         let last = self.buffer.char_count();
         let start = self
@@ -627,9 +580,8 @@ impl Tab {
         self.reveal_range(&start, &end);
     }
 
-    /// Put the caret on the first place the note writes `#name` and reveal it: what a row under a
-    /// tag in the Tags section opens onto, the way a search result opens onto its match. A note that
-    /// no longer carries the tag leaves the caret where it was.
+    /// Jump to the first exact `#name` and reveal it for a Tags result.
+    /// Leave the caret unchanged if the tag no longer exists.
     pub fn goto_tag(&self, name: &str) {
         let text = self.text();
         let found = tag_range(&text, name).and_then(|at| crate::references::char_range(&text, at));
@@ -638,13 +590,10 @@ impl Tab {
         }
     }
 
-    /// Mark where a jump landed, until the document is touched.
+    /// Highlight a jump destination until the document is touched.
     ///
-    /// The tag joins the table after the muted occurrence tag and before the find bar's match
-    /// tag, so the three coexist by priority rather than by luck: a revealed match is never
-    /// dimmed by the hint that may cover the same word, and where a find-bar match covers it the
-    /// bar's tag wins — which paints the same `search-match` colour, so an overlap reads the same
-    /// either way. Only the reveal expires; the other two are as long-lived as what they answer.
+    /// Insert the reveal tag above occurrence hints and below find matches so dim hints cannot
+    /// override it and find highlighting retains priority. Only the reveal expires.
     pub fn reveal_range(&self, start: &gtk::TextIter, end: &gtk::TextIter) {
         self.clear_reveal();
         if start.offset() == end.offset() {
@@ -654,8 +603,8 @@ impl Tab {
         self.revealed.set(true);
     }
 
-    /// Reveal the whole of a 1-based line: what Go to Line lands on, where the place asked for is
-    /// the line rather than anything on it. An empty line has no text to paint and shows nothing.
+    /// Reveal a whole one-based line for Go to Line. Empty lines have no
+    /// text to highlight.
     pub fn reveal_line(&self, line: i32) {
         let end = line_end(&self.buffer, line - 1);
         let mut start = end;
@@ -663,11 +612,8 @@ impl Tab {
         self.reveal_range(&start, &end);
     }
 
-    /// Take the reveal down, which the first keystroke, click or caret move in the document does.
-    ///
-    /// No timer and no fade: the highlight answers "where was I sent?", and the reader is the one
-    /// who knows when that has been answered. A timer either goes while they are still looking or
-    /// outstays the question.
+    /// Clear jump reveal on the first edit, click or caret move. Avoid timers:
+    /// interaction indicates the reader has located the destination.
     pub fn clear_reveal(&self) {
         if !self.revealed.replace(false) {
             return;
@@ -685,8 +631,7 @@ impl Tab {
         (self.revealed.get(), self.reveal_tag.clone())
     }
 
-    /// Scroll a line into view without moving the caret: what the go-to entry previews while the
-    /// number is still being typed.
+    /// Preview a line while typing in Go to Line, scrolling without moving the caret.
     pub fn show_line(&self, line: i32) {
         let iter = self.line_iter(line, 1);
         // A comparison's collapsed run is opened through the comparison, as its own button opens

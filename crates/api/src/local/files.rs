@@ -1,6 +1,5 @@
-//! What [`Local`](super::Local) does to the files themselves: read, write, delete, the templates
-//! a new note is made from, the rename that carries a note's links with it, and the conflict
-//! copies a sync leaves behind.
+//! Vault file operations, templates, link-preserving moves and sync conflicts
+//! for [`Local`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
@@ -17,9 +16,8 @@ use crate::{
     RepageReport, ReplaceReport, UndoReport, fs, locked,
 };
 
-/// Most text a Replace All keeps to undo itself with. The pre-images are held in memory, and the
-/// 3.3k-note replace measured on the generated vault came to about 57 MB of them; past this the
-/// rewrite still runs and no undo is offered.
+/// Memory budget for Replace All originals. Replacements still run beyond
+/// the cap, but no undo is offered.
 const UNDO_CAP: usize = 64 * 1024 * 1024;
 
 /// A file as it was before a Replace All rewrote it, and the etag the rewrite left on it: what
@@ -35,12 +33,9 @@ impl Local {
         fs::read_note(&self.resolve(rel)?).map_err(named(rel))
     }
 
-    /// Write a note, then tell the worker about it: the index is correct within a millisecond
-    /// instead of a watcher debounce later, and the save never comes back as [`Event::FileChanged`].
-    ///
-    /// ponytail: the write runs on the calling thread, because an fsync of a note is well under a
-    /// frame on an SSD. If a slow disk ever shows up, move the write to the worker and answer
-    /// with an event.
+    /// Save a note and notify the worker immediately, avoiding watcher debounce
+    /// and suppressing an own-save [`crate::Event::FileChanged`]. Writes and fsync run
+    /// on the calling thread.
     pub fn save(&self, rel: &str, text: &str, expected: Option<Etag>) -> Result<Etag> {
         let etag = fs::write_note(&self.resolve(rel)?, text, expected).map_err(named(rel))?;
         self.post(Msg::Saved {
@@ -61,9 +56,8 @@ impl Local {
         Ok(())
     }
 
-    /// Tell the worker `rel` was written behind its back, as [`write_file`](Self::write_file)
-    /// does for its own: what a remote vault's `write_file` asks once its bytes are on the host,
-    /// which they reach over ssh rather than through here.
+    /// Notify the worker of an external write, including remote
+    /// [`write_file`](Self::write_file) bytes transferred separately over SSH.
     pub fn wrote(&self, rel: &str) -> Result<()> {
         self.resolve(rel)?;
         self.post(Msg::Update {
@@ -89,12 +83,9 @@ impl Local {
         }
     }
 
-    /// Delete a file or a whole directory, permanently.
-    ///
-    /// The desktop trashes through `gio` instead and never calls this; it exists for a vault on
-    /// another machine, where there is no session bus to ask and no trash to ask it about. The
-    /// UI is what makes that difference visible, by confirming the way it already confirms a
-    /// delete the trash could not take.
+    /// Permanently delete a file or directory for remote vaults without a
+    /// session bus or trash. The desktop uses `gio` trash instead; the UI
+    /// confirms permanent deletion.
     pub fn delete(&self, rel: &str) -> Result<()> {
         let path = self.resolve(rel)?;
         match path.is_dir() {
@@ -140,9 +131,9 @@ impl Local {
         ))
     }
 
-    /// Create a file, optionally from a template. Returns the path it was created at and where
-    /// the caret belongs. The name is taken as it is given: `notes` is a file called `notes`, not
-    /// a note called `notes.md`. Callers that mean markdown say so (`note_from_template` does).
+    /// Create a file with an optional template, returning its path and cursor
+    /// stops. Preserve the supplied name: `notes` does not become `notes.md`.
+    /// Markdown callers add the extension (`note_from_template` does).
     pub fn create_note(&self, rel: &str, template: Option<&str>) -> Result<(String, Vec<usize>)> {
         let rel = rel.to_string();
         let (text, cursor) = match template {
@@ -169,11 +160,9 @@ impl Local {
         Ok(())
     }
 
-    /// Copy a file, or a whole directory, from one place in the vault to another.
-    ///
-    /// Vault-relative on both ends, so on a remote vault this runs where the files are and an
-    /// in-vault paste costs no bytes over the link. It never overwrites: the caller picks a name
-    /// nothing holds yet, which is what makes a paste beside its source a "(copy)".
+    /// Copy a file or directory between vault-relative paths without overwriting.
+    /// Remote copies run beside the files, avoiding transfers; the caller chooses
+    /// an unused destination such as a "(copy)" name.
     pub fn copy(&self, from: &str, to: &str) -> Result<()> {
         let (src, dest) = (self.resolve(from)?, self.resolve(to)?);
         match src.is_dir() {
@@ -188,19 +177,11 @@ impl Local {
         Ok(())
     }
 
-    /// What moving these files and folders would touch, so the UI can show it before anything
-    /// is written: the notes whose links the moves would leave naming the wrong place, and the
-    /// source files whose imports the language servers already running say would.
-    ///
-    /// A dry run of the rewrite rather than a list of backlinks, so a move whose backlinks are
-    /// all bare `[[Note]]`s names nothing and asks nothing. The candidates are the notes linking
-    /// to anything that moves, and the moved notes whose markdown links are relative to them.
-    /// The servers are asked here, before anything moves, because they may read the disk to
-    /// answer: rust-analyzer asks it whether the path is a folder.
-    ///
-    /// The index is asked once it has taken in every note written before the call, the tabs the
-    /// window has just flushed among them: a link saved a moment ago would otherwise be missed
-    /// by the plan and left naming the old place.
+    /// Plan link and import rewrites before moving files, for UI confirmation.
+    /// Dry-run candidate notes to omit unchanged bare links; include links to
+    /// moved files and relative links in moved notes. Ask running language
+    /// servers before the move because they may read disk. Settle preceding
+    /// writes first so freshly saved links are included.
     pub fn plan_moves(&self, moves: &[(String, String)]) -> Result<RenamePlan> {
         self.settle_index();
         let files = self.moved_files(moves)?;
@@ -245,15 +226,11 @@ impl Local {
         })
     }
 
-    /// Apply a [`RenamePlan`]: the moves in order, stopping at the first that fails, then, with
-    /// `update`, the link rewrites for what did move and the import edits. Only a failure before
-    /// the first move fails the call; a move or a file that could not be done is reported
-    /// instead, because a half-renamed vault is worse than one whose report says exactly what
-    /// happened.
-    ///
-    /// Not cut off at [`crate::vault::MOVE_BOUND`] the way a rewrite is, for the same reason: by
-    /// the time the links are being rewritten the files have already moved, and there is no second
-    /// run that could finish them. The bound is what a remote caller waits, not a cap here.
+    /// Apply [`RenamePlan`] in order, stopping moves at the first failure. With
+    /// `update`, rewrite links for completed moves and apply import edits. Fail
+    /// the call only before any move; report partial results thereafter.
+    /// [`crate::vault::MOVE_BOUND`] limits caller waiting, not host work: after
+    /// files move, interrupted link rewrites cannot be resumed.
     pub fn rename(&self, plan: &RenamePlan, update: bool) -> Result<RenameReport> {
         // Which file each link names is a question only the index can answer, and only while it
         // still describes the vault as it was: ask before the first move.
@@ -316,9 +293,8 @@ impl Local {
         Ok(report)
     }
 
-    /// Make a language server's edits to the file now at `now`, back to front, gated on the etag
-    /// they were measured against: a file that changed since the plan is refused, not guessed at,
-    /// and so is a set of edits that overlap.
+    /// Apply server edits at `now` from back to front, requiring the planned
+    /// etag. Reject changed files and overlapping edits rather than guessing ranges.
     fn edit_one(&self, now: &str, found: &FileEdits) -> Result<()> {
         let path = self.resolve_inside(now)?;
         let (mut text, _) = fs::read_note(&path)?;
@@ -395,11 +371,10 @@ impl Local {
         Ok(true)
     }
 
-    /// `text`, the note at `from`, as its copy at `to` has to read for every relative link,
-    /// reference definition and HTML `src`/`href` in it to name the file it named: what Save As
-    /// writes, the original left as it is. `None` when no path needs it. The text is the caller's,
-    /// unsaved edits and all, so its paths are resolved here rather than read from what the index
-    /// holds for `from`.
+    /// Retarget relative links, reference definitions and HTML paths from
+    /// `from` to a Save As copy at `to`. Preserve the original and return `None`
+    /// when no paths change. Resolve caller text, including unsaved edits,
+    /// rather than relying on stale indexed links.
     pub fn relink_copy(&self, from: &str, to: &str, text: &str) -> Result<Option<String>> {
         let targets = self.path_targets(from, text)?;
         Ok(markdown::rewrite_moved(
@@ -424,18 +399,11 @@ impl Local {
         Ok(out)
     }
 
-    /// Point every note link into the PDF `rel` at where `edit` took the page it names, each note
-    /// read, rewritten and written back through the etag gate as a rename's are.
-    ///
-    /// The notes are the PDF's backlinks: every link the index resolved to it, a highlight's
-    /// `page=N&selection=…` and a plain `page=N` jump alike. `keep` is what the delete an Undo
-    /// takes back left behind (see [`markdown::repage_links`]). A note that cannot be read or
-    /// written is reported, not fatal: the page edit has already happened.
-    ///
-    /// The index is asked once it has taken in every note written before the call, the ones the
-    /// caller has just flushed and any a walk held back: a note missing from it would keep its
-    /// old page numbers, and the next edit would move them from there. Whether the index has
-    /// every note is the caller's to wait for, as it is before a rename (`reconciled`).
+    /// Rewrite note links to PDF `rel` after `edit`, using the etag save gate.
+    /// Include page jumps and selections; `keep` restores links retained for
+    /// delete undo ([`markdown::repage_links`]). Report per-note failures because
+    /// the PDF edit already happened. Settle preceding writes before querying
+    /// backlinks; the caller must also wait for full indexing, as for renames.
     pub fn repage_links(
         &self,
         rel: &str,
@@ -505,29 +473,15 @@ impl Local {
         Ok(done)
     }
 
-    /// Replace every match of `query` under `options` in every file whose indexed body has one —
-    /// the files [`grep`](Self::grep) lists and counts under the same `include_ignored`, notes or
-    /// not. The pattern is compiled here, as `grep` compiles it.
-    ///
-    /// `literal` takes `$1` in `replacement` as two characters rather than a capture group, which
-    /// is what the sidebar's non-regex modes mean. Same shape as [`rename`](Self::rename): a file
-    /// that could not be written is reported rather than fatal, because a vault where most of the
-    /// replacements landed is a real outcome the user has to be told about.
-    ///
-    /// It reads, substitutes and fsyncs one file at a time on the calling thread, which costs
-    /// far more than a main loop can spend: 1.9 s across 245 notes and 35 s across 3.3k of them,
-    /// measured on the 3.6k-note generated vault. Callers with a UI run it on a worker thread —
-    /// the desktop app does, and the handle is `Send + Sync` so a binding can too. It is bounded
-    /// by [`crate::vault::REPLACE_BOUND`], which is what a remote caller waits for: without it the
-    /// caller gave up after ten seconds while the host went on rewriting.
-    ///
-    /// What each file held before is kept for [`undo_replace`](Self::undo_replace), up to
-    /// [`UNDO_CAP`], and whatever the last Replace All kept is dropped here: there is one undo,
-    /// for the last rewrite. On a remote vault it stays on the host, in the `serve` behind the
-    /// window, so no note's text crosses the link twice.
-    ///
-    /// ponytail: no progress callback. The one caller shows an indeterminate bar, and a fraction
-    /// nothing renders would be machinery for its own sake.
+    /// Replace `query` under `options` in indexed matching files, using the
+    /// same compilation and `include_ignored` as [`grep`](Self::grep). With
+    /// `literal`, write `$1` literally rather than expanding captures. Report
+    /// per-file failures so partial replacements remain visible.
+    /// Read, substitute and fsync on the calling thread; UI callers must use a
+    /// worker. [`crate::vault::REPLACE_BOUND`] bounds host work and remote waits.
+    /// Keep originals up to [`UNDO_CAP`] for [`undo_replace`](Self::undo_replace),
+    /// replacing the previous undo record. Remote originals stay on the host.
+    /// Progress is indeterminate; no progress callback is provided.
     pub fn replace_all(
         &self,
         query: &str,
@@ -545,13 +499,9 @@ impl Local {
         )
     }
 
-    /// [`replace_all`](Self::replace_all) under a budget, which is what makes the bound a remote
-    /// caller waits for a promise rather than a guess.
-    ///
-    /// It stops *between* files, never inside one: each is read, substituted and written whole,
-    /// so the vault is consistent wherever it stops, and the files it never reached are listed as
-    /// not written rather than passed over silently. Running it again finishes them — the pattern
-    /// still matches exactly those.
+    /// Run [`replace_all`](Self::replace_all) within a budget, stopping between
+    /// whole-file writes. Report unprocessed files; another run finishes remaining
+    /// matches without leaving a partially written file.
     fn replace_within(
         &self,
         re: &Regex,
@@ -605,13 +555,9 @@ impl Local {
         Ok(report)
     }
 
-    /// How many matches this file lost, and what it held before; `None` when it held none. The
-    /// count comes from the file rather than from the index, which may be a watcher debounce
-    /// behind what is on disk.
-    ///
-    /// A diagram's labels are rewritten through its model, as the index searched them, and its
-    /// XML — style keys, ids, markup — is left alone; it is written once however many labels
-    /// changed.
+    /// Count removed matches from current file text and retain its original;
+    /// `None` if no matches. Avoid stale indexed counts. Rewrite diagrams
+    /// through their labels only, preserving XML keys, ids and markup in one write.
     fn replace_one(
         &self,
         rel: &str,
@@ -653,10 +599,9 @@ impl Local {
         Ok(Some((matches, Before { rel, text, etag })))
     }
 
-    /// Put back what the last [`replace_all`](Self::replace_all) rewrote, through the same etag
-    /// gate a save goes through: a file changed since the rewrite, by the editor, a sync or
-    /// anything else, is left as it is and named in the report rather than clobbered. The undo
-    /// is spent here whatever happens, so a second call has nothing left to write.
+    /// Undo the last [`replace_all`](Self::replace_all) through the etag gate.
+    /// Leave changed files untouched and report them. Consume the undo record
+    /// even on failure, so a second call cannot restore it again.
     pub fn undo_replace(&self) -> Result<UndoReport> {
         let before = locked(&self.undo).take().unwrap_or_default();
         let mut report = UndoReport::default();
@@ -674,14 +619,11 @@ impl Local {
         Ok(report)
     }
 
-    /// Keep theirs: the conflict copy's bytes replace the original.
-    ///
-    /// This is a force-write, not a gated one — the caller has already seen the diff and chosen.
-    /// So that the choice stays undoable, what the original held is copied to a sibling
-    /// `*.sync-conflict-<timestamp>-accent.md` first: a name the vault keeps out of the note
-    /// index and the resolve dialog offers back. The copy that won stays on disk too, because
-    /// deleting it belongs in the system trash. Keeping mine needs no call here at all, it is
-    /// just trashing the copy.
+    /// Keep theirs by force-writing the conflict copy over the original after
+    /// UI comparison and choice. First preserve the original in a sibling
+    /// `*.sync-conflict-<timestamp>-accent.md` so the dialog can offer it back.
+    /// Leave the winning copy for system-trash cleanup. Keeping mine only
+    /// trashes the conflict copy and needs no call here.
     pub fn adopt_conflict(&self, original: &str, conflict: &str) -> Result<Etag> {
         let (text, _) = fs::read_note(&self.resolve(conflict)?).map_err(named(conflict))?;
         let target = self.resolve(original)?;
@@ -701,11 +643,8 @@ impl Local {
         Ok(written)
     }
 
-    /// Where a template says its notes go today, or `None` when it does not say.
-    ///
-    /// The `accent-target:` directive goes through the same renderer the body does, so
-    /// `Daily/{{date:%Y-%m-%d}}.md` is today's daily note. `{{title}}` in a target is the
-    /// template's own name: there is no note yet to take one from.
+    /// Render a template's `accent-target:`, or `None` if absent. Expand dates
+    /// as in the body; `{{title}}` uses the template name because no note exists yet.
     pub fn template_target(&self, template: &str) -> Result<Option<String>> {
         let Some(target) = template::parse(&self.read_template(template)?).target else {
             return Ok(None);
@@ -715,11 +654,9 @@ impl Local {
         Ok(Some(with_md(&rel)))
     }
 
-    /// Create the note a template names, or open the one it already made.
-    ///
-    /// Invoked twice on the same day, a dated target hands back the note it made the first time,
-    /// byte for byte: that is what makes a daily note daily. `None` is a template that says
-    /// nothing about where its notes go, which is the caller's cue that it needs a name.
+    /// Create the template's target or open it unchanged if already present,
+    /// so repeated daily-note requests preserve existing content. `None` means
+    /// no target directive and asks the caller to supply a name.
     pub fn note_from_template(&self, template: &str) -> Result<Option<(String, Vec<usize>)>> {
         let Some(rel) = self.template_target(template)? else {
             return Ok(None);
@@ -753,9 +690,8 @@ impl Local {
     }
 }
 
-/// Source files a language server may be asked to follow when they move: what rust-analyzer and
-/// typescript-language-server answer `willRename` for. A moved one no running server was asked
-/// about is reported as unchecked.
+/// Source types supported by server `willRename`, such as Rust and TypeScript.
+/// Report moved files unchecked if no running server was asked.
 const IMPORTING: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"];
 
 /// Whether `rel` is a source file other files import by its path.
@@ -772,8 +708,7 @@ fn is_under(rel: &str, dir: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-/// A core file error naming `rel`, the path the vault speaks in, where it named the absolute path
-/// the core was handed.
+/// Rewrite a core file error's absolute path as vault-relative `rel`.
 fn named(rel: &str) -> impl FnOnce(accent_core::Error) -> Error + '_ {
     move |e| {
         match e {
@@ -1118,9 +1053,8 @@ mod tests {
         assert_eq!(f.vault.undo_replace().unwrap(), UndoReport::default());
     }
 
-    /// The host's own bound, which is what a remote caller's wait is derived from: the rewrite
-    /// stops between notes and says which it never reached, rather than running past the moment
-    /// the caller has stopped waiting. Driven with no budget at all, so it stops before the first.
+    /// Verify the host budget stops between files and reports those not reached.
+    /// A zero budget stops before the first file.
     #[test]
     fn a_rewrite_out_of_time_stops_between_notes_and_reports_the_rest() {
         let f = Fixture::open(VaultConfig::default());
@@ -1325,8 +1259,7 @@ mod tests {
         ));
     }
 
-    /// The daily note, now that it is only a template with a dated target: created the first
-    /// time it is asked for and opened untouched every time after, which is the whole behaviour.
+    /// Create a dated template target once and open it unchanged thereafter.
     #[test]
     fn a_dated_target_is_created_once_and_reused() {
         let f = Fixture::open(VaultConfig::default());

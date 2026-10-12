@@ -66,12 +66,9 @@ pub struct Template {
     pub body: String,
 }
 
-/// Lift `accent-target:` out of a template's leading `---` block.
-///
-/// The directive is accent's, not the note's, so it never reaches the note: the line goes, and the
-/// whole block goes with it when the line was all it held — together with the blank line that
-/// separated the block from the text, so the note starts where its first heading does. Everything
-/// else is copied byte for byte, including a second `accent-target:` and any `---` further down.
+/// Remove the first `accent-target:` directive from leading frontmatter so it does not reach the
+/// new note. If that empties the block, remove it and its separating blank line. Preserve all
+/// other bytes, including duplicate directives and later `---` lines.
 pub fn parse(text: &str) -> Template {
     let fence = |line: &str| line.trim_end() == "---";
     let mut lines = text.split_inclusive('\n');

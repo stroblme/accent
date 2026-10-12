@@ -1,14 +1,12 @@
-//! Markdown for the editor and the rendered view.
-//!
-//! Both call straight into the core. The only thing this layer adds is the offset conversion:
-//! the core reports byte ranges into the Rust string, and Kotlin indexes UTF-16 units.
+//! Core Markdown analysis and rendering for Android. Convert output byte
+//! ranges to Kotlin UTF-16 units.
 
 use accent_core::markdown;
 
 use crate::ffi::convert::{Analysis, Heading, Link, PdfAnchor, Span, Tag, Utf16};
 
-/// What a link's anchor names inside a PDF — `page=3&selection=0,4,1,9` — or `None` for a
-/// heading or a block, which is what tells a link into a PDF apart. The page is zero-based.
+/// Parse PDF anchors such as `page=3&selection=0,4,1,9` into a zero-based
+/// page and selection. `None` distinguishes heading and block anchors.
 #[uniffi::export]
 pub fn pdf_anchor(anchor: String) -> Option<PdfAnchor> {
     let (page, selection) = markdown::pdf_anchor(&anchor)?;
@@ -18,9 +16,9 @@ pub fn pdf_anchor(anchor: String) -> Option<PdfAnchor> {
     })
 }
 
-/// The note rendered as an HTML fragment, exactly as the desktop preview gets it: wikilinks as
-/// `accent://open/…`, tags as `accent://tag/…`, embeds as `accent://file/…`, maths as MathML, a
-/// `data-line` marker before every block and a slug on every heading.
+/// Render the desktop-compatible HTML fragment: `accent://open/…` links,
+/// `accent://tag/…` tags, `accent://file/…` embeds, MathML, block `data-line`
+/// markers and heading slugs.
 #[uniffi::export]
 pub fn to_html(text: String) -> String {
     markdown::to_html(&text)
@@ -78,8 +76,7 @@ mod tests {
     use super::*;
     use accent_core::markdown::Style;
 
-    /// The whole point of `analyze_utf16`: the same heading measured in the units the other side
-    /// counts, so a span applied to the Kotlin string lands on the heading and not beside it.
+    /// Verify UTF-16 styling spans land on the same headings as core byte spans.
     #[test]
     fn a_heading_after_an_emoji_is_measured_in_utf16_units() {
         let text = "é🙂\n\n# Heading\n";

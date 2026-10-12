@@ -101,14 +101,9 @@ impl Line {
 /// the list.
 type Jump = Rc<RefCell<Rc<dyn Fn(u32)>>>;
 
-/// An outline list that is refilled in place, so a document that changes under the reader keeps
-/// the pane where it was scrolled to: a list built afresh is a new scrolled window, at the top.
-///
-/// Generic in what a row jumps to, because the callers mean different things by it: a text tab's
-/// symbols carry a position in the buffer, a PDF's bookmarks and a diagram's pages a page number.
-///
-/// Indented by level rather than nested in a tree: an outline is read top to bottom, and an
-/// expander per row would hide exactly what the pane exists to show.
+/// Outline list refilled in place to retain scroll position. Generic jump targets support text
+/// positions, PDF bookmarks and diagram pages. Use level indentation rather than expanders so
+/// the full outline remains visible.
 pub(super) struct List {
     /// The document the rows are of.
     pub(super) key: String,
@@ -243,12 +238,9 @@ impl List {
         }
     }
 
-    /// Select `row`, the one the caret is in, and scroll `shown` into view as little as it takes:
-    /// the same row, or the first while the caret is above it, which takes the list to its top.
-    /// `None` selects nothing, or scrolls nowhere. Neither activates a row nor moves the focus, so
-    /// the editor keeps the keyboard and nothing jumps. Nothing moves while the pointer is over the
-    /// list, which is being read: a PDF comment's row jumps to a page under another bookmark, and
-    /// following it would scroll the row clicked away. The row comes back as the pointer leaves.
+    /// Select `row` and minimally reveal `shown` without activating or moving keyboard focus;
+    /// `None` clears selection or requests no scroll. Defer both while the pointer is over the
+    /// list so navigation cannot move a clicked row away, then follow again on leave.
     pub(super) fn follow(&self, row: Option<usize>, shown: Option<usize>) {
         let position = |row: Option<usize>| row.map_or(gtk::INVALID_LIST_POSITION, |r| r as u32);
         self.followed.set(position(row));

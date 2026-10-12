@@ -55,13 +55,9 @@ pub(super) fn bench_git(app: &Rc<App>) {
     });
 }
 
-/// Whether the Git pane is on the switcher, before and after a `git init` in the vault root.
-///
-/// A vault with no repository has no Git pane (DESIGN.md, Layout map), so the page that used to
-/// say so was never reachable. What replaced it has nothing to click: `git init` writes inside
-/// `.git`, the watcher reports that write like any other, and a vault with no repository answers
-/// one by going looking for repositories. Point it at a throwaway vault that is not a repository;
-/// it makes one, so never run it anywhere that matters.
+/// Check Git pane visibility before and after `git init`: watcher discovery must reveal the pane
+/// when the first repository appears. Creates a repository; use a throwaway vault with no
+/// existing repository.
 pub(super) fn bench_git_init(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -81,17 +77,12 @@ pub(super) fn bench_git_init(app: &Rc<App>) {
     });
 }
 
-/// A commit row of the history clicked the moment another repository is picked, before the
-/// refresh that reads the new one's has landed. Point it at a vault holding two repositories with
-/// a commit each. The row used to be the old repository's, asked of the new one, which toasted
-/// `Cannot list the commit's files: fatal: bad object …`; now the history is empty until then.
+/// Click a commit immediately after selecting another repository, before refresh; old rows must
+/// not be queried against it. Use two repositories with commits.
 ///
-/// Then it picks every repository twice over, the second round all seen before, and prints what
-/// each pick drew at once — history rows and the branch button — how long until the history was
-/// on screen, how long the pick itself held the main loop (`pick_ms`: the rows that go are taken
-/// apart there), the longest the main loop went without turning until its lists were full
-/// (`stall_ms`), and the toasts a click on its first row at once raised: a repository seen before
-/// is drawn from what the pane held about it, and its rows are its own.
+/// Select every repository twice and report immediate cached rows/branch, display delay,
+/// `pick_ms`, `stall_ms` and first-row toasts. Cached rows must belong to the selected
+/// repository.
 pub(super) fn bench_git_switch(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -346,12 +337,8 @@ fn bench_git_headers(view: &gtk::ListView) {
     println!("bench git_header_rows activatable={lit}/{rows}");
 }
 
-/// What a row's name has room for either side of the pointer arriving on it.
-///
-/// The buttons sit in a revealer, so while they are away they measure nothing and the label has
-/// the whole width of the pane; the truncation starts only where they really appear. PRELIGHT is
-/// set by hand — Xvfb has no pointer — which is the flag GTK puts on the row it is over and the
-/// one `reveal_on_hover` watches.
+/// Measure name width before and after action reveal. Set PRELIGHT manually under Xvfb; hidden
+/// controls reserve no width, and truncation begins only when they appear.
 async fn bench_git_hover(list: &gtk::Widget, path: &str) {
     let stack = change_row(list, path).and_downcast::<gtk::Stack>();
     let shown = stack.as_ref().and_then(|stack| stack.visible_child());
@@ -492,16 +479,10 @@ pub(super) fn bench_git_press(app: &Rc<App>, path: &str) {
     });
 }
 
-/// Whether a real click leaves a row's buttons out once the pointer has gone, against what the
-/// keyboard does, driven through XTEST (`build-aux/xtest.py`, spawned per step): the first commit
-/// row hovered, clicked open and shut with the pointer moved off each time, the keyboard walked
-/// off it and back, left there past GTK's three seconds of visible focus, Tabbed into its first
-/// button and back, its Copy Commit ID clicked and the row clicked once more; then the Changes
-/// list's `src` folder pressed, walked off and back to, unfolded with Return and clicked, each fold
-/// keeping the keyboard on its row (`on=folder`, `src=` its chevron and the list's rows). Point it
-/// at the repository the default drill wants. Every pointer step but the hover and a press still
-/// held ends `commit=false folder=false`, and every keyboard step on a row prints that row's
-/// buttons out.
+/// Use XTEST to compare pointer and keyboard action reveal on commits and the `src` folder.
+/// Include open/close clicks, focus traversal, Tab into controls and Copy Commit ID. Pointer
+/// steps ending off-row expect `commit=false folder=false`; keyboard focus keeps that row's
+/// buttons shown. Use the default drill repository.
 pub(super) fn bench_git_focus(app: &Rc<App>) {
     app.show_pane("git");
     let app = app.clone();
@@ -641,13 +622,9 @@ pub(super) fn bench_git_focus(app: &Rc<App>) {
     });
 }
 
-/// Whether a refresh leaves the Git pane's two lists where they were: a real click, through
-/// XTEST, on a Stage button half way down the scrolled changes list, then a commit of it while the
-/// history is scrolled half way down. Prints how far the row above the one staged moved on screen
-/// and which row has the keyboard afterwards, then how far the commit row half way down the
-/// history moved. Point it at a repository with nothing staged and enough changes and history to
-/// scroll; it commits there. `moved=0` both times, and the keyboard on the row now in the staged
-/// one's place.
+/// Stage midway down a scrolled list through XTEST, then commit while history is also scrolled.
+/// Expected `moved=0` for both retained rows and focus on the staged row's replacement. Commits
+/// changes; use a scratch repository with enough changes/history to scroll.
 pub(super) fn bench_git_scroll(app: &Rc<App>) {
     app.show_pane("git");
     let app = app.clone();
@@ -901,16 +878,12 @@ fn make_buttons(row: &gtk::Widget) {
     }
 }
 
-/// Close the window while git runs, and print what the close did (DESIGN.md, States).
+/// Close while git runs (DESIGN.md, States). Pull asks Close When Finished and waits for sync;
+/// push/fetch stop and close immediately. Expect no remaining working processes.
 ///
-/// `pull` starts a Sync and closes during its pull, which asks, is answered Close When Finished
-/// and waits for the whole sync; `push` closes during that sync's push and `fetch` during the
-/// fetch on opening the vault, which are stopped and close at once. Point it at a scratch clone
-/// whose origin is slow both ways — `remote.origin.uploadpack` set to `sleep 3; git-upload-pack`,
-/// a `pre-receive` hook in the origin that sleeps 3 s — with a commit to push, and launch it from
-/// outside the clone's parent directory: what it prints last is how many processes are still
-/// working in there, which is to be none. On a remote vault the processes are the host's, so
-/// `pull` and `push` go by the pane's own word for the half, and `fetch` is not for one.
+/// Use a scratch clone with `remote.origin.uploadpack` set to `sleep 3; git-upload-pack`, a 3 s
+/// sleeping pre-receive hook and a commit to push. Launch outside the clone's parent for process
+/// counting. Remote pull/push use pane phase state; fetch is local-only.
 pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
     let Some(gtk_app) = app.window.application() else {
         return bench_quit(app);
@@ -1125,15 +1098,10 @@ fn working_in(dir: &Path) -> usize {
         .count()
 }
 
-/// Git's conflict markers in an editor tab, over a note a real `git merge` left with three blocks
-/// or more (`=markers:<rel>`). It prints the conflict tags and any heading tag on each line of the
-/// note, then where each block's row of buttons sits against its first line — the line's top, the
-/// row's top and bottom, the text's top — and holds 6 s for a screenshot. Then Next Conflict twice
-/// and Previous Conflict once from the top, printing the caret's line; Accept Current on the first
-/// block by its button, Accept Incoming from the palette's command with the caret in the next, and
-/// Accept Both on the next by its button, printing the text after each; three undos, printing
-/// whether the text is back; the first block's `=======` deleted and put back; and the rows while
-/// a comparison is up and once it has gone.
+/// `=markers:<rel>` checks conflict styling and controls on at least three real merge blocks.
+/// Report tags and button geometry, hold 6 s for a screenshot, then navigate conflicts and
+/// accept Current, Incoming and Both through buttons/palette. Three undos restore text;
+/// delete/restore `=======` and inspect controls during and after comparison.
 pub(super) fn bench_git_markers(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());

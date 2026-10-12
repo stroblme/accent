@@ -1,12 +1,10 @@
-//! A diagram's labels as text: one line per label, which is what search indexes and finds in a
-//! diagram, and the labels rewritten through the model, which is what Replace All does to one.
-//! The XML itself is never searched or rewritten, so a style key or an id is never a hit.
+//! Label text for search and replacement, one line per label. Edits use the model
+//! so XML attributes, style keys and ids cannot become search hits.
 
 use crate::label::{self, Run};
 use crate::model::{Cell, CellId, File};
 
-/// Whether `text` is a draw.io file by its first element, whatever its name says: how an `.xml`
-/// draw.io wrote is known.
+/// Detect draw.io XML by its first element, including files named `.xml`.
 pub fn sniff(text: &str) -> bool {
     let body = text.trim_start_matches('\u{feff}').trim_start();
     let body = match body.strip_prefix("<?xml") {
@@ -65,9 +63,9 @@ pub fn label_at(file: &File, at: usize) -> Option<(usize, CellId)> {
     None
 }
 
-/// Rewrite the text of every label through `edit`, which answers `None` for text it leaves
-/// alone. A plain label is handed over whole; an HTML one text run by text run, its markup kept
-/// as it was, so a match cannot reach across a tag. Returns how many labels changed.
+/// Rewrite labels through `edit`; `None` leaves text unchanged. Plain labels are
+/// edited whole; HTML labels are edited per text run to preserve markup, so matches
+/// cannot cross tags. Returns the number of changed labels.
 pub fn edit_labels(file: &mut File, mut edit: impl FnMut(&str) -> Option<String>) -> usize {
     let mut changed = 0;
     for page in &mut file.pages {

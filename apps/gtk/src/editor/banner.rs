@@ -1,24 +1,22 @@
-//! The tab's banner: the standing questions about its file, and which of them is on screen.
+//! Persistent file-state questions shown in the tab's banner.
 
 use super::Tab;
 
-/// Why a tab's banner is up. The intent is stored rather than re-derived when the button is
-/// pressed, so the button always does what its label says: deriving it from the file system meant
-/// a Reload that could arrive as a Save, and a Save that quietly reloaded.
-///
-/// The first two only ever appear on a tab with unsaved edits: a clean tab is reloaded silently.
+/// Store banner intent so its button always performs the labelled action,
+/// even if disk state changes before the click. The first two variants
+/// require unsaved edits; clean tabs reload silently.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Alert {
-    /// Someone else wrote the file while this buffer had edits. The button opens the diff, which
-    /// is the only honest one-click answer: neither side can be thrown away unseen.
+    /// External edits conflict with this buffer. Compare before discarding
+    /// either version.
     Compare,
     /// The file is gone and this buffer is the only copy left. The button writes it back.
     Restore,
-    /// Syncthing left a `*.sync-conflict-*` copy of this file beside it. The button opens the
-    /// same side-by-side resolver the tree offers, on the copy the vault reports.
+    /// A sibling `*.sync-conflict-*` copy exists. Open the tree's side-by-side
+    /// resolver using the vault-reported copy.
     Conflict,
-    /// The bytes are not valid UTF-8, so what is on screen is a lossy reading of them. There is
-    /// no button: the only safe answer is to leave the file alone, which is what the tab does.
+    /// Invalid UTF-8 displayed lossily. Keep the tab read-only with no action
+    /// button to preserve the original bytes.
     ReadOnly,
 }
 
@@ -32,9 +30,8 @@ impl Alert {
         }
     }
 
-    /// `None` for a banner that only reports, which DESIGN.md allows: a banner is a state that
-    /// persists, and not every state has an answer. `None` too while the tab shows the comparison
-    /// the button opens, which `shown` names: pressing it again only built the same one.
+    /// No action for informational states or while the button's comparison
+    /// is already shown, preventing duplicate comparisons.
     fn button(self, shown: Option<Alert>) -> Option<&'static str> {
         if shown == Some(self) {
             return None;
@@ -48,18 +45,11 @@ impl Alert {
     }
 }
 
-/// Which of the standing questions the one banner shows.
+/// Choose the highest-priority standing question for the tab's single banner.
 ///
-/// A tab has one `AdwBanner` and can have more than one thing to say about its file, so they
-/// queue instead of overwriting each other: a conflict copy appearing used to wipe the "changed
-/// on disk" question, and resolving that copy then took the bar down with the wiped question
-/// still standing — a dirty tab that would never autosave again, with nothing on screen to say
-/// why. The order is what each one can cost: the two that mean this buffer holds the only copy
-/// of something come first, the conflict copy beside the note next (it blocks nothing), and the
-/// read-only report last, because it asks nothing at all.
-///
-/// Queued rather than merged: `AdwBanner` has exactly one button, and two questions on one line
-/// have no honest single label.
+/// Queue questions so resolving one cannot erase another. Unsaved-copy risks lead, conflict
+/// copies follow, and read-only status is last. Separate queued questions preserve one
+/// meaningful action label because AdwBanner has only one button.
 fn banner_alert(standing: &[Alert]) -> Option<Alert> {
     [
         Alert::Restore,
@@ -72,8 +62,7 @@ fn banner_alert(standing: &[Alert]) -> Option<Alert> {
 }
 
 impl Tab {
-    /// Raise `alert`, which decides both what the banner says and what its button does. It goes
-    /// on the queue: whichever standing question matters most is the one on screen.
+    /// Queue `alert` and display the highest-priority pending question.
     pub fn show_alert(&self, alert: Alert) {
         let mut standing = self.alerts.borrow_mut();
         if !standing.contains(&alert) {
@@ -83,8 +72,7 @@ impl Tab {
         self.render_banner();
     }
 
-    /// Take one question down, leaving whatever else is standing. The banner comes back with the
-    /// next one rather than going away.
+    /// Remove one question and display the next, preserving other pending states.
     pub fn clear_alert(&self, alert: Alert) {
         self.alerts.borrow_mut().retain(|a| *a != alert);
         self.render_banner();
@@ -112,8 +100,7 @@ impl Tab {
         }
     }
 
-    /// Say that the comparison on screen is what the banner's `alert` button opens, so the button
-    /// goes until the comparison does.
+    /// Hide the `alert` button while its comparison is shown.
     pub fn comparing_answers(&self, alert: Alert) {
         if let Some(comparing) = self.comparing.borrow_mut().as_mut() {
             comparing.answers = Some(alert);
@@ -121,9 +108,8 @@ impl Tab {
         self.render_banner();
     }
 
-    /// Take down the questions about the file on disk, and only those. A save or a reload answers
-    /// "changed on disk" and "deleted on disk"; it says nothing about a conflict copy sitting
-    /// next to the note, whose banner has to survive the first autosave.
+    /// Clear changed/deleted-on-disk questions after save or reload. Keep
+    /// sync-conflict questions so autosave cannot dismiss them.
     pub fn clear_disk_alert(&self) {
         self.alerts
             .borrow_mut()

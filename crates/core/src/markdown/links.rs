@@ -60,14 +60,10 @@ pub(super) fn split_anchor(dest: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Read a PDF anchor: `page=3` or `page=3&selection=4,0,4,11`, as Obsidian writes them.
+/// Parse Obsidian PDF anchors such as `page=3&selection=4,0,4,11`. Returns a zero-based page and
+/// selection numbers in written order; heading and block anchors return `None`.
 ///
-/// The page comes back **zero-based**, the way [`crate::pdf::Selection`] counts, and the four
-/// selection numbers in the order the link spells them. `None` for a heading or a block anchor,
-/// which is what tells a link to a note apart from a link into a PDF.
-///
-/// Here rather than in `pdf.rs` because this is link syntax, not PDF geometry: the index parses
-/// it without the `pdf` feature, and so does a build with no libpdfium at all.
+/// Kept with link syntax so indexing works without the `pdf` feature or libpdfium.
 pub fn pdf_anchor(anchor: &str) -> Option<(usize, Option<[usize; 4]>)> {
     let (mut page, mut selection) = (None, None);
     for part in anchor.split('&') {
@@ -296,20 +292,16 @@ pub fn path_keys(rel: &str) -> Vec<String> {
     keys
 }
 
-/// Rewrite every link in the note `src_old` that a move leaves naming the wrong place, as the
-/// note will read once it is at `src_new`, or `None` when no link needs it.
+/// Rewrite links affected by a move from `src_old` to `src_new`, or return `None` if no edit is
+/// needed.
 ///
-/// `targets` is the file each link key resolved to before the move — only the index can say,
-/// so the caller asks it first — and `moves` is where each moved file went, old path to new. A
-/// link is rewritten when, read from where its note now is, it would no longer name the file it
-/// named: a bare `[[Note]]` survives a pure move and `[[Dir/Note]]` does not, and a relative
-/// `[t](../a.png)` follows its own note as much as the image. A wikilink or an embed keeps its
-/// author's spelling ([`as_written`]); a markdown link becomes the relative path from the
-/// note's folder, percent-encoded, its `#anchor` untouched.
+/// `targets` maps pre-move link keys to resolved files; `moves` maps old paths to new. Rewrite
+/// only when the link from its new note location would resolve differently. Wikilinks preserve
+/// spelling through [`as_written`]; markdown destinations become percent-encoded relative paths,
+/// preserving anchors.
 ///
-/// Two path forms the parser does not hand over as links are scanned for as well: reference-style
-/// `[ref]: path "title"` definitions and the `src`/`href` of the HTML a note holds
-/// ([`scanned_paths`]).
+/// Also handles reference definitions and HTML `src`/`href` paths through [`scanned_paths`],
+/// since the parser does not expose them as links.
 pub fn rewrite_moved(
     text: &str,
     src_old: &str,
@@ -459,13 +451,11 @@ fn scanned_paths(text: &str, a: &Analysis) -> Vec<Range<usize>> {
     out
 }
 
-/// The destinations of the reference-style definitions: `[ref]: path "title"` on a line of its own.
+/// Scan reference destinations in `[ref]: path "title"` definitions, which pulldown-cmark
+/// resolves without reporting their source locations.
 ///
-/// pulldown-cmark resolves a definition into the links that use it and never says where the
-/// definition itself sits, so this is a scan of its own: a line indented at most three spaces —
-/// four would make it code — whose `[label]` is closed by `]:`, outside anything verbatim. A
-/// footnote's `[^1]:` is a definition of another kind and its text is no path. The destination is
-/// read to the next space; a title after it, and a `<…>` destination's brackets, are left out.
+/// Accept at most three leading spaces and skip verbatim regions and footnote definitions. Read
+/// the destination to its next space, excluding titles and `<…>` brackets.
 fn definitions(text: &str, a: &Analysis) -> Vec<Range<usize>> {
     let skip = verbatim(a);
     let mut out = Vec::new();
@@ -606,16 +596,13 @@ pub struct Repaged {
     pub left: Vec<(String, usize)>,
 }
 
-/// Point the links in the note `src` into the PDF `pdf` at where `edit` took the pages they name:
-/// `[[paper.pdf#page=3&selection=…]]`, `![[paper.pdf#page=3]]` and `[t](paper.pdf#page=3)`
-/// alike, the page number rewritten and nothing else of the link. A reference definition's
-/// destination and an HTML `href` follow too, scanned for as [`rewrite_moved`] scans for them.
+/// Update only page numbers in links to `pdf` after `edit`, including wikilinks, embeds,
+/// markdown destinations, reference definitions and HTML `href` values. `targets` maps resolved
+/// files as in [`rewrite_moved`].
 ///
-/// A link into the page a delete took out names no page any more; it is left as written and
-/// handed back in [`Repaged::left`], because guessing at a neighbour would be a wrong link that
-/// looks right. `keep` is that list from the delete an Undo takes back: those links name the page
-/// coming back, so they stay, where every other link follows the insert and the note reads as it
-/// did. `targets` is the file each link key resolves to, as [`rewrite_moved`] takes it.
+/// Links to deleted pages remain unchanged and appear in [`Repaged::left`], avoiding misleading
+/// neighbour substitutions. Undo supplies that list as `keep`: those links retain their restored
+/// page numbers while all others follow the insertion.
 pub fn repage_links(
     text: &str,
     src: &str,

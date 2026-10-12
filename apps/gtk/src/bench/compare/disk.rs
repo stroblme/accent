@@ -33,22 +33,15 @@ fn bench_compare_fade(tab: &Rc<Tab>, compare: &diff::Compare) {
     println!("bench compare_fade off fading={}", theirs.fading());
 }
 
-/// The note is given fifty lines, written out, then edited in two places: a rewrite near the
-/// top and a line added at the end. The comparison with the disk copy is then read back — rows,
-/// hunks, hidden runs, buttons, how many rows GTK lays out at a height other than the one the
-/// alignment asked for, and how much lower one column starts than the other (0 and 0 are the
-/// claim) — before a Find Next into the hidden run, which has to open it on both sides, the first
-/// hunk is taken from Theirs, the hidden run is opened, and the same is read again, with the
-/// button of the changed-on-disk banner that stands over it (none while the comparison is up,
-/// Compare once it has gone, which is the third Escape out of presentation with a find bar up).
-/// Then two blobs in a tab of their own, at a
-/// zoom, for the same numbers and the page margins, which follow the zoom. With the vault under
-/// git, last, the working tree against the index in the note's tab: whether it opened with the run
-/// before the first change folded and the caret on that change, and then a character typed into
-/// it, see [`bench_compare_type`]. That half wants a scratch repository whose committed note
-/// differs from the fifty lines in a few places, one of them a long line where the drill writes a
-/// short one, which carries the difference as padding under it, so the change is padded and the
-/// view has room to scroll.
+/// Compare a saved 50-line note after a near-top rewrite and final insertion. Report rows,
+/// hunks, hidden runs, buttons and layout; expected wrong-height rows and column offset: 0 and
+/// 0. Find Next must reveal both sides of a hidden run. Take the first hunk, open the run, and
+/// leave presentation/find/comparison with Escape; the disk banner is absent during comparison
+/// and offers Compare afterward.
+///
+/// Repeat layout and zoom-margin checks with two blobs. In a scratch git repository, compare the
+/// working tree with the index and run [`bench_compare_type`]. Commit differing lines, including
+/// a long line replaced by a short one, so typing tests alignment padding and scroll room.
 pub(in crate::bench) fn bench_compare(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -205,23 +198,12 @@ pub(in crate::bench) fn bench_compare(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// The end-of-line diagnostics of a comparison's collapsed runs: they used to be drawn all the
-/// same, one under the other on the single row the run stands for.
+/// Check diagnostic messages across collapsed diff runs and editor folds. A changed line and
+/// three hidden warnings yield 1 message while collapsed and 4 when open or comparison ends;
+/// gutter marks stay at 4. The editor fold yields 2 then 4 messages, again with 4 marks.
 ///
-/// The file is given fifty lines, written out, then changed near the top and near the bottom so
-/// the middle collapses, and handed four warnings — one on the changed line and three inside the
-/// run that is about to be hidden. It prints how many messages each state put up: with the run
-/// hidden the claim is 1, with it opened 4, and 4 again once the comparison has gone. The gutter
-/// marks stay at 4 throughout, which is the icon on the left the hidden ones are left with.
-///
-/// Then the editor's own fold over the same file, which hides lines the same way: a block whose
-/// header carries a warning of its own and whose two hidden lines carry one each. Nothing is
-/// published between the fold and the reading, so what is printed is what folding alone laid: 2
-/// while it is shut — the header's message and the one at the top of the file — and 4 once it is
-/// open, the marks staying at 4 throughout.
-///
-/// Point it at a scratch text file no language server answers for — `n.txt` — since a publish
-/// would replace what it hands over.
+/// Use a scratch text file without a language server, e.g. `n.txt`, to prevent diagnostic
+/// publications replacing the fixture.
 pub(in crate::bench) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -419,17 +401,10 @@ fn bench_banner_button(tab: &Tab) -> Option<glib::GString> {
     tab.banner.button_label().filter(|label| !label.is_empty())
 }
 
-/// A note compared, the comparison scrolled and left once its overlay scrollbar has faded out, and
-/// the editor scrolled the moment the other column has been freed: prints `gone=true` and the
-/// scroll, for two comparisons. With the disk copy first, which puts the copy's column on the
-/// editor's scrollbar: handing the column its own scrollbar back used to leave GTK's fade handler
-/// for it on the editor's adjustment (see `diff::columns::swap_vadjustment`), so this scroll ran
-/// the handler on freed memory: a critical here (fatal under the drills' `G_DEBUG`), a segfault in
-/// a real session, the window crash of 2026-09-28. Then with the index of a repository the drill
-/// makes in the vault root, which puts the editor on the Index column's scrollbar: the editor's
-/// own scrollbar kept the fade handler it was given before the comparison, and taking that
-/// scrollbar back ran it on an indicator GTK had let go of, the same critical. Writes the note and
-/// makes a repository, so point it at a throwaway vault.
+/// Regression for overlay-scrollbar handlers surviving comparison teardown. Scroll and leave
+/// disk and index comparisons after fade-out, then immediately scroll the editor; report
+/// `gone=true` and its scroll without fatal criticals or crashes. Use a throwaway vault: writes
+/// the note and creates a repository.
 pub(in crate::bench) fn bench_compare_left(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -524,15 +499,11 @@ async fn bench_left(tab: &Tab) -> String {
     )
 }
 
-/// The page a comparison's companion shares with the editor beside it. The note is a heading over
-/// eighty lines, written out and then changed at line 70, so the comparison with its disk copy
-/// hides the heading in the run it collapses and opens scrolled past it. Prints whether the sticky
-/// block title is up (only the editor's column has one, and it showed there empty, over the first
-/// row, its heading being hidden), and the `h1` marker's hang and the tab width on both sides
-/// (`page=editor/companion`, the two equal) as the comparison opened and again after a zoom and a
-/// new Indent Width: the companion hung its markers against a left margin of 0 and kept a tab width
-/// of 4. Then the sticky title again once the comparison has gone and the editor is scrolled past
-/// the heading. Writes the note, so point it at a scratch vault.
+/// Check companion page styling and sticky titles across comparison, zoom and indent changes. A
+/// heading above 80 lines is hidden by the diff run; the editor must not show an empty sticky
+/// title, and `page=editor/companion` margins and tab widths must agree. Check the sticky title
+/// after leaving comparison and scrolling past the heading. Writes the note; use a scratch
+/// vault.
 pub(in crate::bench) fn bench_compare_page(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -591,20 +562,12 @@ pub(in crate::bench) fn bench_compare_page(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Hidden runs opened from their buttons, as a click does: the note is written as 400 lines, most
-/// of them wrapping to a few rows, and changed at every fortieth from line 20, so the comparison
-/// with its disk copy hides a run between each two and has pages of rows. The middle run's button
-/// is pressed, then the first run's, the one above the first change at the top of the note, each
-/// scrolled halfway down the view first. Prints for each where the scroll, the line above the
-/// button and the line under it were before and after, in the view's pixels, and the furthest the
-/// scroll strayed from where it was, read every 16 ms meanwhile (`value=a->b above=y0->y1
-/// below=y0->y1 strayed=0`: the rows above stay and the run opens downwards), then the middle run
-/// again in a tab of two blobs. Opening the first run used to scroll the view by twice the run's
-/// height, which both views took back from the scroll they share. The blobs are then read again
-/// with three lines more at the top of each side, as the Git pane's refresh reads them, printing
-/// the line at the top of the view and where it starts before and after (`reread
-/// top="line 18"@-4->"line 18"@-4`, the two the same): the view used to land elsewhere. Writes the
-/// note, so point it at a scratch vault.
+/// Open middle and first collapsed runs in a wrapping 400-line comparison, then repeat with two
+/// blobs. Sample scroll every 16 ms; expected `strayed=0`, unchanged rows above and downward
+/// expansion.
+///
+/// Reread blobs with three added leading lines and retain the top line and offset, e.g. `reread
+/// top="line 18"@-4->"line 18"@-4`. Writes the note; use a scratch vault.
 pub(in crate::bench) fn bench_compare_gap(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -693,23 +656,13 @@ fn top(view: &gtk::TextView) -> String {
     format!("{text:?}@{}", y - seen.y())
 }
 
-/// Show All Unchanged Lines pressed and let go, over a note of 400 lines changed at every
-/// fortieth compared with its disk copy, the middle run opened from its button first and that
-/// button's row put halfway down the view; then over a tab of two blobs. Prints the controls in
-/// the toggle's title row by tooltip (`row=["Show All Unchanged Lines", "Stop Comparing"]`), and
-/// for each press the hidden runs and the line at the top of the view before and after
-/// (`on hidden=10->0 top="line 181"@-250->"line 181"@-250`): every run opens, and letting go
-/// hides them all again, the one opened by hand too, the line at the top staying where it was
-/// in every frame painted meanwhile (`away=0/…`, see [`painted`]). Then with the caret on a change
-/// two thirds down the view, under a hidden run, where the caret's line stays instead, in every
-/// frame (`caret … caret="line 220"@361->"line 220"@361 strayed=0`, the most it was off in a
-/// frame painted meanwhile; 20 while it was held by its row, the padding above it settling),
-/// and the divider between the columns dragged, the line at the top staying (`editor resize`,
-/// see [`bench_resize`]). Then at the start of the file, where the first run opens downwards
-/// from the top of the view and collapses again under it
-/// (`start on … top="line 17 "@24->"line 1 w"@24`), the blobs' toggle and divider, and last the
-/// two blobs read again three lines longer at the top, as the Git pane's refresh reads them
-/// (`reread`). Writes the note, so point it at a scratch vault.
+/// Exercise Show All Unchanged Lines in note/disk and two-blob comparisons over 400 lines
+/// changed every fortieth. Expected controls: `["Show All Unchanged Lines", "Stop Comparing"]`.
+/// Toggling opens all runs and then collapses them, including manually opened ones.
+///
+/// Retain the top line across painted frames (`away=0/…`), or the caret line when selected
+/// (`strayed=0`). Repeat at file start, after divider resize ([`bench_resize`]) and after
+/// rereading longer blobs. Writes the note; use a scratch vault.
 pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1050,18 +1003,11 @@ pub(super) async fn centre(compare: &diff::Compare, view: &gtk::TextView, y: i32
     glib::timeout_future(Duration::from_millis(500)).await;
 }
 
-/// The comparison's buttons pressed through the real pointer, which a drill's `clicked` is not: a
-/// note of 400 lines changed at every fortieth, compared with its disk copy, the editor's caret at
-/// its start. Prints `bench compare_press aim <x> <y>` over the middle "⋯" button of the editor's
-/// column, for `build-aux/xtest.py :N "move <x> <y>; focus; down; up"`, and once the run has
-/// opened (`acted=true`), the editor's caret line and the widget with the keyboard; then the same
-/// over the middle Take and then the middle Keep Both of those laid near the view, in the strip
-/// between the columns, with the other column's caret offset, and the strip as laid when each is
-/// aimed at (`strip`, see `Compare::strip`). The claim is `caret_line=0` and `theirs_caret=0`
-/// throughout, the keyboard staying where it was: the press reached the text view under the
-/// button too, which put that column's caret under the pointer and gave it the keyboard. Waits
-/// ten seconds for each press.
-/// Writes the note, so point it at a scratch vault.
+/// Verify real pointer presses on collapse, Take and Keep Both buttons do not move either text
+/// caret or keyboard focus. A 400-line note differs every fortieth line. Each `bench
+/// compare_press aim <x> <y>` gives a centre for `build-aux/xtest.py :N "move <x> <y>; focus;
+/// down; up"`, with 10 s per press. Expected `acted=true`, `caret_line=0` and `theirs_caret=0`;
+/// also report strip geometry. Writes the note; use a scratch vault.
 pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1158,27 +1104,17 @@ pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// A scroll made while a comparison still keeps its view: a note of 400 lines changed at every
-/// fortieth, compared with its disk copy from the top, opens on its first hunk, and each round
-/// scrolls before it has got there. `drill` moves the scroll half a page down itself, as the
-/// comparison's own scrolls do; the others print `bench compare_reader <what> aim <x> <y>` as soon
-/// as the comparison is up, over the editor's column or, for `bar`, the other column's scrollbar
-/// and, for `map`, the minimap, switched on for that round, for `build-aux/xtest.py :N`:
-/// `wheel` `"move <x> <y>; focus; scroll -3"`, `page` `"move <x> <y>; focus; down; up; key
-/// Page_Down"` (a click first, Page Down starting from the caret, which the opening put on the
-/// first hunk), `bar` and `map` `"move <x> <y>; sleep 0.1; down; move <x> <y+100>; up"`, and `end`
-/// and `end_animated` `"move <x> <y>; focus; key ctrl+End"`. Each prints whether the comparison
-/// still kept its view when the scroll came (`kept=true`, the case this is about); where the input
-/// left the scroll and the line at the top of the editor's column, by where its text starts
-/// (`asked`, after a key once GTK has laid out the lines it scrolls to, which is where Ctrl+End
-/// scrolls); the same once the comparison has settled (`got`); and whether that is the line the
-/// drill's own scroll ended on, the first hunk's (`back`). The claim is `back=false` and `got` the
-/// line `asked` for the reader's: the line the input left at the top is held there until the rows
-/// are laid. Ctrl+End holds the caret's line instead, so the `end` rounds print whether the caret
-/// is on screen once settled (`caret_shown=true` the claim, the view at the end). Animations are
-/// off, so a key scrolls at once, but in `end_animated`, where GTK animates the scroll to where it
-/// estimates the caret is. Waits ten seconds for each. Writes the note, so point it at a scratch
-/// vault.
+/// Scroll during initial comparison anchoring over a 400-line note changed every fortieth.
+/// `drill` scrolls programmatically; reader cases print `bench compare_reader <what> aim <x>
+/// <y>` for XTEST.
+///
+/// Input steps: wheel `"move <x> <y>; focus; scroll -3"`; page `"move <x> <y>; focus; down; up;
+/// key Page_Down"`; bar/map `"move <x> <y>; sleep 0.1; down; move <x> <y+100>; up"`;
+/// end/end_animated `"move <x> <y>; focus; key ctrl+End"`. The map case enables the minimap.
+///
+/// Expected `kept=true` at input, `back=false`, and settled `got` matching `asked`; end cases
+/// retain the caret with `caret_shown=true`. Only end_animated enables animations. Allow 10 s
+/// per input. Writes the note; use a scratch vault.
 pub(in crate::bench) fn bench_compare_reader(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1392,13 +1328,9 @@ fn text_top(view: &gtk::TextView) -> String {
     format!("{text:?}@{}", view.iter_location(&line).y() - seen)
 }
 
-/// A note with its first section folded, compared with its disk copy, which differs only at the
-/// end: the run the comparison collapses reaches over the fold's end. It asks for the iter at every
-/// pixel row of the editor, as GtkSourceView asks at the top and bottom of the screen on every
-/// frame, and prints whether the fold was open meanwhile and is shut again once the comparison
-/// has gone. With the fold left shut, the line where it ended was laid out as a blank row, and an
-/// iter asked in that row's pixels-below-lines aborted the process ("Byte index … is off the end of
-/// the line"). Writes the note, so point it at a scratch vault.
+/// Compare a note whose collapsed run crosses an existing fold boundary, then query an iter at
+/// every pixel row. This must avoid partially hidden lines that abort GTK. Report the fold
+/// opening during comparison and closing afterward. Writes the note; use a scratch vault.
 pub(in crate::bench) fn bench_compare_folds(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1461,14 +1393,9 @@ pub(in crate::bench) fn bench_compare_folds(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// A paragraph under a blank line, padded below on the disk copy's side where the note's is
-/// longer, is made a row longer on the note's side and laid out at once, as a scroll lays out what
-/// is on screen; then the comparison is laid again eight times before GTK lays out anything else,
-/// as relayouts faster than GTK's idle are, and the padding the blank line and the paragraph carry
-/// on the disk copy's side (`above/below`) is printed after each pass and once GTK has caught up.
-/// The blank line was laid out with the paragraph's padding, and each pass handed both its pads
-/// back to the paragraph: twice as much every pass, until a line's height overflowed GTK's `int`.
-/// The claim: none on the blank line, no doubling, and the longer row's padding once caught up.
+/// Regression for blank-line padding leaking into the following paragraph. Grow the note side,
+/// force layout, then relayout eight times before GTK idles. Report companion `above/below`
+/// padding: none on the blank line, no doubling, and correct paragraph padding after settling.
 pub(in crate::bench) fn bench_compare_runaway(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());

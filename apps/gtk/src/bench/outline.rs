@@ -2,16 +2,12 @@
 
 use super::*;
 
-/// Lines of the note the caret is walked to: above the first heading, down through the sections,
-/// back above the first heading from the bottom, which takes the list to its top, then into the
-/// top section and down again, so the tab switch after it has a row far from the top to come back
-/// to. Clamped to the note's length.
+/// Caret positions covering section changes and returns to the top, clamped to note length.
 const WALK: [i32; 8] = [0, 6, 60, 120, 400, 0, 12, 190];
 
-/// Open `note` with the Outline pane showing, walk its caret over [`WALK`] and print what the pane
-/// selected each time; then open `other` and come back, then move the caret while the pane is
-/// hidden and show it again. `hold:<note>` instead prints where the editor and the list are and
-/// then the pane's state whenever it changes, for 20 s, for keys and a pointer driven by XTEST.
+/// Follow [`WALK`] caret positions, then switch tabs and hide/show Outline to check
+/// selection catch-up. `hold:<note>` prints input targets and pane changes for 20 s
+/// while XTEST drives real input.
 pub(super) fn bench_outline(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("index:") {
         return bench_outline_index(app, rel);
@@ -40,12 +36,9 @@ pub(super) fn bench_outline(app: &Rc<App>, arg: &str) {
     });
 }
 
-/// `index:<rel_code>`: a Rust or Python file's Outline from the index. Prints the rows once there are any,
-/// whether a language server's or the index's, and what the missing server is; the same 6 s later,
-/// when a server that is installed has answered; then a row activated and where the caret landed,
-/// the caret put inside the first function and the row that follows it; last a function typed at
-/// the end and the file saved, and the rows once the save is indexed. It writes the file, so point
-/// it at a scratch vault under `/tmp`.
+/// `index:<rel_code>` probes Rust/Python Outline fallback to the index. Print initial
+/// rows/server status, then server answers 6 s later. Activate a row, follow the caret,
+/// append a function and save; require refreshed symbols. Writes files; use `/tmp`.
 fn bench_outline_index(app: &Rc<App>, rel: &str) {
     scratch_only(app, "ACCENT_BENCH_OUTLINE=index");
     app.open_path(rel);
@@ -194,10 +187,9 @@ fn bench_outline_hidden(app: Rc<App>, tab: Rc<Tab>, step: i32) {
     });
 }
 
-/// Edits leave the list where the reader has it. The caret is put at the end of a heading two
-/// thirds down and the list scrolled back to its top, as by hand; then a word is typed into that
-/// heading, a heading is added under it and both are undone, each printed with the scroll and the
-/// selected row, which should not change. Last a caret move, which takes the list along again.
+/// Keep Outline scroll/selection stable through a heading edit, insertion and undo
+/// while the list is scrolled away from the caret. A subsequent caret move must resume
+/// following the active section.
 fn bench_outline_edit(app: Rc<App>, tab: Rc<Tab>, step: usize) {
     let buffer = tab.buffer.clone();
     let typed = |text: &str| {
@@ -289,9 +281,8 @@ fn bench_outline_hold(app: &Rc<App>, tab: &Rc<Tab>) {
     });
 }
 
-/// The caret's line, the heading it is under, the row the pane selected and whether that row is
-/// on screen, and who has the keyboard. `placed` is where the caret was put: a row activated by
-/// the selection would have moved it to that heading.
+/// Print caret line, enclosing heading, selected row, row visibility and focus.
+/// Compare with `placed` to detect selection incorrectly activating a heading.
 fn outline_state(app: &Rc<App>, tab: &Rc<Tab>, placed: i32) -> String {
     let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
     let focus = match gtk::prelude::GtkWindowExt::focus(&app.window) {

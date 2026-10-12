@@ -2,8 +2,8 @@
 // mxgraph/src/view/mxGraphView.js and mxgraph/src/shape/mxText.js (Apache-2.0, Copyright (c)
 // 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see
 // crates/drawio/NOTICE.
-//! A page as a display list: what to paint, in paint order, in page coordinates. The toolkit
-//! turns each [`Prim`] into its own drawing calls and measures text itself.
+//! Toolkit-independent display lists in paint order and page coordinates.
+//! The toolkit paints each [`Prim`] and measures text.
 
 use std::collections::HashMap;
 
@@ -28,9 +28,8 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// The points edge `id` runs through, absolute and first end first: where its ends are on
-    /// the page before arrow heads shorten it (mxGraph's `absolutePoints`). `None` for an edge
-    /// not drawn.
+    /// Absolute route points from source to target before arrow heads shorten the line
+    /// (mxGraph's `absolutePoints`); `None` when the edge is not drawn.
     pub fn route(&self, id: &str) -> Option<&[Point]> {
         self.routes.get(id).map(Vec::as_slice)
     }
@@ -139,8 +138,8 @@ pub const SHADOW_COLOR: Color = Color {
     a: 64,
 };
 
-/// One thing to paint. `cell` names the cell it belongs to, for hit testing and selection;
-/// `locked` is set when the cell's layer is locked, which leaves it out of hit tests.
+/// A drawing primitive. `cell` identifies it for hit testing and selection;
+/// `locked` excludes cells on locked layers from hit tests.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Prim {
     /// An outline, rotation already applied to its points.
@@ -223,14 +222,13 @@ impl Prim {
     }
 }
 
-/// The display list of `page`: every visible cell in paint order — layers bottom first, each
-/// cell's shape, then its picture, then its label, then its children. The page is shown as a
-/// lone page with no clock; see [`scene_with`].
+/// Build a display list in paint order: layers bottom first, then each cell's shape,
+/// picture, label and children. Uses single-page context without a clock; see [`scene_with`].
 pub fn scene(page: &Page) -> Scene {
     scene_with(page, &Context::default())
 }
 
-/// [`scene`] of `page` shown where and when `ctx` says, which labels with placeholders fill in.
+/// Build [`scene`] with `ctx` for page and time placeholder expansion.
 pub fn scene_with(page: &Page, ctx: &Context) -> Scene {
     let b = Builder::run(page, ctx);
     Scene {
@@ -292,12 +290,12 @@ impl<'a> Builder<'a> {
 pub const BASE_SPACING_TOP: f64 = 5.0;
 pub const BASE_SPACING_BOTTOM: f64 = 1.0;
 
-/// `mxConstants.DEFAULT_FONTSIZE`: a label's size when its style has none. The stylesheet gives
-/// every vertex 12 and every edge 11, so this is for a style that skips it (a leading `;`).
+/// Fallback font size (`mxConstants.DEFAULT_FONTSIZE`) for styles that skip the
+/// stylesheet with a leading `;`. Normal vertex and edge defaults are 12 and 11.
 const DEFAULT_FONTSIZE: f64 = 11.0;
 
-/// `mxConstants.DEFAULT_FONTFAMILY`, likewise for a style that skips the stylesheet, which gives
-/// every cell Helvetica. Pango reads the comma as CSS does: Arial first, Helvetica after it.
+/// Fallback font family (`mxConstants.DEFAULT_FONTFAMILY`) for styles that skip
+/// the stylesheet's Helvetica. Pango resolves the CSS list as Arial, then Helvetica.
 const DEFAULT_FONTFAMILY: &str = "Arial,Helvetica";
 
 struct Builder<'a> {
@@ -766,11 +764,9 @@ enum LabelAt<'p> {
     Edge(&'p [Point], &'p Geometry),
 }
 
-/// The point `x` of the way along `points` (-1 the start, 0 the middle, 1 the end), moved `y`
-/// off the line to its left and then by `offset` (`mxGraphView.getPoint`).
-/// Where an edge routed along `points` with geometry `g` puts its label (mxGraphView's
-/// `absoluteOffset`): a relative geometry's place along the edge and across it, else the middle
-/// of its ends; the offset added either way.
+/// Position an edge label (`mxGraphView.getPoint`, `absoluteOffset`). Relative geometry
+/// uses `x` along the route (-1 start, 0 middle, 1 end) and `y` to its left; other
+/// geometry uses the midpoint of the endpoints. Add `offset` in either case.
 // mxGraphView.updateEdgeLabelOffset, mxGraphView.js 2213-2262
 pub fn edge_label_at(points: &[Point], g: &Geometry) -> Point {
     match g.relative {
@@ -832,11 +828,10 @@ fn fill(style: &Resolved, fill: Fill, outline: &[PathCmd], place: &Placement) ->
     }
 }
 
-/// A cell's fill of `outline`: its colour at its `fillOpacity`, as a gradient when it has a
-/// `gradientColor`, running `gradientDirection` (south by default, or `radial` from the centre)
-/// across the outline's own box before `place` mirrors and turns it. draw.io's SVG gradient is in
-/// `objectBoundingBox` units of each path it fills (`mxSvgCanvas2D.createSvgGradient`), so a
-/// level arrow's south gradient crosses its band.
+/// Resolve fill colour, opacity and gradient within the outline's box before
+/// `place` mirrors and rotates it. Gradients follow `gradientDirection` (south by
+/// default, or radial from the centre). Per-path bounds match draw.io's SVG
+/// `objectBoundingBox` gradients (`mxSvgCanvas2D.createSvgGradient`).
 fn paint(style: &Resolved, outline: &[PathCmd], place: &Placement) -> Option<Paint> {
     let alpha = style.num("fillOpacity", 100.0) / 100.0;
     let from = style.color("fillColor")?.fade(alpha);

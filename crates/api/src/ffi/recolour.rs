@@ -1,8 +1,6 @@
-//! Images recoloured like a PDF page, the test for which ones want it, and turning them upright.
-//!
-//! The rules are the core's ([`accent_core::recolour`], [`accent_core::orientation`]): Android
-//! decodes with its own decoder and hands the pixels over as straight-alpha RGBA8, in the same
-//! [`Theme`] a PDF page is rendered in, so a figure and a page in one vault land on the same paper.
+//! Expose core recolouring and EXIF orientation for Android-decoded
+//! straight-alpha RGBA8 pixels. Use the PDF [`Theme`] so figures and pages
+//! share paper and ink ([`accent_core::recolour`], [`accent_core::orientation`]).
 
 use accent_core::orientation;
 use accent_core::pdf;
@@ -10,17 +8,17 @@ use accent_core::recolour;
 
 use crate::ffi::convert::{Theme, Tile};
 
-/// Whether `width` × `height` straight-alpha RGBA8 pixels read as a document — a scan, plot,
-/// diagram or screenshot of text — rather than a photo, and so want recolouring. A buffer that
-/// does not match its size, or an image above 64 MP, is never one. See [`recolour::classify`].
+/// Classify `width` × `height` straight-alpha RGBA8 as recolourable document
+/// content rather than a photo ([`recolour::classify`]). Invalid buffer sizes
+/// and images above 64 MP return false.
 #[uniffi::export]
 pub fn looks_like_document(rgba: Vec<u8>, width: u32, height: u32) -> bool {
     recolour::classify(&rgba, width, height).document
 }
 
-/// Straight-alpha RGBA8 pixels moved onto the theme's paper and ink, alpha untouched unless
-/// `fill` lays them on that paper, for a page that is not the screen's own
-/// ([`recolour::onto_white`]); under [`Theme::Plain`] they come back as they went in.
+/// Apply theme paper and ink to straight-alpha RGBA8. Preserve alpha unless
+/// `fill` composites onto paper ([`recolour::onto_white`]); [`Theme::Plain`]
+/// returns pixels unchanged.
 #[uniffi::export]
 pub fn recolour_image(mut rgba: Vec<u8>, theme: Theme, fill: bool) -> Vec<u8> {
     if let pdf::Theme::Recolour { paper, ink } = theme.into() {
@@ -32,9 +30,9 @@ pub fn recolour_image(mut rgba: Vec<u8>, theme: Theme, fill: bool) -> Vec<u8> {
     rgba
 }
 
-/// Straight-alpha RGBA8 pixels `width` × `height`, decoded from the image file at `path`, turned
-/// the way its EXIF Orientation tag says, which `BitmapFactory` ignores; they come back as they
-/// went in when the file has no tag, or when they do not match their size.
+/// Orient `width` × `height` straight-alpha RGBA8 using `path`'s EXIF tag,
+/// which `BitmapFactory` ignores. Return unchanged pixels for absent tags
+/// or invalid buffer sizes.
 #[uniffi::export]
 pub fn upright_image(rgba: Vec<u8>, width: u32, height: u32, path: String) -> Tile {
     let tag = std::fs::File::open(path).map_or(1, |mut file| orientation::read(&mut file));
@@ -51,9 +49,9 @@ pub fn upright_image(rgba: Vec<u8>, width: u32, height: u32, path: String) -> Ti
     }
 }
 
-/// An SVG's text with the same recolouring as a filter, so it stays vector, on the paper when
-/// `fill` asks for it ([`recolour::recolour_svg_on_paper`]); under [`Theme::Plain`] it comes back
-/// as it went in. `None` when there is no root `<svg>` element to hang the filter on.
+/// Add a recolouring filter to SVG text, preserving vectors. `fill` adds
+/// paper ([`recolour::recolour_svg_on_paper`]); [`Theme::Plain`] is unchanged.
+/// `None` means no root `<svg>` exists for the filter.
 #[uniffi::export]
 pub fn recolour_svg(svg: String, theme: Theme, fill: bool) -> Option<String> {
     match theme.into() {
@@ -77,8 +75,7 @@ mod tests {
         }
     }
 
-    /// The thresholds are the core's and tested there; what is tested here is that a page and a
-    /// photo get told apart through the ffi's own types.
+    /// Verify page/photo classification through FFI types; core tests cover thresholds.
     #[test]
     fn a_page_is_a_document_and_noise_is_not() {
         let mut page = [255u8; 64 * 64 * 4];
@@ -113,8 +110,8 @@ mod tests {
         );
     }
 
-    /// The reading and the turning are the core's and tested there; what is tested here is
-    /// that a file's tag reaches the pixels, and that they come back whole without one.
+    /// Verify EXIF reaches FFI pixels and absent tags preserve them; core tests
+    /// cover tag parsing and rotation.
     #[test]
     fn an_image_is_turned_the_way_its_file_says() {
         let dir = tempfile::tempdir().unwrap();

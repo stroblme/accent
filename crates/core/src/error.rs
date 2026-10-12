@@ -1,8 +1,7 @@
-//! The one error the core hands back.
+//! Serializable core errors for local, process and Android callers.
 //!
-//! Plain data rather than a chain of sources: a caller matches on the kind, the message reads as
-//! the end of "Cannot <what>: <why>", and the whole of it crosses a process or the Android
-//! boundary as it is. Whatever context a failure needs is formatted into it where it is made.
+//! Callers match the kind; messages complete `Cannot <what>: <why>`. Required context is
+//! included at the failure site rather than carried in a source chain.
 
 use std::fmt::Display;
 

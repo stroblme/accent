@@ -55,15 +55,13 @@ pub struct PdfTab {
     pub(super) status: adw::StatusPage,
     pub(super) view: PdfView,
     pub(super) thumbs: PdfView,
-    /// A plain box between the stack and the scroller, and the link preview's parent: a popover
-    /// hung off a widget with a `size_allocate` of its own never re-presents (DESIGN.md, States),
-    /// and `PdfView` has one.
+    /// Plain parent for the link preview. Popovers do not re-present from widgets with custom
+    /// `size_allocate`, such as `PdfView` (DESIGN.md, States).
     pub(super) host: gtk::Box,
     /// The drawing tools, floating over the page while the window says they are wanted.
     pub(super) ring: Rc<ring::PdfRing>,
-    /// The strip the thumbnails live in, built once. Handing the Outline pane a fresh
-    /// `GtkScrolledWindow` around the same widget every time would re-parent a widget that
-    /// already has a parent, which GTK refuses with a critical.
+    /// Thumbnail scroller built once to preserve its parent; rebuilding around the same widget
+    /// would trigger a GTK reparenting critical.
     pub(super) thumb_strip: gtk::ScrolledWindow,
     /// The strip with the page buttons and the drop bar floating over it, which is what the
     /// Outline pane is handed. Built once, for the same reason.
@@ -97,8 +95,8 @@ pub struct PdfTab {
     pub(super) links: RefCell<std::collections::HashMap<usize, Vec<pdf::Link>>>,
     /// What other readers wrote on each page, asked for with its links.
     pub(super) comments: RefCell<HashMap<usize, Vec<pdf::Comment>>>,
-    /// The tooltip's content for the comments it last showed, kept while the pointer stays on
-    /// them: GTK asks again on every motion, and a new widget each time would rebuild the tooltip.
+    /// Cached tooltip widgets reused while the pointer stays on the same comments, avoiding
+    /// rebuilds on every GTK motion query.
     pub(super) tip: RefCell<Option<(Vec<pdf::Comment>, gtk::Widget)>>,
     /// The comments a click pinned, in a popover whose text can be selected.
     pub(super) pinned: RefCell<Option<gtk::Popover>>,
@@ -129,9 +127,8 @@ pub struct PdfTab {
     /// vault's copy — and whether another save landed while it was. See [`PdfTab::claim_upload`].
     pub(super) uploading: Cell<bool>,
     pub(super) upload_again: Cell<bool>,
-    /// The far end refused the last upload, and the copy beside the document too, and the reader
-    /// has been told so once: the strokes after it are refused for the same reason and say
-    /// nothing. See [`PdfTab::told_conflict`].
+    /// Whether the reader has been told that both the upload and conflict copy were refused.
+    /// Suppresses repeated errors from subsequent stroke saves; see [`PdfTab::told_conflict`].
     pub(super) conflict_told: Cell<bool>,
     /// The last upload did not reach the far end at all — a folder it may not write, a full
     /// disk — and the reader has been told once. See [`PdfTab::told_failure`].
@@ -365,9 +362,8 @@ pub fn open(
     tab
 }
 
-/// How long a document may take to open before a spinner takes the place of its empty pages: as
-/// long as a search waits before its progress bar (DESIGN.md, Loading), so one that opens at once
-/// never shows one.
+/// Opening delay before showing the spinner, matching search progress timing (DESIGN.md,
+/// Loading) to avoid flashing on quick opens.
 const OPENING: std::time::Duration = std::time::Duration::from_millis(160);
 
 impl PdfTab {
@@ -456,11 +452,8 @@ impl PdfTab {
         self.ask(Request::Retarget(moved));
     }
 
-    /// Follow the theme and the PDFs' switch in Preferences, the other way round while this
-    /// document is inverted by hand ([`theme_of`]).
-    ///
-    /// A page is rendered in the theme's colours rather than recoloured afterwards, so every
-    /// texture in the cache belongs to one palette, and a new palette lets them all go.
+    /// Apply theme and PDF preferences, reversed when manually inverted ([`theme_of`]). Cached
+    /// textures belong to one palette, so a palette change invalidates them all.
     pub fn restyle(&self) {
         let theme = theme_of(self.inverted.get());
         if self.theme.replace(theme) != theme {
@@ -516,8 +509,8 @@ impl PdfTab {
         self.view.goto_page(page, None);
     }
 
-    /// Show a page without remembering where the reader was. Paging is reading and a jump is a
-    /// jump: a history full of single steps has nothing left to go back to.
+    /// Page without adding navigation history, keeping Back useful for jumps rather than every
+    /// reading step.
     fn show_page(&self, page: usize) {
         self.view.goto_page(page, None);
     }
@@ -560,8 +553,7 @@ impl PdfTab {
         (said, self.opens.get())
     }
 
-    /// What the reading view and then the strip last painted without. Only drills ask.
-    /// The reading view and the thumbnail strip, to tell whether they went with the tab.
+    /// Reading and thumbnail views for drills to check that both moved with the tab.
     #[cfg(feature = "bench")]
     pub fn views(&self) -> [gtk::Widget; 2] {
         [self.view.clone().upcast(), self.thumbs.clone().upcast()]
@@ -707,9 +699,8 @@ impl PdfTab {
         self.on_mode.emit(self);
     }
 
-    /// Whether the tool in hand needs to know what is drawn on the page, which every tool does:
-    /// the Adjust tool takes hold of a stroke, the eraser has to find the one under the pointer,
-    /// and a stylus's eraser tip erases under any of them.
+    /// Whether active tools need page strokes for adjustment or erasing. A stylus eraser can
+    /// erase under any drawing tool.
     pub(super) fn wants_inks(&self) -> bool {
         self.view.mode() != pdfview::Mode::Select
     }
@@ -792,10 +783,9 @@ impl PdfTab {
         self.edit_pages(pdf::PageEdit::insert(at));
     }
 
-    /// Put a blank page in, take one out, or move one, at once: each is a step Undo takes back, a
-    /// page taken out coming back with its ink. Written out on the same timer a stroke is, when
-    /// the thread answers with the new pages. The thread refuses to take out the last page — a
-    /// PDF keeps one.
+    /// Request a page insertion, deletion or move as an undoable step, saving through the stroke
+    /// timer after updated sizes arrive. Deleted pages retain ink for Undo; the last page cannot
+    /// be deleted.
     pub fn edit_pages(self: &Rc<Self>, edit: pdf::PageEdit) {
         self.ask(Request::Pages(edit));
     }
@@ -999,12 +989,8 @@ impl PdfTab {
         self.stack.set_visible_child_name("status");
     }
 
-    /// The document will not open, whether the render thread could not start or could not read
-    /// it: say so in place of the pages, wait for the file to change, and tell the window, which
-    /// is still showing it as opening or showing its pages.
-    ///
-    /// Pages that were showing go: they are of a file that is not there any more. Where the
-    /// reader was is kept for when it opens again.
+    /// Replace pages with the opening error, notify the window and wait for the file to change.
+    /// Discard obsolete pages while retaining the reading position for recovery.
     pub(super) fn fail(self: &Rc<Self>, message: &str) {
         if self.view.page_count() > 0 {
             self.resume.set(Some(self.view.anchor()));
@@ -1059,12 +1045,9 @@ fn covering(outline: &[pdf::Outline], page: usize) -> Option<usize> {
         .map(|(_, row)| row)
 }
 
-/// The tree `path` reads `key` out of: `path` with `key`'s own components taken off the end.
-///
-/// A PDF is always read from a file on this machine, which is the vault's own on a local vault
-/// and the ssh cache's copy on a remote one. Both mirror the vault, so a rename moves the key on
-/// the end of whichever tree this tab was opened from — `root.join(key)` would point a remote
-/// tab at the host's path, where there is nothing here to read.
+/// Remove vault-key components from the local `path` to find its backing root. Local files use
+/// the vault; remote files use a mirrored SSH cache. This lets renames follow the actual copy
+/// instead of the host path.
 fn tree_of(path: &Path, key: &str) -> Option<PathBuf> {
     let mut tree = path.to_path_buf();
     for _ in Path::new(key).components() {

@@ -1,5 +1,4 @@
-//! The minimap's drills: whether the band covers what the view shows, where a press and a drag
-//! leave the view, and what the map costs a scrolling frame.
+//! Probe minimap viewport-band accuracy, jump/drag behavior and frame cost.
 
 use super::*;
 use crate::minimap::Minimap;
@@ -12,38 +11,23 @@ const FRAME: Duration = Duration::from_millis(300);
 /// How long a round waits for the XTEST input it asked for.
 const XTEST: Duration = Duration::from_secs(10);
 
-/// `ACCENT_BENCH_MINIMAP=<round>:<rel>` fills the note at `rel` with 256 KB of sections, switches
-/// the minimap on and prints one round's lines, so point it at a scratch vault.
+/// `ACCENT_BENCH_MINIMAP=<round>:<rel>` fills a scratch note with 256 KB of sections
+/// and enables the minimap. Rounds:
 ///
-/// - `band` prints the lines the view shows beside the lines under the band's edges, and the
-///   band's pixels in the map (`view=10..52 band=Some((10, 52)) px=…/900 ok=true`): with the view
-///   at its top, a quarter, half way and at its end, with the first section folded, unwrapped
-///   (Alt+Z), zoomed to 150 %, and over a comparison with the disk with its unchanged runs
-///   collapsed and with Show All Unchanged Lines down. `ok` is both pairs equal and the band
-///   inside the map.
-/// - `jump` presses the map at 70 % of its height through the widget's own press and prints the
-///   line pressed and the lines on screen after it, the moment it lands and a second later once
-///   GTK has laid out the lines above (`ok`: the line in the middle third, or on screen with the
-///   view at its end); then prints `aim <x> <y>` at 30 % for `build-aux/xtest.py :N "move <x> <y>;
-///   down; up"` and the same once the press has scrolled the view.
-/// - `drag` takes hold of the band through the widget's press and drags it 40, 120 and -60 px,
-///   printing the band's top before and after each (`ok`: it moved with the pointer, within a
-///   row), then from the top of the note 80 % of the map's height down, and a second later;
-///   then prints `aim <x> <y> <dy>` for `"move <x> <y>; down; move <x> <y+dy/2>; move <x>
-///   <y+dy>; up"` and the same once that drag has scrolled the view.
-/// - `look` saves the window as `minimap-<theme>-<what>.png` in the working directory, light and
-///   dark: a note holding h1 to h4 and a setext heading, at its top and a quarter of the way down,
-///   a comparison with the disk where it opens, on its first hunk, and a code file it writes
-///   beside the note.
-/// - `frames` scrolls the note down by a quarter page [`STEPS`] times, a step per frame, with the
-///   map off and then on, three times over as the machine's load moves, printing each round's
-///   median and worst frame: `paint_ms` from the end of the layout phase to the end of painting
-///   (the snapshot and the render), `frame_ms` from the frame's start to the end of painting, and
-///   `paint_cpu_ms` the main thread's CPU time over the painting, which a busy machine does not
-///   inflate. `typing` is the same with a character typed into the middle of the note every
-///   150 ms instead, adding the main thread's CPU time over the round (`cpu_ms`) and the median
-///   keystroke's own time (`key_us`), as `ACCENT_BENCH_STYLE=typing:` prints them. Both print
-///   what the map's own drawing cost per step (`map_us`).
+/// - `band`: compare view and band line ranges at four scroll positions, folded,
+///   unwrapped, at 150% zoom and in collapsed/expanded comparisons. `ok` requires
+///   equal ranges and a band inside the map.
+/// - `jump`: press at 70% map height, then request XTEST input at `aim <x> <y>` (30%).
+///   The target line must settle in the middle third, or remain visible at the end.
+/// - `drag`: move the band 40, 120 and -60 px, then 80% map height; require pointer
+///   tracking within a row. `aim <x> <y> <dy>` requests an equivalent XTEST drag.
+/// - `look`: write `minimap-<theme>-<what>.png` in the working directory for light/dark
+///   headings, comparison hunks and a generated code file.
+/// - `frames`: scroll a quarter-page per frame for [`STEPS`], map off/on, three rounds.
+///   Report median/worst `paint_ms` (layout end to paint end), `frame_ms` (whole frame)
+///   and `paint_cpu_ms` (main-thread painting CPU, excluding scheduling delays).
+/// - `typing`: type every 150 ms, with the same metrics plus round `cpu_ms` and median
+///   `key_us`. Both performance rounds report map drawing cost per step as `map_us`.
 pub(super) fn bench_minimap(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_MINIMAP");
     let Some((round, rel)) = arg.split_once(':') else {

@@ -1,15 +1,10 @@
-//! SyncTeX: which line of which source a point of a LaTeX-built PDF was typeset from, and where
-//! on which page a source line went. The engines write it beside the PDF when run with
-//! `-synctex=1` (`main.synctex.gz`, or `main.synctex` uncompressed); this reads the file itself,
-//! so nothing of TeX's has to be installed for it (format: `synctex_parser_readme.txt` and
-//! `synctex_parser.c` in TeX Live).
+//! Map LaTeX PDF positions to source lines and back using `.synctex.gz` or `.synctex` files
+//! written with `-synctex=1`. Parsing requires no TeX installation; format references are TeX
+//! Live's `synctex_parser_readme.txt` and `synctex_parser.c`.
 //!
-//! The file is a line per record. Each page (`{3` to `}3`) nests boxes: `[` a vbox, `(` an hbox,
-//! `h`/`v` an empty one; inside them `x`, `k`, `g` and `$` mark positions in a line of text. A
-//! record names its input by tag (`Input:5:/path/./chapter.tex`) and line, then its position and
-//! for a box its width, height and depth, in the engine's scaled points from the top-left of the
-//! page. An hbox of a paragraph carries the line its paragraph ended on; the records inside it
-//! carry the lines their words came from, which is why a hit is read off them.
+//! Pages contain nested boxes and position records keyed by input tag and line, in scaled points
+//! from the top-left. Paragraph hboxes name their ending source line; enclosed records name the
+//! actual words, so hit lookup uses those records.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;

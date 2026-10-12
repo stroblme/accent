@@ -1,23 +1,17 @@
-//! One key controller on the view, and the order the modules see a press in.
+//! Dispatch editor keys in an explicit priority order.
 //!
-//! Five things in this editor want the same handful of keys — Tab, Escape, Return — and they used
-//! to take them through four capture-phase controllers on one widget, each guessing whether
-//! another had already acted. GTK runs controllers on the same widget newest first, which is an
-//! order nothing here could read, so the guessing was the design.
+//! Separate capture controllers depend on GTK's newest-first installation order, making
+//! ownership of shared keys unclear. One controller offers each press to:
 //!
-//! This is the order, written down once:
+//! 1. Completion: arrows, Escape, and Return or Tab with a selected row.
+//! 2. Signature help: Escape while visible.
+//! 3. Template Tab stops: Tab and Escape.
+//! 4. Ghost text: Tab, Escape and Ctrl+Right while painted.
+//! 5. Secondary carets: supported edits and motions at every caret.
+//! 6. Markdown typing helpers.
+//! 7. The view's own snippets, indentation and bindings.
 //!
-//! 1. **the completion popup**, while it is up: the arrows, Escape, and Return and Tab while a
-//!    row is selected (`completion::Session::press`); everything else goes on beneath it, so what
-//!    is typed is typed, list helpers and pairs included, and narrows the list;
-//! 2. **the signature popover**, which owns Escape while it is showing;
-//! 3. **a template's Tab stops** (Tab, and Escape to stop walking them), because a snippet the
-//!    user is walking outranks both a suggestion and a list item's indent;
-//! 4. **ghost text** (Tab, Escape, `Ctrl+Right`), while a suggestion is painted;
-//! 5. **the extra carets**, which replay what they understand at every caret;
-//! 6. **the markdown typing helpers** in a note (Return, Backspace, a delimiter, Tab on a list
-//!    item);
-//! 7. the view itself: its snippets, its indent, its bindings.
+//! Unclaimed keys continue through the chain, allowing normal typing to narrow completion.
 
 use super::Tab;
 use crate::{completion, ghost, signature, typing};

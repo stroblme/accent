@@ -1,9 +1,7 @@
-//! draw.io's live preview (`mxGraphHandler.livePreview`, `mxVertexHandler.livePreview`): while a
-//! move, a resize or a turn is under way, the page is painted as the drag would leave it — the
-//! cells where they are going, at full strength, and the edges on them routed again. On a frame
-//! the pointer moved in, a copy of the page takes the edit its release will make and is built
-//! into a display list of its own; a move of more than [`MAX_LIVE`] cells moves a plain box
-//! instead, as draw.io's does.
+//! Show geometry edits live during moves, resizes and rotations, rerouting edges
+//! on a copied page once per pointer-changing frame (`mxGraphHandler.livePreview`,
+//! `mxVertexHandler.livePreview`). Moves above [`MAX_LIVE`] cells show only a box,
+//! matching draw.io, to bound preview work.
 
 use accent_drawio::edit::{self, Moving};
 use accent_drawio::{Page, Point, Rect, Scene};
@@ -27,8 +25,8 @@ pub(super) enum Preview {
 }
 
 pub(super) struct Live {
-    /// The page the drag started on, the edges a move takes already let go of the shapes they
-    /// leave: the part of a move that does not depend on how far, done once.
+    /// Initial page with moved edges disconnected from stationary terminals;
+    /// prepare once because this is independent of drag distance.
     base: Page,
     moving: Option<Moving>,
     /// The edit [`Live::scene`] shows; `None` until the first frame.
@@ -63,9 +61,8 @@ impl Preview {
 }
 
 impl Live {
-    /// Show `edit`, unless the scene already does: the grid holds a move still over many frames.
-    /// What was laid out for the frame before (the sheet's, on the first) is kept for every prim
-    /// that paints the same thing.
+    /// Skip unchanged edits when grid snapping holds the pointer in place. Reuse
+    /// layouts from the previous frame, or sheet on the first, for unchanged prims.
     fn show(&mut self, edit: &Edit, sheet: &Sheet, sheet_cache: &Cache) {
         if self.shown.as_ref() == Some(edit) {
             return;

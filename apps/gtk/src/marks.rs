@@ -1,15 +1,8 @@
-//! Change marks in the editor gutter: which lines differ from what git has committed.
+//! Mark changes from committed text and pending language checks in the editor gutter.
 //!
-//! The bars are the same green and red the diff view uses, at full alpha because a 3 px column
-//! has no room to be subtle. A modified line is the accent instead: it is neither an addition nor
-//! a removal, and the accent is the colour this app already means "something here" with.
-//!
-//! The marks come from the same line diff the comparison tabs are built from, less its word-level
-//! pass (`accent_core::diff::line_ops`), so a line the diff paints green is a line the gutter marks
-//! green.
-//!
-//! Beside them, in the same column, a bar in the accent at half alpha marks the lines a language
-//! server has still to check (`Event::Checking`), as VS Code's Lean extension does in orange.
+//! Git marks use the comparison's line diff (`accent_core::diff::line_ops`) and colours:
+//! green for additions, red for deletions and accent for modifications. Full opacity keeps
+//! 3 px bars legible; pending checks (`Event::Checking`) use half-opacity accent.
 
 use std::ops::Range;
 
@@ -40,15 +33,10 @@ pub enum Mark {
     DeletedBelow,
 }
 
-/// One slot per line of the new text, `None` where nothing changed.
+/// Map each new line to its change, with `None` for unchanged lines.
 ///
-/// The rows [`accent_core::diff::align`] lays the two panes out with are the same pairing a gutter
-/// needs: a row with a line on both sides is a rewrite, a row with only a new line is an addition,
-/// and a row with only an old one is a removal that left no line to colour, so it marks the line
-/// that closed over it. What the diff view draws in a column, the gutter draws in three pixels.
-///
-/// `lines` needs no word-level refinement for this; [`accent_core::diff::line_ops`] is the cheap
-/// way to get it.
+/// [`accent_core::diff::align`] pairs rewrites and additions; deletions mark the next surviving
+/// line. [`accent_core::diff::line_ops`] avoids unnecessary word-level refinement.
 pub fn marks(lines: &[DiffLine], line_count: usize) -> Vec<Option<Mark>> {
     let rows = accent_core::diff::align(lines);
     let mut marks = vec![None; line_count];
@@ -106,9 +94,8 @@ impl Renderer {
         self.queue_draw();
     }
 
-    /// Mark `lines` as still being checked, in order and apart; none once the check is done.
-    /// The column comes up with the first check and stays, git or not, so the text does not move
-    /// each time a check starts and ends.
+    /// Mark sorted, disjoint `lines` as pending checks; clear them when finished.
+    /// Keep the column after its first use to avoid shifting text on every check.
     pub fn set_checking(&self, lines: Vec<Range<u32>>) {
         if !lines.is_empty() {
             self.imp().checked.set(true);
@@ -129,9 +116,7 @@ impl Renderer {
         self.imp().checking.borrow().clone()
     }
 
-    /// Take the colours from the theme, the way every other painted thing here does: the diff's
-    /// own green and red mixed with the resolved foreground, the accent for a rewrite, and the
-    /// accent at [`CHECKING_ALPHA`] for a line still being checked.
+    /// Resolve diff green/red, modification accent and [`CHECKING_ALPHA`] pending-check accent from the theme.
     pub fn restyle(&self, view: &impl IsA<gtk::Widget>) {
         let fg = view.as_ref().color();
         let accent = adw::StyleManager::default().accent_color_rgba();
@@ -155,8 +140,7 @@ mod imp {
         pub checking: RefCell<Vec<Range<u32>>>,
         /// A check has marked lines here: the column stays up from then on.
         pub checked: Cell<bool>,
-        /// Added, removed, modified, checking. Set from the theme; the fallback is only ever seen
-        /// if a draw beats the first `restyle`, which one `connect_map` away cannot happen.
+        /// Theme colours for added, removed, modified and checking marks, with a pre-restyle fallback.
         pub colours: Cell<[gdk::RGBA; 4]>,
     }
 

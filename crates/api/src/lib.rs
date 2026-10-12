@@ -1,19 +1,14 @@
-//! accent-api: the UI-facing façade. Plain serde data types only; no GTK, no Android types.
-//! Desktop links this directly; Android gets uniffi bindings of this crate; the CLI renders it as JSON-RPC over stdio.
-//!
-//! [`Vault`] owns the lifecycle of one open vault: three SQLite connections, the filesystem
-//! watcher, and the batching that turns a Syncthing pull of 500 files into a single [`Event`].
-//! The caller reads on its own connection and never waits for the worker, which is what keeps a
-//! UI thread free while the vault is being indexed.
+//! UI-facing façade with serde data types independent of GTK and Android.
+//! Desktop links it directly; Android uses UniFFI; CLI serves JSON-RPC over stdio.
+//! [`Vault`] owns three SQLite connections, a watcher and batched updates.
+//! Separate caller reads keep indexing work off the UI thread.
 
 use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
-/// The uniffi bindings Android calls this crate through. See `ffi::`.
-///
-/// The scaffolding is declared here rather than in the module because uniffi's macros look for
-/// the tag it defines in the crate root.
+/// Android UniFFI bindings. Declare scaffolding at the crate root because
+/// UniFFI macros look for its tag there.
 #[cfg(feature = "android")]
 pub mod ffi;
 #[cfg(feature = "android")]
@@ -61,9 +56,8 @@ pub use language::{
 
 // ---------------------------------------------------------------- public data
 
-/// What happened in the vault, in vault-relative paths the UI can use directly.
-///
-/// No `PartialEq`: `index::Progress` has none, and an event type is matched, not compared.
+/// Vault events with vault-relative paths for the UI. No `PartialEq` because
+/// `index::Progress` lacks it; consumers match event variants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
     Progress(Progress),
@@ -71,9 +65,8 @@ pub enum Event {
     /// The direct children of these directories changed ("" is the vault root). The tree refills
     /// exactly these levels instead of dropping its whole cache.
     DirsChanged(Vec<String>),
-    /// The direct children of these folders changed: folders the index does not walk, watched
-    /// because the window lists them ([`Vault::watch_unindexed`]). Nothing the index holds moved,
-    /// so listing them again is all there is to do.
+    /// Direct children changed in watched unindexed folders
+    /// ([`Vault::watch_unindexed`]). Refresh listings only; the index is unaffected.
     UnindexedChanged(Vec<String>),
     /// Someone else changed this note's content. Never fires for our own saves.
     FileChanged(String),
@@ -86,15 +79,11 @@ pub enum Event {
         original: String,
         conflict: String,
     },
-    /// Something under a repository's `.git` moved: a commit, a checkout, a stage. The git pane
-    /// refreshes on it, which is how a `git commit` typed in a shell reaches the UI.
+    /// Repository `.git` state changed, prompting the git pane to refresh
+    /// for commits, checkouts or staging done outside the app.
     GitChanged,
-    /// A remote vault is still getting ready, and this is what it is doing. Shown where the
-    /// indexing progress is shown, because to the reader it is the same wait.
-    ///
-    /// `fraction` is how far the step has got, 0 to 1, for the one step that can measure itself:
-    /// uploading the server binary, which is most of a first connection's wait. The others are
-    /// waits of unknown length, and say so with `None` rather than with a number nobody computed.
+    /// Remote connection progress, sharing the indexing-progress display.
+    /// `fraction` is 0–1 for server uploads; `None` for steps of unknown duration.
     Connecting {
         what: String,
         fraction: Option<f64>,
@@ -105,9 +94,9 @@ pub enum Event {
     /// The remote vault is not answering, and why. Reads stay served from whatever the UI already
     /// has; writes fail until [`Vault::reconnect`] succeeds.
     Disconnected(String),
-    /// The host answered and will not serve the vault, and why: its folder is not there, or its
-    /// index would not open. Otherwise [`Disconnected`](Self::Disconnected), except that trying
-    /// again meets the same answer until someone changes the host.
+    /// The host refused the vault, for example because its folder or index
+    /// could not open. Unlike [`Disconnected`](Self::Disconnected), retrying
+    /// requires a change on the host.
     Refused(String),
     Error(String),
     /// What a language provider has to say about an open document, whole: an empty list clears.
@@ -115,20 +104,17 @@ pub enum Event {
         rel: String,
         items: Vec<Diagnostic>,
     },
-    /// A language provider started or finished a background job worth waiting for — the
-    /// ghost-text index rebuilding, and nothing else today. `what` is what to call it on screen,
-    /// and `message` how far the job says it has got, in its own words ("1200 files"), while it
-    /// says so. Shown where the vault's own indexing is shown, and yielding to it: this one is
-    /// optional.
+    /// Language-provider background progress, currently ghost-index rebuilds.
+    /// `what` labels the job; `message` carries its progress text (for example,
+    /// "1200 files"). Display yields to vault indexing progress.
     Busy {
         what: String,
         busy: bool,
         message: Option<String>,
     },
-    /// A language server is checking `rel`: `lines` are the 0-based lines it has still to check,
-    /// in order and apart, and none once it is done. Lean's `$/lean/fileProgress` is the one
-    /// sender: a file importing Mathlib is minutes of it, during which the server has no answer
-    /// about those lines. Lean checks declarations in parallel, so a check is several ranges.
+    /// Pending checks of `rel` as sorted, separate zero-based line ranges;
+    /// empty when complete. Lean's `$/lean/fileProgress` reports parallel checks
+    /// whose lines may lack answers while Mathlib loads.
     Checking {
         rel: String,
         lines: Vec<std::ops::Range<u32>>,
@@ -142,16 +128,14 @@ pub struct RenamePlan {
     pub moves: Vec<(String, String)>,
     /// The notes whose links the moves would leave naming the wrong place, by their paths now.
     pub rewrites: Vec<String>,
-    /// What the language servers already running asked to have changed because of the moves —
-    /// an import naming a moved module — by each file's path now.
+    /// Language-server edits needed by the moves, such as import updates,
+    /// keyed by each file's current path.
     pub imports: Vec<FileEdits>,
-    /// Moved source files no running language server was asked about, whose imports nothing
-    /// checked.
+    /// Moved source files whose imports no running language server checked.
     pub unchecked: Vec<String>,
 }
 
-/// Edits to one file: byte ranges of its text as it was when they were asked for, which the
-/// etag says, and what to put in each.
+/// Edits to text identified by its etag: byte ranges and replacement strings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileEdits {
     pub rel: String,
@@ -159,20 +143,20 @@ pub struct FileEdits {
     pub edits: Vec<(usize, usize, String)>,
 }
 
-/// What a global replace wrote, in the shape [`RenameReport`] has: what worked is counted, what
-/// failed is named, and a file the replace could not write never fails the whole call.
+/// Global-replace results: successful counts and per-file failures, following
+/// [`RenameReport`]. A failed file does not fail the whole call.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReplaceReport {
     pub rewritten: Vec<String>,
     pub matches: usize,
     pub failed: Vec<(String, String)>,
-    /// Whether [`Vault::undo_replace`] can put the rewritten files back: false when nothing was
-    /// rewritten, or when what they held was more than an undo keeps.
+    /// Whether [`Vault::undo_replace`] can restore the rewritten files. False
+    /// if nothing changed or original contents exceeded the undo budget.
     pub undoable: bool,
 }
 
-/// What undoing a Replace All did: the files it put back, the ones changed since the rewrite and
-/// so left alone, and the ones it could not write.
+/// Replace All undo results: restored files, files changed since replacement
+/// and left alone, and write failures.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UndoReport {
     pub restored: Vec<String>,
@@ -180,7 +164,7 @@ pub struct UndoReport {
     pub failed: Vec<(String, String)>,
 }
 
-/// What it actually did.
+/// Completed moves and rewrites, including failures.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RenameReport {
     /// The moves that happened: all of the plan's, unless one failed.
@@ -193,22 +177,20 @@ pub struct RenameReport {
     pub failed: Vec<(String, String)>,
 }
 
-/// What following a PDF's page edit did to the notes that link into it, in the shape
-/// [`RenameReport`] has.
+/// Note-link rewrites after a PDF page edit, following [`RenameReport`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RepageReport {
     /// The notes rewritten.
     pub rewritten: Vec<String>,
     /// How many links now name another page.
     pub moved: usize,
-    /// The links left naming the page a delete took out, which the Undo of that delete hands back
-    /// to keep.
+    /// Links still naming deleted pages, retained so undo can restore them.
     pub left: Vec<KeptLink>,
     pub failed: Vec<(String, String)>,
 }
 
-/// A link a page edit left where it was ([`accent_core::markdown::Repaged::left`]): its note,
-/// its anchor (`page=N&…`), and which of that note's links into the PDF with that anchor it is.
+/// A link unchanged by a page edit ([`accent_core::markdown::Repaged::left`]):
+/// its note, `page=N&…` anchor and occurrence among that note's matching PDF links.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeptLink {
     pub note: String,
@@ -216,10 +198,8 @@ pub struct KeptLink {
     pub nth: usize,
 }
 
-/// Take a lock, ignoring poison.
-///
-/// A panic in one query must not take the whole vault down with it, so a poisoned lock is used
-/// rather than propagated: everything behind one here is a cache the next query rebuilds.
+/// Acquire a lock despite poisoning. These locks protect rebuildable caches,
+/// so a query panic must not make the whole vault unusable.
 pub(crate) fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }

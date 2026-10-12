@@ -1,4 +1,4 @@
-//! What the drills read off a comparison, and the presses they make on it.
+//! Comparison state and actions exposed to drills.
 
 use accent_core::diff;
 use adw::prelude::*;
@@ -8,8 +8,8 @@ use super::links::Ends;
 use super::{Compare, Side, first_change};
 
 impl Compare {
-    /// How many pixels lower the right column starts than the left one in the window: 0 is the
-    /// claim, and what [`Compare::misaligned`] cannot see, being in buffer coordinates.
+    /// Right-minus-left column start in window pixels; expected zero.
+    /// [`Compare::misaligned`] uses buffer coordinates and cannot detect this.
     pub fn skew(&self) -> i32 {
         let top = |side: Side| {
             self.pane(side)
@@ -20,16 +20,15 @@ impl Compare {
         (top(Side::New) - top(Side::Old)).round() as i32
     }
 
-    /// Whether the rows are laid and the view is where the comparison was keeping it: what a drill
-    /// waits for before it acts on a comparison just opened.
+    /// Whether rows and saved viewport position have settled before a drill acts.
     pub fn settled(&self) -> bool {
         self.asked.get().is_none()
             && self.columns.keep.get().is_none()
             && self.columns.pending.borrow().is_none()
     }
 
-    /// Whether the first hunk's first line is inside its view right now, on the first side that
-    /// has a line in it: what a comparison has to open on.
+    /// Whether the first hunk is visible on its first nonempty side,
+    /// the required opening position.
     pub fn first_hunk_on_screen(&self) -> bool {
         let Some((side, at)) = self.first_hunk_line() else {
             return false;
@@ -58,8 +57,8 @@ impl Compare {
         })
     }
 
-    /// Where the first hunk's lines and the ones after it start, as GTK lays them out: the row,
-    /// then the old and the new side's `y`, `None` where a side has no visible line in the row.
+    /// GTK y positions of first-hunk and following rows, old/new per row.
+    /// `None` means no visible line on that side.
     pub fn first_hunk_tops(&self) -> Vec<(usize, Option<i32>, Option<i32>)> {
         let hunk = {
             let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
@@ -107,15 +106,14 @@ impl Compare {
         first_change(&lines, &rows, &self.starts.borrow()[side.idx()], side)
     }
 
-    /// How many rows GTK lays out at a different height than the last relayout meant them to
-    /// have, on either side: the number the alignment stands or falls on, and 0 is the claim.
+    /// Count rows differing from intended alignment height; expected zero.
     pub fn misaligned(&self) -> usize {
         self.columns.misaligned()
     }
 
-    /// The rows on screen whose two lines GTK draws at different heights right now, and the first
-    /// of them spelled out (`row:old_y/new_y`, below the top of the view). `None` while an edit has
-    /// not been laid over yet, when the rows say nothing about the text.
+    /// Count visible rows whose peer lines have unequal GTK heights and
+    /// describe the first as `row:old_y/new_y` relative to viewport top.
+    /// `None` while an edit leaves the row mapping stale.
     pub fn uneven(&self) -> Option<(usize, String)> {
         let (lines, rows, starts) = (
             self.lines.borrow(),
@@ -170,8 +168,8 @@ impl Compare {
         Some((count, first))
     }
 
-    /// The first row [`Compare::misaligned`] counts, spelled out: which row and side, what the
-    /// relayout expected, what GTK laid out, and the line. For the bench to print.
+    /// Describe the first [`Compare::misaligned`] row: side, expected and
+    /// actual GTK positions, and line text.
     pub fn first_misaligned(&self) -> Option<String> {
         let rows = self.rows.borrow().len();
         (0..rows)
@@ -226,8 +224,7 @@ impl Compare {
 }
 
 impl Columns {
-    /// How many rows GTK lays out at a different height than the last relayout meant them to
-    /// have, in any column: the number the alignment stands or falls on, and 0 is the claim.
+    /// Count rows differing from intended height in any column; expected zero.
     pub(super) fn misaligned(&self) -> usize {
         let rows = self.rows.borrow().changed.len();
         if self.grid.borrow().tops.len() != rows {
@@ -242,9 +239,8 @@ impl Columns {
             .count()
     }
 
-    /// Row `r`'s line in column `c` as laid out: where the last relayout meant it to start, where
-    /// GTK put it, its own height and its row's, in buffer pixels. `None` where the column has no
-    /// line there.
+    /// Return row `r`/column `c` intended and GTK y positions, line height
+    /// and row height in buffer pixels. `None` when the column has no line.
     pub(super) fn laid(&self, r: usize, c: usize) -> Option<(i32, i32, i32, i32)> {
         let (rows, grid) = (self.rows.borrow(), self.grid.borrow());
         let own = grid.heights[c].get(r).copied().flatten()?;
@@ -279,10 +275,9 @@ impl Columns {
         buttons
     }
 
-    /// The strips as laid now: how wide the columns and the strips are, where the buttons on
-    /// screen are against the columns (`over=0`, none on a column, is the claim), how many of them
-    /// are not at the top of their bands (`stale=0`), and how many connector ends are off the rows
-    /// they stand on (`links_off=0`).
+    /// Return strip geometry and alignment counts: `over=0` for buttons
+    /// over columns, `stale=0` for misplaced buttons and `links_off=0` for
+    /// connector endpoints missing their rows.
     pub(super) fn strip(&self) -> String {
         let (columns, strips) = self.links.widths();
         let (buttons, rects, over, stale) = self.links.rects(self);
@@ -293,9 +288,9 @@ impl Columns {
         )
     }
 
-    /// Each connector's ends, as `(top, bottom)` on its strip's left and on its right, by strip,
-    /// in the drawing's pixels, and how many of those ends are not where GTK draws the line of the
-    /// row they stand on: 0 is the claim, what [`Columns::misaligned`] is to the rows.
+    /// Connector `(top, bottom)` endpoints per strip side in drawing pixels,
+    /// plus count not matching GTK row positions; expected zero, as with
+    /// [`Columns::misaligned`] for rows.
     pub(super) fn links_check(&self) -> (Vec<Vec<Ends>>, usize) {
         let ends: Vec<Vec<Ends>> = (0..self.panes.len() - 1)
             .map(|i| self.links.ends(i, self))

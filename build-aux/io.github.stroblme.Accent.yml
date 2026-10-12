@@ -37,6 +37,41 @@ modules:
         url: https://download.gnome.org/sources/libspelling/0.4/libspelling-0.4.10.tar.xz
         sha256: 56e3f01a3a18b575beea4c34349f99cdaba316e1f7c271b1231f7bcf5d9af73b
 
+  # The runtime has no libvte-2.91-gtk4 either. These three are Ptyxis's Flathub modules.
+  - name: fast_float
+    buildsystem: cmake-ninja
+    sources:
+      - type: git
+        url: https://github.com/fastfloat/fast_float.git
+        tag: v8.2.5
+        commit: 05087a303dad9c98768b33c829d398223a649bc6
+
+  - name: simdutf
+    buildsystem: cmake-ninja
+    # Its tests are some 200 targets, a good part of the whole Flatpak build.
+    config-opts:
+      - -DSIMDUTF_TESTS=OFF
+      - -DSIMDUTF_TOOLS=OFF
+    sources:
+      - type: git
+        url: https://github.com/simdutf/simdutf.git
+        tag: v9.0.0
+        commit: ca7acbcea967b5dcbab490066e99e3a6e6925539
+
+  - name: vte
+    buildsystem: meson
+    config-opts:
+      - --buildtype=release
+      - -Dgtk3=false
+      - -Dgtk4=true
+      - -Dglade=false
+      - -Dgir=false
+      - -Dvapi=false
+    sources:
+      - type: archive
+        url: https://download.gnome.org/sources/vte/0.84/vte-0.84.0.tar.xz
+        sha256: 0414e31583836aeb7878da25f67c515f7e8879917ecc37c92e26b83e8d8fc3e3
+
   # Cargo feature `pdf`. pdfium-render dlopen()s libpdfium.so at runtime and accent-core looks
   # next to the binary first (crates/core/src/pdf.rs), so /app/bin/accent finds /app/lib/accent
   # with no environment variable. Build 8076 matches what `make pdfium` puts in vendor/pdfium.
@@ -88,6 +123,7 @@ modules:
           - target
           - testvault
           - testvault-external
-          - vendor
+          # `make pdfium`'s download; the module above brings the library. vendor/mermaid is source.
+          - vendor/pdfium
       # Regenerate whenever Cargo.lock changes, see the command in the repo README/report.
       - cargo-sources.json

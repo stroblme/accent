@@ -1,5 +1,4 @@
-//! What a press on the canvas takes hold of, and what the drag it starts asks of the diagram
-//! when it ends.
+//! Canvas drag initiation and release edits.
 
 use accent_drawio::geom::rotate;
 use accent_drawio::guide::{self, Neighbour};
@@ -452,9 +451,8 @@ impl DiagramView {
         }
     }
 
-    /// The edit a drag's release makes of `edit`, what it asked for as the pointer went: a
-    /// segment's waypoints become the corners of the route through them
-    /// (`mxEdgeSegmentHandler.updatePreviewState`), or the route jumps on release.
+    /// Finalize the preview edit by converting segment waypoints to routed corners
+    /// (`mxEdgeSegmentHandler.updatePreviewState`), preventing a route jump on release.
     fn settled(&self, drag: &Drag, edit: Edit, p: Point, free: bool) -> Edit {
         let Drag::Knob {
             id,

@@ -1,11 +1,7 @@
-//! Organising a document's pages from the thumbnail strip: a thumbnail dragged along it moves its
-//! page, and the thumbnail under the pointer carries two buttons — Delete Page at its corner and
-//! Insert Page Here on the gap below it.
+//! Move, delete and insert pages through the thumbnail strip.
 //!
-//! They float over the strip in an overlay, which is what the Outline pane is handed. The strip
-//! is one canvas (`PdfView`), so a thumbnail is a rectangle of it rather than a widget, and what
-//! is over which page is worked out from its layout (`PdfView::placement`). The buttons fade in
-//! the way the Git pane's rows reveal theirs.
+//! The strip is one `PdfView` canvas, so layout rectangles determine thumbnail targets.
+//! Overlay buttons provide Delete Page and Insert Page Here, fading in like Git row actions.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -184,11 +180,9 @@ impl PdfTab {
         self.wire_page_drag();
     }
 
-    /// A thumbnail dragged along the strip and dropped into a gap moves its page there.
-    ///
-    /// The drag carries the page's number, and the strip takes a drop only of its own drag: the
-    /// number is nothing to another document. A drop beside where the page already is moves
-    /// nothing, and says so while the drag is still over it.
+    /// Move a page dropped into a strip gap. Accept only this strip's drag because page numbers
+    /// belong to its document. Indicate no-op drops beside the original position during the
+    /// drag.
     fn wire_page_drag(self: &Rc<Self>) {
         let source = gtk::DragSource::builder()
             .actions(gdk::DragAction::MOVE)

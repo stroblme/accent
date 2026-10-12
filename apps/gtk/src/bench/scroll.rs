@@ -3,21 +3,14 @@
 
 use super::*;
 
-/// `ACCENT_BENCH_SCROLL=<rel_dir>`: scroll each list half way down, put the keyboard on a row on
-/// screen as a click does, change the vault under it from outside the app, and print where the
-/// list is and whether it still has the keyboard after each change.
+/// `ACCENT_BENCH_SCROLL=<rel_dir>` checks scroll and keyboard retention across tree,
+/// Git, Search and Tags updates. Use a scratch vault and a folder of about 100 files;
+/// setup creates a repository ignoring `*.tmp`, 80 commits and 60 changed files.
 ///
-/// It makes the vault a repository ignoring `*.tmp` with 80 commits, so point it at a scratch
-/// vault, and at a folder of a hundred files or so: the tree is scrolled with that folder open,
-/// and 60 of its files are changed for the Git pane's Changes. The Files half makes a file git
-/// ignores, which redraws every row, then two files at once, sorting first and last in the
-/// folder, so the tree's splice spans the row with the keyboard, edits one and removes all three.
-/// The Git half asks for a refresh that finds nothing new, stages a file below the rows on
-/// screen, clicks the Stage button of one on screen, whose row leaves Changes, and commits with
-/// the keyboard on a history row, which replaces the whole page. Last the Search pane, with the
-/// keyboard on a result of `calibration` when a note holding the word is made, and the Tags
-/// section, with it on a tag when a note with a new one is. On a remote vault the changes are made on the
-/// host, over the vault's own ssh master.
+/// With each list scrolled halfway and a row focused, insert/edit/remove tree entries,
+/// refresh/stage/commit Git changes, add a `calibration` search hit and add a tag.
+/// Print position and focus after each change. Remote writes run on the host through
+/// the vault's SSH master.
 pub(super) fn bench_scroll(app: &Rc<App>, dir: &str) {
     scratch_only(app, "ACCENT_BENCH_SCROLL");
     let (app, dir) = (app.clone(), dir.to_string());

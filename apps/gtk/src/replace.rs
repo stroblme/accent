@@ -3,14 +3,11 @@
 use super::*;
 
 impl App {
-    /// Rewrite every match of `re` in the vault, from the sidebar's Replace All.
+    /// Replace every vault match of `re` from the sidebar's Replace All.
     ///
-    /// Open tabs are saved first: the vault writes through the etag gate, so an unsaved buffer
-    /// would come back as a changed-on-disk banner instead of a replacement. That part is the
-    /// main loop's, and so is the reload afterwards; the rewrite between them is not. It is a
-    /// read, a substitution and an fsync per file — 1.9 s across 245 notes and 35 s across 3.3k
-    /// of them, measured on the generated vault — so it goes to a worker thread and `done` hands
-    /// the sidebar back its pane when it lands.
+    /// Save open tabs first to avoid etag conflicts with unsaved buffers; reload them afterwards.
+    /// These steps run on the main loop, while reads, substitutions and fsyncs run on a worker.
+    /// `done` restores the sidebar when the rewrite finishes.
     pub fn replace_in_files(
         self: &Rc<Self>,
         query: String,
@@ -71,11 +68,8 @@ impl App {
         });
     }
 
-    /// Put back what the last Replace All rewrote: the Undo on the toast it left.
-    ///
-    /// Open tabs are saved first, as before the rewrite, so a note edited in one since counts as
-    /// changed and is left alone rather than written over. The files it did put back are then
-    /// reloaded, and the Search pane asks its question again, since its rows are the rewrite's.
+    /// Undo the last Replace All after saving open tabs.
+    /// Skip files edited since replacement, reload restored files and refresh Search results.
     pub fn undo_replace(self: &Rc<Self>) {
         let (Some(vault), Some(ops)) = (self.vault().cloned(), self.ops().cloned()) else {
             return;
@@ -102,8 +96,7 @@ impl App {
     }
 }
 
-/// What the toast says after a Replace All: what it wrote, what it could not, and what is still
-/// showing the old text because its tab has unsaved edits. Same shape as `fileops::rename_message`.
+/// Summarise Replace All writes, failures and tabs retaining unsaved text, matching file-operation messages.
 fn replace_message(
     matches: usize,
     files: usize,
@@ -138,8 +131,7 @@ fn replace_message(
     message
 }
 
-/// What an Undo on the Replace All toast did. A file changed since the rewrite was left alone,
-/// and one such file is named, since the reader may want to go and look at it.
+/// Summarise Undo, naming one file skipped because it changed since replacement.
 fn undo_message(report: &accent_api::UndoReport) -> String {
     let mut parts = Vec::new();
     match report.restored.len() {

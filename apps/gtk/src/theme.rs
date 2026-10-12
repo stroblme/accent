@@ -1,25 +1,16 @@
-//! The window's colour scheme: System, Light, Dark and Solarized.
+//! System, Light, Dark and Solarized colour schemes.
 //!
-//! The first three are libadwaita's own, set through `AdwStyleManager`. Solarized is ours, and it
-//! is the only place in the app where a colour is written out as a literal: libadwaita 1.7
-//! declares `--window-bg-color` and friends on `:root` at theme priority and resolves every one of
-//! its own rules through `var()`, so a provider of ours at `STYLE_PROVIDER_PRIORITY_APPLICATION`
-//! that redeclares those variables recolours the whole window without touching a single widget.
-//! Application priority rather than user priority on purpose: the user's own
-//! `~/.config/gtk-4.0/gtk.css` must still win over ours.
-//!
-//! Solarized deliberately changes only the surfaces and the text on them. Accents, shades and
-//! borders keep coming from GNOME, so DESIGN.md's one-accent rule holds in every theme and the
-//! seven system accents all still work.
+//! Libadwaita supplies the first three. Solarized overrides its CSS variables at application
+//! priority, recolouring surfaces and text while allowing user CSS to win. GNOME still
+//! supplies accents, shades and borders, preserving the one-accent rule and system accents.
 
 use accent_core::config::{RecolourConfig, Theme};
 pub use accent_core::recolour::Page;
 use gtk::gdk;
 use std::cell::{Cell, RefCell};
 
-/// Ethan Schoonover's Solarized: `base3` / `base2` / `base00` in light, `base03` / `base02` /
-/// `base0` in dark. The first of each pair is the flat background every surface shares, the
-/// second the one raised surfaces (popovers, dialogs, cards) sit on.
+/// Ethan Schoonover's Solarized light and dark bases: flat background, raised background and text.
+/// Flat surfaces use base3/base03; floating surfaces use base2/base02.
 const LIGHT_BASE: &str = "#fdf6e3";
 const LIGHT_RAISED: &str = "#eee8d5";
 const LIGHT_TEXT: &str = "#657b83";
@@ -36,18 +27,14 @@ const VIEW_DARK: &str = "#1d1d20";
 /// spelled out: every widget gets it from `--view-fg-color`, but a rendered page is pixels.
 const VIEW_DARK_TEXT: &str = "#ebebeb";
 
-/// The light half of the same pair, pre-composited. libadwaita's light `--view-fg-color` is
-/// `RGB(0 0 6 / 80%)`, and VTE stores a foreground as opaque RGB and drops the alpha, so handing it
-/// the translucent value would paint pure black — blacker than every other piece of text in the
-/// window. Over `VIEW_LIGHT` that is `0×0.8 + 255×0.2 = 0x33` and `6×0.8 + 255×0.2 = 0x38`.
+/// Precomposite libadwaita's translucent Light text colour over white.
+/// VTE discards alpha, so passing raw RGB would make terminal text darker than other widgets.
 const VIEW_LIGHT_TEXT: &str = "#333338";
 
-/// The sixteen ANSI colours a terminal is handed, in the usual order: black, red, green, yellow,
-/// blue, magenta, cyan, white, then the bright eight.
+/// Sixteen ANSI colours in standard order, followed by their bright variants.
 ///
-/// Ayu, by Ivan Demchenko (MIT), transcribed from `mbadolato/iTerm2-Color-Schemes` (MIT). VTE's
-/// built-in default is arithmetic rather than designed — its blue is `#0000c0`, which on
-/// `VIEW_DARK` is a 1.41:1 contrast ratio and unreadable.
+/// Ayu by Ivan Demchenko (MIT), from `mbadolato/iTerm2-Color-Schemes` (MIT). VTE's default blue
+/// has only 1.41:1 contrast on `VIEW_DARK`, so the terminal needs a designed palette.
 const AYU_DARK_ANSI: [&str; 16] = [
     "#11151c", "#ea6c73", "#7fd962", "#f9af4f", "#53bdfa", "#cda1fa", "#90e1c6", "#c7c7c7",
     "#686868", "#f07178", "#aad94c", "#ffb454", "#59c2ff", "#d2a6ff", "#95e6cb", "#ffffff",
@@ -57,8 +44,7 @@ const AYU_LIGHT_ANSI: [&str; 16] = [
     "#000000", "#ea6c6d", "#6cbf43", "#eca944", "#3199e1", "#9e75c7", "#46ba94", "#bababa",
     "#686868", "#f07171", "#86b300", "#f2ae49", "#399ee6", "#a37acc", "#4cbf99", "#d1d1d1",
 ];
-/// Solarized's own ANSI-16 mapping, on both of its bases: Schoonover defines one palette and lets
-/// the background decide which end of it reads as foreground.
+/// Solarized ANSI palette shared by light and dark bases; background determines which end reads as foreground.
 const SOLARIZED_ANSI: [&str; 16] = [
     "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
     "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
@@ -93,12 +79,10 @@ thread_local! {
     };
 }
 
-/// Put `theme` on screen: the colour scheme libadwaita understands, plus our own variables when
-/// the answer is Solarized.
+/// Apply libadwaita's colour scheme and Solarized variables when selected.
 ///
-/// Every window asks, as it is built and on each dark or accent notify, so the provider is
-/// swapped only when the half it would hold differs from the one it holds: a swap restyles every
-/// widget in every window.
+/// Swap providers only when the theme half changes: replacing one restyles every widget
+/// in every window, and each window asks on construction and theme notifications.
 pub fn apply(theme: Theme) {
     CHOICE.set(theme);
     adw::StyleManager::default().set_color_scheme(match theme {
@@ -133,8 +117,7 @@ pub fn apply(theme: Theme) {
     });
 }
 
-/// The system flipped between light and dark: Solarized has to swap which half of its palette is
-/// installed, and the other themes have nothing to do.
+/// Switch Solarized palette halves after system light/dark changes; other schemes need no action.
 pub fn refresh() {
     apply(CHOICE.get());
 }
@@ -143,8 +126,7 @@ fn is_dark() -> bool {
     adw::StyleManager::default().is_dark()
 }
 
-/// Whether Solarized is on screen, for the one number that is not a colour and still differs by
-/// theme: the contrast floor dim text is held above (`highlight::dim`).
+/// Whether Solarized is active, selecting its dim-text contrast floor in highlight::dim.
 pub fn solarized() -> bool {
     CHOICE.get() == Theme::Solarized
 }
@@ -160,11 +142,8 @@ pub fn view_bg(dark: bool) -> &'static str {
     }
 }
 
-/// The ink on that background, for the one widget that cannot read `--view-fg-color`: a
-/// `VteTerminal` is coloured by libvte's own widget rule (`color: @theme_text_color`), and that
-/// legacy named colour is what libadwaita's CSS variables are derived *from*, so redeclaring them
-/// the way Solarized does cannot flow back into it. Written as the mirror of `view_bg` on purpose:
-/// the pair can no longer disagree, which is what left the foreground behind on a theme change.
+/// Resolve theme foreground for VTE, whose legacy named colour bypasses Solarized CSS variables.
+/// Pair with view_bg so foreground and background change together.
 pub fn view_fg(dark: bool) -> &'static str {
     match (CHOICE.get(), dark) {
         (Theme::Solarized, true) => DARK_TEXT,
@@ -174,9 +153,7 @@ pub fn view_fg(dark: bool) -> &'static str {
     }
 }
 
-/// The page a note is printed or exported onto, and its ink: Light's view whatever the theme on
-/// screen, since paper is white and a printout or a shared file is read away from the window. The
-/// ink is the pre-composited one, so text reaches the page solid rather than as translucent black.
+/// White paper and opaque precomposited ink for print/export, independent of screen theme.
 pub fn paper() -> (&'static str, gdk::RGBA) {
     (VIEW_LIGHT, rgba(rgb(VIEW_LIGHT_TEXT), 1.0))
 }
@@ -190,13 +167,10 @@ pub fn terminal_palette(dark: bool) -> &'static [&'static str; 16] {
     }
 }
 
-/// The paper and ink a PDF page or a document-like image is recoloured onto, or `None` to leave
-/// it exactly as the file defines it.
+/// Return paper and ink for PDF or document-image recolouring, or `None` to preserve the file.
 ///
-/// A light theme leaves a page alone: white paper on a white view is what the author intended
-/// and what a printout looks like. Every other theme is asking for the page to belong to the
-/// window, so it is remapped — which is also how Solarized gets its cream paper rather than a
-/// white rectangle in the middle of a cream window.
+/// Light leaves author-defined pages unchanged. Other themes remap pages to their surfaces,
+/// including Solarized's cream paper.
 pub fn page_colours(dark: bool) -> Option<Page> {
     match (CHOICE.get(), dark) {
         (Theme::Solarized, true) => Some((rgb(DARK_BASE), rgb(DARK_TEXT))),
@@ -216,20 +190,16 @@ pub fn recolour() -> RecolourConfig {
     RECOLOUR.get()
 }
 
-/// The page a file is shown on under the half on screen, or `None` to show it as it is: `auto`
-/// is whether its kind is recoloured ([`recolour`]) and `inverted` whether the reader inverted it
-/// (`accent_core::recolour::onto`). The image loader takes the same two pages into its look.
+/// Choose recolouring paper for `auto` and `inverted`, or `None` to preserve the file.
+/// Use accent_core::recolour::onto; image loading shares the same theme halves.
 pub fn onto(auto: bool, inverted: bool) -> Option<Page> {
     let dark = is_dark();
     accent_core::recolour::onto(auto, inverted, page_colours(dark), page_colours(!dark))
 }
 
-/// How strongly what the reader is doing to a PDF page is painted over it: a note's highlight,
-/// the text selection, a search match and the one being stepped to, the ghost of a stroke the
-/// Adjust tool is moving, and the hairline that tells white paper from a white window.
+/// Opacity for PDF overlays: highlights, selection, search, adjusted strokes and page borders.
 ///
-/// Here rather than in the widget that paints them, because this file is the one that says what
-/// a colour is (DESIGN.md, Colour) and an alpha is half of one.
+/// Keep alpha values with colour definitions in `theme.rs` to follow DESIGN.md's colour rule.
 pub const HIGHLIGHT_ALPHA: f32 = 0.2;
 pub const SELECTION_ALPHA: f32 = 0.35;
 pub const MARK_ALPHA: f32 = 0.3;
@@ -239,10 +209,8 @@ pub const PAGE_EDGE_ALPHA: f32 = 0.15;
 /// A diagram's grid over its paper, in the ink that reads on it: draw.io's `#e6e6e6` on white.
 pub const GRID_ALPHA: f32 = 0.1;
 
-/// libadwaita's text selection as its stylesheet writes it: the accent at 30 % while the text has
-/// the keyboard (`selection:focus-within`), the text colour at 10 % when it does not. GTK paints
-/// the primary caret's selection from that rule, and a column's other carets are painted to match
-/// (`multicaret::View::selection_colour`).
+/// Selection opacity matching libadwaita: 30 % accent while focused, 10 % foreground otherwise.
+/// Custom secondary selections match GTK's primary selection.
 pub const TEXT_SELECTION_ALPHA: f32 = 0.3;
 pub const UNFOCUSED_SELECTION_ALPHA: f32 = 0.1;
 
@@ -250,23 +218,17 @@ pub const UNFOCUSED_SELECTION_ALPHA: f32 = 0.1;
 /// this is about how strong the colour is, not about whether the text survives.
 pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
 
-/// The minimap's words, in the foreground at this alpha so a page of them reads as grey under
-/// the text beside it, those the editor dims at the second, and those it writes in the accent in
-/// the accent at the third; and the band over the lines on screen, at rest and under the pointer
-/// or a drag.
+/// Minimap normal/dim/accent word opacities and idle/hovered-or-dragged band opacities.
 pub const MAP_INK_ALPHA: f32 = 0.45;
 pub const MAP_DIM_ALPHA: f32 = 0.2;
 pub const MAP_ACCENT_ALPHA: f32 = 0.8;
 pub const MAP_BAND_ALPHA: f32 = 0.08;
 pub const MAP_BAND_HOVER_ALPHA: f32 = 0.16;
 
-/// A conflict block's incoming side and its marker line over `page` where the theme has a blue of
-/// its own for it, or `None` for the one derived from the foreground (`conflict::tints`).
+/// Override incoming-conflict tints for Solarized Light, or use derived foreground tints.
 ///
-/// Solarized's light page only: its cream cancels a light wash of the derived blue, mixed with an
-/// ink that is a blue-grey itself, into grey. Solarized's own blue, the terminal's, reads there at
-/// a little more strength, which its ink allows: base00 keeps 3.3:1 on the side and 3.0:1 on the
-/// marker line, against its own 4.1:1 on the page.
+/// The derived blue becomes grey on cream paper. Solarized's stronger blue preserves
+/// readable ink: 3.3:1 on the side and 3.0:1 on its marker line.
 pub fn incoming_on(page: gdk::RGBA) -> Option<(gdk::RGBA, gdk::RGBA)> {
     let blue = rgb(SOLARIZED_ANSI[4]);
     (rgb_of(page) == rgb(LIGHT_BASE)).then(|| (rgba(blue, 0.2), rgba(blue, 0.27)))
@@ -301,12 +263,10 @@ pub fn accent() -> gdk::RGBA {
     adw::StyleManager::default().accent_color_rgba()
 }
 
-/// The system accent as bytes, for the two places a colour has to end up inside a file rather
-/// than on screen: a highlight's `/C` and an ink stroke's colour.
+/// Resolve system accent bytes for PDF highlight `/C` values and ink strokes.
 ///
-/// The same exception a rendered page already is — pixels in a PDF cannot read a CSS variable —
-/// so the value is resolved here and handed over, and this stays the only file that says what a
-/// colour is.
+/// File content cannot read CSS variables, so theme colour resolution happens here before
+/// serialisation.
 pub fn accent_rgb() -> [u8; 3] {
     rgb_of(accent())
 }
@@ -316,10 +276,8 @@ pub fn rgb_of(c: gdk::RGBA) -> [u8; 3] {
     [byte(c.red()), byte(c.green()), byte(c.blue())]
 }
 
-/// The six colours the ring offers for ink: the accent — `None`, resolved when a stroke is
-/// written, so a tool left on it follows the system — four hues around the wheel from it on the
-/// CSV columns' rule (DESIGN.md, Colour), and black, the one literal, which is why this lives
-/// here.
+/// Six ink choices: dynamic system accent (`None`), four CSV-wheel hues and black.
+/// Resolve accent when writing strokes so selected tools follow system changes.
 pub fn swatches() -> [Option<[u8; 3]>; 6] {
     let c = accent();
     let hsv = gtk::rgb_to_hsv(c.red(), c.green(), c.blue());
@@ -342,9 +300,8 @@ fn rgb(hex: &str) -> [u8; 3] {
     [byte(1), byte(3), byte(5)]
 }
 
-/// The GtkSourceView style scheme for the editor. GtkSourceView paints its background from the
-/// scheme rather than from GTK CSS, so this is the one widget that has to be told about Solarized
-/// by name; both schemes ship with gtksourceview 5.
+/// Select GtkSourceView scheme, explicitly naming shipped Solarized variants.
+/// The widget reads scheme backgrounds rather than GTK CSS.
 pub fn scheme_id(dark: bool) -> &'static str {
     match (CHOICE.get(), dark) {
         (Theme::Solarized, true) => "solarized-dark",
@@ -396,9 +353,7 @@ mod tests {
         assert!(dark.contains("--popover-bg-color: #073642;"), "{dark}");
     }
 
-    /// The regression the terminal had: its background was a pure function of the theme and its
-    /// foreground was read off resolved CSS, which is blind to Solarized, so a theme change moved
-    /// one and not the other.
+    /// Verify terminal foreground and background change together even when legacy CSS misses Solarized.
     #[test]
     fn terminal_foreground_follows_the_theme() {
         CHOICE.set(Theme::Solarized);
@@ -423,10 +378,8 @@ mod tests {
         (x.max(y) + 0.05) / (x.min(y) + 0.05)
     }
 
-    /// The reported bug was dark-mode readability — VTE's own blue is `#0000c0`, which scores 1.41
-    /// here — so that is what the floor guards, and only there. Ayu Light and Solarized are
-    /// deliberately low-contrast designs that fail a 3.0 floor on their authors' own values (Ayu
-    /// Light's yellow is 2.03 on white, Solarized's green 2.97 on `base3`); they ship verbatim.
+    /// Guard dark terminal readability, where VTE default blue has 1.41:1 contrast.
+    /// Preserve author palettes for Ayu Light and Solarized, whose values intentionally fall below 3:1.
     #[test]
     fn the_dark_palette_is_readable_on_its_background() {
         for (i, colour) in AYU_DARK_ANSI.iter().enumerate() {

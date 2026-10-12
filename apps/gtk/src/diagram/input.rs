@@ -1,5 +1,4 @@
-//! What reaches a diagram tab from the canvas besides a gesture: the menu on a secondary click,
-//! the keys, which fire the window's actions, and a wheel pushed on past the page's edge.
+//! Diagram context menus, action keys and page-turning scroll overshoot.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -12,9 +11,8 @@ use super::geometry::Overshoot;
 use super::{DiagramTab, Tool};
 
 impl DiagramTab {
-    /// The canvas's own menu on a secondary click, as a PDF page has one: the cell under the
-    /// pointer is selected first unless it is already, and empty page lets the selection go, as
-    /// draw.io's `mxPopupMenuHandler` does.
+    /// Select the right-clicked cell unless already selected, or clear selection on
+    /// empty space, matching draw.io's `mxPopupMenuHandler`.
     pub(super) fn wire_menu(self: &Rc<Self>) {
         let secondary = gtk::GestureClick::builder()
             .button(gdk::BUTTON_SECONDARY)
@@ -95,9 +93,8 @@ impl DiagramTab {
         crate::widgets::popup_menu(&host, &menu, Some(anchor));
     }
 
-    /// The canvas's keys. Undo, Select All and Delete belong to whatever has the keyboard, so
-    /// they are the canvas's own and fire the window's actions rather than being accelerators
-    /// (the PDF doctrine, `actions.rs`).
+    /// Route canvas keys to window actions. Undo, Select All and Delete are local
+    /// handlers so they act on the focused widget rather than global accelerators.
     pub(super) fn wire_keys(self: &Rc<Self>) {
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(glib::clone!(

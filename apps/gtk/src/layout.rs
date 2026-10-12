@@ -44,10 +44,8 @@ impl Mode {
     }
 }
 
-/// Below this width the sidebar steps aside for the note: the default sidebar (280 px) beside the
-/// narrowest cap the note's column ever gets (`COLUMN_FLOOR`, 480 px), under which the clamp stops
-/// applying and the text takes whatever width is left. In `sp`, so a larger interface text size
-/// collapses it sooner, as it makes the sidebar's rows wider.
+/// Sidebar collapse width in sp: 280 px sidebar plus the 480 px column floor.
+/// Larger interface fonts collapse sooner because sidebar rows grow.
 const COLLAPSE: f64 = 760.0;
 
 /// What leaving presentation mode has to put back. The window's size is not part of it: F5 only
@@ -64,10 +62,8 @@ thread_local! {
     static LIFT: RefCell<Option<(gtk::CssProvider, i32)>> = const { RefCell::new(None) };
 }
 
-/// What a window narrower than [`COLLAPSE`] puts back when it widens: whether the sidebar was up,
-/// and where the divider was. The divider has to be kept as well as the sidebar, because
-/// `GtkPaned` clamps it to a window narrower than it, and a dragged 400 px came back as 349 from a
-/// 350 px window.
+/// Remember sidebar visibility and divider width while the window is collapsed.
+/// GtkPaned clamps positions in narrow windows, so visibility alone cannot restore the chosen width.
 #[derive(Clone, Copy)]
 pub struct Collapsed {
     sidebar: bool,
@@ -75,9 +71,8 @@ pub struct Collapsed {
 }
 
 impl App {
-    /// Hide the sidebar while the window is narrower than [`COLLAPSE`], where `AdwOverlaySplitView`
-    /// would have collapsed it, and put back what was there, at the width it was dragged to, on the
-    /// way up. F9 still shows the sidebar while collapsed, beside the note rather than over it.
+    /// Hide sidebar below [`COLLAPSE`] and restore its prior width when widening.
+    /// F9 can still show it beside the note while collapsed.
     pub(crate) fn install_collapse(self: &Rc<Self>) {
         let condition = adw::BreakpointCondition::new_length(
             adw::BreakpointConditionLengthType::MaxWidth,
@@ -185,14 +180,12 @@ impl App {
         }
     }
 
-    /// What is on screen, and where the preview is. Split shows the preview beside the pane tree.
-    /// Presenting shows the active pane alone, where it is in the tree and without its tab bar,
-    /// whatever mode the user will come back to; a tab with a buffer is shown rendered, the
-    /// preview laid over the pane's tabs (`Pane::cover`), so the pane's find bar and its
-    /// `Ctrl+Tab` card go on being its own over the rendered note. A tab that draws its own
-    /// document — a PDF, a diagram, an image, a diff, a terminal — is the thing presented, as it
-    /// is, a PDF or a diagram fitted to a whole page meanwhile. Laid out again whenever another
-    /// tab comes to the front while presenting (`App::sync_active`).
+    /// Apply editor, split or presentation layout.
+    ///
+    /// Split places preview beside the pane tree. Presentation keeps only the active pane,
+    /// without its tab bar. Text uses a preview overlay (`Pane::cover`) so find and Ctrl+Tab stay
+    /// pane-local; other documents present themselves, fitting PDFs and diagrams to a page.
+    /// [`App::sync_active`] reapplies layout when the active tab changes during presentation.
     pub(crate) fn lay_out(self: &Rc<Self>) {
         let presenting = self.presenting.get().is_some();
         let active = self.pane();
@@ -247,11 +240,8 @@ impl App {
         }
     }
 
-    /// Put the handle back in the middle whenever the preview comes on screen. A `GtkPaned` keeps
-    /// whatever position it was left at, and one that has never been allocated has none at all, so
-    /// the editor's natural width could take the whole row and the preview open with nothing to
-    /// show: the "clicked the button and nothing happened" report. Presentation mode never hit it,
-    /// because there the preview is laid over the presented pane instead.
+    /// Centre the split when preview first appears.
+    /// An unallocated paned has no position, otherwise natural editor width can leave preview with no room.
     fn even_split(self: &Rc<Self>) {
         if self.centre_handle() {
             return;
@@ -280,11 +270,9 @@ impl App {
         self.mode.get() == Mode::Split || self.presenting.get().is_some()
     }
 
-    /// F5: the document alone, with the sidebar, the other panes, the tab bars and both header
-    /// bars gone. A state of the window rather than a [`Mode`], because it is a way of looking at
-    /// the current tab instead of a layout to work in, and it is deliberately not part of the
-    /// session: a window restored chromeless would be hard to get out of. [`App::lay_out`] says
-    /// what each kind of tab looks like meanwhile.
+    /// Present only the active document with F5.
+    /// This temporary window state is excluded from sessions so restored windows retain reachable chrome;
+    /// [`App::lay_out`] handles each document kind.
     pub fn set_presenting(self: &Rc<Self>, on: bool) {
         match (on, self.presenting.get()) {
             (true, None) => {
@@ -338,13 +326,10 @@ impl App {
         self.retarget_find(&self.pane());
     }
 
-    /// While presenting, the status bar shows for as long as the pointer is over the strip at the
-    /// bottom of the editor column where it sits, and goes again when it leaves. `at` is the
-    /// pointer in the window's coordinates, `None` once it has left the window.
+    /// Reveal the presentation status bar while `at` is over its bottom strip.
     ///
-    /// A menu opened from the bar keeps it, wherever the pointer goes to pick from it: the menu
-    /// is the bar's, and goes with it. Opening one takes the pointer, which the window hears as
-    /// the pointer leaving it.
+    /// `at` uses window coordinates; `None` means the pointer left. An open bar menu keeps the
+    /// bar visible because popovers take the pointer away from the window.
     pub fn hover_status(&self, at: Option<(f64, f64)>) {
         if self.presenting.get().is_none() {
             return;
@@ -366,14 +351,11 @@ impl App {
         self.lift_toasts(over.then_some(height));
     }
 
-    /// While presenting, the status bar's widget a fresh pick finds at `(x, y)` in `from`'s
-    /// coordinates, or `None` where the bar is not up there.
+    /// Pick the presentation status-bar widget at `(x, y)` in `from` coordinates, if present.
     ///
-    /// GTK aims a press at the widget the last motion was over. It moves a pointer at rest onto
-    /// what a layout change put under it with a motion of its own, but only once the surface's
-    /// frame is thawed, which a compositor's frame callback does and Xvfb or an X11 window
-    /// manager without frame sync never does: there the press beats it, and a bar that came up
-    /// under a resting pointer had its press go to the document beneath (`wire_window`).
+    /// GTK normally targets the last motion widget. On Xvfb or X11 without frame sync, a newly
+    /// revealed bar can receive a press before GTK updates that target. A fresh pick avoids
+    /// sending the press to the document beneath it.
     pub fn bar_widget_at(&self, from: &gtk::Widget, x: f64, y: f64) -> Option<gtk::Widget> {
         self.presenting.get()?;
         let point = from.compute_point(&self.window, &graphene::Point::new(x as f32, y as f32))?;
@@ -391,10 +373,8 @@ impl App {
         Some((x - dx, y - dy))
     }
 
-    /// Lift the toasts by `by` pixels, the status bar's height while it shows over a presented
-    /// document, or put them back down with `None`. A class over a rule written for that height,
-    /// so a toast that comes up while the bar shows goes up too, and the move eases over
-    /// `widgets::FADE_MS` (`build::install_chrome_css`).
+    /// Lift toasts by presentation status-bar height `by`, or reset with `None`.
+    /// A height-specific CSS class also positions later toasts, animating with widgets::FADE_MS.
     fn lift_toasts(&self, by: Option<i32>) {
         if let Some(by) = by {
             LIFT.with_borrow_mut(|lift| {
@@ -422,10 +402,8 @@ impl App {
         crate::widgets::set_class(self.toasts.widget(), "accent-lifted", by.is_some());
     }
 
-    /// Give the keyboard to what F5 shows, on F5 and on every tab a held `Ctrl+Tab` steps to, so
-    /// it reads its own keys as it does outside presentation: Space, Page Down, the arrows, Home
-    /// and End through the rendered note, a PDF or an image, typing into a shell. F5 and Escape
-    /// leave presentation ahead of it all the same (`wire::wire_window`).
+    /// Focus the presented document on F5 and tab cycling so its normal reading or shell keys work.
+    /// Window handlers still intercept F5 and Escape to leave presentation.
     pub(crate) fn focus_presented(&self) {
         let widget: gtk::Widget = match self.active_doc() {
             Some(Doc::Text(_)) => match self.preview.borrow().as_ref() {
@@ -443,11 +421,8 @@ impl App {
         });
     }
 
-    /// Let the preview go, out of sight for [`preview::idle_for`]: its web process ends with it,
-    /// the view having a `WebContext` of its own, and WebKit's network process too once no other
-    /// view is left. The next render that shows it builds another ([`App::ensure_preview`]) and
-    /// scrolls it to the caret, as any render does. [`App::lay_out`] calls the release off as
-    /// it shows the preview, so it never takes one on screen.
+    /// Release a hidden preview after [`preview::idle_for`], ending its private web process.
+    /// The next visible render rebuilds and scrolls to the caret. Showing cancels pending release.
     fn drop_preview(&self) {
         let Some(preview) = self.preview.take() else {
             return;
@@ -517,10 +492,8 @@ impl App {
         *self.preview.borrow_mut() = Some(preview);
     }
 
-    /// What a preview may read: a note's asset path to the vault file it names and that file on
-    /// this machine. The assets come through the vault, so a note's images load whether the file
-    /// is on this disk or on a host. A window with no vault has only loose notes, whose images the
-    /// preview reads beside them without asking (`preview::resolve_asset`).
+    /// Resolve preview assets through the vault to local files, downloading remote assets as needed.
+    /// Loose notes use their own folder through preview::resolve_asset.
     pub(crate) fn asset_resolver(&self) -> Arc<preview::Resolve> {
         let vault = self.vault().cloned();
         Arc::new(move |rel: &str| match &vault {
@@ -586,14 +559,10 @@ impl App {
         }
     }
 
-    /// What follows an edit into the tab in front, [`RENDER`] after the last keystroke: the
-    /// preview is re-rendered, and the status bar is asked for the word count again.
+    /// Debounce preview rendering and word counting together by [`RENDER`].
     ///
-    /// One timer for both, because they are the same question — what does the buffer say now.
-    /// The count used to be read only when a tab was opened or switched to, so a draft grew
-    /// under a number that never moved; counting per keystroke instead would copy the whole
-    /// buffer out on every key, and a number that settles a third of a second later reads the
-    /// same to anyone watching it.
+    /// Both consume current buffer text. A shared timer keeps counts current without copying
+    /// the entire buffer on each keystroke.
     pub fn queue_refresh(self: &Rc<Self>, tab: &Rc<Tab>) {
         if !self.is_active(tab) {
             return;
@@ -654,12 +623,10 @@ impl App {
 
     // --- chrome --------------------------------------------------------------------------
 
-    /// A change in `tab`'s buffer: the chrome fades while the user types, which is the point of
-    /// the app (DESIGN.md), and the tab stops being a preview.
+    /// Fade chrome and keep a preview tab after typing in its active view.
     ///
-    /// Only a keystroke into *this* tab's own view counts. A reload writing into a background
-    /// buffer is not the user typing, and neither is one arriving in another pane while the
-    /// keyboard is here, nor one replacing the text under the caret (`Tab::is_loading`).
+    /// Reloads, background edits and loading replacements are not user typing, so they must
+    /// not trigger focus mode or change preview status.
     pub fn on_edit(&self, tab: &Rc<Tab>) {
         if !tab.view.has_focus() || tab.is_loading() {
             return;
@@ -671,10 +638,8 @@ impl App {
         self.promote(&tab.page);
     }
 
-    /// A key pressed anywhere in the window, heard before whatever has the keyboard: one that moves
-    /// through the document the keyboard is in fades the chrome, as typing does (DESIGN.md). Not
-    /// under a completion popup, whose arrows pick a row, and not while presenting, which owns the
-    /// chrome and shows the status bar on a hover.
+    /// Fade chrome on document-navigation keys heard before focused widgets.
+    /// Completion-popup arrows and presentation mode are excluded because they have separate UI ownership.
     pub fn on_key(&self, key: gdk::Key, state: gdk::ModifierType) {
         if self.presenting.get().is_some() {
             return;
@@ -707,9 +672,8 @@ impl App {
         gtk::prelude::GtkWindowExt::focus(&self.window)
     }
 
-    /// Fade what the focus mode preference says to: nothing at None; the chrome at Medium; and at
-    /// High the chrome, the window's dividers, every pane but the one being written in, and the
-    /// text away from the caret (DESIGN.md, Chrome auto-hide).
+    /// Apply focus mode: None preserves chrome, Medium fades chrome, and High also fades
+    /// dividers, inactive panes and text away from the caret.
     pub fn hide_chrome(&self) {
         let level = self.config.borrow().focus_mode;
         if level == FocusMode::None || self.chrome_hidden.get() || self.chrome_busy() {
@@ -773,9 +737,8 @@ impl App {
         chrome
     }
 
-    /// Never fade over something that is waiting for an answer: a dialog, a banner or an open
-    /// popover. An open find bar is not one: it stays, and its matches stay unveiled
-    /// (`fade::cover`), while the rest fades around the note being written in.
+    /// Suspend fading for unanswered dialogs, banners and popovers.
+    /// Find bars remain visible with unveiled matches while surrounding text fades.
     fn chrome_busy(&self) -> bool {
         if self.window.visible_dialog().is_some() {
             return true;
@@ -797,11 +760,8 @@ pub enum Surface {
     Preview,
 }
 
-/// Whether `key` moves through a document on `surface` rather than writing in it or firing a
-/// command: the caret keys anywhere, which are the arrows, Home, End, Page Up and Page Down, alone
-/// or with Shift and Ctrl; and where the document is read rather than written, Space too, which
-/// pages there, and a PDF's own `n` and `p`. Alt or Super makes a chord instead — Back, Forward,
-/// a caret added above — and Caps Lock and Num Lock change nothing.
+/// Whether `key` navigates `surface`: arrows, Home/End and Page Up/Down with Shift or Ctrl,
+/// plus Space and PDF n/p on reading surfaces. Alt/Super denote commands; lock modifiers do not matter.
 pub fn navigates(key: gdk::Key, state: gdk::ModifierType, surface: Surface) -> bool {
     use gdk::{Key, ModifierType as M};
     if state.intersects(M::ALT_MASK | M::SUPER_MASK | M::META_MASK | M::HYPER_MASK) {

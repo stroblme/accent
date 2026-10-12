@@ -26,12 +26,8 @@ pub(super) struct Preview {
 }
 
 impl PdfTab {
-    /// The Ctrl-hover link preview: where a link goes, without going there.
-    ///
-    /// A controller of its own rather than the cursor hook next door, for two reasons: that hook's
-    /// signature drops the controller, and so the modifier state with it, and this one can refuse
-    /// the event on the modifier alone. A pointer crossing a page without Ctrl held therefore
-    /// costs one bit test and never looks a link up, let alone asks for a render.
+    /// Ctrl-hover link preview. A separate controller retains modifier state and rejects
+    /// non-Ctrl motion before link lookup or rendering.
     pub(super) fn wire_preview(self: &Rc<Self>) {
         let motion = gtk::EventControllerMotion::new();
         motion.connect_motion(glib::clone!(
@@ -149,12 +145,9 @@ impl PdfTab {
         }
     }
 
-    /// Slide the target page behind the band, rendering its low-resolution stand-in first if this
-    /// is a page nobody has looked at.
-    ///
-    /// Only ever reached from a Ctrl-hover that landed on a link the popover is not already
-    /// showing, so the pdfium lock is taken for one 256 px page render at most, and never once
-    /// per pointer event.
+    /// Render a target's low-resolution stand-in if needed and position it behind the preview
+    /// band. Only changed Ctrl-hover targets request a render, avoiding pdfium work on every
+    /// pointer event.
     fn fill_band(self: &Rc<Self>, page: usize, top: Option<f32>) {
         let theme = self.view.theme();
         let ready = self.view.cache().borrow_mut().lowres(page as u32, theme);
@@ -201,10 +194,8 @@ fn band_offset(top: Option<f32>, page_h: f32, texture_h: f32) -> i32 {
     (at - band / 2.0).clamp(0.0, (texture_h - band).max(0.0)) as i32
 }
 
-/// One horizontal band of a texture, as a texture of its own.
-///
-/// The crop is of the pixels and not of the layout: a clipped widget still asks for the whole
-/// page's height, and a popover is as big as what it holds asks to be.
+/// Crop a horizontal pixel band into a texture. Widget clipping would retain full-page size
+/// requests and enlarge the popover.
 fn crop(texture: &gtk::gdk::MemoryTexture, top: i32, height: i32) -> gtk::gdk::MemoryTexture {
     let (w, h) = (texture.width(), texture.height());
     let height = height.min(h);

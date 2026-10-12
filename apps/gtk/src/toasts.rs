@@ -1,15 +1,11 @@
-//! The window's toasts, several at once.
+//! Show up to [`MAX`] simultaneous toasts, newest above oldest.
 //!
-//! `AdwToastOverlay` shows one toast and queues the rest, so a toast waited behind every one
-//! before it, and a Replace All's Undo could still be waiting after a newer rewrite it would no
-//! longer undo. Here up to [`MAX`] stand at the bottom centre, the newest on top, each going on
-//! its own timeout; one more sends the oldest away, and a toast with a key takes the place of the
-//! one standing under the same key. What is on screen is all the history there is.
+//! `AdwToastOverlay` queues messages, which can delay an Undo until a later edit invalidates
+//! it. Each toast here has its own timeout; overflow removes the oldest, and matching keys
+//! replace existing toasts.
 //!
-//! Each is drawn as libadwaita draws its own (`adw-toast-widget.ui`): a box under the `toast` CSS
-//! name, which Adwaita's stylesheet paints, holding the title, an optional button and a close
-//! button. Its timeout waits while the pointer is over it or it has the keyboard, Escape takes
-//! the newest away, and it is announced as libadwaita announces its own.
+//! The widgets use Adwaita's `toast` styling and announcements. Pointer hover or keyboard
+//! focus pauses expiry; Escape dismisses the newest.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -171,8 +167,7 @@ impl Toasts {
         titles
     }
 
-    /// One toast's widgets, wired to take it away: the close button, the button's press and
-    /// the timeout, which the pointer over it and the keyboard in it hold off.
+    /// Wire toast controls and expiry, pausing timeout while hovered or focused.
     fn draw(
         self: &Rc<Self>,
         title: String,
@@ -347,8 +342,7 @@ mod imp {
 
     impl ObjectImpl for Pile {}
 
-    /// Only the toasts take the pointer: the gaps between and beside them are the document's,
-    /// as the space around libadwaita's one toast is.
+    /// Pass presses between and beside toasts through to the document.
     impl WidgetImpl for Pile {
         fn contains(&self, _x: f64, _y: f64) -> bool {
             false

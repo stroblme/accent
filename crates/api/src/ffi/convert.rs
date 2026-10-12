@@ -1,14 +1,7 @@
-//! What the types the façade speaks look like on the other side.
-//!
-//! Three things do not cross and are restated here. uniffi carries no `usize`, no
-//! `std::ops::Range`, no `PathBuf`, no tuple and no `char`, so anything holding one gets a
-//! record of its own. A colour crosses as one `u32` rather than an array of bytes, which is
-//! also how Android already spells one. And a text offset changes meaning: the core counts
-//! bytes, Kotlin counts UTF-16 units, so every range over a document's text is converted on the
-//! way out (see [`Utf16`]).
-//!
-//! Everything else is declared to uniffi where it already stands, with `#[uniffi::remote]`: no
-//! second definition to keep in step, no conversion at all.
+//! Convert façade types for UniFFI. Replace unsupported `usize`, `Range`,
+//! `PathBuf`, tuples and `char` with records, pack colours as `u32` and
+//! convert text byte ranges to Kotlin UTF-16 units ([`Utf16`]). Other types
+//! use `#[uniffi::remote]` to avoid duplicate definitions.
 
 // Every name here is imported bare because `#[uniffi::remote]` restates the type where it
 // already stands: the name has to resolve to the real one.
@@ -114,10 +107,9 @@ pub enum LinkKind {
 
 // ------------------------------------------------------------------------------- text offsets
 
-/// Byte offset in a Rust string → UTF-16 code-unit offset in the Kotlin string it becomes.
-///
-/// One entry per byte plus the end. Every byte of a character maps to the unit its character
-/// starts at, so a range that somehow cuts a character in half clamps instead of lying.
+/// Map Rust byte offsets to Kotlin UTF-16 units, with one entry per byte
+/// plus the end. Interior character bytes map to its starting unit,
+/// clamping ranges that cut through a character.
 pub struct Utf16(Vec<u32>);
 
 impl Utf16 {
@@ -183,9 +175,8 @@ pub struct SearchHit {
     pub rel_path: String,
     pub title: Option<String>,
     pub snippet: String,
-    /// Byte range of the phrase in the note — bytes, not UTF-16 units, because the note it
-    /// points into has not been read yet. A caller that wants to place a caret converts it
-    /// against the text it then reads.
+    /// Phrase byte range, retained until the source note is read. Convert
+    /// against that text before placing a Kotlin caret.
     pub at: Option<Range>,
 }
 
@@ -265,8 +256,8 @@ pub struct PageSize {
     pub height: f32,
 }
 
-/// One character with its box on the page. `ch` is one character, as a string: uniffi has no
-/// `char`, and Kotlin has no character that holds an astral one either.
+/// One glyph and its page box. Use a string because UniFFI has no `char`
+/// and Kotlin `Char` cannot hold astral characters.
 #[derive(uniffi::Record)]
 pub struct Glyph {
     pub ch: String,
@@ -325,14 +316,14 @@ pub struct Point {
     pub y: f32,
 }
 
-/// How much of which page a change touched, so a viewer knows which tiles to draw again.
+/// Changed page and area, identifying which viewer tiles need repainting.
 #[derive(uniffi::Record)]
 pub struct PageArea {
     pub page: u32,
     pub area: pdf::Rect,
 }
 
-/// Whether Undo, and then Redo, has anything to walk.
+/// Whether undo and redo are available.
 #[derive(uniffi::Record, Debug, PartialEq, Eq)]
 pub struct History {
     pub undo: bool,
@@ -345,8 +336,7 @@ pub struct SearchLine {
     pub quads: Vec<pdf::Rect>,
 }
 
-/// Where one note link lands on a page today: the quads to paint, and which of the links the
-/// caller handed over it is.
+/// Current highlight quads and index into the caller's input links.
 #[derive(uniffi::Record)]
 pub struct LinkHighlight {
     pub page: u32,
@@ -548,8 +538,7 @@ impl From<Vec<pdf::Rect>> for SearchLine {
 mod tests {
     use super::*;
 
-    /// Kotlin counts UTF-16 units, so a note with anything above ASCII in it has to be measured
-    /// twice: once for the text the core parsed and once for the string Android holds.
+    /// Verify byte-to-UTF-16 conversion for non-ASCII document ranges.
     #[test]
     fn a_range_crosses_in_the_units_the_other_side_counts() {
         // "é" is two bytes and one unit; "🙂" is four bytes and two units.

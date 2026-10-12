@@ -23,8 +23,9 @@ android {
         // accent from, the way the desktop takes GNOME's.
         minSdk = 31
         targetSdk = 36
-        versionCode = 1
-        versionName = "2.0.0"
+        // A release build passes both from its tag (`release.yml`); a local build keeps these.
+        versionCode = (findProperty("versionCode") as String?)?.toInt() ?: 1
+        versionName = findProperty("versionName") as String? ?: "2.0.0"
     }
 
     buildFeatures { compose = true }

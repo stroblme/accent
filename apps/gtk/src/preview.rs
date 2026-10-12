@@ -1,13 +1,10 @@
-//! Read-only markdown preview: a WebKitGTK view fed by `markdown::to_html`.
+//! Read-only WebKitGTK markdown preview fed by `markdown::to_html`.
 //!
-//! The pane renders notes that may have been synced from another machine, so it is built to be a
-//! dead end: an ephemeral network session, no page JavaScript, a content filter that refuses every
-//! load, and a custom `accent:` scheme that only ever hands out files from inside the vault.
+//! Synced notes are untrusted: an ephemeral network session, disabled page JavaScript,
+//! load-denying filter and vault-only `accent:` scheme restrict their access.
 //!
-//! WebKit cannot read GTK's CSS variables, so the stylesheet is generated in Rust from the same
-//! three sources `highlight.rs` uses — foreground, background, accent — and injected as a user
-//! stylesheet. The font comes from `editor::default_font` for the same reason. Editor and preview
-//! therefore agree by construction, in every theme, accent and font.
+//! Generated CSS uses the editor's foreground, background, accent and font because WebKit
+//! cannot read GTK CSS variables. This keeps both views consistent across themes.
 
 use crate::look::{self, Look, Served};
 use crate::theme;
@@ -23,14 +20,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use webkit6::prelude::*;
 
-/// Prose column width, in `ch`. DESIGN.md asks for 60 to 72 characters, and `ch` is the advance
-/// of "0", which is wider than the average letter: measured on this pane, 56ch is 71 characters of
-/// Adwaita Sans and about 62 of Cantarell, so both GNOME document fonts land in the range.
+/// Preview column width in ch for DESIGN.md's 60–72-character measure.
+/// 56ch measures roughly 71 Adwaita Sans or 62 Cantarell characters.
 const COLUMN_CH: u32 = 56;
 
-/// What WebKit's find is told under the find bar's toggles: wrapping always, without regard to case
-/// unless Match Case is down, and Match Whole Word as matches at a word's start, the nearest WebKit
-/// has (`foo` finds `food`). A regular expression it cannot match: the query stays literal.
+/// WebKit find options: wrap, optional case matching and word starts for whole-word mode.
+/// WebKit has no regex search; queries remain literal, and foo can match food at word starts.
 fn find_options(options: Options) -> webkit6::FindOptions {
     let mut find = webkit6::FindOptions::WRAP_AROUND;
     if !options.case {
@@ -44,10 +39,8 @@ fn find_options(options: Options) -> webkit6::FindOptions {
 /// WebKit's own guard against a query that matches the whole page; the counter says "500+" past it.
 const FIND_LIMIT: u32 = 500;
 
-/// How long a WebKit view nobody is using is kept, and its web process of 60 to 120 MB: a preview
-/// out of sight, the diagram formulas' typesetter with nothing to typeset. Long enough that Split
-/// view toggled off and on again, or the next formula of the diagram being drawn, finds it still
-/// there. Two seconds under `ACCENT_BENCH_WEBIDLE`, whose drill waits it out.
+/// Idle lifetime for unused WebKit views and their 60–120 MB processes.
+/// Keep short toggles and successive formulas warm; ACCENT_BENCH_WEBIDLE uses two seconds.
 pub fn idle_for() -> std::time::Duration {
     #[cfg(feature = "bench")]
     if std::env::var_os("ACCENT_BENCH_WEBIDLE").is_some() {
@@ -56,25 +49,21 @@ pub fn idle_for() -> std::time::Duration {
     std::time::Duration::from_secs(5 * 60)
 }
 
-/// Tracing target for what the page's own JavaScript says, so
-/// `RUST_LOG=accent::preview=debug accent <vault>` gives the preview's console and nothing else.
-/// Its own target for the reason `accent::saves` has one: the answer is a handful of lines.
+/// Preview-console tracing target, selectable through RUST_LOG=accent::preview=debug.
 const PREVIEW: &str = "accent::preview";
 
 /// The name the page posts its console through; spelled again inside [`CONSOLE_SCRIPT`], which is
 /// a JavaScript literal and cannot interpolate a Rust constant.
 const LOG_HANDLER: &str = "accentLog";
 
-/// WebKit content-blocker rules: refuse every load, then re-allow our own scheme. `decide_policy`
-/// only sees navigations, so without this a note could still reach the network through a
-/// subresource — an `<img>` tracking pixel in raw HTML being the obvious one.
+/// Block all loads except accent-scheme assets.
+/// Navigation policy alone misses subresources such as tracking pixels in note HTML.
 const BLOCK_NETWORK: &str = concat!(
     r#"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}},"#,
     r#"{"trigger":{"url-filter":"^accent:"},"action":{"type":"ignore-previous-rules"}}]"#
 );
 
-/// Scroll sync. The markers `to_html` emits sit *inside* their block (`<p><span data-line="5">…`),
-/// so the marker itself is hidden and the block around it is what gets scrolled into view.
+/// Scroll-sync script targets marker-containing blocks because to_html source-line markers are hidden.
 const SCROLL_SCRIPT: &str = r#"
 window.__accentScrollToLine = function (line) {
   var marks = document.querySelectorAll('[data-line]');
@@ -91,18 +80,14 @@ window.__accentScrollToLine = function (line) {
 };
 "#;
 
-/// A re-render of the note on the page, put in place of the one there ([`Inner::patch`]): the
-/// blocks at the top level that did not change stay as they are, and with them the scroll, a
-/// selection, the find's match and a drawn diagram in them; the ones between are replaced.
+/// Patch top-level rendered blocks while retaining unchanged blocks and their UI state.
 ///
-/// A block is known by the HTML it was put there as, its source-line markers left out, since a
-/// line added above shifts every marker below and changes nothing else; a kept block takes its
-/// markers from the new render. The page's own blocks are taken at `DOMContentLoaded`, before the
-/// mermaid bootstrap at `End` replaces a fence by its drawing ([`MERMAID`] hands the fence's place
-/// over); any other node a script puts at the top level is left where it is.
+/// Compare HTML without source-line markers so insertions above a block do not replace it;
+/// update retained markers from the new render. Capture blocks at DOMContentLoaded before
+/// Mermaid replaces fences, and leave script-added nodes intact.
 ///
-/// Answers whether the selection lies wholly before the first change, so that a find's place
-/// among the matches still holds.
+/// Return whether the selection precedes all changes, allowing the find counter to retain
+/// its current match position.
 const PATCH_SCRIPT: &str = r#"
 (function () {
   var keys = new Map(), joined = new Set();
@@ -165,11 +150,8 @@ const PATCH_SCRIPT: &str = r#"
 })();
 "#;
 
-/// Relay the page's own errors back into this process.
-///
-/// WebKit's `enable-write-console-messages-to-stdout` writes on the *web process's* stdout, which
-/// a normal session never sees, so a script message handler is the only route home. `console.error`
-/// is wrapped rather than replaced, so anything watching from a web inspector still sees it.
+/// Forward JavaScript errors through script messages because web-process stdout is unavailable.
+/// Wrap console.error while retaining Web Inspector output.
 const CONSOLE_SCRIPT: &str = r#"
 (function () {
   var post = function (kind, text) {
@@ -187,15 +169,11 @@ const CONSOLE_SCRIPT: &str = r#"
 })();
 "#;
 
-/// Mermaid plus the bootstrap that draws the diagrams, injected only into a note that has one.
+/// Vendored Mermaid and bootstrap, injected only when the note contains diagrams.
 ///
-/// The library is vendored rather than fetched: the preview's content filter blocks every load
-/// that is not `accent:`, and a diagram must render with no network at all. Mermaid asks for
-/// nothing at runtime, so nothing else in the hardening moves.
-///
-/// The bootstrap is Android's too (`vendor/mermaid/bootstrap.js`); what is the desktop's alone is
-/// the theme by the page's lightness, the scroll-sync marker each fence carries, and drawing again
-/// the fences a patch brings ([`PATCH_SCRIPT`]).
+/// The preview blocks non-`accent:` loads, so diagrams must render offline without runtime
+/// fetches. Android shares `vendor/mermaid/bootstrap.js`; desktop adds theme selection,
+/// scroll markers and rerendering for patched fences ([`PATCH_SCRIPT`]).
 const MERMAID: &str = concat!(
     include_str!("../../../vendor/mermaid/mermaid.min.js"),
     "\n",
@@ -231,8 +209,7 @@ struct Inner {
     mermaid: RefCell<Option<webkit6::UserScript>>,
     /// Whether a page may load yet; see [`Gate`].
     gate: RefCell<Gate>,
-    /// How many renders were asked for: a page back from its worker loads only if it is the
-    /// latest, so a long note's render never lands over a shorter one asked for after it.
+    /// Render generation so slow older workers cannot overwrite newer requested pages.
     renders: Cell<u64>,
     /// Whether the page up is the latest render's.
     loaded: Cell<bool>,
@@ -245,17 +222,14 @@ struct Inner {
     /// page drops WebKit's find, and a patch may replace the blocks its matches are in.
     query: RefCell<Option<String>>,
     options: Cell<Options>,
-    /// Matches WebKit last counted, and which of them the reader is on (1-based, 0 for none).
-    /// `WebKitFindController` reports a total and never a position, so the position is ours to
-    /// keep: [`Inner::refind`] starts every fresh search from the top, and the two step methods
-    /// walk it the same way WebKit walks the page.
+    /// Find total and locally tracked position, 1-based or 0 for none.
+    /// WebKit reports totals only; fresh searches reset position and stepping mirrors its traversal.
     total: Cell<u32>,
     at: Cell<u32>,
     /// Where the readout goes, called with the label rather than the numbers so the bar does not
     /// have to know how a preview counts.
     report: RefCell<Option<Report>>,
-    /// Whether the count handler is already on WebKit's find controller. The reporter itself is
-    /// replaceable, the handler is not: connecting a second one would count every match twice.
+    /// Whether the one find-count handler is installed, avoiding double counting when reporters change.
     counting: Cell<bool>,
     /// Whether the count on its way is of a search from the reader's match, which keeps `at`,
     /// rather than from the top ([`Inner::refind`]).
@@ -266,10 +240,8 @@ struct Inner {
 }
 
 impl Inner {
-    /// Put `body` on the page as `rel`'s: patched into the page up when that is `rel`'s and wants
-    /// the scripts it has, loaded as a new page otherwise. Only a load sets the base URI that
-    /// `rel`'s links and images resolve from, and the scripts the page runs. Either way an image
-    /// that changed under the page is named at an address of its own ([`versioned`]).
+    /// Patch `rel`'s existing page when scripts match, otherwise load anew.
+    /// Only loads update base URI and scripts; [`versioned`] gives changed assets new cache addresses.
     fn put(self: &Rc<Self>, rel: &str, body: &str) {
         let base = base_uri(rel);
         let body = versioned(body, &base, &self.assets.versions.borrow());
@@ -287,9 +259,8 @@ impl Inner {
         self.view.load_html(&document(&body), Some(&base));
     }
 
-    /// Put `body` in place of the page's body ([`PATCH_SCRIPT`]). Nothing about the page's
-    /// loading changes: the network filter stays on it, and only an image the new blocks name
-    /// that WebKit does not hold is asked for, as on a load.
+    /// Patch body blocks through [`PATCH_SCRIPT`] without changing loading or network filtering.
+    /// Only uncached images in new blocks are requested.
     fn patch(self: &Rc<Self>, body: &str) {
         let render = self.renders.get();
         let args = glib::VariantDict::new(None);
@@ -350,14 +321,10 @@ impl Inner {
         );
     }
 
-    /// Run the stored find query against the page that is up now. Searching a page that has not
-    /// finished loading silently finds nothing — measured under Xvfb: the same query returns 0
-    /// matches issued a second after `load_html` and 3 issued five seconds later — so every route
-    /// to a search goes through here and the load handler calls it again.
+    /// Run the stored find query only when the page is loaded; rerun from the load handler.
     ///
-    /// `from_match` searches from the match the reader is on, the selection, rather than from the
-    /// top: a patch that changed nothing before it leaves every match up to it where it was, so
-    /// the counter's place still holds and only the total is counted again.
+    /// WebKit silently reports no matches while loading. `from_match` preserves the selected
+    /// match after patches that leave earlier blocks unchanged, recounting only the total.
     fn refind(&self, from_match: bool) {
         let query = self.query.borrow();
         let (Some(finder), Some(text)) = (
@@ -403,8 +370,8 @@ impl Inner {
         }
     }
 
-    /// Add or drop the mermaid script. It is 3.4 MB of JavaScript to parse, so a note without a
-    /// diagram must not carry it; `remove_script` takes the one script, leaving `SCROLL_SCRIPT`.
+    /// Install Mermaid only for notes containing diagrams to avoid parsing its 3.4 MB script unnecessarily.
+    /// Removing it retains SCROLL_SCRIPT.
     fn set_mermaid(&self, wanted: bool) {
         let mut slot = self.mermaid.borrow_mut();
         if wanted == slot.is_some() {
@@ -427,9 +394,8 @@ impl Inner {
     }
 }
 
-/// What one of our own `evaluate_javascript` calls reported. An error thrown inside an injected
-/// user script reaches `window.onerror` as a bare "Script error." — WebKit scrubs it, the script
-/// not being the document's own — so the calls this file makes are logged where the detail is.
+/// Log evaluate_javascript results where errors retain detail.
+/// WebKit scrubs injected-script failures to Script error in window.onerror.
 fn report_js(result: Result<webkit6::javascriptcore::Value, glib::Error>) {
     if let Err(e) = result {
         tracing::warn!(target: PREVIEW, "{e}");
@@ -447,11 +413,8 @@ fn stepped(at: u32, total: u32, forward: bool) -> u32 {
     }
 }
 
-/// "3 of 12", the way the editor and the PDF reader both say it.
-///
-/// `at` is 1-based, 0 meaning nothing is selected. A total that reaches [`FIND_LIMIT`] is a floor
-/// rather than a count — WebKit stops looking there — so the position goes with it: "7 of 500" on
-/// a page holding nine hundred matches would be wrong in both halves.
+/// Format 1-based match `at` and total, with 0 for no selection.
+/// Totals reaching [`FIND_LIMIT`] are lower bounds, so use capped wording rather than false exact positions.
 fn matches_label(at: u32, total: u32) -> String {
     match (at, total) {
         (_, 0) => "No results".to_string(),
@@ -461,10 +424,8 @@ fn matches_label(at: u32, total: u32) -> String {
     }
 }
 
-/// What the preview is allowed to read: a vault-relative path in, the vault file it names (its
-/// key) and that file on *this* machine out, `None` when there is none. Every window passes
-/// `Vault::fetch`, which is the file itself for a local vault and a copy fetched over ssh for a
-/// remote one — so a call can block on the network.
+/// Resolve vault-relative assets to their key and local path through Vault::fetch.
+/// Remote fetches can block on downloads, so callers must dispatch off-thread.
 pub type Resolve = dyn Fn(&str) -> Option<(String, PathBuf)> + Send + Sync;
 
 /// Keys the window keeps and its preview reads as it serves: the images inverted, the diagrams
@@ -480,8 +441,7 @@ struct Assets {
     /// image it was served before.
     #[cfg(feature = "bench")]
     requests: Cell<u32>,
-    /// The keys served since WebKit's memory cache was last cleared, each with the paths the page
-    /// asked for it at: WebKit may answer a render with their bytes even after the file changed.
+    /// Served keys and request paths since the memory cache was cleared, used to invalidate stale WebKit responses.
     served: RefCell<HashMap<String, HashSet<String>>>,
     /// How many times the file a path names changed under the page, which asks for it with `v=`
     /// that many ([`versioned`]).
@@ -504,18 +464,14 @@ pub struct Preview {
 }
 
 impl Preview {
-    /// `resolve` turns a vault-relative asset path into a file on this machine; [`resolve_asset`]
-    /// says which half of the containment guarantee is whose. `inverted` holds the images the
-    /// reader inverted, which are served the other way round from what the theme asks; `web` the
-    /// diagrams whose pictures on the web an embed of them draws. `on_open`
-    /// fires when the reader clicks a link into the vault, with a wikilink's target as written or
-    /// a markdown link's vault path, and the `#anchor` if there is one; `on_tag` when the reader
-    /// clicks a `#tag`, with the tag; `on_invert` when the reader asks the image menu to invert an
-    /// image, with its key.
+    /// Build a preview with asset resolution and navigation callbacks.
     ///
-    /// ponytail: every `Preview` builds its own `WebContext`, so one per tab means one WebKit
-    /// process group per tab. Sharing a context (and its registered scheme) across previews is the
-    /// upgrade path if tab memory ever shows up in a measurement.
+    /// `resolve` maps vault-relative assets to local files under [`resolve_asset`]'s containment
+    /// contract. `inverted` stores image inversions and `web` supplies embedded web diagrams.
+    /// `on_open` receives a written wikilink target or markdown vault path plus any anchor;
+    /// `on_tag` receives clicked tags, and `on_invert` receives image keys.
+    ///
+    /// Each preview owns a WebContext and therefore a WebKit process group.
     pub fn new(
         resolve: impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync + 'static,
         inverted: Keys,
@@ -535,9 +491,8 @@ impl Preview {
         )
     }
 
-    /// A page to print or export a note from, never shown: the note on the light theme's white
-    /// paper whatever the window's theme, its images as their files are, its diagrams in mermaid's
-    /// `neutral` theme, and nothing in it followed anywhere.
+    /// Build an unseen print/export preview: white paper, original images and neutral Mermaid diagrams.
+    /// Disable navigation so paper preparation cannot follow links.
     pub fn for_paper(resolve: Arc<Resolve>, web: Keys) -> Preview {
         Self::build(resolve, Rc::default(), web, |_| {}, |_| {}, |_| {}, true)
     }
@@ -687,14 +642,11 @@ impl Preview {
         &self.widget
     }
 
-    /// Render `text`, resolving relative links as if the note lived at `rel`.
+    /// Render `text` with relative links based at `rel`.
     ///
-    /// A render of the note on the page patches it, keeping the reading position and what is
-    /// selected wherever their blocks did not change; another note's starts a new page from the
-    /// top, and the caller restores the reading position with [`Preview::scroll_to_line`].
-    /// `to_html` runs on a worker, a note of a megabyte taking some 20 ms, and only the latest
-    /// render asked for lands. One asked for before the network filter is on the view waits for
-    /// it ([`Gate`]).
+    /// Same-note renders patch unchanged blocks to preserve reading and selection state; other
+    /// notes start at the top for the caller to restore via [`Preview::scroll_to_line`]. Workers
+    /// render HTML, only the latest result lands, and [`Gate`] waits for the network filter.
     pub fn render(&self, rel: &str, text: &str) {
         let render = self.inner.renders.get() + 1;
         self.inner.renders.set(render);
@@ -743,9 +695,8 @@ impl Preview {
         self.inner.look.replace(look) != look
     }
 
-    /// Drop every image WebKit keeps from the page, then `then`, which renders the note again:
-    /// a new look is served only to a page that asks for its images once more, so the render
-    /// loads a new page rather than patching blocks that would keep theirs.
+    /// Clear image cache, then call `then` to reload rather than patch.
+    /// A fresh page requests newly styled images instead of retaining old block content.
     pub fn forget_images(&self, then: impl FnOnce() + 'static) {
         self.inner.assets.served.borrow_mut().clear();
         self.inner.shown.take();
@@ -769,10 +720,8 @@ impl Preview {
         );
     }
 
-    /// Have the page ask again for `key`'s file, or for every file under the folder `key`, which
-    /// changed, went, moved or was inverted: WebKit answers an address it was served with the
-    /// bytes it kept, so the next render names the file at an address of its own ([`versioned`])
-    /// and asks for nothing else again. Says whether the page was served any.
+    /// Invalidate served `key` or folder descendants using [`versioned`] asset addresses.
+    /// Return whether any were served; unrelated images keep their cache entries.
     pub fn forget_image(&self, key: &str) -> bool {
         let folder = format!("{key}/");
         let mut versions = self.inner.assets.versions.borrow_mut();
@@ -811,11 +760,8 @@ impl Preview {
         &self.inner.view
     }
 
-    /// Call `f`, which renders the note again, when WebKit's process dies under the page — a
-    /// crash, or past its memory limit — which leaves the view on its last frame, scrolling and
-    /// following nothing, until something renders it again. Once until a page has finished
-    /// loading since: a note that brings the process down as it loads waits for its next render
-    /// rather than bringing it down again and again.
+    /// Call `f` once after web-process loss to render again.
+    /// Reset only after successful page load, avoiding crash loops for notes that fail while loading.
     pub fn connect_lost(&self, f: impl Fn() + 'static) {
         let inner = Rc::downgrade(&self.inner);
         self.inner
@@ -944,14 +890,10 @@ impl Preview {
 
 // ------------------------------------------------------------------------------------- console
 
-/// Hand the page a way to report its own JavaScript errors, and log what comes back.
+/// Forward page JavaScript errors to the application log.
 ///
-/// An error in [`SCROLL_SCRIPT`] or in the mermaid bootstrap is otherwise entirely silent:
-/// `set_enable_write_console_messages_to_stdout` writes on the web process's stdout and produced
-/// nothing here. An uncaught error is a `warn!` because it means a feature of the pane is not
-/// working; `console.warn`/`console.error` are `debug!` because a vendored library is entitled to
-/// grumble — mermaid says nothing at all about a fence it cannot parse, which is how this was
-/// checked.
+/// Web-process stdout does not reliably reach this process. Uncaught errors use `warn!`
+/// because features may fail; library console warnings and errors use `debug!`.
 fn install_console(content: &webkit6::UserContentManager) {
     if !content.register_script_message_handler(LOG_HANDLER, None) {
         return tracing::warn!(target: PREVIEW, "no console relay: {LOG_HANDLER} is taken");
@@ -991,9 +933,8 @@ thread_local! {
     static FILTER: RefCell<Option<Compiled>> = const { RefCell::new(None) };
 }
 
-/// Call `then` with the network filter, which every view loading what a file holds puts on
-/// itself before its first load. WebKit compiles it asynchronously and disk-backed, the only
-/// API it offers, so the first view to ask waits a moment and every one after has it at once.
+/// Provide the shared compiled filter to `then` before any file-backed view loads.
+/// WebKit compiles asynchronously with disk storage; later views reuse the cached result.
 pub(crate) fn network_filter(then: impl FnOnce(&Filter) + 'static) {
     let ready = FILTER.with_borrow_mut(|compiled| match compiled.get_or_insert_with(compile) {
         Compiled::Waiting(waiting) => {
@@ -1043,9 +984,8 @@ fn not_installed(why: String) -> String {
     why
 }
 
-/// What stands between a render and the page: the network filter, which arrives a moment after
-/// the view does. No page loads before it is on the view, so not even the first note's images
-/// reach the network, and no note at all if it could not be put there.
+/// Gate page loading on successful network-filter installation.
+/// Retain the latest pending page; failed installation refuses notes entirely.
 enum Gate {
     /// On its way; the latest page asked for meanwhile.
     Waiting(Option<Page>),
@@ -1058,9 +998,7 @@ enum Gate {
 type Page = (String, String);
 
 impl Gate {
-    /// What to load for `page` now: itself once the filter is in, a page saying why there is
-    /// none once it could not be, and nothing while it is on its way, `page` waiting in place of
-    /// whatever waited before.
+    /// Load `page` when filtering is ready, show refusal after failure, or replace the latest waiting page.
     fn pass(&mut self, page: Page) -> Option<Page> {
         match self {
             Gate::Waiting(waiting) => {
@@ -1153,10 +1091,8 @@ fn decide(
     true
 }
 
-/// Whether a navigation leaves the app for the system. Only a click does — a note carrying
-/// `<meta http-equiv="refresh">` or a script redirect must not open anything on its own — and only
-/// to what the editor's Go to Definition opens too ([`markdown::is_url`]): never `javascript:`,
-/// `data:` or `file:`.
+/// Allow system navigation only for explicit clicks and markdown::is_url schemes.
+/// Meta refreshes, redirects and JavaScript/data/file addresses must not launch applications.
 fn launches(uri: &str, clicked: bool) -> bool {
     clicked && markdown::is_url(uri)
 }
@@ -1205,17 +1141,11 @@ fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
 
 // ----------------------------------------------------------------------------------- uri scheme
 
-/// Answer one `accent://file/<rel>` request, or fail it. Everything the preview is allowed to see
-/// passes through here, so this is the only place a path from a note becomes a path on disk.
+/// Serve or fail an `accent://file/<rel>` request, the preview's file-access boundary.
 ///
-/// The answer arrives a main-loop turn later. Resolving a remote vault's asset downloads it, which
-/// is an ssh round trip, and the handler runs on the main loop — a large image would freeze the
-/// window. WebKit documents the way out on `register_uri_scheme`: keep a reference to the request
-/// and finish it once the data is there. So the resolving goes to a `gio::spawn_blocking` worker,
-/// the same pairing the git pane uses, and only the finishing comes back to the main loop. The
-/// worker also decides how an image is shown in the look in force, which may mean recolouring it
-/// ([`look::serve`]). A diagram is drawn back on the main loop, where GTK and its typesetter
-/// live, as an SVG that then goes through the look as an SVG image does ([`look::serve_svg`]).
+/// Retain the request while a worker resolves remote assets and applies [`look::serve`],
+/// then finish on the main loop to avoid blocking it on downloads. Diagrams render on the
+/// main loop for GTK/typesetter access, then use [`look::serve_svg`].
 fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     #[cfg(feature = "bench")]
     assets.requests.set(assets.requests.get() + 1);
@@ -1286,18 +1216,13 @@ fn deny(request: &webkit6::URISchemeRequest, what: &str) {
     request.finish_error(&mut error);
 }
 
-/// A note's asset path -> a real file on this machine, or `None`.
+/// Resolve a note asset to a local file under lexical and canonical containment rules.
 ///
-/// Containment is split now that the vault may be on another machine. The lexical half is here and
-/// unconditional: an empty, absolute or `..`-escaping `rel` never reaches the resolver, which is
-/// what stops `![[../../../etc/passwd]]` however the resolver is written. The other half is the
-/// resolver's, and has to be: only it knows the root, so only it can say whether the file it hands
-/// back is still inside the vault once symlinks have been followed.
+/// Reject empty, absolute and `..`-escaping paths before calling the resolver. The resolver
+/// must enforce vault containment after symlinks because only it knows the root.
 ///
-/// A `note` from outside every vault, keyed by its absolute path, has no resolver to ask: its own
-/// folder is the root, under the same two rules ([`beside`]). Its page is based at that folder's
-/// path ([`base_uri`]), so what it links relatively arrives as a path under the folder, which is
-/// taken back to one relative to it, and a `![[name]]` arrives bare.
+/// Loose notes use their own directory as root with the same rules ([`beside`]). [`base_uri`]
+/// makes relative links arrive under that directory; wikilink embeds arrive as bare names.
 fn resolve_asset(resolve: &Resolve, note: &str, rel: &str) -> Option<(String, PathBuf)> {
     let folder = Path::new(note)
         .parent()
@@ -1325,8 +1250,7 @@ fn resolve_asset(resolve: &Resolve, note: &str, rel: &str) -> Option<(String, Pa
     }
 }
 
-/// `rel` in the folder `dir` as a vault holds a file: the file it names once symlinks are followed,
-/// while that is still under `dir`, keyed by its path as a loose tab is.
+/// Resolve `rel` under `dir` after following symlinks, requiring containment and returning a loose-file key.
 fn beside(dir: &Path, rel: &str) -> Option<(String, PathBuf)> {
     let root = dir.canonicalize().ok()?;
     let path = root.join(rel).canonicalize().ok()?;
@@ -1387,10 +1311,8 @@ fn base_uri(rel: &str) -> String {
     }
 }
 
-/// `body` with every image address whose file changed under the page asking for it with `v=` its
-/// version ([`Preview::forget_image`]): WebKit keeps what it was served by address, so an address
-/// of its own is what has one image asked for again. An address is matched by the path it names,
-/// resolved from `base` as the page resolves it; one written without quotes keeps its address.
+/// Add v= versions to changed image addresses in `body` so WebKit fetches only invalidated files.
+/// Match paths relative to `base`; unquoted addresses remain unchanged.
 fn versioned<'a>(body: &'a str, base: &str, versions: &HashMap<String, u32>) -> Cow<'a, str> {
     if versions.is_empty() {
         return Cow::Borrowed(body);
@@ -1493,11 +1415,9 @@ fn dim(c: gdk::RGBA, alpha: f32) -> String {
     css_rgba(crate::theme::at(c, alpha))
 }
 
-/// The whole preview look, derived from three values plus the document font. The alphas are the
-/// ones `highlight.rs::restyle` gives the editor, so the two panes read as one app; so are a
-/// conflict block's tints (`conflict::tints`), its sides boxed where the editor tints lines. A
-/// caption is its marker line's tint laid over the page, opaque, as the editor lays that line:
-/// left translucent, the side's own tint under it showed through and darkened it.
+/// Generate preview styling from foreground, background, accent and document font.
+/// Editor alpha and conflict tint rules are shared. Composite caption tints to opaque colours
+/// so underlying side backgrounds cannot darken them.
 fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) -> String {
     let (text, accent) = (css_rgba(fg), css_rgba(accent));
     let (surface, quote, rule) = (dim(fg, 0.07), dim(fg, 0.6), dim(fg, 0.15));
@@ -1731,9 +1651,7 @@ mod tests {
         std::fs::remove_dir_all(&outside).unwrap();
     }
 
-    /// A note outside every vault reads its images beside it: its folder stands in for the vault
-    /// root, so a relative link or a bare `![[name]]` reaches a file in it or under it, and nothing
-    /// above it, named by its path or through a symlink out of it.
+    /// Verify loose-note assets remain within their directory, including after symlink resolution.
     #[test]
     fn a_loose_note_reads_its_images_beside_it() {
         let root = scratch("loose").canonicalize().unwrap();

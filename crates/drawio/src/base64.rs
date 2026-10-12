@@ -1,5 +1,5 @@
-//! Standard base64 (RFC 4648, `+/`, `=` padding), for embedded images and the compressed page
-//! form. A few lines are cheaper than a dependency for the two directions we need.
+//! RFC 4648 base64 (`+/`, `=` padding) for embedded images and compressed pages,
+//! implemented locally to avoid a dependency for encoding and decoding.
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

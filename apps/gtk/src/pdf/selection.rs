@@ -22,14 +22,9 @@ impl PdfTab {
         self.view.clipboard().set_text(&text);
     }
 
-    /// Copy the selection as a wikilink into this PDF, with the selected text as its alias.
-    ///
-    /// Pasting that link into a note is what makes it a highlight: the index sees a link into a
-    /// page and a selection, and the viewer paints it. There is no separate Highlight action,
-    /// because a highlight is a link and the clipboard is how a link gets where it is wanted.
-    ///
-    /// One link per page, joined by newlines: `page=N&selection=…` names one page, and a drag
-    /// that ran across a break is two places in the document.
+    /// Copy selected text as one PDF wikilink per page. Pasting into a note creates indexed
+    /// selection links that the viewer paints as highlights; no separate highlight store is
+    /// needed. Join cross-page selections with newlines.
     pub fn copy_link(&self) {
         // A loose PDF is linked by name: an absolute path in a wikilink resolves nowhere, and
         // the name is what a vault would key it by if the file ever joined one.
@@ -147,14 +142,9 @@ impl PdfTab {
         self.view.set_selection(Vec::new());
     }
 
-    /// A click that was not a drag: open the note whose link paints a highlight here, or else pin
-    /// the comments under it.
-    ///
-    /// After the link handler, which answers on the press — a link inside a highlight is still a
-    /// link, and following it is what a click on one has always meant. With Ctrl held it is Go
-    /// to Source instead, every LaTeX viewer's SyncTeX click, which does nothing where the window
-    /// has disabled it, on a PDF with no SyncTeX file. Nothing with a tool in hand: the page is
-    /// the tool's, and the Eraser's click was an erase.
+    /// On click release, open the note behind a highlight or pin comments. Link presses take
+    /// priority; Ctrl invokes Go to Source when enabled. Ignore clicks with a tool active
+    /// because the gesture belongs to that tool.
     pub(super) fn clicked_highlight(
         self: &Rc<Self>,
         view: &PdfView,

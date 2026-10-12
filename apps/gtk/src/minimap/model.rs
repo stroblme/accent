@@ -1,12 +1,8 @@
-//! What the minimap draws, as numbers: how many rows each line of the buffer takes, where each
-//! one starts, and the conversions between the view's lines, the map's rows and the pointer.
-//! Pure, so the arithmetic is tested without a widget; [`super::Minimap`] fills it from the
-//! buffer.
+//! Pure line-to-row and pointer conversions for the minimap.
 //!
-//! The rows are an estimate of the page's shape, never asked of GTK's layout: a line takes as
-//! many rows as the page would wrap it into at the column's width, a heading's scale included.
-//! The band and every jump go through a line and a fraction of it, so where the estimate is off
-//! the map is only drawn a little taller or shorter, and the view still lands on the line asked.
+//! Rows estimate wrapping from line text, column width and heading scale without querying
+//! GTK layout. Jumps and the visible band use a line plus its fraction, so estimation errors
+//! change the map's height without changing the target line.
 
 use std::ops::Range;
 
@@ -132,8 +128,8 @@ impl Model {
             .collect()
     }
 
-    /// The buffer's edit at line `at`, which left it `delta` lines longer (or shorter): as many
-    /// lines put in (or taken out) after it, and it read again.
+    /// Apply a buffer edit at `at`: splice `delta` following lines and
+    /// invalidate the edited line.
     pub fn splice(&mut self, at: usize, delta: isize) {
         let at = at.min(self.lines.len().saturating_sub(1));
         let after = (at + 1).min(self.lines.len());
@@ -192,8 +188,8 @@ impl Model {
         f64::from(self.start(at)) + frac.clamp(0.0, 1.0) * f64::from(self.rows(at))
     }
 
-    /// The line at `row` and how far down it `row` is, never a hidden one: [`Model::row_of`]
-    /// backwards. Clamped into the rows there are.
+    /// Invert [`Model::row_of`] to line/fraction, clamping to existing rows
+    /// and skipping hidden lines.
     pub fn line_at_row(&self, row: f64) -> (usize, f64) {
         debug_assert!(self.summed);
         let total = self.total();
@@ -219,9 +215,9 @@ pub struct Pace {
 }
 
 impl Pace {
-    /// The rows of the document per row of the map the band moves by: more than one once the map
-    /// scrolls itself. The band drawn `screen` rows down the map has its top on row
-    /// `screen × ratio`, which is how a drag keeps it under the pointer.
+    /// Document rows per minimap band step, exceeding one when the map
+    /// scrolls. A band at map row `screen` corresponds to `screen × ratio`,
+    /// keeping drags under the pointer.
     pub fn ratio(&self) -> f64 {
         if self.total <= self.height || self.height <= self.usual {
             return 1.0;
@@ -229,14 +225,10 @@ impl Pace {
         (self.total - self.usual) / (self.height - self.usual)
     }
 
-    /// Where the map's own scroll is, in rows, with the band's top at row `top` and `band` rows
-    /// tall.
+    /// Return minimap scroll in rows for a visible band at `top` with height `band`.
     ///
-    /// The map scrolls itself only when the document outgrows it, and then in step with the band,
-    /// as VS Code's minimap does: the band's top runs down the map as the view goes down the
-    /// document. At the pace of the usual band rather than this one, which grows and shrinks with
-    /// the lines on screen (a heading's label takes several rows), so a heading coming into view
-    /// does not jolt the map; at either end the band is kept on the map.
+    /// Scroll only when the document outgrows the map. Use the usual band pace rather than
+    /// variable heading heights to avoid jumps, clamping the band inside both ends.
     pub fn offset(&self, top: f64, band: f64) -> f64 {
         if self.total <= self.height {
             return 0.0;
@@ -259,10 +251,9 @@ pub struct Bar<T> {
     pub tone: T,
 }
 
-/// The bars of a line, given its characters each with its tone: wrapped every `per_row` columns,
-/// a tab taking the columns to the next multiple of `tab`, and nothing past row `rows`. A word
-/// is cut at the wrap rather than carried to the next row, which a bar a pixel per character
-/// wide does not show.
+/// Draw toned characters as bars, wrapping at `per_row` and expanding
+/// tabs to multiples of `tab`. Stop after `rows`. Split words at wraps
+/// because one-pixel characters cannot show word wrapping.
 pub fn bars<T: Copy + PartialEq>(
     chars: impl Iterator<Item = (char, T)>,
     per_row: u32,
@@ -315,8 +306,8 @@ fn split<T: Copy>(out: &mut Vec<Bar<T>>, cols: Range<u32>, tone: T, per_row: u32
     }
 }
 
-/// What a heading's label on the map says: its text without the `#` markers, an ATX closing
-/// sequence's included, or `None` where nothing is left to read (a setext heading's underline).
+/// Heading label without opening/closing ATX markers, or `None` for
+/// empty content such as a setext underline.
 pub fn label(line: &str) -> Option<&str> {
     let text = line.trim().trim_start_matches('#');
     let closed = text.trim_end_matches('#');
@@ -468,8 +459,7 @@ mod tests {
         assert!(m.take_unmeasured().is_empty(), "taken once");
     }
 
-    /// The map's scroll is a number in every case a document can be in: no lines, fewer rows than
-    /// the map, a band as tall as the document or taller than the map.
+    /// Verify finite scroll values for empty, short and oversized-band documents.
     #[test]
     fn the_offset_is_always_finite() {
         for (top, band, usual, total, height) in [
@@ -503,9 +493,8 @@ mod tests {
         assert_eq!(fits.offset(10.0, 40.0), 0.0, "fits: no scroll");
     }
 
-    /// A band drawn some rows down the map, its top put where [`Pace::ratio`] says, is drawn
-    /// exactly there again, scrolled map or not: a drag keeps it under the pointer. And however
-    /// tall the band is, away from the ends: a heading coming onto the screen does not move it.
+    /// Verify band position round-trips through [`Pace::ratio`] during drag,
+    /// independent of map scrolling and away from ends, changing heading heights.
     #[test]
     fn a_drag_keeps_the_band_under_the_pointer() {
         for total in [1000.0, 300.0] {

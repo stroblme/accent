@@ -1,4 +1,4 @@
-//! Which cell is under a point, and which cells a rubber band takes.
+//! Point hit testing and rubber-band selection.
 
 use std::collections::HashMap;
 
@@ -48,10 +48,9 @@ impl Scene {
     }
 }
 
-/// Whether `prim` takes a click at `p`. A closed outline takes it anywhere inside, filled or
-/// not, as draw.io's `pointerEvents` default has it, and so does an open one that is filled, as
-/// a swimlane's title is; any outline takes it on its stroke, which reaches half the stroke
-/// width or `tolerance`, whichever is more.
+/// Hit-test an outline: closed or filled paths accept interior clicks, matching
+/// draw.io's default `pointerEvents`. All strokes accept clicks within half their
+/// width or `tolerance`, whichever is greater.
 fn hits(prim: &Prim, p: Point, tolerance: f64) -> bool {
     match prim {
         Prim::Path {

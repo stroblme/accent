@@ -1,27 +1,19 @@
 //! `gen-vault`: a synthetic Obsidian-shaped vault for tests and benchmarks.
 //!
 //! ```text
-//! cargo run --release -p accent-core --example gen-vault -- testvault --notes 3600 --files 40000
+//! cargo run --release -p accent-core --example gen-vault -- testvault --notes 3600 --files
+//! 40000
 //! ```
 //!
-//! An example rather than a CLI subcommand: it is repo tooling, not a feature of the app, and
-//! `make vault` is its only caller. Being Rust in the workspace keeps it under the same
-//! `clippy --all-targets` gate and keeps its tests in `cargo test` (`test = true` in Cargo.toml).
+//! Workspace tooling invoked by `make vault`, with linting and tests under the workspace gates.
+//! The real vault is never read. Fixtures model folder depth, note sizes, links, tags, Syncthing
+//! conflicts, Obsidian files, external symlinks, a virtual environment and non-note code files.
 //!
-//! The user's real vault is never read, not even to sample it — this only mimics its *shape*:
-//! folder depth, note-size distribution, wikilinks/embeds, a ~300-tag Zipf pool, Syncthing
-//! conflicts and temp files, `.obsidian/`, a symlinked external code repo, an in-vault `.venv`,
-//! and a `Code/` folder of files that are not notes: the ones the editor has to open, refuse or
-//! convert.
+//! The same `--seed --notes --files` produces a byte-identical tree: one splitmix64 stream is
+//! consumed in a fixed order without parallel writes.
 //!
-//! Deterministic: the same `--seed --notes --files` produces a byte-identical tree, because
-//! every random draw comes from one splitmix64 stream consumed in a fixed order (hence: no
-//! parallel writing).
-//!
-//! ponytail: std only, no `rand`/`chrono`/image crates. The images and documents are real:
-//! PNGs decode (IHDR + a stored-deflate IDAT + IEND, checksums by hand), JPEGs decode (a
-//! baseline scan of flat blocks, fixed Huffman tables) and PDFs are valid (objects + xref), so
-//! the preview and the `pdf` module can open them.
+//! Uses only std. Generated PNGs, JPEGs and PDFs are valid files so preview and PDF tests can
+//! open them.
 
 use anyhow::{Context, Result, bail};
 use std::collections::HashSet;
@@ -79,7 +71,7 @@ fn main() -> Result<()> {
 
 // ------------------------------------------------------------------ rng
 
-/// splitmix64: 4 lines, deterministic, plenty for test data.
+/// Deterministic splitmix64 generator for test data.
 struct Rng(u64);
 
 impl Rng {
@@ -106,7 +98,7 @@ impl Rng {
     fn word(&mut self) -> &'static str {
         WORDS[self.below(WORDS.len())]
     }
-    /// Log-uniform index: 0 is the most popular, the tail is long — close enough to Zipf.
+    /// Log-uniform index approximating a Zipf distribution; 0 is most popular.
     fn zipf(&mut self, n: usize) -> usize {
         let u = self.unit();
         (((n as f64).powf(u)) as usize).min(n - 1)
@@ -303,7 +295,7 @@ struct Gen {
     root: PathBuf,
     ext_root: PathBuf,
     rng: Rng,
-    /// 1 MiB of noise, sliced for file payloads — cheaper than per-byte rng, just as incompressible.
+    /// 1 MiB of reusable noise for incompressible payloads, avoiding per-byte RNG calls.
     blob: Vec<u8>,
     tags: Vec<String>,
     dirs: HashSet<String>,
@@ -702,8 +694,7 @@ fn figure_png() -> Vec<u8> {
     png_of(w, h, 3, &px)
 }
 
-/// Line art on nothing, as a scanner or a drawing app exports it: black strokes, a ring and a
-/// diagonal, on transparent pixels.
+/// Transparent line-art fixture with black strokes, a ring and a diagonal.
 fn lineart_png() -> Vec<u8> {
     let (w, h) = (200, 200);
     let mut px = vec![0u8; w * h * 4];
@@ -719,10 +710,9 @@ fn lineart_png() -> Vec<u8> {
     png_of(w, h, 4, &px)
 }
 
-/// A note holding one of each thing print and export must carry: a heading, math inline and on
-/// its own lines, a diagram, a code line too long for the page, a table, a PNG and an SVG from
-/// the vault and one from the web, links into the vault, out of it and to its own heading, and a
-/// script that must never run or leave with it.
+/// Print/export fixture covering headings, inline and display math, diagrams, long code lines,
+/// tables, local and web images, and local, external and heading links. Its script must neither
+/// execute nor appear in the export.
 const EXPORT_NOTE: &str = r#"# Export
 
 Inline math, $e^{i\pi} + 1 = 0$, and a formula on its own lines:
@@ -759,7 +749,7 @@ A link into the vault, [[Figures]], one out of it, [GNOME](https://www.gnome.org
 <script>document.body.textContent = 'scripted';</script>
 "#;
 
-/// The SVG one: black strokes and a label on a transparent canvas.
+/// SVG fixture with black strokes and a label on a transparent canvas.
 const FIGURE_SVG: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">
   <g fill="none" stroke="#000" stroke-width="2">
@@ -818,9 +808,8 @@ impl Bits {
 }
 
 impl Gen {
-    /// A decodable 8-bit RGB PNG of roughly `n` bytes: square-ish, random pixels, one
-    /// stored deflate stream. Real images and the vault's size distribution are not in
-    /// conflict — noise does not compress, so the file is as big as its pixels.
+    /// Decodable 8-bit RGB PNG of roughly `n` bytes. Random pixels and stored deflate keep file
+    /// size proportional to pixel count for the vault size distribution.
     fn png(&mut self, n: usize) -> Vec<u8> {
         let w = (n / 3).isqrt().max(1);
         let h = (n / (3 * w + 1)).max(1);
@@ -829,14 +818,9 @@ impl Gen {
         png_of(w, h, 3, &px)
     }
 
-    /// A baseline JPEG of roughly `n` bytes: a grey diagonal ramp, one flat 8x8 block per step.
-    ///
-    /// ponytail: no DCT, no quality knob, fixed tables. A uniform block's only non-zero
-    /// coefficient is DC = 8*(value - 128), so with an all-ones quantiser the scan is one
-    /// category code plus an end-of-block per block, and the two Huffman tables can be the
-    /// smallest legal ones that spell that out. It satisfies a decoder; it does not compress.
-    /// The bulk of `n` is noise in an application segment, where a photo would carry EXIF and a
-    /// thumbnail, so the vault keeps its size distribution without a gigantic image.
+    /// Baseline JPEG of roughly `n` bytes with a grey diagonal ramp of flat 8×8 blocks. Fixed
+    /// tables and DC-only blocks avoid a DCT or compressor; an application segment holds noise
+    /// to meet the target size without a large image.
     fn jpg(&mut self, n: usize) -> Vec<u8> {
         let side = (n / 3).isqrt().clamp(64, 512) & !7; // whole 8x8 blocks
         let blocks = side / 8;
@@ -907,14 +891,12 @@ impl Gen {
         Self::pdf_of(&objs)
     }
 
-    /// `n` A4 pages that say which page they are and nothing random, so paging, the thumbnail
-    /// strip and page edits have a document whose pages can be told apart. Nothing is drawn from
-    /// the stream, so every other file comes out as it did; the bulk fill, which runs last and to
-    /// exactly `--files`, ends one file sooner.
+    /// `n` labelled A4 pages for paging, thumbnail and page-edit tests; `n` must be at least 3.
+    /// No random draws are consumed, preserving the other fixtures; final bulk fill still
+    /// reaches `--files`.
     ///
-    /// Its outline starts on the second page, so the Outline pane has a page above its first
-    /// bookmark to follow: Introduction on page 2 with Details under it on page 3, and Appendix on
-    /// the last page. `n` is at least 3.
+    /// The outline starts on page 2 so navigation can reach a page before its first bookmark:
+    /// Introduction on page 2, Details beneath it on page 3, and Appendix on the last page.
     fn pages_pdf(n: usize) -> Vec<u8> {
         // 1 the catalog, 2 the page tree, 3 the font, then each page and its text, then the
         // outline's root and its three entries.
@@ -957,11 +939,10 @@ impl Gen {
         Self::pdf_of(&objs)
     }
 
-    /// One 400 x 300 pt page of three lines that other readers marked up, none of the marks with
-    /// an appearance stream of its own but the typed text: a highlight by Ada with a comment, an
-    /// underline with a comment and a link on its last word, a strike-out without one, Grace's
-    /// sticky note with its popup, a hidden note and a `/FreeText`. Then a blank page, and a third
-    /// with Grace's note of two lines. `ACCENT_BENCH_PDF=comments:` knows where each is.
+    /// Annotation fixture: a 400 × 300 pt page with a commented highlight by Ada, a commented
+    /// underline with a link, a strike-out, Grace's sticky note and popup, a hidden note, and
+    /// `/FreeText`. Only typed text has an appearance stream. A blank page and a page with
+    /// Grace's two-line note follow. `ACCENT_BENCH_PDF=comments:` depends on their positions.
     fn comments_pdf() -> Vec<u8> {
         let content = "BT /F1 14 Tf 40 250 Td (Ada highlighted this line.) Tj ET\n\
                        BT /F1 14 Tf 40 220 Td (This line is underlined, with a link.) Tj ET\n\
@@ -1637,8 +1618,7 @@ mod tests {
         }
     }
 
-    /// The hand-rolled encoder only has to satisfy a decoder, so ask one. `magick` is optional:
-    /// without it the structural checks still run.
+    /// Validate the custom encoder with `magick` when available; structural checks always run.
     #[test]
     fn jpg_decodes_at_the_expected_size() {
         let mut g = Gen::new(PathBuf::from("."), PathBuf::from("."), 7);

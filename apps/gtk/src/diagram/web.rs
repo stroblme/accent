@@ -1,7 +1,6 @@
-//! Pictures a diagram links from the web (`image=https://…`). Nothing is fetched until the reader
-//! says Load on the diagram's banner, which the window remembers for that file (the session's
-//! `web_images`, never the diagram itself). Then each picture is downloaded once into the cache,
-//! where the canvas, an export and a note's embed draw it from, offline too.
+//! Download diagram web images only after Load permission, stored per file in the
+//! window session rather than the diagram. Cache each URL once for canvas, export
+//! and note embeds, including offline use.
 
 use std::cell::RefCell;
 use std::collections::HashSet;

@@ -143,20 +143,14 @@ pub fn fit_scale(sizes: &[(f32, f32)], zoom: PdfZoom, vw: f32, vh: f32) -> f32 {
     }
 }
 
-/// One zoom step in or out from the zoom `from`. The arithmetic is the document's, so a page
-/// steps in the same tenths a note does however far a fit mode left it from one.
-///
-/// `from` is a zoom, not a layout scale: one read back out of [`Layout::scale`] is an `f32`
-/// divided by [`PT_TO_PX`], a hair off the tenth the page was asked at.
+/// Step zoom in tenths from `from`, including when starting from a fit mode. Use the requested
+/// zoom rather than [`Layout::scale`] to avoid float conversion drifting off the tenth.
 pub fn stepped(from: f64, out: bool) -> PdfZoom {
     PdfZoom::Scale(clamp_scale(crate::zoom::stepped_zoom(from, out)))
 }
 
-/// Where a reading position resumes from, given the zoom it resumes into.
-///
-/// Under [`PdfZoom::FitPage`] one page is one screen, so the page lands at its top. Keeping the
-/// fraction of it the viewport happened to be left at is what made Fit Page look broken: the
-/// scale was right, but the same half of one page and half of the next stayed on screen.
+/// Restore a reading position at the current zoom. [`PdfZoom::FitPage`] starts at the page top
+/// so the screen shows one whole page rather than retaining a fractional scroll offset.
 pub fn resume_at(zoom: PdfZoom, anchor: Anchor) -> Anchor {
     match zoom {
         PdfZoom::FitPage => Anchor {
@@ -198,10 +192,8 @@ pub fn offset_of(layout: &Layout, anchor: Anchor) -> Option<(f64, f64)> {
     ))
 }
 
-/// Which page a content coordinate falls in, or the nearest one above it.
-///
-/// A binary search rather than a walk: this answers every scroll tick, every motion event of a
-/// drag and both ends of every frame's visible range, and a 1 554-page document is a long walk.
+/// Find the page containing a content coordinate, or the nearest page above it. Binary search
+/// keeps per-scroll, per-drag and per-frame lookups cheap in long documents.
 pub(super) fn page_at(layout: &Layout, y: f64) -> usize {
     layout
         .pages

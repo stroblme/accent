@@ -1,4 +1,4 @@
-//! Annotations: reading and writing `/Highlight` and `/Ink`, and the colour trap around both.
+//! Highlight and ink annotations, with safe appearance-stream colour handling.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -852,21 +852,15 @@ fn take(p: &mut PdfPage<'_>, page: usize, index: usize) -> Result<(Drawn, Rect)>
     Ok((drawn, was))
 }
 
-/// The colour an annotation is drawn in.
+/// Read annotation colour without pdfium-render's unsafe appearance-stream fallback.
 ///
-/// Deliberately avoids `PdfPageAnnotationCommon::fill_color()` **and** `stroke_color()` on any
-/// annotation carrying an appearance stream. Both call `FPDFAnnot_GetColor()`, which pdfium
-/// documents as returning false in exactly that case, and both then fall back to
-/// `FPDFPageObj_GetFillColor(self.handle() as FPDF_PAGEOBJECT)` — casting an `FPDF_ANNOTATION`
-/// to an unrelated opaque pointer type. That is UB and segfaults in practice; rendering a page
-/// makes pdfium synthesise the appearance stream, so it fires on the second call and not the
-/// first. Reproduced on pdfium-render 0.9.3 against both pdfium 7881 (the build its bindings are
-/// generated from) and 8035, so it is a crate bug, not an ABI mismatch.
+/// On annotations with an appearance stream, `fill_color()` and `stroke_color()` fall back from
+/// `FPDFAnnot_GetColor()` by casting an annotation handle to an unrelated page-object handle,
+/// causing undefined behaviour and crashes. Rendering can generate the stream, so subsequent
+/// reads trigger it. Reproduced with pdfium-render 0.9.3 and pdfium 7881 and 8035 (ISSUES.md).
 ///
-/// The split below keeps us on the safe branch of each: with an appearance stream we read the
-/// generated path object's real fill colour, without one `FPDFAnnot_GetColor()` succeeds on `/C`
-/// and the bad fallback is never reached.
-///
+/// Read the actual path object's fill colour when a stream exists; otherwise
+/// `FPDFAnnot_GetColor()` safely reads `/C`.
 // ponytail: the one uncovered case is an annotation whose `/AP` exists but contains no page
 // objects — then `stroke_color()` still takes the crashing branch. Never seen in the wild, and
 // the real fix is upstream (or our own `FPDFAnnot_GetColor` call, which needs the raw

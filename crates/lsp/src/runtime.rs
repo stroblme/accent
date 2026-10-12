@@ -1,9 +1,5 @@
-//! The one async runtime in the process.
-//!
-//! Language servers are the first thing accent talks to asynchronously and the MCP server
-//! (Phase 7) is the second; both share this runtime rather than each starting one. Two workers:
-//! the work is framing and JSON, and the callers are the GTK main loop and `serve`'s request
-//! threads, which poll from outside.
+//! Process-wide async runtime shared by language servers and MCP. Two workers handle framing and
+//! JSON while GTK and RPC callers poll from outside the runtime.
 
 use std::sync::OnceLock;
 

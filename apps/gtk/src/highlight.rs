@@ -10,12 +10,10 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-/// Byte offset -> char offset. `markdown::analyze` reports byte ranges, `TextBuffer` iters count
-/// characters, so every span boundary needs translating.
+/// Translate analysis byte offsets to TextBuffer character offsets.
 ///
-/// ponytail: the non-ASCII path builds one `u32` per source byte (4 MB for a 1 MB note) instead of
-/// binary-searching a sparse table. Notes are small and this runs once per debounced analysis;
-/// switch to a sorted `(byte, char)` table if a multi-megabyte note ever shows up.
+/// Non-ASCII text uses one `u32` per byte for direct lookups, trading 4 MB per 1 MB note
+/// for simple conversion once per debounced analysis.
 pub enum Offsets {
     /// One byte == one char, no table needed.
     Ascii(usize),
@@ -78,17 +76,15 @@ fn tag_name(style: Style) -> &'static str {
     }
 }
 
-/// The heading tags, `h1` first: what a caller that asks "is this a heading" looks up, so the
-/// names live here with the tags themselves rather than as literals at every such site.
+/// Shared heading tag names, h1 first, so heading detection cannot drift from styling.
 pub const HEADING_TAGS: [&str; 6] = ["h1", "h2", "h3", "h4", "h5", "h6"];
 /// The paragraph tags [`hang`] gives each heading level's margins, `hang1` first.
 const HANG_TAGS: [&str; 6] = ["hang1", "hang2", "hang3", "hang4", "hang5", "hang6"];
 /// The fenced-block tag, for the same reason.
 pub const CODEBLOCK: &str = "codeblock";
 
-/// Heading scale factors, indexed by level - 1: what [`install_tags`] gives the `h1`..`h4` tags,
-/// and the 1.0 that leaves `h5` and `h6` at the body size. [`hang`] measures the markers with
-/// them, so the two lists cannot drift apart unnoticed.
+/// Heading scales indexed by level minus one, shared by tags and [`hang`] measurements.
+/// Levels five and six retain body scale.
 const HEADING_SCALES: [f64; 6] = [1.6, 1.4, 1.2, 1.1, 1.0, 1.0];
 
 const TAG_NAMES: &[&str] = &[
@@ -123,9 +119,8 @@ const TAG_NAMES: &[&str] = &[
     "marker",
 ];
 
-/// Create our tags in `buffer`'s tag table (idempotent) and give them their theme-independent
-/// attributes. Colours are set separately by [`restyle`] because they follow the system accent.
-/// After `wrap::install`, so the heading hangs outrank the wrap indents.
+/// Install theme-independent tags idempotently after wrap::install so heading hangs win priority.
+/// [`restyle`] supplies theme colours.
 pub fn install_tags(buffer: &sourceview5::Buffer) {
     let table = buffer.tag_table();
     if table.lookup("marker").is_some() {
@@ -171,15 +166,10 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     tag("marker");
 }
 
-/// The family of the platform's monospace font, which is the font a code tab is given
-/// (`editor::page::install_font`) and the one a run of code or a formula inside a note is set in.
+/// Resolve the platform monospace family for code tabs, inline code and formulas.
 ///
-/// Named rather than left to CSS's generic `monospace`: the alias is whatever fontconfig answers
-/// with, which is a face nothing else in the window uses, and a run set in it sits on the same
-/// line as prose set in another — so its glyphs are rasterised on their own terms, at a size
-/// chosen for the other font's metrics. That is what left an inline `$=$` with the top bar of its
-/// `=` all but gone beside a plain `=` two lines down that kept it. With the defaults this is the
-/// note's own face, and the formula is drawn exactly as the text around it is.
+/// A named family matches the default document face; generic CSS `monospace` can choose
+/// another face whose metrics rasterise inline formulas poorly at the prose font's size.
 fn monospace_family() -> String {
     pango::FontDescription::from_string(&adw::StyleManager::default().monospace_font_name())
         .family()
@@ -187,32 +177,19 @@ fn monospace_family() -> String {
         .unwrap_or_else(|| "monospace".to_string())
 }
 
-/// The lowest contrast a dim colour may read at against the page under it.
+/// Minimum contrast for dim markup against the page.
 ///
-/// The alphas below say what a marker is worth where the page has contrast to spare, and on
-/// Adwaita they give 2.8:1 in light and 3.8:1 in dark — which is what every note has been read
-/// at. On a page whose own ink is close to it they say nothing: Solarized's prose is 4.1:1
-/// against its paper, so 40 % of it is 1.6:1 and the bullet is not there. This is the floor those
-/// alphas are held above, so a scheme is lifted into the band rather than needing an alpha of its
-/// own.
-///
-/// A contrast target and not WCAG's 4.5:1 on purpose. That floor is for text somebody reads; a
-/// marker is punctuation the eye is meant to pass over, and lifting markup to 4.5:1 would make it
-/// louder than the prose in every theme. The number is Adwaita's own dimmer half, so the default
-/// theme does not move and nothing here is a judgement about what reads well — only that no page
-/// may be quieter than the one people already read.
+/// Fixed alphas become illegible on lower-contrast palettes such as Solarized. This floor
+/// preserves Adwaita's dim-marker contrast across themes without raising punctuation to
+/// the 4.5:1 target for readable text and making it compete with prose.
 const DIM_FLOOR: f32 = 2.8;
 
-/// The floor on Solarized alone. Its prose is only 4.13:1 light and 4.75:1 dark, so under
-/// [`DIM_FLOOR`] a list marker (0.4) and a quote (0.6) were both lifted onto 2.8:1 and read the
-/// same. 1.8 is Adwaita's marker carried over: 2.84:1 under prose at 12.6:1 is 41 % of the
-/// prose's contrast on a log scale, and 41 % of 4.13:1 is 1.8:1. The marker lands on 1.80:1 light
-/// under a quote at 2.16:1, and dark keeps both alphas, 1.86:1 under 2.59:1.
+/// Solarized-specific dim contrast floor preserving a distinction between markers and quotes.
+/// The normal floor lifts both equally; 1.8:1 scales Adwaita marker contrast to Solarized
+/// light prose, while dark retains original marker and quote alpha.
 const SOLARIZED_DIM_FLOOR: f32 = 1.8;
 
-/// What `colour` reads at against `page`, composited over it: a translucent foreground *is* a mix
-/// with what is behind it, so that mix is the contrast the reader gets. WCAG 2.1's ratio, which
-/// is the only definition of "reads at" anyone shares.
+/// WCAG 2.1 contrast of `colour` composited over `page`, matching the visible mix rather than raw RGB.
 pub fn reads_at(colour: gdk::RGBA, page: gdk::RGBA) -> f32 {
     let a = colour.alpha();
     let over = |c: f32, p: f32| a * c + (1.0 - a) * p;
@@ -242,10 +219,8 @@ pub fn dim(ink: gdk::RGBA, page: gdk::RGBA, alpha: f32) -> gdk::RGBA {
     lift(ink, page, alpha, floor)
 }
 
-/// `ink` at `alpha`, or at as much more of it as it takes to clear `floor` against `page`.
-///
-/// Contrast against the page only grows as the ink does, so the smallest alpha that clears the
-/// floor is a bisection away; a page with no room left hands back the ink itself.
+/// Raise `ink` alpha minimally to clear `floor` against `page`, or use opaque ink if unattainable.
+/// Contrast increases monotonically with alpha, allowing bisection.
 fn lift(ink: gdk::RGBA, page: gdk::RGBA, alpha: f32, floor: f32) -> gdk::RGBA {
     if reads_at(theme::at(ink, alpha), page) >= floor {
         return theme::at(ink, alpha);
@@ -268,11 +243,8 @@ pub fn page(dark: bool) -> gdk::RGBA {
     gdk::RGBA::parse(crate::theme::view_bg(dark)).unwrap_or(gdk::RGBA::WHITE)
 }
 
-/// The accent that text on the page is written in: the standalone one, not `accent_color_rgba`.
-/// That one is the brand colour a button is filled with, and it is the same in both halves of the
-/// theme. libadwaita darkens it for a light page and lightens it for a dark one before anybody
-/// writes text in it, which is what `to_standalone_rgba` hands back — the colour the platform's
-/// own links are written in. The link tags, a CSV's columns and the git history's lanes all take it.
+/// Resolve standalone text accent rather than the fixed button brand colour.
+/// Libadwaita adjusts standalone accent for light/dark readability; links, CSV and Git lanes share it.
 pub(crate) fn text_accent() -> gdk::RGBA {
     let style = adw::StyleManager::default();
     style.accent_color().to_standalone_rgba(style.is_dark())
@@ -313,16 +285,11 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     }
 }
 
-/// Re-analyse the whole buffer, bring our tags in line with it, and hand the analysis back — with
-/// the byte to character table it was tagged through, so a caller that also wants the links in
-/// the buffer's own coordinates neither parses the note twice nor rebuilds the table. The
-/// analysis needs the text as one contiguous copy, so it stays on the main thread.
+/// Analyse the buffer, sync tags and return analysis plus its byte-to-character table.
 ///
-/// Only what differs is touched ([`sync_tag`]): removing every tag over the whole note and
-/// applying it back, which this did until 2026-10, had GTK lay the whole note out again on every
-/// pass. Each tag's ranges are read back off the buffer itself rather than kept from the last
-/// pass, so an edit, a reload, an undo or [`apply_line`] in between leave nothing to keep in
-/// step, and a theme change, which restyles the tags themselves, needs no pass at all.
+/// Shared results avoid duplicate parsing and coordinate conversion for link consumers.
+/// Only changed ranges are tagged to avoid full relayout. Existing buffer tags remain the
+/// source of truth after edits, reloads and Undo; theme changes restyle tags without a pass.
 pub fn apply(buffer: &sourceview5::Buffer) -> (markdown::Analysis, Offsets) {
     let (start, end) = buffer.bounds();
     let text = buffer.text(&start, &end, true);
@@ -347,10 +314,8 @@ pub fn apply(buffer: &sourceview5::Buffer) -> (markdown::Analysis, Offsets) {
     (analysis, offsets)
 }
 
-/// Put `tag` over exactly the characters `want` covers, removing and applying it only where the
-/// buffer has it otherwise: each apply or remove has GTK lay its whole range out again, whether
-/// the tag was there or not, for any tag that can change a line's size — a font, a margin, an
-/// underline.
+/// Apply `tag` only where current ranges differ from `want`.
+/// Even redundant size-affecting tag changes trigger GTK relayout, so exact range differences matter.
 pub fn sync_tag(buffer: &sourceview5::Buffer, tag: &gtk::TextTag, want: Vec<Range<i32>>) {
     sync_runs(buffer, tag, &runs(buffer, tag), want);
 }
@@ -412,9 +377,7 @@ pub fn runs(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) -> Vec<Range<i32>>
     out
 }
 
-/// [`runs`] for each of `tags`, read in one walk over every toggle in the buffer. A walk per tag
-/// goes over the text again for each, skipping only stretches the tag never touches, which in a
-/// note dense with markup is little of it.
+/// Read [`runs`] for every tag in one toggle walk, avoiding repeated scans of markup-dense text.
 fn runs_of(buffer: &sourceview5::Buffer, tags: &[gtk::TextTag]) -> Vec<Vec<Range<i32>>> {
     let index = |tag: &gtk::TextTag| tags.iter().position(|t| t == tag);
     let mut out = vec![Vec::new(); tags.len()];
@@ -461,9 +424,7 @@ fn merged(mut ranges: Vec<Range<i32>>) -> Vec<Range<i32>> {
     out
 }
 
-/// The tags whose ranges in `buffer` differ from what a fresh pass over the same text gives:
-/// every span tagged one by one on a buffer that had none, which is what [`apply`] did before it
-/// diffed. For `ACCENT_BENCH_STYLE`, after a run of edits.
+/// Find styling differences from a fresh full pass for ACCENT_BENCH_STYLE after edits.
 #[cfg(feature = "bench")]
 pub fn mismatches(buffer: &sourceview5::Buffer) -> Vec<&'static str> {
     let fresh = sourceview5::Buffer::new(None);
@@ -485,10 +446,8 @@ pub fn mismatches(buffer: &sourceview5::Buffer) -> Vec<&'static str> {
         .collect()
 }
 
-/// The tags a span is given: its style's, and where the span is an ATX heading the hanging indent
-/// that pulls its `#` markers out into the gutter. [`apply_line`] hands it spans clipped to a
-/// single line: clipping can only move a start past the `#` markers, and a line that has not got
-/// them has nothing to hang.
+/// Return span style tags and ATX hanging tags when visible markers remain.
+/// [`apply_line`] clipping may exclude markers; clipped body text must not receive heading hang.
 fn tags_of(text: &str, span: &Span) -> impl Iterator<Item = &'static str> {
     let hang = match span.style {
         Style::Heading(level) if is_atx(text, span.range.start) => {
@@ -524,9 +483,8 @@ fn line_bytes(text: &str, line: usize) -> Option<Range<usize>> {
     (line == lines && (text.is_empty() || text.ends_with('\n'))).then_some(start..start)
 }
 
-/// Every span that overlaps `range`, clipped to it, in the order [`apply`] would tag them. A span
-/// that *encloses* the range survives across its full width, which is how a line inside a fence or
-/// frontmatter keeps the block's styling.
+/// Clip overlapping spans to `range` in full-pass order.
+/// Enclosing fence/frontmatter spans retain the full clipped line, preserving document context.
 fn clipped(spans: &[Span], range: &Range<usize>) -> Vec<Span> {
     spans
         .iter()
@@ -538,12 +496,10 @@ fn clipped(spans: &[Span], range: &Range<usize>) -> Vec<Span> {
         .collect()
 }
 
-/// Re-tag one line from a fresh analysis of the whole document, for the long notes that cannot
-/// afford [`apply`] on the keystroke. The parse is the cheap half of a pass and the tag churn the
-/// expensive one, so the line under the caret is styled as it is typed and the rest waits for the
-/// debounced full pass. Parsing everything is also what makes it correct: a line inside a fence or
-/// frontmatter is covered by the span the parse emits for the block, so nothing is read out of
-/// context.
+/// Style one line from a whole-document analysis while long notes await a debounced full pass.
+///
+/// Parsing is cheaper than tag churn. Whole-document context keeps fence and frontmatter
+/// styling correct while only the edited line's tags change.
 pub fn apply_line(buffer: &sourceview5::Buffer, line: i32) {
     let (start, end) = buffer.bounds();
     let text = buffer.text(&start, &end, true);
@@ -565,30 +521,20 @@ pub fn apply_line(buffer: &sourceview5::Buffer, line: i32) {
     }
 }
 
-/// Whether the heading starting at byte `start` writes its own `#` markers *and* has closed them
-/// with a space. A setext heading is underlined on the line below instead, so it has no marker to
-/// hang. The space matters while typing: a bare `#` still parses as an empty heading, so hanging
-/// it would pull the line left the moment the key is pressed and push it back as soon as the next
-/// character turns it into a `#tag`.
+/// Whether an ATX heading at byte `start` has # markers followed by a space.
+/// Setext headings have no markers. Waiting for the space avoids shifting a typed bare #
+/// that may become a tag.
 fn is_atx(text: &str, start: usize) -> bool {
     let rest = &text[start..];
     let after = rest.trim_start_matches('#');
     after.len() < rest.len() && after.starts_with([' ', '\t'])
 }
 
-/// Pull each ATX heading's `#` markers out into the left gutter, so heading text lines up with
-/// body text the way it does in Apostrophe. The markers are measured rather than guessed: their
-/// width follows the document font, the heading's scale and the current zoom.
+/// Hang ATX heading markers into the left gutter, aligning heading text with prose.
 ///
-/// Pango reads a negative indent as a *hanging* indent, so the first line of the paragraph sits
-/// at the tag's left margin and the wrapped ones at `left_margin + |indent|`; a tag's left margin
-/// replaces the view's rather than adding to it. Putting the marker's width in both therefore
-/// starts the heading line that much left of the gutter and lands everything after the marker,
-/// wrapped lines included, on the body column.
-///
-/// ponytail: the 48 px gutter is not widened, so `##### ` and `###### ` are wider than it, clamp
-/// at the window edge and start their text a few pixels right of the body column. Widen the
-/// gutter, or scale it with the zoom, if that ever reads as a misalignment.
+/// Measure markers in the current font, heading scale and zoom. Negative Pango indent and
+/// a matching left margin align wrapped rows with the body column. The fixed 48 px gutter
+/// can clip level-five and level-six markers, shifting their text slightly right.
 pub fn hang(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     let table = buffer.tag_table();
     let gutter = view.left_margin();
@@ -613,8 +559,7 @@ pub fn hang(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
 /// How many hues the columns cycle through before repeating.
 pub const CSV_COLUMNS: usize = 6;
 
-/// The CSV column tags, deliberately outside [`TAG_NAMES`]: the two sets never overlap, so
-/// neither one's remove pass can reach the other's tags.
+/// CSV tag names kept separate from [`TAG_NAMES`] so either styling pass cannot clear the other.
 const CSV_TAG_NAMES: [&str; CSV_COLUMNS] = ["csv0", "csv1", "csv2", "csv3", "csv4", "csv5"];
 
 /// Install the column tags in `buffer`'s tag table (idempotent). Colours come from
@@ -638,10 +583,9 @@ pub fn apply_csv(buffer: &sourceview5::Buffer) {
 /// A cell as a pass tags it: its characters and its column.
 type Tagged = (i32, i32, usize);
 
-/// A buffer's column colouring, kept from one pass to the next so that a pass after an edit reads
-/// and re-tags only the records the edit can have changed: tagging every cell took 1–2.5 s a pass
-/// at 120,000 rows (2026-10-08), and reading them all 50 ms (2026-10-10). A file that ends
-/// without a row terminator still has its last cell tagged, and an empty buffer yields no cells.
+/// Incremental CSV colouring state, retagging only records affected by edits.
+/// Whole-file passes are expensive on large CSVs. Unterminated final records still contribute cells;
+/// empty buffers contribute none.
 #[derive(Default)]
 pub struct Csv {
     /// The records the last pass read, `None` before the first pass.
@@ -670,9 +614,8 @@ impl Csv {
         self.edited.set(Some((b.min(before), a.min(after))));
     }
 
-    /// Tag every cell with its column's tag: all of them on the first pass, and after that those
-    /// of the records from the one the first edit is in until the read is back in step with the
-    /// last pass's ([`Rows::resume`]), with what those records held cleared first.
+    /// Tag all cells initially, then edited records until [`Rows::resume`] rejoins unchanged records.
+    /// Clear old tags only within the reread records.
     pub fn apply(&self, buffer: &sourceview5::Buffer) {
         let mut rows = self.rows.borrow_mut();
         let (before, after) = match (rows.is_some(), self.edited.take()) {
@@ -708,8 +651,8 @@ impl Csv {
     }
 }
 
-/// Where each record of a text starts, in characters, the delimiter it was read with and the
-/// text's length. The read is outside quotes at every record start, so it can begin at any.
+/// Character record starts, delimiter and text length.
+/// Each start lies outside quotes, allowing incremental parsing to resume there.
 #[derive(Default)]
 struct Rows {
     starts: Vec<i32>,
@@ -725,11 +668,8 @@ impl Rows {
         i.checked_sub(1).map_or(0, |i| self.starts[i])
     }
 
-    /// The cells of `text`, which begins at the record start `from` of the text these rows are
-    /// of once edited to `len` characters, up to the first record start at or past `end`, where
-    /// the edits end, that these rows have too: the text after it is theirs, so the read after
-    /// it would be. With that start, `None` where there is none, and the delimiter, sniffed
-    /// again where `text` is the file's start.
+    /// Read edited `text` from record start `from` until an unchanged start at or beyond `end`.
+    /// Return cells, the resume start if any, and delimiter; resniff only at file start.
     fn resume(&self, text: &str, from: i32, end: i32, len: i32) -> (Vec<Tagged>, Option<i32>, u8) {
         let offsets = Offsets::new(text);
         let at = |byte| from + offsets.char_of(byte);
@@ -785,9 +725,8 @@ pub fn restyle_csv(buffer: &sourceview5::Buffer) {
     }
 }
 
-/// A git graph lane's colour, on the same wheel the CSV columns use (DESIGN.md, Colour): the
-/// accent's hue turned `column` sixths of a turn, so lane 0 is the accent and a seventh lane
-/// repeats the first hue instead of inventing a colour.
+/// Git lane colour from the CSV six-hue accent wheel.
+/// Lane 0 is the accent and lane 6 repeats it, preserving DESIGN.md's colour rule.
 pub fn lane_colour(column: usize) -> gdk::RGBA {
     let accent = text_accent();
     let hsv = gtk::rgb_to_hsv(accent.red(), accent.green(), accent.blue());
@@ -796,9 +735,7 @@ pub fn lane_colour(column: usize) -> gdk::RGBA {
     gdk::RGBA::new(r, g, b, accent.alpha())
 }
 
-/// The accent's hue moved `column` sixths of a turn around the wheel, saturation and value
-/// untouched. Column 0 is the accent itself, which is what makes the six read as one family
-/// rather than as a second palette.
+/// Rotate accent hue by `column` sixths, preserving saturation and value for one colour family.
 pub(crate) fn rotate(hsv: (f32, f32, f32), column: usize) -> (f32, f32, f32) {
     let (h, s, v) = hsv;
     ((h + column as f32 / CSV_COLUMNS as f32).fract(), s, v)
@@ -1030,9 +967,7 @@ mod tests {
         assert!(minus(&want, &want).is_empty());
     }
 
-    /// The six column hues: distinct, a sixth of the wheel apart, wrapping once past 1.0, with the
-    /// accent's saturation and value carried through untouched. `rotate` is the whole colour rule
-    /// that does not need GTK, and GTK cannot be initialised in a test here.
+    /// Verify six distinct rotating hues preserve accent saturation/value without requiring GTK initialisation.
     #[test]
     fn csv_hues_step_evenly_around_the_wheel() {
         let accent = (0.75, 0.4, 0.9);

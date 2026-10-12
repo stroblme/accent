@@ -1,7 +1,4 @@
-//! Line diff of two texts.
-//!
-//! Deliberately about two strings and nothing else: the conflict view of Phase 1 and the git
-//! views of Phase 4 are the same widget over the same rows.
+//! Line diffs shared by conflict and git views, independent of the UI toolkit.
 
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, DiffTag, TextDiff};
@@ -39,22 +36,14 @@ pub struct DiffLine {
     pub emphasis: Vec<Range<usize>>,
 }
 
-/// How long [`lines`] may spend refining changed lines word by word, all of them together: past
-/// it, the pairs left come back whole. A pair takes about 2 µs: the 120,000 of a long file
-/// rewritten throughout take 200 ms (CSV rows, a character added to each, 2026-10-08), which
-/// [`lines_within`] can be given room for off the main thread.
+/// Total word-refinement budget for [`lines`]. Remaining pairs stay unrefined when it expires,
+/// bounding UI latency; background callers can allow more time through [`lines_within`].
 pub const REFINE: Duration = Duration::from_millis(100);
 
-/// Line diff of two texts, oldest-first, suitable for a side-by-side view.
+/// Line diff in source order for side-by-side views.
 ///
-/// A changed line's emphasis is what differs from the line it is paired with on its row
-/// ([`align`]), word by word, so a hunk of any length is refined at the cost of its pairs; a line
-/// the other side has none for is left whole.
-///
-/// ponytail: the word-level refinement runs on `similar`'s 0.5 similarity floor, below which a
-/// pair is left unrefined: the library's choice, not a measurement of ours;
-/// `iter_inline_changes_with_options` (and the `unicode` feature, for grapheme-accurate tokens)
-/// is the upgrade path if it shows.
+/// Changed pairs from [`align`] receive word-level emphasis; unpaired lines and pairs below
+/// `similar`'s 0.5 similarity floor stay unrefined.
 pub fn lines(old: &str, new: &str) -> Vec<DiffLine> {
     lines_within(old, new, REFINE).0
 }
@@ -118,12 +107,8 @@ fn emphasis(old: &str, new: &str, deadline: Instant) -> [Vec<Range<usize>>; 2] {
     emphasis
 }
 
-/// Line diff of two texts without the word-level refinement [`lines`] does: the same rows in the
-/// same order, every `emphasis` empty.
-///
-/// What a gutter needs — which lines changed, and how — for a fraction of the cost:
-/// [`lines`] re-diffs each changed pair word by word under a budget of [`REFINE`], and a change bar
-/// three pixels wide has nowhere to put the answer.
+/// The same rows as [`lines`] with empty `emphasis`, avoiding word refinement for gutter change
+/// bars.
 pub fn line_ops(old: &str, new: &str) -> Vec<DiffLine> {
     let mut lines = changes(old, new);
     for line in &mut lines {
@@ -133,10 +118,9 @@ pub fn line_ops(old: &str, new: &str) -> Vec<DiffLine> {
     lines
 }
 
-/// What turns `old` into `new` with the lines the two share left alone: each stretch of `old`'s
-/// lines that differs (0-based, numbered as [`lines`] numbers them), in order, with the text that
-/// takes its place, line endings included. What a pane read again replaces, so that the lines it
-/// keeps keep their layout.
+/// Ordered replacements turning `old` into `new`: zero-based old-line ranges with replacement
+/// text, including line endings. Unchanged lines are retained so editor layouts survive a
+/// reread.
 pub fn replaced(old: &str, new: &str) -> Vec<(Range<usize>, String)> {
     let diff = TextDiff::from_lines(old, new);
     (diff.ops().iter())
@@ -211,12 +195,9 @@ impl Side {
     }
 }
 
-/// Turn the flat diff into rows: an `Equal` line sits on both sides, a run of `Delete`s is paired
-/// row by row with the `Insert` run beside it, and whichever run is shorter gets `None` fillers so
-/// the two columns stay in step.
-///
-/// This is the whole correctness surface of a side-by-side widget, so it lives here as a plain
-/// function over plain data rather than inside a toolkit.
+/// Align equal lines on both sides and pair adjacent delete/insert runs row by row, padding the
+/// shorter run with `None`. Kept independent of the toolkit so side-by-side alignment can be
+/// tested directly.
 pub fn align(lines: &[DiffLine]) -> Vec<Row> {
     let mut rows = Vec::new();
     let (mut dels, mut ins) = (Vec::new(), Vec::new());

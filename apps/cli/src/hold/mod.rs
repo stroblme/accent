@@ -1,15 +1,11 @@
-//! Shells that outlive their window.
+//! Shells that survive their windows.
 //!
-//! One holder per user and machine (`accent-cli hold`) owns every shell: its pty, its process, and
-//! a model of its screen. A terminal tab runs `accent-cli attach <id>` in its own pty, and that
-//! client relays bytes between the tab and the holder over a unix socket, so closing the window
-//! only ends the client. The next `attach` with the same id gets the shell back, redrawn with its
-//! history, whichever window it lands in — and over `ssh -t` it is the same command on the host.
+//! One `accent-cli hold` process owns each shell's pty, process and screen model. `accent-cli
+//! attach <id>` relays from a tab or `ssh -t`; closing the terminal only detaches. Reattaching
+//! restores the shell and history.
 //!
-//! The socket lives in `$TMPDIR/accent-<uid>/`, not `$XDG_RUNTIME_DIR`: the runtime dir is removed
-//! at a full logout, which on a remote host happens as soon as the window's ssh master goes, and
-//! the socket would vanish under a holder that is still running. tmux keeps its sockets in `/tmp`
-//! for the same reason.
+//! Sockets use `$TMPDIR/accent-<uid>/` because `$XDG_RUNTIME_DIR` disappears on logout,
+//! including when a remote SSH master closes, while the holder may still be running.
 
 pub mod client;
 pub mod clip;

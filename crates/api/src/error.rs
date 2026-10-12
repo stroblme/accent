@@ -1,8 +1,6 @@
-//! The one error the façade hands back, whichever backend answered.
-//!
-//! What the core can say is [`Error::Core`], unchanged; the rest is what only a vault reached over
-//! a link or a language server can meet. Plain data, as the core's is, so it crosses the wire
-//! whole: a failure on the host arrives here as the same value it was there.
+//! Backend-independent façade errors, serialized unchanged across the wire.
+//! [`Error::Core`] preserves core failures; other variants describe remote
+//! connections and language servers.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,15 +8,15 @@ use serde::{Deserialize, Serialize};
 pub enum Error {
     #[error(transparent)]
     Core(#[from] accent_core::Error),
-    /// There is no link to the host: it went, or it is still being made. Nothing was asked of it.
+    /// No host connection; the request was not sent.
     #[error("{0}")]
     Offline(String),
-    /// The link went while the call was out, so the host may have done what it was asked: the
-    /// answer is what was lost.
+    /// The connection failed during a call. The host may have completed it
+    /// without returning an answer.
     #[error("{0}")]
     Lost(String),
-    /// The host will not serve the vault, its folder not there or its index not opening. Asking
-    /// again meets the same answer until someone changes the host.
+    /// The host refused the vault because its folder or index could not be opened.
+    /// Retrying requires a change on the host.
     #[error("{0}")]
     Refused(String),
     /// ssh, a forward, a transfer or a deadline failed in a way none of the above names.
@@ -46,8 +44,8 @@ impl Error {
         matches!(self, Error::Offline(_) | Error::Lost(_))
     }
 
-    /// Whether the call never reached the host, so asking again once the link is back cannot do
-    /// twice what it does: a rewrite of the vault, say.
+    /// Whether the request never reached the host, making a retry safe
+    /// from duplicate side effects.
     pub fn unasked(&self) -> bool {
         matches!(self, Error::Offline(_))
     }

@@ -1,6 +1,5 @@
-//! The tools a diagram offers, the cell each one makes, and the ring they are picked from. The
-//! styles are draw.io's own sidebar defaults, so what is drawn here looks the same when the
-//! file is opened there.
+//! Diagram tools, cell creation and tool ring. Use draw.io sidebar style defaults
+//! so new cells look the same when opened in draw.io.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -27,8 +26,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    /// The window action that puts the tool in hand: the ring's buttons, the status bar and the
-    /// palette all read the label out of `ACTIONS` through it.
+    /// Action id shared by ring buttons, status bar and palette to obtain labels from `ACTIONS`.
     pub fn action(self) -> &'static str {
         match self {
             Tool::Select => "win.diagram-select",
@@ -45,8 +43,8 @@ impl Tool {
         matches!(self, Tool::Rect | Tool::Ellipse | Tool::Text)
     }
 
-    /// The style a new cell made with it gets, drawn as the ring's outer orbit says (kept in the
-    /// config's `[diagram]`, so every diagram draws alike).
+    /// New-cell style from the ring's options, persisted in `[diagram]` so all tabs
+    /// share drawing settings.
     pub fn style(self, options: &DiagramConfig) -> String {
         match self {
             Tool::Rect if options.rounded => presets::ROUNDED.to_string(),
@@ -220,8 +218,7 @@ impl DiagramRing {
         }
     }
 
-    /// Show the tool in hand's options, the ones in force checked. Which is checked is the
-    /// options' say, never the click's, as on the PDF's ring.
+    /// Show active-tool options, deriving checked state from settings rather than clicks.
     fn sync(&self) {
         let (tool, options) = (self.ring.tool(), self.options.get());
         let check = |button: &gtk::ToggleButton, shown: bool, wanted: bool| {

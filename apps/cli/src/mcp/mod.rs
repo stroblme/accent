@@ -1,8 +1,6 @@
-//! `accent-cli mcp`: a vault served to an agent over the Model Context Protocol, on stdio.
-//!
-//! The same façade, index and vault config as the app (DESIGN.md, MCP), so it answers with the
-//! app closed and shares the app's index while it is open. What it hands out is held to the
-//! vault's real root: a path a symlink takes outside it is neither read nor listed.
+//! Serve vault tools over stdio MCP using the app's façade, config and shared index, including
+//! while the app is closed. Restrict reads and results to the real vault root, excluding
+//! external symlink targets (DESIGN.md, MCP).
 
 use std::collections::HashMap;
 use std::path::{Component, Path};

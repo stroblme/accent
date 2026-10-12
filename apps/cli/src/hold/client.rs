@@ -1,10 +1,7 @@
-//! The other end of the holder's socket: `attach`, the terminal end of a held shell, and the
-//! one-shot `kill` and `held`.
+//! Relay between a terminal and a held shell, with one-shot kill and listing commands.
 //!
-//! `attach` runs in the terminal's own pty (a VTE tab, or `ssh -t` on a host) and only relays:
-//! keystrokes to the holder on one thread, SIGWINCH as a new size on another, and the shell's
-//! output back to the terminal on the main one. It keeps no state worth losing, so when the
-//! terminal goes away it just exits, and the shell stays with the holder.
+//! `attach` forwards input, SIGWINCH sizes and output on separate threads. It keeps no
+//! persistent state: terminal closure ends the relay while the holder retains the shell.
 
 use super::protocol::{self, DETACHED, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT, RESIZE};
 use super::{FAILED, SOCKET, clip, lock};
@@ -34,9 +31,8 @@ pub fn attach(id: &str, cwd: Option<PathBuf>) -> i32 {
     code
 }
 
-/// End shell `id`. A holder is started if none is running, since the `attach` that is to start
-/// the shell may still be on its way (Close Tab in the moment after New Terminal), and the kill
-/// has to be there before it: the holder then starts nothing for it.
+/// End shell `id`, starting a holder if necessary to record the kill before a pending attach can
+/// create it. This handles Close Tab immediately after New Terminal.
 pub fn kill(id: &str) -> io::Result<()> {
     protocol::write_frame(&mut connect()?, KILL, id.as_bytes())
 }

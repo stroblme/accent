@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-/// How often a scan still finding the files says how many it has found: often enough to read as
-/// moving, and past the whole scan of a desktop vault, which then reports nothing extra.
+/// Scan-progress interval, frequent enough to show a long walk advancing while avoiding extra
+/// reports for quick scans.
 const SCAN_TICK: Duration = Duration::from_millis(250);
 
 impl Index {
@@ -340,15 +340,12 @@ impl Index {
         Ok(())
     }
 
-    /// Bring one path in line with the disk. This is the watcher's entry point: the caller turns a
-    /// filesystem event into a vault-relative path and lets the index decide what it means.
+    /// Update one vault-relative path after a watcher event. Matching `(mtime_ns, size, ino)`
+    /// leaves the row untouched and returns [`Change::Unchanged`], avoiding reloads on save
+    /// echoes.
     ///
-    /// A row whose `(mtime_ns, size, ino)` still match the disk is left completely untouched, which
-    /// is what makes the echo of our own save free, and lets the UI ignore the resulting
-    /// [`Change::Unchanged`] instead of reloading the buffer the user is typing in.
-    ///
-    /// ponytail: no `(dev, ino)` dedup here, so a note linked in twice gets a row per path until
-    /// the next full reconcile collapses them. Aliases are rare and never wrong, only duplicated.
+    /// This path does not deduplicate `(dev, ino)`; duplicate symlink entries remain until full
+    /// reconciliation.
     pub fn update_file(&mut self, root: &Path, rel: &str) -> Result<Change> {
         self.update_one(root, rel, true)
     }
@@ -671,15 +668,9 @@ fn upsert(
     Ok(id)
 }
 
-/// Rewrite the `notes` rows [`upsert`] and [`clear_derived`] set aside — each file's old body out,
-/// its new one in where it has one — and through the triggers both FTS tables, one statement
-/// each way.
-///
-/// FTS5 writes the terms it holds in memory out as a new segment at every statement savepoint,
-/// which the statements of a batch after a note's write open: a body written per file was a
-/// segment per note in each table, and merging them back was half of a first index (the
-/// generated vault, 41 683 files: 23.5 s → 12.2 s). The rows, the triggers and the index they
-/// build are the same.
+/// Apply pending body deletions and insertions together through the FTS triggers. Per-file
+/// writes create extra FTS segments at statement savepoints; batching avoids costly segment
+/// merges while producing the same index.
 fn write_bodies(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     tx.prepare_cached("DELETE FROM notes WHERE file_id IN (SELECT file_id FROM temp.bodies)")?
         .execute([])?;
@@ -1055,8 +1046,7 @@ mod tests {
         assert_eq!(st.conflicts, 1);
     }
 
-    /// The `!BUG`: a CRLF note was indexed from its raw bytes while the editor held it as LF, so
-    /// every offset drifted by one byte per preceding line.
+    /// Indexed CRLF notes must use editor-normalised LF text so byte offsets agree.
     #[test]
     fn offsets_in_a_crlf_note_address_the_normalised_buffer() {
         let (vault, db) = fixture();

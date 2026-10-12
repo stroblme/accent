@@ -1,15 +1,12 @@
-//! The action table and everything that dispatches from it: `run_action`, the accelerators in
-//! force and the menus that name the actions.
+//! Shared action definitions, dispatch, effective accelerators and menus.
 
 use super::*;
 use crate::export::Export;
 use accent_core::conflict::Take;
 
-/// Every user-facing action: the name it answers to, the label the menu and the palette show, and
-/// its accelerators. One table, so an action cannot exist without being reachable and findable
-/// (DESIGN.md, Keyboard). Stepping along the bar and picking a tab by number stay `AdwTabView`'s
-/// own shortcuts; the two that walk the tabs in the order they were last used are ours, because
-/// libadwaita has no notion of that order.
+/// Action names, labels and accelerators shared by menus and palette so commands
+/// remain discoverable. AdwTabView owns positional tab navigation; MRU cycling is
+/// implemented here because libadwaita does not track usage order.
 pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.save", "Save", &["<Control>s"]),
     ("win.save-as", "Save As…", &["<Control><Shift>s"]),
@@ -743,8 +740,7 @@ impl App {
         }
     }
 
-    /// Mark Resolved, from a merge view's title row or the palette: the file written as it stands,
-    /// then staged (`git::Panel::mark_resolved`). A file that could not be written is not.
+    /// Save the merge result before staging (`git::Panel::mark_resolved`); failed saves never stage.
     pub(crate) fn mark_resolved(self: &Rc<Self>, tab: &Rc<Tab>) {
         let Some(git) = self.git.get() else {
             return;
@@ -776,14 +772,11 @@ impl App {
         }
     }
 
-    /// One of the three zoom chords, dispatched to whatever the active tab is.
+    /// Dispatch zoom chords according to the active document kind.
     ///
-    /// A PDF fits its pages, an image is given a size of its own, a shell scales its own font and
-    /// a document or a comparison scales the display-wide one; a status page draws at a size
-    /// nobody chose, so the chords do nothing there. It is matched in the same shape as
-    /// [`App::sync_status`] and [`App::refresh_zoom`] on purpose: what the chords reach and what
-    /// the readout says have to be the same list, or the bar says 120 % over something drawn at
-    /// its own size.
+    /// PDFs fit pages, images resize, shells scale their font and text uses document zoom.
+    /// Status pages ignore zoom. Keep dispatch aligned with [`App::sync_status`] and
+    /// [`App::refresh_zoom`] so readouts describe the rendered document.
     fn zoom_action(self: &Rc<Self>, name: &str) {
         // Reset is 100 % for anything counted in percentages, and Fit Height for a PDF: one whole
         // page, which is what a reader resetting a zoom wants back, though a PDF opens at Fit
@@ -822,9 +815,7 @@ impl App {
         }
     }
 
-    /// Push the accelerators in force into the application and rebuild this window's captured
-    /// chords. The table is the application's and lives with the [`Shell`]; the captured
-    /// controller is the window's own.
+    /// Apply application-wide accelerators and rebuild this window's captured chords.
     pub fn refresh_accels(&self) {
         let Some((shell, gtk_app)) = self.shell.upgrade().zip(self.window.application()) else {
             return;
@@ -842,9 +833,7 @@ impl App {
         fill_captured(&self.captured, &captured);
     }
 
-    /// Store an accelerator override for `action` and put it into effect at once, in every
-    /// window. `None` drops the override, so the action goes back to what [`ACTIONS`] says.
-    /// Returns what is in force after.
+    /// Apply a shortcut override in every window; `None` restores [`ACTIONS`] defaults. Return effective bindings.
     pub fn rebind(&self, action: &str, accels: Option<Vec<String>>) -> Vec<String> {
         {
             let mut config = self.config.borrow_mut();
@@ -858,9 +847,7 @@ impl App {
     }
 }
 
-/// What `action` is bound to right now: the user's override from the config if there is one, the
-/// built-in table otherwise. An override that is an empty list leaves the action unbound, which is
-/// a binding too — it still lists in the palette, just without a chord.
+/// Effective bindings: config override or defaults. An empty override leaves the action unbound but in the palette.
 pub fn accels_for(config: &Config, action: &str) -> Vec<String> {
     if let Some(accels) = config.shortcuts.get(action) {
         return accels.clone();
@@ -886,35 +873,15 @@ const CAPTURED: &[&str] = &[
     "win.toggle-comment",
 ];
 
-/// The chords the window keeps while a shell has the keyboard. Everything else in [`ACTIONS`]
-/// goes to the shell: a terminal that answers only half of readline is not a terminal.
+/// Select application shortcuts retained while a terminal owns focus.
 ///
-/// GTK dispatches a window's application accelerators at the window in the capture phase, ahead
-/// of the focused VTE, so a chord in the table is eaten whatever the terminal does with it —
-/// unbinding it in `Shell::apply_accels` is what lets the key through. The reserved set is small
-/// and each entry earns its place:
+/// Application accelerators precede VTE, so `Shell::apply_accels` must unbind all others.
+/// Keep Close Tab, MRU tab cycling, pane and divider moves, New Terminal, zoom, Fullscreen,
+/// Go to File and Control+Shift chords. These preserve navigation and window control;
+/// readline alternatives remain for Ctrl+W's delete-word and Ctrl+E's end-of-line.
 ///
-/// * `win.close-tab` (`Ctrl+W`) — Close Tab has to mean the same thing over every tab. This is
-///   the one budgeted cost: readline loses delete-word, and `Alt+Backspace` still does it.
-/// * `win.next-tab` / `win.previous-tab` (`Ctrl+Tab`) — the same rule as Close Tab, and these
-///   were `AdwTabView`'s own capture-phase chords before they were actions, so a shell never had
-///   them to lose. No readline meaning either: `Ctrl+I` is the completion key, not `Ctrl+Tab`.
-/// * the four Move Tab and four Move Divider actions — arranging the panes has to work from
-///   whatever is in one. `Shift+Alt`+arrow and `Ctrl+Alt`+arrow have no readline meaning; what a
-///   shell loses is a program that binds them itself, tmux's pane resizing being the usual one.
-/// * `win.terminal` (`Ctrl+J`) and the three zoom actions — the chords that open a shell and
-///   scale one have to be reachable from inside one.
-/// * `win.fullscreen` (`F11`) — no readline or curses meaning, and GNOME Terminal keeps the same
-///   key for the same reason: a fullscreen window has to be leavable from a focused shell.
-/// * `win.palette-files` (`Ctrl+E`) — Go to File, so a file is one chord away from a shell as it
-///   is from a note. What a shell loses is readline's end-of-line, which `End` still does.
-/// * every chord whose spelling carries both `<Control>` and `<Shift>` — the existing convention,
-///   which no shell claims, and which already covers Copy and Paste in Terminal, the pane chords,
-///   the palette's second spelling and Replace in Files.
-///
-/// ponytail: matched on the accelerator's spelling. A `<Primary>` or `<Ctrl>` written by hand into
-/// the config is not recognised; `gtk::accelerator_parse` would settle it but needs an initialised
-/// GTK, which the tests do not have.
+/// Matching uses accelerator spelling. Hand-written `<Primary>` or `<Ctrl>` aliases are not
+/// recognised; parsing would require GTK initialisation unavailable to these tests.
 fn reserved(action: &str, accel: &str) -> bool {
     matches!(
         action,
@@ -938,12 +905,10 @@ fn reserved(action: &str, accel: &str) -> bool {
     ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
 }
 
-/// Whether the window keeps `accel` while a shell has the keyboard: the [`reserved`] set, or,
-/// where the shell is given every key (`Config::forward_keys_to_terminal`), Copy and Paste in
-/// Terminal alone. Those two act on the shell rather than on the window, and a terminal hands
-/// `Ctrl+Shift+C` to the program as `Ctrl+C`, so forwarding it would interrupt what runs instead
-/// of copying from it. `AdwTabView`'s own chords are not in this table and stay either way, which
-/// is how the keyboard leaves such a shell: `Ctrl+PageUp` / `Ctrl+PageDown` to the next tab.
+/// Keep [`reserved`] shortcuts, or only terminal Copy and Paste when forwarding all keys.
+///
+/// VTE turns Ctrl+Shift+C into Ctrl+C for programs, so forwarding Copy would interrupt them.
+/// AdwTabView's separate PageUp/PageDown shortcuts still allow leaving the terminal.
 fn kept(action: &str, accel: &str, forward: bool) -> bool {
     match forward {
         true => matches!(action, "win.terminal-copy" | "win.terminal-paste"),
@@ -960,11 +925,8 @@ fn clear(controller: &gtk::ShortcutController) {
     }
 }
 
-/// The window's capture controller, which takes chords the text widgets would otherwise claim.
-///
-/// It runs before everything, so it has to ask who has the keyboard first: these are editor
-/// chords, and a shell wants `Ctrl+K` to kill to the end of the line rather than to toggle a
-/// comment in a note nobody is looking at.
+/// Capture editor chords before text widgets, checking focus first so terminal
+/// shortcuts such as Ctrl+K retain shell behavior.
 fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String)]) {
     clear(controller);
     for (action, accel) in bindings {
@@ -1035,9 +997,7 @@ pub fn install_actions(app: &Rc<App>) {
     ));
 }
 
-/// Which action a mouse button asks for, for the two GTK has no name for. GDK names only the
-/// first three buttons; 8 and 9 are the side pair every mouse that has one ships, and browsers
-/// have meant back and forward by them for twenty years.
+/// Map mouse side buttons 8 and 9 to Back/Forward; GDK names only the first three buttons.
 pub fn nav_action(button: u32) -> Option<&'static str> {
     match button {
         8 => Some("win.back"),
@@ -1054,13 +1014,11 @@ pub fn label_of(action: &str) -> &str {
         .map_or(action, |(_, label, _)| *label)
 }
 
-/// The primary menu's four sections (DESIGN.md, Primary menu), for a window opened on `key`: the
-/// files in this window, which vault it is on, what it shows, and the application. What needs a
-/// vault — making a file or a folder in it, closing it — is left off a window without one rather
-/// than offered and refused. A window of shells has Save Session, and a named one Close Session
-/// as its way out. A shell on this machine is its own item only where New Terminal opens one on a
-/// host. Every item is the window's whichever tab is in front: what acts on the document, Save,
-/// Find and Toggle Preview among them, is left to its chord and the palette.
+/// Build the primary menu's file, vault, view and application sections for `key`.
+///
+/// Omit unavailable vault operations. Shell windows offer Save Session and named sessions
+/// Close Session; local shell creation is separate when New Terminal targets a host.
+/// Document commands stay in shortcuts and the palette rather than this window-level menu.
 fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let vault = key.vault().is_some();
     let mut shows = vec!["win.terminal", "win.terminal-remote"];
@@ -1121,33 +1079,21 @@ pub fn primary_menu(key: &crate::shell::WindowKey) -> gio::Menu {
     menu
 }
 
-/// The tab's own context menu, as a pane is built with it: nothing yet known about which page
-/// will show it, so without the two items that name a file, Move to New Window or the ones that
-/// print it, and offering Pin Tab.
+/// Initial tab menu with Pin and no page-specific file, transfer or print commands.
 pub fn tab_menu() -> gio::Menu {
     let menu = gio::Menu::new();
     fill_tab_menu(&menu, false, false, false, None);
     menu
 }
 
-/// The tab's own context menu: what can be done with the file behind a tab without touching it.
-/// Splitting leads, because it opens rather than copies; Reveal sits in a section of its own
-/// because it moves the sidebar rather than the clipboard.
+/// Fill the shared tab context menu for the page about to show it.
 ///
-/// `file` says whether the tab about to show this holds a file of this vault, which is what
-/// Rename and Move to Trash need and nothing else here does: a shell and a comparison are no
-/// file, and a loose one is outside the vault those two act in. On such a tab the two are not on
-/// the menu at all rather than on it and refusing (DESIGN.md, Principle 1). `movable` says whether
-/// another window could open what the tab holds, which Move to New Window needs: a shell, a
-/// comparison and a remote vault's file cannot. `pinned` says which
-/// of Pin Tab and Unpin Tab it offers, and `prints` what the tab can be printed and exported as
-/// (`export::printable`): a note Print…, Export as PDF… and Export as HTML…, a PDF the first two,
-/// a diagram those two and Export as PNG… and SVG…, anything else none, in a section of their own after Reveal, since they make something of the
-/// file rather than name it.
+/// `file` enables vault-only Rename and Trash; `movable` enables opening in another window.
+/// `pinned` selects Pin or Unpin, and `prints` supplies supported print/export formats.
+/// Split leads; Reveal and exports have separate sections because their effects differ.
 ///
-/// Filled in place rather than built afresh, because `AdwTabView` holds one model per pane and a
-/// `GtkPopoverMenu` follows the model it was made from: the page about to show the menu is what
-/// decides what it says (`wire::wire_pane`, `setup-menu`).
+/// Update the existing model because AdwTabView and its popover retain it across pages
+/// (`wire::wire_pane`, `setup-menu`).
 pub fn fill_tab_menu(
     menu: &gio::Menu,
     file: bool,
@@ -1222,16 +1168,14 @@ pub fn fill_tab_menu(
     }
 }
 
-/// Where `pane` sits in the window, for [`panes::neighbour`]. A pane that has not been allocated
-/// yet — a split in the same main-loop turn — has no bounds, and a zero rect is what says so.
+/// Pane bounds for [`panes::neighbour`]; zero rectangle before allocation, including newly split panes.
 pub fn pane_rect(pane: &Pane, root: &gtk::Widget) -> graphene::Rect {
     pane.widget()
         .compute_bounds(root)
         .unwrap_or_else(graphene::Rect::zero)
 }
 
-/// One button rather than a two-item group: there are only two states, so the pressed look plus
-/// an icon that names the current one says everything a second toggle would have.
+/// Use one toggle: pressed state and current-state icon distinguish the two states.
 pub fn mode_switcher() -> gtk::ToggleButton {
     let button = gtk::ToggleButton::builder()
         .icon_name(Mode::Editor.icon())
@@ -1243,15 +1187,11 @@ pub fn mode_switcher() -> gtk::ToggleButton {
 }
 
 impl Shell {
-    /// Push the accelerators in force into the application. Done wholesale: forty
-    /// `set_accels_for_action` calls are cheaper than working out which of them a config change
-    /// touched.
+    /// Replace application accelerators with the current config's full table.
     ///
-    /// A focused shell narrows the table to what is [`kept`], because an application accelerator
-    /// is dispatched at the window ahead of the VTE and unbinding it is the only thing that lets
-    /// the key reach the shell. The filter reads the accelerators in force, so a rebound chord
-    /// follows the same rule as the default it replaced. The shell asked about is the active
-    /// window's, whichever window is rebuilding: the table is one for all of them.
+    /// Filter through [`kept`] while the active window focuses a shell, allowing other keys to
+    /// reach VTE. Filter effective bindings so rebindings obey the same rule; the table belongs
+    /// to the application even when another window rebuilds it.
     pub fn apply_accels(&self, gtk_app: &gtk::Application) {
         let config = self.config.borrow();
         let shell = terminal::has_focus(gtk_app);
@@ -1267,8 +1207,7 @@ impl Shell {
         }
     }
 
-    /// The keyboard moved: rebuild the table if it crossed into or out of a shell. Only a change
-    /// is worth acting on — focus moves on every click, and the rebuild is sixty calls.
+    /// Rebuild shortcuts only on transitions into or out of shell focus, avoiding work on every click.
     pub fn sync_accels(&self, gtk_app: &gtk::Application) {
         if terminal::has_focus(gtk_app) != self.shell_keys.get() {
             self.apply_accels(gtk_app);
@@ -1653,12 +1592,10 @@ mod tests {
         "<Control><Shift>End",
     ];
 
-    /// `AdwTabView` binds its own chords in the capture phase, ahead of both our accelerators and
-    /// the focused view's class shortcuts, so a chord it keeps is a chord nothing else can have.
-    /// Neither half of that is visible in `ACTIONS`, which is why it takes a test: one direction
-    /// is two controllers fighting over one chord, the other is the tab bar quietly holding a
-    /// GtkSourceView built-in — how `Ctrl+Home` in a note left the note instead of going to its
-    /// start.
+    /// Ensure AdwTabView capture shortcuts do not overlap actions or editor built-ins.
+    ///
+    /// Its shortcuts are absent from `ACTIONS` and run before focused widgets, so overlaps
+    /// would silently replace document navigation or compete with application actions.
     #[test]
     fn the_tab_bar_keeps_no_chord_that_is_ours_or_forbidden() {
         for (accel, what) in panes::widget_chords() {
@@ -1675,12 +1612,10 @@ mod tests {
         }
     }
 
-    /// The reader's own keys are in the table so they list in the palette, and carry no
-    /// accelerator there on purpose: a reader pages with `Space`, `n`, `p` and the arrows and
-    /// undoes a stroke with `Ctrl+Z`, and an application accelerator is dispatched at the window
-    /// ahead of whatever has the keyboard — so a bare `space` in the table would stop the editor,
-    /// the terminal and every entry in the app from taking one, and `<Control>z` would take undo
-    /// from every text view. The keys stay on the PDF tab's own controller, which fires these.
+    /// Keep PDF reader commands in the palette without application accelerators.
+    ///
+    /// Their tab-local controller owns Space, arrows and Undo. Global bindings would intercept
+    /// normal typing and text Undo before the focused widget.
     #[test]
     fn the_paging_commands_are_listed_and_carry_no_accelerator() {
         for action in [

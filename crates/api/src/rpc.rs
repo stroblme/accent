@@ -1,18 +1,10 @@
-//! The façade as JSON-RPC 2.0 over stdio, so a vault can live on another machine.
-//!
-//! One JSON object per line, in both directions: requests and responses carry an `id`, and the
-//! server pushes the vault's [`Event`]s as `event` notifications, which have none. Newline framing
-//! rather than `Content-Length` headers because the whole protocol then reads in a terminal and
-//! `serve` can be driven by hand while debugging.
-//!
-//! Two rules keep it honest. File bytes never travel here — a note's text does, but a PDF or an
-//! image is fetched over its own `cat`, because base64 through a JSON parser is neither fast nor
-//! debuggable. And every call has a deadline: a request whose answer never comes must fail the one
-//! caller waiting for it, not freeze the window.
-//!
-//! A link can also die without closing: the host never hears the TCP connection go, and `serve`
-//! would sit on a stdin that neither ends nor speaks. So the client pings every [`PING`], and a
-//! server that has been pinged once takes [`SILENCE`] without a word as the window gone.
+//! JSON-RPC 2.0 over stdio for remote vaults. One JSON object per line keeps
+//! the protocol readable and manually testable. Requests and responses carry
+//! an `id`; vault [`Event`]s arrive as `event` notifications without one.
+//! File bytes travel separately over SSH, avoiding binary encoding in JSON.
+//! Calls have deadlines so a missing response cannot indefinitely block a caller.
+//! Clients ping every [`PING`]; after its first ping, a server exits on [`SILENCE`]
+//! without input, detecting connections that die without closing stdin.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -24,34 +16,29 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-/// Who is waiting for which answer. One entry per call in flight, taken out by the reader thread
-/// when the answer arrives and dropped wholesale when the connection dies.
+/// In-flight calls by request id. The reader removes answered calls;
+/// a lost connection clears all waiters.
 type Waiting = Arc<Mutex<HashMap<u64, Sender<Result<Value>>>>>;
 
 use crate::{Error, Event, Local, Result, locked};
 
-/// How long a call waits before giving up on the far end. Generous next to a round trip on any
-/// link a person would edit over, and short enough that a wedged server is a message rather than
-/// a hang. A method the host itself allows longer — a commit whose hooks run for a minute — is
-/// given its own bound on top of this (the `methods!` table in `vault.rs` says which).
+/// Default remote-call deadline, bounding stalled servers. Host-bounded
+/// operations add their own allowance, as listed in `vault.rs`'s `methods!` table.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
 /// How often the client says it is still there.
 pub const PING: Duration = Duration::from_secs(10);
 
-/// How long a pinged server waits without hearing anything before it stops. Nine missed pings:
-/// well past the 10–17 s a flaky VPN drops out for, and past ssh's own 15 s ServerAlive give-up,
-/// after which the window has let go of this server anyway.
+/// Silence timeout after the first ping: nine missed pings, allowing transient
+/// VPN outages and exceeding SSH's 15 s ServerAlive timeout.
 pub const SILENCE: Duration = Duration::from_secs(90);
 
-/// How long a server that has stopped hearing from its client still waits for the requests it is
-/// running: the longest a git call may take on the host — a sync, a pull and a push each under
-/// `TRANSFER_TIMEOUT` — and a little over for the process group to be stopped.
+/// Wait for in-flight work after losing the client. Covers the longest git
+/// sync (pull and push under `TRANSFER_TIMEOUT`) plus process-group shutdown.
 const LINGER: Duration = Duration::from_secs(2 * accent_core::git::TRANSFER_TIMEOUT.as_secs() + 10);
 
-/// A call the host bounds must finish inside [`LINGER`], or a server whose client has gone would
-/// stop while still rewriting the vault. Checked where the two are written rather than left to a
-/// run that would only show it on a slow link.
+/// Assert host-bounded calls finish within [`LINGER`], preventing server
+/// shutdown during a vault rewrite after client loss.
 const _: () = assert!(
     crate::vault::REPLACE_BOUND.as_secs() <= LINGER.as_secs(),
     "a rewrite may outlast the wait a server gives the requests it is running"
@@ -64,8 +51,7 @@ const BAD_PARAMS: i64 = -32602;
 /// Every other failure. Whichever the code, the error itself is the `data`.
 const FAILED: i64 = -32000;
 
-/// An error as it crosses: JSON-RPC's code for it, the sentence a person reads, and the error
-/// itself as `data`, which is what the caller on the other end is handed.
+/// Wire error: JSON-RPC code, display message and the original error in `data`.
 fn to_wire(e: &Error) -> Value {
     let code = match e {
         Error::UnknownMethod(_) => NO_METHOD,
@@ -75,8 +61,8 @@ fn to_wire(e: &Error) -> Value {
     json!({"code": code, "message": e.to_string(), "data": e})
 }
 
-/// The error an answer carries, as it was on the far side: its `data`, or its message where
-/// there is none, which only another program on the other end would send.
+/// Recover the remote error from `data`, falling back to the message
+/// for peers that do not provide it.
 fn from_wire(e: &Value) -> Error {
     e.get("data")
         .and_then(|data| serde_json::from_value(data.clone()).ok())
@@ -89,8 +75,8 @@ fn from_wire(e: &Value) -> Error {
 /// What `hello` answers: who is on the other end, and where the vault really is.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Hello {
-    /// The vault root as the *server* canonicalised it. Every `rel` is relative to this, and the
-    /// UI needs the real spelling for the git pane and for anything it shows the user.
+    /// Server-canonicalized root. All `rel` paths use it; the UI needs this
+    /// spelling for git and displayed paths.
     pub root: std::path::PathBuf,
     pub version: String,
 }
@@ -114,12 +100,9 @@ pub struct Client {
 }
 
 impl Client {
-    /// Start routing. `events` receives the server's notifications; it is the same channel the
-    /// local worker would have posted to, so nothing downstream can tell the two apart.
-    ///
-    /// `on_lost` runs once, on the reader thread, when the server's output ends without
-    /// [`close`](Self::close) having asked for it: the link dropped, or the server died. It must
-    /// not join this client, whose reader is the thread it runs on.
+    /// Route responses and send remote notifications to the local-style `events` channel.
+    /// `on_lost` runs once on the reader thread for an unsolicited output close.
+    /// It must not join this client, since it runs on the thread being joined.
     pub fn new(
         out: Box<dyn Write + Send>,
         input: Box<dyn Read + Send>,
@@ -197,8 +180,8 @@ impl Client {
         self.call_tracked(method, params, &Mutex::new(None), DEADLINE)
     }
 
-    /// The same, waiting up to `deadline` and leaving the request id in `asked`, so a caller that
-    /// gives up on the answer can [`cancel`](Self::cancel) it at the server.
+    /// Wait up to `deadline`, storing the request id in `asked` so a caller
+    /// can [`cancel`](Self::cancel) when the answer becomes stale.
     pub fn call_tracked<T: DeserializeOwned>(
         &self,
         method: &str,
@@ -211,12 +194,9 @@ impl Client {
             .map_err(|e| Error::Protocol(format!("{method} answered something unreadable: {e}")))
     }
 
-    /// Tell the server this request has no reader left. A notification, with no id of its own:
-    /// there is no answer to it, and a request that has already finished simply is not there.
-    ///
-    /// Its caller is let go at once, answered "cancelled", rather than left waiting for an answer
-    /// nobody reads: a ghost-text request waits on a blocking thread of its own, and a fast typist
-    /// on a slow link would otherwise pile them up, one per pause, each until the host answered.
+    /// Notify the server that the request is cancelled; finished requests are ignored.
+    /// Release the caller immediately with "cancelled", avoiding accumulated blocking
+    /// threads for stale ghost-text requests on slow links.
     pub fn cancel(&self, id: u64) {
         if let Some(waiter) = locked(&self.pending).remove(&id) {
             let _ = waiter.send(Err(accent_core::Error::Cancelled.into()));
@@ -266,12 +246,9 @@ impl Client {
         }
     }
 
-    /// Let go of the writing end, which is what tells `serve` to stop.
-    ///
-    /// Replacing the writer drops the pipe, and `serve` reads EOF on its stdin. Separate from
-    /// [`join`](Self::join) because the caller owning the process in between has to be able to
-    /// kill it: the reader thread ends when that process's output closes, and a wedged one would
-    /// never close it. The end that follows is the one asked for, so `on_lost` stays quiet.
+    /// Close the writer so `serve` reads EOF, suppressing `on_lost` for this shutdown.
+    /// Separate from [`join`](Self::join) so the process owner can kill a wedged
+    /// child before joining the reader, which needs stdout to close.
     pub fn close(&self) {
         self.closing.store(true, Ordering::SeqCst);
         let _ = self.stop.send(());
@@ -293,24 +270,21 @@ impl Client {
 }
 
 impl Drop for Client {
-    /// Let go of the pipe even when nobody closed it, as a connection whose `hello` failed does.
-    /// The heartbeat shares the writer, so dropping the client alone would leave it open.
+    /// Close the pipe on drop, including failed handshakes. The heartbeat shares
+    /// the writer, so dropping the client alone would leave it open.
     fn drop(&mut self) {
         self.close();
     }
 }
 
-/// The language requests a server has running, by the request id that asked for them.
-///
-/// A `cancel` takes one out and aborts it, which drops the future and so tells the language
-/// server the same thing. Without it a completion the user typed past kept a thread busy to the
-/// deadline and the answer went into a pipe nobody was reading.
+/// Active host language requests by request id. `cancel` removes and aborts
+/// a task, dropping its future to cancel the underlying language-server request
+/// and release the waiting thread.
 type InFlight = Arc<Mutex<HashMap<u64, tokio::task::AbortHandle>>>;
 
 thread_local! {
-    /// The request this worker thread is answering, and where to register what it waits on.
-    /// Set by [`serve_local`], read by [`block`]; unset everywhere else, which is what makes a
-    /// vault used directly rather than served register nothing.
+    /// Current host request and task registry, set by [`serve_local`] and read
+    /// by [`block`]. Direct vault calls leave this unset and register nothing.
     static SERVING: std::cell::RefCell<Option<(u64, InFlight)>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -341,11 +315,8 @@ fn route(msg: Value, pending: &Waiting, events: &Sender<Event>) {
 
 // ------------------------------------------------------------------- server
 
-/// Open the vault at `root` and answer requests on `input` until it ends.
-///
-/// This is `accent-cli serve`: the whole of what runs on a remote host. The config arrives in the
-/// `hello` the client opens with, rather than as an argument, because it belongs to the window
-/// and can change while the vault is open.
+/// Serve `root` over `input` until EOF (`accent-cli serve`). The opening
+/// `hello` supplies window-owned config, which may change while the vault is open.
 pub fn serve(
     root: &std::path::Path,
     db: Option<&std::path::Path>,
@@ -368,8 +339,8 @@ pub fn serve(
     Ok(())
 }
 
-/// Answer the first request — the client's `hello` — with why there is no vault to serve.
-/// Exiting alone would only close the pipe, and the window would say the link closed.
+/// Reply to the opening `hello` with the vault failure. Exiting alone would
+/// report only a closed link and lose the actionable reason.
 fn refuse(e: &crate::Error, input: impl Read, mut output: impl Write) {
     for line in BufReader::new(input)
         .lines()
@@ -388,14 +359,11 @@ fn refuse(e: &crate::Error, input: impl Read, mut output: impl Write) {
     }
 }
 
-/// Answer requests on `input` until it ends, forwarding `events` as notifications.
-///
-/// Each request runs on a thread of its own: the vault is `Sync` and keeps a second SQLite reader
-/// for exactly this, so a whole-vault grep does not hold up the tree the user is clicking through.
-/// Every line is written whole under one lock, so two answers can never interleave.
-///
-/// Once the client has pinged, `silence` without a line from it ends the server too. Until then
-/// it waits for as long as it is left, so `serve` driven by hand still works.
+/// Serve requests until EOF and forward `events` as notifications.
+/// Each request has a thread and separate search reader so a vault-wide grep
+/// does not block tree reads. Lock whole output lines to prevent interleaving.
+/// After the first ping, exit on `silence` without input; unpinged manual
+/// sessions wait for EOF.
 pub(crate) fn serve_local(
     vault: Local,
     events: Receiver<Event>,
@@ -538,9 +506,8 @@ pub(crate) fn arg<T: DeserializeOwned>(params: &Value, n: usize) -> Result<T> {
         .map_err(|e| Error::Protocol(format!("argument {n} is not what was expected: {e}")))
 }
 
-/// Bind each named argument to its position in `p`, in order, answering the dispatch with the
-/// first that does not read: what the tables in `vault.rs` and `language.rs` write for every
-/// method they carry. The position is counted by shadowing rather than by hand.
+/// Deserialize positional arguments into named bindings for the vault and
+/// language tables. Shadow the position counter and return the first error.
 macro_rules! args {
     ($p:ident; $($arg:ident : $t:ty),*) => {
         let _i = 0usize;
@@ -565,11 +532,9 @@ pub(crate) fn answer<T: serde::Serialize>(r: Result<T, impl Into<Error>>) -> Res
     ok(r.map_err(Into::into)?)
 }
 
-/// The whole remote surface. Most of it is one line of the [`methods!`](crate::vault) table and
-/// is answered by [`crate::vault::dispatch`]; what is left here is what that table cannot say —
-/// the methods whose two sides differ, and the document's own lifecycle. Anything absent from
-/// both is deliberately local: the session file, the config, and path arithmetic, all of which
-/// belong to the machine the window is on.
+/// Dispatch the remote surface through [`crate::vault::dispatch`] plus
+/// operations the method table cannot express, including document lifecycle.
+/// Session files, local config and path arithmetic stay on the window's machine.
 fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
     if let Some(answer) = crate::vault::dispatch(vault, method, p)
         .or_else(|| crate::language::dispatch(vault, method, p))
@@ -629,11 +594,9 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
     }
 }
 
-/// Wait for a language request, registered so that a `cancel` for it can drop it.
-///
-/// The registration is what makes cancellation real on the far side: aborting the task drops the
-/// future, which is what sends `$/cancelRequest` to the language server underneath it. A vault
-/// that is not being served registers nothing and simply waits.
+/// Wait for a language request, registering it for remote `cancel`. Aborting
+/// drops its future and sends `$/cancelRequest` to the language server.
+/// Direct vault calls wait without registration.
 pub(crate) fn block<T>(task: crate::Task<T>) -> crate::Result<T> {
     let serving = SERVING.with_borrow(Clone::clone);
     if let Some((id, live)) = &serving {
@@ -653,9 +616,8 @@ mod tests {
     use accent_core::Error as Core;
     use std::time::{Duration, Instant};
 
-    /// A client and a server joined by two pipes, exactly as ssh joins them, with no ssh in the
-    /// way. `std::io::pipe` is what makes this a real end-to-end test of the protocol rather than
-    /// a test of a mock.
+    /// Join a client and server with real pipes, as SSH does, to test the protocol
+    /// end to end without a network.
     struct Wired {
         client: Client,
         server: Option<std::thread::JoinHandle<()>>,
@@ -998,9 +960,8 @@ mod tests {
         assert_eq!(e, Error::Offline("not connected".into()));
     }
 
-    /// A call waits as long as its caller gave it: a method the host may take longer over is
-    /// answered, where the same call given less gives up at its own deadline — and the one that
-    /// gave up tells the host so, or the host works on for an answer nobody will read.
+    /// Verify caller-specific deadlines: longer waits permit host work, shorter
+    /// waits time out and cancel work whose answer is no longer wanted.
     #[test]
     fn a_call_waits_for_as_long_as_it_was_given() {
         let (server_in, client_out) = std::io::pipe().unwrap();
@@ -1285,10 +1246,9 @@ mod tests {
         assert!(!db.exists(), "no index for a vault that is not there");
     }
 
-    /// A remote vault's walk runs on the host, so Stop has to reach the worker there while it is
-    /// going. It does: every request is served on a thread of its own, and these two raise a flag
-    /// rather than queueing behind the walk. Enough notes that the walk outlives the `hello`
-    /// round trip `Wired::open` ends with.
+    /// Verify Stop reaches a running host scan and Resume restarts it. Separate
+    /// request threads set a flag without queueing behind the walk; enough notes
+    /// keep the scan running past `Wired::open`'s handshake.
     #[test]
     fn stop_and_resume_reach_the_hosts_worker_over_the_wire() {
         let w = Wired::seeded(&|root| {

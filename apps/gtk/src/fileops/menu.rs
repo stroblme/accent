@@ -13,24 +13,11 @@ use std::rc::Rc;
 
 /// The action group the context menu's items resolve through, inserted on the tree widget.
 const GROUP: &str = "fileops";
-/// Right-click and Menu-key context menu for the file tree. `host` is the tree's outer box, and
-/// `anchor` is where to point the popover in that box's coordinates.
+/// File-tree menu anchored in `host` coordinates. `row` supplies a path and directory flag;
+/// blank space offers creation and paste only. `marked` selects the multi-file [`marked_menu`].
 ///
-/// `row` is the row that was clicked, as (path, is a directory), or `None` where the click landed
-/// on no row at all — the blank area below the last one. Creating and pasting are offered in all
-/// three cases, since both name a folder rather than a row; everything else needs a path, so a menu
-/// opened over nothing holds those alone.
-///
-/// `marked` is the set a Ctrl+click has built, and is empty unless the click landed on one of its
-/// rows — the caller decides that, since it is the tree that holds the marks. A menu over a marked
-/// row is [`marked_menu`]: the whole set, and nothing that names one file.
-///
-/// ponytail: the popover is parented to the box rather than to the `GtkListView` inside it,
-/// because GTK only re-presents a popover from its parent's `allocate_native_children`, which a
-/// widget with a custom `size_allocate` such as `GtkListView` never reaches. A menu parented to
-/// the list keeps its first-frame size and `GtkPopoverMenu`'s internal scrolled window turns the
-/// rest into a scrollbar. Fallback if one ever reappears: set that scrolled window's policies to
-/// Never.
+/// Parent the popover to the outer box: `GtkListView`'s custom allocation prevents re-presenting
+/// it, leaving a stale first-frame size and an internal scrollbar.
 pub fn context_menu(
     ops: &Rc<Ops>,
     host: &gtk::Widget,
@@ -114,13 +101,9 @@ pub fn context_menu(
     crate::widgets::popup_menu(host, &menu, Some(anchor))
 }
 
-/// The menu a right-click on a marked row offers: what can act on several paths at once, and
-/// nothing else. Open, the create items, Rename, Leave Out of Search, the three Copy … Path items,
-/// Show in Files and Download… all name one file, and an item that could do nothing — or that
-/// would quietly act on one row out of several — is never on the menu (DESIGN.md, Principle 1).
-///
-/// `dir` is where a Paste puts what it holds, the same answer [`row_dir`] gives the single-row
-/// menu, and `paste` whether there is anything to paste at all.
+/// Multi-file menu containing only actions that apply to the whole marked set. `dir` is the
+/// paste destination from [`row_dir`]; `paste` indicates available clipboard content. Omit
+/// single-file actions rather than silently using one selected row.
 fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool) -> gio::Menu {
     let menu = gio::Menu::new();
     let clip = gio::Menu::new();
@@ -138,15 +121,9 @@ fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool) -> gio::Menu {
     menu
 }
 
-/// Cut, Copy, Move to… and Paste. `row` is the file the first three act on, `None` on a menu
-/// opened over nothing; `dir` is where a Paste puts what it holds, which is [`row_dir`]'s answer
-/// either way, so pasting and dropping and New File all agree on where "here" is. Move to… is
-/// the marked set's own item handed a set of one, as it acts on a set.
-///
-/// Paste is drawn only where there is something to paste. The clipboard says what it holds
-/// without a read, so the question costs nothing and an item that could do nothing is never on
-/// the menu (DESIGN.md, Principle 1). Cut and Copy need a folder's own action, as Rename does:
-/// where a `(copy)` mark goes depends on whether the name has an extension to keep.
+/// Cut, Copy and Move to… act on `row`; Paste targets `dir` from [`row_dir`]. Omit Paste without
+/// clipboard files. Pass directory identity to Cut/Copy so duplicate-name suffixes preserve file
+/// extensions but treat folder names whole.
 fn clip_section(ops: &Rc<Ops>, row: Option<(&str, bool)>, dir: &str) -> gio::Menu {
     let section = gio::Menu::new();
     if let Some((rel, is_dir)) = row {
@@ -164,10 +141,8 @@ fn clip_section(ops: &Rc<Ops>, row: Option<(&str, bool)>, dir: &str) -> gio::Men
     section
 }
 
-/// The folder a row stands for: the folder itself, the one holding the file, and the vault root
-/// where there is no row at all — the blank area below the last one, or the root label above the
-/// first. It is where New File, New Folder and Upload put what they create, and where a drop
-/// moves what was dragged, so the two ways of putting a file somewhere agree by construction.
+/// Shared destination for creation, paste and drops: the row's directory, a file's parent, or
+/// the vault root on blank space.
 pub fn row_dir(row: Option<(&str, bool)>) -> &str {
     match row {
         Some((rel, true)) => rel,

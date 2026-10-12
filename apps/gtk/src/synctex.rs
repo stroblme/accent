@@ -7,12 +7,10 @@ use super::*;
 use accent_core::synctex::{self, Synctex};
 use std::time::SystemTime;
 
-/// How many SyncTeX files stay read, the last ones asked about: each is held whole, and a long
-/// document's is megabytes.
+/// Maximum recently used SyncTeX files retained whole, bounding memory for large documents.
 const KEEP: usize = 2;
 
-/// Why Go to Source or Show in PDF is greyed over a LaTeX build without a SyncTeX file, as the
-/// palette's row says it; a menu item, which carries no tooltip, ends in the shorter label below.
+/// Disabled-action explanation for LaTeX builds missing SyncTeX; menu items use the shorter label below.
 pub(crate) const NO_SYNCTEX: &str = "This build has no SyncTeX data: build with -synctex=1";
 const NO_SYNCTEX_LABEL: &str = "(no SyncTeX data)";
 
@@ -20,14 +18,12 @@ thread_local! {
     /// The SyncTeX files read, oldest first, each with the etag it was read at: a rebuild is
     /// read again, and nothing else is.
     static READ: RefCell<Vec<(PathBuf, Etag, Arc<Synctex>)>> = const { RefCell::new(Vec::new()) };
-    /// The builds accent goes on taking for their PDF's after writing into it, by the PDF's path.
-    /// Remembered while accent runs, through a tab closed and opened again.
+    /// Trusted PDF build state keyed by path, surviving tab closure for this process.
     static TRUSTED: RefCell<HashMap<PathBuf, Trust>> = RefCell::new(HashMap::new());
 }
 
-/// A PDF's build as accent last found it, and what accent has written into the PDF since: ink and
-/// highlights move no text, so the SyncTeX file stays true however much newer the PDF is, and a
-/// page put in, taken out or moved does not, until the next build.
+/// Remember the last PDF build and Accent writes since it.
+/// Ink and highlights preserve SyncTeX coordinates; page edits invalidate them until rebuilding.
 #[derive(Clone)]
 struct Trust {
     /// The SyncTeX file, and when it was written.
@@ -38,9 +34,8 @@ struct Trust {
     moved: bool,
 }
 
-/// The SyncTeX file that is the build of the PDF at `pdf`: one no older than it
-/// ([`synctex::beside`]), or the one it was built with where only accent's own ink and highlights
-/// have been written into it since ([`Trust`]).
+/// Find the PDF's current SyncTeX build through [`synctex::beside`] or [`Trust`].
+/// Accent-only ink and highlight saves retain trust even when the PDF mtime becomes newer.
 fn build_of(pdf: &Path) -> Option<PathBuf> {
     let trust = TRUSTED.with_borrow(|trusted| trusted.get(pdf).cloned());
     if trust.as_ref().is_some_and(|trust| trust.moved) {
@@ -56,9 +51,8 @@ fn build_of(pdf: &Path) -> Option<PathBuf> {
     })
 }
 
-/// Whether the PDF at `pdf` is a LaTeX build with no SyncTeX file to go by: built without one,
-/// or built again since without one. Not one whose pages accent has moved, whose file is there
-/// but names pages no longer where they were.
+/// Whether `pdf` is a LaTeX build missing current SyncTeX.
+/// Page-edit invalidation differs: the SyncTeX file exists but its page numbers no longer match.
 fn without_synctex(root: &Path, pdf: &Path) -> bool {
     let moved = TRUSTED.with_borrow(|trusted| trusted.get(pdf).is_some_and(|trust| trust.moved));
     !moved && build_of(pdf).is_none() && synctex::is_build(root, pdf)
@@ -109,10 +103,8 @@ fn is_tex(key: &str) -> bool {
 }
 
 impl App {
-    /// Go to Source (`win.pdf-go-to-source`): the line of the source the active PDF was typeset
-    /// from at [`PdfTab::source_point`](pdftab::PdfTab::source_point), opened with the caret on
-    /// it as Go to Definition opens one. A line of a file outside the vault — a class's, a
-    /// package's — is named in a toast instead.
+    /// Open the source line at [`PdfTab::source_point`](pdftab::PdfTab::source_point).
+    /// Files outside the vault are reported in a toast instead of opened as vault notes.
     pub(crate) fn go_to_source(self: &Rc<Self>) {
         let Some(pdf) = self.active_pdf() else {
             return;
@@ -154,9 +146,8 @@ impl App {
         });
     }
 
-    /// Show in PDF (`win.show-in-pdf`): the line of text the caret's line of the active `.tex`
-    /// went into, in the PDF of the first build near it that lists it ([`synctex::near`]),
-    /// opened or brought forward as a link into a PDF is, and marked a moment.
+    /// Find a nearby SyncTeX build containing the active .tex line ([`synctex::near`]),
+    /// open or raise its PDF and temporarily highlight the resulting location.
     pub(crate) fn show_in_pdf(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
             return;
@@ -208,10 +199,8 @@ impl App {
         });
     }
 
-    /// Offer Go to Source over a PDF with a SyncTeX file beside it, and Show in PDF over a `.tex`
-    /// with a build near it, both of a local vault. Disabled anywhere else, which takes each off
-    /// the menu that names it, unless only a SyncTeX file is missing ([`App::synctex_missing`]):
-    /// then the page's menu shows it greyed, saying why.
+    /// Enable SyncTeX for local PDFs with mappings and .tex files with nearby builds.
+    /// Hide unavailable actions except missing-map builds, which remain disabled with an explanation.
     pub(crate) fn sync_synctex(&self, doc: Option<Doc>) {
         if let Some(pdf) = doc.as_ref().and_then(Doc::pdf) {
             pdf.set_without_synctex(self.synctex_missing(doc.as_ref()).0);
@@ -231,10 +220,9 @@ impl App {
         }
     }
 
-    /// A PDF opened or read again, which a LaTeX build does to it: a build no older than it is
-    /// trusted afresh, one only accent's own last write made older stays trusted, and any other
-    /// is not; Show in PDF's mark lands once its pages are there, its SyncTeX file is read again if
-    /// one is kept, and the offer follows.
+    /// Refresh build trust and SyncTeX after opening or reloading a PDF.
+    /// Retain trust for Accent-only saves; otherwise require a map no older than the PDF.
+    /// Apply pending source highlights once pages arrive and refresh action availability.
     pub(crate) fn synctex_opened(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
         if self.is_local_pdf(pdf) {
             let path = pdf.path();
@@ -268,10 +256,8 @@ impl App {
         }
     }
 
-    /// Show in PDF on a `.tex` tab's own menu, in a section of its own after the editor's items,
-    /// shown while the window offers it. A secondary press asks again first: a build may have
-    /// been made since the tab came forward, and the press may be on a pane other than the active
-    /// one.
+    /// Add Show in PDF after editor menu items when available.
+    /// Recheck on secondary press because builds or active panes may have changed.
     pub(crate) fn offer_show_in_pdf(self: &Rc<Self>, tab: &Rc<Tab>) {
         if self.local_tex(&tab.rel()).is_none() {
             return;
@@ -304,9 +290,8 @@ impl App {
         tab.view.add_controller(press);
     }
 
-    /// Whether Go to Source, then Show in PDF, is missing nothing but a SyncTeX file over `doc`:
-    /// a local vault's PDF that is a LaTeX build ([`synctex::is_build`]), or a `.tex` whose
-    /// build's PDF is there ([`synctex::pdf_near`]), built without `-synctex=1`.
+    /// Whether `doc` lacks only SyncTeX: a local LaTeX PDF build or .tex file with a nearby PDF
+    /// that was built without `-synctex=1`.
     pub(crate) fn synctex_missing(&self, doc: Option<&Doc>) -> (bool, bool) {
         let root = self.root();
         let source = (doc.and_then(Doc::pdf))
@@ -322,8 +307,7 @@ impl App {
         (source, show)
     }
 
-    /// accent wrote into a PDF itself, ink, highlights or pages: a trusted build stays trusted
-    /// through it, the write being accent's own, unless pages moved ([`App::synctex_repaged`]).
+    /// Preserve build trust after Accent writes ink or highlights; page edits invalidate it.
     pub(crate) fn synctex_written(&self, pdf: &pdftab::PdfTab) {
         let path = pdf.path();
         TRUSTED.with_borrow_mut(|trusted| {
@@ -333,8 +317,7 @@ impl App {
         });
     }
 
-    /// A page of a PDF was put in, taken out or moved, or such an edit undone or made again: its
-    /// build names pages that are no longer where they were, until the next build.
+    /// Invalidate mapping after page insertion, deletion, movement, Undo or Redo until the next build.
     pub(crate) fn synctex_repaged(&self, pdf: &pdftab::PdfTab) {
         TRUSTED.with_borrow_mut(|trusted| {
             if let Some(trust) = trusted.get_mut(&pdf.path()) {

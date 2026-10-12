@@ -2,14 +2,11 @@
 
 use super::*;
 
-/// `ACCENT_BENCH_GOALS=<rel>:<line>:<col>[:<line>:<col>]` opens a Lean file, waits for its server
-/// to say it answers goals, puts the caret at the 1-based `line` and `col` and brings the Code
-/// pane up, then waits up to a minute for the pane's answer and prints `bench goals <n> <first
-/// goal's last line>`, `none` where it shows no goals, and how long the answer took. With a second
-/// place it then hides the sidebar, moves the caret there, which asks nothing while the pane is
-/// out of sight, and shows the sidebar again, printing what the pane asks for as it comes back
-/// (`bench goals shown …`). Meanwhile it prints the lines the gutter marks as still being checked
-/// each time they change, 1-based, and quits once the check is done ([`watch_checking`]).
+/// `ACCENT_BENCH_GOALS=<rel>:<line>:<col>[:<line>:<col>]` opens Lean and waits for
+/// goal support. Place the caret at 1-based coordinates, show Code and wait up to a
+/// minute; print `bench goals <n> <first goal's last line>` or `none`, plus latency.
+/// A second position probes deferred requests after moving with the sidebar hidden
+/// (`bench goals shown …`). Print 1-based checking lines until done ([`watch_checking`]).
 pub(super) fn bench_goals(app: &Rc<App>, arg: &str) {
     let (rel, places) = arg.split_once(':').unwrap_or((arg, ""));
     let places: Option<Vec<accent_api::Pos>> = places

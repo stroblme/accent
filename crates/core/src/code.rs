@@ -1,14 +1,10 @@
-//! The declarations in a source file — functions, methods, types and the like — found by a
-//! scanner of our own: what the index keeps for a code file (its `symbols` table), and what an
-//! outline, a caller or a callee is answered from without a language server.
+//! Source declarations for indexed outlines and call lookup without a language server.
 //!
-//! A scanner, not a parser. Comments and string literals are blanked first ([`mask`]), offsets
-//! and newlines kept, so that no brace or keyword inside one is read as code. A brace language
-//! is then read a statement at a time: what stands before a `{` is that block's header, and a
-//! declaration is a header (or a statement ending in `;`) whose line a language's pattern names;
-//! its end is the brace that closes the block. Python is read by indentation. What a pattern
-//! does not know — a declaration a macro writes, a C function behind a `#if` — is not found, which
-//! the scanner's tests measure against codegraph's tree-sitter parse of this repository.
+//! This scanner masks comments and literals while preserving byte offsets and newlines. Brace
+//! languages use block headers and semicolon-terminated statements; Python uses indentation.
+//! Language patterns determine which declarations are recognised, so macro-generated or
+//! preprocessor-hidden declarations may be missed. Tests compare its results with CodeGraph's
+//! tree-sitter parse of this repository.
 
 use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
@@ -117,8 +113,8 @@ pub fn lang_of(rel: &str) -> Option<Lang> {
     })
 }
 
-/// Whether a file is a test file by where it is or what it is called: everything declared in it
-/// is a test's.
+/// Whether the path or filename identifies a test file; all its declarations are marked as
+/// tests.
 pub fn is_test_path(rel: &str) -> bool {
     let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
     let stem = name.split('.').next().unwrap_or(name);
@@ -132,7 +128,7 @@ pub fn is_test_path(rel: &str) -> bool {
         || name.contains(".spec.")
 }
 
-/// A line this long is a minified script or a generated table, not code to outline.
+/// Maximum line length to scan, excluding minified scripts and generated tables from outlines.
 const MINIFIED: usize = 2_000;
 
 /// The declarations in `text`, read as `lang`, in the order they start.
@@ -1264,8 +1260,8 @@ mod tests {
         assert!(text[new.range.clone()].ends_with("Point { x }\n    }"));
     }
 
-    /// The scanner on files of this repository, whose every `fn` line it has to find, the
-    /// strings, raw strings, lifetimes and doc comments in them notwithstanding.
+    /// Repository fixtures ensure every `fn` declaration is found despite strings, lifetimes and
+    /// doc comments.
     #[test]
     fn rust_files_of_this_repository() {
         let fns = Regex::new(

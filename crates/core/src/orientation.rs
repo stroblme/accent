@@ -1,8 +1,5 @@
-//! Which way up a camera's picture is to be seen, and turning its pixels that way.
-//!
-//! A camera stores the sensor's rows as they came and writes how to turn them into the EXIF
-//! Orientation tag. GDK's decoders ignore the tag (GTK 4.22), and so does Android's
-//! `BitmapFactory`, so both apps read it here and turn the decoded pixels themselves.
+//! EXIF orientation and pixel transforms shared by desktop and Android. GDK and `BitmapFactory`
+//! ignore the tag, so both apps orient decoded pixels here.
 
 use std::io::{Read, Seek, SeekFrom};
 

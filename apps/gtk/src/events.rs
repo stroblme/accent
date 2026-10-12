@@ -4,9 +4,8 @@ use super::*;
 use accent_core::path::parent_dir;
 
 impl App {
-    /// Point every tab at or under `from` at the same place under `to`. The watcher's rename
-    /// does this, and so does a move of our own before it reloads the notes it rewrote: those
-    /// are named by where they are now, which their tabs are not until they follow.
+    /// Retarget tabs under `from` after a rename or move, before reloading rewritten
+    /// notes whose paths already use `to`.
     pub(crate) fn follow_rename(self: &Rc<Self>, from: &str, to: &str) {
         // On a remote vault a PDF reads and writes its cached copy, which has to be under the
         // new name before the tab is pointed there.
@@ -29,12 +28,10 @@ impl App {
         self.sync_active();
     }
 
-    /// Have the vault report on the folder `key` is in, which the walk may not enter: a file
-    /// in a gitignored folder or a dependency tree changes nothing the index hears, so its tab
-    /// would not follow an edit made outside accent. The news comes as
-    /// [`Event::UnindexedChanged`], as the tree's does for the folders it lists; the worker
-    /// leaves a folder it walks to the index. Watched for as long as the window is open, as the
-    /// tree's are: one folder per document, one level each.
+    /// Watch `key`'s parent folder for changes the index does not walk.
+    ///
+    /// Gitignored and dependency files need [`Event::UnindexedChanged`] to follow external edits.
+    /// Indexed folders stay with the worker; one-level watches last for the window's lifetime.
     pub(crate) fn watch_folder_of(&self, key: &str) {
         let dir = parent_dir(key);
         let Some(vault) = self.vault().cloned() else {
@@ -53,8 +50,7 @@ impl App {
         });
     }
 
-    /// Bring whatever shows `rel` up to date with its file, which something other than this
-    /// window has changed.
+    /// Refresh open documents for an external change to `rel`.
     pub(crate) fn changed_on_disk(self: &Rc<Self>, rel: &str) {
         self.reshow_preview_image(rel);
         self.details_stale(rel);
@@ -435,12 +431,10 @@ impl App {
     }
 }
 
-/// Hand the window what the vault worker says, as it says it.
+/// Forward worker events through a channel awaited by the main loop.
 ///
-/// A thread waits on the worker's channel and passes each event on to one the main loop awaits,
-/// so the window sleeps until there is something to do: the 120 ms poll this replaces woke it
-/// eight times a second for nothing. The thread ends with the vault, which is the last to hold
-/// the other end, or at the first event after the window has gone.
+/// A blocking relay thread avoids periodic idle wakeups. It ends when the vault drops its
+/// sender or the next event finds the window gone.
 pub fn start_events(app: &Rc<App>, events: Receiver<Event>) {
     // Weak: `Shell.windows` holds the only strong `App`, so closing a window drops it along with
     // its vault, its worker thread and its WebKit process.

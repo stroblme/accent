@@ -108,12 +108,8 @@ impl PdfDoc {
             .map_err(|e| Error::Pdf(format!("page {page}: {e:?}")))
     }
 
-    /// `(width, height)` in points.
-    /// One page's size in points, without loading the page.
-    ///
-    /// `FPDF_GetPageSizeByIndexF` reads the size out of the page tree; going through a loaded
-    /// `PdfPage` instead costs a full parse of that page's content, which for a 1 500-page
-    /// document is eleven seconds of work to learn how big the paper is.
+    /// Page width and height in points without loading its content. `FPDF_GetPageSizeByIndexF`
+    /// reads the page tree, avoiding a costly parse for every page.
     pub fn page_size(&self, page: usize) -> Result<(f32, f32)> {
         let _guard = lock();
         let rect = self
@@ -267,15 +263,11 @@ impl PdfDoc {
         text.inside_rect(rect.to_pdf(page_height))
     }
 
-    /// The document as it now stands, annotations included.
+    /// Serialise the document with annotations.
     ///
-    /// Saved twice once a render has left something of pdfium's own in the document
-    /// ([`PdfDoc::drawn`]): read back, every object the first save wrote is the file's own, and of
-    /// those pdfium writes only what something refers to, so the popups and appearances a render
-    /// made and nothing refers to any more stay out. The key `drawn` turned into a placeholder is
-    /// blanked in the first output, so it is not read back at all (ISSUES.md). It costs about a
-    /// save again: 85 then 106 ms for an 80 MB file (2026-10-10).
-    ///
+    /// After rendering leaves pdfium-generated objects ([`PdfDoc::drawn`]), blank the
+    /// placeholder key and reload the first save before saving again. The second pass omits
+    /// unreferenced generated appearances and popups (ISSUES.md).
     // ponytail: `FPDF_SaveAsCopy` rewrites the whole file under the global pdfium lock (80 to
     // 140 ms for a 100 MB scanned PDF, 25 to 50 ms for a 6 MB one of 383 pages of text) and loses
     // whatever incremental history the file had. `FPDF_INCREMENTAL` is no cheaper way out: pdfium
@@ -318,16 +310,10 @@ impl PdfDoc {
         drawn
     }
 
-    /// The `/Link` annotations on one page, in document order. Links whose target we cannot
-    /// resolve to a page or a URI are skipped.
+    /// List resolvable `/Link` annotations in document order.
     ///
-    /// Deliberately **not** `PdfPage::links()`. `PdfPageLinks::get(i)` treats `i` as a link index,
-    /// but passes it to `FPDFLink_Enumerate` as a start position in the page's `/Annots` array,
-    /// and that function scans *forward* from there to the next `/Link`. So every non-link
-    /// annotation before a link makes that link answer one more index: on our own two-page
-    /// fixture, whose first page is a highlight followed by a link, `links()` reports two links
-    /// and returns the same one for both. Filtering `annotations()` is exact and no more code, so
-    /// do not "simplify" this back.
+    /// Filter `annotations()` rather than using `PdfPage::links()`: its index is passed as an
+    /// `/Annots` start position, so preceding non-link annotations cause duplicate links.
     pub fn links(&self, page: usize) -> Result<Vec<Link>> {
         let _guard = lock();
         let p = self.page(page)?;

@@ -44,9 +44,9 @@ pub fn parse(bytes: &[u8]) -> Result<File, Error> {
     Ok(File { attrs, pages })
 }
 
-/// How deep the elements of a diagram may nest. draw.io writes six levels
-/// (`mxfile > diagram > mxGraphModel > root > mxCell > mxGeometry`, plus `mxPoint`s under that);
-/// the cap is there for what a file may claim, not for what one holds.
+/// Nesting limit to reject files that would overflow the recursive writer's stack.
+/// Normal draw.io nesting is `mxfile > diagram > mxGraphModel > root > mxCell >
+/// mxGeometry`, with `mxPoint` children.
 const MAX_DEPTH: usize = 64;
 
 /// The document element as a tree, attribute values and text unescaped. Text beside child
@@ -168,8 +168,7 @@ fn page(diagram: Element) -> Result<Page, Error> {
     Ok(model_page(attrs, model))
 }
 
-/// The most one compressed page may inflate to. Each page of a real 36-page slide deck
-/// inflates to well under 1 MiB and the whole file is 8.8 MB, so only a zip bomb comes near.
+/// Inflated page-size limit to bound memory use when reading compressed pages.
 const MAX_INFLATED: usize = 64 << 20;
 
 /// A compressed page's model: base64 of raw deflate of `encodeURIComponent` of the XML
@@ -773,8 +772,8 @@ mod tests {
         assert!(super::decode_data_uri("https://example.org/a.png").is_none());
     }
 
-    /// A hand-edited file may hold two cells under one id; draw.io's own model never does. The
-    /// tree is walked by id, so the second one has to become a cell of its own on the way in.
+    /// Assign fresh ids to duplicate cells in hand-edited files so id-based traversal
+    /// can address each cell.
     #[test]
     fn a_duplicate_id_is_given_a_fresh_one() {
         let xml = br#"<mxGraphModel><root>
@@ -794,8 +793,8 @@ mod tests {
         assert!(!write(&file).is_empty());
     }
 
-    /// The parse is a loop, the write is a recursion: a file may claim more nesting than the
-    /// stack has, and the refusal has to come before the tree is built.
+    /// Reject excessive nesting during the iterative parse, before the recursive
+    /// writer can overflow its stack.
     #[test]
     fn nesting_past_the_cap_is_refused() {
         let deep = format!(

@@ -1,12 +1,7 @@
-//! Git for a vault: what changed, what the history looks like, and staging.
+//! Git status, history and staging for vault repositories.
 //!
-//! The repositories in a vault belong to the user, not to us: they may be signed, hooked,
-//! LFS-backed or configured in ways no reimplementation would honour. Driving their own `git`
-//! binary is the only way what accent shows can agree with what `git status` shows in their
-//! terminal, so every operation here is one subprocess plus a parser over its porcelain output.
-//!
-//! Everything is synchronous. A `git status` on a cold cache takes long enough to drop frames,
-//! so callers run these off the main thread.
+//! Uses the user's git binary to honour hooks, signing, LFS and configuration. Operations are
+//! synchronous; callers must run them off the main thread to avoid dropped frames.
 
 mod lanes;
 mod proc;
@@ -132,12 +127,8 @@ impl Status {
             .filter(|e| !e.unmerged && (e.y != '.' || e.x == '?'))
     }
 
-    /// Whether the repository has work that is not committed — anything `git status` had
-    /// something to say about, untracked files included.
-    ///
-    /// Deliberately the whole of `entries` rather than a sum of the three lists above: it is the
-    /// same set the Git pane's changes list is drawn from, so a dot elsewhere in the window and
-    /// that list can never disagree. Ignored paths are their own field and do not count.
+    /// Whether any tracked or untracked change exists. Uses all `entries` so change indicators
+    /// agree with the Git pane; ignored paths do not count.
     pub fn dirty(&self) -> bool {
         !self.entries.is_empty()
     }
@@ -253,11 +244,8 @@ pub fn nested(dir: &Path) -> Result<Option<Repo>, Error> {
     Ok(Some(repo(dir.to_path_buf(), PathBuf::from(git_dir))))
 }
 
-/// Every repository the vault touches: the one holding `vault_root`, then each indexed directory
-/// that is a repository in its own right.
-///
-/// Errors are swallowed on purpose. Discovery runs whenever a vault opens, and a directory that
-/// vanished mid-scan or a repository git dislikes must cost the user a missing row, not a dialog.
+/// Discover the repository containing `vault_root` and repositories rooted in indexed
+/// directories. Discovery errors omit rows rather than interrupting vault startup.
 pub fn discover(vault_root: &Path, dirs: &[PathBuf]) -> Vec<Repo> {
     let top = match toplevel(vault_root) {
         Ok(top) => top,
@@ -301,14 +289,11 @@ fn repo(root: PathBuf, git_dir: PathBuf) -> Repo {
 
 // ---------------------------------------------------------------------- status
 
-/// Every untracked file on its own row (`-uall`), as VS Code lists them: git's default makes an
-/// untracked folder one `dir/` entry, which says nothing about what is in it and leaves nothing
-/// to open or stage one at a time. A nested repository stays one `dir/` entry either way.
+/// List untracked files individually with `-uall` so each can be opened or staged; nested
+/// repositories remain single directory entries.
 ///
-/// `--ignored=matching` is what keeps that affordable: the default mode under `-uall` lists every
-/// file inside an ignored folder, a `target/` or an ignored `node_modules/` included, while this
-/// one reports a folder its pattern matches as one `dir/` entry without walking it. A file
-/// matched by a file pattern (`*.log`) comes one by one, never as its folder.
+/// `--ignored=matching` reports pattern-matched directories once without traversing large build
+/// trees. File-pattern matches such as `*.log` remain individual entries.
 pub fn status(repo: &Repo) -> Result<Status, Error> {
     let out = run(
         &repo.root,
@@ -488,15 +473,9 @@ fn entry(line: &str, fields: usize) -> Option<Entry> {
 
 // ------------------------------------------------------------------ the remote
 
-/// Bring the remote-tracking refs up to date, and nothing else.
-///
-/// Nothing is merged and nothing in the worktree moves, so this is safe to run on a timer: it is
-/// what makes [`Status`]' `behind` count and the upstream-only commits [`log`] lists mean
-/// anything at all. Only this repository's configured remotes, because the caller is showing one
-/// repository and a vault may hold several.
-///
-/// Nobody is waiting for it, so it is the shortest-lived of the bounded calls (see
-/// [`FETCH_TIMEOUT`]), and a closing window stops it ([`interrupt`]).
+/// Refresh configured remote-tracking refs without touching the worktree, updating behind counts
+/// and upstream history. Safe for timer use, bounded by [`FETCH_TIMEOUT`], and stopped on window
+/// close through [`interrupt`].
 pub fn fetch(repo: &Repo) -> Result<String, Error> {
     let cmd = network(&repo.root, &["fetch"], false);
     let out = bounded(cmd, None, FETCH_TIMEOUT, "fetch", Some(&repo.root))?;
@@ -520,15 +499,9 @@ pub fn incoming(repo: &Repo) -> Result<Vec<String>, Error> {
 
 // ----------------------------------------------------------------- submodules
 
-/// The submodules of `repo`, as `git submodule status` reports them.
-///
-/// A repository with no `.gitmodules` has none, and that is a stat rather than a process: the
-/// command costs about as much as `git status` (30 ms on a 40 000-file repository) and the Git
-/// pane asks on every refresh, so the common case must not pay for it. Where the index may still
-/// hold a gitlink — broken, with no `.gitmodules` to say where it comes from, and refused by
-/// `git submodule status` for it — the index is asked instead ([`gitlinks`]). So is it where
-/// `git submodule status` refuses: one gitlink `.gitmodules` does not map is enough for it to
-/// list none, and the index lists them all, the mapped ones without their describe.
+/// List submodules from `git submodule status`. A missing `.gitmodules` avoids a subprocess
+/// unless the index may hold gitlinks. [`gitlinks`] also provides a fallback when status fails,
+/// retaining unmapped entries.
 pub fn submodules(repo: &Repo) -> Result<Vec<Submodule>, Error> {
     if !repo.root.join(".gitmodules").exists() {
         return match may_hold_gitlink(&repo.git_dir) {
@@ -549,11 +522,9 @@ pub fn submodules(repo: &Repo) -> Result<Vec<Submodule>, Error> {
         .collect())
 }
 
-/// Whether the index may hold a gitlink: its mode, 0o160000, is stored as the four bytes
-/// `00 00 e0 00` in every index version, so where they appear nowhere in the index — nor in the
-/// shared index a split one keeps the rest of its entries in — there is none. A match elsewhere
-/// in an entry costs no more than the `ls-files` it would otherwise spare. For 40 000 files, a
-/// 2.8 MB index, this is 1–3 ms of reading, where `ls-files` and its answer take 20.
+/// Check index bytes for gitlink mode 0o160000 (`00 00 e0 00`), including a split index's shared
+/// file. Absence avoids `ls-files`; false positives only cost the subprocess it would otherwise
+/// skip.
 fn may_hold_gitlink(git_dir: &Path) -> bool {
     let gitlink = [0, 0, 0xe0, 0];
     std::fs::read_dir(git_dir)
@@ -717,20 +688,12 @@ impl Blob {
     }
 }
 
-/// The bytes of `path` at `rev`, or `None` when that revision has no such file.
+/// Read `path` at `rev`, returning `None` if the file is absent. Empty `rev` reads the index;
+/// `:1`, `:2` and `:3` read conflict base, ours and theirs, with absent stages also returning
+/// `None`.
 ///
-/// An empty `rev` means the index, which is what the diff view compares a staged change against.
-/// A file that is new — untracked, or added but not yet committed — is a normal answer here, not
-/// an error, so the four ways git words "it isn't there" all become `Ok(None)`, and so does HEAD
-/// before the first commit, which has no files at all.
-///
-/// A revision is peeled to its commit first. git words a full object name it does not have the
-/// same way as a path the commit lacks, so a commit asked of the wrong repository would read as
-/// a file that is not there; peeled, it is "invalid object name", which stays an error.
-///
-/// `:1`, `:2` and `:3` are an unmerged file's base, ours and theirs, and a stage the conflict
-/// has none of — no base where both sides added the file, no theirs where they deleted it — is
-/// `None` too.
+/// Unborn HEAD and new files are normal absence cases. Other revisions are first resolved to a
+/// commit so an invalid object remains an error rather than looking like a missing path.
 pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Blob>, Error> {
     let stage = matches!(rev, ":1" | ":2" | ":3");
     let object = match rev {
@@ -1059,21 +1022,16 @@ pub fn discard(repo: &Repo, paths: &[impl Borrow<str>]) -> Result<(), Error> {
     write(repo, &["restore", "--worktree"], paths)
 }
 
-/// Make `text` what the index holds for `path`, the file itself untouched: Stage Selected Lines
-/// and Unstage Selected Lines, whose text is the index's with some lines of the other side's
-/// taken over (`diff::apply_lines`).
+/// Replace the index content of `path` without changing the worktree, for staging or unstaging
+/// selected lines.
 ///
-/// A new blob and an index entry pointing at it, as VS Code stages a range, rather than a patch
-/// for `git apply --cached`: the text is already worked out, and a patch would only have git work
-/// it out again from hunk headers that must agree with the index to the line. `text` has `\n`
-/// endings, as a buffer holds it, so the file's own go back on first; `--path` then runs the
-/// attributes' clean filters and line-ending conversion over it, which is what `git add` does to
-/// the file itself. The entry keeps its mode, and a path the index does not hold yet becomes a
-/// plain file. A conflicted path is refused: writing it would resolve the conflict with whatever
-/// the text holds.
+/// Writes the computed text as a blob and updates its index entry, avoiding patch
+/// reconstruction. Buffer `
+/// ` endings are restored to the file's endings before `--path` applies git's clean filters and
+/// conversions. Existing mode is retained; new entries are regular files. Conflicted paths are
+/// refused to avoid resolving them implicitly.
 ///
-/// Bounded like the commit, and for the same reason: a clean filter is one of the user's own
-/// programs.
+/// Bounded because clean filters can run user programs.
 pub fn stage_text(repo: &Repo, path: &str, text: &str) -> Result<(), Error> {
     // `<mode> <oid> <stage>\t<path>`, a line per stage; `:(literal)` keeps a `[` in a name from
     // matching other files.
@@ -1110,10 +1068,8 @@ pub fn stage_text(repo: &Repo, path: &str, text: &str) -> Result<(), Error> {
     Ok(())
 }
 
-/// The paths go in over stdin, NUL-separated, rather than on the command line, which the kernel
-/// caps at 2 MB: a Stage All over an untracked tree of 60 000 files was refused before git ran.
-/// Nor can a note called `-f` be read as an option there. Borrowed or owned strings alike, so a
-/// caller holding `String`s, as the rpc server does, passes them as they are.
+/// Send paths as NUL-separated stdin to avoid command-line size limits and interpreting
+/// filenames as options. Accepts borrowed or owned strings without caller conversion.
 fn write(repo: &Repo, verb: &[&str], paths: &[impl Borrow<str>]) -> Result<(), Error> {
     let args = [verb, &["--pathspec-from-file=-", "--pathspec-file-nul"]].concat();
     let mut child = command(&repo.root, &args, false)
@@ -1128,22 +1084,14 @@ fn write(repo: &Repo, verb: &[&str], paths: &[impl Borrow<str>]) -> Result<(), E
     Ok(())
 }
 
-/// Commit what is staged, returning the short id of the new commit.
+/// Commit staged content and return the short commit id. The message is passed through stdin
+/// without argument-size limits.
 ///
-/// The message goes in over stdin rather than as an argument: a note's commit message is written
-/// in a text box and may be of any length and contain anything.
+/// `all` uses `git commit -a`, including tracked changes and deletions while leaving untracked
+/// files alone. An empty message uses the merge message, stripping commented conflict lines;
+/// elsewhere git refuses it.
 ///
-/// `all` is `git commit -a`, which is what the pane sends when nothing is staged: every tracked
-/// file's change goes in, deletions included, and an untracked file stays untracked. Deliberately
-/// not `git add -A`, which would sweep up whatever the user has not decided about yet.
-///
-/// An empty message is git's own, which only a merge under way has: `MERGE_MSG`, with the
-/// commented `# Conflicts:` list stripped the way an editor session would strip it. Anywhere else
-/// git refuses it as it refuses an empty message in a terminal.
-///
-/// Bounded like the transfers, and for the same reason: a `pre-commit` hook is one of the user's
-/// own programs, and one that never returns would hold the thread — and the pane's Commit button
-/// — for the life of the process.
+/// Bounded so a hanging user hook cannot hold the worker and Commit button indefinitely.
 pub fn commit(repo: &Repo, message: &str, all: bool) -> Result<String, Error> {
     let args: &[&str] = match all {
         true => &["commit", "-a"],
@@ -1171,20 +1119,16 @@ pub fn push(repo: &Repo) -> Result<String, Error> {
     transcript(repo, &["push"], true)
 }
 
-/// A Sync's first half. A pull cannot be stopped: its merge rewrites the working tree.
+/// Pull before pushing during Sync. Pull cannot be interrupted because its merge rewrites the
+/// worktree.
 ///
-/// It merges, which was git's own default until it began refusing a diverged branch that
-/// `pull.rebase` and `pull.ff` say nothing about. A merge never rewrites a commit, and a conflict
-/// stops where the pane already shows one. `--no-rebase` outranks either setting where the user
-/// has one, `pull.ff = only` included: a Sync always merges.
+/// Sync always merges with `--no-rebase`, overriding `pull.rebase` and `pull.ff`, including
+/// `only`, without rewriting existing commits. Conflicts use the pane's existing resolution
+/// flow.
 ///
-/// Both halves run every time: the `behind` count a background [`fetch`] keeps current is a
-/// readout and not a decision — it can be a whole fetch interval old — and the pull is also what
-/// keeps the push from landing on a history the remote has moved past. A branch with no upstream
-/// has nothing to pull from, so there this does nothing and the push publishes it.
-///
-/// Two calls rather than one, so the window knows which half it is in: closing during the pull
-/// waits for git, closing during the push stops it (DESIGN.md, States).
+/// Both halves always run: background behind counts may be stale. With no upstream, pull does
+/// nothing and push publishes the branch. Separate calls let window close wait for pull but
+/// interrupt push (DESIGN.md, States).
 pub fn pull(repo: &Repo) -> Result<String, Error> {
     if upstream(repo).is_none() {
         return Ok(String::new());
@@ -1249,15 +1193,9 @@ fn publish(repo: &Repo) -> Result<String, Error> {
     transcript(repo, &["push", "--set-upstream", &remote, "HEAD"], true)
 }
 
-/// There is nothing worth parsing in what a transfer prints, and plenty worth reading, so the UI
-/// gets the transcript as the terminal would show it — including stderr, where git puts the ref
-/// summary that says what actually moved.
-///
-/// Bounded by [`TRANSFER_TIMEOUT`]: this is where a pull that never answers would otherwise leave
-/// the Sync button insensitive for good. `stoppable` is whether a closing window may cut it off.
-///
-/// Every transfer through here was asked for by hand, so this is the one place that may ask for a
-/// passphrase (see [`network`]).
+/// Return the transfer transcript with stderr, including git's ref summary. Bounded by
+/// [`TRANSFER_TIMEOUT`]; `stoppable` permits interruption on window close. These user-requested
+/// transfers may prompt for a passphrase through [`network`].
 fn transcript(repo: &Repo, args: &[&str], stoppable: bool) -> Result<String, Error> {
     let cmd = network(&repo.root, args, true);
     let what = args.first().copied().unwrap_or("transfer");

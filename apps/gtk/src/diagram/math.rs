@@ -1,18 +1,11 @@
-//! Labels with formulas, typeset by WebKit.
+//! Typeset formula labels with WebKit because Pango has no math layout.
 //!
-//! Pango has no mathematics, and draw.io itself draws a label as HTML with MathJax in it. So a
-//! label holding a formula is written out as HTML with each formula as MathML — core's
-//! converter, the one the note preview uses — laid out by a WebKit view that sits on the canvas
-//! unseen, and painted as a picture of the whole label: its wrapping, its baselines and its
-//! bullets are the browser's, as they are in draw.io. A label with no formula never comes here.
+//! Convert formulas to MathML with the core converter and snapshot whole HTML labels
+//! to preserve browser wrapping, baselines and bullets. Batch labels into bounded
+//! snapshots; show source text while waiting. Plain labels stay in Pango.
 //!
-//! Everything a page asks for goes into one document: one load, one snapshot cut into a picture
-//! per label, as many labels as one snapshot can hold, the rest waiting for the next. The canvas
-//! paints the label's source meanwhile.
-//!
-//! One typesetter serves the whole app ([`shared`]): every diagram tab and every note's embed of
-//! a diagram, a WebKit view being a web process of its own. Its view is held by no window, which
-//! WebKit lays out and snapshots all the same.
+//! One shared typesetter ([`shared`]) serves tabs and note embeds to avoid a web
+//! process per diagram; its view needs no window for layout or snapshots.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -29,8 +22,7 @@ use webkit6::prelude::*;
 /// is scaled down, not up, below it.
 pub(super) const RENDER_ZOOM: f64 = 3.0;
 
-/// The tallest snapshot a batch is taken as, in texture pixels, which bounds what is held while
-/// it is cut up: 300 small formulas in one would make a picture of nearly 200 MB.
+/// Snapshot-height limit in texture pixels, bounding memory while batches are sliced.
 const MAX_PICTURE: f64 = 8192.0;
 
 /// How long after a batch fails to wait for WebKit to say its process died.
@@ -101,8 +93,8 @@ impl Typesetter {
         view.get_or_insert_with(|| self.make_view(filter)).clone()
     }
 
-    /// A view that lives, unseen and untouchable, in a host of its own, kept off the network by
-    /// the preview's filter: a label's HTML comes from the file.
+    /// Create a hidden view isolated from input and the network by the preview filter,
+    /// since label HTML comes from files.
     fn make_view(&self, filter: &webkit6::UserContentFilter) -> webkit6::WebView {
         let host = gtk::Overlay::new();
         let settings = webkit6::Settings::new();
@@ -149,10 +141,9 @@ impl Typesetter {
         view
     }
 
-    /// WebKit's process died under the view — a crash, or past its memory limit — and the batch
-    /// in flight will never come back, which left every formula after it as its source until the
-    /// diagram was opened again. It goes again on a new process, once until a batch comes back:
-    /// a batch that brings the process down again stays as source, and the rest go on.
+    /// Recover an interrupted batch after WebKit process death. Retry once in a new
+    /// process until a batch succeeds; if the retry also crashes, retain source labels
+    /// and continue with later batches.
     fn lost(&self) {
         let batch: Vec<Label> = self.batch.borrow_mut().drain(..).collect();
         match self.lost.replace(true) {
@@ -352,9 +343,9 @@ impl Typesetter {
             .eq(keys.iter().copied())
     }
 
-    /// The batch is done: say so, and load what has been asked for since. With nothing left, the
-    /// view goes once nothing more has come for [`crate::preview::idle_for`], and its web process
-    /// and network session with it; the labels typeset stay, and the next batch makes a view.
+    /// Notify listeners and load pending labels. When idle for [`crate::preview::idle_for`],
+    /// release the view, web process and network session, retaining rendered labels.
+    /// The next batch creates a new view.
     fn finish(&self) {
         self.batch.borrow_mut().clear();
         self.on_ready.borrow_mut().retain(|f| f());
@@ -571,9 +562,8 @@ mod tests {
         );
     }
 
-    /// A family is a CSS string inside an HTML attribute, written by whoever wrote the file:
-    /// nothing in it ends either, so a `.drawio` file can put neither markup on the typesetter's
-    /// page nor a declaration fetching something into the label's style.
+    /// Escape a file-provided font family as both a CSS string and an HTML attribute
+    /// to prevent injected markup or network-fetching style declarations.
     #[test]
     fn a_font_family_stays_inside_its_quotes() {
         for family in [

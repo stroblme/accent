@@ -2,10 +2,9 @@
 
 use super::*;
 
-/// `ACCENT_BENCH_SWITCHER=symbol:<query>` waits for the vault to be indexed, opens Filter by Tag
-/// and prints its title and row count; then types `@<query>` into Go to File, and `<query>` into
-/// Go to Symbol, printing each dialog's title and first rows (`symbol_row <name> <container>
-/// <path>:<line>`); last it picks the first and prints the file and the caret it landed on.
+/// `ACCENT_BENCH_SWITCHER=symbol:<query>` waits for indexing, then compares Filter
+/// by Tag, Go to File `@<query>` and Go to Symbol titles/rows. Print declarations as
+/// `symbol_row <name> <container> <path>:<line>` and the first pick's file/caret.
 pub(super) fn bench_symbol(app: &Rc<App>, query: &str) {
     let (app, query) = (app.clone(), query.to_string());
     glib::spawn_future_local(async move {

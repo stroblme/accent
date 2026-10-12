@@ -1,22 +1,16 @@
-//! Two behaviours the window's dividers are missing: a double-click resets one to its default
-//! position, and the line thickens while it is being dragged so the pointer has something to
-//! aim at.
+//! Add double-click reset and drag feedback to window dividers.
 //!
-//! `GtkPaned` offers neither. It sets no state flag and no style class while its handle is
-//! dragged, and it has no reset gesture. Its own drag gesture runs in the capture phase *on the
-//! paned* and claims the sequence, so a `GtkGestureClick` added next to it never sees the second
-//! press. A [`gtk::EventControllerLegacy`] does: a claimed sequence cancels gestures, not raw
-//! event controllers, so this one keeps receiving presses and releases while a drag is running.
+//! `GtkPaned` provides neither behaviour. Its capture-phase drag claims the sequence and
+//! cancels neighbouring click gestures, so [`gtk::EventControllerLegacy`] observes raw
+//! presses and releases even during a drag.
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
-/// The class the CSS in `main::install_chrome_css` widens the line for, and what tells the Info
-/// pane's dividers a move is the reader's.
+/// CSS class for wider dragged dividers and detecting user divider moves in Info.
 pub(crate) const DRAGGING: &str = "dragging";
 
-/// One button press on a handle, in window coordinates and GDK's own event time (milliseconds),
-/// which is what `gtk-double-click-time` is measured in.
+/// Handle press in window coordinates and GDK event milliseconds, matching GTK double-click settings.
 #[derive(Clone, Copy, Debug)]
 pub struct Click {
     pub x: f64,
@@ -24,8 +18,7 @@ pub struct Click {
     pub time: u32,
 }
 
-/// Whether `now` completes a double-click begun by `prev`: soon enough and close enough, by the
-/// user's own GTK settings. The pure half of [`watch`], and the only part worth a test.
+/// Whether `now` completes `prev` within GTK's double-click time and distance limits.
 pub fn is_double(prev: Click, now: Click, within_ms: u32, within_px: f64) -> bool {
     now.time.saturating_sub(prev.time) <= within_ms
         && (now.x - prev.x).abs() <= within_px
@@ -113,12 +106,10 @@ fn press(window: &gtk::Window, event: &gdk::Event) -> Option<Click> {
     })
 }
 
-/// The paned whose drag handle sits at this point, if any.
+/// Find the paned whose handle contains this point.
 ///
-/// The handle is a `GtkGizmo` child of the paned with no accessor of its own, so it is
-/// identified by elimination: a pick that lands on a direct child of a paned which is neither of
-/// its two panes can only be the handle. That holds for nested paneds too, where the inner one
-/// *is* a pane of the outer.
+/// The handle is a direct `GtkGizmo` child with no accessor. Excluding both panes identifies
+/// it even in nested splits.
 fn handle_at(window: &gtk::Window, x: f64, y: f64) -> Option<gtk::Paned> {
     let picked = window.pick(x, y, gtk::PickFlags::DEFAULT)?;
     let paned = picked.parent()?.downcast::<gtk::Paned>().ok()?;

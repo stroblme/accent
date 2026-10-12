@@ -1,12 +1,10 @@
-//! accent-drawio: read, draw and edit draw.io (`.drawio`) diagrams.
+//! Read, draw and edit draw.io (`.drawio`) diagrams.
 //!
-//! The file is mxGraph's XML. [`File`] keeps every part of it, understood or not, so a diagram
-//! saved here opens in draw.io as it was; [`scene()`] turns a page into a display list any toolkit
-//! can paint; [`Editor`] changes the model with undo. There are no UI types here and no
-//! dependency on the rest of accent: the GTK app and the Android app paint the same list.
+//! [`File`] preserves unknown XML so diagrams remain compatible with draw.io.
+//! [`scene()`] produces a toolkit-independent display list; [`Editor`] edits with undo.
+//! GTK and Android share this model without UI types or dependencies on other accent crates.
 //!
-//! Parts are ported from mxGraph and draw.io (Apache-2.0). Each such file says so in its header;
-//! see `NOTICE`.
+//! Parts are ported from mxGraph and draw.io (Apache-2.0); see file headers and `NOTICE`.
 
 mod base64;
 pub mod clipboard;

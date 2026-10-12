@@ -1,39 +1,19 @@
-//! texlab's outline of a LaTeX document, put right before it is shown.
+//! Correct texlab outlines using the last build's table of contents. Match
+//! `.aux` entries in order rather than by title alone, handling duplicate
+//! titles, commands and class-specific numbering. Find a file's own `.aux`
+//! beside it or in `build/`, `out/`, or latexmkrc-configured output directories,
+//! including mirrored paths below ancestor folders. Source-only counters
+//! cannot reproduce included chapters or custom class/preamble numbering.
 //!
-//! texlab numbers a heading by looking its title up in the table of contents the last build left
-//! in the `.aux` file: two headings of one title both read the last one's number, a title holding
-//! a command reads none (the toc writes `\emph{best}` as `\emph  {best}`), and a `\paragraph` or a
-//! starred heading titled like a numbered one reads that one's number. Here the headings take the
-//! toc's entries in order instead ([`Toc`]), from the file's own `.aux`, which is where a
-//! document and every file it `\include`s leave theirs: beside it for a build in place, and for a
-//! build into another directory (latexmk's `-outdir`) in a `build/` or `out/` next to it or next to
-//! a folder above it, or in the `$out_dir` or `$aux_dir` a `latexmkrc` there names, which mirrors
-//! the folders below. The numbers are the ones the PDF shows, whatever the class makes of them
-//! (IEEEtran's `I-A`, memoir's `\chapternumberline`, a changed `secnumdepth`), and like the PDF's
-//! they are the last build's.
+//! For `\input` files without their own `.aux`, choose the nearby table
+//! matching the most headings by level and title in order ([`Tocs::of`]).
+//! Repeated inputs or identical heading sequences use the first match. If
+//! no table matches, keep texlab numbers except for paragraphs, subparagraphs
+//! and starred headings, which this outline leaves unnumbered.
 //!
-//! Counting the headings in the text instead would stay current between builds, but it cannot
-//! number an `\include`d chapter, the chapters before it being in other files, nor anything a
-//! class or a preamble numbers otherwise than article, report and book do.
-//!
-//! A file with no `.aux` of its own (an `\input` one) is numbered by the document that reads it,
-//! whose `.aux` lists its headings among its own. texlab knows that document by its dependency
-//! graph; here it is whichever `.aux` from the file's folder up to the vault root, or in a
-//! `build/`, an `out/` or a `latexmkrc`'s folder in one of them ([`Tocs::of`]), lists most of the
-//! file's headings by level and title, in order ([`tidy`]). Titles are all it goes by, so a file
-//! `\input` twice, or two files headed alike, read the first place the toc has them. With none
-//! listing any, the file keeps texlab's numbers, less the one on a `\paragraph`, a
-//! `\subparagraph` or a starred heading, which LaTeX never numbers.
-//!
-//! Every name is put on one line, texlab sending a title written over two lines as written.
-//!
-//! texlab also lists every display-math environment, labelled or not, and one inside another as
-//! its child: an `aligned` in a labelled `equation` is a second row under the first. Only an
-//! environment with a `\label` is listed; one without gives its place to what is inside it, which
-//! keeps a label written in the inner environment listed.
-//!
-//! Inside `\input{…}` texlab offers only the `.tex` files; [`inputs`] lists the rest of the folder
-//! being typed, an exported plot's `.pgf` say, which the document's words layer adds to its answer.
+//! Collapse multiline titles and list only labelled display-math environments,
+//! promoting children of unlabelled environments. [`inputs`] supplements
+//! texlab's `.tex` completion with other files such as exported `.pgf` plots.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -67,9 +47,8 @@ const LEVELS: [&str; 7] = [
 /// How many `.aux` files around a file with none of its own are read for the one numbering it.
 const NEAR: usize = 16;
 
-/// `symbols` as texlab answered them for `text`, put right: numbered by `own`, the toc of the
-/// file's own build, or else by the one of `near` that lists most of its headings, the nearest of
-/// those ([`Tocs::of`] finds both).
+/// Correct `symbols` for `text` using `own`, or the nearest `near` table
+/// matching the most headings ([`Tocs::of`]).
 pub(super) fn tidy(
     symbols: Vec<DocumentSymbol>,
     text: &str,
@@ -120,16 +99,15 @@ fn numbered<'a>(
     }
 }
 
-/// Every `.aux` table of contents read so far, by path, kept while the file has the modification
-/// time it was read at: an outline is asked for on every edit, and the build rewrites the `.aux`
-/// far less often.
+/// Cache `.aux` tables by path and mtime: outlines change on every edit,
+/// while tables change only on builds.
 #[derive(Default)]
 pub(super) struct Tocs(Mutex<HashMap<PathBuf, (SystemTime, Arc<Toc>)>>);
 
 impl Tocs {
-    /// The tocs that may number `file`, below `root`: its own build's, and when it has none, the
-    /// [`NEAR`] nearest others, from its folder up to `root`, each folder before its `build/`,
-    /// `out/` and those its `latexmkrc` names. Only a toc that lists a heading counts.
+    /// Find tables numbering `file` below `root`: its own build, otherwise the
+    /// [`NEAR`] nearest candidates up to `root`. Try each folder before `build/`,
+    /// `out/` and latexmkrc paths. Ignore tables without headings.
     pub(super) fn of(&self, root: &Path, file: &Path) -> (Option<Arc<Toc>>, Vec<Arc<Toc>>) {
         let (Some(dir), Some(stem)) = (file.parent(), file.file_stem()) else {
             return (None, Vec::new());
@@ -233,8 +211,8 @@ impl<'a> Heading<'a> {
         })
     }
 
-    /// The heading's name in the outline, texlab having called it `texlab`: its number, if it has
-    /// one, then its title.
+    /// Format the outline name from the heading's number and title, replacing
+    /// texlab's supplied name.
     fn name(&self, texlab: &str, toc: Option<&mut Toc>) -> String {
         let title = one_line(self.title);
         let number = match toc {
@@ -297,19 +275,17 @@ impl Toc {
         Self { entries, next: 0 }
     }
 
-    /// The number the last build gave the next heading, of `level` and titled `key`: that of the
-    /// next entry of that level and title, the entries skipped over being those of headings
-    /// deleted since the build or written by an `\input` file. A heading whose title the toc has
-    /// otherwise (a macro in it expanded, the title edited since the build) takes the next entry
-    /// instead when that one is of its level.
+    /// Take the next matching level/title entry, skipping headings deleted
+    /// since build or supplied by other inputs. If the title changed or expanded
+    /// differently, use the next entry when its level matches.
     fn number(&mut self, level: &str, key: &str) -> Option<String> {
         let (at, _) = self.find(self.next, level, key)?;
         self.next = at + 1;
         self.entries[at].number.clone()
     }
 
-    /// The entry [`Toc::number`] hands a heading, looking from `from`, and whether it is the
-    /// heading's by title as well as by level.
+    /// Find the entry for [`Toc::number`] from `from`, and whether its title
+    /// as well as level matches.
     fn find(&self, from: usize, level: &str, key: &str) -> Option<(usize, bool)> {
         let rest = &self.entries[from..];
         match rest
@@ -321,12 +297,9 @@ impl Toc {
         }
     }
 
-    /// Where the headings of a file with no build of its own sit in this toc: the entry the first
-    /// of them takes, and how many of them the toc lists by level and title, handed their entries
-    /// as [`Toc::number`] hands them — how surely this is the build that reads the file. An
-    /// `\input` file's headings are a run of entries, so of the entries of its first heading's
-    /// level the one listing most of them is taken, then the one they spread over least. `None`
-    /// where it lists none of them.
+    /// Locate an input file's heading sequence: its first entry and number of
+    /// level/title matches. Among possible starts, prefer the most matches,
+    /// then the shortest span. `None` means no headings match.
     fn place(&self, headings: &[(&str, String)]) -> Option<(usize, usize)> {
         let ((level, key), rest) = headings.split_first()?;
         let mut best: Option<(usize, usize, usize)> = None;
@@ -354,10 +327,9 @@ impl Toc {
     }
 }
 
-/// Where `\input{` is being typed when the caret, at `character` on `line`, is inside its
-/// braces: the vault path of the folder named so far, read from the folder of the document at
-/// `rel` as LaTeX reads it, and the column the file name being typed starts at. `None` outside
-/// the braces, and for a folder outside the vault.
+/// While the caret is inside `\input{…}`, return the vault folder resolved
+/// from `rel` and the filename's starting column. `None` outside braces or
+/// when the folder escapes the vault.
 pub(super) fn input_dir(rel: &str, line: &str, character: u32) -> Option<(String, u32)> {
     const INPUT: &str = r"\input{";
     let head: String = line.chars().take(character as usize).collect();
@@ -377,10 +349,9 @@ pub(super) fn input_dir(rel: &str, line: &str, character: u32) -> Option<(String
     })
 }
 
-/// What `\input{` offers beside texlab, which lists the `.tex` files and the folders: the
-/// folder's other files, by their whole name, since LaTeX adds `.tex` only to a name without an
-/// extension, and its folders, to go on into. `rows` is the folder's listing; a dot-named or a
-/// sync-conflict row is left out, as the file tree leaves it out.
+/// Supplement texlab's `\input` completion with other files and navigable
+/// folders from `rows`. Keep extensions since LaTeX adds `.tex` only to
+/// extensionless names; exclude dotfiles and sync-conflict copies.
 pub(super) fn inputs(rows: Vec<FileRow>, replace: Range) -> Vec<Completion> {
     rows.into_iter()
         .filter(|row| row.kind != FileKind::Conflict)
@@ -433,8 +404,8 @@ fn group(text: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// A title as it is matched to the toc: its letters and digits, the commands in it left out,
-/// the toc writing them otherwise (`\emph  {best}`) and the white space moved about.
+/// Normalize titles to letters and digits for table matching, ignoring
+/// commands and whitespace that `.aux` may spell differently.
 fn key(title: &str) -> String {
     printed(&one_line(title))
         .filter(|c| c.is_alphanumeric())
@@ -538,10 +509,9 @@ mod tests {
         )
     }
 
-    /// `sections/intro.tex`, `\input` by `main.tex`, has no `.aux` of its own and texlab numbers
-    /// its headings by title alone: its `Results` subsection as the section `Results` is. The
-    /// build around it that lists its headings in order numbers them, not a nearer one listing
-    /// fewer of them.
+    /// An input file without its own `.aux` uses the table matching most
+    /// headings in order, avoiding texlab's title-only numbering and closer
+    /// tables with fewer matches.
     #[test]
     fn a_file_with_no_aux_takes_its_numbers_from_the_build_listing_its_headings() {
         let text = "\\subsection{Results}\n\\subsection{Method}\n";
@@ -570,9 +540,8 @@ mod tests {
         );
     }
 
-    /// What pdflatex (latexmk `-outdir=build`) wrote for a `main.tex` with a `Results`
-    /// subsection of its own before `\input{sections/results}`: the file's headings are the run
-    /// of entries its `\input` left, not the first entry of their level and title.
+    /// Use the input file's heading sequence in a latexmk output table,
+    /// skipping identical headings earlier in the parent document.
     #[test]
     fn an_input_file_reads_the_run_of_entries_it_left() {
         let text = "\\subsection{Results}\n\\subsection{Discussion}\n\\subsection{Results}\n";
@@ -597,10 +566,9 @@ mod tests {
         );
     }
 
-    /// The file's own build is found beside it, in a `build/` or `out/` there or a folder a
-    /// `latexmkrc` names, or where an out-of-directory build of the document mirrors its folder;
-    /// any other `.aux` from its folder up to the vault root is a candidate, nearest first, one
-    /// listing nothing is not, and a rebuild is read again.
+    /// Find own tables beside the file, in output directories or mirrored
+    /// latexmk paths; rank other ancestor tables nearest first, ignore empty
+    /// tables and reread after rebuild.
     #[test]
     fn the_builds_around_a_file_are_found_and_read_again_once_rebuilt() {
         let vault = tempfile::tempdir().unwrap();

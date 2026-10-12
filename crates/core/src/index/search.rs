@@ -25,50 +25,24 @@ pub const MIN_INFIX: usize = 3;
 pub(super) const PER_FILE: usize = 5;
 
 impl Index {
-    /// Full-text search over the titles and bodies the index holds: every note, plus every other
-    /// file that decoded as text under [`MAX_INDEXED_BODY`]. Directories, PDFs, conflict copies
-    /// and binaries have no `notes` row and so can never be a hit.
+    /// Search indexed titles and text bodies as one ordered phrase ([`fts_query`]), returning
+    /// occurrences with byte ranges. Directories, PDFs, conflict copies and binaries have no
+    /// searchable body.
     ///
-    /// The query is **one phrase**, not a bag of words ([`fts_query`]): "Toggle Split View" finds
-    /// the notes that say those three words in that order, and the one that mentions each of them
-    /// somewhere is not a hit at all. That is what the sidebar's Word toggle already meant, and
-    /// what the user expects of a query typed as a sentence. Each hit carries the phrase's byte
-    /// range in the body, so the row opens the note on the match.
+    /// Exclude ignored files unless `include_ignored`, always retaining markdown notes.
+    /// Exclusions precede the ranking limit so ignored build output cannot displace visible
+    /// results.
     ///
-    /// Git-ignored files are left out unless `include_ignored` — but never a note, whatever
-    /// ignores it. The exclusion sits **inside** the ranking subquery, ahead of its `LIMIT`:
-    /// filtering the capped rows afterwards would answer "No Results" on a vault where the build
-    /// output happens to rank above the source it was built from.
+    /// Exact titles lead, followed by ascending SQLite `bm25`, with title weight 10 and body
+    /// weight 1. Corpus measurements showed partial-title ranking gains saturating near 10;
+    /// larger weights displaced body matches with little benefit.
     ///
-    /// Ranking is "the note you named, then the notes that are about it": a title equal to the
-    /// query, ignoring case, comes first, and the rest go by `bm25` with the title weighted ten
-    /// times the body. bm25 is negative in SQLite, so ascending is best-first, and the weights
-    /// follow the `notes_fts` column order (body, title).
+    /// Rank before reading bodies and build snippets locally: FTS5 `snippet()` repeatedly merges
+    /// prefix-term positions and was costly for short queries.
     ///
-    /// Weight 10, re-derived on the corpus it now ranks — 21 360 documents, 3 653 notes and
-    /// 17 707 other text bodies. Sweeping 0/1/2/5/10/20/40 over 60 sampled notes and six
-    /// ordinary queries: an *exact* title query puts its note first 59 times in 60 at every
-    /// weight, including 0, because the equality clause above decides that and not bm25. What
-    /// the weight still buys is a *partial* title — the note's title with its first word
-    /// dropped — and there it saturates at 10: the note is in the top ten 5, 13, 16, 23, 26,
-    /// 26, 27 times as the weight rises, so 20 buys nothing and 40 buys one. The cost keeps
-    /// rising past it: 56 of the six top tens' 60 rows already come from a title word at 10,
-    /// and all 60 at 20. Not one non-markdown document enters a top ten at any weight, so the
-    /// 17 707 that joined the corpus do not bear on this at all.
-    ///
-    /// The snippet is cut here rather than by FTS5's `snippet()`, and the ranking runs in a
-    /// subquery so only the rows that survive it are quoted at all. Both are about the same
-    /// measurement: on the 3.6k-note `testvault/` a one-character query took 2.4 s and a
-    /// two-character one 0.5 s, and `snippet()` was every millisecond of it. It re-derives the
-    /// match positions from the term index, which for a prefix term means merging the doclist of
-    /// every term that starts with those letters, per row — 19 ms a row for `t*`. Finding the
-    /// same window over the body the index already stores costs a tenth of that.
-    ///
-    /// A query that starts mid-word — `oggle split` — is not a term the index holds, so this
-    /// ranked path comes back empty and [`infix`](Self::infix) answers it instead. Where it does
-    /// find something, the mid-word matches below it are
-    /// [`search_mid_word`](Self::search_mid_word)'s, asked for separately so the prefix rows
-    /// never wait for them.
+    /// If no prefix result exists, [`infix`](Self::infix) handles mid-word queries. Otherwise
+    /// [`search_mid_word`](Self::search_mid_word) adds them separately so prefix results appear
+    /// promptly.
     pub fn search(
         &self,
         query: &str,
@@ -176,17 +150,12 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The ranked files as one row per occurrence rather than one per file.
+    /// Expand ranked files into occurrence rows, at most [`PER_FILE`] per file and `limit`
+    /// overall, counting omitted occurrences on the last row. Title-only hits retain one row
+    /// quoting the body start.
     ///
-    /// The query above says which files answer the question and in what order; this reads their
-    /// bodies in that order and lists every occurrence of the phrase in them, at most
-    /// [`PER_FILE`] from one file — the rest counted onto its last row — and at most `limit`
-    /// rows in all. A hit whose body does not hold the phrase at all, a title's, stays the one
-    /// row the ranked query made of it, quoting the head of the note.
-    ///
-    /// A body per listed file rather than a body per ranked file: the bodies are read here, one
-    /// keyed lookup each, instead of being selected alongside the ranking, where the sorter would
-    /// carry every one of them whether its file ended up on screen or not.
+    /// Read bodies only for listed files through keyed lookups, keeping large bodies out of the
+    /// ranking sorter.
     fn per_match(
         &self,
         hits: Vec<SearchHit>,
@@ -215,28 +184,15 @@ impl Index {
         Ok(out)
     }
 
-    /// The notes a mid-word query finds, which the ranked path cannot: `notes_fts` indexes terms
-    /// and the prefixes of terms, and `oggle split` is neither however finely the prefixes are
-    /// cut. `notes_tri` indexes every three-character window of the same bodies, which is what
-    /// lets a substring be an index lookup rather than a pass over every note.
+    /// Find literal mid-word substrings with the trigram index, avoiding a scan of every body.
+    /// [`search`](Self::search) uses this when prefix search is empty;
+    /// [`search_mid_word`](Self::search_mid_word) adds results after typing stops.
     ///
-    /// [`search`](Self::search) runs it only where the prefix index came back empty, which is
-    /// what keeps the path the sidebar takes on every keystroke exactly as fast as it was: a query
-    /// that matches a word never reaches this there, and one that matches nothing pays a single
-    /// index probe. Below a query that did match, it is
-    /// [`search_mid_word`](Self::search_mid_word)'s, which the sidebar asks once the typing
-    /// stops.
+    /// Matches fold case and Latin diacritics, treating `%` and `_` literally. Trigram
+    /// candidates are verified with [`folded_find`] through `phrase_start` rather than an
+    /// unfolded wildcard `LIKE`.
     ///
-    /// The match is a substring of the body or the title, folded as the ranked path folds —
-    /// case and Latin diacritics, so `cafe` finds `Unicafé` — and taken literally, `%` and `_`
-    /// included. The index is asked for the files holding every three-character window of the
-    /// query, which it folds the same way (`remove_diacritics 1`), and each of those is then
-    /// read for the query itself ([`folded_find`], through `phrase_start`): a `LIKE` would be
-    /// verified against the stored text, unfolded, with its wildcards live.
-    ///
-    /// With no term statistics to rank by — `detail='none'` keeps none — the order is a title
-    /// that holds the needle first, then the shortest file, which is the length normalisation
-    /// bm25 would have applied.
+    /// Without term statistics (`detail=none`), title matches lead, then shorter files.
     fn infix(&self, query: &str, limit: usize, include_ignored: bool) -> Result<Vec<SearchHit>> {
         let needle = terms(query).join(" ");
         let chars: Vec<char> = needle.chars().collect();
@@ -275,15 +231,11 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Every hit of `re` in an indexed body, in `rel_path` order: at most `limit` of them, plus
-    /// how many there are in all, which is what a Replace All would rewrite — it visits the same
-    /// bodies, through [`grep_paths`](Self::grep_paths) — so a truncated list can still say so.
+    /// List up to `limit` regex matches in `rel_path` order and count all matches, including
+    /// those omitted. [`grep_paths`](Self::grep_paths) visits the same bodies for Replace All.
     ///
-    /// This is the exact-match counterpart of [`search`](Self::search): FTS5 answers "which files
-    /// are about this", regexes answer "where exactly does this text occur". The bodies are
-    /// already in the index, so nothing is read from disk, and the statement streams them one row
-    /// at a time rather than materialising the whole vault's text. `include_ignored` means the
-    /// same as it does there, and so does the note escape.
+    /// Bodies stream from the index without disk reads or materialising the vault. Ignored-file
+    /// handling matches [`search`](Self::search), always retaining markdown notes.
     pub fn grep(
         &self,
         re: &Regex,
@@ -314,20 +266,11 @@ impl Index {
         Ok((out, total))
     }
 
-    /// Every hit of `re` in one body, appended to `out` and counted in `total`.
+    /// Append matches from one supplied body to `out` and count them in `total`, without reading
+    /// disk or the index. This also supports unindexed files.
     ///
-    /// Lifted out of [`grep`](Self::grep) so the façade can run the same matching over files the
-    /// index holds no body for — one too large for [`MAX_INDEXED_BODY`], or one under a tree the
-    /// walk never entered — and hand the sidebar rows it cannot tell apart from a note's. It
-    /// touches neither the index nor the disk: the caller supplies the text and says where it
-    /// came from.
-    ///
-    /// `limit` caps `out` across all bodies rather than per body, and `total` keeps counting past
-    /// it, so a truncated list can still say how much a Replace All would touch. On top of it
-    /// [`PER_FILE`] caps what one body may contribute, and the rest are counted into
-    /// [`Match::more`] on its last listed row: a generated file with a hundred matches used to
-    /// fill the whole list and hide every other file, and with `All` on it took the room the
-    /// unindexed trees were about to ask for.
+    /// `limit` caps the combined output; `total` continues counting. [`PER_FILE`] leaves room
+    /// for other files, with omitted matches recorded in [`Match::more`] on the last listed row.
     pub fn matches_in(
         rel: &str,
         title: Option<&str>,
@@ -594,13 +537,11 @@ const LATIN_BASE: &[u8; 192] = b"aaaaaa_ceeeeiiii_nooooo__uuuuy__aaaaaa_ceeeeiii
                                  aaaaaaccccccccdd__eeeeeeeeeegggggggghh__iiiiiiiii___jjkk_llllll_\
                                  ___nnnnnn___oooooo__rrrrrrsssssssstttt__uuuuuuuuuuuuwwyyyzzzzzz_";
 
-/// Fold one character the way `notes_fts` matches it: lower case, and a Latin letter stripped of
-/// its diacritics. This is the single place that folding is decided; the window and the marking
-/// both go through it, and they have to agree or a hit is quoted with nothing highlighted in it.
+/// Fold characters consistently for snippet selection and highlighting: lowercase and remove
+/// Latin diacritics.
 ///
-/// ponytail: `unicode61 remove_diacritics 2` is a table inside SQLite that no SQL function
-/// exposes, so this is an approximation of it — the Latin ranges people actually type, and plain
-/// lower casing everywhere else. That is already more than the ASCII-only `lower()` it replaced.
+/// Approximates SQLite's unexposed `unicode61 remove_diacritics 2` table for Latin ranges, using
+/// lowercase elsewhere.
 fn fold_char(c: char) -> char {
     let c = c.to_lowercase().next().unwrap_or(c);
     match u32::from(c).checked_sub(0xC0).map(|i| i as usize) {
@@ -643,13 +584,9 @@ fn folded_prefix(hay: &str, needle: &str) -> Option<usize> {
     Some(used)
 }
 
-/// Where the folded `needle` first occurs in `hay`, as the byte offset it starts at and the bytes
-/// it covers there. The length is `hay`'s rather than the needle's: folding and a run of
-/// whitespace both let the two differ.
-///
-/// An ASCII character folds to its own lower case, so only the needle's first character can begin
-/// a match where the body has one, and that test comes first: it spares nearly every character of
-/// a body the whole fold, which the mid-word path pays on every file the index offers it.
+/// First folded match in `hay`, as its byte offset and source-byte length. Folding and
+/// whitespace runs can change length relative to `needle`. An ASCII first-character check avoids
+/// full folding at most positions.
 pub(super) fn folded_find(hay: &str, needle: &str) -> Option<(usize, usize)> {
     let first = needle.chars().next().filter(|&w| w != ' ');
     hay.char_indices()
@@ -657,13 +594,9 @@ pub(super) fn folded_find(hay: &str, needle: &str) -> Option<(usize, usize)> {
         .find_map(|(i, _)| folded_prefix(&hay[i..], needle).map(|n| (i, n)))
 }
 
-/// The stretch of `body` a hit should quote: [`SNIPPET_LEAD`] characters ahead of the first
-/// folded occurrence of `needle`, [`SNIPPET_CHARS`] in all, with `…` on whichever side was cut.
-///
-/// `needle` arrives folded. Finding the window here rather than with SQL's `instr(lower(body))`
-/// is what lets it fold the way the index does: SQLite's `lower` is ASCII, so a note found only
-/// through `cafe` ~ `café` used to fall back to quoting its first 240 characters — which is the
-/// other half of why nothing in it was ever marked.
+/// Snippet around the first folded match: [`SNIPPET_LEAD`] preceding characters and
+/// [`SNIPPET_CHARS`] total, with `…` at clipped ends. `needle` is already folded; local matching
+/// handles diacritics that SQLite's ASCII-only `lower()` cannot.
 pub(super) fn snippet_window(body: &str, needle: &str) -> String {
     // Characters, not bytes: the window is cut by character position on both ends.
     let hit = match folded_find(body, needle) {
@@ -711,14 +644,10 @@ fn mark_phrase(window: &str, phrase: &str) -> String {
     out
 }
 
-/// Turn a user query into safe FTS5 syntax: one quoted phrase, its last token a prefix match.
-///
-/// `toggle split vie` becomes `"toggle split vie"*`, which matches the notes whose text runs those
-/// tokens in that order — not the notes that hold each of them somewhere, which is what a term per
-/// word (an implicit `AND`) used to find. The prefix keeps a query answering while it is typed.
-///
-/// ponytail: no operator support (`AND`, `NEAR`, `-`). Quoting everything means a stray `"` or
-/// `*` can never produce a syntax error; expose raw FTS later behind an explicit flag if wanted.
+/// Quote a query as one safe FTS5 phrase with its last token matched as a prefix, e.g. `toggle
+/// split vie` becomes `"toggle split vie"*`. Ordered words preserve sentence matching; the
+/// prefix supports queries during typing. Operators are treated literally, preventing syntax
+/// errors from user punctuation.
 fn fts_query(q: &str) -> String {
     let toks = terms(q);
     if toks.is_empty() {
@@ -803,9 +732,8 @@ mod tests {
         assert_eq!(mark_phrase("ÄHNLICH", &fold("ahnlich")), "«ÄHNLICH»");
     }
 
-    /// The `!BUG` the phrase query exists for: "Toggle Split View" used to be three terms joined
-    /// by an implicit `AND`, so every note holding all three words anywhere was a hit and the note
-    /// that says the sentence was not first.
+    /// Phrase search must match adjacent ordered words rather than independent terms anywhere in
+    /// a note.
     #[test]
     fn a_ranked_query_matches_the_whole_phrase() {
         let vault = tempfile::tempdir().unwrap();
@@ -1009,9 +937,8 @@ mod tests {
         assert_eq!(ix.grep_paths(&re, false).unwrap(), ["a.md", "sub/Beta.md"]);
     }
 
-    /// One file with a hundred matches used to be the whole list. It now gets [`PER_FILE`] rows
-    /// and says how many it left out, so every other file still has room — including the ones the
-    /// unindexed pass adds after this one.
+    /// Per-file caps must leave room for other files and later unindexed results, while
+    /// reporting omitted matches.
     #[test]
     fn one_file_cannot_fill_the_list_on_its_own() {
         let (vault, db) = fixture();
@@ -1048,9 +975,8 @@ mod tests {
         assert_eq!(few[2].more, 97);
     }
 
-    /// A match can start in a line ending the row does not show: the `\n` of a CRLF line, whose
-    /// `\r` the row trims. Its range started past the end of the row's text, and the sidebar's
-    /// slice of it panicked.
+    /// Matches beginning in trimmed CRLF bytes must produce a valid empty range instead of
+    /// panicking when sliced.
     #[test]
     fn a_match_in_a_crlf_line_ending_stays_inside_its_row() {
         let re = crate::search::pattern(

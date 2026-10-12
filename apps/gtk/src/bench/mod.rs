@@ -1,6 +1,5 @@
-//! The `ACCENT_BENCH_*` drills: headless runs under Xvfb that time or probe one interaction,
-//! print what they saw to stdout and quit. `install_bench_hooks` says which variable starts which.
-//! The drills live in a module per area and share the helpers at the end of this one.
+//! Headless `ACCENT_BENCH_*` drills under Xvfb, printing timings or state before quitting.
+//! [`install_bench_hooks`] catalogs entry points; area modules share helpers here.
 
 use super::*;
 
@@ -100,487 +99,173 @@ use style::{
 };
 use tags::bench_tags;
 
-/// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
-/// that used to stall the main loop, print the numbers to stdout and quit, the switcher with the
-/// first rows its query shows. Both run headless under
-/// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
-/// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
-/// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` clicks outside each dialog through XTEST
-/// instead (`dismiss::bench_dismiss`), `=prefs` times Preferences presenting (`bench_prefs`), and
-/// `=ignored:<rel>` follows a note in a gitignored folder into the window (`ignored::bench_ignored`),
-/// and `=early:<query>` is the list landing in a dialog already open (`corpus::bench_early`), and
-/// `=symbol:<query>` is Go to Symbol's rows for `@<query>` and its first opened (`symbols`).
-/// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
-/// times, plus the branch readout and how many history rows a background fetch marked as not
-/// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
-/// until the pointer is on the row, and then the changes list's splices across a refresh that
-/// changes nothing and two Stage clicks, and each section header's buttons and whether its row
-/// takes the hover highlight; last the Changes header's Discard All, its question answered.
-/// `=press:<path>` instead prints where that row's Stage button is and stays up, for an XTEST
-/// press held while the repository changes. `=init` is the pane's own visibility: whether
-/// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
-/// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did,
-/// and `=sync` asks for a Sync during the fetch on opening and prints whether it waited for it.
-/// `=focus` clicks rows and walks the keyboard over them through XTEST, and prints whether each
-/// row's buttons are out. `=scroll` clicks Stage half way down the scrolled changes list, then
-/// commits with the history scrolled, and prints whether the rows on screen stayed put (see
-/// `git::bench_git_scroll`). `=commit` commits the one change left through XTEST and prints
-/// where the keyboard went (see `git::bench_git_commit_focus`). `ACCENT_BENCH_START=1`, on a
-/// `--new-window` launch, is the start screen's, which has no `App` (`start::bench_start`).
-/// `=switch` picks the second repository and clicks the history's first row
-/// at once, and prints what that asked for, then what each pick draws at once, every repository
-/// twice over (see `git::bench_git_switch`). `=markers:<rel>` resolves the conflict blocks a merge
-/// left in a note through their buttons and the palette (see `git::bench_git_markers`). `=branch`
-/// types names git would refuse into Create Branch… and prints the name the dialog says it will
-/// create, then creates one and prints the branch HEAD is on. `=syncall` presses Sync All and
-/// prints its spinner, its toast and each repository's state after it (see
-/// `git::bench_git_sync_all`).
-/// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
-/// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
-/// note and prints the ones whose marker or indent did not come out as `typing` says it should,
-/// plus the width one indent is worth there, then Tab on lines that already have text on them.
-/// `=occur:<rel>` asks for XTEST presses of `Alt+J`, `Ctrl+Shift+L` and `Shift+Alt+Up` / `Down`
-/// with typing after them, and prints every selection and the buffer after each (see
-/// `keys::bench_occurrence_keys`). `=box:<rel>` asks for XTEST drags and a press with `Shift+Alt`
-/// and without, and prints the carets and the selection after each (see `keys::bench_box_drag`).
-/// It opens with the completion popup: that Return at the end of a list item under it continues
-/// the list while no row is selected and accepts the row once one is, and that a view taken off
-/// screen takes the popup with it.
-/// `ACCENT_BENCH_SUGGEST=escape:<rel>` types a word for the popup and paints ghost text, with the
-/// find bar open and with the note compared with its disk copy, and asks for an XTEST Escape over
-/// each, printing what it put away (see `suggest::bench_suggest_escape`). Only on a scratch vault
-/// under `/tmp`. `=ghost:<rel>` prints the status bar's busy line from a cold start, then switches
-/// Ghost Text off and on under the open note and prints the `merl-rt` processes, how long one
-/// takes to end and what the line says (see `suggest::bench_suggest_ghost`). `=words:<rel>`
-/// switches Word Suggestions on, off and on and prints the words offered and whether a word typed
-/// by XTEST brings the popup up (see `suggest::bench_suggest_words`), on a scratch vault under
-/// `/tmp`. `ACCENT_BENCH_COMPLETE=note:<rel>` types `[[` and `#` completions into a note and
-/// `=code:<rel>` member completion into a file a language server answers for, and prints the
-/// rows, the documentation and the text each key leaves (see `complete::bench_complete`).
-/// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
-/// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
-/// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
-/// for XTEST presses of the keys that step through a note, the preview and a PDF, and prints
-/// whether each one faded the chrome (see `chrome::bench_chrome_keys`). `=find:<a>,<b>,<c>`
-/// presses a tab in the other of two panes' bar, opens a note open there again and deletes the one
-/// in front of it, through XTEST, and prints the active pane beside the one with the keyboard,
-/// which pane recedes at High and whose find bar `Ctrl+F` opens (see `chrome::bench_chrome_find`).
-/// `=present:<note>,<pdf>,<image>,<side>` presents a note, a PDF, an image and a shell from one of
-/// two panes and prints what F5 shows, the find bar, a held `Ctrl+Tab`'s card, Escape over it, a
-/// toast against the status bar, and the layout leaving F5 puts back (see
-/// `present::bench_present`). `=toasts` raises four toasts and two under one key and prints the
-/// ones standing (see `toasts::bench_toasts`). `ACCENT_BENCH_PATHS=1`
-/// drives a path entry's completion, and prints widths and the text its keys apply.
-/// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
-/// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
-/// or a drop out of a styled or folded line brings its tags along, and last whether a run of edits
-/// leaves every tag where a fresh pass puts it (`mismatch=0`). `=typing:<rel>` types into 4 to
-/// 256 KB of note and prints the main thread's busy share (see `style::bench_typing`).
-/// `=wrap:<rel>,<rel>…` opens each file in a narrow window and prints where every line's wrapped
-/// rows hang, then times the wrap indent on 10k lines of code in the last one. `=dragfold:<rel>`
-/// selects a folded section and prints where to press and let go for XTEST, then what a real drag
-/// of it left in the note.
-/// `=seam:<rel>` joins a line to a fold with Delete and with Backspace, asks for the iter at every
-/// pixel row, and prints what stays hidden: a line left partly hidden aborts it inside GTK; then
-/// runs a Ctrl-held pointer over a fold shut in the same frame (`case=stale`), draws the view
-/// with its top row on a partly hidden line (`case=screen`), and draws it at the top over hidden
-/// first lines with the layout's height overflowed below zero (`case=overflow`).
-/// `=listing:<rel>` prints how a LaTeX file's listings are coloured (`style::bench_listing`).
-/// Every form of it runs only on a scratch vault under `/tmp` (`scratch_only`).
-/// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
-/// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
-/// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
-/// what the panes hold and whether their rows line up, and what focus mode's line fade follows in
-/// the other column. `=pads:<rel_path>` instead stages a note of long paragraphs in a repository
-/// it makes itself and types at the start of the two lines whose padding tag does not begin at
-/// the newline before them, and `=lines:<rel_path>` stages and
-/// unstages one line of a note it commits in a repository of its own. `=row:<repo_rel>` activates
-/// that file's Changes row, as a click on it does, and prints what the comparison it opened holds;
-/// `=row:stale:<repo_rel>` stages the file behind the pane's back first, so the row it activates
-/// is one git has outgrown and the comparison would have nothing to show. `=row:staged:<repo_rel>`
-/// and `=row:commit:<repo_rel>` are the same shape for the two that open a tab of their own: a
-/// Staged row unstaged behind the pane's back, and the file at HEAD against HEAD~1 where HEAD did
-/// not touch it; where HEAD did, the tab it opens says whether its first change is on screen and
-/// where the shared scrollbar is. `=pick:<repo_rel>` picks a second repository in the chooser and
-/// clicks the root's row at once, printing both sides' line counts of what opened (see
-/// `compare::bench_compare_pick`). `=clicks` clicks Changes, Staged, Deleted and history rows in
-/// a repository it makes, in the orders and at the moments a reader does, and prints what both
-/// columns of the comparison in front hold after each (`compare::bench_compare_clicks`);
-/// `=stale:<rel>` clicks a row whose file's tab is behind the disk (`compare::bench_compare_stale`).
-/// `=diag:<rel_text_file>`
-/// collapses a run with warnings in it and prints how many end-of-line messages and gutter marks
-/// each state drew: the messages of a hidden run go, the icons stay. It then folds a block over
-/// the same file, which hides lines the same way, and reads the two numbers again without
-/// publishing anything: a fold's header keeps its own message, the lines under it do not.
-/// `=gutter:<rel_text_file>` puts a warning and a fold chevron on a line padded below and on one
-/// padded above, prints each one's cell and first row, and holds the window up for a screenshot.
-/// `=conflict:<rel_text_file>` writes a sync conflict copy beside that file while its tab is open
-/// and prints what the banner stands for: live, after the tab is opened again, and once the copy
-/// is gone. `=left:<rel>` leaves a comparison with the disk copy and scrolls the editor once the
-/// copy's column is freed (see `compare::bench_compare_left`). `=folds:<rel>` compares a note
-/// whose folded section ends inside a collapsed run and asks for the iter at every pixel row
-/// (`compare::bench_compare_folds`). `=gap:<rel>` opens hidden runs from their buttons in a long
-/// note, and then in a tab of two blobs, and prints where the rows around each button went
-/// (`compare::bench_compare_gap`). `=page:<rel>` prints the sticky title and the page the
-/// companion shares with the editor, across a zoom and a new Indent Width
-/// (`compare::bench_compare_page`). `=press:<rel>` prints where to press a "⋯" button and a hunk's
-/// Take and Keep Both in the strip with XTEST, and where the carets are after each press
-/// (`compare::bench_compare_press`).
-/// `=reader:<rel>` prints where to turn the wheel, press Page Down or Ctrl+End and drag a scrollbar
-/// or the minimap with XTEST while the comparison is still on its way to its first hunk, and
-/// whether it took the scroll back or held the line it left at the top
-/// (`compare::bench_compare_reader`).
-/// `=merge:<rel>` merges two branches that conflict over `<rel>` in a repository it makes, opens
-/// the merge view from the Merge Conflicts row and takes each block's sides from the buttons on
-/// its band, printing where to press them with XTEST (`compare::bench_compare_merge`).
-/// `=unfold:<rel>` presses Show All Unchanged Lines and lets it go, in the note's tab and in a tab
-/// of two blobs, printing the hidden runs and the line at the top of the view each time, or the
-/// caret's line where it is on screen, then drags the divider between the columns
-/// (`compare::bench_compare_unfold`).
-/// `=runaway:<rel>` lays a comparison again eight times before GTK lays out what it re-padded,
-/// printing the padding of a paragraph under a blank line after each
-/// (`compare::bench_compare_runaway`). `=typing:<rel>` types by XTEST into and around a run opened
-/// in a long working-tree comparison, `=typing:short:<rel>` in one under 16 KB, printing what the
-/// frames meanwhile showed of the line typed into and its partner
-/// (`compare::bench_compare_typing`). `=session:save:<rel>,<other>` then `=session:back:…` on
-/// one scratch home leave comparisons with git open across a restart and print what came back
-/// (`compare::bench_compare_session`). `=large:<rel>` compares a long file with a copy changed
-/// throughout and prints how long each step held the main loop (`compare::bench_compare_large`).
-/// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` reads the PDF through, hides and closes it
-/// and prints what the process holds after each, then opens and closes every kind of tab, a
-/// comparison, the preview, a shell and a window, and prints what outlived its close and how the
-/// resident size moved (`memory::bench_memory`). Only on a scratch vault under `/tmp`.
-/// `ACCENT_BENCH_WEBIDLE=<note>` shortens how long an unused WebKit view keeps its process to two
-/// seconds, and prints the WebKit processes as the preview and the diagram formulas' typesetter
-/// are used, left and used again (`memory::bench_webidle`). It writes two diagrams, so point it at
-/// a scratch vault.
-/// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
-/// another size, printing what the picture asks for and says either side of the reload;
-/// `=zoom:<rel_svg>,…` steps an SVG in and back, printing what it is drawn from as the zoom settles.
-/// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` walks each image through the three themes, inverted and
-/// not, printing what the classifier said, the pixel the tab shows at (2,2) and the recolouring's
-/// cost (see `image::bench_image_look`). `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` does the same for
-/// the images a note shows in the preview, with the requests the page made (`bench_preview_look`).
-/// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
-/// two lines and the tab's — until VTE has reported a title of its own. Against `--terminal` that
-/// is the vault-less window; against a vault it opens a shell in a tab and covers that instead.
-/// The vault-less window then answers Save Session with a name and prints whether its primary
-/// menu offers Close Session either side, and what it is asked before replacing the session a
-/// run before it saved under that name; give it a scratch `TMPDIR`, or its shell joins the
-/// holder of whatever session of accent is running.
-/// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
-/// prints what `Ctrl+S` activates.
-/// `ACCENT_BENCH_HOLD=open` then `=back`, on one scratch state, is a shell outliving its window:
-/// `open` leaves a marker in it and quits, `back` prints what the restore brought back and whether
-/// Close Tab ended it in the holder (see `keys::bench_hold`). `=early` closes new shells before
-/// they can have started and prints whether any is held for nobody.
-/// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
-/// and prints the layout either side of it, then adds a page with `win.pdf-add-page-after` and
-/// prints the page count, where the reader landed and the page sizes the file holds on disk once
-/// the save has run, and what the vault itself then holds — on a remote vault the host's own copy,
-/// which is the only witness that the write was uploaded. It then renames the file the way a
-/// dropped row does and adds another page to it, which is the render thread following the new
-/// name, and writes a one-page document over the new name from outside, which the reader must
-/// follow. It writes to the document and moves it, so point it at a scratch copy; and point it at a
-/// document of several pages, since a one-page PDF is wholly on screen whatever the scroll offset
-/// was. `=stale:<rel_path>` is the remote vault's etag gate: it stamps the cached copy with an
-/// etag the host never had, adds a page and prints whether the host's copy is untouched, what
-/// `<name> (edited).pdf` beside it holds and which of the two the tab is on, then adds another
-/// and prints the same again — the page must go into that copy rather than a numbered one, and
-/// leave the toast count where the refusal put it; a note's links into the original stay as they
-/// were. `=failed:<rel_path>` makes the document and its folder
-/// read-only on the host, adds two pages and prints the toast count after each (one failure said,
-/// the second quiet), then makes them writable and presses the toast's Retry, which sends both,
-/// and fails once more, which is said again; then writes a one-page document over it on the host
-/// while that page has not gone up, and prints where the page went and which file the tab is on;
-/// each `chmod` adds the host's "Indexed …" toast to the count.
-/// `=dropped:<rel_path>` writes a note linking into pages 1 to 3, adds a page and ends the vault's
-/// ssh master at once, holds the link down while the save and the links' rewrite land, and prints
-/// what was said, then reconnects and prints whether the page reached the host and the links
-/// followed it; then the same with the tab closed while the link is down, whose links follow once
-/// the document is opened again. `=renaming:<rel_path>` adds a page and renames the document while its
-/// upload is still out (point it at a PDF of a few megabytes on a remote vault), then prints
-/// whether the old name came back on the host and where the page landed. `=closed:<rel_path>`
-/// adds a page and closes the tab in the same turn, then prints what the vault holds; on a remote
-/// vault it does the same with the host's folder read-only, then opens the document again with
-/// the folder writable, which must send that page.
-/// `=pages:<rel_path>` moves the first page below the third as
-/// a drop in the thumbnail strip does, adds a page before the one being read and one after the last
-/// page, and deletes the first through the window actions, which asks nothing, then walks
-/// all four back with Undo and forward again with Redo, and prints the page being read and each
-/// page's text on disk after every step, with the pages a note written first links to (a
-/// highlight, a jump and a markdown link into pages 1 to 3) and what the toast said; then the
-/// items of the page's own menu without and with a selection, and of the status bar's page
-/// count's menu.
-/// Point it at a scratch copy of the generated vault's `Attachments/pages.pdf`.
-/// `=insert:<rel_path>,<source>` drops the PDF `source` onto `rel_path` every way there is: its
-/// row from the Files tree onto the pages through XTEST, the line watched, as a file from another
-/// application onto the pages, and both onto `rel_path`'s row, each undone, printing the pages on
-/// disk, the links of a note into it and the toasts after each (`pdf::bench_pdf_insert`). Both at
-/// the root of a scratch vault, copies of the generated vault's `Attachments/pages.pdf` and
-/// `Attachments/comments.pdf`, whose pop-up pdfium's copy left pointing into it.
-/// `=strip:<rel_path>` is the pointer's half, held for XTEST: it opens the document with the
-/// Outline pane up and prints the same every two seconds for 40 s, so a hover and a drag along the
-/// thumbnail strip (`build-aux/xtest.py :N "drag X0 Y0 X1 Y1"`) can be watched landing in the
-/// file. `=bookmarks:<rel_path>[,<rel_diagram>]` scrolls through the document with the Outline pane
-/// up and prints the bookmark each page is under, whether it is in view and who has the keyboard,
-/// then the same after a page edit and whether the list is the one it was; with a diagram, the
-/// same for each of its pages (`pdf::bench_pdf_bookmarks`). `=render:<rel_path>` scrolls the
-/// reading view and the thumbnail strip together in bursts and zooms, and after each prints how
-/// long both took to paint everything they want, or what is still missing five seconds after the
-/// last tile landed, then `stuck=<bursts that never finished>` (`pdf::bench_pdf_render`); point
-/// it at a few hundred heavy pages, which is where one view's batch used to drop the other's.
-/// `=broken:<rel_path or absolute path>` cuts the PDF in half in place, opens it and writes it
-/// back slowly, then breaks and mends it again under the open tab, printing the waiting page or
-/// the pages after each step and how many opens that cost (`pdf::bench_pdf_broken`); it writes
-/// into the file, so point it at a scratch copy. `=deep:<rel_path>[,<percent>]` zooms to 800 % or
-/// `percent` across the break between the first two pages and prints, each second for 20 s, the
-/// tiles wanted, those on screen not yet sharp, and those that landed and landed again; then how
-/// many wheel notches and Page Downs at that zoom arrived on a tile not yet sharp
-/// (`pdf::bench_pdf_deep`); point it at a text document of a few pages. `=synctex:<rel_path>`
-/// goes to the source from points of a LaTeX build's first two pages through Go to Source, as
-/// the page's menu does, and back with Show in PDF from the line it landed on, printing each
-/// line and line of text, or the toast (`synctex::bench_synctex`); point it at a `-synctex=1`
-/// build of an article in a scratch vault. A build without a SyncTeX file prints the palette's
-/// rows for both commands and the `.tex` tab's menu each second for eight instead, for a
-/// secondary press through XTEST to turn its Show in PDF into "(no SyncTeX data)".
-/// `=comments:<rel_path>` writes a note linking to the first word of the generated vault's
-/// `Attachments/comments.pdf` (`rel_path`), then prints, over each comment and each mark without
-/// one, what the tooltip shows, what a click pins and whether a tooltip shows after it; the same
-/// with the pen in hand, and over the note's highlight with the Eraser in hand, which opens
-/// nothing, and with none, which opens the note; then the comments
-/// once Export Highlights has written the note's quote in, the Outline pane's list of them, and
-/// where its row of the last page's comment goes and what it pins (`pdf::bench_pdf_comments`). It
-/// writes a note and the PDF, so point it at a scratch vault. `=walk:<rel_path>` times reading
-/// every page's comments for that list against the first screen painting, and how soon closing
-/// the tab ends it (`pdf::bench_pdf_walk`); point it at a few hundred pages.
-/// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
-/// with, answers it with the window-shaped size and prints the file that landed and the tool the
-/// tab it opened has in hand, and what the vault holds under its name. `=sketch:<rel_note>` fires
-/// Insert Sketch in that note and prints how long the main loop was held, whether the note embeds
-/// what it made, the tab it opened and what the vault holds under that name.
-/// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
-/// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
-/// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
-/// eye first, and its title and indicator are printed either side of that.
-/// `=pin:<a>,<b>,<c>,<d>` opens four notes in one pane and prints each pane's tabs, pinned ones
-/// marked `^`, after every step: `c` pinned from its tab menu and `b` from the palette, `c`
-/// unpinned and pinned again, `a` and then `b` moved across the pinned ones as a drag along the
-/// bar ends, and `d` and then `c` moved right with Move Tab. It quits the way Ctrl+Q does, which
-/// writes the session; `=pins` on the same scratch state prints what the restore brought back.
-/// `=reload:<key>,…` opens those files, types into the one in front, resizes the window and fires
-/// Reload Window, then prints the panes, the size and whether the typing was written, before and
-/// in the window that comes back (see `panes::bench_reload`); any window will do: a vault's, one
-/// opened on a file, `--terminal` or `terminal://<name>`.
-/// `=tree:<a>,<b>,<c>` clicks `a` and then `b` in the Files tree, double-clicks `c` and then
-/// `a`, drags `b` onto the right edge of the pane, all through XTEST, then pins `c` and fires
-/// Close Tabs in Pane over the left pane, and prints each pane's tabs after every step: the vault
-/// root has to list the three, as a scratch vault of three notes does. Under
-/// `ACCENT_BENCH_SLOW_READ=<ms>`, which holds every text read that long on its worker as a slow
-/// host would, each double click's second press comes before its tab, which must land kept.
-/// `=edited:<pdf>,<diagram>,<note>` opens the PDF as a click on its tree row does, draws a stroke
-/// across it with the pen through XTEST, opens the diagram the same way and adds a page to it,
-/// then opens the note, and prints the pane's tabs after each: an edit keeps a preview, so neither
-/// the PDF nor the diagram may be replaced, which would take its Undo with it.
-/// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
-/// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
-/// remote vault it waits for the host, and neither tab may leave: the file is on the host.
-/// `=apart:<rel>,…` opens those files, a note it makes (`apart-drill.md`) and a shell; fires Open
-/// in New Window from the first one's tree menu, then Move to New Window from every tab's menu,
-/// the made note with an edit still in its buffer, printing whether each menu offered its item,
-/// whether the tab stayed and what was said; then every other window and what it holds, and what
-/// the made note says on disk, before removing it. On a remote vault neither item is offered.
-/// `=cycle:<a>,<b>,…` opens those files and a shell in one pane, prints `cycle ready` once the
-/// window has the keyboard (`xtest.py :N "move 700 400; focus"`), then for 25 s prints the held
-/// `Ctrl+Tab` chord's state whenever it changes, with the ms since the chord began: whether the
-/// card is up, its rows with the lit one, the tab in front and the pane's order; and once, where
-/// the card's third row is (`cycle aim row2=x,y`), for a click on it with Ctrl held.
-/// `=back:<a>,<b>` puts the caret on line 10 of `a`, goes to `b`, writes three lines above that
-/// place in `a` and goes Back, printing where the caret landed against where the text it left
-/// went; then Forward, `a`'s whole text replaced as a reload replaces it, and Back again, which
-/// lands on the line and column the place was taken at.
-/// `=loose:<rel_pdf>` writes a note and its images into `loose-drill/` and opens the note in a
-/// window of its own from its tree row, where no vault is behind it, and prints what the Outline
-/// pane there holds and the headings it lists, then whether each image in its preview loaded:
-/// those beside it and under it, and neither one above its folder nor one through a symlink out
-/// of it. Then it opens an image and a copy of the PDF in windows of their own, the PDF here too,
-/// and prints the image's size there before and after the file is written over with a larger one,
-/// and the pages of the PDF there before and after a page is added here, then here after one is
-/// added there (`loose::bench_loose`), before removing the folder.
-/// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
-/// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
-/// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
-/// that offers to create it, with the name it arrives prefilled with. Then `[[#Nowhere]]`, which
-/// must put the caret on the note's first line and toast, as must a preview click on
-/// `[[#Elsewhere]]`; `[[#^blk]]` followed both ways, which must land on the block it marks; and a
-/// link typed at the end of a note past 16 K characters and followed at once, which must offer New
-/// File as well. Any text file will do for the underline: a `.txt` has no wikilinks, and its URL
-/// underlines all the same. `=hover:<rel_note>` instead aims the real pointer at the note's first
-/// wikilink and prints the hover's font and size beside the note's and the window's, whether it
-/// survives being emptied while up, and whether a wheel scrolls it (see `style::bench_hover`).
+/// Install opt-in headless drills that print timings or state, then quit.
+/// Use a generated scratch vault and isolated state; drills may write files,
+/// config or repositories. `STYLE`, `OCCUR`, `SUGGEST` typing modes, `MEMORY`,
+/// `MOVE` and `SCROLL` require a vault under `/tmp` (`scratch_only`).
+/// Repository-writing drills also require the vault to be its repository root
+/// (`own_repository_only`), preventing writes to an enclosing checkout's index.
+/// Run under Xvfb; `build-aux/xtest.py :N "<steps>"` supplies real input for
+/// interactive modes. `RUST_LOG=accent=debug` adds query timing breakdowns.
+/// Detailed cases live in each area's bench module. Values below follow the
+/// named variable's `=`; paths are vault-relative unless stated otherwise.
 ///
-/// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
-/// Outline row is selected, whether it is in view and who has the keyboard; then again after a
-/// switch to `<rel_other>` and back, and after the caret moved while the pane was hidden; last
-/// the list's scroll and row through a few edits, which leave them alone, and one caret move.
-/// `=hold:<rel_note>` prints where to aim and then the pane's state as XTEST drives it, for 20 s.
-/// `=index:<rel_code>` prints a code file's rows from the index, a jump, the caret followed, and
-/// the rows once a function typed at its end is saved and indexed (`outline::bench_outline_index`).
-///
-/// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
-/// highlight made of each selection, plus the two match colours and the priorities of the tags
-/// they are painted with. Only on a scratch vault under `/tmp`, as `ACCENT_BENCH_STYLE`.
-///
-/// `ACCENT_BENCH_NUMBERS=<rel_note>,<rel_code>,<rel_note>` opens the first two and flips the Line
-/// Numbers switch in the preferences three times, printing after each step whether every open tab
-/// shows its numbers, how wide the column is and whether the tab is in front: the third file
-/// opens after the first flip, and the last flip is made with both notes behind the code. Then
-/// `config.toml` turns them off by hand with the dialog up, and it prints what the dialog's row
-/// says afterwards, whether accent wrote the file again, and whether that row still writes it.
-///
-/// `ACCENT_BENCH_THEME=<rel_note>` walks the window through Light, Dark and Solarized the way a
-/// system switch and the preferences do, and prints what the note's theme-derived tags and the
-/// hues a CSV's columns and the git lanes share hold after every switch: as its first frame paints
-/// them, and again 300 ms later, the two agreeing. A second
-/// launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark` is Solarized's other half.
-///
-/// `ACCENT_BENCH_REVEAL=<rel_note>` jumps into a note as a search hit, a tag and a Go to Line
-/// each do, and prints what the temporary reveal painted and what takes it down again, plus the
-/// three match tags' priorities.
-///
-/// `ACCENT_BENCH_CLOSE=1` opens a note, cancels a New File and an Unsaved Changes dialog, quits,
-/// and prints how many references to the vault the closed window left behind and whether either
-/// dialog outlived it; it exits 1 unless nothing did.
-///
-/// `ACCENT_BENCH_CLIP=<rel_file>` copies a file and pastes it beside itself, then cuts the copy
-/// and pastes it in the vault root: the `(copy)` mark, the rows a Cut dims, and whether the paste
-/// of a Cut moved the file rather than copying it again. Then it puts two files on the clipboard
-/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root, how many
-/// toasts said so — one is right — and what it said. Last it
-/// cuts two notes that link each other and a third, pastes them into the file's folder and
-/// answers the Update Links? question, printing every dialog that came — one is right — and
-/// the three notes' texts afterwards. Each paste is waited for, up to a minute, not timed.
-/// `ACCENT_BENCH_CLIP=outside:<dir>` pastes a folder and a file made on this machine into `<dir>`
-/// ("" is the root) as GNOME Files would, and prints what landed and the toast
-/// (`files::bench_clip_outside`).
-/// `ACCENT_BENCH_TRANSFER=<rel_pdf>` opens, downloads and uploads over a remote vault and prints
-/// the status bar's byte counts for each (`files::bench_transfer`).
-/// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
-/// note and prints the text and the files they left (`attach::bench_attach`).
-/// `ACCENT_BENCH_ANSWER=<rel_note>` answers Overwrite, Keep Mine and a deleted file's Save over a
-/// note it changes behind the tab's back, and prints how long each held the main loop
-/// (`answer::bench_answer`). `=same:<rel_note>` moves the file's etag alone and types at once,
-/// and prints whether the banner went up (`answer::bench_answer_same`).
-/// `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>` exports a PDF that a note highlights into `$TMPDIR` and
-/// copies it for printing, and prints what each copy holds against the source
-/// (`export::bench_export_pdf`); `=note:<rel_note>` exports a note as PDF and as HTML into
-/// `$TMPDIR` and reads both back, then opens its print dialog (`export::bench_export_note`).
-/// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file — a note, a diagram, a PDF or an image — as
-/// another in a folder not there yet, and a note also onto a folder, onto a file open in another
-/// tab and as `.txt` (`bench_save_as`).
-/// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
-/// list the way the popover's own grab does, printing which row stays highlighted while the menu
-/// is up and which once it has closed. Then it marks that row and one more, the way a Ctrl+click
-/// does, and prints the set, the items a menu over one of them offers, the rows drawn with the
-/// mark on them, and the same once the marks are let go. Then a Shift+click's range from that
-/// row to the first shut folder below it: the set, the folder opened with its rows drawn marked,
-/// and a Ctrl+click on one of them taking that one alone out. `=press:<rel_file>` instead
-/// reveals that row and prints where it and the row two below it are on screen, and stays up
-/// for an XTEST Ctrl+click or Shift+click — `build-aux/xtest.py :99 "move X Y; keydown ctrl;
-/// down; up; keyup ctrl"` — printing the rows drawn marked, how many documents are open and the
-/// colour the row above it, it and the two below are painted in every five seconds, which is how
-/// the modifier half is driven at all.
-///
-/// `ACCENT_BENCH_TAGS=<rel_note>` writes a marker tag into a note and takes it away again with
-/// the Tags section on screen, printing whether its list holds the marker at each step.
-///
-/// `ACCENT_BENCH_INFO=<rel>[,<rel>…]` opens each file with the Info pane on screen and prints
-/// which sections it shows, open or shut, and what they say (`info::bench_info`); `terminal`
-/// opens a shell there instead.
-///
-/// `ACCENT_BENCH_GOALS=<rel>:<line>:<col>[:<line>:<col>]` puts the caret there in a Lean file and
-/// prints the goals the Code pane shows, and with a second place those it asks for as the sidebar
-/// comes back after the caret moved there unseen (`goals::bench_goals`), the lines the gutter
-/// marks as still being checked as they change. It needs elan's Lean, so `make drills` does not
-/// run it.
-///
-/// `ACCENT_BENCH_REPLACE=1` writes a note holding one unique word, presses the Search pane's
-/// Replace All on it and prints what the pane lists before and after the rewrite.
-///
-/// `ACCENT_BENCH_FIND=<rel_note>` uses two queries in a note's find bar and then presses Ctrl+F
-/// twice over the open bar — once on a typed query, once on one Up recalled — printing what is
-/// selected in the box each time and again once its delayed search has run. `=options` writes a
-/// note of its own and prints what the bar reads out under each of its toggles, an invalid
-/// pattern and a Replace All with `$1`, then removes the note.
-///
-/// `ACCENT_BENCH_DIAG=<rel_code_file>` hands a code tab an error, a warning and a hint, then
-/// presses the status bar's count twice, printing what the count says and how much of the answer
-/// the text is carrying each time; then types after a long message and prints whether it was cut
-/// again for the line's new end. It writes the file: point it at a scratch vault.
-///
-/// `ACCENT_BENCH_SEARCH=<query>[:<n>]` leaves `<query>` in the Search pane and writes `n` notes
-/// holding it behind the pane's back, printing the rows before, after and once they are gone
-/// again — once ranked, then once more with the replace row open, which is the exact scan, and
-/// last with another pane in front, which is the catch-up the Search pane owes on its way back.
-/// `=type:<query>` types a ranked query and prints each change of the rows with the milliseconds
-/// since the last keystroke: the prefix rows, then the mid-word rows appended below them;
-/// `=walk:<query>` does the same with All on, the walk past the index appending its rows last,
-/// under Not Indexed. `=more:<query>[:<n>]` opens a note's "+N more in this file" row, printing
-/// the rows, the count, the tabs and the scroll before and after, and again after the same query
-/// is asked again and a new one; `=click:` waits for a real XTEST press on it instead.
-/// `=label:<query>` finds `<query>` in a diagram's label on its second page and opens the row,
-/// printing the rows' dim lines, which name the page, and the page and cell the diagram then shows;
-/// `=label:<query>:xml` does it with the diagram saved as a plain `.xml`.
-/// `=seed:<rel_note>` fires Ctrl+Shift+F and Ctrl+Shift+H over the note and prints which box has
-/// the keyboard and what it has selected, then types after the real chord through XTEST (see
-/// `search::bench_seed`).
-///
-/// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
-/// Show Hidden Files off and on again, printing them after each; then the rows git tints and what
-/// they resolve to, with Colour Changed Files on, off and on again.
-///
-/// `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…` opens those folders in the Files tree as clicks would and
-/// prints what it lists under each; `=race:<dir>`, `=renew:<dir>`, `=again:<dir>` and
-/// `=tab:<rel>` change a folder the index does not walk under the tree and a tab from outside
-/// accent and print whether they followed (`folders::bench_unfold`). Those write, so only on a
-/// scratch vault.
-///
-/// `ACCENT_BENCH_MOVE=<rel>,<rel>,…` moves those paths with Move to…, past its dialog, into a
-/// folder that is not there yet, then tries the two moves it refuses, and prints the dialog, the
-/// toasts and where the files are (`folders::bench_move`). Only on a scratch vault under `/tmp`.
-///
-/// `ACCENT_BENCH_SCROLL=<rel_dir>` scrolls the Files tree, the Git pane's two lists, the Search
-/// results and the Tags list half way down with the keyboard on a row, changes the vault and its
-/// repository under them, and prints where each list is after every change
-/// (`scroll::bench_scroll`). It makes the vault a repository, so only on a scratch vault under
-/// `/tmp`.
-///
-/// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram (a sample is written there if there is none) and
-/// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`;
-/// `=export:<rel>:<dir>` exports it as PDF, PNG and SVG and prints it into `<dir>` under Dark.
-///
-/// `ACCENT_BENCH_COLLAPSE=1` drags the sidebar to 400 px and takes the window to 360 px, below the
-/// width the sidebar collapses at, and back, printing the window's width, whether the sidebar
-/// shows, where the divider is and what a session would save (sidebar, width): before, narrow,
-/// after F9 twice while narrow, wide again, and the same round with the sidebar hidden before it.
-/// The divider has to read 400 again once the window is wide.
-///
-/// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
-/// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
-/// quits the way Ctrl+Q does, which writes the session; a fifth field of `shell` goes back to
-/// `a`'s pane and puts a terminal in front of it first, which the session writes into that pane
-/// and as the active tab like any other. Every printout says
-/// which tab is in front of the active pane, which the session writes as the active one, and how
-/// many places each pane's Back and Forward hold. `=1` prints the tree a restore built
-/// once its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
-/// selected `<rel>` in its pane as a click on its tab would, between two tabs landing;
-/// `=focus:<rel>` gives it the keyboard instead, and `=open:<rel>` opens a note the session does
-/// not hold before any tab has landed, as a reader would into the still-empty active pane. On a
-/// remote vault they wait for the host to
-/// answer, `<a>,…` and `=1` printing what the window shows until then, and `=quit` quits there the
-/// way Ctrl+Q does.
-///
-/// `ACCENT_BENCH_MINIMAP=<round>:<rel>` is the minimap's (`minimap::bench_minimap`).
+/// - `ACCENT_BENCH_EXPAND=<rel_path>`: directory-expansion timing.
+/// - `ACCENT_BENCH_SWITCHER=<query>`: palette timing and initial rows; `1`
+///   only opens it. Modes: `dismiss:<relA>,<relB>` (XTEST outside clicks),
+///   `prefs` (Preferences timing), `ignored:<rel>` (ignored-note opening),
+///   `early:<query>` (corpus arrival), `symbol:<query>` (Go to Symbol).
+/// - `ACCENT_BENCH_GIT=1`: Git pane rows, controls and refreshes. Modes:
+///   `press:<path>` (hold for XTEST), `init` (discover a new repository),
+///   `close:<pull|push|fetch>` (close during work), `sync` (sync during fetch),
+///   `focus` (row keyboard focus), `scroll` (stable scrolled rows), `commit`
+///   (post-commit focus), `switch` (repository-switch races), `markers:<rel>`
+///   (conflict resolution), `branch` (branch-name validation), `syncall`.
+/// - `ACCENT_BENCH_START=1`: start screen on a `--new-window` launch,
+///   handled by `start::bench_start` without an `App`.
+/// - `ACCENT_BENCH_KEYS=1`: editor key semantics and completion acceptance.
+///   `<rel_note>` checks Return/Tab on list lines; `occur:<rel>` checks
+///   occurrence shortcuts; `box:<rel>` checks Shift+Alt pointer selections.
+/// - `ACCENT_BENCH_SUGGEST=escape:<rel>`: Escape with popup/ghost/find/compare
+///   layers; `ghost:<rel>`: ghost-session progress and preference lifecycle;
+///   `words:<rel>`: word-suggestion toggles and XTEST popup activation.
+///   Typing modes require a scratch vault under `/tmp`.
+/// - `ACCENT_BENCH_COMPLETE=note:<rel>`: note link/tag completion;
+///   `code:<rel>`: member completion with an installed language server.
+/// - `ACCENT_BENCH_CHROME=1`: focus fades. Modes: `<relA>,<relB>` (split-pane
+///   fades/timing), `keys:<note>,<pdf>` (navigation), `find:<a>,<b>,<c>`
+///   (active-pane/find focus), `present:<note>,<pdf>,<image>,<side>`
+///   (presentation and restored layout), `toasts` (toast replacement/counts).
+/// - `ACCENT_BENCH_PATHS=1`: path-entry completion and sizing.
+/// - `ACCENT_BENCH_STYLE=<rel_path>`: styling latency, tag transfer and edits.
+///   Modes: `typing:<rel>` (4–256 KB typing), `wrap:<rel>,<rel>…` (wrap indent,
+///   including 10k code lines in the last file), `dragfold:<rel>` (XTEST folded
+///   selection drag), `seam:<rel>` (hidden-line layout), `listing:<rel>`
+///   (LaTeX listing colours). Every mode requires a scratch vault under `/tmp`.
+/// - `ACCENT_BENCH_PANES=<relA>,<relB>`: tab moves and divider stepping.
+/// - `ACCENT_BENCH_COMPARE=<rel_path>`: disk comparison alignment/focus.
+///   Modes: `pads:<rel_path>` (paragraph padding), `lines:<rel_path>`
+///   (line staging), `row:<repo_rel>`, `row:stale:<repo_rel>`,
+///   `row:staged:<repo_rel>`, `row:commit:<repo_rel>` (Changes/Staged/history
+///   rows), `pick:<repo_rel>` (repository-pick race), `clicks` (row activation),
+///   `stale:<rel>` (buffer/disk mismatch), `diag:<rel_text_file>` (hidden
+///   diagnostics), `gutter:<rel_text_file>` (hold for screenshot),
+///   `conflict:<rel_text_file>` (sync banner), `left:<rel>` (leave comparison),
+///   `folds:<rel>` (fold/run overlap), `gap:<rel>` (expand runs), `page:<rel>`
+///   (zoom/indent), `press:<rel>` (XTEST hunk actions), `reader:<rel>` (reader
+///   input before first hunk), `merge:<rel>` (XTEST conflict actions),
+///   `unfold:<rel>` (unchanged lines/divider), `runaway:<rel>` (repeated padding),
+///   `typing:<rel>` or `typing:short:<rel>` (XTEST edits; short is under 16 KB),
+///   `session:save:<rel>,<other>` then `session:back:…` (restart restoration
+///   using one scratch home), `large:<rel>` (main-loop timing).
+/// - `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]`: object/process and
+///   resident-memory retention across closes. Requires `/tmp` scratch vault.
+/// - `ACCENT_BENCH_WEBIDLE=<note>`: WebKit reuse and two-second idle release.
+///   Writes two diagrams; use a scratch vault.
+/// - `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>`: zoom and replaced-image
+///   reload; `zoom:<rel_svg>,…`: SVG zoom sources.
+/// - `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…`: image classification/recolouring
+///   across themes and inversion.
+/// - `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>`: preview image themes and requests.
+/// - `ACCENT_BENCH_TERM=1`: shell titles and saved terminal sessions.
+///   `--terminal` uses a vault-less window; a vault launch opens a shell tab.
+///   Use scratch `TMPDIR` so it cannot join the user's running holder.
+/// - `ACCENT_BENCH_SHELL_KEYS=1`: `Ctrl+S` in a shell without window focus.
+/// - `ACCENT_BENCH_HOLD=open` then `back`: shell persistence and close, using
+///   one scratch state; `early`: shells closed before startup.
+/// - `ACCENT_BENCH_PDF=<rel_path>`: fit, save, rename and external reload.
+///   Writes and moves the file; use a scratch multipage PDF. Modes:
+///   `stale:<rel_path>` (remote conflicts), `failed:<rel_path>` (read-only
+///   host/retry), `dropped:<rel_path>` (disconnect/reconnect and note relinking),
+///   `renaming:<rel_path>` (rename during upload; remote PDF of several MB),
+///   `closed:<rel_path>` (close during save), `pages:<rel_path>` (page edits,
+///   undo/redo and note links; generated `Attachments/pages.pdf`),
+///   `insert:<rel_path>,<source>` (drop insertion; put scratch copies of
+///   generated `Attachments/pages.pdf` and `Attachments/comments.pdf` at root),
+///   `strip:<rel_path>` (40 s XTEST hover/drag),
+///   `bookmarks:<rel_path>[,<rel_diagram>]` (outline following),
+///   `render:<rel_path>` (tiles/thumbnail bursts; hundreds of heavy pages),
+///   `broken:<rel_path or absolute path>` (truncation/recovery; scratch file),
+///   `deep:<rel_path>[,<percent>]` (800% default; a few text pages),
+///   `synctex:<rel_path>` (source/PDF round trip; scratch LaTeX `-synctex=1`
+///   build, or XTEST missing-data menu probe without SyncTeX),
+///   `comments:<rel_path>` (tooltips, pinning, highlights and comment outline;
+///   scratch generated `Attachments/comments.pdf`),
+///   `walk:<rel_path>` (comment-list loading/cancellation; hundreds of pages).
+/// - `ACCENT_BENCH_DRAWING=1`: New Drawing; `sketch:<rel_note>`: Insert Sketch.
+/// - `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>`: preview/tab close transitions.
+///   Modes: `pin:<a>,<b>,<c>,<d>` then `pins` (save/restore one scratch session),
+///   `reload:<key>,…` (edits/size after Reload Window; vault, loose file,
+///   `--terminal` or `terminal://<name>`), `tree:<a>,<b>,<c>` (XTEST tree
+///   clicks/drag; root must list all three), `edited:<pdf>,<diagram>,<note>`
+///   (edits keep previews), `pinwin:<a>,<b>,<c>` (move to loose-file window),
+///   `apart:<rel>,…` (new-window actions; creates/removes `apart-drill.md`),
+///   `cycle:<a>,<b>,…` (25 s held Ctrl+Tab probe after XTEST `move 700 400; focus`),
+///   `back:<a>,<b>` (navigation across edits/reload), `loose:<rel_pdf>`
+///   (loose-file readers/assets; creates/removes `loose-drill/`). Remote
+///   pin-window/apart modes verify tabs cannot move off the host.
+/// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay text reads on workers to reproduce
+///   double-clicks before tabs arrive in the `TABS=tree:` drill.
+/// - `ACCENT_BENCH_FOLLOW=<rel_note>`: Ctrl-hover, missing targets and anchors;
+///   `hover:<rel_note>`: XTEST hover size, emptying and wheel behavior.
+///   Any text file can exercise URL underlines.
+/// - `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>`: caret following and edits;
+///   `hold:<rel_note>`: 20 s XTEST probe; `index:<rel_code>`: indexed symbols.
+/// - `ACCENT_BENCH_OCCUR=<rel_note>`: occurrence tags, colours and priorities.
+///   Requires a scratch vault under `/tmp`.
+/// - `ACCENT_BENCH_NUMBERS=<rel_note>,<rel_code>,<rel_note>`: line-number
+///   preferences, hidden tabs and external config changes.
+/// - `ACCENT_BENCH_THEME=<rel_note>`: theme changes and immediate tag colours.
+///   Repeat with `ADW_DEBUG_COLOR_SCHEME=prefer-dark` for dark Solarized.
+/// - `ACCENT_BENCH_REVEAL=<rel_note>`: temporary search/tag/line reveal.
+/// - `ACCENT_BENCH_CLOSE=1`: cancelled dialogs and vault references after quit;
+///   exits 1 if anything survives.
+/// - `ACCENT_BENCH_CLIP=<rel_file>`: copy/cut, multi-file paste and link updates;
+///   waits up to a minute per paste. `outside:<dir>`: external folder/file
+///   paste, with empty `<dir>` meaning root.
+/// - `ACCENT_BENCH_TRANSFER=<rel_pdf>`: remote open/download/upload byte counts.
+/// - `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>`: image paste/drop.
+/// - `ACCENT_BENCH_ANSWER=<rel_note>`: conflict responses and main-loop timing;
+///   `same:<rel_note>`: etag-only change during typing.
+/// - `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>`: annotated export and print copy;
+///   `note:<rel_note>`: PDF/HTML export and print dialog. Outputs use `$TMPDIR`.
+/// - `ACCENT_BENCH_SAVE_AS=<rel_file>`: note/diagram/PDF/image Save As and errors.
+/// - `ACCENT_BENCH_MENU=<rel_file>`: tree context menus and modifier selections;
+///   `press:<rel_file>`: hold for XTEST Ctrl/Shift clicks, for example
+///   `build-aux/xtest.py :99 "move X Y; keydown ctrl; down; up; keyup ctrl"`.
+/// - `ACCENT_BENCH_TAGS=<rel_note>`: tag-list updates after edits.
+/// - `ACCENT_BENCH_INFO=<rel>[,<rel>…]`: per-file Info sections; `terminal`
+///   opens a shell instead.
+/// - `ACCENT_BENCH_GOALS=<rel>:<line>:<col>[:<line>:<col>]`: Lean goals,
+///   sidebar restoration and checking marks. Requires elan's Lean; excluded
+///   from `make drills`.
+/// - `ACCENT_BENCH_REPLACE=1`: Search-pane Replace All updates.
+/// - `ACCENT_BENCH_FIND=<rel_note>`: query selection/history; `options`:
+///   search toggles, invalid patterns and replacement captures in a temporary note.
+/// - `ACCENT_BENCH_DIAG=<rel_code_file>`: diagnostic expansion and line-end
+///   truncation. Writes the file; use a scratch vault.
+/// - `ACCENT_BENCH_SEARCH=<query>[:<n>]`: result refresh after external writes;
+///   `type:<query>`: ranked timing; `walk:<query>`: All/unindexed timing;
+///   `more:<query>[:<n>]`: expanded per-file results; `click:`: wait for XTEST;
+///   `label:<query>` or `label:<query>:xml`: diagram-label navigation;
+///   `seed:<rel_note>`: XTEST search/replace shortcuts and box focus.
+/// - `ACCENT_BENCH_HIDDEN=1`: hidden-file visibility and git row colours.
+/// - `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: folder expansion; `race:<dir>`,
+///   `renew:<dir>`, `again:<dir>` and `tab:<rel>`: external unindexed changes.
+///   Changing modes write files; use a scratch vault.
+/// - `ACCENT_BENCH_MOVE=<rel>,<rel>,…`: Move to… dialogs and refusal cases.
+///   Requires a scratch vault under `/tmp`.
+/// - `ACCENT_BENCH_SCROLL=<rel_dir>`: list scroll retention during vault/git
+///   changes. Creates a repository; requires a scratch vault under `/tmp`.
+/// - `ACCENT_BENCH_DIAGRAM=<rel>`: diagram edits/save, creating a sample if
+///   absent; `shot:<rel>:<dir>`: render pages; `export:<rel>:<dir>`: dark-theme
+///   PDF/PNG/SVG export and print output.
+/// - `ACCENT_BENCH_COLLAPSE=1`: responsive sidebar width and saved state.
+/// - `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>[,shell]`: save split layout and
+///   active tab; `1`: inspect restored layout without saving; `pick:<rel>`,
+///   `focus:<rel>`, `open:<rel>`: tab selection/focus/open during restore;
+///   `quit`: quit during remote startup. Reuse scratch state for restoration.
+/// - `ACCENT_BENCH_MINIMAP=<round>:<rel>`: minimap probes (`minimap::bench_minimap`).
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let minimap = std::env::var("ACCENT_BENCH_MINIMAP").ok();
@@ -1138,16 +823,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     });
 }
 
-/// `ACCENT_BENCH_SWITCHER=prefs` presents Preferences three times and prints, for each, how long
-/// the action held the main loop (`open_ms`), how long until the window painted after it
-/// (`first_frame_ms`), and over the dialog's presenting animation the frames painted, the
-/// longest gap between two of them (`worst_frame_ms`), the time those frames spent styling and
-/// laying out (`layout_ms`, the main thread's own) and the median one spent painting
-/// (`paint_ms`, which under Xvfb's cairo renderer is the whole window in software every frame).
-/// Then it writes `config.toml` by hand with the dialog closed and again with it up, and prints
-/// what its Column Width row shows each time: the kept dialog has to show a config that moved
-/// while it was away. Last it answers Restore Defaults and prints whether the dialog is the same
-/// one and what the row shows.
+/// Time three Preferences presentations: `open_ms`, `first_frame_ms`, frame count,
+/// `worst_frame_ms`, total `layout_ms` and median `paint_ms`. Cairo paints the
+/// whole window in software under Xvfb. Verify external config changes update
+/// the retained dialog while closed or open, and Restore Defaults reuses it.
 fn bench_prefs(app: &Rc<App>) {
     /// libadwaita's floating dialog takes 300 ms to present; a little more catches its last frame.
     const ANIMATION: Duration = Duration::from_millis(400);
@@ -1294,12 +973,8 @@ fn bench_switcher_rows(app: &Rc<App>) {
     }
 }
 
-/// First `GtkSearchEntry` in `w`'s subtree, which the bench drives directly because the headless
-/// image has no xdotool.
-///
-/// The caller must pass the palette dialog, not the window: a window holds the sidebar's search
-/// entry too, and it comes first in tree order, so searching from the window typed the benchmark's
-/// query into the sidebar and measured nothing.
+/// Find the first `GtkSearchEntry` for direct headless input. Pass the palette
+/// dialog: searching from the window finds the sidebar entry first.
 fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
     if let Ok(e) = w.clone().downcast::<gtk::SearchEntry>() {
         return Some(e);
@@ -1314,8 +989,8 @@ fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
     None
 }
 
-/// What a toast standing over the window reads, which is how a drill sees one: libadwaita gives
-/// no way to ask the overlay what it is showing.
+/// Read visible error-toast text through widgets because libadwaita has no
+/// overlay query API.
 fn bench_said(app: &Rc<App>) -> Option<String> {
     let label = find_widget(app.window.upcast_ref(), &|w| {
         w.downcast_ref::<gtk::Label>()
@@ -1339,8 +1014,7 @@ fn find_widget(root: &gtk::Widget, found: &dyn Fn(&gtk::Widget) -> bool) -> Opti
     None
 }
 
-/// Emit a key press on the entry's own key controller: the headless image has no window manager
-/// to give the toplevel the keyboard, and no xdotool to press anything with.
+/// Emit an entry-controller key press without a window manager or external input tool.
 fn press_key(entry: &gtk::Entry, key: gdk::Key) {
     use glib::translate::IntoGlib;
     let controllers = entry.observe_controllers();
@@ -1358,8 +1032,7 @@ fn press_key(entry: &gtk::Entry, key: gdk::Key) {
     }
 }
 
-/// Turn the main loop until it has nothing left to dispatch. The find bar's own highlight is
-/// scanned on an idle, so its tag is on nothing at all the instant its query is set.
+/// Dispatch pending main-loop work so idle find highlighting reaches the buffer.
 fn bench_pump() {
     let context = glib::MainContext::default();
     for _ in 0..10_000 {
@@ -1369,9 +1042,8 @@ fn bench_pump() {
     }
 }
 
-/// End the run with status 2 unless the vault is a scratch copy under `/tmp`, as `make vault
-/// VAULT=/tmp/<name>` makes one. For the drills that type into a note: an autosave, or the save a
-/// quit makes, writes what they typed, and `testvault/` or a real vault must never get it.
+/// Exit 2 unless the vault is under `/tmp` (`make vault VAULT=/tmp/<name>`).
+/// Typing drills autosave, so they must never use `testvault/` or real notes.
 fn scratch_only(app: &Rc<App>, drill: &str) {
     let root = app.root();
     if !root.starts_with("/tmp") {
@@ -1382,11 +1054,9 @@ fn scratch_only(app: &Rc<App>, drill: &str) {
     }
 }
 
-/// A drill that makes a repository in the vault root, or stages and commits in the one there,
-/// refuses a vault inside a repository whose top it is not — a scratch copy under this checkout's
-/// `target/` — where its `git add` and the Git pane's Stage would reach that repository's index,
-/// the pane having picked it before any `git init` of the drill's. A vault in no repository is left
-/// to the drill, whose own `git init` makes it one; a remote vault's git is its host's.
+/// Reject local vaults nested in another repository, preventing drill staging
+/// from touching its index. Allow a vault that is its repository root or has
+/// no repository yet. Remote git runs on the host and is not checked here.
 fn own_repository_only(app: &Rc<App>, drill: &str) {
     if app.vault().is_none_or(|vault| vault.is_remote()) {
         return;

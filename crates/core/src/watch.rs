@@ -1,16 +1,9 @@
-//! Debounced vault watcher: turns raw inotify noise into a handful of vault-level facts.
+//! Debounce filesystem events into vault changes. Suppress Syncthing download temporaries and
+//! report conflict copies promptly.
 //!
-//! Two Syncthing realities shape this: a pulled file appears as `.syncthing.X.tmp` and is then
-//! renamed into place (so the temp name must never reach the index), and a losing edit lands as
-//! `X.sync-conflict-….md` (so the UI wants to know the moment one shows up).
-//!
-//! The watch set is exactly the directory list the walk kept — one non-recursive watch each,
-//! never a recursive watch on the root. Two kernel limits make that matter: `max_user_watches`
-//! (135 768 on the author's machine) is charged per directory, and `max_queued_events` (16 384)
-//! is filled by our own walk, because inotify reports an open on every watched directory. A vault
-//! with more watched directories than the queue holds therefore overflows it on each reconcile,
-//! and an overflow asks for another reconcile — measured as a permanent loop on a 16 536-directory
-//! vault. Whatever the walk skips must be skipped here too, or neither limit improves.
+//! Use one non-recursive watch per indexed directory, excluding skipped trees to conserve
+//! inotify watches and event-queue space. Recursive watching can reintroduce dependency trees
+//! and create reconcile loops when directory-open events overflow the queue.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -74,23 +67,12 @@ fn over_budget(dir_count: usize) -> bool {
 }
 
 impl Watcher {
-    /// Watch `root` and each of `dirs`, one non-recursive watch per directory.
+    /// Watch `root` and `dirs` non-recursively so skipped trees do not consume inotify watches.
+    /// Symlink paths retain their vault names in events. Fall back to polling near the watch
+    /// budget.
     ///
-    /// `dirs` is what the walk kept, as vault paths (a directory reached through a symlink is
-    /// watched through that same path — `inotify_add_watch` resolves the link, so the events come
-    /// back under the name the vault knows). One watch per directory rather than a recursive
-    /// watch on the root is what makes the skipped trees actually free: a recursive watch walks
-    /// the disk itself and would re-add every `.venv` directory the walk refused. inotify charges
-    /// per directory, so the watch set is exactly the walk's directory count.
-    ///
-    /// If that count is close to the kernel's inotify budget the watcher falls back to polling
-    /// instead of silently missing changes (inotify fails per-directory once the budget is gone).
-    ///
-    /// A directory created after this call is not watched until [`set_dirs`](Self::set_dirs) is
-    /// given it; the caller is responsible for that.
-    ///
-    /// `on_event` runs on the debouncer's own thread, so it must not block: hand the event to a
-    /// channel or the UI's main context and return.
+    /// New directories require [`set_dirs`](Self::set_dirs). `on_event` runs on the debouncer
+    /// thread and must return promptly, handing work to a channel or main context.
     pub fn new(
         root: &Path,
         dirs: &[PathBuf],
@@ -151,15 +133,9 @@ impl Watcher {
         })
     }
 
-    /// Watch `dirs` besides the root from now on: a watch for each directory that is new, an
-    /// unwatch for each that went, on the same debouncer.
-    ///
-    /// A new [`Watcher`] would cost more than the watches. The debouncer holds each event for
-    /// 300 ms before reporting it, and dropping one drops what it holds, so a file written just
-    /// before a rebuild was never reported: the window's first git refresh changes the set about
-    /// a second after a git vault opens. `false`, and nothing changed, when the set has crossed
-    /// the inotify budget either way since this watcher was made: switching between inotify and
-    /// polling takes a new one.
+    /// Update directory watches on the existing debouncer, retaining pending events that
+    /// replacing it would lose. Returns `false` without changes if crossing the inotify budget
+    /// requires a new watcher to switch between polling and inotify.
     pub fn set_dirs(&mut self, dirs: &[PathBuf]) -> bool {
         if over_budget(dirs.len() + 1) != matches!(self.backend, Backend::Poll(_)) {
             return false;
@@ -563,9 +539,8 @@ mod tests {
         );
     }
 
-    /// Reading a repository is not changing it. inotify's mask carries `IN_OPEN`, so every
-    /// `git status` the Git pane runs opens `.git/HEAD` — and reporting that as news made the
-    /// pane ask git again, once a second, forever.
+    /// Opening git files must not trigger refreshes; reporting `IN_OPEN` from `git status` would
+    /// create an endless status loop.
     #[test]
     fn a_read_inside_a_git_directory_is_not_a_change() {
         use notify::event::{AccessKind, AccessMode, DataChange};

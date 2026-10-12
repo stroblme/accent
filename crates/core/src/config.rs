@@ -1,11 +1,7 @@
 //! Global settings and per-vault session state.
 //!
-//! Settings are global only: nothing is ever written into the vault. A vault is a plain folder
-//! that Syncthing and git already own, so an app config file dropped in it would sync accent's
-//! preferences to every device and show up as noise in the tree.
-//!
-//! The config file lives at `~/.config/accent/config.toml`; [`Config`] documents it with a
-//! worked example.
+//! Config stays outside the vault so preferences do not sync through Syncthing or git.
+//! `~/.config/accent/config.toml` is documented by [`Config`] with a worked example.
 
 use crate::git::Comparison;
 use crate::{Error, Result};
@@ -13,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The documented example. A macro rather than a `const` because only a literal may be pasted
-/// into a doc attribute, and the test below parses the same text the docs show.
+/// A macro supplies the literal required by the doc attribute; tests parse the same example.
 macro_rules! example {
     () => {
         r#"recent_vaults = ["/home/me/Notes"]
@@ -115,20 +110,17 @@ pub struct Config {
     /// Numbers in the editor's left gutter, in every text tab, code as well as prose. Off by
     /// default: a note is prose, and the gutter is what an ATX heading's markers hang in.
     pub line_numbers: bool,
-    /// Group the Git pane's changed files by folder rather than listing them flat. On by default:
-    /// a vault's changes arrive a folder at a time, and a flat list of thirty repeats the same
-    /// directory thirty times.
+    /// Group Git changes by folder to avoid repeating directory names in a flat list. Enabled by
+    /// default.
     pub git_tree: bool,
     /// List dot-named files and folders in the Files pane, dimmed. On by default: `.gitignore`
     /// and `.python-version` are files people edit. `.git` and `.trash` are never listed.
     pub show_hidden: bool,
-    /// Tint the Files pane's names by what git says of them: a changed file and the folders above
-    /// it in the accent, a new one in green. On by default, as VS Code does; ignored rows are
-    /// dimmed either way.
+    /// Tint changed Files entries and their ancestors with the accent, and new files green.
+    /// Enabled by default; ignored entries are always dimmed.
     pub git_tint: bool,
-    /// How much of the editor's width the document column may fill, as a percentage. 50 is what
-    /// the fixed 800 px cap came to on a maximised window; the editor floors it so a narrow
-    /// window keeps a readable line.
+    /// Document-column width as a percentage of editor width. The editor enforces a readable
+    /// minimum on narrow windows; 50 approximates the former 800 px cap on a maximised window.
     pub column_width: u32,
     /// How many columns one indent is worth in a code tab: the width of a tab character and of
     /// the run of spaces Tab writes in its place. Prose is not measured in columns and keeps
@@ -154,17 +146,11 @@ pub struct Config {
     pub vaults: BTreeMap<String, VaultConfig>,
 }
 
-/// What search leaves out on the user's say-so.
+/// User-defined search exclusions, combined with git ignores. `All` includes them, the file tree
+/// shows them dimmed, and markdown notes remain searchable.
 ///
-/// The one place a directory can be named. It joins what git ignores in the index's exclusion
-/// column rather than replacing it, so `All` still reaches these directories, the file tree still
-/// lists them dimmed, and — DESIGN.md, Sidebar — a note inside one is still found, because that
-/// column is never applied to markdown. Naming a directory here is therefore a way to quieten
-/// search, never a way to hide a note.
-///
-/// It is deliberately not a walk-level skip: [`crate::walk`]'s own skips keep whole dependency
-/// trees out of the index and out of the kernel's watch budget, which is a different question
-/// from "I would rather not see this folder in my results".
+/// Unlike [`crate::walk`] skips, these directories are still indexed and watched; exclusions
+/// control results rather than traversal.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchConfig {
@@ -335,10 +321,7 @@ impl Default for VaultConfig {
     }
 }
 
-/// What a window looked like when it was last closed. Cheap to lose, so it lives in the state
-/// dir rather than in the config.
-/// How a PDF is sized to its window. Here rather than in the app because the session remembers
-/// it per document, and the session is core's to write.
+/// PDF sizing mode, stored per document in core session state.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PdfZoom {
@@ -418,19 +401,15 @@ pub struct Session {
     pub view: String,
     /// Document zoom, 1.0 being the font as GNOME sets it.
     pub zoom: f64,
-    /// Files opened in this vault, most recent first. Filesystem mtime is what the index can
-    /// offer, and it says when a file last changed, not when it was last read; the palette wants
-    /// the second, so the window records it. Called `recent_notes` in older files.
+    /// Recently opened files, most recent first. The window records reads because filesystem
+    /// mtime tracks edits. Called `recent_notes` in older state files.
     #[serde(alias = "recent_notes")]
     pub recent_files: Vec<String>,
     /// Full action names of the commands run from the palette or a menu, most recent first.
     pub recent_commands: Vec<String>,
-    /// Where each PDF this vault has opened was left, keyed by vault-relative path.
-    ///
-    /// ponytail: never pruned, so a state file grows by an entry per PDF ever opened. Drop the
-    /// ones the index no longer has the day that is measurable.
+    /// Saved reading positions keyed by vault-relative PDF path. Entries are not pruned.
     pub pdf: BTreeMap<String, PdfPlace>,
-    /// Where each diagram was left, the same way (and with the same ceiling) as `pdf`.
+    /// Saved diagram positions keyed by vault-relative path; entries are not pruned.
     pub diagram: BTreeMap<String, DiagramPlace>,
     /// Where each open shell was, keyed by its tab key (`terminal:<id>`).
     pub terminals: BTreeMap<String, ShellPlace>,
@@ -560,13 +539,10 @@ impl Layout {
 }
 
 impl Config {
-    /// Never fails: a missing or broken file logs and yields the defaults, because a typo in a
-    /// hand-edited config must not keep the app from starting.
+    /// Load defaults on a missing or broken config so hand-edit errors cannot prevent startup.
     ///
-    /// A file that exists but does not parse is moved to `config.toml.broken` first. The
-    /// defaults are what [`save`](Self::save) writes next, and writing them over the user's
-    /// recent vaults, shortcuts and exclusions because of one typo is the one thing this must
-    /// not do; the copy is theirs to fix and move back.
+    /// An invalid file is first moved to `config.toml.broken`, preserving preferences for repair
+    /// before a later save writes defaults.
     pub fn load() -> Config {
         let path = config_path();
         let text = std::fs::read_to_string(&path);
@@ -821,14 +797,8 @@ fn set_known(text: Option<String>) {
     *KNOWN.lock().unwrap_or_else(|e| e.into_inner()) = text;
 }
 
-/// The config in `text`, where that is a change of someone else's: `None` for no file, or for the
-/// text accent itself last read or wrote; an error for a change that does not parse.
-/// The file's text, or `None` where there is no file.
-///
-/// An error is a file that is there and could not be read — no permission, an I/O failure, bytes
-/// that are not UTF-8. Told apart from "there is no file" because the two mean opposite things to
-/// a writer: nothing on disk is free to write, and a file that cannot be read is the one thing
-/// that must not be written over, its contents being unknown rather than absent.
+/// Read the file text, or `None` if absent. Unreadable or non-UTF-8 files return an error so
+/// their unknown contents cannot be overwritten.
 fn on_disk(path: &Path) -> Result<Option<String>> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
@@ -894,10 +864,8 @@ fn merge(
     theirs.cloned()
 }
 
-/// Write `bytes` where `path` is, atomically: a torn config or state file is read back as the
-/// defaults, which is the difference between losing one edit and losing every preference. Same
-/// temp-in-the-same-directory-then-rename shape as [`crate::fs::write_note`], minus the etag gate
-/// and the ownership dance a vault file needs.
+/// Atomically write config or state bytes using a temporary file and rename. This prevents torn
+/// files from loading as defaults and losing all preferences.
 fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -947,14 +915,12 @@ pub fn vault_hash(root: &Path) -> String {
     digest[..16].to_string()
 }
 
-/// What a vault's retired daily-note settings mean now: the `accent-target` its three `daily_*`
-/// keys spelled, and the template file they named.
+/// Migration advice for a vault's retired `daily_*` settings: their equivalent `accent-target`
+/// and template.
 ///
-/// `None` unless `config.toml` still carries one of them for `root`. Serde drops an unknown field
-/// before anything can see it, so a second parse into a table is the only place they are still
-/// visible. Nothing is written here, and nothing is ever written into the vault: the directive is
-/// the user's line to add, and the dead keys leave `config.toml` the next time [`Config::save`]
-/// writes it, the struct they were parsed into no longer having them.
+/// Returns `None` when no retired key remains for `root`. A second TOML-table parse preserves
+/// keys Serde discards. Nothing is written here; the user adds the directive, and the next
+/// [`Config::save`] drops the old keys.
 pub fn daily_keys(root: &Path) -> Option<(String, Option<String>)> {
     let text = std::fs::read_to_string(config_path()).ok()?;
     retired_daily(&text.parse().ok()?, &vault_key(root))
@@ -1175,8 +1141,7 @@ daily_template = "DailyNote.md"
         assert!(!config_path_exists(tmp.path()));
     }
 
-    /// The `!BUG`: a typo in `config.toml` used to load as the defaults, and the next save wrote
-    /// those defaults over everything the user had set.
+    /// An invalid config must be preserved before defaults can be saved.
     #[test]
     fn broken_config_file_is_default_and_kept_aside_for_the_next_save() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1278,7 +1243,7 @@ daily_template = "DailyNote.md"
         assert!(merged.unwrap().get("shortcuts").is_none());
     }
 
-    /// The `!BUG`: a hand edit made while accent ran was written over by accent's next save.
+    /// A hand edit made while accent runs must survive the next save.
     #[test]
     fn a_hand_edit_is_never_written_over_and_is_taken_in_under_accents_change() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1306,9 +1271,8 @@ daily_template = "DailyNote.md"
         });
     }
 
-    /// A config that cannot be read is not a config that is not there: reading the second out of
-    /// the first let the guard above pass and wrote the defaults over a file whose bytes nobody
-    /// had seen.
+    /// An unreadable config must block saving; treating it as absent would overwrite unknown
+    /// contents.
     #[test]
     fn a_config_that_cannot_be_read_is_not_written_over() {
         use std::os::unix::fs::PermissionsExt;

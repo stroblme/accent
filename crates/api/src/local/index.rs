@@ -1,4 +1,4 @@
-//! What [`Local`](super::Local) answers from the index: the tree, the searches, the links and
+//! What [`Local`] answers from the index: the tree, the searches, the links and
 //! the tags, plus the repository discovery that reads the same directory listing.
 
 use std::collections::HashSet;
@@ -22,24 +22,18 @@ use crate::{
 };
 
 impl Local {
-    /// Direct children of one directory ("" is the vault root): one level per call, so the tree
-    /// costs what it shows.
-    ///
-    /// The index's own rows, plus the trees it deliberately does not hold — `node_modules`, a
-    /// `.venv`, a cargo `target/` — read straight off the disk
-    /// ([`walk::unindexed_children`]) and merged in, so the file tree can show every folder in
-    /// the vault without any of them being indexed, watched or searched. Those rows carry
-    /// `id == 0`, which is what tells them apart. It happens here rather than in the tree so
-    /// that a vault on another machine gets it too: this runs on the host holding the files.
+    /// List direct children of a vault-relative directory (`""` for root),
+    /// keeping tree cost proportional to visible levels. Merge indexed rows
+    /// with [`walk::unindexed_children`] from disk; unindexed rows carry `id == 0`.
+    /// Run beside the files so remote trees can also show dependency folders
+    /// without indexing, watching or searching them.
     pub fn list_dir(&self, rel: &str) -> Result<Vec<FileRow>> {
         list_dir(&self.index(), &self.root, rel)
     }
 
-    /// Ranked full-text search. On the search connection, so a slow query cannot block the tree,
-    /// and superseded by the next one the pane asks ([`supersede`](Local::supersede)).
-    ///
-    /// `include_ignored` is the sidebar's All toggle: off, what git ignores is left out of the
-    /// results; on, it is put back. A note is in either way.
+    /// Ranked search on a separate connection, superseded by newer pane queries
+    /// ([`supersede`](Local::supersede)). `include_ignored` implements All; notes
+    /// are included regardless, while other gitignored files require it.
     pub fn search(
         &self,
         query: &str,
@@ -61,14 +55,10 @@ impl Local {
         Ok(self.supersede(|index| index.search_mid_word(query, limit, include_ignored, skip))?)
     }
 
-    /// Exact search: one row per match of `query` under `options`, capped at `limit`, plus how
-    /// many there are in all, which is what a [`replace_all`](Self::replace_all) under the same
-    /// `include_ignored` would rewrite. `include_ignored` means what it does in
-    /// [`search`](Self::search), and it is superseded as that is.
-    ///
-    /// The pattern is compiled here, where the files are, because a `Regex` does not cross the
-    /// wire: a remote caller sends what the user typed and the toggles, and case-insensitivity
-    /// lives in the builder rather than in the pattern string.
+    /// Exact matches for `query` and `options`, capped at `limit`, plus total
+    /// count for [`replace_all`](Self::replace_all). Use the same `include_ignored`
+    /// and supersession as [`search`](Self::search). Compile beside the files: a
+    /// `Regex` cannot cross RPC, and options such as case folding belong to its builder.
     pub fn grep(
         &self,
         query: &str,
@@ -80,39 +70,13 @@ impl Local {
         Ok(self.supersede(|index| index.grep(&re, limit, include_ignored))?)
     }
 
-    /// The same exact search over the files the index does not hold at all: those under a
-    /// dependency tree, a `node_modules`, a `target/` or a gitignored directory the walk
-    /// deliberately never entered.
-    ///
-    /// This is the second half of the Search pane's All toggle. The first half drops the
-    /// git-ignored exclusion, which is a column in the index and which ranked search reads as
-    /// well; this one reaches what was never indexed, and it can only be a walk, so a ranked query
-    /// cannot rank what it finds: the pane lists it last, in path order, and only once the box
-    /// has been still for a moment. Everything already in the index is skipped by path, so no
-    /// file is greped twice, and the walk stops as soon as `limit` matches are in hand.
-    ///
-    /// The matching runs **inside** the walk ([`walk::visit`]), on its threads, rather than over
-    /// a [`walk::ScanResult`] it built first: reading 10 000 dependency files one at a time was
-    /// most of what a settled query cost. The row budget is therefore shared — an atomic every
-    /// thread reads before it opens a file and writes when it has appended — so a query whose
-    /// rows fill early stops the walk instead of finishing it. Nothing is read on the index's
-    /// connection: the guard is dropped before the walk starts, and the caller is the sidebar's
-    /// search worker either way. `.git` and `.trash` stay unreachable, and so does a symlinked
-    /// repository's own gitignored build output: that is somebody else's build tree, and leaving
-    /// it out is what keeps a per-query walk affordable.
-    ///
-    /// The rows are sorted by path before they are returned, because the walk answers in whatever
-    /// order its threads got there and the reader is looking at a list. *Which* rows survive a
-    /// full budget is no longer deterministic — the threads race for it — and cannot be: that is
-    /// the price of not reading every file, and the pane already says the list is capped.
-    ///
-    /// Rows only, no count beside them: nothing here can be rewritten by Replace All, which
-    /// visits the indexed files, so a number of matches past `limit` would have no reader.
-    ///
-    /// `stop` is read before each file as the budget is, so a question the reader has already
-    /// moved on from ends its walk rather than finishing it.
-    ///
-    /// ponytail: the walk runs per query, with no cache, for as long as All is on.
+    /// Search unindexed files for the Search pane's All toggle. Skip indexed
+    /// paths to avoid duplicates; return rows only, since Replace All uses the index.
+    /// Match inside [`walk::visit`] workers with a shared atomic row budget and
+    /// check `stop` before each file. Release the index connection before walking.
+    /// Exclude `.git`, `.trash` and symlinked repositories' ignored build output
+    /// to bound per-query cost. Sort returned rows by path; which rows survive
+    /// a full budget depends on worker order. No cache: each query walks again.
     pub fn grep_unindexed(
         &self,
         query: &str,
@@ -201,10 +165,8 @@ impl Local {
         Ok(self.index().backlinks(rel)?)
     }
 
-    /// Every link that resolves to `rel`, where it is written, whatever kind of file `rel` is:
-    /// what the References pane lists wherever nothing else answers — a PDF, an image, a text
-    /// file no language server speaks for. A note's own come from its provider, which reads the
-    /// sources as the editor has them.
+    /// Locate links resolving to any file at `rel`, for References when no
+    /// language provider answers. Notes use their provider's open-buffer text.
     pub fn backlink_locations(&self, rel: &str) -> Result<Vec<Location>> {
         let rows = self.index().backlinks(rel)?;
         Ok(notes::placed(rows, |src| {
@@ -268,33 +230,18 @@ impl Local {
         Ok(self.index().pdf_links(rel)?)
     }
 
-    /// Every file the app can open, notes first: what the palette's switcher lists, now that a
-    /// tab is not necessarily a note. `[[` completion asks the index for notes and PDFs alone
-    /// (`Index::note_and_pdf_paths`), those being what a wikilink may name.
-    ///
-    /// The palette has no All toggle of its own, so it asks with `include_ignored` false and the
-    /// build output stays out of Go to File. The tree still lists an ignored file, dimmed, which
-    /// is the way to open one.
+    /// List openable files, notes first, for Go to File. Use `include_ignored`
+    /// false to omit build output; ignored files remain openable from the tree.
+    /// Wikilink completion separately uses `Index::note_and_pdf_paths`.
     pub fn file_paths(&self, include_ignored: bool) -> Result<Vec<String>> {
         Ok(self.index().file_paths(include_ignored)?)
     }
 
-    /// Hand the index what search leaves out, so every later query can leave it out.
-    ///
-    /// Called from the git refresh, which is the one place in the app that has already asked git
-    /// and where the `[search] exclude` list joins git's answer. The write goes to the vault
-    /// worker rather than to the caller's connection, because the worker owns the only writing
-    /// one: on the caller's it had to wait for the worker's write lock while holding the mutex
-    /// the main thread reads through, and `list_dir` queued behind it. Measured on the 40k-entry
-    /// test vault, cold: a read waited 5 006 ms and the write then failed outright with "database
-    /// is locked", the busy handler having been starved by a reconcile that takes the write lock
-    /// back between every batch.
-    ///
-    /// It still returns only once the write has landed — the worker answers on `reply` — because
-    /// the caller re-runs the query on screen the moment it does. What the caller now waits for is
-    /// the worker reaching this message, which during a reconcile is the end of the batch in
-    /// progress rather than of the walk: the worker writes the set for the rows already there and
-    /// again once the walk is over (`Worker::reconcile`).
+    /// Write search exclusions from git refresh and `[search] exclude` through
+    /// the sole writing worker, avoiding a write-lock wait while holding the
+    /// main thread's reader mutex. Wait for `reply` before returning so the next
+    /// query sees exclusions. During reconciliation, apply to current rows
+    /// between batches and again after the walk.
     pub fn set_excluded(&self, entries: &[String]) -> Result<()> {
         let gone = || accent_core::Error::Index("the vault worker stopped".to_string());
         let (reply, answer) = channel();
@@ -314,8 +261,8 @@ impl Local {
         Ok(self.index().resolve_target(target)?)
     }
 
-    /// The notes links name that are not there yet, by the path New File would create each at.
-    /// One a link finds in a folder git ignores is there, and is not one of them.
+    /// Missing linked notes by the path New File would create. Exclude targets
+    /// that exist in ignored folders.
     pub fn missing_notes(&self) -> Result<Vec<String>> {
         let mut missing = self.index().missing_notes()?;
         let ignored = self.lang.ignored.listing(false);
@@ -323,10 +270,9 @@ impl Local {
         Ok(missing)
     }
 
-    /// The notes in the folders git ignores, which the index never walks: what Go to File lists
-    /// behind the files the index holds. `fresh` walks the vault for them again, which Go to File
-    /// asks for as it opens; otherwise they are the last walk's, the first walk being the first
-    /// time anyone asks.
+    /// List ignored-folder notes after indexed files in Go to File. `fresh`
+    /// requests a new walk on opening; otherwise reuse the last walk, loading
+    /// lazily on the first request.
     pub fn ignored_notes(&self, fresh: bool) -> Result<Vec<String>> {
         Ok(self.lang.ignored.listing(fresh).notes().cloned().collect())
     }
@@ -391,10 +337,9 @@ pub(crate) fn list_dir(index: &Index, root: &Path, rel: &str) -> Result<Vec<File
 // ----------------------------------------------------------------------- git
 
 impl Local {
-    /// The repositories the vault touches: the one holding the root, plus every indexed directory
-    /// carrying a `.git` entry. Runs on the caller's thread, which is never the main one.
-    ///
-    /// The walk hard-skips `.git`, so a repository is only ever found by the directory holding it.
+    /// Find the repository containing the root and indexed directories with
+    /// `.git` entries. Call off the main thread. Since walks skip `.git`,
+    /// discover repositories through their containing directories.
     pub fn repos(&self) -> Vec<Repo> {
         // The searcher's connection, not the main thread's: discovery spawns a `git` process per
         // candidate directory and must not hold the lock the UI reads through.
@@ -608,9 +553,8 @@ mod tests {
         assert_eq!(paths, sorted, "rows must be ordered for the reader");
     }
 
-    /// The cap can fall inside a file's rows, and the "+N more in this file" tail rides on the
-    /// last of them: what the cut takes has to end up on the row before it rather than going with
-    /// the row it was on.
+    /// Preserve the "+N more in this file" tail when the cap cuts a file's
+    /// rows, transferring omitted counts onto the last surviving row.
     #[test]
     fn a_cut_inside_a_file_folds_its_dropped_rows_into_the_tail_row() {
         let f = Fixture::open(VaultConfig::default());

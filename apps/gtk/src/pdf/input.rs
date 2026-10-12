@@ -121,12 +121,9 @@ impl PdfTab {
         ));
     }
 
-    /// What both views answer: the tiles they want rendered, and a click that names a page.
-    ///
-    /// The rest of [`Self::wire`] is the reading view's alone. The strip is a column of
-    /// thumbnails, not a page being read: a drag across it used to select text in the reading
-    /// view, the pointer over it wore an I-beam, and scrolling it asked for the links and the
-    /// strokes of whatever page went past.
+    /// Wire render requests and page clicks shared by reading and thumbnail views. Selection,
+    /// pointer and page-content handling remain exclusive to the reading view because the strip
+    /// is navigation.
     pub(super) fn wire_strip(self: &Rc<Self>, view: &PdfView) {
         view.connect_wants(glib::clone!(
             #[weak(rename_to = tab)]
@@ -150,21 +147,13 @@ impl PdfTab {
         ));
     }
 
-    /// The page's own menu, on a secondary click over it.
+    /// Page context menu: Go to Source when available, selection copy actions, page edits and
+    /// highlight export. Commands target the pointer's page; palette and status-bar commands
+    /// target the reading page. Read-only and remote refusals are reported by toast. Drawing
+    /// tools use the ring.
     ///
-    /// Go to Source first, about the point the menu was opened on, where the window leaves it
-    /// enabled — a LaTeX build in a local vault (`App::sync_synctex`) — and hidden elsewhere.
-    ///
-    /// Copy and Copy Link to Selection when there is a selection, then Add Page Before, Add Page
-    /// After, Delete Page and Export Highlights, which are about the document rather than about
-    /// what is selected and so are always offered — a read-only or remote document says so in a
-    /// toast rather than by hiding the row. The page commands act on the page under the pointer,
-    /// where the status bar's page count and the palette act on the page being read. The drawing
-    /// tools are not here: they are the ring, which the header's Drawing button opens.
-    ///
-    /// `win.` actions rather than a group of the tab's own: that is what gives them a row in the
-    /// palette and a rebindable accelerator, which is the whole argument of DESIGN.md's keyboard
-    /// section. The tab keeps `Ctrl+C` in its key controller either way.
+    /// Use `win.` actions for palette entries and rebindable accelerators; Ctrl+C stays in the
+    /// tab's key controller.
     pub(super) fn wire_menu(self: &Rc<Self>) {
         let secondary = gtk::GestureClick::builder()
             .button(gtk::gdk::BUTTON_SECONDARY)
@@ -306,12 +295,9 @@ impl PdfTab {
         self.view.add_controller(keys);
     }
 
-    /// Page from a key, through `win.pdf-next-page` / `win.pdf-previous-page`.
-    ///
-    /// The keys are dispatched here rather than from the window's accelerator table — a bare
-    /// `space` or arrow there would be taken from every entry in the app — but the *command* is
-    /// the window's, so the palette lists it and a menu or a script can fire it. This is the one
-    /// place the keys and the palette meet.
+    /// Dispatch paging keys through window actions so palette and scripted commands share
+    /// behaviour. Bind bare keys here rather than globally so entries elsewhere retain space and
+    /// arrows.
     fn page(&self, forward: bool) {
         self.run(match forward {
             true => "win.pdf-next-page",

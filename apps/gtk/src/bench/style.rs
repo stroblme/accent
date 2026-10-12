@@ -5,10 +5,8 @@ use crate::editor::line_end;
 use accent_core::config::Theme;
 use sourceview5::prelude::BufferExt as _;
 
-/// Type a heading into the note at `rel`, at a size that styles on the keystroke and at one that
-/// used to wait for the debounce, and print whether the `h1` tag is on the line *before the main
-/// loop turns again*. `changed` is emitted from inside the insert, so a `true` here can only have
-/// come from the synchronous path — which is the whole question this bench answers.
+/// Type headings below and above the debounce threshold. Read `h1` before the main loop turns
+/// again: only synchronous styling can make it true during insertion.
 pub(super) fn bench_style(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -35,12 +33,9 @@ pub(super) fn bench_style(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Copy part of a styled line, paste it into a plain one, and print whether the pasted text still
-/// carries a heading's or a bold's tags. GTK's own copy is rich text, and pasting it back inserts
-/// the copy run by run with each run's tags applied after `changed` has re-tagged the text, so the
-/// last run kept its tags: a selection ending one character into a bold word left that character
-/// bold. Every paste lands mid-line, so nothing it brings can start a heading of its own. The
-/// middle click and the drop are the other two ways text comes in from the buffer itself.
+/// Paste styled fragments mid-line and check that heading/bold tags do not leak from GTK
+/// rich-text runs applied after `changed`. Include a selection ending inside bold text,
+/// middle-click paste and buffer drop.
 async fn bench_style_paste(tab: &Rc<Tab>) {
     const HEADING: &str = "# Heading here\nplain line\n";
     const BOLD: &str = "Some **bold** words\nplain line\n";
@@ -210,15 +205,10 @@ pub(super) const TYPING_SECTION: &str = "## Section\n\nSome prose with **bold**,
     - a list item with **bold**\n- [ ] a task\n- [x] a done task\n\n> a quote with *emphasis*\n\n\
     ```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\n";
 
-/// `ACCENT_BENCH_STYLE=typing:<rel>` fills the note at `rel` with 4, 15, 64 and 256 KB of
-/// sections and types into the middle of each at a key every 150 ms, printing the main thread's
-/// CPU time over the run against the wall time: what a keystroke costs once GTK has laid out
-/// whatever the restyle touched, which a timer around the restyle itself cannot see. 15 rather
-/// than 16 so that size styles on every keystroke, below `editor::INSTANT`. `idle` is the same
-/// share over the second before the typing, so a layout of the fill still running shows,
-/// `key_us` the median keystroke's own time, the styling it runs before it returns included, and
-/// `pass_us` what one more full pass over the typed note costs, changing nothing.
-/// `typing:<rel>:<kb>` types into that one size, for a profiler.
+/// `ACCENT_BENCH_STYLE=typing:<rel>` measures typing in 4, 15, 64 and 256 KiB fixtures at 150 ms
+/// per key. Report main-thread CPU versus wall time, preceding `idle` share, median `key_us` and
+/// full unchanged `pass_us`. Size 15 stays below `editor::INSTANT`; `typing:<rel>:<kb>` selects
+/// one size for profiling.
 pub(super) fn bench_typing(app: &Rc<App>, arg: &str) {
     let (rel, sizes) = match arg.rsplit_once(':') {
         Some((rel, kb)) if kb.parse::<usize>().is_ok() => (rel, vec![kb.parse().unwrap_or(4)]),
@@ -281,19 +271,13 @@ pub(super) fn bench_typing(app: &Rc<App>, arg: &str) {
     });
 }
 
-/// The pointer's half of `drop_fold`, held for XTEST: a section folded under its heading and
-/// selected whole, where to press on it and where to let it go at the end of the note, and five
-/// seconds later what the note holds and the action a drag of ours ended with, ten times, every
-/// other one meant to be driven with Ctrl held. A move has to carry the hidden body and take all
-/// of it away from where it was, so `hidden body` is in the note once, after `plain line`; a copy
-/// leaves it twice. Each round says whether the drag was ours (`ended=Some`), and `lost=true`
-/// where the hidden body left the note; the last line counts the rounds whose drag was GTK's own
-/// (`gtk`, the note changed with no drag of ours ending), that changed nothing (`missed`) and that
-/// lost text (`lost`), the invariant being that a drag never takes away text it does not carry.
-/// Drive it in steps with pauses between them — `move X0 Y0; down`, a move past the drag
-/// threshold, then `sleep 0.3; move X1 Y1; sleep 0.5; up` — because XDND's position and status
-/// messages have to go round before the release, and `xtest.py`'s one-shot `drag` lets go too
-/// soon.
+/// Hold folded-section drag tests for XTEST, ten rounds alternating Ctrl-copy. Report
+/// source/target points, resulting text and action. Moves keep one `hidden body` after `plain
+/// line`; copies keep two. Expected no lost text; final `gtk`, `missed` and `lost` counts
+/// distinguish outcomes.
+///
+/// Drive with pauses for XDND negotiation: `move X0 Y0; down`, cross the threshold, then `sleep
+/// 0.3; move X1 Y1; sleep 0.5; up`. One-shot `drag` releases too soon.
 pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
     const FOLDED: &str = "# One\nhidden body\n# Two\nplain line\n";
     app.open_path(rel);
@@ -353,14 +337,10 @@ pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Delete at the end of a folded heading and Backspace at the start of the line after its fold,
-/// each of which joins a visible line to a hidden one, then ask for the iter at every pixel row of
-/// the note, as GtkSourceView asks at the top and bottom of the screen on every frame. A line left
-/// partly hidden aborts the process there (GTK's "Byte index … is off the end of the line"); kept
-/// to whole lines, each case prints what is hidden and what the joined line reads. Then `stale`
-/// shuts the fold and runs a Ctrl-held pointer down every row before GTK has measured the hidden
-/// lines again, and `screen` draws the view with its top row below a partly hidden line, where
-/// GtkSourceView's gutter and annotations ask GTK for the iter: both aborted the same way.
+/// Join visible and folded lines with Delete/Backspace, then query every pixel-row iter to catch
+/// GTK aborts from partially hidden lines. Report hidden ranges and joined text. Also test stale
+/// layout with Ctrl-hover and drawing below the hidden line through gutter/annotation iter
+/// queries.
 pub(super) fn bench_seam(app: &Rc<App>, rel: &str) {
     // Short lines after the fold: GTK's walk past the joined line lands in a line too short for
     // the bytes it carried along, which is what aborts.
@@ -743,18 +723,8 @@ fn bench_wrap_cost(tab: &Rc<Tab>) {
     );
 }
 
-/// Select things in the note at `rel` and print what the muted occurrence highlight made of each:
-/// the query it took and the character ranges it painted. Then open the find bar on the same word,
-/// so the last lines say what happens where a find-bar match and a muted occurrence land on the
-/// same text: both tags are on it, and the find bar's is the higher priority of the two.
-///
-/// The buffer is filled with text of its own first: the ranges are the point, and they have to be
-/// the bench's rather than whatever the vault generator wrote. Nothing is saved — the run quits
-/// well inside the one-second autosave.
-/// What a Ctrl+hover underlines, and what following the same link does when nothing answers to
-/// it. The underline's link half only: a plain word is a question for a language server, and the
-/// vault a drill runs against holds notes rather than code. A bare URL underlines in any text
-/// file, so pointed at a `.txt` the drill still underlines it, and only it.
+/// Check Ctrl-hover link underlines and unresolved-link navigation. Plain words require
+/// language-server coverage outside this note drill; `.txt` fixtures underline bare URLs only.
 pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
     if let Some(rel) = rel.strip_prefix("hover:") {
         return bench_hover(app, rel);
@@ -802,14 +772,10 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// The hover over the first wikilink of the note at `rel`, zoomed in twice, through the real
-/// pointer: prints `bench hover_aim <x> <y>` for `build-aux/xtest.py :N "move <x> <y>"`, then, once
-/// the hover is up, its font beside the note's, its size beside the window's, a line of it beside
-/// one of the note's and how tall its whole text is, and `emptied`: the hover emptied while up, as
-/// GtkSourceView empties it before asking again, which aborted. Then `bench hover_scroll_aim <x>
-/// <y>`, the middle of the hover, for the pointer to be walked into (a jump there dismisses it)
-/// and a wheel turned, and what the hover's scroll came to. Held on screen 5 s in all, long enough
-/// for `import -window root -display :N shot.png`.
+/// Hover the first wikilink at two zoom steps through XTEST: `bench hover_aim <x> <y>` for
+/// `build-aux/xtest.py :N "move <x> <y>"`. Report font, size, line height and clearing the live
+/// hover (`emptied`) without aborting. Walk into `bench hover_scroll_aim <x> <y>` before
+/// wheeling; jumping dismisses it. Hold 5 s for `import -window root -display :N shot.png`.
 fn bench_hover(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -924,18 +890,10 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Follow the link under the caret, which nothing in the vault answers to, the way F12, the
-/// chord and a Ctrl+click do: New File comes up with the path the link spells already typed in,
-/// its anchor and alias left out.
-///
-/// Then `[[#Nowhere]]`, a heading the note does not have: `bad_anchor` prints the caret's line,
-/// which must be the top of the note, and the toast saying why; `preview_bad_anchor` the same for
-/// a click on `[[#Elsewhere]]` in the preview, which printed the caret's own line and no toast
-/// before the two shared a landing (`App::no_heading`). Then `block` and `preview_block`, the
-/// same for a `^id` the note has and one it lacks. Last `late`: a link typed at the end of a note
-/// past 16 K characters and followed at once, before the pause its analysis waits for, which must
-/// offer New File as the first did — it printed `typed=None` while the server was sent the text
-/// only after that pause.
+/// Follow unresolved links through the shared definition path: New File must prefill the target
+/// without anchor or alias. Missing-heading editor/preview clicks must land at note top with a
+/// reason toast; repeat for present and absent block IDs. A newly typed link past 16 K
+/// characters must resolve immediately before debounced analysis.
 async fn bench_dangling(app: Rc<App>, tab: Rc<Tab>) {
     app.go_to_definition();
     bench_new_file(&app, "dangling").await;
@@ -1031,27 +989,13 @@ async fn bench_new_file(app: &Rc<App>, case: &str) {
     }
 }
 
-/// Walk the window through the themes and print what a note's own tags are painted in on each
-/// side of every switch. `theme::apply` moves `AdwStyleManager`'s dark state, which is the very
-/// signal a system switch raises, so the `notify::dark` handler in `wire.rs` — `theme::refresh`
-/// then `App::restyle_all` — is what runs here, portal or no portal. Solarized raises no such
-/// notify (it keeps the system's own dark state), so the pass is asked for the way
-/// `Shell::apply_config` asks for it there.
+/// Switch themes through `AdwStyleManager` dark notification and the Solarized config path. Read
+/// foreground-derived tags at first paint (`painted`) and 300 ms later (`after`); both must
+/// match resolved `view_fg` at their alpha. `scheme_text` is printed to distinguish scheme ink
+/// from the actual rendered foreground.
 ///
-/// Solarized follows the system between its two halves and Xvfb has no portal to move the system
-/// with, so its dark half is a second launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
-///
-/// `painted` is read as the first frame after the switch paints, and `after` 300 ms later. Every
-/// foreground-derived tag must be that line's own `view_fg` at its alpha in both, and the two
-/// lines must agree. When the pass ran inside the notify they were the outgoing theme's in both —
-/// `listmarker=rgba(0,0,6,0.4)`, near-black, against a `view_fg` of `rgb(255,255,255)`, which is
-/// the invisible bullet; when it ran on an idle after the frame, in `painted` alone.
-///
-/// `scheme_text` is beside them to say why `view_fg` is the right thing to mix from. It is the
-/// style scheme's own `text` foreground, and in none of the four themes is it what reaches the
-/// glyphs: rendering the view and reading its pixels gives the prose as `view_fg` every time
-/// (`(51,51,55)` on white under Adwaita, where the scheme says `#504E55`), so the scheme's ink is
-/// a colour nothing on screen is drawn in.
+/// Xvfb has no system portal; test Solarized dark in another launch with
+/// `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -1336,17 +1280,9 @@ pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Jump into the note at `rel` the three ways a jump arrives — a search hit's range, a tag's
-/// name, a Go to Line — and print what the reveal painted each time, then what each kind of
-/// interaction leaves of it. The find bar's query and whether it is painting are printed beside
-/// it throughout: a jump hands the bar the matched text so `F3` steps through it, and that is all
-/// it hands over — turning the highlight on with it is what used to light every other occurrence
-/// in the note and never expire.
-///
-/// A click is not driven here because it is the same mark move an arrow key is: GtkTextView
-/// places the caret on button-press, and the reveal comes down with the caret wherever it moves.
-///
-/// Point it at a note that carries a tag, or the first three lines have nothing to resolve.
+/// Check temporary reveal marks for search-range, tag and Go to Line jumps, then their removal
+/// after interaction. Find-bar text supports F3 without enabling persistent occurrence
+/// highlights. Caret movement models click dismissal. Use a note containing a tag.
 pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
     // The cold path first, which is the one a click in the sidebar really takes: the note has no
     // tab, so the jump waits on `with_tab` until one has landed and the load has filled it. The

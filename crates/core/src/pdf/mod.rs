@@ -1,12 +1,8 @@
-//! PDF rendering, glyph geometry, selection links and highlight annotations, via pdfium.
+//! Shared PDF rendering, glyph geometry, selections and annotations through pdfium, with plain
+//! data for GTK, CLI and Android.
 //!
-//! Everything here is plain data (no UI toolkit types) so the same code serves the GTK app,
-//! the CLI and — later — Android through uniffi.
-//!
-//! Coordinates: all [`Rect`]s in this module are **page points with the origin at the top-left**
-//! and y growing downwards, matching how a viewport draws them. pdfium's own coordinate space has
-//! the origin at the bottom-left; the conversion happens at the boundary in [`Rect::from_pdf`] /
-//! [`Rect::to_pdf`].
+//! All [`Rect`]s use page points with a top-left origin and downward y. [`Rect::from_pdf`] and
+//! [`Rect::to_pdf`] convert pdfium's bottom-left coordinate space at the boundary.
 
 mod annot;
 mod doc;

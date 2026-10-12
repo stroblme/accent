@@ -1,6 +1,4 @@
-//! Which pages a document has and in what order: a blank page put in, another document's pages
-//! put in, a page taken out, a page moved somewhere else, and the whole document kept for a page
-//! taken out to come back.
+//! PDF page insertion, deletion, movement and snapshots for restoring deleted pages.
 
 use std::io::Write;
 use std::os::raw::{c_int, c_ulong};
@@ -53,13 +51,11 @@ impl PdfDoc {
             .map_err(|e| Error::Pdf(format!("delete page {page}: {e:?}")))
     }
 
-    /// The document as it now stands, as a second document of its own: what a page delete keeps
-    /// for its Undo to swap back in (`ledger`), since pdfium cannot hand back a page once it is
-    /// gone, and a copy of one would lose the links into it, out of it and the bookmarks naming it.
+    /// Snapshot the document for page-delete Undo. Restoring the whole document preserves links
+    /// and bookmarks that a page copy would lose.
     ///
-    /// It is read from a file in the cache dir rather than held in memory, so a scanned PDF of a
-    /// hundred megabytes costs that much disk per delete in the history, not memory. The file has
-    /// no name: it goes with the last document reading it, a crash included.
+    /// Uses an unnamed cache file so large PDFs consume disk rather than memory per history
+    /// entry. The file disappears when the last document handle closes, including after a crash.
     pub(super) fn snapshot(&self) -> Result<PdfDoc> {
         let bytes = self.save()?;
         let dir = crate::config::xdg("XDG_CACHE_HOME", ".cache").join("accent");
@@ -71,16 +67,13 @@ impl PdfDoc {
         PdfDoc::from_file(file.map_err(|e| Error::io(dir.display(), e))?)
     }
 
-    /// Every page of `source` in at `at`, in order, each with its text, its annotations and its
-    /// resources. pdfium's copy of a page drops its links to other pages, as for any copy, and
-    /// `source`'s bookmarks stay behind. `at` may be the page count, which appends. How many
-    /// pages went in.
+    /// Insert all pages of `source` at `at` in order, returning their count. `at` may equal the
+    /// page count to append. Text, annotations and resources are copied; links to other pages
+    /// and source bookmarks are not.
     ///
-    /// The copy also keeps every annotation's `/Parent` as it was — a pop-up's markup, a widget's
-    /// form field — naming an object of `source`, which a save follows into freed memory once
-    /// `source` has closed, and writes as whichever object of this document has its number while
-    /// it is open. Each is cut loose here, while `source` is still open: a pop-up opens with its
-    /// markup, and no form field comes along.
+    /// Clear copied annotations' `/Parent` references while `source` is open. Otherwise saving
+    /// can follow source objects into freed memory or unrelated destination objects. Popups
+    /// still open with their markup; form fields are not imported.
     pub fn import_pages(&mut self, source: &PdfDoc, at: usize) -> Result<usize> {
         let _guard = lock();
         let count = self.doc().pages().len() as usize;
@@ -107,12 +100,9 @@ impl PdfDoc {
         Ok(added)
     }
 
-    /// Move the page at `from` so that it ends up at `to`.
-    ///
-    /// The page itself moves — the page tree is reordered and nothing is copied — so a bookmark or
-    /// a link that points at it still points at it wherever it lands. A copy and a delete, which
-    /// is all pdfium-render offers, would leave both pointing at a page that is gone. Hence the one
-    /// raw call below: `FPDF_MovePages` is bound but not wrapped.
+    /// Move the page itself from `from` to `to`, preserving links and bookmarks. Raw
+    /// `FPDF_MovePages` is required because pdfium-render offers only copy and delete, which
+    /// invalidate those references.
     pub fn move_page(&mut self, from: usize, to: usize) -> Result<()> {
         let _guard = lock();
         let doc = self.doc();

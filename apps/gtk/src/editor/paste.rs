@@ -1,25 +1,21 @@
-//! Paste over a selection in a note, when the clipboard is one address: the selection becomes a
-//! link to it, `[selection](address)`, the way Obsidian and GitHub do it. `Ctrl+Shift+V` is the
-//! way around it, the clipboard as it is (DESIGN.md, Editing).
+//! Paste a single address over selected note text as `[selection](address)`.
+//! `Ctrl+Shift+V` bypasses this transformation (DESIGN.md, Editing).
 
 use super::{Flavour, Tab};
 use crate::multicaret;
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
-/// What a paste of `clipboard` over `selection` in a file of `flavour` puts there instead of the
-/// clipboard, or `None` for an ordinary paste: the link, when the clipboard, trimmed, is a single
-/// address.
+/// Return a link for an eligible `selection` and single trimmed clipboard
+/// address, or `None` for ordinary paste in this `flavour`.
 pub(super) fn link(clipboard: &str, selection: &str, flavour: Flavour) -> Option<String> {
     let url = clipboard.trim();
     (could_link(selection, flavour) && is_url(url))
         .then(|| format!("[{}]({})", link_text(selection), destination(url)))
 }
 
-/// The selection as a link's text: a bracket it would end the text at escaped, and a backslash
-/// at its end, which would escape the closing one. The selection is markdown already, so a
-/// bracket it escapes itself stays as it is, and so does all of a code span, where a backslash is
-/// a backslash.
+/// Escape link-text brackets and trailing backslashes that could close
+/// the link incorrectly. Preserve existing Markdown escapes and code spans.
 fn link_text(selection: &str) -> String {
     let mut out = String::with_capacity(selection.len());
     let mut rest = selection;
@@ -46,8 +42,8 @@ fn link_text(selection: &str) -> String {
     out
 }
 
-/// How much of `rest`, which starts with a backtick, a code span takes: up to the next run of
-/// exactly as many backticks, or the run alone where none closes it, which is then text.
+/// Find the matching backtick run closing `rest`'s code span. Without one,
+/// return the opening run length because it is plain text.
 fn code_span(rest: &str) -> usize {
     let run = rest.len() - rest.trim_start_matches('`').len();
     let mut at = run;
@@ -62,9 +58,8 @@ fn code_span(rest: &str) -> usize {
     run
 }
 
-/// The address as a link's destination: as it is, unless a space, a parenthesis left open or
-/// shut too often, or an angle bracket would end it or read as something else; then between `<`
-/// and `>`, CommonMark's other form, with the angle brackets in it escaped.
+/// Format a destination literally when valid, otherwise use CommonMark
+/// `<…>` with escaped angle brackets for spaces or unbalanced parentheses.
 fn destination(url: &str) -> String {
     let mut depth = 0i32;
     let balanced = url.chars().all(|c| {
@@ -81,8 +76,8 @@ fn destination(url: &str) -> String {
     }
 }
 
-/// What the file and the selection decide on their own, before the clipboard is read: prose,
-/// where `[x](y)` is a link and not code, and some text on one line that is not an address itself.
+/// Check clipboard-independent eligibility: prose with a non-address,
+/// nonempty single-line selection.
 fn could_link(selection: &str, flavour: Flavour) -> bool {
     flavour.is_note()
         && !selection.contains('\n')
@@ -102,13 +97,11 @@ fn is_url(text: &str) -> bool {
         })
 }
 
-/// Answer a paste over a selection that [`could_link`] with the link when the clipboard is an
-/// address, and with the paste GTK would have made when it is not. Every other paste is left to
-/// GTK and to a column's own: no selection, a column of carets, a read-only view, code.
+/// Replace eligible selected note text with a link when the clipboard contains an address.
 ///
-/// The signal is what `Ctrl+V`, `Shift+Insert` and the context menu's Paste all emit, and this
-/// runs before the inherited handler, which it stops. Returns the handler, which
-/// [`Tab::paste_verbatim`] holds back.
+/// Otherwise preserve GTK's paste; columns, code, read-only views and empty selections use
+/// existing handlers. Handle the shared paste signal before GTK, returning its ID so
+/// [`Tab::paste_verbatim`] can temporarily bypass it.
 pub(super) fn link_paste(view: &sourceview5::View, flavour: Flavour) -> glib::SignalHandlerId {
     view.connect_paste_clipboard(move |view| {
         let buffer = view.buffer();
@@ -164,8 +157,8 @@ pub(super) fn link_paste(view: &sourceview5::View, flavour: Flavour) -> glib::Si
 }
 
 impl Tab {
-    /// `Ctrl+Shift+V`: the clipboard as it is, never made into a link. GTK's own paste, at every
-    /// caret of a column as `Ctrl+V` is, with [`link_paste`] held back for the one emission.
+    /// Paste verbatim at all carets using GTK, suppressing [`link_paste`]
+    /// for this emission (`Ctrl+Shift+V`).
     pub fn paste_verbatim(&self) {
         self.view.block_signal(&self.paste_link);
         self.view.emit_paste_clipboard();

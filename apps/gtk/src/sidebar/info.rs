@@ -1,11 +1,7 @@
-//! The Info pane: what links to the file in front, the vault's tags and what the file is, as
-//! sections one above the other. Each folds to its header; the open ones share the height across
-//! dividers the reader drags, as VS Code's views do.
+//! Collapsible backlinks, tags and file details in the Info pane.
 //!
-//! The shape is fixed when the pane is built — a vertical `GtkPaned` per divider, never
-//! reparented — and a section that does not apply to the tab in front is hidden rather than
-//! taken out. A divider with a shut section beside it lies against that section, which then
-//! shows its header alone.
+//! A fixed tree of vertical `GtkPaned`s lets readers divide space between open sections.
+//! Inapplicable sections are hidden without reparenting; collapsed sections retain headers.
 
 use super::widgets::Section;
 use crate::widgets::status_page;
@@ -83,14 +79,9 @@ impl Divider {
         }
     }
 
-    /// Put the divider at its held share of the height it is about to have.
-    ///
-    /// In the frame's layout, after the window's own handler has allocated: a section shown or
-    /// shut above this divider changes its height in the same turn, so the height it has now is
-    /// the one it is leaving, and `GtkPaned` hands the change out by the old position — or not at
-    /// all, where it last laid out one side alone. What is moved there is laid out again within
-    /// the frame (`App::restyle_all` leans on the same order). A paned not realized yet is placed
-    /// when the pane is mapped.
+    /// Place the divider during frame layout after the window allocates its new height. Section
+    /// visibility may change that height in the same frame, so using the old allocation would
+    /// preserve the wrong split. Un-realised panes are placed on map.
     fn place(&self) {
         let Some(clock) = self.paned.frame_clock() else {
             return;

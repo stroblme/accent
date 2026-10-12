@@ -605,8 +605,7 @@ fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
     }
 }
 
-/// Port forwarding is ssh's, over the master that is already open: nothing is spawned, and the
-/// connection keeps the list, which it puts back after a reconnect and the pane draws.
+/// Reuse the SSH master and connection-owned forward list so forwards survive reconnects.
 fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     sidebar::PortsData {
         add_forward: Arc::new({
@@ -633,8 +632,7 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     }
 }
 
-/// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
-/// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
+/// Wire Git hooks with weak window captures to avoid retaining the vault after window closure.
 fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
     let (toast, open, diff, compare, merge, leave, trash, changed, syncing) = (
         Rc::downgrade(app),
@@ -751,9 +749,7 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
     })
 }
 
-/// A sidebar with the Outline pane alone, for a window opened on a file rather than a folder.
-/// There is no index behind it, so Files, Search, Tags and References have nothing to show; an
-/// outline does not need one, and a PDF's bookmarks are the reason such a window has a sidebar.
+/// Standalone-file sidebar: Outline requires no index, including PDF bookmarks; index panes are omitted.
 fn build_outline_sidebar(app: &Rc<App>) {
     adopt_sidebar(app, None);
 }
@@ -824,13 +820,10 @@ fn adopt_sidebar(
     let _ = app.sidebar.set(pane);
 }
 
-/// Say once, in the window and in the log, what a vault's retired `daily_*` settings mean now.
+/// Report retired `daily_*` settings once in the window and log.
 ///
-/// The keys are gone, so a vault configured for a daily note would simply stop making one with
-/// nothing saying why. Nothing is written into the vault — the `accent-target:` line is the
-/// user's to add, and a template travels with the vault where these keys never did — and the
-/// keys leave `config.toml` with the caller's next save, so this is said once. A courtesy: a
-/// config that will not re-read says nothing at all.
+/// Users must migrate to vault-local template `accent-target:` lines. Do not rewrite vault
+/// content; retired config keys disappear on the next save. Unreadable configs stay silent.
 fn retired_daily_keys(app: &Rc<App>) {
     let Some(root) = app.vault().map(|v| v.root()) else {
         return;
@@ -850,8 +843,7 @@ fn retired_daily_keys(app: &Rc<App>) {
     app.toast(&say);
 }
 
-/// Everything `fileops` needs from the window, as closures. Weak throughout: the operations
-/// outlive nothing, and a strong capture here would keep a closed window's vault open.
+/// Supply file-operation callbacks with weak window captures to avoid retaining closed vaults.
 fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let toast = Rc::downgrade(app);
     let transferring = Rc::downgrade(app);
@@ -1004,14 +996,10 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     })
 }
 
-/// The display-wide rule every editor starts from: Adwaita Mono at the size of GNOME's *document*
-/// font, which is [`editor::default_font`]. A vault is prose with code fences, tables and
-/// wikilinks in it, and none of those line up in a proportional face, so the family is ours and
-/// only the size follows the system.
+/// Install Adwaita Mono at the GNOME document-font size for all editors.
 ///
-/// It goes through [`editor::font_css`], the same function a tab's own zoom rule is written with,
-/// so the family and the size are decided in one place and a zoomed note cannot end up in a
-/// different face from an unzoomed one.
+/// Monospace aligns fences, tables and wikilinks while the size follows the system.
+/// [`editor::font_css`] also generates tab zoom rules, keeping family and size consistent.
 pub fn install_document_font() {
     let Some(display) = gdk::Display::default() else {
         return;
@@ -1044,54 +1032,23 @@ thread_local! {
     static FONT: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
 
-/// The app's own rules. The chrome fade (DESIGN.md) is opacity only, so the layout never
-/// shifts and neither the focus order nor accessibility notices; with `gtk-enable-animations` off
-/// the class still toggles but there is no transition, so the chrome snaps instead of fading and
-/// nothing becomes unreachable. `.bars-hidden` goes on the window with the bars, at Medium and High
-/// alike: the undershoot line a scrolled window draws where it meets a flat bar would otherwise
-/// stay across the head and the foot of the column once the bars have gone. The undershoot is a
-/// CSS node of the scrolled window's own rather than a widget, so it takes its line and gradient
-/// away where everything else takes opacity. `.dividers-hidden` is High's addition, on the window:
-/// every paned handle, since a divider left at full strength frames the panes that recede.
-/// `.accent-flat` puts the two columns on the note's own background
-/// so nothing bands against it, on a class of ours rather than on `headerbar` globally; on the find
-/// bar it reaches the box Adwaita paints (`searchbar > revealer > box`), since the bar's own node
-/// is covered by it, and takes away the shade line Adwaita draws under that box, black in dark.
-/// `expander` and `dropdown arrow` are the glyphs libadwaita draws from `pan-*` names for a tree
-/// row's disclosure and a dropdown's arrow, drawn from the `go-*` names instead: themes redraw
-/// `pan-*` (WhiteSur's use a single-quoted `fill` GTK cannot recolour, and drew nothing), and the
-/// Git pane's own disclosures are `go-*` already (DESIGN.md, Iconography).
-/// `.accent-section` is an Info pane section's header, inset as the pane's rows are.
-/// `.accent-lone-header` drops the bottom padding of the sidebar header, the one header in the
-/// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
-/// bottom and its bar area another 3, so with 6 above and none below both headers hold their
-/// contents in the same band whatever the interface font makes of their height.
-/// `.accent-bar-button` does the same job for the status bar's two controls, the branch readout
-/// and the zoom one: Adwaita gives a button a 24 px minimum and 5 px of padding either side, a box
-/// is as tall as its tallest child however that child is aligned, and so either of them appearing
-/// lifted the bar from 29 px to 46 px. Dropping the minimum and the vertical padding puts them on
-/// the caption's own line height, and they stay buttons rather than becoming labels, so the click,
-/// the focus ring and the tooltip stay. `.accent-statusbar` spaces the status bar with padding
-/// rather than margins, so its background covers the whole bar where presentation mode shows it
-/// over the document. `.accent-idle-pane` is on every pane's tab bar but the active one's
-/// (`App::mark_active_pane`): its selected tab is outlined rather than filled, so two panes do not
-/// show two identical pills. Not under the pointer, where it takes Adwaita's hover fill like any
-/// other tab, and not on a bar of one tab, which Adwaita draws with no pill at all. The toasts'
-/// pile eases its transform over `widgets::FADE_MS` where animations are on, for the lift
-/// presentation mode gives the toasts over the status bar (`App::lift_toasts`), and a toast in it
-/// trades Adwaita's margins for the pile's spacing, which clicks pass through to the document.
+/// Install application CSS for focus mode, compact chrome and editor theme integration.
 ///
-/// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
-/// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
-/// `STYLE_PROVIDER_PRIORITY_APPLICATION` outranks both per property, so the document takes the
-/// theme's view colours instead of the scheme's grey, and the hover takes the popover's. The
-/// scheme itself stays: dropping it takes the find bar's match highlight with it.
-/// On the `text` node only `color` is ours, because GtkSourceView pins that node's background to
-/// transparent at maximum priority; the background therefore goes on the `textview` node. The
-/// gutter is the same correction one node over: a scheme's `line-numbers` style carries a
-/// background of its own, and Solarized's is a shade off its text background (`base2` on `base3`,
-/// `base02` on `base03`), so the line numbers sat in a stripe beside the page. Adwaita happens to
-/// paint the two the same, which is why only Solarized showed it.
+/// Focus mode uses opacity to preserve layout, focus and accessibility. Disabled animations
+/// still toggle visibility immediately. Hidden bars remove scroller undershoots; High also
+/// dims dividers. `.accent-flat` gives header/find surfaces the document background.
+///
+/// Use `go-*` disclosure icons because themes such as WhiteSur can supply `pan-*` SVGs GTK
+/// cannot recolour. Section and sidebar-header rules align rows and stacked headers.
+/// Status-bar button rules remove minimum height and padding without losing button roles;
+/// bar padding keeps backgrounds complete in presentation mode. Inactive pane tabs use
+/// outlines, retaining normal hover and single-tab behaviour. Toast spacing and transforms
+/// follow the shared animation duration.
+///
+/// Application-priority CSS overrides GtkSourceView's scheme and widget providers per
+/// property. Keep the scheme for search highlighting, set foreground on `text` and background
+/// on `textview` because the text node forces transparency. Match gutter background to the
+/// page to avoid Solarized's contrasting line-number stripe.
 // ponytail: the header rule leans on libadwaita's own header padding (6 above a lone header,
 // 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
 // API instead if one ever appears; today the class is the only handle on it.
@@ -1116,12 +1073,10 @@ thread_local! {
 // A GtkSourceView assistant is never narrower than 1 px: GtkSourceView empties a hover that is up
 // before asking the providers again, and the view's allocations present it meanwhile at what it
 // measures, 0 wide when empty, which `gdk_popup_present` refuses with a critical.
-/// Registers the icons compiled into the binary and points the theme at them, and GtkSourceView
-/// at the language specs beside them.
+/// Register embedded icons and GtkSourceView language specifications.
 ///
-/// A GResource rather than hicolor: the completion list and the file lists need their icons
-/// long before anyone runs `make install`, and the theme keeps answering for every Adwaita name
-/// as it did.
+/// GResources make icons available before installation while retaining normal theme lookup
+/// for Adwaita names.
 pub(crate) fn install_icons() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

@@ -29,15 +29,10 @@ pub(super) fn bench_toast(app: &Rc<App>) -> Option<String> {
     app.toasts.shown().into_iter().next()
 }
 
-/// Type one character into the comparing editor's side — `line`, or the first change where it is
-/// `None` — `at` of the way along that line, and print what moved while the comparison caught up:
-/// how often the shared scroll range changed, whether the scroll position did, how many rows were
-/// off right after the keystroke and once it had settled, and how often something laid over the
-/// editor was hidden or shown. The claim is 0, false, 0, 0, 0. `padded` says whether the line
-/// carried alignment padding, which is the case the flash was about, `padded_after` whether it
-/// still carries it on the character just typed — the invariant the flash is the loss of — and
-/// `scroll` is the position against the furthest it can go, which says whether it had room to
-/// drift.
+/// Type a character on `line`, or the first change, at fraction `at`. Report shared-range
+/// changes, scroll movement, immediate/settled misalignment and overlay visibility changes;
+/// expected: 0, false, 0, 0, 0. `padded` and `padded_after` verify alignment padding survives
+/// insertion; `scroll` confirms room for drift.
 fn bench_compare_type(tab: &Rc<Tab>, at: f64, line: Option<i32>, then: impl FnOnce() + 'static) {
     let tab = tab.clone();
     glib::timeout_add_local_once(Duration::from_millis(300), move || {

@@ -13,11 +13,9 @@ use super::selection::pages_of;
 use super::tab::PdfTab;
 
 impl PdfTab {
-    /// Forget what is kept of each page that cannot follow it to another number or document: the
-    /// strokes the tools know, the links, and the glyphs with the selection made of them — an
-    /// export or a rebuild moves the text, and a stale index would paint the selection elsewhere.
-    /// Each is asked for again as it is needed. The comments stay until they are read again, so
-    /// the Outline pane's list does not empty and fill again under the reader.
+    /// Clear strokes, links, glyphs and selections after document changes so stale indices
+    /// cannot paint the wrong content. Fetch them again as needed. Keep comments until refreshed
+    /// to avoid emptying the Outline list during reload.
     pub(super) fn forget_pages(&self) {
         self.view.clear_inks();
         self.links.borrow_mut().clear();

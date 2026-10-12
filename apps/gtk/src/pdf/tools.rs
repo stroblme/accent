@@ -38,10 +38,8 @@ impl Mode {
         matches!(self, Mode::Line | Mode::Rect | Mode::Circle)
     }
 
-    /// The window action that puts this tool in hand, or `None` for Select, which is what having
-    /// no tool in hand is. The one map from a tool to a name: the ring's buttons, the status
-    /// bar's readout and the palette all read the label out of `ACTIONS` through it, so the three
-    /// cannot drift apart.
+    /// Window action for this tool, or `None` for Select. The ring, status bar and palette share
+    /// its `ACTIONS` label to keep names consistent.
     pub fn action(self) -> Option<&'static str> {
         Some(match self {
             Mode::Select => return None,

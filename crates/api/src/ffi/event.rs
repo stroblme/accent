@@ -1,8 +1,5 @@
-//! What the vault tells the app about, narrowed to what a phone can act on.
-//!
-//! The façade's own [`crate::Event`] also carries git news, the remote connection's state and
-//! language-server diagnostics. None of those exist on Android, so they are dropped here rather
-//! than crossing as variants nothing ever matches.
+//! Android vault events. Drop git, remote-connection and language-server
+//! variants that mobile does not use.
 
 use crate::ffi::convert::Progress;
 
@@ -12,8 +9,8 @@ pub enum Event {
     Progress {
         progress: Progress,
     },
-    /// The index is level with the files again, or as level as a walk that was `stopped` left it:
-    /// a partial index, and a vault that walks again on [`Vault::resume_indexing`] alone.
+    /// Index reconciliation completed, possibly with a partial index if
+    /// `stopped`. Only [`Vault::resume_indexing`] resumes a paused vault.
     ///
     /// [`Vault::resume_indexing`]: crate::ffi::Vault::resume_indexing
     Reconciled {
@@ -49,7 +46,7 @@ pub enum Event {
     },
 }
 
-/// The ones that mean something here. `None` is an event Android has no use for.
+/// Convert supported events; `None` means Android does not use the event.
 pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
     Some(match e {
         crate::Event::Progress(p) => Event::Progress { progress: p.into() },

@@ -9,14 +9,11 @@ use std::cell::Cell;
 /// The response id the name dialogs confirm with.
 pub(crate) const CONFIRM: &str = "confirm";
 
-/// Present `dialog` over `parent` and call `callback` once, with the response it closes on: what
-/// `AlertDialogExtManual::choose` does, without its leak.
+/// Present `dialog` over `parent` and call `callback` once with its closing response.
 ///
-/// libadwaita-rs 0.9.2's `choose` hands `adw_alert_dialog_choose` a full reference where the C side
-/// takes `self` as `transfer none`, so every dialog shown with it outlived its close, and with it
-/// whatever its handlers held: New File's path field completes from the vault, which kept a closed
-/// window's vault open. Once a release of the bindings passes `self` borrowed, this can go and the
-/// callers can call `choose` again.
+/// libadwaita-rs 0.9.2's `choose` passes a full reference where C expects `transfer none`,
+/// leaking dialogs and captured resources. Remove this workaround once the binding passes
+/// a borrowed reference.
 pub(crate) fn choose(
     dialog: &adw::AlertDialog,
     parent: Option<&impl IsA<gtk::Widget>>,
@@ -31,17 +28,11 @@ pub(crate) fn choose(
     dialog.present(parent);
 }
 
-/// Close `dialog` on a primary press outside it, as Escape closes it: what a palette, Preferences
-/// and About do, never an alert, whose question waits for its answer. An `AdwAlertDialog` is
-/// floating at every window size (its template says so), so nothing closes it on such a press.
+/// Dismiss non-alert dialogs on a primary press outside, matching Escape.
 ///
-/// libadwaita closes a dialog so only as a bottom sheet: a floating one's dimming is a
-/// `GtkWindowHandle`, which drags or maximises the window instead (adw-floating-sheet.c). The
-/// dimming is part of the dialog, which spans the window, and while a dialog is up no press
-/// reaches the window's own controllers, so the gesture is the dialog's, in the capture phase
-/// ahead of the dimming. A press is outside where the widget under it is not the dialog's child
-/// or inside it; a press in a popover comes from a surface of its own and never is. The press is
-/// claimed, so nothing under the dimming acts on it.
+/// Libadwaita only does this for bottom sheets; floating dimming handles window drags.
+/// A dialog-local capture gesture claims outside presses before the dimming can act.
+/// Popover presses come from another surface and are excluded. Alerts still require answers.
 pub(crate) fn close_on_outside_press(dialog: &adw::Dialog) {
     let gesture = gtk::GestureClick::new();
     gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -68,12 +59,10 @@ pub(crate) fn close_on_outside_press(dialog: &adw::Dialog) {
     dialog.add_controller(gesture);
 }
 
-/// Put the keyboard in `entry`, and then let `place` set its caret or its selection. Called after
-/// `choose` has presented the dialog, so the entry is in a window that can focus it.
+/// Focus `entry` after presentation, then apply `place` to its caret or selection.
 ///
-/// Every grab of the entry selects its whole text (`gtk-entry-select-on-focus`), and the dialog
-/// grabs it once more on its second frame, when it opens its sheet (libadwaita's `map_tick_cb`).
-/// So `place` waits for the frame after that, or what it did would be thrown away.
+/// Entry focus selects all text, and libadwaita grabs focus again on its second frame.
+/// Waiting until the following frame prevents that grab from overwriting `place`.
 pub(crate) fn focus_entry(entry: &gtk::Entry, place: impl Fn(&gtk::Entry) + 'static) {
     entry.grab_focus();
     let frames = Cell::new(0);
@@ -87,12 +76,10 @@ pub(crate) fn focus_entry(entry: &gtk::Entry, place: impl Fn(&gtk::Entry) + 'sta
     });
 }
 
-/// An alert with its responses in one call. `responses` are `(id, label, appearance)` in the
-/// order they are shown; the first one is also what closing the dialog answers, which is why it
-/// is Cancel everywhere this is called. `default` is the response Return activates.
+/// Build an alert with `(id, label, appearance)` responses in display order.
 ///
-/// An empty `body` is no body at all, which is what a dialog whose question is entirely in its
-/// extra child wants.
+/// The first response is also the close response, so callers put Cancel first. Return
+/// activates `default`. An empty `body` leaves room for a question in the extra child.
 pub(crate) fn alert(
     heading: &str,
     body: &str,
@@ -111,12 +98,10 @@ pub(crate) fn alert(
     dialog
 }
 
-/// The question every "are you sure" takes: Cancel, one verb, Return and Escape on Cancel.
-/// `then` runs on the verb and on nothing else.
+/// Ask with Cancel and one verb; Return and Escape cancel, and only the verb runs `then`.
 ///
-/// `destructive` paints the verb in the destructive colour, which is what marks the answers that
-/// lose something (DESIGN.md, States). A question with a third answer, or one whose verb is the
-/// safe one, builds its own with [`alert`] and [`choose`].
+/// `destructive` marks answers that lose data. Use [`alert`] and [`choose`] for three answers
+/// or a safe default verb.
 pub(crate) fn confirm(
     parent: &impl IsA<gtk::Widget>,
     heading: &str,

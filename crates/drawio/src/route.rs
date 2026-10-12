@@ -1,12 +1,9 @@
 // Derived from draw.io src/main/webapp/mxgraph/src/view/mxEdgeStyle.js, mxGraphView.js, mxGraph.js, src/main/webapp/mxgraph/src/shape/mxShape.js and js/grapheditor/Graph.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
-//! Edge routing: from the two ends, the style and the waypoints to the points an edge is drawn
-//! through.
+//! Route edges from terminals, style and waypoints.
 //!
-//! [`route`] composes the steps as `mxGraphView.updateEdgeState` does, at zoom 1: ends pinned by
-//! a connection constraint are placed first, the edge style then turns the waypoints into bends,
-//! and the ends still floating are put on their terminals' outlines, facing their neighbours.
-//! Functions are named after their JS originals and cite their lines in draw.io 31.4.5, so the
-//! port can be compared against later releases.
+//! [`route`] follows `mxGraphView.updateEdgeState` at zoom 1: place constrained ends,
+//! route bends, then project floating ends onto terminal outlines. Functions cite
+//! their JS originals in draw.io 31.4.5 to support comparison with later releases.
 
 mod orth;
 
@@ -170,12 +167,11 @@ pub struct Constraint {
     pub perimeter: bool,
 }
 
-/// The connection points of vertex `id`, draw.io's snap points: where an edge end can be
-/// pinned, each in page coordinates and turned with the shape, with the constraint that pins it
-/// there. Empty for an edge, a layer and an unknown id.
+/// Connection snap points for vertex `id`, transformed to page coordinates, with
+/// their pinning constraints. Returns none for edges, layers or unknown ids.
 ///
-/// A `points` style lists them; a list that does not parse gives none. Without one they are
-/// the shape's own ([`shapes::constraints`]), measured as it faces east.
+/// A `points` style overrides shape defaults ([`shapes::constraints`]); an invalid
+/// list yields no points. Shape defaults are measured facing east.
 // Graph.getAllConnectionConstraints, Graph.js 18456-18519
 pub fn anchors(page: &Page, id: &str) -> Vec<(Point, Constraint)> {
     let Some(cell) = page.cell(id) else {
@@ -432,8 +428,8 @@ fn update_points(input: &EdgeInput, state: &State) -> Vec<Option<Point>> {
     pts
 }
 
-/// Puts the floating ends on their outlines, the target first, so that the source end of an edge
-/// without bends faces the target's end rather than its centre.
+/// Project floating ends onto terminal outlines, target first so a source without
+/// bends faces the actual target endpoint rather than its centre.
 // mxGraphView.updateFloatingTerminalPoints, mxGraphView.js 1556-1575
 fn update_floating_terminal_points(input: &EdgeInput, pts: &mut [Option<Point>]) {
     let last = pts.len() - 1;
@@ -487,9 +483,8 @@ fn next_point(pts: &[Option<Point>], opposite: Option<&Terminal>, source: bool) 
     point.or_else(|| opposite.map(|t| t.bounds.centre()))
 }
 
-/// The points without those less than a unit away from the point before them. The JS drops a
-/// last end that close too; here the end stays, so the line and its arrow reach the terminal,
-/// and the point before it goes instead.
+/// Remove successive points less than one unit apart. Unlike the JS, keep a close
+/// final endpoint and remove its predecessor so the line and arrow reach the terminal.
 // mxShape.getWaypoints, mxShape.js 984-1016
 fn get_waypoints(pts: &[Point]) -> Vec<Point> {
     let far = |a: Point, b: Point| (a.x - b.x).abs() >= 1.0 || (a.y - b.y).abs() >= 1.0;

@@ -3,14 +3,9 @@
 /// Bump on any schema change: `open` then drops and recreates the cache.
 pub(super) const SCHEMA_VERSION: i64 = 13;
 
-/// Biggest non-markdown file whose text goes into the index.
-///
-/// Deliberately far stricter than [`crate::fs::MAX_TEXT`] (16 MiB), which is the cap on what a
-/// tab will *open*: opening a 15 MiB generated file is something the user asked for once, while
-/// indexing it is something the vault pays for on every reconcile, in database size and in the
-/// FTS terms every later query has to merge. Measured on `testvault/`: none of its 17 700
-/// non-note text files reach 1 MiB, so the cap costs nothing a real vault would notice. A note
-/// is never subject to it — markdown is read whatever its size.
+/// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
+/// because indexing repeatedly consumes database space and FTS query work, whereas opening a
+/// large file is explicit. Markdown notes are exempt.
 pub(super) const MAX_INDEXED_BODY: u64 = 1024 * 1024;
 
 /// Files per write transaction. Big enough to amortise the WAL commit, small enough that a

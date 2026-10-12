@@ -1,28 +1,12 @@
-//! Ghost text: the rest of the line, suggested where the caret is, accepted with Tab or one
-//! word at a time with Ctrl+Right.
+//! Inline suggestions accepted with Tab or one word at a time with Ctrl+Right.
 //!
-//! The suggestion comes from the vault's own notes, through the language layer's
-//! `inline_completion` (merl answers it; see `crates/api/src/language.rs`). It is never in the
-//! buffer — `multicaret::View` paints it — so it costs no undo step, no save and no reparse, and
-//! it disappears the moment anything moves.
+//! The vault's `inline_completion` supplies suggestions; `multicaret::View` paints them
+//! outside the buffer, avoiding undo, save and reparse work. Suggestions appear only at
+//! line ends with no selection or secondary carets, so they cannot cover existing text.
 //!
-//! Two rules keep it out of the way of everything else:
-//!
-//! * **The popup wins.** While the completion popup is up nothing is asked for and nothing is
-//!   painted, so Tab always means one thing: the popup's selected row while it has one, the
-//!   suggestion while one is painted, and a list item's indent otherwise. Which of the two
-//!   key controllers GTK reaches first is not something `typing.rs` relies on either, and for the
-//!   same reason.
-//! * **Only at the end of a line**, with no selection and no secondary carets. A suggestion
-//!   painted mid-line would sit on top of the text after the caret, and moving that text out of
-//!   the way is a widget of its own.
-//!
-//! Typing what is painted does not chase it away: `connect_insert_text` sees the characters
-//! before they land, and what is left of the suggestion is painted again the moment the caret
-//! reaches them. Ctrl+Right does the same thing on purpose, writing one word of the suggestion
-//! and leaving the rest standing.
-//!
-//! ponytail: end of line only, one line at a time. A mid-line ghost is the obvious extension.
+//! The completion popup suppresses requests and painting, giving Tab one owner. Typing a
+//! matching prefix or accepting a word preserves the remainder; other edits or caret moves
+//! clear it. Suggestions are limited to one line.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -33,8 +17,7 @@ use gtk::{gdk, glib};
 use crate::editor::{Tab, caret};
 use crate::lang;
 
-/// What this tab knows about its ghost text. The suggestion itself lives on the view, which is
-/// what paints it.
+/// Tab-local ghost-text state; the suggestion itself lives on the view that paints it.
 #[derive(Default)]
 pub struct State {
     /// The preference. Off means nothing is asked for and nothing is shown, at once.
@@ -89,8 +72,8 @@ pub fn install(tab: &Rc<Tab>) {
     ));
 }
 
-/// What a painted suggestion does with a key, or `None` for a key it does not want — which is
-/// every key while nothing is painted, so Tab then falls through to the list item's own indent.
+/// Handle a key for painted ghost text, or return `None` to continue dispatch.
+/// Without a suggestion, Tab remains available for list indentation.
 pub fn on_key(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> Option<glib::Propagation> {
     let text = tab.ghost_view().and_then(|v| v.ghost())?;
     Some(match key {
@@ -137,14 +120,13 @@ fn word_of(text: &str) -> &str {
     &text[..text.len() - after.trim_start().len()]
 }
 
-/// What is left of `ghost` once `typed` has been written at its head, or `None` when the two
-/// have parted company. `Some("")` means the suggestion has been typed out in full.
+/// Return `ghost` after removing prefix `typed`, or `None` when it differs.
+/// `Some("")` means the suggestion was fully typed.
 fn remainder<'a>(ghost: &'a str, typed: &str) -> Option<&'a str> {
     ghost.strip_prefix(typed)
 }
 
-/// The buffer changed or the caret moved. A suggestion survives exactly one thing: the caret
-/// arriving where the characters typed into it said it would.
+/// Keep a suggestion only when the caret reaches the position predicted by matching typed text.
 fn settle(tab: &Tab) {
     let typed = tab.lang.ghost.typed.borrow().clone();
     match typed {
@@ -163,8 +145,7 @@ pub fn clear(tab: &Tab) {
     set(tab, None);
 }
 
-/// Paint a suggestion, or none, and forget the one being typed through: this is the suggestion
-/// now, and what was left of the old one is about the text before this answer.
+/// Paint the new suggestion and discard pending typed-through state from the previous answer.
 fn set(tab: &Tab, text: Option<String>) {
     *tab.lang.ghost.typed.borrow_mut() = None;
     if let Some(view) = tab.ghost_view() {
@@ -172,11 +153,8 @@ fn set(tab: &Tab, text: Option<String>) {
     }
 }
 
-/// Ask for the rest of the line, and paint what comes back.
-///
-/// Awaited from `lang::refresh`, so the text has already been flushed to the provider and the
-/// request is dropped — and cancelled at the server — on the next keystroke, like every other
-/// request that follows the caret.
+/// Request and paint the rest of the line after `lang::refresh` flushes current text.
+/// The next keystroke drops the request and cancels it at the server.
 pub async fn request(tab: &Rc<Tab>) {
     if !tab.lang.ghost.armed(tab) {
         return;

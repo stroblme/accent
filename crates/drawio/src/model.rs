@@ -1,6 +1,5 @@
-//! The diagram as the file holds it. Everything accent does not interpret is kept verbatim —
-//! attributes, style keys, unknown child elements — so a file opened and saved here loses
-//! nothing draw.io put in it.
+//! Diagram data with unknown attributes, style keys and child elements preserved
+//! so saving retains data accent does not interpret.
 
 use crate::Error;
 use crate::geom::{Point, Rect};
@@ -8,8 +7,7 @@ use crate::style::{Color, Style, parse_num};
 
 pub type CellId = String;
 
-/// An XML element accent has no model for, kept whole so it writes back unchanged. The parser
-/// builds its tree out of these too.
+/// An XML element preserved for parsing and round-tripping unsupported content.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Element {
     pub name: String,
@@ -50,8 +48,8 @@ pub struct File {
 }
 
 impl File {
-    /// An `<mxfile>`, or a bare `<mxGraphModel>` as one page. Empty input is a new diagram of one
-    /// blank page, so an empty `.drawio` made by New File opens ready to draw on.
+    /// Parse an `<mxfile>` or a bare `<mxGraphModel>` as one page. Empty input creates
+    /// a blank page so an empty `.drawio` from New File is editable.
     pub fn from_bytes(bytes: &[u8]) -> Result<File, Error> {
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(File::blank());
@@ -219,12 +217,11 @@ impl Page {
         }
     }
 
-    /// The layer new cells go into while the reader has picked none, or the one picked is locked
-    /// or hidden: the topmost that is neither, so that what is drawn shows and can be picked
-    /// again. draw.io puts them in its default parent, the first layer until the reader picks
-    /// another in the Layers dialog, and disables inserting while that layer is locked
-    /// (EditorUi.js `updateActionStates` 6004-6096, Graph.js `isCellLocked` 1431-1444). `None`
-    /// when every layer is locked or hidden, or there is none.
+    /// The topmost unlocked, visible layer, or `None` if none exists, so new cells
+    /// remain visible and selectable. Used when no usable layer is selected.
+    /// Unlike this fallback, draw.io uses its selected default parent (initially the
+    /// first layer) and disables insertion when locked (`EditorUi.updateActionStates`,
+    /// `Graph.isCellLocked`).
     pub fn default_parent(&self) -> Option<&str> {
         self.layers()
             .into_iter()
@@ -247,8 +244,8 @@ impl Page {
         true
     }
 
-    /// Where a cell's geometry is measured from: the absolute top-left of its parent vertex, or
-    /// the page origin under a layer. Edges do not offset their children this way.
+    /// The absolute parent-vertex origin, or the page origin for cells under a layer.
+    /// Edges do not offset their children this way.
     pub fn origin_of(&self, id: &str) -> Point {
         let mut at = Point::default();
         let mut cell = self.cell(id);
@@ -289,8 +286,8 @@ impl Page {
     }
 }
 
-/// What a cell shows: plain `value` text, or a user object (`<object>`, `<UserObject>`) whose
-/// `label` attribute is the text and whose other attributes are the user's own data.
+/// Label data: plain `value` text, or a user object (`<object>`, `<UserObject>`)
+/// with a `label` attribute and custom attributes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Text(String),
@@ -400,8 +397,8 @@ impl Cell {
         }
     }
 
-    /// Whether the cell is drawn with a fill it can be given (`Graph.isFillState`): every vertex,
-    /// and of the edges the flex arrow, the one edge shape ported with an inside.
+    /// Whether the cell supports a fill (`Graph.isFillState`): every vertex and
+    /// `flexArrow`, the only supported edge shape with an interior.
     pub fn takes_fill(&self) -> bool {
         self.vertex || (self.edge && self.style.resolve(true).shape() == "flexArrow")
     }
@@ -453,8 +450,8 @@ impl Geometry {
     }
 }
 
-/// A new id in draw.io's own form: 20 characters of `[0-9a-zA-Z-_]` (`Editor.guid`). Random per
-/// call, from the standard library's per-process random hasher keys.
+/// A random 20-character draw.io id (`[0-9a-zA-Z-_]`, `Editor.guid`), generated
+/// using the standard library's per-process random hasher keys.
 pub fn guid() -> String {
     use std::hash::{BuildHasher, Hasher};
     const ALPHABET: &[u8; 64] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_";
@@ -578,8 +575,8 @@ mod tests {
         assert!(!edge("endArrow=block;").takes_fill());
     }
 
-    /// A cell that is its own parent: draw.io writes none, a hand-edited file can hold one, and
-    /// the walk up the parents is reached from opening the file.
+    /// A hand-edited file can contain a self-parent; opening it must not loop
+    /// while traversing ancestors.
     #[test]
     fn a_cell_parented_to_itself_does_not_hang() {
         let mut p = Page::blank("P", "p");

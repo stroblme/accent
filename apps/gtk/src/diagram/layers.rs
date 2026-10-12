@@ -1,9 +1,6 @@
-//! The Properties pane's Layers group: the page's layers, the topmost first, each with its name,
-//! whether it shows and whether it is locked, and the current one — where new cells go — marked.
-//!
-//! Each row writes one change through the tab, which is one undo step, as the pane's other rows
-//! do. Picking the current layer is no edit at all: it is kept for the session, as draw.io keeps
-//! its default parent (`Editor::set_current_layer`).
+//! Layers in the Properties pane, topmost first, with visibility, locks and the
+//! current insertion layer. Changes use the tab's undo path; current-layer selection
+//! is session state, matching draw.io's default parent (`Editor::set_current_layer`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -42,8 +39,7 @@ const CURRENT: &str = "accent-current-layer";
 
 struct Row {
     row: adw::EntryRow,
-    /// The layer's name as last filled or renamed here: what Escape puts back, and what a focus
-    /// leaving a changed name renames from.
+    /// Last filled or committed name, used for Escape and detecting renames on focus loss.
     name: Rc<RefCell<String>>,
     /// Whether the layer shows and whether it is locked, as last filled: what a press flips.
     visible: Rc<Cell<bool>>,
@@ -76,9 +72,8 @@ impl Layers {
         }
     }
 
-    /// Show `layers`, the topmost first, marking `current`. The rows are kept while the same
-    /// layers stand in the same order, so a toggle pressed or a name being typed stays where it
-    /// is; a layer added, removed or moved builds them again.
+    /// Show layers topmost first, marking `current`. Reuse rows while ids and order
+    /// match so toggles and name edits retain focus; rebuild for structural changes.
     pub fn fill(&self, layers: &[Layer], current: Option<&str>) {
         let same = {
             let rows = self.rows.borrow();
@@ -286,8 +281,7 @@ impl Layers {
     }
 }
 
-/// End whatever edit the window's keyboard is in, by taking the keyboard off it: a name being
-/// edited is renamed as its focus leaves.
+/// Clear window focus to commit any layer-name edit through its focus-loss handler.
 fn end_edit(widget: &impl IsA<gtk::Widget>) {
     if let Some(root) = widget.root() {
         root.set_focus(None::<&gtk::Widget>);

@@ -1,10 +1,6 @@
-//! The one handle a window holds, and the only place that knows whether the files are on this
-//! machine.
-//!
-//! Every method here means the same thing either way: a local vault answers from
-//! [`Local`](crate::local::Local), a remote one asks the `accent-cli serve` at the other end of an
-//! ssh connection. The UI was written against a local vault and did not have to learn anything to
-//! work on a remote one, which is the whole point of the split.
+//! A shared interface for local and remote vaults, so the UI need not distinguish them.
+//! Local operations use [`Local`]; remote operations use
+//! `accent-cli serve` over SSH.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
@@ -21,22 +17,15 @@ use crate::{
     VaultConfig, fs, git, remote, rpc, ssh,
 };
 
-/// One open vault, wherever it lives.
+/// An open vault with the same interface for local and remote files.
 ///
-/// A window holds exactly one of these and cannot tell the two apart: every method below means
-/// the same thing whether the files are on this machine or on the other end of an ssh connection.
-/// That is the whole point of the split — the UI was written against a local vault and did not
-/// have to learn anything to work on a remote one.
-///
-/// Reads and writes are synchronous here, as they always were. A remote call is a round trip, and
-/// every window of the desktop app shares one main thread, so it makes them on worker threads,
-/// autosave included: a round trip once a second while someone typed held every window. What
-/// stays where it is called is a write that has to land before its caller can go on: a tab
-/// closing with its buffer dirty, and the writes behind a banner's buttons.
+/// Operations are synchronous. The desktop runs remote calls, including autosave,
+/// on worker threads to avoid blocking its shared main loop. Writes that must finish
+/// before the caller continues, such as closing a dirty tab, remain on the caller.
 pub struct Vault {
     pub(crate) backend: Backend,
-    /// What this vault is called in the config, the recents and the session file: the root for a
-    /// local vault, the `ssh://` address for a remote one. Never a path to open.
+    /// Config, recents and session key: the local root or remote `ssh://` address.
+    /// Never a path to open.
     key: PathBuf,
 }
 
@@ -62,17 +51,16 @@ impl Vault {
         Ok((Vault::of(Backend::Local(local)), events))
     }
 
-    /// [`open`](Self::open) with no filesystem watcher: Android, where inotify over emulated
-    /// storage drops events. Nothing arrives on its own there, so the app calls
-    /// [`rescan`](Self::rescan) when it comes back to the foreground; its own writes still
-    /// reach the index, since every one of them posts an update to the worker.
+    /// [`open`](Self::open) without a filesystem watcher, for Android storage where
+    /// inotify drops events. Call [`rescan`](Self::rescan) on foregrounding; writes
+    /// through this API still update the index.
     pub fn open_unwatched(root: &Path, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
         let db = accent_core::index::default_db_path(root);
         Vault::open_unwatched_at(root, &db, cfg)
     }
 
-    /// [`open_unwatched`](Self::open_unwatched) with an explicit index file: `accent-cli`, which
-    /// is done before a change could matter.
+    /// [`open_unwatched`](Self::open_unwatched) with an explicit index file, for
+    /// short-lived `accent-cli` commands.
     pub fn open_unwatched_at(
         root: &Path,
         db: &Path,
@@ -82,11 +70,9 @@ impl Vault {
         Ok((Vault::of(Backend::Local(local)), events))
     }
 
-    /// Open a vault on another machine, addressed as `ssh://[user@]host[:port]/path`.
-    ///
-    /// Returns before the connection exists. The window opens on the spot and the connection
-    /// reports itself through the events: [`Event::Connecting`] while it works, then
-    /// [`Event::Connected`] or [`Event::Disconnected`].
+    /// Open `ssh://[user@]host[:port]/path` without waiting for the connection.
+    /// [`Event::Connecting`] reports progress, followed by [`Event::Connected`]
+    /// or [`Event::Disconnected`].
     pub fn open_remote(url: &str, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
         let url = ssh::parse(url)?;
         let (events, event_rx) = channel::<Event>();
@@ -118,15 +104,14 @@ impl Vault {
         }
     }
 
-    /// What this vault is keyed by: the root locally, the `ssh://` address remotely. The recent
-    /// list, the per-vault settings and the session file all use this, so a remote vault keeps
-    /// its own history without ever being mistaken for a directory on this machine.
+    /// The local root or remote `ssh://` address used by recents, settings and sessions.
+    /// Remote vault history stays separate from local directories.
     pub fn key(&self) -> &Path {
         &self.key
     }
 
-    /// The remote half, for the things only a remote vault has: a shell on the host, a port
-    /// forward, an upload. `None` for a local vault, which is how the UI decides what to offer.
+    /// Remote-only operations: host shells, port forwarding and uploads.
+    /// `None` for a local vault, so the UI can offer the appropriate actions.
     pub fn remote(&self) -> Option<&std::sync::Arc<remote::Remote>> {
         match &self.backend {
             Backend::Remote(r) => Some(r),
@@ -152,8 +137,8 @@ impl Vault {
         }
     }
 
-    /// Never waits, so the main loop can make it: a remote vault sends this and the two below on
-    /// to the host from a thread of its own, in the order they were made.
+    /// Apply config without blocking the main loop. Remote updates, including the next
+    /// two setters, run on a worker in call order.
     pub fn set_config(&self, cfg: VaultConfig) {
         match &self.backend {
             Backend::Local(v) => v.set_config(cfg),
@@ -179,10 +164,8 @@ impl Vault {
         }
     }
 
-    /// Ask for a full walk: after a resume, or when the UI suspects it missed something.
-    ///
-    /// A local vault posts to its own worker and cannot fail; a remote one is a round trip, and
-    /// a failure is the caller's to see rather than something to drop on the floor.
+    /// Request a full scan after resume or suspected missed changes. Local requests
+    /// are queued without failure; remote failures are returned to the caller.
     pub fn rescan(&self) -> Result<()> {
         match &self.backend {
             Backend::Local(v) => {
@@ -193,14 +176,10 @@ impl Vault {
         }
     }
 
-    /// Stop the walk that is running, keeping every row it has already written.
-    ///
-    /// A pause rather than a cancel: the reconcile it ends reports
-    /// [`ReconcileStats::stopped`](accent_core::index::ReconcileStats::stopped), the vault stays
-    /// usable with the part of the index that exists, and the remainder is indexed by
-    /// [`resume_indexing`](Self::resume_indexing) or by the next open of the vault. A remote
-    /// vault's walk runs on the host, so this is a round trip to the worker there; the server
-    /// gives every request a thread of its own, so it is answered while that walk runs.
+    /// Pause indexing while retaining completed rows. The reconcile reports
+    /// [`ReconcileStats::stopped`](accent_core::index::ReconcileStats::stopped), and
+    /// the partial index stays usable. Continue with [`resume_indexing`](Self::resume_indexing)
+    /// or by reopening the vault. Remote requests reach the host worker while it scans.
     pub fn stop_indexing(&self) -> Result<()> {
         match &self.backend {
             Backend::Local(v) => {
@@ -211,8 +190,8 @@ impl Vault {
         }
     }
 
-    /// Walk again after [`stop_indexing`](Self::stop_indexing), which is the only thing that
-    /// will: a paused vault ignores every other reason to rescan.
+    /// Resume after [`stop_indexing`](Self::stop_indexing). Paused vaults ignore all
+    /// other rescan requests.
     pub fn resume_indexing(&self) -> Result<()> {
         match &self.backend {
             Backend::Local(v) => {
@@ -223,19 +202,16 @@ impl Vault {
         }
     }
 
-    /// Wait until the index has taken in every write made through this vault before the call:
-    /// the worker takes a write in a batch later, and a search right after it would miss it.
-    /// Off the main loop only, a walk being one batch. A remote vault answers at once.
+    /// Wait until all preceding vault writes reach the index, so a following query
+    /// sees them. Call off the main loop: a scan is one batch. Remote vaults return immediately.
     pub fn settle_index(&self) {
         if let Backend::Local(v) = &self.backend {
             v.settle_index();
         }
     }
 
-    /// Join `rel` to the vault root, refusing anything that would land outside it.
-    ///
-    /// For a remote vault the answer is a path on the *host*, so it is what to show and what to
-    /// pass to a remote command — never something to open. Use [`fetch`](Self::fetch) for that.
+    /// Resolve `rel` inside the vault root, rejecting escapes. Remote paths belong
+    /// to the host; use [`fetch`](Self::fetch) to obtain a local file.
     pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
         match &self.backend {
             Backend::Local(v) => v.resolve(rel),
@@ -243,8 +219,8 @@ impl Vault {
         }
     }
 
-    /// The session as it was left. Always this machine's: where the windows and tabs were is a
-    /// fact about the desk, not about the files.
+    /// The saved session on this machine: window and tab state belongs to the desktop,
+    /// independently of where vault files live.
     pub fn session(&self) -> Session {
         Session::load(&self.key)
     }
@@ -254,46 +230,28 @@ impl Vault {
     }
 }
 
-/// How much longer than a round trip a remote move may take: a folder of a few thousand notes
-/// is an index query and a read each to plan, and an fsync per rewritten note to apply.
-///
-/// An estimate of the work rather than a cap on it. The host runs a move to the end whatever
-/// happens, because the files have already moved by the time the links are being rewritten and
-/// there is no second run that could finish them: a move cut half way through would leave links
-/// naming the wrong place with nothing left to fix them from.
+/// Extra remote-call allowance for planning moves and fsyncing rewritten links.
+/// This is an estimate, not a host timeout: moves must finish because interrupted
+/// link rewrites cannot be resumed after the source files have moved.
 pub(crate) const MOVE_BOUND: std::time::Duration = std::time::Duration::from_secs(50);
 
-/// How long a vault-wide rewrite runs on the host before it stops. [`Local::replace_all`] reads,
-/// substitutes and fsyncs one file at a time — 1.9 s across 245 notes and 35 s across 3.3k of
-/// them — so this is room for some ten thousand and a cap on the thread either way.
-///
-/// A cap, unlike [`MOVE_BOUND`], because a rewrite *is* resumable: it stops between files, never
-/// inside one, the files it did not reach are listed in the report, and the Search pane asks its
-/// question again the moment it returns — so the remaining matches are on screen and Replace All
-/// finishes them.
+/// Host timeout for [`Local::replace_all`], which rewrites and fsyncs each file.
+/// Unlike [`MOVE_BOUND`], replacement can stop between files. The report lists
+/// unprocessed files, and another Replace All finishes the remaining matches.
 pub(crate) const REPLACE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// The methods that mean the same thing wherever the files are, written once.
+/// Generate matching [`Vault`] methods, RPC routes and wire names from one table.
 ///
-/// Each line here used to be three that had to agree: a [`Vault`] method with a local arm and a
-/// remote one, an arm of the rpc dispatch answering it on the host, and the wire name spelling
-/// them the same. The name is now the wire name by construction, and a method that is added or
-/// removed is added or removed everywhere at once.
+/// All methods return [`Result`], preserving errors across the wire. A function
+/// after `=` runs beside the repository instead of calling the corresponding
+/// [`Local`] method; git routes retain their `git_` wire prefix.
 ///
-/// Every one answers a [`Result`], whose error crosses the wire as itself. A row naming a function
-/// after `=` runs that function where the repository is, rather than a [`Local`] method of its own
-/// name: the git rows, whose wire names carry a `git_` prefix the module does not.
+/// `ref` arguments are borrowed locally and serialized as owned values (`str` as
+/// `String`); `val` arguments travel unchanged. `bounded by` adds the host timeout
+/// to [`rpc::DEADLINE`], so callers wait for operations such as long-running hooks.
 ///
-/// An argument marked `ref` is taken by reference and travels as the owned form of its type
-/// (`str` as a `String`); one marked `val` travels as itself.
-///
-/// A method the host runs under a timeout of its own ends with `bounded by` that timeout, and a
-/// remote caller waits for it plus [`rpc::DEADLINE`] rather than the deadline alone. Without it a
-/// merge whose hooks ran past ten seconds timed out here while the host carried on and landed it.
-///
-/// What is *not* here is anything whose two sides differ: the walk for unindexed matches, whose
-/// `stop` cannot cross; the transfers, which carry bytes outside the protocol; and `repos`, which
-/// posts to the vault's own worker.
+/// Operations with different local and remote behavior are defined separately:
+/// cancellable unindexed searches, byte transfers and worker-backed `repos`.
 macro_rules! methods {
     // What one argument is, on the façade, on the wire, and at the call the host makes.
     (@fty ref $t:ty) => { &$t };
@@ -337,8 +295,8 @@ macro_rules! methods {
             )*
         }
 
-        /// The half of the rpc dispatch this table writes: `None` for a method that is not one of
-        /// these, which is [`rpc::dispatch`]'s cue to try the ones it spells out itself.
+        /// Dispatch table-defined methods; `None` lets `rpc::dispatch` try its
+        /// explicit routes.
         pub(crate) fn dispatch(
             vault: &Local,
             method: &str,
@@ -362,17 +320,15 @@ methods! {
     read(rel: ref str) -> (String, Etag);
     read_text(rel: ref str) -> fs::Read;
     stat(rel: ref str) -> Option<Etag>;
-    /// Delete a file or a directory. Local vaults go to the system trash through the desktop, so
-    /// this is the remote path only — permanent, and confirmed as such by the UI.
+    /// Permanently delete a remote file or directory after UI confirmation.
+    /// Local deletion uses the desktop system trash.
     delete(rel: ref str) -> ();
     create_dir(rel: ref str) -> ();
-    /// Take a file written behind the index's back into it at once, as a local write is, rather
-    /// than a watcher debounce later: what [`write_file`](Vault::write_file) asks of a host once
-    /// the bytes are there.
+    /// Index an external write immediately, without watcher debounce.
+    /// [`write_file`](Vault::write_file) calls this after uploading bytes.
     wrote(rel: ref str) -> ();
-    /// Copy a file or a whole directory inside the vault. It runs where the files are, so a
-    /// paste inside a remote vault sends nothing over the link; overwriting is not its business,
-    /// the caller naming a path nothing holds yet.
+    /// Copy a file or directory within the vault, without transferring remote bytes.
+    /// The caller must choose an unused destination; existing files are not overwritten.
     copy(from: ref str, to: ref str) -> ();
     plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
     rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
@@ -387,8 +343,8 @@ methods! {
     note_from_template(template: ref str) -> Option<(String, Vec<usize>)>;
     render_template(template: ref str, title: ref str) -> (String, Vec<usize>);
     templates() -> Vec<String>;
-    /// The templates that name a target: one question for New from Template rather than one
-    /// [`template_target`](Vault::template_target) per template, a round trip each when remote.
+    /// Fetch all template targets in one request, avoiding a remote round trip
+    /// per [`template_target`](Vault::template_target).
     template_targets() -> Vec<String>;
     /// Replace every match in every file whose indexed body has one: what
     /// [`grep`](Vault::grep) counts under the same `include_ignored`. The pattern crosses as what
@@ -406,14 +362,13 @@ methods! {
 
     // ------------------------------------------------------------ index reads
     list_dir(rel: ref str) -> Vec<FileRow>;
-    /// Keep the listings of these folders, which the index does not walk, fresh until
-    /// [`unwatch_unindexed`](Vault::unwatch_unindexed): a file made, removed or renamed directly
-    /// inside one comes back as [`Event::UnindexedChanged`]. Watched where the files are, one
-    /// level each, never the tree under one.
+    /// Watch direct children of unindexed folders until
+    /// [`unwatch_unindexed`](Vault::unwatch_unindexed). Creates, removals and renames
+    /// emit [`Event::UnindexedChanged`]; subtrees are not watched.
     watch_unindexed(dirs: ref [String]) -> ();
     unwatch_unindexed(dirs: ref [String]) -> ();
-    /// Walk one folder of the vault (Reload on its row), where [`rescan`](Vault::rescan) walks
-    /// all of it: what the watcher never reported under it is taken in.
+    /// Rescan one folder for missed watcher events (Reload);
+    /// [`rescan`](Vault::rescan) scans the whole vault.
     rescan_dir(dir: ref str) -> ();
     search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
     search_mid_word(
@@ -472,9 +427,8 @@ methods! {
     // the `git` binary the user configured, with their hooks and their credential helper.
     git_status = git::status(repo: ref Repo) -> Status;
     git_untracked = git::untracked(repo: ref Repo, dir: ref str) -> Vec<String>;
-    /// One page of history. The graph itself is computed where it is drawn: [`git::lanes`] is a
-    /// forward pass over every commit so far, so the pane keeps the list and re-lanes it, and
-    /// there is nothing in it for a remote host to do.
+    /// Fetch one page of history. The UI retains commits and computes
+    /// [`git::lanes`] locally because lane assignment needs all preceding commits.
     git_log = git::log(repo: ref Repo, skip: val usize, limit: val usize) -> Vec<Commit>;
     git_show = git::show(repo: ref Repo, rev: ref str, path: ref str) -> Option<git::Blob>;
     git_changed_files = git::changed_files(repo: ref Repo, oid: ref str) -> Vec<git::ChangedFile>;
@@ -515,8 +469,7 @@ methods! {
 
 /// The rest: the methods whose two sides really do differ.
 impl Vault {
-    /// Whether there is anything at `rel`. One `stat`, and the answer the tree and the open path
-    /// actually want.
+    /// Check whether `rel` exists with one `stat`, for the tree and open actions.
     pub fn exists(&self, rel: &str) -> bool {
         matches!(self.stat(rel), Ok(Some(_)))
     }
@@ -530,16 +483,15 @@ impl Vault {
         }
     }
 
-    /// A path on *this* machine holding `rel`'s current bytes: the file itself when the vault is
-    /// local, a cached copy fetched over ssh when it is not. For the readers that need a real
-    /// file — the PDF viewer, an image, the preview's assets. `NotFound` when there is nothing at
-    /// `rel`, on either backend.
+    /// Return a local file for readers that require one, such as PDF and image viewers.
+    /// Local vaults return the file itself; remote vaults fetch a cached copy over SSH.
+    /// Both return `NotFound` for a missing file.
     pub fn fetch(&self, rel: &str) -> Result<PathBuf> {
         self.fetch_with(rel, &|_, _| ())
     }
 
-    /// [`fetch`](Self::fetch), telling `progress` the bytes so far and how many there are while
-    /// a remote vault's copy downloads. A local file is already here, so it tells nothing.
+    /// [`fetch`](Self::fetch) with received and total byte counts during remote
+    /// downloads. Local files do not report progress.
     pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<PathBuf> {
         match &self.backend {
             Backend::Local(v) => {
@@ -558,8 +510,8 @@ impl Vault {
         self.upload_with(local, rel, &|_, _| ())
     }
 
-    /// [`upload`](Self::upload), telling `progress` the bytes sent so far and how many there are
-    /// on a remote vault. A local copy is the disk's speed, and tells nothing.
+    /// [`upload`](Self::upload) with sent and total byte counts for remote uploads.
+    /// Local copies do not report progress.
     pub fn upload_with(&self, local: &Path, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<()> {
         match &self.backend {
             Backend::Local(v) => match std::fs::copy(local, v.resolve(rel)?) {
@@ -570,8 +522,8 @@ impl Vault {
         }
     }
 
-    /// Write `bytes` to a file nothing holds yet: an image pasted or dropped into a note. The bytes
-    /// travel as an upload's do, over ssh rather than in the protocol.
+    /// Create a new file from `bytes`, for pasted or dropped images. Remote bytes
+    /// travel over SSH rather than through the RPC protocol.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
         match &self.backend {
             Backend::Local(v) => v.write_file(rel, bytes),
@@ -596,9 +548,8 @@ impl Vault {
         }
     }
 
-    /// Create a file, optionally from a template. The template is an `Option<&str>`, which is
-    /// neither a reference the table can borrow nor a value it can send, so this one is spelled
-    /// out.
+    /// Create a file, optionally from a template. Defined outside the method table
+    /// because `Option<&str>` cannot use its `ref` or `val` argument forms.
     pub fn create_note(&self, rel: &str, template: Option<&str>) -> Result<(String, Vec<usize>)> {
         match &self.backend {
             Backend::Local(v) => v.create_note(rel, template),
@@ -606,16 +557,10 @@ impl Vault {
         }
     }
 
-    /// [`Local::grep_unindexed`], and nothing at all when there is no room for a row.
-    ///
-    /// The Search pane fills its row budget from the index first and asks here for the remainder,
-    /// so a query common enough to fill it asks for zero rows — which is most of what a query
-    /// looks like while it is being typed. The walk costs 18 ms of the 55 ms this call takes on
-    /// 10 000 dependency files, and a round trip on a remote vault, for an answer that can only
-    /// be empty.
-    ///
-    /// `stop` ends a local walk early. It cannot cross to a host, so a remote walk runs to its
-    /// budget and the caller drops an answer it no longer wants.
+    /// [`Local::grep_unindexed`] for the Search pane's remaining row budget.
+    /// Return immediately for a zero budget to avoid an unnecessary walk or round trip.
+    /// `stop` cancels local walks; remote walks run to their budget and callers discard
+    /// stale answers because the flag cannot cross the wire.
     pub fn grep_unindexed(
         &self,
         query: &str,
@@ -632,13 +577,9 @@ impl Vault {
         }
     }
 
-    /// Which vault file an embed names, or `None` when nothing answers to it.
-    ///
-    /// `![[img.png]]` is written the way a wikilink is, so a basename on its own has to be found
-    /// the way `[[note]]` is found — through the index, which knows the file lives in
-    /// `Attachments/`. The path as written wins whenever it is really there, so an embed that
-    /// spells the whole path never takes a second look. Here rather than in the preview because
-    /// nothing about it is the desktop's: the same embeds render on Android.
+    /// Resolve an embed to a vault file, or `None` if missing. An existing explicit
+    /// path wins; basename wikilinks use the index to find files in folders such as
+    /// `Attachments/`. Shared here so desktop and Android resolve embeds alike.
     pub fn asset(&self, rel: &str) -> Option<String> {
         if self.exists(rel) {
             return Some(rel.to_string());
@@ -646,22 +587,12 @@ impl Vault {
         self.resolve_link(rel).ok().flatten()
     }
 
-    /// Which vault file following a link to `target` opens, or `None` when nothing is there and
-    /// the UI can offer to write it.
-    ///
-    /// The index answers first. A file in a tree it does not hold — a gitignored `build/` it has
-    /// not walked, a `node_modules` it never enters — is still there to open, so the file New
-    /// File would write for the link ([`linked_path`]) is looked for on disk before it is offered:
-    /// one `stat`, and only for a link the index could not place. Last, a link by name alone
-    /// finds a file in a gitignored folder ([`resolve_ignored`](Self::resolve_ignored)).
-    ///
-    /// That `stat` is asked through [`stat`](Self::stat) rather than [`exists`](Self::exists),
-    /// which cannot say why it answered `false`: on a remote vault that is not answering, a link
-    /// to a note that is really there read as one to write, and a click offered New File over
-    /// it. Same reasoning as [`repos`](Self::repos) below.
-    ///
-    /// What a click in the preview follows. Go to Definition asks the note's language provider
-    /// instead, which answers the same way on the host, beside the files.
+    /// Resolve a link target, or `None` so the UI can offer to create it.
+    /// Try the index, then [`linked_path`] on disk for unindexed trees, then
+    /// [`resolve_ignored`](Self::resolve_ignored) for basename links in ignored folders.
+    /// Use [`stat`](Self::stat) to distinguish missing files from remote failures;
+    /// [`exists`](Self::exists) cannot, and could offer New File while offline.
+    /// The preview uses this; Go to Definition asks the language provider beside the files.
     pub fn follow(&self, target: &str) -> Result<Option<String>> {
         if let Some(rel) = self.resolve_link(target)? {
             return Ok(Some(rel));
@@ -673,8 +604,8 @@ impl Vault {
         self.resolve_ignored(target)
     }
 
-    /// The repositories the vault touches. A failure is the caller's to see: offline used to read
-    /// as "no repositories", which is what emptied the git pane on a dropped connection.
+    /// List repositories touching the vault. Return failures so a disconnected
+    /// remote vault does not appear to have no repositories.
     pub fn repos(&self) -> Result<Vec<Repo>> {
         match &self.backend {
             Backend::Local(v) => Ok(v.repos()),
@@ -695,8 +626,8 @@ mod tests {
         assert::<Vault>();
     }
 
-    /// Replacing across a vault is minutes of fsyncs, so the desktop app runs it on a worker
-    /// thread. That only compiles while the handle can cross one.
+    /// Assert the vault can cross threads: the desktop runs costly vault-wide
+    /// replacements on a worker.
     #[test]
     fn a_vault_handle_can_cross_a_thread() {
         fn crosses<T: Send + Sync>() {}
@@ -851,10 +782,9 @@ mod tests {
         );
     }
 
-    /// The notes provider through the façade: what the editor sees when a note is opened.
-    ///
-    /// `block_on` inside the body and never around the fixture: dropping the vault stops the
-    /// providers by blocking on the same runtime, which a runtime thread may not do.
+    /// Exercise the notes provider through the façade used by the editor.
+    /// `block_on` surrounds only the request: vault teardown blocks on the same
+    /// runtime and cannot run on a runtime thread.
     #[test]
     fn notes_provider_completes_and_diagnoses() {
         let f = Fixture::open(VaultConfig::default());

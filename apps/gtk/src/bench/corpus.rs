@@ -1,14 +1,11 @@
-//! Go to File's list as it lands: in a dialog opened before the vault was indexed, and fresh on
-//! the opening after a note was saved.
+//! Check Go to File updates while indexing and immediately after a save.
 
 use super::*;
 
-/// `ACCENT_BENCH_SWITCHER=early:<query>` opens Go to File at once, types `<query>` and prints its
-/// first rows (`early_rows open`); then, the dialog still up, once the vault is indexed and again
-/// (`early_rows indexed`). Then it saves `Fresh Links.md`, linking to a note not written yet and
-/// carrying an alias, closes the dialog, opens it again and prints the rows for the link's target
-/// and for the alias (`early_rows saved`): both are there on that opening, not the one after. It
-/// writes a note, so point it at a scratch vault under `/tmp`.
+/// `ACCENT_BENCH_SWITCHER=early:<query>` prints Go to File rows before and after
+/// indexing while the dialog stays open (`early_rows open/indexed`). Save
+/// `Fresh Links.md` with an alias and missing-note link; both must appear on the
+/// next opening (`early_rows saved`). Writes notes; use a scratch vault under `/tmp`.
 pub(super) fn bench_early(app: &Rc<App>, query: &str) {
     scratch_only(app, "ACCENT_BENCH_SWITCHER=early");
     let (app, query) = (app.clone(), query.to_string());

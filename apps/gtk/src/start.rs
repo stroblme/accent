@@ -22,9 +22,7 @@ const MIN_HEIGHT: i32 = 400;
 const COLUMN_WIDTH: i32 = 360;
 /// The response the connect dialog opens a remote with.
 const CONNECT: &str = "connect";
-/// How long the folder completion's own ssh connection may take before it gives up. Deliberately
-/// not `rpc::DEADLINE`: nobody has pressed Connect, and a field that goes quiet for ten seconds is
-/// worse than one that never completes.
+/// Short SSH completion timeout: before Connect, slow suggestions must not stall the field.
 const PROBE_SECONDS: u32 = 5;
 
 /// Remove from Recents as the shell does it (`Shell::remove_recent`): the widget to ask over, the
@@ -172,12 +170,10 @@ pub fn present(
     window
 }
 
-/// The vaults the app has seen and the field that searches them, or `None` when it has seen none
-/// that are still there.
+/// Build searchable recent vaults, or return `None` if no existing entries remain.
 ///
-/// One section: the rule that divides them from the two ways to a vault the app has never seen —
-/// a bare `GtkSeparator`, with the column's 18 px on either side — a search field, and the list.
-/// The list scrolls on its own, because it is not capped and the buttons above it must stay put.
+/// Keep the list separately scrollable so uncapped history does not move the open buttons;
+/// a separator divides recent entries from new-vault actions.
 fn recent_section(
     window: &adw::ApplicationWindow,
     config: &Rc<RefCell<Config>>,
@@ -275,8 +271,7 @@ fn recent_section(
     Some((section, search))
 }
 
-/// Whether a row belongs under what is typed in the search: every row while nothing is, and
-/// otherwise the rows whose name or path holds the text, case aside.
+/// Match recent names or paths case-insensitively; empty search shows every row.
 fn matches(query: &str, title: &str, subtitle: &str) -> bool {
     let query = query.trim().to_lowercase();
     query.is_empty()
@@ -284,8 +279,7 @@ fn matches(query: &str, title: &str, subtitle: &str) -> bool {
         || subtitle.to_lowercase().contains(&query)
 }
 
-/// `fallbacks` are where the keyboard goes when its row is removed and no other row shows: the
-/// search while there are rows it hides, and Open Local… once the list is empty.
+/// Focus fallback after removal: search if it hides rows, Open Local if no rows remain.
 fn recent_row(
     path: PathBuf,
     home: Option<&Path>,
@@ -359,12 +353,10 @@ fn recent_row(
     row
 }
 
-/// Drop `path` from the recent vaults and write the config back: what Remove from Recents does
-/// once it may (`Shell::remove_recent`), and what Close Session ends with.
+/// Remove `path` from recents and save config after [`crate::shell::Shell::remove_recent`] permits it.
 ///
-/// A vault's own files are not touched, nor its state file: the list is the only thing that
-/// remembers a vault, and its tabs are still there when it is opened again. A terminal session is
-/// nothing but its state file, so that goes with the row; its shells have been ended by then.
+/// Vault files and state remain for reopening. Terminal sessions also lose their state file
+/// after their shells have been ended.
 pub(crate) fn forget_vault(config: &Rc<RefCell<Config>>, path: &Path) {
     config.borrow_mut().recent_vaults.retain(|p| p != path);
     crate::settings::save(&config.borrow());
@@ -373,14 +365,10 @@ pub(crate) fn forget_vault(config: &Rc<RefCell<Config>>, path: &Path) {
     }
 }
 
-/// What a recent row says about a vault: it is named by its folder and placed by its path, on
-/// this machine and on another one alike — a remote row differs by its address and its icon, not
-/// by reading the other way round. An address that will not parse is shown as it was stored,
-/// since anything else would be a guess about what the user meant.
+/// Name recent vaults by folder and locate them by path, including remote vaults.
 ///
-/// ponytail: a non-default port is not in the subtitle. `destination` is what ssh is handed, and
-/// `me@box:2222:/srv/vault` reads worse than it informs; add it if two vaults on one host ever
-/// differ by port alone.
+/// Unparseable addresses retain their stored text rather than guessing intent. Remote
+/// subtitles omit non-default ports.
 pub(crate) fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
     if let Some(name) = crate::terminal::session_name(path) {
         return (name.to_string(), "Terminal session".to_string());
@@ -401,9 +389,8 @@ pub(crate) fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
     (name, abbreviate(path, home))
 }
 
-/// The icon a recent row carries, if any. Only what is not a folder here is marked: most rows are
-/// folders on this machine, and an icon on every one of them would say nothing. The terminal is
-/// Adwaita's; the server is shipped (`data/icons`), the theme's own not being a rack.
+/// Mark terminal and remote entries only; local folders need no repeated icon.
+/// Use the shipped server icon because theme alternatives may not depict a server.
 pub(crate) fn row_icon(path: &Path) -> Option<&'static str> {
     if crate::terminal::session_name(path).is_some() {
         return Some("utilities-terminal-symbolic");
@@ -411,8 +398,7 @@ pub(crate) fn row_icon(path: &Path) -> Option<&'static str> {
     ssh::is_remote_path(path).then_some("remote-server-symbolic")
 }
 
-/// The folder a remote vault is, for the row's title. A path with no last component — the whole
-/// host, `ssh://box/` — has only the host to be named by.
+/// Remote title from the last path component, or the host for a root address such as `ssh://box/`.
 fn remote_name(url: &ssh::Url) -> String {
     url.path
         .file_name()
@@ -432,8 +418,7 @@ pub(crate) fn abbreviate(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
-/// The recent vaults, once [`prune`] has taken out the ones that have gone. What it takes is
-/// written back through the usual save, and nothing is written when it takes nothing.
+/// Prune unavailable recents and save only if the list changed.
 pub(crate) fn recent_vaults(config: &Rc<RefCell<Config>>) -> Vec<PathBuf> {
     if prune(&mut config.borrow_mut().recent_vaults) {
         crate::settings::save(&config.borrow());
@@ -441,21 +426,17 @@ pub(crate) fn recent_vaults(config: &Rc<RefCell<Config>>) -> Vec<PathBuf> {
     config.borrow().recent_vaults.clone()
 }
 
-/// Drop the local vaults whose folder has gone — deleted, or on a drive nobody has mounted — and
-/// the terminal sessions that were never written, and say whether any went. The list is not capped, so this is what keeps it to vaults that can
-/// still open, rather than a row that can only fail.
+/// Prune missing local vault folders and unwritten terminal sessions; report whether any left.
 ///
-/// A remote stays whatever state it is in, until it is removed by hand: the only way to find out
-/// is to connect, and dialling out to draw a list would be far worse than an entry that might
-/// not answer.
+/// Keep remote entries until manually removed: checking them would require network
+/// connections merely to draw the list.
 fn prune(recent: &mut Vec<PathBuf>) -> bool {
     let before = recent.len();
     recent.retain(|p| openable(p));
     recent.len() < before
 }
 
-/// Whether a recent entry can still open: a remote, which cannot be asked without dialling out; a
-/// folder that is still there; or a terminal session that has been written down.
+/// Whether an entry is usable: remote address, existing local folder or saved terminal session.
 pub(crate) fn openable(path: &Path) -> bool {
     ssh::is_remote_path(path)
         || path.is_dir()
@@ -463,12 +444,10 @@ pub(crate) fn openable(path: &Path) -> bool {
             && accent_core::config::state_path(path).is_file())
 }
 
-/// The recent vaults a window can switch to: all of them but the one it is already on. Keys, not
-/// paths — `Vault::key`, `Config::touch_recent` and this list all spell a vault the same way, a
-/// canonical path or an `ssh://` address, so plain equality is the answer.
+/// List recent keys other than the current vault, using canonical paths or SSH addresses.
 ///
-/// A vault that already has a window of its own stays in: picking it raises that window, which is
-/// the one-vault-one-window rule doing its job rather than a row that fails.
+/// Existing windows remain eligible because selecting them raises the window rather than
+/// opening another on the same vault.
 pub(crate) fn other_vaults(recent: &[PathBuf], current: Option<&Path>) -> Vec<String> {
     recent
         .iter()
@@ -479,18 +458,11 @@ pub(crate) fn other_vaults(recent: &[PathBuf], current: Option<&Path>) -> Vec<St
 
 // ------------------------------------------------------------------ connecting
 
-/// Ask for a host and a path, and hand the address they make to `on_open_remote`.
+/// Ask for host and path, then pass the address to `on_open_remote`.
 ///
-/// An `AdwAlertDialog` like the ones in `fileops`: Cancel, one verb, and the form as its extra
-/// child. Any response closes such a dialog, so an address that does not parse is refused by
-/// keeping the verb insensitive and saying why under the fields, rather than by closing on a
-/// failure the user would then have to reopen the dialog to correct. The start screen has no
-/// toast overlay, so there is nowhere else for that sentence to go anyway.
-///
-/// `at` fills the form in with a remote window's own address, for Open Remote… there: the host
-/// is the one the window is on, and the path is the one it was opened at, ready to be corrected.
-/// `title` and `verb` say what the address is for: a vault to open, or a shell to start there.
-/// `recent` is the recent vaults, which order the config's hosts in the host menu.
+/// Disable the verb and show validation below fields until the address parses, avoiding
+/// closing a form the user needs to correct. `at` prefills a remote window's address;
+/// `title` and `verb` distinguish vault and shell actions, and `recent` orders host suggestions.
 pub(crate) fn connect_dialog(
     window: &impl IsA<gtk::Widget>,
     at: Option<&ssh::Url>,
@@ -612,21 +584,12 @@ pub(crate) fn connect_dialog(
     pathfield::look_again(&path);
 }
 
-/// The host's folders, fetched over a connection the dialog makes for itself, so the path can be
-/// completed and a `~` resolved before anybody has pressed Connect.
+/// Fetch remote folder completions over a dialog-owned connection.
 ///
-/// Every rule here is about not surprising the user, who has asked for a form and not for a
-/// connection:
-///
-/// * **Never on a keystroke of its own.** One attempt for the life of the dialog per address, made
-///   the first time a completion is really wanted — the path field has the keyboard and the two
-///   fields name a host. Every later folder reuses that connection, and each listing is cached.
-/// * **Never a prompt.** [`ssh::probe`] forces `BatchMode=yes`, so a host that would want a
-///   passphrase or a host-key answer simply offers no completion. `askpass.rs` is for a connection
-///   the user asked for.
-/// * **Never a failure on screen.** A refusal, a timeout or a listing error offers nothing and is
-///   logged at debug. There is no toast, no banner and nothing in the form.
-/// * **Never the vault's socket**, and what it opens is shut down when the dialog closes.
+/// Probe each address once, only when a focused path field needs completion. Cache listings
+/// and reuse the connection. [`ssh::probe`] uses BatchMode so completion never prompts;
+/// failures stay in debug logs. Never reuse the vault socket, and close the connection with
+/// the dialog.
 #[derive(Default)]
 struct Probe {
     /// The address the answers below are about. A different host starts over.
@@ -653,8 +616,7 @@ impl Probe {
         self.silent.set(false);
     }
 
-    /// The folders in `dir`, or `None` while that is not known — including for good, when the host
-    /// could not be reached. Asks once per directory and calls `again` when the answer lands.
+    /// Request each directory once; return `None` while unknown or unreachable and call `again` on reply.
     fn folders(self: &Rc<Self>, dir: &str, asked: &gtk::Entry) -> Option<Vec<String>> {
         if let Some(known) = self.dirs.borrow().get(dir) {
             return known.clone();
@@ -695,8 +657,7 @@ impl Probe {
         None
     }
 
-    /// Shut down every socket this dialog opened, on a thread of its own: the dialog is closing
-    /// and nothing here waits for an answer.
+    /// Close dialog-owned SSH sockets on a worker so dialog teardown does not block.
     fn close(&self) {
         let urls = std::mem::take(&mut *self.opened.borrow_mut());
         if urls.is_empty() {
@@ -716,14 +677,10 @@ impl Probe {
     }
 }
 
-/// `(the host's `$HOME`, the folders in `dir`)`, or `None` where the host could not be reached.
+/// Return the host's home and folders in `dir`, or `None` if unreachable.
 ///
-/// One command answers both: the home directory is what a `~` path needs and what says the shell
-/// really ran, so an empty first line is how a refused or timed-out connection is told apart from
-/// a directory that simply is not there.
-///
-/// ponytail: `ls -1p` and one line per name, so a folder whose name holds a newline is listed as
-/// two. Nothing here writes anything, and the worst case is a completion nobody can use.
+/// One command supplies both; an empty home line identifies refusal or timeout rather than
+/// a missing directory. `ls -1p` cannot represent newline-containing folder names correctly.
 fn ask(url: &ssh::Url, dir: &str) -> Option<(String, Vec<String>)> {
     let ctl = ssh::probe_path(url);
     if let Some(parent) = ctl.parent() {
@@ -750,8 +707,7 @@ fn ask(url: &ssh::Url, dir: &str) -> Option<(String, Vec<String>)> {
     Some((home.to_string(), folders))
 }
 
-/// The directory as a word for the remote shell, with a leading `~` left to the host's own
-/// `$HOME` rather than resolved here — the whole point being that this machine does not know it.
+/// Quote a remote directory, leaving leading `~` for the host to resolve against its home.
 fn remote_word(dir: &str) -> String {
     match dir.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => {
@@ -761,9 +717,7 @@ fn remote_word(dir: &str) -> String {
     }
 }
 
-/// The folder a half-typed remote path points into: everything up to the last `/`, with the root
-/// spelled `/` rather than empty. `~` on its own counts, so a tilde path resolves its home before
-/// there is anything to complete.
+/// Completion directory up to the last `/`; preserve `/` for root and bare `~` to resolve host home.
 fn typed_dir(typed: &str) -> Option<String> {
     let typed = typed.trim();
     match typed.rsplit_once('/') {
@@ -773,12 +727,10 @@ fn typed_dir(typed: &str) -> Option<String> {
     }
 }
 
-/// The host entry, with the hosts from `~/.ssh/config` in a menu beside it.
+/// Build an editable host entry with SSH-config hosts in a menu when available.
 ///
-/// A menu button rather than completion inside the entry, because GTK4 dropped
-/// `GtkEntryCompletion` and put nothing in its place: a `GtkDropDown` either closes the field to
-/// what is listed or needs a factory of its own to stay editable. These are a shortcut for typing,
-/// not the only way in, so the cheap shape is the right one. Nothing to suggest, no button.
+/// GTK4 removed GtkEntryCompletion; a separate menu retains free typing without a custom
+/// editable dropdown factory.
 fn host_field(entry: &gtk::Entry, recent: &[PathBuf]) -> gtk::Widget {
     let hosts = by_use(ssh_hosts(&ssh_config()), recent);
     if hosts.is_empty() {
@@ -821,8 +773,7 @@ fn host_field(entry: &gtk::Entry, recent: &[PathBuf]) -> gtk::Widget {
     field.upcast()
 }
 
-/// The user's ssh config, or nothing at all. Having none is ordinary rather than an error: the
-/// hosts it holds are a convenience, and every field here still accepts anything typed.
+/// Read SSH-config host suggestions if available; absent config still allows free input.
 fn ssh_config() -> String {
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".ssh/config"))
@@ -830,11 +781,8 @@ fn ssh_config() -> String {
         .unwrap_or_default()
 }
 
-/// The host names an ssh config declares, in the order it declares them.
-///
-/// A `Host` line carries patterns as well as names, and a pattern (`*`, `?`, or a `!` negation)
-/// matches hosts rather than naming one, so there is nothing there to connect to. `Match` blocks
-/// and `Include` are not followed: this only saves the user some typing.
+/// SSH `Host` names in file order, excluding wildcard and negated patterns because
+/// they are not connectable names. Do not follow `Match` or `Include`; these are suggestions.
 fn ssh_hosts(config: &str) -> Vec<String> {
     config
         .lines()
@@ -848,8 +796,7 @@ fn ssh_hosts(config: &str) -> Vec<String> {
         .collect()
 }
 
-/// `hosts` in the order a vault on each was last opened, newest first, as the recent vaults are
-/// kept; a host no recent vault is on keeps its place in the config, after them.
+/// Order hosts by recent vault use, newest first, then unused hosts in config order.
 fn by_use(mut hosts: Vec<String>, recent: &[PathBuf]) -> Vec<String> {
     let used: Vec<String> = recent
         .iter()
@@ -861,16 +808,11 @@ fn by_use(mut hosts: Vec<String>, recent: &[PathBuf]) -> Vec<String> {
     hosts
 }
 
-/// The address the two fields make, or why they do not make one yet.
+/// Parse the host and path fields into an address, or return a validation reason.
 ///
-/// Assembled as text and read back with [`ssh::parse`] rather than built as an [`ssh::Url`], so a
-/// host typed with a login, a port or IPv6 brackets is understood exactly as `Vault` will
-/// understand it, and a malformed one is refused here rather than at the connection. A field that
-/// is still empty is an unfinished form, not a mistake, so it comes back with nothing to say.
-///
-/// `~` and `~/…` are the host's home, which only the host knows: `home` is what [`Probe`] read off
-/// it, and without it the form says so rather than guessing at this machine's own home. An address
-/// is stored, cached and keyed by its path, so the tilde is resolved here and never travels.
+/// Use [`ssh::parse`] so login, port and IPv6 syntax match vault opening. Empty fields are
+/// unfinished, not errors. Resolve `~` from [`Probe`]'s host home before storing or keying the
+/// address; without it, report the missing home rather than use this machine's.
 fn address(host: &str, path: &str, home: Option<&str>) -> Result<String, String> {
     let (host, path) = (host.trim(), path.trim());
     if host.is_empty() || path.is_empty() {

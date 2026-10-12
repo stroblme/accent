@@ -1,14 +1,11 @@
-//! What a language server says is wrong with the open file, painted on the tab.
+//! Paint language-server diagnostics according to their severity.
 //!
-//! Four channels, because one diagnostic is not like another. An error and a warning are worth
-//! interrupting for: a wavy underline in the text, an icon in the gutter and the message itself
-//! at the end of the line. Information and hints are not — a dangling `[[wikilink]]` is the
-//! ordinary state of a vault — so they get a thin dim underline and say nothing until the pointer
-//! asks. The same rule decides the status bar: it counts errors and warnings and nothing else.
+//! Errors and warnings get wavy underlines, gutter icons and inline messages, and contribute
+//! to the status count. Information and hints get dim underlines with messages in the hover,
+//! since conditions such as dangling wikilinks are common while editing.
 //!
-//! The colours are derived the way `diff.rs` derives its own: a fixed hue mixed with the resolved
-//! theme foreground, so they read on a light theme and on a dark one without a hex colour outside
-//! `theme.rs`.
+//! Fixed hues mixed with the theme foreground keep diagnostics readable in light and dark
+//! themes; colour literals remain in `theme.rs`.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -31,8 +28,7 @@ const TAGS: [&str; 4] = [ERROR, WARNING, INFO, HINT];
 pub const MARK_ERROR: &str = "error";
 pub const MARK_WARNING: &str = "warning";
 
-/// How loud the two quiet severities are, as an alpha over the view's background. A hint is the
-/// dimmest thing the editor draws: it marks something that is not yet a problem.
+/// Opacity for information and hint underlines, with hints dimmest because they are not yet problems.
 const INFO_ALPHA: f32 = 0.4;
 const HINT_ALPHA: f32 = 0.25;
 
@@ -45,9 +41,8 @@ fn tag_of(severity: Severity) -> &'static str {
     }
 }
 
-/// Install the four tags on a buffer. Their colours arrive with the first [`restyle`]; the shapes
-/// are fixed here, because a squiggle under an error and a straight line under a hint is the
-/// distinction, not the colour.
+/// Install severity tags with fixed underline shapes; [`restyle`] supplies colours.
+/// Shapes distinguish errors from hints independently of colour.
 pub fn install_tags(buffer: &sourceview5::Buffer) {
     let table = buffer.tag_table();
     for name in TAGS {
@@ -86,13 +81,10 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
 /// from, which [`refit`] cuts again when the line changes.
 pub type Shown = BTreeMap<i32, (sourceview5::Annotation, String)>;
 
-/// Paint `items` over the buffer, replacing whatever was there, and return the end-of-line
-/// messages that went up. A message in `kept` ([`Edit::reline`]) is not cut again where its text
-/// is the same: measuring is nearly all a paint costs.
+/// Replace diagnostics with `items` and return end-of-line messages.
 ///
-/// A publish is the server's whole answer for the file, but the underlines are moved only where
-/// they changed ([`highlight::sync_tag`]): an underline is something GTK lays a line out again
-/// for, and a note re-publishes after every pause in the typing.
+/// Reuse unchanged messages from `kept` to avoid measuring again. [`highlight::sync_tag`]
+/// updates only changed underlines, avoiding full relayout on each diagnostic publication.
 pub fn render(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -177,9 +169,7 @@ pub fn render(
     shown
 }
 
-/// Cut the message on `line`, if it has one, to the room the line leaves now: an edit there moves
-/// the line's end, and the message cut for the old end ran past the column's edge. An annotation
-/// cannot be given new text, so a new one takes its place.
+/// Refit `line`'s message to remaining width after edits, replacing its immutable annotation.
 pub fn refit(
     view: &sourceview5::View,
     provider: &sourceview5::AnnotationProvider,
@@ -213,11 +203,8 @@ pub fn cuts(view: &sourceview5::View, shown: &Shown) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// `text` cut to the room between the end of `line` and the right edge of the text column.
-///
-/// GtkSourceView draws a message that is too long to sit against that edge two line heights past
-/// the line's last character (`_gtk_source_annotations_draw_annotation`), at its full width, and
-/// the column clips it mid-letter. The whole message is still the hover's and the gutter icon's.
+/// Truncate `text` to the remaining column width after `line`.
+/// GtkSourceView otherwise draws full-width messages and clips mid-glyph; hover and gutter retain the full message.
 fn fit(view: &sourceview5::View, line: i32, text: String) -> String {
     let visible = view.visible_rect();
     // Not laid out yet: the tab lays its messages again once it has a width.
@@ -265,11 +252,8 @@ fn ellipsize(text: String, room: i32, width: impl Fn(&str) -> i32) -> String {
     cut(fits)
 }
 
-/// Whether the line starting at `at` is hidden — by a comparison's "N unchanged lines" button or
-/// by a fold. [`crate::fold::hiding`] is the one list of what hides text in this window, so a
-/// third way of hiding it would be answered here without this having to learn about it.
-///
-/// A fold's header line is outside the run it hides, so it keeps its own message.
+/// Whether text starting at `at` is hidden by [`crate::fold::hiding`].
+/// Fold headers remain visible and retain their messages.
 fn out_of_sight(at: &gtk::TextIter) -> bool {
     !crate::fold::hiding(&at.buffer(), at).is_empty()
 }
@@ -327,8 +311,7 @@ pub fn error_lines(buffer: &sourceview5::Buffer) -> (Vec<i32>, Vec<i32>) {
     (underlined, marks)
 }
 
-/// Reading order, which is what a range comparison means. `Pos` is not `Ord` — it crosses the
-/// wire and orderings are not part of that contract — so the tuple does it here.
+/// Compare diagnostic positions in reading order using tuples; wire type Pos does not define Ord.
 fn key(pos: Pos) -> (u32, u32) {
     (pos.line, pos.character)
 }
@@ -374,9 +357,7 @@ impl Edit {
         }
     }
 
-    /// Move `items` with the edit, as their underlines and gutter marks move with the text.
-    /// Whether any now starts on another line, which the end-of-line messages, pinned to a line
-    /// number, have to be laid again for.
+    /// Move diagnostics with the edit and report line changes requiring message relayout.
     pub fn shift(&self, items: &mut [Diagnostic]) -> bool {
         let mut lines = false;
         for item in items {
@@ -388,9 +369,8 @@ impl Edit {
         lines
     }
 
-    /// The messages up, by the line each will be on, for [`render`] to keep their cuts: the room
-    /// a line leaves is its own, wherever it is. Those on a line the edit runs through are left
-    /// out, to be cut again.
+    /// Map unchanged-line messages to their new lines for [`render`] reuse.
+    /// Exclude edited lines because their available width needs remeasurement.
     pub fn reline(&self, shown: Shown) -> Shown {
         let below = self.end.line as i32 - self.to.line as i32;
         shown
@@ -404,8 +384,7 @@ impl Edit {
     }
 }
 
-/// Every diagnostic covering `pos`. What the hover appends to the server's own answer, all four
-/// severities included: a hint that says nothing on screen has to say it here.
+/// Return all diagnostics covering `pos` for hover, including otherwise message-free hints.
 pub fn at(items: &[Diagnostic], pos: Pos) -> Vec<&Diagnostic> {
     items
         .iter()
@@ -419,9 +398,7 @@ pub fn at(items: &[Diagnostic], pos: Pos) -> Vec<&Diagnostic> {
         .collect()
 }
 
-/// What the status bar says in the word-count slot: "2 errors, 1 warning". Errors and warnings
-/// only, matching the gutter; `None` when the file has neither, so the slot goes away rather than
-/// standing there saying zero.
+/// Format nonzero error/warning counts for the status bar, or `None` to hide an empty slot.
 pub fn counts(items: &[Diagnostic]) -> Option<String> {
     let count = |want: Severity| items.iter().filter(|d| d.severity == want).count();
     let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));

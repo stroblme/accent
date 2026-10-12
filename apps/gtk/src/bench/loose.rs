@@ -1,5 +1,4 @@
-//! A vault's files opened in windows of their own, where no vault is behind them (DESIGN.md,
-//! Window without a vault): what such a window still reads from the file itself.
+//! Probe file-derived behavior in standalone windows without a vault.
 
 use super::*;
 

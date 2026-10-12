@@ -1,15 +1,10 @@
-//! Command palette, file, symbol and vault switcher: one dialog, five modes.
+//! One palette for commands, files, symbols, tags and vaults.
 //!
-//! The caller says which mode the palette opens in, so `Ctrl+P` and `Ctrl+Shift+P` both land on an
-//! empty entry that is already searching the right thing. A typed leading `>` (commands), `#`
-//! (tags) or `@` (declarations across the vault) still switches mode mid-search, VS Code style. Command mode is also the app's shortcuts reference
-//! (DESIGN.md "Keyboard": there is no shortcuts window until the libadwaita floor reaches 1.8), so
-//! every command row carries its accelerator.
+//! Callers choose the initial mode; `>`, `#` and `@` switch modes while typing. Command rows
+//! show accelerators because this is also the shortcuts reference below libadwaita 1.8.
 //!
-//! Opening must be instant, so file mode goes up showing the files this window opened last and
-//! then the most recently modified ones (one indexed query, no matching at all), and only matches
-//! against the full file list once the user types something. Keystrokes are debounced, so holding a key down cannot queue up one full match
-//! per character.
+//! File mode opens immediately with recently opened and modified files, matching the full
+//! list only after typing. Debouncing prevents a full match being queued for every character.
 
 use crate::start;
 use crate::widgets::{Debounce, status_page};
@@ -37,13 +32,11 @@ const PAGE: u32 = 10;
 
 /// One thing the palette can offer.
 pub enum Item {
-    /// A file to open, by vault-relative path. Any file, not only a note: a source file
-    /// has to be reachable by name too.
+    /// Any vault file by relative path, including source files for name-based navigation.
     File(String),
-    /// A note a link names that is not there yet, by the path New File would create it at.
+    /// Missing linked note at the path New File would create.
     Missing(String),
-    /// A note in a folder git ignores, which the index never walks: opened as a file is, and
-    /// marked, search not reaching it.
+    /// An ignored note outside the index, marked as such but still openable.
     Ignored(String),
     /// A note found by one of its frontmatter aliases: the alias that matched, and the note.
     Alias { name: String, rel: String },
@@ -51,13 +44,11 @@ pub enum Item {
     Command {
         action: String,
         label: String,
-        /// Every accelerator bound to it, first one shown. The whole list, because rebinding
-        /// replaces it and a clash has to be found across all of them, not just the first.
+        /// All bound accelerators, first shown; keep the full list for rebinding and clash detection.
         accels: Vec<String>,
         /// Position in the window's recently-run list, if it is in it at all. Lower is newer.
         recent: Option<usize>,
-        /// Why it cannot run here, where the window has a reason to give: the row is greyed and
-        /// says it.
+        /// Reason a disabled action is greyed out, shown in its row.
         why: Option<String>,
     },
     /// A tag to filter by.
@@ -85,13 +76,11 @@ impl Item {
 
 /// Where the three modes get their rows.
 pub struct Sources {
-    /// Shown in file mode until the first keystroke; never matched against. It is the window's
-    /// own list followed by the index's modification-time one, which is a browse page rather than
-    /// use order — a file a sync or a checkout touched is not a file the user opened.
+    /// Initial browse list: window-open history followed by index modification times.
+    /// Not matched; sync or checkout mtimes are distinct from user-open history.
     pub recent: Vec<String>,
-    /// What this window opened, newest first. This is the recency a typed query is ranked by, so
-    /// it holds nothing but the user's own moves, and a file in it the index does not list is
-    /// ranked with the files ([`with_history`]).
+    /// User-open history, newest first, for typed-query recency ranking. Include
+    /// unindexed files through [`with_history`].
     pub mru: Vec<String>,
     pub files: Files,
     pub commands: Vec<Item>,
@@ -99,25 +88,20 @@ pub struct Sources {
     /// The recent vaults this window can switch to, newest first, the one it is on left out.
     /// Names the config already holds, pruned of folders that have gone.
     pub vaults: Vec<String>,
-    /// Chords no command of ours holds but that a widget does, each with the name of what it does
-    /// there. They are not rows in the palette — nothing can run them — but the rebind dialog has
-    /// to refuse them, or a command bound to one would be silently shadowed.
+    /// Widget-owned chords excluded from rebinding to prevent silently shadowed commands.
     pub taken: Vec<(String, String)>,
     /// Bind an action to a new set of accelerators, or to its default when given `None`. Returns
     /// what is in force afterwards, so the row can be redrawn without asking again.
     pub on_rebind: Box<Rebind>,
     /// The declarations a query names, handed to the callback once the index answers.
     pub symbols: Box<Find>,
-    /// Drop a vault from the recent list, by the key its row carries, and run the callback once
-    /// the row may go: at once for a vault, after the question for a terminal session, whose
-    /// shells end with it (`Shell::remove_recent`), and never if that question is declined.
+    /// Remove a recent key, then run the callback: immediate for vaults, after confirmed
+    /// shell teardown for terminal sessions, never on cancellation (`Shell::remove_recent`).
     pub on_forget: Box<Forget>,
 }
 
-/// What a typed Go to File query ranks: every file, followed by the notes links name that are not
-/// there yet from `real` on; which of the files are notes in a folder git ignores
-/// ([`with_ignored`]); and `(alias, note)` for every front matter alias, ranked with the files by
-/// the alias. The window's own lists, shared rather than copied.
+/// Shared ranking corpus: files before `real`, then missing linked notes; ignored
+/// notes marked by [`with_ignored`], and `(alias, note)` pairs ranked by alias.
 #[derive(Clone, Default, PartialEq)]
 pub struct Files {
     pub paths: Rc<Vec<String>>,
@@ -171,10 +155,8 @@ impl Mode {
     }
 }
 
-/// Where a key moves the highlight in a list of `n` rows, or `None` where the key is not the
-/// list's and the entry should have it. The arrows step, a page is [`PAGE`] rows, and Home and
-/// End are the two ends — the keys every list in GNOME answers, on a dialog whose keyboard never
-/// leaves the search box.
+/// Move the highlight with arrows, [`PAGE`]-sized jumps, Home or End while focus
+/// stays in search. Return `None` for keys the entry should handle.
 fn step(key: gdk::Key, at: u32, n: u32) -> Option<u32> {
     if n == 0 {
         return None;
@@ -205,22 +187,18 @@ fn parse_query(raw: &str, opened_in: Mode) -> (Mode, &str) {
     }
 }
 
-/// Indices of `haystacks` that match `query`, best first, capped at [`MAX_RESULTS`].
+/// Return matching `haystacks` indices, best first, capped at [`MAX_RESULTS`].
 ///
-/// [`fuzzy::rank`] with the cap on: the ranking itself is the core's, shared with the note
-/// completion popup and with Android's file switcher, so one query typed on the phone and on the
-/// laptop offers the same note first. `recent` is this window's own, and is what makes a command
-/// run twice lead a half-typed query.
+/// Core [`fuzzy::rank`] keeps GTK completion and Android file ranking consistent. Window-local
+/// `recent` boosts frequently used commands.
 fn rank(haystacks: &[String], recent: &[Option<usize>], query: &str, corpus: Corpus) -> Vec<usize> {
     let mut hits = fuzzy::rank(haystacks, recent, query, corpus);
     hits.truncate(MAX_RESULTS);
     hits
 }
 
-/// The declarations the index found for `query`, ranked by their names as the other lists are
-/// ranked, its own order (the name itself, then a name it starts, then one holding it, a test's
-/// last) breaking ties. `Type::name` and `Type.name` are a name in a type to the index, and
-/// ranked by the name.
+/// Rank declarations by name, using index order to break ties: exact, prefix,
+/// substring, then tests. `Type::name` and `Type.name` rank by the member name.
 fn rank_symbols(found: Vec<CodeSymbol>, query: &str) -> Vec<Rc<Item>> {
     let name = query.rsplit([':', '.']).next().unwrap_or(query).trim();
     let names: Vec<String> = found.iter().map(|s| s.name.clone()).collect();
@@ -232,8 +210,7 @@ fn rank_symbols(found: Vec<CodeSymbol>, query: &str) -> Vec<Rc<Item>> {
         .collect()
 }
 
-/// Where each of `corpus` sits in `mru`, for [`rank`]'s recency tiebreak. A map rather than a
-/// scan per path: the corpus is every file in the vault and this runs once per dialog.
+/// Map corpus entries to MRU positions for [`rank`], avoiding a history scan per vault file.
 fn places(corpus: &[String], mru: &[String]) -> Vec<Option<usize>> {
     let at: HashMap<&str, usize> = mru
         .iter()
@@ -246,11 +223,9 @@ fn places(corpus: &[String], mru: &[String]) -> Vec<Option<usize>> {
         .collect()
 }
 
-/// The corpus a typed query ranks, and where its files end: `files` up to `real`, then each file
-/// of `opened` the index does not list — a build output git ignores, a file in a folder the index
-/// does not walk — then the notes links name that are not written yet, less any of those. The
-/// shared list itself when the history adds nothing. A file from outside the vault is no path in
-/// it, and stays on the opening page alone.
+/// Rank indexed files, then unindexed files from `opened`, then remaining missing
+/// linked notes. Reuse the shared corpus when history adds nothing. Files outside
+/// the vault remain only on the initial browse page.
 fn with_history(
     files: &Rc<Vec<String>>,
     real: usize,
@@ -284,8 +259,7 @@ fn with_history(
     (Rc::new(corpus), end)
 }
 
-/// The index's files followed by the notes in the folders git ignores that it does not hold, so an
-/// indexed file leads one of those at the same score; and which of `files` those notes now are.
+/// Append unique ignored notes after indexed files so indexed paths lead on equal scores.
 pub fn with_ignored(files: &mut Vec<String>, ignored: Vec<String>) -> HashSet<String> {
     let added: Vec<String> = {
         let held: HashSet<&str> = files.iter().map(String::as_str).collect();
@@ -312,17 +286,14 @@ fn text_at(selection: &gtk::SingleSelection, at: u32) -> Option<String> {
     Some(boxed.borrow::<Rc<Item>>().text().to_string())
 }
 
-/// "<Control>p" -> "Ctrl+P", spelled the way this GTK build spells it.
-///
-/// `gtk::ShortcutLabel` would do the same, but it is deprecated since GTK 4.18.
+/// Format `<Control>p` as `Ctrl+P` using this GTK build's spelling.
+/// `gtk::ShortcutLabel` is deprecated since GTK 4.18.
 fn accel_label(accel: &str) -> Option<String> {
     let (key, mods) = gtk::accelerator_parse(accel)?;
     Some(gtk::accelerator_get_label(key, mods).into())
 }
 
-/// Every accelerator that more than one command claims. Computed from the rows themselves, so a
-/// clash a hand-edited `[shortcuts]` table introduced surfaces the same way one made in the
-/// rebind dialog does.
+/// Find shortcut clashes from effective rows, including conflicts introduced by hand-edited config.
 fn conflicts(items: &[Rc<Item>]) -> HashSet<String> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut twice = HashSet::new();
@@ -339,8 +310,7 @@ fn conflicts(items: &[Rc<Item>]) -> HashSet<String> {
     twice
 }
 
-/// The accelerator, as a button that opens the rebind dialog: DESIGN.md leaves command mode as the
-/// app's only shortcuts reference, so this is also where a shortcut is changed.
+/// Open rebinding from the accelerator button; command mode is also the shortcuts reference.
 fn accel_button(
     action: &str,
     accels: &[String],
@@ -368,10 +338,8 @@ fn accel_button(
     button
 }
 
-/// Forgetting a recent vault, the same removal the start screen's rows have. Always visible, not
-/// a hover affordance: a button that only appears under the pointer is not there at all for the
-/// keyboard or for a touchscreen. A vault goes without a question, being only a list entry; a
-/// terminal session is asked about, its shells ending with it (`Shell::remove_recent`).
+/// Always-visible removal button for keyboard and touch access. Vault entries need
+/// no confirmation; terminal sessions confirm before ending shells (`Shell::remove_recent`).
 fn forget_button(key: &str, forget: &Rc<dyn Fn(&str)>) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name("user-trash-symbolic")
@@ -386,16 +354,10 @@ fn forget_button(key: &str, forget: &Rc<dyn Fn(&str)>) -> gtk::Button {
     button
 }
 
-/// Row template: a file row's icon, name, dimmed directory, and the slot the accelerator button
-/// goes in. The directory label expands, so the accelerator sits at the far end even when there
-/// is no directory to show.
+/// Build a row with icon, name, dim directory and a trailing accelerator slot.
 ///
-/// No margins: `.navigation-sidebar` gives the row its 36 px height and its padding, the same way
-/// the sidebar's file rows get theirs.
-///
-/// The button is built in `bind`, not in `setup`: it carries the action name of the row it is on,
-/// and a widget recycled across rows cannot. Only command rows get one and there are forty
-/// commands, so nothing worth saving is allocated here.
+/// The directory expands to align accelerators; `.navigation-sidebar` supplies row sizing.
+/// Command buttons are built in `bind` because their action names change when rows recycle.
 fn row_factory(
     rebind: Rc<dyn Fn(&str)>,
     forget: Rc<dyn Fn(&str)>,
@@ -527,9 +489,7 @@ fn row_factory(
     )
 }
 
-/// What the never-bind list of DESIGN.md's Keyboard section comes down to for someone standing in
-/// front of the dialog. Documented rather than enforced: the desktop and the editor will simply
-/// keep the chord, and saying so is more useful than a rule that guesses at the user's setup.
+/// Explain desktop/editor-owned shortcuts; actual interception depends on the user's setup.
 const RESERVED: &str = "Super, Alt+Tab, Ctrl+Alt and F1 belong to the desktop, and Ctrl+Z, Ctrl+A \
                         and Ctrl+X/C/V to the editor.";
 
@@ -613,13 +573,10 @@ fn capture_shortcut(
     dialog.present(Some(parent));
 }
 
-/// Opens in `mode` with an empty entry: the mode is chrome (title and placeholder), never a
-/// character the user has to type around or delete.
+/// Open `mode` with an empty entry; title and placeholder communicate the mode.
 ///
-/// What it returns hands the dialog the window's files again for as long as it is open: they can
-/// land after it opened — in a vault's first seconds, or fresh from the opening itself — and a
-/// typed query is then ranked again over them, the highlight staying on its row if that is still
-/// there. A list that has not changed changes nothing.
+/// The returned handle refreshes files while the dialog remains open, reranking the query
+/// and retaining selection when its row survives. Unchanged lists need no update.
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     mode: Mode,

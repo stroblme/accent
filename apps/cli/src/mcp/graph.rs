@@ -1,8 +1,6 @@
-//! explore's code: the declarations a question names, what calls them and what they call, and
-//! the calls leading from one to another — by name, from the index's declarations and the code's
-//! own text, as codegraph's are (`resolvedBy: exact-match`), or `precise`ly, by the language
-//! servers' call hierarchy (`precise.rs`). A call found by name is not resolved to the one
-//! declaration it reaches: a name several declarations share says so.
+//! Call relationships for explore, using indexed declarations and names or language-server call
+//! hierarchy (`precise.rs`). Name matches do not resolve individual declarations; ambiguous
+//! names are reported.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 

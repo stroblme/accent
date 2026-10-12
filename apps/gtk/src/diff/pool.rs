@@ -1,4 +1,4 @@
-//! The buttons a comparison lays over its views, kept for reuse from one refresh to the next.
+//! Reusable buttons over comparison views, retained across refreshes.
 
 use adw::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -13,11 +13,10 @@ struct Slot {
     key: Rc<Cell<usize>>,
 }
 
-/// Which slot each of `wanted` goes to, `had` naming what each slot shows now (`None`, hidden):
-/// the one showing it already, or else a spare one, shown ones before hidden ones, and new ones
-/// past the end once those run out. So a button stays with what it shows while that is wanted,
-/// and is shown or hidden only as the number wanted changes: a keystroke lays every button again,
-/// and a scroll lays those near the view.
+/// Assign `wanted` keys to slots in `had`: preserve matching slots, then
+/// reuse shown spares before hidden ones, then allocate. Stable assignment
+/// keeps buttons attached to runs across keystrokes and scroll relayouts;
+/// only count changes require showing or hiding them.
 pub(super) fn hand_out<K: PartialEq>(had: &[Option<K>], wanted: &[K]) -> Vec<usize> {
     let kept: Vec<Option<usize>> = (wanted.iter())
         .map(|key| had.iter().position(|h| h.as_ref() == Some(key)))
@@ -30,25 +29,21 @@ pub(super) fn hand_out<K: PartialEq>(had: &[Option<K>], wanted: &[K]) -> Vec<usi
         .collect()
 }
 
-/// The "⋯ N unchanged lines" buttons laid over one view, kept for reuse.
+/// Pool unchanged-run buttons for reuse on one view.
 ///
-/// GTK 4.22 has no public way to take an overlay back off a text view — `gtk_text_view_remove`
-/// knows the anchored children and the four border children, and warns for anything else — so
-/// a button that is not needed is hidden, and the next refresh picks it up again. The pool is
-/// owned by the pane and not by the comparison, because the editor's view outlives every
-/// comparison it hosts and the buttons parented to it have to as well.
+/// GTK 4.22 cannot publicly remove text-view overlay children, so unused buttons hide.
+/// Pane ownership matches the editor view's lifetime across comparisons.
 #[derive(Default)]
 pub struct Pool {
-    /// What the comparison laid over the view right now does with a press, asked at the press:
-    /// the buttons outlive the comparison that made them.
+    /// Current comparison action, looked up on click because pooled buttons
+    /// outlive the comparison that created them.
     pub(super) act: RefCell<Option<Act>>,
     slots: RefCell<Vec<Slot>>,
 }
 
 impl Pool {
-    /// A shown button for each of `runs`, `(key, rows)` the hidden run keyed `key`, `rows` long,
-    /// in order, laid over `view` where the pool has too few, and every other button hidden: see
-    /// [`hand_out`].
+    /// Show buttons for ordered `(key, rows)` runs, reuse slots via [`hand_out`],
+    /// add overlays only when needed and hide unused buttons.
     pub(super) fn claim(
         self: &Rc<Self>,
         view: &sourceview5::View,
@@ -85,9 +80,8 @@ impl Pool {
         slots.iter().filter(|slot| slot.button.is_visible()).count()
     }
 
-    /// A new button laid over `view`. Its press runs the comparison's [`Pool::act`] as it is at
-    /// the press, with the key the slot holds then; weak on the pool, because the button is a
-    /// child of the view the pool's slots hold.
+    /// Create an overlay button invoking the current [`Pool::act`] with its
+    /// current slot key. Keep the pool weak to avoid a view/button/slot cycle.
     fn build(self: &Rc<Self>, view: &sourceview5::View) -> Slot {
         let button = gtk::Button::new();
         button.add_css_class("flat");

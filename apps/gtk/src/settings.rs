@@ -1,9 +1,7 @@
-//! Preferences dialog.
+//! Preferences with immediate saving and change notifications, following GNOME convention.
 //!
-//! Every row writes the config and saves it as it is edited, then reports it through `on_change`,
-//! so there is no OK button (GNOME convention). Nothing here knows about `App`: the dialog takes
-//! the shared config, the vault it is editing and one callback, which is what lets `main` wire it
-//! up without a cycle.
+//! Shared config, vault and `on_change` are supplied by the caller, avoiding a dependency
+//! on `App`.
 
 use accent_core::config::{Config, FocusMode, RecolourConfig, Theme, VaultConfig};
 use adw::prelude::*;
@@ -35,25 +33,19 @@ const FOCUS_MODES: [(FocusMode, &str, &str); 3] = [
     ),
 ];
 
-/// A window's Preferences dialog, built once, ahead of its first open, and presented again after
-/// that. An open built its twenty-odd rows, then styled and laid them out, about 60 ms on the
-/// main thread before the dialog's animation could run, the stutter a reader saw; a dialog shown
-/// before costs about 30 (`ACCENT_BENCH_SWITCHER=prefs`), its first showing still styling every
-/// row once.
+/// Cached Preferences dialog, built before its first opening to reduce main-thread
+/// work during the presentation animation (`ACCENT_BENCH_SWITCHER=prefs`).
 pub struct Preferences {
     dialog: adw::PreferencesDialog,
     config: Rc<RefCell<Config>>,
-    /// The config the rows show, kept while the dialog is closed and `None` while it is up, its
-    /// rows then following whatever they change. Every row reads its value once, so a config that
-    /// moved in between — a hand edit, the palette — gets the dialog a new page before it shows.
+    /// Config snapshot while closed, `None` while shown. Rebuild rows if config changed
+    /// between openings because each row reads its initial value only once.
     shown: Rc<RefCell<Option<Config>>>,
 }
 
 impl Preferences {
-    /// `root` identifies which vault's per-vault settings are being edited, and is `None` in a
-    /// window opened on a file rather than a folder, where that group has no vault to be about.
-    /// `on_change` is called after every edit, with the config already saved to disk, so the
-    /// caller can apply it live.
+    /// `root` enables per-vault settings; `None` omits that group for standalone files.
+    /// `on_change` applies edits live after config is saved.
     pub fn new(
         config: Rc<RefCell<Config>>,
         root: Option<PathBuf>,
@@ -105,12 +97,10 @@ impl Preferences {
     }
 }
 
-/// Write `config` to disk, and say so in the log when that fails: the change is already in force
-/// on screen, and a preference that will not outlive the process is not worth a dialog.
+/// Save preferences, logging failures without interrupting the already-applied UI change.
 ///
-/// A file changed by someone else is not written over. Taking the change in is the config
-/// watcher's (`Shell::config_file_changed`), which keeps this change on top and writes both, or
-/// warns once that the file does not parse; so a refusal here is only a debug line.
+/// Do not overwrite external edits. `Shell::config_file_changed` merges them with current
+/// changes or warns about invalid config; the refusal here stays at debug level.
 pub fn save(config: &Config) {
     match config.save() {
         Ok(true) => {}
@@ -122,17 +112,14 @@ pub fn save(config: &Config) {
 /// The action a Preferences dialog answers by building its rows again ([`reload`]).
 const RELOAD: &str = "preferences.reload";
 
-/// Build a Preferences dialog's rows again from the config: what a hand edit to `config.toml`
-/// does to an open one (`Shell::config_file_changed`), and a config that moved does to a closed
-/// one as it is presented again. Only a Preferences dialog has the action, so any other dialog is
-/// left alone.
+/// Rebuild Preferences rows after a config change, on an open dialog or before
+/// reopening a cached one. Ignore dialogs without the reload action.
 pub fn reload(dialog: &adw::Dialog) {
     let _ = dialog.activate_action(RELOAD, None);
 }
 
-/// Put a page of rows reading `config` into `dialog`, in place of the one it has. Every row reads
-/// its value once, at construction, so a reset or a config taken in that changes any of them is
-/// a new page rather than a handle kept on each row.
+/// Replace the page from `config`: rows read values only at construction, so reset
+/// and external changes rebuild them rather than retain individual row handles.
 fn fill(
     dialog: &adw::PreferencesDialog,
     config: &Rc<RefCell<Config>>,
@@ -626,8 +613,7 @@ fn vault_group(
 
 // ---------------------------------------------------------------------------- restore defaults
 
-/// The one row that changes settings it does not show, so it asks first and the question names
-/// what survives. DESIGN.md, States: an alert dialog is for a choice that can lose data.
+/// Confirm resetting settings because it changes values beyond those shown; name preserved settings.
 fn reset_group(
     dialog: &adw::PreferencesDialog,
     config: &Rc<RefCell<Config>>,
@@ -689,8 +675,7 @@ fn reset_group(
     group
 }
 
-/// One entry row wired to a field of the vault config; `set` decides how the typed text lands in
-/// it. The entry itself is never rewritten while the user types, or the caret would jump.
+/// Bind an entry to vault config through `set`, preserving typed text and caret position.
 fn entry_row(
     title: &str,
     tooltip: Option<&str>,
@@ -720,8 +705,7 @@ fn entry_row(
     row
 }
 
-/// Trim a folder entry and drop any leading or trailing `/`: these paths are vault-relative, and
-/// a leading slash is the mistake that would quietly point one outside the vault.
+/// Trim whitespace and surrounding `/` to keep folder settings vault-relative.
 fn folder(text: &str) -> String {
     text.trim().trim_matches('/').trim().to_string()
 }

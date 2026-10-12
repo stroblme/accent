@@ -1,9 +1,5 @@
-//! The undo ledger: what this session drew, erased and moved on a document's pages, and which
-//! pages it put in, took out and moved.
-//!
-//! It lives here rather than in a viewer because both viewers need it — the GTK render thread
-//! and the Android session — and because it is pure bookkeeping over [`PdfDoc`]: no widget, no
-//! channel, no thread. What a viewer adds on top is where the work runs, not what it means.
+//! Shared undo/redo bookkeeping for ink and page edits. GTK and Android choose where work runs;
+//! this ledger defines the operations without widgets, channels or threads.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -23,13 +19,11 @@ pub fn fresh_id() -> u32 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// One change this session made to a page's ink or to the pages, for Undo to walk back and Redo
-/// to walk forward again. A stroke is named by an id rather than an index, because every erase
-/// and every move shuffles the indices.
+/// One undo/redo step for ink or pages. Stroke IDs survive the index shifts caused by erases and
+/// moves.
 ///
-/// A step's page number is the page's number when the step was made, and is never rewritten:
-/// Undo and Redo walk the one history newest first, so whenever a step is walked the pages are
-/// in the order they were in when it was made.
+/// Page numbers remain those at step creation: sequential Undo and Redo restore the page order
+/// needed by each step.
 pub enum Step {
     /// A stroke or a shape was drawn. What it drew is kept once Undo has taken it off, so that
     /// Redo can draw it again.
@@ -211,10 +205,9 @@ impl Ink {
         }
     }
 
-    /// The history ends — the tab closes — so the strokes of another editor's an erase hid,
-    /// which no Undo will show again now, are deleted for good, with their popups, and the
-    /// history and the names go with them. Only strokes this session hid: one the file already
-    /// had hidden is no step here. Nothing reaches the disk: the caller saves, as after a stroke.
+    /// End the history and delete foreign strokes still hidden by this session, including
+    /// popups. Pre-existing hidden strokes are untouched. Clear IDs and history; the caller
+    /// saves the document.
     pub fn purge(&mut self, doc: &mut PdfDoc) -> Result<()> {
         let hidden: Vec<u32> = (self.done.iter().flatten())
             .filter_map(|step| match step {

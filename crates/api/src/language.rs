@@ -1,15 +1,8 @@
-//! What a text tab asks about its own content: completion, hover, definition, symbols,
-//! references, folds, and the diagnostics that arrive unasked.
-//!
-//! One shape for every text file. A code file is answered by a language server over
-//! `accent-lsp`; a note is answered by the index (`notes.rs`). The UI never learns which. Every
-//! position here is a line and a column in *characters* (Unicode scalars), which is what a
-//! `GtkTextIter` counts in; the UTF-16 arithmetic a server wants happens next to the text, on
-//! the host that holds it.
-//!
-//! The requests are futures on the shared runtime, wrapped in a [`Task`] that aborts when
-//! dropped: a completion the user has typed past is cancelled at the server rather than answered
-//! into the void.
+//! Completion, navigation, symbols, folds and diagnostics for all text documents.
+//! Code uses `accent-lsp`; notes use the index, behind the same UI interface.
+//! Positions use zero-based lines and Unicode scalar columns to match `GtkTextIter`;
+//! server encoding conversions happen beside the text on its host. Requests run
+//! on the shared runtime as [`Task`]s, cancelled when dropped.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -54,14 +47,14 @@ pub struct Range {
     pub end: Pos,
 }
 
-/// Somewhere to go. `path` is vault-relative inside the vault, absolute outside it, and a URL
-/// when the target is not a file at all (an external link in a note).
+/// A navigation target: `path` is vault-relative inside the vault, absolute
+/// outside it, or a URL for external links.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Location {
     pub path: String,
     pub range: Range,
-    /// A link's `#anchor` where `range` cannot place it: a PDF's `page=3&selection=…`, or a
-    /// heading or a `^block` the file does not have, `range` then being the top of the file.
+    /// A `#anchor` not represented by `range`, such as a PDF selection or a missing
+    /// heading/block. Missing text anchors leave `range` at the file start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<String>,
     /// Nothing is there yet: `path` is the file following the link would create.
@@ -83,8 +76,8 @@ pub struct TextEdit {
     pub text: String,
 }
 
-/// What a completion item is, for the glyph beside it. The LSP kinds accent shows, plus `Tag`
-/// for a note's `#tag`; anything else a server sends is `Text`.
+/// Completion glyph kinds: supported LSP kinds plus `Tag` for note tags.
+/// Unsupported server kinds map to `Text`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     Text,
@@ -149,35 +142,34 @@ pub struct Completion {
     pub insert: String,
     /// `insert` is a snippet (`$1`, `${2:name}`), not literal text.
     pub is_snippet: bool,
-    /// What `insert` replaces: the word or trigger before the caret, and whatever the item wants
-    /// eaten after it.
+    /// Range replaced by `insert`, including the prefix before the caret
+    /// and any suffix the completion replaces.
     pub replace: Range,
     /// Applied with the insert, in one undo step: an import, typically.
     pub extra_edits: Vec<TextEdit>,
     /// The item as the server sent it, when it can still be resolved for more; opaque to the UI.
     pub resolve: Option<serde_json::Value>,
-    /// Selected as the list opens once what was typed is its filter exactly: a Lean abbreviation
-    /// typed out (`\to`), so Tab writes it. Set by the window's abbreviations only; a server's own
-    /// `preselect` is not read, as Return would stop meaning a new line in code.
+    /// Preselect an exact abbreviation match, so Tab accepts a fully typed Lean
+    /// abbreviation such as `\to`. Only window abbreviations set this; server
+    /// `preselect` is ignored to preserve Return as a newline in code.
     #[serde(default)]
     pub preselect: bool,
 }
 
-/// A completion answer. `incomplete` is the server saying it stopped at a cap: the list has to
-/// be asked for again as the word grows, because narrowing what it sent would miss items it
-/// left out.
+/// Completion results. When `incomplete` is true, query again as the prefix grows;
+/// filtering this capped list alone could miss omitted items.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Completions {
     pub items: Vec<Completion>,
     pub incomplete: bool,
-    /// A PDF's bookmarks the side that answered could not list, having no PDF reader: a host's
-    /// `serve`. The window lists them from its own copy of the file ([`Vault::completion`]).
+    /// PDF bookmarks deferred by a host without a PDF reader. The window lists
+    /// them from its local copy ([`Vault::completion`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pages: Option<PdfPages>,
 }
 
-/// `[[paper.pdf#` left for the side holding a copy of the PDF to answer: which file, and what
-/// each `[[paper.pdf#page=N]]` row keeps of the link as typed.
+/// Deferred `[[paper.pdf#` completion for the side holding a readable PDF:
+/// the resolved file and the typed target retained in each page row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PdfPages {
     /// The PDF the link resolved to, vault-relative.
@@ -187,7 +179,7 @@ pub struct PdfPages {
     pub replace: Range,
 }
 
-/// The signature the caret is inside a call of.
+/// The signature of the call containing the caret.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Signature {
     pub label: String,
@@ -205,7 +197,7 @@ pub struct Hover {
     pub range: Option<Range>,
 }
 
-/// What a proof assistant says holds at a position. Plain text, which the window shows as it is.
+/// Proof-assistant state at a position, displayed as plain text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Goals {
     /// The open goals of the tactic proof there, each as its hypotheses then `⊢ target`;
@@ -241,11 +233,11 @@ pub struct Diagnostic {
     pub source: Option<String>,
 }
 
-/// A call a language server's call hierarchy found, seen from the declaration asked about.
+/// A language-server call-hierarchy edge relative to the queried declaration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Call {
-    /// The declaration at the other end — the caller of an incoming call, the callee of an
-    /// outgoing one — by its name's range, inside the vault.
+    /// The caller for incoming calls or callee for outgoing calls, located by its
+    /// name range inside the vault.
     pub decl: Location,
     pub name: String,
     /// The lines the calls are written on, in the caller's file, 0-based.
@@ -273,8 +265,8 @@ pub struct Support {
     pub signature_triggers: Vec<char>,
     /// The language server accent looked for and did not find, so the UI can say so when asked.
     pub missing: Option<String>,
-    /// Ghost text can be had for this document (it is prose and `merl-rt` is installed), so the
-    /// UI arms the inline path for this tab while the Ghost Text preference is on.
+    /// Whether prose ghost text is available (`merl-rt` is installed), allowing
+    /// the UI to enable inline suggestions when the preference is on.
     pub inline: bool,
     /// The provider answers [`Vault::goals`]: a proof assistant's server.
     pub goals: bool,
@@ -282,15 +274,13 @@ pub struct Support {
 
 // -------------------------------------------------------------------- tasks
 
-/// A request in flight on the shared runtime. Dropping it aborts the request, which is what
-/// sends `$/cancelRequest` to a language server.
-///
-/// A `JoinHandle` can be polled from any executor, so the GTK main loop awaits one directly.
+/// A request on the shared runtime. Dropping it aborts the request and sends
+/// `$/cancelRequest` to its language server. Its `JoinHandle` can be awaited
+/// from any executor, including the GTK main loop.
 pub struct Task<T> {
     handle: tokio::task::JoinHandle<Result<T>>,
-    /// What to do when the answer stops mattering, for a request that cannot be aborted where it
-    /// waits. A remote round trip runs on a blocking thread, where `abort` does nothing at all,
-    /// so it is cancelled by telling the server instead.
+    /// Cancellation callback for requests whose wait cannot be aborted. Remote
+    /// round trips use blocking threads, so cancellation must notify the server.
     on_drop: Option<Box<dyn FnOnce() + Send>>,
 }
 
@@ -350,39 +340,37 @@ impl<T: Send + 'static> Task<T> {
 
 pub(crate) type Fut<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
-/// One thing that answers for a set of open documents: a language server, or the index.
-///
-/// Boxed futures rather than `async fn`, because the registry holds these as `dyn Language`.
-/// `open`, `change` and `close` are synchronous: each is a notification or a local analysis,
-/// and neither provider waits on anything to answer them.
+/// A provider for open documents: a language server or the index.
+/// Boxed futures allow the registry to store `dyn Language`. `open`, `change`
+/// and `close` are synchronous notifications or local analysis and do not wait.
 pub(crate) trait Language: Send + Sync {
     fn open(&self, rel: &str, language_id: &str, text: String) -> Result<Support>;
     fn change(&self, rel: &str, text: String) -> Result<()>;
-    /// The document reached the disk. What a server does on a save it does not do on a change:
-    /// rust-analyzer's `cargo check` diagnostics, for one.
+    /// Notify that the document reached disk, triggering save-only work such as
+    /// rust-analyzer's `cargo check` diagnostics.
     fn saved(&self, _rel: &str) -> Result<()> {
         Ok(())
     }
-    /// The user left the document. A provider too expensive to tell about every save is told
-    /// here instead: merl rebuilds its whole index on a save, which is not a per-keystroke cost.
+    /// Notify that the user left the document. Expensive save work, such as merl
+    /// rebuilding its index, runs here instead of on each autosave.
     fn settle(&self, _rel: &str) -> Result<()> {
         Ok(())
     }
-    /// Say again what is wrong with the document, the text being what it was. For a provider
-    /// whose answer depends on more than the document — the index, which the note a link names
-    /// may have just appeared in — where a language server publishes on its own and ignores this.
+    /// Refresh diagnostics when external state changes without a text edit, such
+    /// as a missing link target appearing in the index. Language servers publish
+    /// their own updates and ignore this.
     fn rediagnose(&self, _rel: &str) -> Result<()> {
         Ok(())
     }
     fn close(&self, rel: &str);
     fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Completions>;
-    /// The rest of the line, from a model or an index of the vault: ghost text, painted where
-    /// the caret is rather than listed in the popup. `None` from anything that does not offer it.
+    /// Inline ghost text from a model or vault index; `None` for providers
+    /// without this capability.
     fn inline_completion(&self, _rel: &str, _pos: Pos) -> Fut<'_, Option<String>> {
         Box::pin(async { Ok(None) })
     }
-    /// Fill in what the item was too expensive to send: `rel` says which document's text the
-    /// edits it comes back with are measured against.
+    /// Resolve deferred completion details. `rel` identifies the document whose
+    /// text defines returned edit ranges.
     fn resolve(&self, rel: &str, item: Completion) -> Fut<'_, Completion>;
     fn signature_help(&self, rel: &str, pos: Pos) -> Fut<'_, Option<Signature>>;
     fn hover(&self, rel: &str, pos: Pos) -> Fut<'_, Option<Hover>>;
@@ -394,19 +382,18 @@ pub(crate) trait Language: Send + Sync {
     fn goals(&self, _rel: &str, _pos: Pos) -> Fut<'_, Option<Goals>> {
         Box::pin(async { Ok(None) })
     }
-    /// Whether the provider wants to be asked before the file or folder at `abs` moves: a
-    /// language server's `willRename` filters.
+    /// Whether the provider's `willRename` filters match the file or folder at `abs`.
     fn renames(&self, _abs: &Path, _is_dir: bool) -> bool {
         false
     }
-    /// What has to change because these files move, `(old, new)` vault-relative: an import naming
-    /// a moved module. Asked before they move, because a server may look at the disk to answer.
+    /// Request edits for `(old, new)` vault-relative moves, such as import updates.
+    /// Ask before moving files because the server may read them to answer.
     fn will_rename(&self, _moves: Vec<(String, String)>) -> Fut<'_, Vec<FileEdits>> {
         Box::pin(async { Ok(Vec::new()) })
     }
-    /// The calls into the declaration whose name is at `pos` (`incoming`), or out of it, as the
-    /// file is on disk unless it is open; `None` where the provider knows no declaration, and
-    /// [`Error::NotYet`] where it cannot tell yet.
+    /// Incoming or outgoing calls for the declaration named at `pos`. Use the
+    /// open buffer when available, otherwise disk. `None` means no declaration;
+    /// [`Error::NotYet`] means the provider cannot answer yet.
     fn calls(
         &self,
         _rel: &str,
@@ -416,8 +403,8 @@ pub(crate) trait Language: Send + Sync {
     ) -> Fut<'_, Option<Vec<Call>>> {
         Box::pin(async { Ok(None) })
     }
-    /// Whether it has answered [`Self::calls`] with a declaration, which a server still loading
-    /// its project has not.
+    /// Whether [`Self::calls`] has returned a declaration; false while
+    /// the server is still loading its project.
     fn has_answered(&self) -> bool {
         true
     }
@@ -439,9 +426,8 @@ pub(crate) type Key = (String, PathBuf);
 /// The open documents: each one's provider, the session it came from, and whether it is prose.
 pub(crate) type Open = HashMap<String, (Option<Key>, Arc<dyn Language>, bool)>;
 
-/// What opening a document settled on: the provider that answers for it, if anything does, the
-/// protocol's name for its language, a server that should have been installed and was not, and
-/// the session to count the document against.
+/// The provider, protocol language id, missing server and session selected
+/// when opening a document.
 type Opened = (
     Option<Arc<dyn Language>>,
     String,
@@ -449,20 +435,17 @@ type Opened = (
     Option<Key>,
 );
 
-/// The providers a vault has started, and which document each one holds.
-///
-/// Filled in by the notes and external providers; the registry itself is the shape of the
-/// session map and of the `Event` channel the diagnostics travel on.
+/// Vault providers and their open documents. Notes and external providers
+/// populate the registry; diagnostics travel through its `Event` channel.
 pub(crate) struct Languages {
     pub(crate) root: PathBuf,
     pub(crate) db: PathBuf,
     pub(crate) events: Sender<Event>,
     /// One session per (server, root): the cell makes concurrent openers await one start.
     pub(crate) sessions: Mutex<HashMap<Key, Session>>,
-    /// Open document → the provider holding it, the session it came from, and whether it is
-    /// prose (and so wants the ghost session): the last document to close takes that session
-    /// down with it. The key is `None` for a document no session answers for, which is a prose
-    /// file with its words and nothing else.
+    /// Each open document's provider, session and prose flag. Closing the last
+    /// document stops its session. A `None` key denotes prose with word
+    /// suggestions but no session.
     pub(crate) docs: Mutex<Open>,
     /// Whether the vault runs a ghost-text session; the preference behind it is global, so a
     /// vault is told it once and every document follows.
@@ -481,9 +464,8 @@ pub(crate) struct Languages {
     asked: Mutex<HashMap<Key, tokio::time::Instant>>,
 }
 
-/// The vault's listing of a folder, the file tree's own ([`crate::local::list_dir`]), for a
-/// completion that offers files. It reads the index on a connection of its own, opened by the
-/// first such completion, so it never waits on the tree's.
+/// Folder listings for path completion, using [`crate::local::list_dir`] and
+/// a lazily opened index connection to avoid waiting on the file tree's connection.
 pub(crate) struct Listing {
     root: PathBuf,
     db: PathBuf,
@@ -524,10 +506,9 @@ impl Languages {
         })
     }
 
-    /// Turn ghost text on or off. Off shuts the ghost session down at once, and with it merl's
-    /// index; on starts it again, indexing the vault anew, if a prose document is open to want
-    /// it, and takes back a give-up ([`Self::ghost_may_start`]). Each document takes up the
-    /// change on its next suggestion ([`words::Layered`]).
+    /// Toggle ghost text. Off stops the session and frees merl's index; on clears
+    /// give-up state ([`Self::ghost_may_start`]) and restarts if prose is open.
+    /// Documents observe the change on their next suggestion ([`words::Layered`]).
     pub(crate) fn set_ghost(self: &Arc<Self>, on: bool) {
         if self.ghost.swap(on, Ordering::Relaxed) == on {
             return;
@@ -547,8 +528,8 @@ impl Languages {
         }
     }
 
-    /// Offer prose documents words or not. Off lets the dictionary go too, which is read again
-    /// on the first word asked for once they are back on.
+    /// Toggle prose word suggestions. Off releases the dictionary; the first
+    /// request after enabling reloads it.
     pub(crate) fn set_words(&self, on: bool) {
         self.words.store(on, Ordering::Relaxed);
         if !on {
@@ -556,9 +537,8 @@ impl Languages {
         }
     }
 
-    /// The session under `key`, started with `start` if it is not there yet. Concurrent openers
-    /// of the same server await one start, and a start that failed is not remembered, so the
-    /// next document to open tries again.
+    /// Get or start the session under `key`. Concurrent openers share one start;
+    /// failed starts are not cached, so the next opener retries.
     pub(crate) async fn session(
         self: &Arc<Self>,
         key: Key,
@@ -579,11 +559,9 @@ impl Languages {
         cell.get_or_try_init(|| start).await.cloned()
     }
 
-    /// The vault's one ghost-text session, started on the first prose document that wants it.
-    ///
-    /// Keyed by the vault root rather than by `session_root`: merl indexes the whole vault, and
-    /// a multi-project vault would otherwise get one index per `.git` in it. The argv is exactly
-    /// these three words — merl-rt exits with a usage message on any other flag.
+    /// Start one ghost-text session on the first prose document that needs it.
+    /// Key by vault root because merl indexes the whole vault, avoiding duplicate
+    /// indexes for multiple projects. Pass only the three supported argv words.
     async fn ghost_session(self: &Arc<Self>) -> Option<Arc<dyn Language>> {
         let root = self.root.clone();
         let key = (GHOST.to_string(), root.clone());
@@ -622,9 +600,9 @@ impl Languages {
         }
     }
 
-    /// How a document gets the ghost session whenever it has no live one: the running one, or
-    /// a fresh start. Nothing while Ghost Text is off or the vault has given up on it. Weak,
-    /// because the registry holds the document's provider.
+    /// Weak callback supplying a live or restarted ghost session. Return none
+    /// when disabled or after give-up. Weak ownership avoids a cycle with the
+    /// registry-held document provider.
     fn respawn(self: &Arc<Self>) -> words::Respawn {
         let me = Arc::downgrade(self);
         Box::new(move || {
@@ -638,9 +616,9 @@ impl Languages {
         })
     }
 
-    /// Count a start of the ghost session at `now`, or refuse it: a `merl-rt` that exits as soon
-    /// as it starts must not be started again on every pause in the typing. Past [`GHOST_STARTS`]
-    /// within [`GHOST_WINDOW`] the vault gives up on it until it is opened again, and says so once.
+    /// Allow a ghost-session start at `now` unless [`GHOST_STARTS`] within
+    /// [`GHOST_WINDOW`] have exhausted the retry budget. This prevents restart
+    /// loops on each typing pause; give up until reopening and report once.
     fn ghost_may_start(&self, now: Instant) -> bool {
         let mut starts = locked(&self.ghost_starts);
         let Some(recent) = starts.as_mut() else {
@@ -665,10 +643,8 @@ impl Languages {
             .ok_or_else(|| Error::Language(format!("{rel} is not open")))
     }
 
-    /// Stop every provider and forget every document.
-    ///
-    /// Blocks on the runtime, so it must never be called from a runtime worker thread; its one
-    /// caller is `Local::drop`, which runs on the thread that closed the window.
+    /// Stop all providers and clear documents. Blocks on the runtime; never call
+    /// from a runtime worker. `Local::drop` calls this on the closing thread.
     pub(crate) fn shutdown(&self) {
         let sessions: Vec<Session> = locked(&self.sessions)
             .drain()
@@ -693,14 +669,10 @@ impl Languages {
         });
     }
 
-    /// Ask every language server already running, whose project holds a moved path and whose
-    /// filters take it, what the moves mean for the code naming them — before anything moves.
-    /// Returns those edits and the moves some server was asked about.
-    ///
-    /// Only running sessions: a rename is no reason to start rust-analyzer, and a server that
-    /// was not running has nothing open that could be wrong. Each is given 5 s. Blocks on the
-    /// runtime, so it must not be called from one of its workers; the callers are a rename's
-    /// worker thread and the host's request threads.
+    /// Before moving files, request edits from running servers whose projects
+    /// and filters match the paths. Return edits and the moves covered. Do not
+    /// start servers for a rename; give each 5 s. Blocks on the runtime, so call
+    /// from a rename worker or host request thread, never a runtime worker.
     pub(crate) fn will_rename(
         &self,
         moves: &[(String, String, bool)],
@@ -741,11 +713,10 @@ impl Languages {
         (edits, asked)
     }
 
-    /// [`Language::calls`] from the language server for `rel`'s language, as the app would run
-    /// it, started for this when it is not running and stopped once it has gone `waits.idle`
-    /// without a question, unless a tab's document holds it. Waits `waits.starting` for a server
-    /// that has not answered yet, `waits.asking` for one that has; an error says why there is no
-    /// answer ("rust-analyzer not ready").
+    /// Request [`Language::calls`] for `rel`, starting its configured server if
+    /// needed. Allow `waits.starting` until the first answer, then `waits.asking`.
+    /// Stop after `waits.idle` without requests unless an open tab retains it.
+    /// Errors explain why no answer is available.
     pub(crate) fn calls(
         self: &Arc<Self>,
         rel: String,
@@ -914,13 +885,9 @@ impl Languages {
         })
     }
 
-    /// The user closed the tab: the provider is told, and a session left with no open document
-    /// is shut down rather than kept for the life of the vault.
-    ///
-    /// ponytail: the last close is the rule, not a wall clock. Reopening the file then pays a
-    /// cold start, which is the price of not holding a rust-analyzer for a file nobody is
-    /// reading. The ghost session is not counted here — it is one process for the whole vault
-    /// and its start is measured in seconds; it ends with the vault, or with Ghost Text.
+    /// Close the document and stop its session if no documents remain. Reopening
+    /// pays a cold start rather than retaining an unused server. The vault-wide
+    /// ghost session is separate and ends with the vault or Ghost Text preference.
     pub(crate) fn close_document(&self, rel: String) -> Task<()> {
         let (key, provider) = match locked(&self.docs).remove(&rel) {
             Some((key, provider, _)) => (key, Some(provider)),
@@ -945,18 +912,16 @@ impl Languages {
     }
 }
 
-/// The ghost-text server: one process per vault, answering `textDocument/inlineCompletion` from
-/// an index of the vault's own notes. Not in `SERVERS`, because it answers beside a language's
-/// own provider rather than instead of one.
+/// One vault-wide ghost-text process serving `textDocument/inlineCompletion`
+/// from notes. Separate from `SERVERS` so it supplements a language provider.
 const GHOST: &str = "merl-rt";
 
 /// How long a server still loading its project is left before it is asked again.
 const AGAIN: Duration = Duration::from_millis(250);
 
-/// How long [`Vault::calls`] waits on a language server — `starting` until it has answered once,
-/// rust-analyzer loading a project for seconds first, and `asking` a question after that — and
-/// how long one started for them is kept without a question (`idle`, counted from a question's
-/// start, so longer than the waits).
+/// Timeouts for [`Vault::calls`]: `starting` before the first answer, `asking`
+/// afterwards, and `idle` for sessions started by requests. Idle time starts
+/// with the request and must exceed the request waits.
 #[derive(Debug, Clone, Copy)]
 pub struct Waits {
     pub starting: Duration,
@@ -1017,11 +982,9 @@ pub(crate) enum Server {
     Missing(String),
 }
 
-/// The servers accent starts by itself: GtkSourceView language id, the id the protocol calls the
-/// same language, and the command lines to try in order.
-///
-/// Deliberately short. A language nobody here has run is better served by a line in the vault's
-/// config than by a guess in this table.
+/// Built-in server choices: GtkSourceView id, protocol id and commands in
+/// preference order. Keep the list to tested languages; configure others
+/// in the vault instead of guessing defaults.
 const SERVERS: &[(&str, &str, &[&[&str]])] = &[
     ("rust", "rust", &[&["rust-analyzer"]]),
     ("c", "c", &[&["clangd"]]),
@@ -1096,10 +1059,10 @@ pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
     }
 }
 
-/// The program that answers for `language` as a status line names it ("lake"): the configured
-/// command line's, or the table's. Read from the config alone, not the PATH, which is the host's
-/// on a remote vault: `None` for a note, which the index answers, a language with no server, and
-/// one whose built-in choices are different programs (Python's pyright or pylsp).
+/// Server program name for a status line (for example, "lake"), from config
+/// without consulting the local PATH, which may differ from the host's.
+/// `None` for notes, unsupported languages or ambiguous built-in choices
+/// such as Python's pyright/pylsp.
 fn server_name(cfg: &LspConfig, language: &str) -> Option<String> {
     let name = |program: &str| {
         Path::new(program)
@@ -1162,16 +1125,11 @@ fn in_path(exe: &str) -> bool {
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(exe).is_file()))
 }
 
-/// Where a server should be rooted for a file: the nearest checkout or folder holding one of
-/// the language's `markers` at or above it that is still inside the vault, else the vault itself.
-///
-/// A vault of several projects gets one server per project, which is what makes `rust-analyzer`
-/// see a crate rather than a directory of unrelated ones. A worktree's `.git` is a file, so
-/// existence is the test, not directory-ness.
-///
-/// A file under a `.lake` folder, Lean's packages and builds, is looked up from the folder
-/// holding the outermost one: a package there has a lakefile and a checkout of its own but no
-/// build, so a file Go to Definition opens in it is the project's server's to answer.
+/// Choose the nearest checkout or language root marker inside the vault,
+/// falling back to the vault root. This gives each project its own server.
+/// Test `.git` existence because worktrees use a file.
+/// For files under `.lake`, search from outside the outermost `.lake` so
+/// dependency packages use the project's server rather than their own roots.
 pub(crate) fn session_root(vault_root: &Path, abs_file: &Path, markers: &[&str]) -> PathBuf {
     let lake = abs_file
         .ancestors()
@@ -1189,17 +1147,12 @@ pub(crate) fn session_root(vault_root: &Path, abs_file: &Path, markers: &[&str])
 
 // ------------------------------------------------------------------ the façade
 
-/// What a text tab asks about the document it holds. Every one of these is a [`Task`]: the UI
-/// awaits it on its own loop and drops it when the answer stops mattering.
-///
-/// A remote vault asks the host, where the files and the language servers are; the call itself
-/// blocks, so it runs on a blocking thread of the runtime rather than being cancelled.
+/// Document operations as [`Task`]s, awaited by the UI and dropped when stale.
+/// Remote requests execute beside the files and servers; their round trips
+/// run on the runtime's blocking pool.
 impl Vault {
-    /// Start answering for `rel`, and say what the provider can do. Nothing else here works
-    /// before this has finished.
-    ///
-    /// Spelled out rather than tabled: it is the one call that reads the vault's config, for the
-    /// language server the file's language names.
+    /// Open `rel` and return provider capabilities before any other operation.
+    /// Defined separately because it reads the vault's language-server config.
     pub fn open_document(&self, rel: &str, language_id: &str, text: String) -> Task<Support> {
         match &self.backend {
             Backend::Local(v) => v.open_document(rel, language_id, text),
@@ -1220,8 +1173,8 @@ impl Vault {
         server_name(&self.config().lsp, language)
     }
 
-    /// The user closed the tab. Spelled out because it forgets the document rather than telling
-    /// a provider about it.
+    /// Close the tab and remove its document from the registry, beyond notifying
+    /// the provider.
     pub fn close_document(&self, rel: &str) -> Task<()> {
         match &self.backend {
             Backend::Local(v) => v.close_document(rel),
@@ -1229,12 +1182,10 @@ impl Vault {
         }
     }
 
-    /// The calls into the declaration whose name is at `pos` in `rel` (`incoming`), or out of
-    /// it, by the call hierarchy of the language server the app runs for the file — which needs
-    /// no tab open: the server reads the file from disk. `None` where it knows no declaration.
-    /// Waits for a server that is starting or loading its project, and keeps it running until
-    /// it goes unasked, as `waits` says. A local vault's only: `accent-cli mcp`, which asks
-    /// this, runs where the files are.
+    /// Incoming or outgoing calls for the declaration named at `pos` in `rel`.
+    /// No open tab is required: the configured server can read from disk.
+    /// `None` means no declaration. `waits` controls startup, request and idle waits.
+    /// Local vaults only, for `accent-cli mcp` running beside the files.
     pub fn calls(
         &self,
         rel: &str,
@@ -1254,13 +1205,10 @@ impl Vault {
     }
 }
 
-/// What a document is asked and told, written once for the three layers that carry it:
-/// [`Languages`] finds the provider that holds the document and spawns the call on the runtime,
-/// [`Vault`] makes it here or on the host that has the files, and the host answers it through the
-/// same rpc dispatch every other method goes through. Each line reads `façade => trait method`. A
-/// line with an answer is a request, whose trait method is a future to await, and `then f`
-/// finishes a host's answer here with `f`; one without is a notification, which the provider has
-/// taken in by the time its trait method returns.
+/// Generate document operations for [`Languages`], [`Vault`] and host RPC.
+/// Rows map `façade => trait method`: requests await a future, with `then f`
+/// finishing host answers locally; notifications finish when the provider
+/// accepts them. Providers run on the shared runtime beside the files.
 macro_rules! requests {
     (@remote $r:ident $name:ident $params:expr) => {
         remote_task($r.clone(), stringify!($name), $params)
@@ -1306,9 +1254,8 @@ macro_rules! requests {
             }
         )* }
 
-        /// These methods' half of the rpc dispatch. Every request runs on its own thread in
-        /// [`crate::rpc::serve_local`], so blocking on the runtime here is a wait for one answer
-        /// and never a nested one.
+        /// Dispatch these operations on host request threads in
+        /// [`crate::rpc::serve_local`], allowing a single, non-nested runtime wait.
         pub(crate) fn dispatch(
             vault: &Local,
             method: &str,
@@ -1338,28 +1285,25 @@ requests! {
     folds => folds() -> Vec<Fold>;
     /// The proof goals at a position, from a proof assistant's server ([`Support::goals`]).
     goals => goals(pos: Pos) -> Option<Goals>;
-    /// The rest of the line as ghost text, or nothing. Asked on every pause in the typing, so
-    /// dropping the task is the normal end of one.
+    /// Inline ghost text, or none. Queried on typing pauses, so dropping stale
+    /// tasks is the normal cancellation path.
     inline_completion => inline_completion(pos: Pos) -> Option<String>;
 
     // What the editor did to the document: nothing to answer, and nothing to await inside.
     change_document => change(text: String);
     /// The buffer was written; a server that checks on save is told.
     save_document => saved();
-    /// The user left the document. Cheap for every provider but the ghost one, which re-reads
-    /// the vault here rather than on every autosave.
+    /// Notify that the user left the document. The ghost provider rereads the
+    /// vault here rather than on every autosave.
     settle => settle();
-    /// The index moved under the document: its hints are worked out again and published. What a
-    /// note's dangling link needs, the note it names having just been created.
+    /// Republish hints after index changes, such as a dangling link's target
+    /// being created without an edit to the source note.
     rediagnose => rediagnose();
 }
 
-/// One remote request as a task.
-///
-/// The round trip runs on a blocking thread, where `abort` does nothing, so dropping the task
-/// sends the server a `cancel` for that request id instead: a completion the user has typed past
-/// is dropped where the language server is, rather than computed into a pipe nobody reads, and
-/// the blocking thread is let go at once rather than when the host answers.
+/// Wrap a remote request as a task. The round trip blocks, so dropping sends
+/// `cancel` to the host instead of relying on thread abort. This cancels stale
+/// server work and releases the waiting thread without waiting for an answer.
 fn remote_task<T: DeserializeOwned + Send + 'static>(
     r: Arc<Remote>,
     method: &'static str,
@@ -1390,9 +1334,8 @@ fn remote_task_then<T: DeserializeOwned + Send + 'static>(
     .cancelled_by(move || r.cancel(&asked))
 }
 
-/// List the bookmarks a host left unlisted in its answer to `[[paper.pdf#`, its `serve` having no
-/// PDF reader: from the copy this machine keeps to show the PDF, fetched as opening it would be.
-/// Remote bytes travel as files, never in the protocol (DESIGN.md, Architecture).
+/// Complete deferred `[[paper.pdf#` bookmarks from the locally fetched PDF;
+/// host `serve` has no PDF reader. Remote bytes travel as files, never RPC data.
 fn list_pages(r: &Remote, mut answer: Completions) -> Result<Completions> {
     match answer.pages.take() {
         Some(pages) => {
@@ -1419,9 +1362,8 @@ impl Local {
     }
 }
 
-/// A note's headings as symbols and the folds of its sections, fences and frontmatter, read from
-/// its text alone: what the notes provider answers, for a note outside every vault, which has no
-/// provider to ask.
+/// Compute headings and folds from note text for documents outside a vault,
+/// where no notes provider is available.
 pub fn note_outline(text: &str) -> (Vec<Symbol>, Vec<Fold>) {
     let analysis = markdown::analyze(text);
     (
@@ -1430,7 +1372,7 @@ pub fn note_outline(text: &str) -> (Vec<Symbol>, Vec<Fold>) {
     )
 }
 
-/// Byte offset → position in `text`. Linear in the offset; a line table if a note ever makes it show.
+/// Convert a byte offset to a position in `text`, in linear time.
 pub fn pos_of(text: &str, byte: usize) -> Pos {
     let byte = byte.min(text.len());
     let head = &text[..byte];
@@ -1640,8 +1582,8 @@ mod tests {
         );
     }
 
-    /// The notes provider is the session every checkout has — no binary to install — so it is
-    /// what proves the rule: a session lives exactly as long as a document it holds is open.
+    /// The notes provider needs no external binary, so it verifies that a session
+    /// lives exactly while it holds an open document.
     #[test]
     fn the_last_document_to_close_takes_its_session_with_it() {
         let root = tempfile::tempdir().unwrap();
@@ -1680,9 +1622,8 @@ mod tests {
         });
     }
 
-    /// A server started for `calls` is waited on longer until it first answers — the fake one
-    /// refuses for longer than `asking` here, as rust-analyzer does while it loads a project —
-    /// and stopped once it has gone `idle` without a question.
+    /// Verify longer startup waits until the server first answers, then stop it
+    /// after `idle` without requests. The fake server models project loading.
     #[test]
     fn a_server_started_for_calls_is_waited_for_then_stopped_when_idle() {
         let root = tempfile::tempdir().unwrap();
@@ -1853,8 +1794,7 @@ mod tests {
         });
     }
 
-    /// Exits spread out are started again every time; a burst of them is given up on for good,
-    /// and said so once.
+    /// Retry spaced-out exits; give up after a burst and report it once.
     #[test]
     fn a_ghost_session_that_keeps_exiting_is_given_up_on_once() {
         let (events, said) = std::sync::mpsc::channel();

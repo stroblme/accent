@@ -448,17 +448,10 @@ pub(super) fn bench_hidden(app: &Rc<App>) {
     });
 }
 
-/// Copy a file and paste it beside itself, then cut the copy and paste it in the vault root.
-///
-/// What no unit test reaches: the real GDK clipboard a local vault writes and reads back, the
-/// `(copy)` mark a paste beside its source takes, the rows a Cut dims, and that the paste of a Cut
-/// moves the file rather than copying it again. Every step is a clipboard read plus a worker — a
-/// `stat` per candidate name and then the copy — which is what the waits are for.
-///
-/// The files are asked after with `exists`, a plain `stat`: `list_dir` reads the index, and a copy
-/// reaches that only once the watcher and the worker have caught up. It waits up to a minute for
-/// the first reconcile, a move being refused until then, so it wants a small vault rather than the
-/// generated one — `clip_reconciled 0` is the drill saying it never got that far.
+/// Copy a file beside itself, then Cut the copy to vault root through the real clipboard and
+/// worker path. Check `(copy)` naming, dimmed Cut rows and movement. Use direct `exists` stats
+/// because index listings lag watcher updates. Wait up to 1 min for reconcile; use a small
+/// scratch vault, and `clip_reconciled 0` reports timeout.
 pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
     let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
         return bench_quit(app);
@@ -811,14 +804,9 @@ async fn bench_cut_many(app: &Rc<App>, ops: &Rc<fileops::Ops>, vault: &Arc<Vault
     }
 }
 
-/// What a path entry's completion does with the keyboard, and whether the entry takes the width
-/// the list gives the dialog.
-///
-/// Layout is real under Xvfb — an allocation wants a mapped window, not a window manager — so the
-/// width either side of the list appearing is measured rather than argued. The keys are emitted on
-/// the entry's own controller, which proves the handler, the selection and the text it applies but
-/// **not** the propagation phase: emitting a signal skips phase dispatch altogether, so that Return
-/// beats `GtkText`'s own binding is still a claim only a real session can settle.
+/// Check path-completion key handling and allocated dialog width before/after suggestions. Xvfb
+/// provides real allocation; emitting controller signals verifies handler state but bypasses
+/// propagation, so Return precedence over GtkText needs a real-session check.
 pub(super) fn bench_paths(app: &Rc<App>) {
     let entry = gtk::Entry::new();
     let field = crate::pathfield::path_field(&entry, "bench", |_| {
@@ -893,16 +881,11 @@ fn selected_offer(field: &gtk::Widget) -> Option<String> {
         .map(|label| label.label().into())
 }
 
-/// `ACCENT_BENCH_SAVE_AS=<rel>`: Save As on the file at `rel`, past the dialog, which is only the
-/// path field Rename has. It writes to `Saved As/`, a folder that is not there yet, and prints the
-/// tab's key after and what each file holds. A note is also given an edit it has not saved first,
-/// which only the copy may hold, both halves linking to the note itself by a relative path, which
-/// the copy has to point back at the original — the vault paths its links name are printed, and
-/// whether the tab reloaded to what the copy holds; a diagram likewise, and a PDF a page before and a page after,
-/// which only the copy may get the second of; an image is copied as it is and its tab retitled;
-/// then a note is saved onto a folder, which is refused, onto its old
-/// name while a tab of its own has that open, whose Replace question is answered, and as `.txt`,
-/// which reopens it as text.
+/// `ACCENT_BENCH_SAVE_AS=<rel>` writes into new `Saved As/` and reports tab key and file
+/// content. Notes include unsaved edits and self-relative links; only the copy receives edits
+/// and its links must still target the original. Repeat for diagrams, PDFs with unsaved page
+/// changes and images. Also test folder refusal, confirmed overwrite of an open name, and `.txt`
+/// reopening as text.
 pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());

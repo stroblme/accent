@@ -1,14 +1,10 @@
-//! Side-by-side panes: one `AdwTabBar` and one `AdwTabView` each, nested in `GtkPaned`s.
+//! Split panes with an `AdwTabBar` and `AdwTabView` each, nested in `GtkPaned`s.
 //!
-//! There is no model of the layout beside the widget tree; the widget tree *is* the tree. A pane's
-//! parent is either the `AdwBin` that holds the whole arrangement or a `GtkPaned`, so a split is
-//! "replace the pane in its parent with a paned holding the pane and its new neighbour", and a
-//! close is the same swap backwards. Nothing else has to be kept in step.
+//! The widget tree is the layout model: splitting replaces a pane with a paned; closing
+//! reverses that swap. No parallel layout state needs synchronisation.
 //!
-//! Moving a tab between panes needs no code of ours: libadwaita's tab drag carries the
-//! `AdwTabPage` itself, every `AdwTabBox` and every `AdwTabView` already accepts that type, and
-//! `AdwTabView:is-transferring-page` says when one is in flight. What is added here is the drop
-//! *zones*: an edge of a pane means "split", which libadwaita has no notion of.
+//! Libadwaita transfers `AdwTabPage`s between panes. This module adds edge drop zones to
+//! split panes, which libadwaita does not provide.
 
 use crate::find;
 use crate::pdfview::Anchor;
@@ -21,33 +17,24 @@ use std::time::{Duration, Instant};
 
 /// The class `main::install_chrome_css` paints the drop hint with.
 const ZONE: &str = "accent-drop-zone";
-/// How much of a pane's width or height each edge zone claims. A quarter is enough to aim at
-/// without swallowing the middle, which is the far commoner drop.
+/// Share of pane width or height reserved for an edge drop zone, leaving the middle easy to target.
 const EDGE: f64 = 0.25;
 
-/// What a preview tab carries in its indicator slot: an eye, since the tab is only being looked
-/// at, and clicking it keeps the tab. A file from outside the vault has the slot already
-/// (`App::mark_loose`), and that says more, so it keeps it.
+/// Preview indicator whose eye action keeps the tab. Loose-file indicators take priority.
 const PREVIEW_ICON: &str = "view-reveal-symbolic";
 const PREVIEW_TIP: &str = "Preview — Click to Keep";
 
-/// What a pinned tab carries in the same slot. A mark rather than a button, unlike the eye:
-/// unpinning is the tab menu's, not something a stray click on the tab's edge should do. The
-/// outside-the-vault mark keeps the slot here too, since where a save goes matters more than
-/// what the tab's place at the start of the bar already says.
+/// Pinned indicator, with unpinning kept in the menu to avoid stray clicks.
+/// Loose-file indicators take priority because save location matters more than pin state.
 const PINNED_ICON: &str = "view-pin-symbolic";
 const PINNED_TIP: &str = "Pinned";
 
-/// What `AdwTabView` keeps of its own chords. Six are taken away: `Ctrl+Tab` and
-/// `Ctrl+Shift+Tab` are `win.next-tab` / `win.previous-tab`, which walk the tabs in the order
-/// they were last used rather than along the bar, and both Home / End pairs go back to
-/// GtkSourceView, whose document start and end — with the selection and without — are on
-/// DESIGN.md's never-bind list. The widget's controller runs in the capture phase, so keeping
-/// `Ctrl+Shift+Home` here meant a note could not be selected to its top at all.
+/// AdwTabView shortcuts retained after reserving window and editor bindings.
 ///
-/// What is left — `Ctrl+PageUp` / `Ctrl+PageDown`, the Shift variants that move a tab along the
-/// bar, and `Alt+0` to `Alt+9` — is libadwaita's and stays there, being chords no action of ours
-/// wants. [`CHORDS`] is what writes them down.
+/// Ctrl+Tab/Shift+Tab belong to MRU actions. Home/End pairs must reach GtkSourceView for
+/// document navigation and selection, since the tab controller runs in capture phase.
+/// PageUp/PageDown, their Shift variants and Alt+0..9 remain with libadwaita; [`CHORDS`]
+/// records them for shortcut discovery.
 fn shortcuts() -> adw::TabViewShortcuts {
     adw::TabViewShortcuts::ALL_SHORTCUTS.difference(
         adw::TabViewShortcuts::CONTROL_TAB
@@ -59,9 +46,8 @@ fn shortcuts() -> adw::TabViewShortcuts {
     )
 }
 
-/// Every chord `AdwTabView` binds, with the flag that carries it and what it does, spelled the
-/// way `main::ACTIONS` spells its accelerators. Exhaustive over `ALL_SHORTCUTS` — a test says so
-/// — because a chord no table names is a chord the palette and the rebind dialog cannot see.
+/// Complete AdwTabView shortcut catalogue with flags, action names and accelerator spellings.
+/// Tests require every ALL_SHORTCUTS flag so palette and rebinding cannot miss a shortcut.
 const CHORDS: &[(adw::TabViewShortcuts, &str, &str)] = &[
     (
         adw::TabViewShortcuts::CONTROL_TAB,
@@ -137,12 +123,9 @@ pub fn widget_chords() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// The order `Ctrl+Tab` walks and a close falls back to: `history` filtered down to the pages
-/// that are still here, then any page that has never been selected, in the order the bar shows
-/// them.
+/// Return live history pages followed by never-selected pages in bar order.
 ///
-/// Pure, so both of the things it decides — which tab a close lands on and which tab a step of
-/// `Ctrl+Tab` lands on — are testable with no display.
+/// Both Ctrl+Tab and close fallback use this order, with no display needed to test it.
 pub fn recent_order<T: Clone + PartialEq>(history: &[T], live: &[T]) -> Vec<T> {
     let mut order: Vec<T> = history
         .iter()
@@ -158,11 +141,8 @@ pub fn recent_order<T: Clone + PartialEq>(history: &[T], live: &[T]) -> Vec<T> {
     order
 }
 
-/// Where a cursor at `at` in an order of `len` tabs lands after one `Ctrl+Tab`. Wraps, so a chord
-/// held past the end of the list comes round to the tab it started on.
-///
-/// Pure, and the whole of what a held chord decides: the order it walks is [`recent_order`]'s and
-/// does not move until the chord ends.
+/// Advance `at` through `len` tabs with wrapping.
+/// The [`recent_order`] stays fixed while Ctrl is held, making successive steps predictable.
 pub fn cycle_to(len: usize, at: usize, forward: bool) -> usize {
     match len {
         0 => 0,
@@ -177,10 +157,8 @@ pub fn to_front<T: Clone + PartialEq>(order: &mut Vec<T>, item: &T) {
     order.insert(0, item.clone());
 }
 
-/// Where a tab at `at` belongs in a bar holding `pinned` pinned tabs besides it, which are always
-/// its first ones: a pinned tab no further right than the end of that group, any other no further
-/// left. Pure, and the whole of pinning's order — pinning or unpinning a tab is flipping its state
-/// and asking this, which lands it on the boundary; so is any move that crossed it.
+/// Clamp a tab position to the boundary of the leading `pinned` group.
+/// Pin/unpin and drag reordering use the same rule, keeping pinned tabs before all others.
 pub fn pinned_slot(at: usize, pinned: usize, is_pinned: bool) -> usize {
     match is_pinned {
         true => at.min(pinned),
@@ -202,19 +180,15 @@ pub fn mark_pinned(page: &adw::TabPage, pinned: bool) {
 
 // --- back and forward ----------------------------------------------------------------------
 
-/// How many places back the reader can go. A navigation history is not an undo stack; a hundred
-/// is far past what anyone follows in one sitting. The PDF reader's number, now the pane's.
+/// Maximum pane navigation history, shared with the PDF reader.
 const HISTORY: usize = 100;
-/// How far apart two lines are before they are two places rather than one. A paragraph typed in
-/// one sitting leaves one mark, not one per keystroke.
+/// Line distance separating navigation entries, coalescing nearby typing into one place.
 const NEARBY: i32 = 10;
-/// How long a pause makes the same paragraph a second visit. Long enough to think mid-sentence,
-/// short enough that coming back to a note tomorrow is a place of its own.
+/// Pause separating repeat visits to nearby text, while allowing mid-sentence pauses to coalesce.
 const COALESCE: Duration = Duration::from_secs(10);
 
-/// Where in a document a [`Place`] is. The smallest thing that covers both kinds of reader: a
-/// caret, and a PDF's [`Anchor`]. Everything else — an image, a diff, a shell — has one position
-/// and that is the whole document.
+/// Location within a document: text caret, PDF [`Anchor`] or diagram page.
+/// Other document kinds have only a whole-document position.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Spot {
     /// A 1-based line and column, as [`crate::editor::Tab::goto_line`] takes them.
@@ -225,22 +199,19 @@ pub enum Spot {
     Whole,
 }
 
-/// Somewhere the reader has been: which document, and where in it.
-///
-/// The document is named by its `Doc::key` rather than held as a page, so an entry survives the
-/// tab moving along the bar and costs nothing to compare.
+/// A document key and location for navigation history.
+/// Keys survive tab reordering without retaining the page.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Place {
     pub key: String,
     pub at: Spot,
-    /// In a text tab, a mark where the caret was, which moves with the edits around it, so Back
-    /// lands on the character the reader left; `at` is where it was then, which is gone to where
-    /// the mark says nothing ([`Held::iter_in`]). Shared by the copies of the place.
+    /// Shared text mark following edits so Back returns to the original character.
+    /// Use recorded `at` when [`Held::iter_in`] cannot resolve the mark.
     pub mark: Option<Rc<Held>>,
 }
 
-/// A place's mark in a text buffer, taken out of the buffer once the last place holding it goes:
-/// its entry leaving the history, which its tab closing does ([`Nav::forget`]).
+/// Navigation mark removed from its buffer when the last history entry releases it.
+/// Closing its tab removes entries through [`Nav::forget`].
 #[derive(Debug, PartialEq)]
 pub struct Held {
     mark: gtk::TextMark,
@@ -249,8 +220,7 @@ pub struct Held {
 }
 
 impl Held {
-    /// An anonymous mark at `iter`, with left gravity: text typed where the reader was goes
-    /// after the place, as it went after the caret they left there.
+    /// Create a left-gravity mark at `iter`, keeping later typing after the recorded place.
     pub fn at(buffer: &gtk::TextBuffer, iter: &gtk::TextIter, replaced: u32) -> Held {
         Held {
             mark: buffer.create_mark(None, iter, true),
@@ -258,9 +228,8 @@ impl Held {
         }
     }
 
-    /// Where the place is now in `buffer`: `None` where the mark is not one of its marks any
-    /// more, or the whole text has been replaced since (`replaced` being the tab's count now),
-    /// which leaves every mark at the start.
+    /// Resolve the mark in `buffer`, or `None` after removal or whole-text replacement.
+    /// `replaced` is the tab's current replacement count; replacements move old marks to the start.
     pub fn iter_in(&self, buffer: &gtk::TextBuffer, replaced: u32) -> Option<gtk::TextIter> {
         let ours = !self.mark.is_deleted() && self.mark.buffer().as_ref() == Some(buffer);
         (ours && replaced == self.replaced).then(|| buffer.iter_at_mark(&self.mark))
@@ -277,11 +246,9 @@ impl Drop for Held {
     }
 }
 
-/// Whether `next` merges into `last` instead of being pushed behind it: the same document, near
-/// enough, and recorded within [`COALESCE`] of it — or exactly the same place, however long ago,
-/// which is what stops a jump recording the spot it starts from twice.
-///
-/// Pure, and the whole of the coalescing rule: `apart` is how long ago the last entry was made.
+/// Whether `next` coalesces with `last`: same document, nearby position and age within [`COALESCE`].
+/// Exact repeats always coalesce so jumps cannot record their starting place twice.
+/// `apart` is the age of the last entry.
 pub fn coalesces(last: &Place, next: &Place, apart: Duration) -> bool {
     if last.key != next.key {
         return false;
@@ -346,8 +313,7 @@ impl Nav {
         Some(to)
     }
 
-    /// How many places are behind and ahead. What the `ACCENT_BENCH_LAYOUT` drill reads to say
-    /// that a restore wrote none of its own steps into the history.
+    /// Back/forward entry counts for checking that session restoration adds no navigation steps.
     #[cfg(feature = "bench")]
     pub fn depth(&self) -> (usize, usize) {
         (self.back.len(), self.forward.len())
@@ -359,8 +325,7 @@ impl Nav {
         self.forward.retain(|p| p.key != key);
     }
 
-    /// The pages of the PDF `key` were edited: each place in it goes where `map` takes its anchor,
-    /// so Back returns to the page it left and not to whatever took that page's number.
+    /// Remap PDF `key`'s history anchors through `map`, keeping Back attached to pages after reordering.
     pub fn repage(&mut self, key: &str, map: impl Fn(Anchor) -> Anchor) {
         for place in self.back.iter_mut().chain(&mut self.forward) {
             if let (true, Spot::Page(anchor)) = (place.key == key, &mut place.at) {
@@ -435,13 +400,11 @@ pub fn arrange(side: Side) -> (gtk::Orientation, bool) {
 /// How far one Move Divider step goes, as a share of the split.
 const DIVIDER_STEP: f64 = 0.05;
 
-/// Where a divider at `position` in a split `extent` long goes one step towards the end
-/// (`forward`) or the start: the next stop on a grid of [`DIVIDER_STEP`]s anchored at the centre,
-/// which is where a split starts and where a double-click puts it back. So a divider the pointer
-/// left off the grid lands on it, and the centre is always a stop. A position within a pixel of a
-/// stop is that stop, a share of the split having been rounded to whole pixels.
+/// Move a divider one [`DIVIDER_STEP`] towards the end (`forward`) or start.
 ///
-/// Pure; keeping the answer inside what the split allows is the caller's.
+/// Stops are anchored at the centre so reset remains reachable and off-grid positions snap
+/// back to the grid. Positions within one pixel count as the stop because ratios round to
+/// pixels. Callers clamp the result to the split's bounds.
 pub fn divider_step(position: i32, extent: i32, forward: bool) -> i32 {
     let step = DIVIDER_STEP * f64::from(extent);
     if step <= 0.0 {
@@ -457,14 +420,11 @@ pub fn divider_step(position: i32, extent: i32, forward: bool) -> i32 {
     (centre + stop * step).round() as i32
 }
 
-/// The pane on `side` of `from`, as an index into `others`: the nearest one that starts at or
-/// past `from`'s far edge on that axis and faces it on the other. Ties — two panes stacked
-/// against the same edge — go to whichever faces more of `from`.
+/// Find the nearest pane on `side` of `from`, as an index into `others`.
 ///
-/// Geometry rather than a walk up the `GtkPaned` ancestors, because the widget tree says which
-/// splits nest and not which pane a reader would call "the one on the left". `others` may hold
-/// `from` itself: it cannot be past its own far edge, so it never matches. An unallocated pane
-/// has no neighbours, as it has no edges in [`zone`].
+/// Candidates start beyond the facing edge and overlap on the other axis; ties prefer more
+/// overlap. Geometry reflects visual neighbours better than split ancestry. `from` may be
+/// included but cannot match; unallocated panes have no neighbours.
 pub fn neighbour(from: graphene::Rect, others: &[graphene::Rect], side: Side) -> Option<usize> {
     if from.width() <= 0.0 || from.height() <= 0.0 {
         return None;
@@ -515,30 +475,22 @@ pub struct Pane {
     /// Tab bar, find bar, document. This is what the paneds hold.
     column: gtk::Box,
     pub bar: adw::TabBar,
-    /// Find, replace and go to line for this pane's document alone, so a split can search two
-    /// notes at once. Revealed between the tab bar and the document rather than over it.
+    /// Pane-local find/replace/go-to-line bar, revealed between tabs and document for independent split searches.
     pub find: Rc<find::Bar>,
     pub tabs: adw::TabView,
     overlay: gtk::Overlay,
-    /// Covers the whole document while a drag is in flight, and carries [`Pane::drop`]. It is an
-    /// overlay child, so it is picked before the tab view, which has a tab drop target of its own
-    /// that would otherwise take every drop as a plain "move it here".
+    /// Drag drop-sheet overlay, picked before AdwTabView's plain-transfer target so edges can split panes.
     hint: gtk::Box,
-    /// The lit rectangle inside `hint`. A child rather than the hint itself, so highlighting a
-    /// zone never moves the widget the pointer coordinates are measured against.
+    /// Highlight rectangle inside `hint`, keeping its coordinate widget fixed as the zone changes.
     shade: gtk::Box,
     pub drop: gtk::DropTarget,
-    /// This pane's tabs in the order they were last selected, most recent first.
-    ///
-    /// Pruned against the pane's live pages on every read, which is what lets a tab dragged into
-    /// another pane or another window need no bookkeeping of its own: it simply stops being one
-    /// of this pane's pages, and joins the other pane's history the moment it is selected there.
+    /// Most-recent-first tab history, pruned against live pages on every read.
+    /// Transferred tabs leave automatically and enter their destination history on selection.
     history: RefCell<Vec<adw::TabPage>>,
     /// How deep into `history` a held `Ctrl+Tab` has walked, `None` when no chord is in flight.
     /// See [`Pane::step`].
     cycling: Cell<Option<usize>>,
-    /// The card a chord held a moment lists `history` on, `cycling` highlighted. An overlay child
-    /// over the document, so a split's other panes stay clear.
+    /// Pane-local switcher overlay listing `history` with `cycling` highlighted, leaving other panes clear.
     pub switcher: Switcher,
     /// Back and forward across this pane's documents. See [`Nav`].
     pub nav: RefCell<Nav>,
@@ -625,10 +577,8 @@ impl Pane {
         self.column.upcast_ref()
     }
 
-    /// Lay `widget` over this pane's document, above its tabs and under the drop sheet and the
-    /// `Ctrl+Tab` card, which go on working over it: presentation mode shows a note rendered here,
-    /// where the note is. Taken from another pane's document if it covers one; anywhere else it
-    /// must have been taken out of first. A no-op while it is already here.
+    /// Overlay `widget` above tabs and below drag hints and the switcher for presentation.
+    /// Transfer it from another pane if needed; other parents must release it first. Skip if already here.
     pub fn cover(&self, widget: &gtk::Widget) {
         if widget.parent().as_ref() == Some(self.overlay.upcast_ref()) {
             return;
@@ -667,13 +617,10 @@ impl Pane {
         recent_order(&self.history.borrow(), &self.pages())
     }
 
-    /// Remember that `page` was just selected. Pruning happens here too, so a page that has left
-    /// the pane is out of the history by the next question anyone asks of it.
+    /// Record selection of `page` and prune pages that have left the pane.
     ///
-    /// While a `Ctrl+Tab` chord is held the order is left alone: the step this made arrives here
-    /// through the selection notify and must not rewrite the list it is walking. A selection from
-    /// anywhere else ends the chord, which is what stops a modifier release that never arrives —
-    /// focus lost, the window unmapped mid-chord — from stranding the pane in cycling state.
+    /// Ctrl+Tab steps preserve the order they are walking. Other selections end cycling, so a
+    /// lost modifier release cannot leave the pane stuck in that state.
     pub fn touch(&self, page: &adw::TabPage) {
         if let Some(at) = self.cycling.get() {
             if self.recent().get(at) == Some(page) {
@@ -700,10 +647,8 @@ impl Pane {
         self.recent().into_iter().find(|p| p != page)
     }
 
-    /// One step of `Ctrl+Tab`: one deeper into the order the tabs were last used in, the order
-    /// itself left alone until the chord ends. Three presses are three tabs back, and
-    /// `Ctrl+Shift+Tab` walks the same cursor the other way. The card held chords show
-    /// ([`Pane::switcher`]) lists [`Pane::recent`] and highlights this cursor.
+    /// Step the fixed MRU order while Ctrl is held; Shift reverses direction.
+    /// [`Pane::switcher`] displays [`Pane::recent`] and highlights the cycling cursor.
     pub fn step(&self, forward: bool) -> Option<adw::TabPage> {
         let order = self.recent();
         let at = cycle_to(order.len(), self.cycling.get().unwrap_or(0), forward);
@@ -716,8 +661,7 @@ impl Pane {
         self.cycling.get()
     }
 
-    /// Ctrl came up: the tab the chord landed on is the most recently used one now. A no-op when
-    /// no chord is in flight, which is what every other Ctrl release is.
+    /// Finish cycling on Ctrl release and record the selected tab as most recent. No-op without a cycle.
     pub fn end_cycle(&self) {
         self.switcher.hide();
         if self.cycling.take().is_none() {
@@ -754,9 +698,7 @@ impl Pane {
 
     // --- preview tabs ----------------------------------------------------------------------
 
-    /// The tab that is only being looked at, if this pane still holds it. A tab that leaves the
-    /// pane is kept on its way out (`Pane::wire_preview`), and that is the whole of "moving a
-    /// tab makes it a real one".
+    /// Return the live preview tab. Leaving the pane keeps it through [`Pane::wire_preview`].
     pub fn preview(&self) -> Option<adw::TabPage> {
         let page = self.preview.borrow().clone()?;
         self.has(&page).then_some(page)
@@ -774,8 +716,7 @@ impl Pane {
         old.filter(|old| old != page)
     }
 
-    /// `page` is a real tab now: it was edited, its own tab was double-clicked, its eye was
-    /// clicked, or it left the pane.
+    /// Keep `page` after editing, tab double-click, eye click or leaving its pane.
     pub fn keep(&self, page: &adw::TabPage) {
         let mut slot = self.preview.borrow_mut();
         if slot.as_ref() == Some(page) {
@@ -789,8 +730,7 @@ impl Pane {
         }
     }
 
-    /// The two ways out of being a preview that the tab view reports itself: a click on the eye,
-    /// and the page leaving this pane, whether into another pane, another window or a drag.
+    /// Wire tab-view preview promotion on eye clicks and page transfers.
     fn wire_preview(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
         self.tabs.connect_indicator_activated(move |_, page| {
@@ -810,13 +750,11 @@ impl Pane {
         });
     }
 
-    /// Call `f` when one of this pane's tabs is double-clicked, with the page that was clicked.
+    /// Call `f` with the page whose tab was double-clicked.
     ///
-    /// `AdwTabBox` claims the press for its own selection and drag, and a claimed sequence cancels
-    /// gestures but not raw event controllers — the lesson [`crate::paned`] records — so this is a
-    /// capture-phase `GtkEventControllerLegacy` like that one, and it never swallows the event.
-    /// The page is the pane's selected one, because the first press of the pair has already
-    /// selected whichever tab it landed on.
+    /// AdwTabBox claims presses, cancelling gestures but not raw controllers. A capture-phase
+    /// legacy controller observes without consuming them. The first press already selected
+    /// the page, so the selected page identifies the clicked tab.
     pub fn on_tab_double_click(self: &Rc<Self>, f: impl Fn(&adw::TabPage) + 'static) {
         let controller = gtk::EventControllerLegacy::new();
         controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -847,9 +785,8 @@ impl Pane {
         self.bar.add_controller(controller);
     }
 
-    /// Take the drop sheet in or out of the picture. It stays mapped either way and only stops
-    /// being targetable, because a widget mapped mid-drag is not picked on every backend; while
-    /// it is off it draws nothing and every click reaches the editor underneath.
+    /// Enable or disable the mapped drop sheet without remapping during a drag.
+    /// Some backends do not pick newly mapped targets; disabled sheets draw nothing and pass input through.
     pub fn set_drop_active(&self, on: bool) {
         self.hint.set_can_target(on);
         if !on {
@@ -898,9 +835,7 @@ fn primary_press(event: &gdk::Event) -> Option<crate::paned::Click> {
     })
 }
 
-/// Put `new` beside `pane` on `side`, by replacing `pane` in its parent with a paned holding
-/// both. The handle starts at the middle of what the old pane had, which is the size it still
-/// has at this point.
+/// Split `pane` with `new` on `side`, replacing it with a paned whose handle starts at the old midpoint.
 pub fn split(pane: &Pane, new: &Pane, side: Side) {
     let Some(parent) = pane.column.parent() else {
         return tracing::warn!("splitting a pane that is not in the window");
@@ -946,10 +881,9 @@ pub fn detach(pane: &Pane) {
     replace(&grandparent, paned.upcast_ref(), &sibling);
 }
 
-/// Show `only` alone, where it is in the pane tree, or every pane again with `None`: each branch
-/// beside the way up from it is hidden. A `GtkPaned` with one child hidden gives the other all of
-/// its room without working out a position, so every divider is where it was once the branches
-/// come back. A node changes only if it has to, so a sibling is not mapped to be hidden again.
+/// Show only `only` in-place by hiding sibling branches, or restore all panes with `None`.
+/// GtkPaned preserves divider positions while its sole visible child fills the split.
+/// Change visibility only where needed to avoid remapping unchanged siblings.
 pub fn isolate(panes: &[Rc<Pane>], only: Option<&Pane>) {
     let mut path = Vec::new();
     let mut at = only.map(|pane| pane.widget().clone());
@@ -1198,8 +1132,7 @@ mod tests {
         assert_eq!(arrange(Side::Down), (gtk::Orientation::Vertical, false));
     }
 
-    /// Nothing else stops a flag a future libadwaita adds from arriving unlisted, which would put
-    /// a chord back beyond the reach of both the rebind dialog and the never-bind test.
+    /// Require catalogue coverage for future libadwaita flags so rebinding and reserved-key tests see every chord.
     #[test]
     fn the_chord_table_covers_every_shortcut_the_widget_has() {
         let listed = CHORDS

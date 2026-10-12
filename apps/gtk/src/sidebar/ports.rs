@@ -306,9 +306,8 @@ fn forward_row(f: Forward, drop_forward: DropForward) -> gtk::ListBoxRow {
     row
 }
 
-/// A port box. Digits only, enforced on `insert-text` rather than through a `GtkEntryBuffer` of
-/// our own: a buffer subclass is a GObject and a hundred lines for the same rule, while refusing
-/// the insertion covers typing, pasting and a drop alike, all three arriving here as one.
+/// Accept digits through `insert-text`, covering typing, paste and drop without a custom
+/// entry-buffer subclass.
 fn port_entry(placeholder: &str) -> gtk::Entry {
     let entry = gtk::Entry::builder()
         .placeholder_text(placeholder)

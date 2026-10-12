@@ -1,10 +1,7 @@
-//! The card a held `Ctrl+Tab` puts over its pane (DESIGN.md, Tabs): the pane's tabs in the order
-//! they were last used, the one letting go of Ctrl lands on highlighted.
+//! Show the most recently used tabs while Ctrl+Tab is held (DESIGN.md, Tabs).
 //!
-//! A view over what the pane already keeps — the order is `Pane::recent`, the cursor
-//! `Pane::cycling` — filled by the window, which knows what each tab holds. It never takes the
-//! keyboard, so the chord's own keys, Tab pressed again and Ctrl let go, still reach the window's
-//! handlers whatever has the focus, a shell included.
+//! The pane owns the order and cursor; the window supplies tab details. The switcher never
+//! takes focus, so Tab and Ctrl release still reach the window even from a shell.
 
 use crate::widgets::{self, Debounce};
 use adw::prelude::*;

@@ -1,7 +1,5 @@
-//! Painting a page's display list with GSK: outlines as `gsk::Path`s, labels through Pango,
-//! pictures as textures. Colours are the document's, painted through a [`Tint`]: as the file
-//! writes them, or moved onto the theme's paper and ink as a PDF page is (DESIGN.md, Colour);
-//! the frame puts page units on screen.
+//! Paint display lists with GSK paths, Pango labels and textures. [`Tint`] applies
+//! file or theme colours; the frame transforms page units to screen coordinates.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
@@ -22,8 +20,7 @@ use super::geometry::Frame;
 use super::math::{self, Typesetter};
 use crate::theme;
 
-/// What painting keeps between frames: labels laid out at the scale they were laid out for, and
-/// pictures decoded once.
+/// Cached label layouts at their layout scale and decoded images, reused between frames.
 #[derive(Default)]
 pub struct Cache {
     /// By prim index, with the scale it was laid out at.
@@ -60,11 +57,9 @@ impl Cache {
         self.boxes.borrow_mut().clear();
     }
 
-    /// What of this cache holds for `new`, a display list replacing `old` prim for prim, as each
-    /// frame of a drag's preview replaces the one before: a label or a picture is kept where the
-    /// prim in its place is the same cell's same kind, a label wrapping at the same width. Only a
-    /// drag's frames are alike enough for that: they move and resize cells, and change nothing
-    /// a cell says.
+    /// Reuse label and image layouts between drag-preview frames when prims retain
+    /// the same cell, kind and wrapping width. This is valid only for geometry-only
+    /// drags that leave cell content unchanged.
     pub fn carried(&self, old: &[Prim], new: &[Prim]) -> Cache {
         let keep = |i: usize| old.len() == new.len() && alike(&old[i], &new[i]);
         Cache {
@@ -82,9 +77,8 @@ impl Cache {
         self.web.set(on);
     }
 
-    /// The topmost unlocked label whose painted text is under page point `p`. The display list
-    /// gives an edge's label no box of its own, only a point, so the text as painted is the
-    /// only place it can be aimed at.
+    /// Hit-test the topmost unlocked label by its painted text. Edge labels have
+    /// only an anchor in the display list, so their painted bounds are needed.
     pub fn label_at<'a>(&self, prims: &'a [Prim], p: Point) -> Option<&'a str> {
         let boxes = self.boxes.borrow();
         prims
@@ -131,8 +125,8 @@ impl Cache {
         picture
     }
 
-    /// The picture at `url` on the web, as downloaded: none until it is, and a failed decode
-    /// is not kept, so a download landing later is drawn.
+    /// Decode a cached web image; return none before download. Do not cache decode
+    /// failures so a later download can be drawn.
     fn web_picture(&self, index: usize, url: &str) -> Option<Rc<Picture>> {
         if let Some(t) = self.textures.borrow().get(&index) {
             return t.clone();
@@ -226,10 +220,9 @@ pub fn rgba(c: Color) -> gdk::RGBA {
     theme::rgba([c.r, c.g, c.b], f32::from(c.a) / 255.0)
 }
 
-/// How the canvas paints the file's colours: as they are, or moved onto a theme's paper and ink
-/// as a PDF page is (`accent_core::recolour`), white onto paper and black onto ink, every other
-/// colour keeping its chroma. Painting takes it as a parameter and never reads the theme, so a
-/// printout or an export can paint with [`Tint::FILE`].
+/// Canvas colours: original or mapped onto theme paper/ink (`accent_core::recolour`).
+/// White maps to paper, black to ink, other colours retain chroma. Pass tint explicitly
+/// so print and export can use [`Tint::FILE`] independently of the current theme.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Tint(Option<theme::Page>);
 
@@ -242,8 +235,8 @@ impl Tint {
         Tint(page)
     }
 
-    /// `c` as the canvas paints it, its alpha kept: a remap is affine, so a colour faded over
-    /// the paper lands where the remapped colour faded over the remapped paper does.
+    /// Map `c` while preserving alpha. The affine remap preserves the appearance of
+    /// colours faded over the corresponding paper.
     pub fn colour(self, c: Color) -> Color {
         let Some((paper, ink)) = self.0 else {
             return c;
@@ -443,10 +436,9 @@ pub fn prim(
     }
 }
 
-/// The page's grid of `step` page units over `area` (page units, the page on screen) as
-/// draw.io paints it (`mxGraphView.createSvgGrid`): a step doubled until it is 4 px on screen
-/// (`minGridSize`), every fourth line strong and the others at a fifth of it, in black on light
-/// paper and white on dark.
+/// Draw a grid over `area` in page units (`mxGraphView.createSvgGrid`). Double
+/// `step` until spacing reaches 4 screen pixels; emphasize every fourth line,
+/// others at a fifth opacity, black on light paper and white on dark.
 pub fn grid(snapshot: &gtk::Snapshot, frame: &Frame, area: Rect, step: f64, paper: Color) {
     const MIN_PX: f64 = 4.0;
     const STRONG_EVERY: i64 = 4;

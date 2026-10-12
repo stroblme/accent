@@ -149,11 +149,8 @@ impl Panel {
         );
     }
 
-    /// Take away whatever file list is open.
-    ///
-    /// The file rows of one commit are contiguous and only one commit is ever expanded, so where
-    /// they are is remembered rather than looked for: a scan would read every row in the store,
-    /// and a `LogItem` is several `String`s.
+    /// Remove the expanded commit's contiguous file rows by their saved range. Only one commit
+    /// is expanded, so this avoids scanning and cloning the whole store.
     fn collapse(&self) {
         self.expanded.replace(None);
         if let Some((start, n)) = self.expanded_at.take() {
@@ -222,11 +219,9 @@ impl Panel {
         });
     }
 
-    /// Put the keyboard on the history's row of the commit HEAD is on, or on its top row where
-    /// that is not listed, scrolled to: where a commit made from the Commit button leaves it. The
-    /// button goes insensitive with the message it took, and hidden where nothing is left to
-    /// commit, and the window would be left with nothing focused. From an idle, once the rows the
-    /// refresh landing now spliced in have widgets.
+    /// Focus and reveal HEAD's history row, or the first row, after Commit. The disabled or
+    /// hidden Commit button cannot retain focus. Wait until idle so newly spliced rows have
+    /// widgets.
     pub(super) fn focus_head(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
         glib::idle_add_local_once(move || {
@@ -308,9 +303,7 @@ impl Panel {
         });
     }
 
-    /// Put a commit's id on the clipboard. No toast for the clipboard alone would be truer to
-    /// DESIGN.md, but nothing else on screen says the id was taken: the row looks the same either
-    /// way.
+    /// Copy a commit ID and show a toast because the unchanged row offers no visible feedback.
     fn copy_id(&self, oid: &str) {
         self.hooks.window.clipboard().set_text(oid);
         (self.hooks.toast)(&format!("Copied {}", short(oid)));
@@ -382,11 +375,8 @@ fn commit_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     commit
 }
 
-/// A label per decoration, the first [`SHOWN_REFS`] and then a count of the rest, because a release
-/// commit can carry a handful of tags and the summary beside them still has to be read. Each is
-/// ellipsized like every other name in the pane — a decoration is as long as the branch it names,
-/// and without this a long branch is the sidebar's floor — and capped, the tooltip having every
-/// name whole.
+/// Show the first [`SHOWN_REFS`] decorations, then `+N`. Cap and ellipsize labels to preserve
+/// summary width; tooltips retain full names.
 fn refs_layout() -> gtk::Box {
     let refs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     for _ in 0..=SHOWN_REFS {
@@ -443,13 +433,9 @@ fn more_layout() -> gtk::Label {
     more
 }
 
-/// A commit row's Check Out Commit and Copy Commit ID buttons, the two things a commit offers.
-///
-/// The same surface a changed file's actions have: hidden until the pointer or the keyboard is on
-/// the row ([`reveal_on_hover`]), in a revealer so they measure nothing while they are away
-/// and the summary reads out to the whole width of the pane, made the first time it reveals them
-/// ([`revealed_actions`]). Like those, they hold the `GtkListItem` rather than the row's data,
-/// because the data under a recycled row is replaced without the widgets being rebuilt.
+/// Commit checkout and copy buttons, lazily revealed on hover or focus. Hidden buttons reserve
+/// no width. Capture the `GtkListItem`, not recycled row data, so actions use the current
+/// commit.
 fn commit_actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
     let panel = panel.clone();
     revealed_actions(item, move |item| commit_buttons(item, &panel))
@@ -705,14 +691,9 @@ fn ago(now: i64, then: i64) -> String {
     }
 }
 
-/// What hovering a commit says: where it sits, what it is called, who wrote it, and the whole
-/// message.
-///
-/// The decorations `git log` already fetched rather than a `git branch --contains` per hover, so
-/// a commit that is no branch tip simply has no first line; the branch its lane draws
-/// ([`git::lanes`]) is the "On" line, where a branch or a tag above it on that lane names one.
-/// The author as `git log` names them, `Name <email>`, and not the committer, which `git log`
-/// leaves out too.
+/// Commit tooltip with lane, decorations, author and full message. Use already-fetched `git log`
+/// data rather than querying branch containment on hover; [`git::lanes`] supplies the lane's
+/// branch name.
 fn commit_tooltip(row: &LogRow) -> String {
     let c = &row.commit;
     let mut head = match c.refs.is_empty() {

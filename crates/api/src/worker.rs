@@ -1,8 +1,5 @@
-//! The one thread that writes the index and owns the watcher.
-//!
-//! Everything here runs on it, so the index has exactly one writer and the UI never waits for
-//! one. The inbox is drained in bursts rather than one message at a time: a Syncthing pull of
-//! 500 files is one batch, and therefore one [`Event`] for the window.
+//! The sole index writer and filesystem watcher, running off the UI thread.
+//! Drain the inbox in batches so bulk sync changes produce one [`Event`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -22,14 +19,12 @@ use accent_core::watch::{VaultEvent, Watcher};
 use crate::paths::{conflict_original_rel, conflict_pairs};
 use crate::{Etag, Event};
 
-/// Start the worker for a vault, and hand back the handle its `Drop` joins.
+/// Start a vault worker; the returned handle joins it on drop.
 ///
-/// `watch` is false on Android, where inotify over emulated storage drops events and the app
-/// asks for a [`Msg::Rescan`] when it comes back to the foreground instead.
-///
-/// `stop` is the one thing that reaches this thread while it is walking: the inbox is only read
-/// between batches, and a walk of 40 000 files is not one message-loop turn. It holds [`RUN`],
-/// [`PAUSE`] or [`CLOSE`]. See [`Worker::reconcile`].
+/// Disable `watch` on Android storage where inotify drops events; the app sends
+/// [`Msg::Rescan`] on foregrounding instead. `stop` holds [`RUN`], [`PAUSE`] or
+/// [`CLOSE`] and interrupts scans while the inbox waits between batches.
+/// See [`Worker::reconcile`].
 pub(crate) fn spawn(
     root: PathBuf,
     index: Index,
@@ -64,9 +59,9 @@ pub(crate) fn spawn(
         .map_err(|e| accent_core::Error::io("the vault worker", e).into())
 }
 
-/// How long after a walk ends the next one the watcher's news asks for waits: a `.gitignore`
-/// saved, which an editor autosaves a second after each pause in the typing, or events the
-/// watcher lost. The first ask past it walks at once; every ask inside it is one walk at its end.
+/// Minimum interval between watcher-triggered scans, limiting rescans during
+/// `.gitignore` autosaves or lost events. Requests within the interval coalesce
+/// into one scan at its end; later requests run immediately.
 const WALK_FLOOR: Duration = Duration::from_secs(2);
 
 /// What `stop` says: walk on.
@@ -83,30 +78,29 @@ pub(crate) enum Msg {
         rel: String,
         own: bool,
     },
-    /// A save of this vault's own, at the etag it left: what tells its echo from another
-    /// process's change whatever order the two reach the worker in. See [`Worker::mine`].
+    /// The etag left by a vault save, used to distinguish its watcher echo
+    /// from external edits regardless of event order. See [`Worker::mine`].
     Saved {
         rel: String,
         etag: Etag,
     },
-    /// The git directories to watch, as `repos()` last found them. The walk hard-skips `.git`,
-    /// so these are never in the index's directory list and the watcher has to be told.
+    /// Git directories found by `repos()`. The index walk skips `.git`,
+    /// so the watcher needs these paths explicitly.
     WatchGit(Vec<PathBuf>),
     /// Folders the index does not walk to start (`true`) or stop watching. See
     /// [`Local::watch_unindexed`](crate::local::Local::watch_unindexed).
     WatchUnindexed(Vec<String>, bool),
     /// What search leaves out, and where to say it has been written. See
-    /// [`Local::set_excluded`]: the worker holds the only writing connection.
+    /// [`crate::local::Local::set_excluded`]: the worker holds the only writing connection.
     SetExcluded(Vec<String>, Sender<accent_core::Result<()>>),
-    /// Answered once everything posted before it has reached the index. The one thing the
-    /// worker's batching costs a caller is that a write it has just made is not yet readable;
-    /// this is how [`Local::settle_index`] waits for it instead of guessing at a delay.
+    /// Reply once all preceding messages reach the index, letting
+    /// [`crate::local::Local::settle_index`] wait for batched writes without an arbitrary delay.
     Settled(Sender<()>),
     /// Walk this folder, `""` being the whole vault.
     Rescan(String),
-    /// Walk again after a [`Local::stop_indexing`](crate::local::Local::stop_indexing), and only
-    /// then: while a vault is paused every other reason to rescan is ignored, or the walk the
-    /// user just stopped would start again on the next thing the watcher saw.
+    /// Resume after [`Local::stop_indexing`](crate::local::Local::stop_indexing).
+    /// Ignore other rescan triggers while paused, so watcher events cannot restart
+    /// a scan the user stopped.
     Resume,
     Shutdown,
 }
@@ -127,11 +121,10 @@ struct Worker {
     /// Failures the UI has already been told about, so a recurring one is said once. See
     /// [`Worker::fail`].
     reported: BTreeSet<String>,
-    /// Every watched repository's git directory, absolute. A change under one of these is news
-    /// for the git pane and nothing else: `.git` is not indexed and must never be.
+    /// Absolute git directories watched for the git pane, never indexed.
     git_dirs: Vec<PathBuf>,
-    /// The folders the index does not walk that the window lists, vault-relative: each watched
-    /// one level deep, and what happens in one re-lists it without touching the index.
+    /// Vault-relative unindexed folders listed by the window. Watch direct children
+    /// and refresh their listings without updating the index.
     unindexed: BTreeSet<String>,
     /// What the inbox held that a walk read between its batches and could not answer there. See
     /// [`Worker::reconcile`].
@@ -142,14 +135,13 @@ struct Worker {
     /// Set by [`Local::stop_indexing`](crate::local::Local::stop_indexing) and by the vault's
     /// `Drop` from another thread, and read inside the walk: the inbox cannot be reached from there.
     stop: Arc<AtomicU8>,
-    /// A walk stopped, and nothing but [`Msg::Resume`] may start another. Not persisted, and it
-    /// must not be: the index is a diff, so *opening the vault again* is the resume. What a
-    /// pause has to survive is this session, where the vault stays open and half-indexed.
+    /// Whether indexing is paused; only [`Msg::Resume`] restarts it in this session.
+    /// Not persisted: reopening the vault resumes by diffing the partial index.
     paused: bool,
     /// When a walk the watcher's news asks for may start: [`WALK_FLOOR`] after the last one.
     next_walk: Instant,
-    /// The folder of one asked for before then, which comes as a [`Msg::Rescan`] at
-    /// [`Worker::next_walk`]: the folder holding every folder asked for meanwhile.
+    /// Common ancestor of pending scan requests, queued as [`Msg::Rescan`]
+    /// at [`Worker::next_walk`].
     due: Option<String>,
 }
 
@@ -161,8 +153,8 @@ struct Batch {
     removed: BTreeSet<String>,
     /// A directory was added, so the watch set — one watch per directory — is short one entry.
     rewatch: bool,
-    /// The directories added, whose watches start at the end of the batch: what is written into
-    /// one before then reaches no watch, so whatever one holds by then is walked in.
+    /// New directories to watch at batch end. Scan their contents then,
+    /// since writes before the watch starts cannot emit events.
     made: Vec<String>,
 }
 
@@ -417,15 +409,9 @@ impl Worker {
         }
     }
 
-    /// The folder of the `.gitignore` `msg` is news about, wherever in the vault it sits.
-    ///
-    /// One of these decides which *directories* the walk enters (`walk::stat_one`), so editing one
-    /// changes the shape of the index rather than the contents of a file: adding `mlruns/` has to
-    /// drop the tree the last walk indexed, and removing it has to walk the tree left lazy. Only a
-    /// walk can do either, and a `.gitignore` rules nothing outside its own folder, so that folder
-    /// is what is walked — the root's, the common one, being the whole vault. One open in a tab is
-    /// saved far more often than it is edited, and [`WALK_FLOOR`] is what keeps that to a walk now
-    /// and then.
+    /// Find the folder affected by a `.gitignore` event. Ignore rules change which
+    /// directories [`walk::stat_one`] enters, so rescan that folder to add or remove
+    /// indexed subtrees. [`WALK_FLOOR`] limits rescans during autosaves.
     fn gitignore_dir(&self, msg: &Msg) -> Option<String> {
         let dir = |rel: &str| {
             let named = Path::new(rel)
@@ -446,13 +432,10 @@ impl Worker {
         }
     }
 
-    /// A walk of the folder `dir` (`""` for the whole vault), then a fresh watcher because
-    /// directories and the symlinked ones may have come or gone. [`Event::Reconciled`] is emitted
-    /// once both are done, so receiving it means the vault is indexed *and* watched.
-    ///
-    /// A first walk of a large vault takes seconds, so the inbox is read between its batches.
-    /// What does not touch the walk is answered there — git news, the git directories to watch,
-    /// the exclusion set — and everything else is held for [`Worker::run`], in the order it came.
+    /// Rescan `dir` (`""` for the vault), then refresh watches for changed directories
+    /// and symlinks. [`Event::Reconciled`] means both indexing and watching are ready.
+    /// During long scans, process git events, watch changes and exclusions between
+    /// batches; defer other messages to [`Worker::run`] in arrival order.
     fn reconcile(&mut self, dir: &str) {
         // Whatever asked for a walk of this folder or of one inside it is answered by this one.
         if self
@@ -547,8 +530,8 @@ impl Worker {
         }
     }
 
-    /// Conflicts the walk found. Syncthing usually leaves them while accent is closed, so no
-    /// watcher event will ever announce them and the resolve dialog would never be offered.
+    /// Report conflicts found by a scan, including those synced while accent was
+    /// closed and therefore unseen by its watcher.
     fn emit_conflicts(&mut self) {
         match conflict_pairs(&self.index) {
             Ok(pairs) => {
@@ -578,10 +561,9 @@ impl Worker {
         }
     }
 
-    /// Whether the git news in `git` made a folder of branch refs, which then wants watching as
-    /// the others are ([`watch`]): a remote's first fetch or push, a first `feature/…` branch.
-    /// One that went, as `git pack-refs` prunes an emptied one, took its watch with it, so the set
-    /// forgets it and watches it afresh when it is made again.
+    /// Refresh watches for added or removed branch-ref folders, such as a first
+    /// fetch or `feature/…` branch. Forget removed folders so later recreation
+    /// gets a new watch. See [`watch`].
     fn ref_dirs_moved(&mut self, git: &[Msg]) -> bool {
         let mut made = false;
         for msg in git {
@@ -604,12 +586,9 @@ impl Worker {
         made
     }
 
-    /// Whether `msg` is news from directly inside the unindexed folders alone, adding each folder
-    /// whose listing it changed to `listed`.
-    ///
-    /// A folder the news names itself was removed or made anew, so its own listing changed too,
-    /// and it is watched afresh (`rewatch`): one made anew is a new directory. A folder the walk
-    /// has entered since — its `.gitignore` line went — is the index's again.
+    /// Handle events confined to unindexed folders and add changed listings to `listed`.
+    /// Rewatch recreated folders; folders entered after an ignore-rule change
+    /// return to normal index handling.
     fn unindexed_news(
         &mut self,
         msg: &Msg,
@@ -755,12 +734,10 @@ impl Worker {
         }
     }
 
-    /// The watcher's news of a path the index already holds as it is on disk: the echo of this
-    /// vault's own write, a change a walk here took in first and reported itself
-    /// (`ReconcileStats::changed`), or one another process sharing the index (`accent-cli mcp`
-    /// beside the app) took in first, which reaches the window here or never. The index cannot
-    /// tell them apart, so the etag of the vault's own write is what does; a walk's is said
-    /// twice. New or edited is unknowable too, so the folder's listing is news either way.
+    /// Handle watcher events whose disk state already matches the index. They may
+    /// echo our own write, a scan, or another process sharing the index. Only our
+    /// saved etag distinguishes an own-write echo; scans may be reported twice.
+    /// Always refresh the folder listing because the event cannot identify a new file.
     fn unchanged(&mut self, rel: &str, b: &mut Batch) {
         let path = self.root.join(rel);
         if !path.exists() || self.mine(rel) {
@@ -774,9 +751,8 @@ impl Worker {
         }
     }
 
-    /// Whether `rel` is on disk as this vault's own last write of it left it, which is no news to
-    /// its window whichever order the write and the watcher's news reach the worker in: the echo
-    /// of an earlier change, read after the save landed, finds the save.
+    /// Check whether `rel` still has this vault's last saved etag. Suppress its
+    /// watcher echo regardless of the order in which save and event arrived.
     fn mine(&self, rel: &str) -> bool {
         self.own
             .get(rel)
@@ -797,14 +773,8 @@ impl Worker {
         }
     }
 
-    /// Never kill the thread over one bad file: log every failure, tell the UI about each
-    /// distinct one once, carry on.
-    ///
-    /// Everything reported here is index maintenance the user cannot act on, and it is driven by
-    /// their typing: an autosave that failed to index raises the same message on the next
-    /// keystroke, and the next. DESIGN.md's toast rule is "a thing that happened and is over",
-    /// which a failure that repeats per save is not — the same reason a synced vault's conflict
-    /// copies became one count instead of a wall of toasts.
+    /// Keep indexing after a bad file: log every failure and notify the UI once
+    /// per distinct error. Repeated autosave failures must not generate repeated toasts.
     fn fail(&mut self, what: &str, e: impl std::fmt::Display) {
         let message = format!("{what}: {e:#}");
         tracing::warn!("{message}");
@@ -818,9 +788,8 @@ impl Worker {
     }
 }
 
-/// Watch the directories the index holds, plus the git directories and the unindexed folders the
-/// window lists: the watcher there is, given the new set ([`Watcher::set_dirs`], which keeps what
-/// it has not reported yet), or a new one.
+/// Update watches for indexed directories, git directories and listed unindexed
+/// folders. Reuse [`Watcher::set_dirs`] to preserve pending events, or create a watcher.
 fn watch(
     watcher: &mut Option<Watcher>,
     index: &Index,

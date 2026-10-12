@@ -80,11 +80,8 @@ impl PdfView {
         }
     }
 
-    /// Scroll one step up or down, which is what the arrow keys ask for.
-    ///
-    /// `GtkScrolledWindow` binds a step to `Ctrl+Up` and `Ctrl+Down` and the bare arrows to
-    /// nothing, so this is the same move under the key a reader reaches for. The adjustment
-    /// clamps its own value, so the two ends of the document need no case here.
+    /// Scroll one adjustment step for bare arrow keys, which `GtkScrolledWindow` leaves unbound.
+    /// The adjustment clamps at document boundaries.
     pub fn scroll_step(&self, down: bool) {
         let Some(vadj) = self.vadjustment() else {
             return;
@@ -171,11 +168,8 @@ impl PdfView {
         self.imp().scroll.v()
     }
 
-    /// Recompute the layout for the current size and zoom, and tell the scrollbars.
-    ///
-    /// The reading position is kept across the recompute, because it is the one thing the raw
-    /// scroll offset cannot carry: a resize or a zoom moves every page, so the same number of
-    /// pixels down the content is a different place in the document.
+    /// Recompute layout and scrollbars while retaining the page-relative reading position. Raw
+    /// pixel offsets would move the reader after resize or zoom.
     pub(super) fn relayout(&self) {
         let (w, h) = (self.width(), self.height());
         if w <= 1 || h <= 1 {

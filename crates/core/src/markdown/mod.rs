@@ -1,11 +1,8 @@
-//! Markdown analysis: one pulldown-cmark pass -> styling spans, links, tags, headings, HTML.
-//! All ranges are byte offsets into the input text. Consumers (GTK, Compose) only apply spans.
+//! Markdown analysis for styling spans, links, tags and headings, with shared preview rendering.
+//! All ranges are source byte offsets for GTK and Compose consumers.
 //!
-//! `analyze` lives here with the types it fills; the helpers it calls sit by concern — `spans`
-//! reads delimiters back from the source, `links` classifies and rewrites targets, `frontmatter`
-//! scans tags and the YAML block, `html` renders the preview.
-//!
-//! `table` stands apart: it lays out a pipe table as the editor's Tab and Enter keep it.
+//! Helpers separate delimiter validation, link handling, frontmatter and HTML. `table` handles
+//! pipe-table layout and cell navigation for Tab and Enter.
 
 mod blocks;
 mod frontmatter;
@@ -486,11 +483,8 @@ mod tests {
         }
     }
 
-    /// A hyphen, a space, `[`, a space, `]`, a space, a backslash, a newline, a tab, a hyphen:
-    /// ten bytes that made pulldown-cmark slice `6..5` inside its heading-attribute block while
-    /// looking at the setext heading the tab-indented `-` opens. Dropping
-    /// `Options::ENABLE_HEADING_ATTRIBUTES` is what keeps it out of that code; a note holding
-    /// these bytes used to take the window down.
+    /// Regression fixture for a pulldown-cmark heading-attribute panic on a tab-indented setext
+    /// heading. Disabling `Options::ENABLE_HEADING_ATTRIBUTES` avoids the invalid `6..5` slice.
     #[test]
     fn a_backslash_before_a_tabbed_setext_rule_does_not_panic() {
         let doc = "- [ ] \\\n\t-";

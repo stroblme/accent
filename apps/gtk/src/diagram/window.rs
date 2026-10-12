@@ -1,5 +1,5 @@
-//! The window's side of a diagram tab: opening one, saving it through the same etag gate a
-//! note's save goes through, what the watcher says about its file, and the diagram commands.
+//! Window integration for diagram opening, commands, file watching and saves through
+//! the same etag gate as notes.
 
 use accent_api::Error;
 use accent_core::Error as Core;
@@ -9,8 +9,7 @@ use accent_drawio::File;
 use super::{DiagramTab, Tool};
 use crate::*;
 
-/// Pictures larger than this are not embedded: a `data:` URI is a third larger again, and it
-/// lives inside the diagram file.
+/// Embedded-image size limit; base64 adds a third to the diagram file size.
 const MAX_IMAGE: usize = 2 * 1024 * 1024;
 
 /// What reading a diagram off the disk came to.
@@ -48,8 +47,7 @@ fn parse_text(text: accent_core::fs::Text) -> Parsed {
 }
 
 impl App {
-    /// A diagram in a tab of its own. The read and the parse happen on a worker; the tab goes up
-    /// once there is a page to show, as a note's goes up once its text has arrived.
+    /// Read and parse on a worker, then open a tab once its page is ready.
     pub(crate) fn open_diagram(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
         let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
         let (key, path) = (key.to_string(), path.to_path_buf());
@@ -268,9 +266,8 @@ impl App {
         true
     }
 
-    /// The insert tools over the diagram in front, greyed on the ring and in the palette while
-    /// its page has no layer to draw into, every one locked or hidden, as draw.io greys its
-    /// Insert actions (EditorUi.js `updateActionStates`); one in hand there is put down.
+    /// Disable insertion when all layers are hidden or locked and clear any active
+    /// insert tool, matching draw.io (`EditorUi.updateActionStates`).
     pub(crate) fn sync_diagram_tools(&self) {
         let diagram = self.active_diagram();
         let open = diagram.as_ref().is_none_or(|d| d.can_insert());
@@ -334,9 +331,8 @@ impl App {
         });
     }
 
-    /// Ctrl+S or the autosave, through the note's save (`App::start_save`): nothing is written
-    /// while the file has moved under unsaved edits, one write is on its way at a time, and a
-    /// write is gated on the etag the tab last knew.
+    /// Save through `App::start_save`, gated on the known etag. Allow one in-flight
+    /// write and pause on disk conflicts with unsaved edits.
     pub(crate) fn save_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>, explicit: bool) {
         if !editor::may_save(tab.save.modified.get(), tab.save.disk_changed.get()) {
             if explicit && tab.save.disk_changed.get() {
@@ -455,9 +451,8 @@ impl App {
         });
     }
 
-    /// The file moved under edits nobody has saved. Both sides hold work, and there is no
-    /// comparison of two diagrams to offer, so the question is which one to keep (DESIGN.md: a
-    /// choice that can lose data is a dialog).
+    /// Ask which version to keep when disk changes conflict with unsaved edits.
+    /// Diagrams have no comparison view, and either choice can lose work.
     pub(crate) fn resolve_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
         let dialog = adw::AlertDialog::new(
             Some("Diagram Changed on Disk"),

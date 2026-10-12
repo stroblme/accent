@@ -1,13 +1,8 @@
-//! The call signature under the caret, over the line it is being typed on.
+//! Show the call signature above the caret without taking keyboard or pointer focus.
 //!
-//! A popover rather than an assistant of GtkSourceView's own: the hover and the completion own
-//! that machinery between them, and a third assistant would fight both for the same space.
-//! It never takes a grab and cannot be targeted, so it sits over the text while the text is
-//! still being typed and neither swallows a key nor steals the pointer.
-//!
-//! It comes up when a trigger character is typed — `(` and `,` for most servers — and goes away
-//! the moment it stops being about what the caret is inside: an answer of `None`, Escape, the
-//! caret leaving the line, the focus leaving the view, or the tab being switched away from.
+//! A popover avoids competing with GtkSourceView's hover and completion assistants. Trigger
+//! characters request it; `None`, Escape, leaving the line, losing focus or switching tabs
+//! hide it.
 
 use crate::editor::{Tab, caret};
 use crate::hover::WIDTH;
@@ -43,9 +38,8 @@ impl Help {
     }
 }
 
-/// `sig` as one line of Pango markup: the whole signature in monospace, with the parameter the
-/// caret is on in bold. Everything is escaped, so a C++ signature full of `<` and `&` cannot turn
-/// the label into a parse error and blank the popover.
+/// Render `sig` as escaped Pango markup, with the active parameter bold and the signature monospace.
+/// Escaping prevents server text containing `<` or `&` from breaking the label.
 pub fn markup(sig: &Signature) -> String {
     let chars: Vec<char> = sig.label.chars().collect();
     let piece = |range: std::ops::Range<usize>| -> String {
@@ -129,9 +123,8 @@ pub fn install(tab: &Rc<Tab>) {
     ));
 }
 
-/// Escape while the popover is up means "this call is not what I want to see", and nothing else
-/// in the view should also act on it. `None` for every other key. `editor::keys` offers a press
-/// here first, ahead of the ghost text, which also wants Escape.
+/// Consume Escape while signature help is visible; return `None` for other keys.
+/// `editor::keys` gives this priority over ghost text so one Escape closes one feature.
 pub fn on_key(tab: &Rc<Tab>, key: gdk::Key) -> Option<glib::Propagation> {
     (key == gdk::Key::Escape && tab.lang.signature.is_shown()).then(|| {
         tab.lang.signature.dismiss();

@@ -1,6 +1,5 @@
-//! The fixture the vault's own tests share: a vault in a tempdir with its index in a second
-//! one, so nothing here can reach the machine's real cache, and the event waits every test
-//! spells the same way.
+//! Shared vault fixtures and event waits. Separate temporary vault and index directories
+//! keep tests away from the user's cache.
 
 use crate::*;
 use std::sync::mpsc::Receiver;
@@ -10,9 +9,8 @@ use tempfile::TempDir;
 /// Long enough for a 300 ms watcher debounce plus a reconcile of a handful of files.
 pub(crate) const BUDGET: Duration = Duration::from_secs(10);
 
-/// A vault in a tempdir with its index in a second one, so no test can reach the user's
-/// real cache. `vault` is declared first: dropping it stops the worker before the
-/// directories it walks disappear.
+/// A vault and index in separate temporary directories. `vault` drops first so its
+/// worker stops before the directories disappear.
 pub(crate) struct Fixture {
     pub(crate) vault: Vault,
     pub(crate) events: Receiver<Event>,
@@ -25,9 +23,8 @@ impl Fixture {
         Fixture::open_dir(tempfile::tempdir().unwrap(), cfg)
     }
 
-    /// Opens `root` and waits for the first reconcile, so the vault is indexed and watched.
-    /// The directory may already hold files: that is the state Syncthing leaves behind while
-    /// accent is closed.
+    /// Open `root` and wait until it is indexed and watched. Existing files model
+    /// changes synced while accent was closed.
     pub(crate) fn open_dir(root: TempDir, cfg: VaultConfig) -> Fixture {
         let cache = tempfile::tempdir().unwrap();
         let (vault, events) =

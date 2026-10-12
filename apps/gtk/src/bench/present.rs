@@ -1,46 +1,22 @@
-//! Presentation mode's drill: what F5 puts on screen for each kind of tab, what still works over
-//! it, and what leaving it puts back.
+//! Check presentation contents, available controls and layout restoration.
 
 use super::*;
 use webkit6::prelude::WebViewExt;
 
-/// `ACCENT_BENCH_CHROME=present:<note>,<pdf>,<image>,<side>` lays out two panes, the note, the
-/// PDF, the image and a shell on the left and `<side>` on the right, and presents each of the
-/// four from the left pane in turn. For each it prints:
+/// `ACCENT_BENCH_CHROME=present:<note>,<pdf>,<image>,<side>` presents four tab kinds
+/// from the left of two panes. Print content bounds, hidden panes/tab bars/sidebar,
+/// PDF zoom and focus; `<kind>_after same=` checks exact layout restoration.
 ///
-/// - `<kind>`: what is on screen, the tab's own page and the preview (drawn or `hidden`, with
-///   their bounds in the window), how many other panes and tab bars are drawn, the sidebar, a
-///   PDF's zoom and what has the keyboard;
-/// - `<kind>_after`: the layout once that F5 is left again, every divider, the panes, the
-///   preview, the sidebar and the keyboard, `same=` saying whether it is the one before it;
+/// While presenting, probe Find (`<kind>_find`), held Ctrl+Tab card bounds/content,
+/// Escape restoring the initial tab, and toast clearance above the status bar during
+/// animation (`<kind>_toast*`). Repeat for a split note with an off-centre divider.
 ///
-/// and, presenting it again:
-///
-/// - `<kind>_find`: whether Ctrl+F opened a bar, inside the presented pane and drawn;
-/// - `<kind>_card`: a `Ctrl+Tab` held past the card's delay: whether the card is drawn, inside
-///   the window, and what the step put on screen;
-/// - `<kind>_escape`: Escape over the held chord, as the window hears it: the tab it started from
-///   in front again, and still presenting;
-/// - `<kind>_toast` and `<kind>_toast_away`: a toast up with the pointer on the status bar's strip
-///   and once it has left, the toast's bottom against the bar's top; for the note,
-///   `note_toast_up` and `note_toast_down` follow both on the frames between.
-///
-/// Then `split` and `split_after`: the note alone in Split view, its divider off the middle,
-/// presented and left again. Last, presenting again, real keys: a held `Ctrl+Tab` pressed twice
-/// and Escape before Ctrl comes up, then one held and let go, every change of the chord, the card
-/// and what is presented printing as `bench present keys`; Page Down over the presented note and
-/// PDF (`<kind>_page_down`, the note's `scrollY` or the PDF's page before and after); the status
-/// bar's menus over the PDF by pointer, `bar_menu_<step>` saying whether a menu is up, the bar
-/// with it and the zoom: the zoom readout right-clicked (`open`), the pointer up over the page
-/// (`away`), Fit Width picked (`pick`, the bar gone with the pointer off it), the page count
-/// clicked (`page`) and Escape (`escape`, the bar staying under the pointer), then the zoom
-/// readout right-clicked (`rest`) and clicked (`rest_click`, Fit Height) by a pointer that came
-/// to rest on it before the bar was up, `bar_menu_page_menu` saying whether the page's own menu
-/// opened instead (both to read `false`); and F5 and Escape
-/// pressed in the presented shell (`shell_F5`, `shell_Escape`, both to read
-/// `presenting=false`). `bench present xtest <steps>` asks for those steps, under Xvfb
-/// `build-aux/xtest.py :N "<steps>"`, the first of them giving the window the X input focus.
-/// `bench present shot <case>` is a second and a half held for a screenshot.
+/// Real XTEST input checks tab cycling, Page Down in notes/PDFs and status-bar menus:
+/// open, leave, select Fit Width, open page menu, Escape, and clicks by a resting
+/// pointer. `bar_menu_page_menu` must be false when the status-bar menu handles input.
+/// F5/Escape in a shell must leave `presenting=false`.
+/// `bench present xtest <steps>` requests `build-aux/xtest.py :N "<steps>"`, starting
+/// with input focus. `bench present shot <case>` pauses 1.5 s for screenshots.
 pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
     if rels.len() != 4 {

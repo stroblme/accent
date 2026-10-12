@@ -1,8 +1,5 @@
-//! One error for the whole surface.
-//!
-//! Kotlin gains nothing from the shape of a failure it cannot act on, so everything that is not
-//! the save conflict — the one case with a real answer, since the caller holds an edit and the
-//! file has moved under it — arrives as a sentence.
+//! FFI errors preserve actionable save conflicts; other failures become
+//! display messages because Kotlin callers cannot act on their variants.
 
 use accent_core::fs::Etag;
 
@@ -10,8 +7,8 @@ use crate::Error;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum AccentError {
-    /// The file changed since it was read, so the save was refused. `current` is what is on disk
-    /// now: the caller either reloads from it or saves again against it.
+    /// Save refused because the file changed. `current` is the disk etag
+    /// for reloading or retrying the save.
     #[error("the file changed on disk")]
     ChangedOnDisk { current: Etag },
     #[error("{reason}")]

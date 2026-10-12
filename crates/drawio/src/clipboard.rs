@@ -2,8 +2,7 @@
 // js/grapheditor/EditorUi.js, js/grapheditor/Graph.js and js/diagramly/EditorUi.js (Apache-2.0,
 // Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for
 // accent; see crates/drawio/NOTICE.
-//! draw.io's clipboard: cells written as the `<mxGraphModel>` its Copy puts there, and the
-//! forms its Paste reads a diagram back out of. Pasting itself is [`crate::Editor::paste`].
+//! Read and write draw.io clipboard formats. [`crate::Editor::paste`] applies the paste.
 
 use std::collections::HashMap;
 
@@ -12,11 +11,11 @@ use crate::model::{Cell, CellId, Page};
 use crate::scene::Scene;
 use crate::xml;
 
-/// The XML draw.io's Copy writes for cells `ids` of `page`, drawn as `drawn` (`mxClipboard.copy`,
-/// `Graph.encodeCells`, `mxGraph.cloneCells`): the topmost of them in the page's order, all
-/// under each going along, on a layer of their own and numbered afresh from 2, placed from the
-/// page's origin. An edge whose shape was not copied lets go of it where its end is drawn, and
-/// a shape placed on a parent that was not copied by fractions of it is placed where it is.
+/// Copy selected cells and their descendants as draw.io-compatible XML
+/// (`mxClipboard.copy`, `Graph.encodeCells`, `mxGraph.cloneCells`). Keep topmost
+/// selections in document order, on a new layer with ids starting at 2 and page-relative
+/// positions. Disconnect edges from uncopied terminals at their drawn endpoints;
+/// convert relative vertices with uncopied parents to absolute positions.
 // mxGraph.js 4523-4660; grapheditor/EditorUi.js 3562-3615; Graph.js 17817-17857
 pub fn copy(page: &Page, ids: &[CellId], drawn: &Scene) -> String {
     let top = crate::edit::topmost(page, ids);
@@ -81,10 +80,9 @@ pub fn copy(page: &Page, ids: &[CellId], drawn: &Scene) -> String {
     xml::write_model(&out)
 }
 
-/// The pages of the diagram in clipboard text, as draw.io's Paste finds one
-/// (`EditorUi.pasteCells`, `extractGraphModelFromHtml`, `isCompatibleString`): the XML of a
-/// model or a page (one page), or of a file (its pages) — as written, URI-encoded as draw.io's
-/// own Copy leaves it, or escaped inside HTML. None for anything else, which pastes as text.
+/// Read clipboard pages from model, page or file XML, whether plain, URI-encoded
+/// or HTML-escaped (`EditorUi.pasteCells`, `extractGraphModelFromHtml`,
+/// `isCompatibleString`). Returns `None` for other content, which pastes as text.
 // diagramly/EditorUi.js 20600-20760, 1535-1575; grapheditor/EditorUi.js 6949-6975
 pub fn pages_in(text: &str) -> Vec<Page> {
     let text = xml::zap_gremlins(text.trim());
@@ -113,7 +111,7 @@ pub fn pages_in(text: &str) -> Vec<Page> {
         .map_or(Vec::new(), |file| file.pages)
 }
 
-/// Plain text as the HTML label of the text cell it pastes as: what it says, each line its own.
+/// Encode plain text as an HTML label, preserving line breaks for pasting.
 pub fn text_label(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.trim_end().chars() {

@@ -1,5 +1,4 @@
-//! Comparing: the tab hosts a diff beside its own document, or a merge of the file git left
-//! unmerged around it, and the read-only companion views the other columns are rendered in.
+//! Tab-hosted comparisons and merges, with read-only companion columns.
 
 use super::{Alert, Flavour, Tab, build, line_numbers, sync_scheme};
 use crate::{diff, fold, highlight, wrap};
@@ -8,8 +7,8 @@ use gtk::glib;
 use sourceview5::prelude::*;
 use std::rc::Rc;
 
-/// What the tab hosts in its document's place: a comparison ([`Tab::compare`]) or a merge
-/// ([`Tab::merge`]), the editor one of its columns either way.
+/// A comparison ([`Tab::compare`]) or merge ([`Tab::merge`]) hosted around
+/// the editor as one column.
 #[derive(Clone)]
 pub enum Hosted {
     Compare(Rc<diff::Compare>),
@@ -72,21 +71,19 @@ impl Hosted {
 /// What the tab is hosting, and how to put the document back: see [`Tab::host`].
 pub(super) struct Comparing {
     hosted: Hosted,
-    /// What the content shows in the document's place: the paned, and what the host put under it.
+    /// Paned comparison content and the host's controls below it.
     shown: Vec<gtk::Widget>,
     /// The box the document sits in, on its side of the paned.
     holder: gtk::Box,
     pub(super) label: String,
     /// The banner question this comparison is the answer to, see [`Tab::comparing_answers`].
     pub(super) answers: Option<Alert>,
-    /// The folds the comparison opened, as a mark on each header line and the header's text:
-    /// see [`Tab::open_folds`].
+    /// Opened fold headers as text and edit-tracking marks ([`Tab::open_folds`]).
     shut: Vec<(gtk::TextMark, String)>,
 }
 
-/// A read-only view over `text` for a comparison, built the way the editor builds its own so the
-/// two sides of a diff render one note alike, and named `name` so the font and zoom CSS written
-/// for the editor applies here too.
+/// Build a read-only companion matching the editor's rendering. Use `name`
+/// to share its font and zoom CSS, keeping both diff columns consistent.
 pub fn companion(
     flavour: Flavour,
     text: &str,
@@ -112,16 +109,15 @@ fn line_text(at: &gtk::TextIter) -> String {
     at.text(&end).to_string()
 }
 
-/// An editable note view over `text` that is not a tab: a diagram's label, edited as Markdown
-/// with the note's own styling (`diagram/label.rs`).
+/// Build an editable Markdown view for diagram labels without a tab
+/// (`diagram/label.rs`).
 pub fn overlay_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
     let (view, buffer) = build(Flavour::Note, None, text);
     style_companion(Flavour::Note, &buffer, &view);
     (view, buffer)
 }
 
-/// The styling a companion's text implies: what [`Tab::analyse`] does for the editor, less the
-/// parts that need a tab.
+/// Apply companion styling like [`Tab::analyse`], without tab-specific work.
 pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     match flavour {
         Flavour::Note => {
@@ -132,8 +128,8 @@ pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &so
     }
 }
 
-/// A companion's colours after the theme moved: what [`Tab::restyle`] does, less the gutters a
-/// tab has.
+/// Update companion colours after theme changes, without tab gutters
+/// ([`Tab::restyle`]).
 pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     sync_scheme(buffer);
     match flavour {
@@ -144,8 +140,8 @@ pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &
     rehang_companion(flavour, buffer, view);
 }
 
-/// A companion's heading markers and wrap indents measured again, against its left margin and in
-/// its font: what [`Tab::rehang`] does for the editor.
+/// Remeasure companion markers and wrap indent in its own font and margin
+/// ([`Tab::rehang`]).
 pub fn rehang_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     if flavour.is_note() {
         highlight::hang(buffer, view);
@@ -154,10 +150,9 @@ pub fn rehang_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &s
 }
 
 impl Tab {
-    /// Show `other` (title, text) beside this tab's editor with the diff laid over both. The
-    /// editor is the `side` column and is never rewritten: what the user types is the merge.
-    /// `hunk_buttons` puts Take / Keep Both on the other pane, `below` goes under the panes for
-    /// the host's own buttons, and `label` says in the tab title what is being compared.
+    /// Show `other` (title, text) beside the editor at `side`. Preserve editor
+    /// text so user edits form the merge. `hunk_buttons` adds Take/Keep Both
+    /// to the peer; `below` holds host controls and `label` names the comparison.
     pub fn compare(
         self: &Rc<Self>,
         mine: &str,
@@ -189,8 +184,8 @@ impl Tab {
         }
     }
 
-    /// Show the file git left unmerged as a merge: its stages `stages` — base, current, incoming
-    /// — beside it, current on the left and incoming on the right, the editor in the middle.
+    /// Show git `stages` (base, current, incoming) around the editor, with
+    /// current on the left and incoming on the right.
     pub fn merge(self: &Rc<Self>, stages: [String; 3]) -> Rc<diff::Merge> {
         // The sides as the markers name them, `HEAD` and the branch, which a rebase swaps.
         let text = self.text();
@@ -244,9 +239,8 @@ impl Tab {
         }
     }
 
-    /// Put what `make` builds around the editor's column in the document's place: the editor
-    /// under a title row reading `mine` with a button that leaves (`stop` its tooltip), `below`
-    /// under the columns, and `label` in the tab title.
+    /// Wrap the editor with `make`, a `mine` title and leave button (`stop`
+    /// tooltip). Place `below` under columns and `label` in the tab title.
     fn host(
         self: &Rc<Self>,
         mine: &str,
@@ -368,9 +362,8 @@ impl Tab {
         self.render_banner();
     }
 
-    /// Open every shut fold for a comparison, which hides lines of its own: see [`Tab::shut`].
-    /// Each header is kept as a mark, which follows it through the comparison's edits, and as its
-    /// text, which says whether it is still the same header when the comparison goes.
+    /// Open folds for comparison, retaining each header's text and a mark
+    /// tracking edits so folds can be restored afterwards ([`Tab::shut`]).
     fn open_folds(&self) -> Vec<(gtk::TextMark, String)> {
         let buffer = self.text_buffer();
         let shut = self
@@ -385,9 +378,9 @@ impl Tab {
         shut
     }
 
-    /// Shut again what [`Tab::open_folds`] opened, where the header is still there and still opens
-    /// a block, to where the block ends now. One the caret is in stays open, as a collapsed run
-    /// does.
+    /// Restore folds opened by [`Tab::open_folds`] if their headers still
+    /// exist and define blocks, using current ends. Keep caret-containing
+    /// blocks open, as with collapsed runs.
     fn shut_again(&self, shut: Vec<(gtk::TextMark, String)>) {
         let buffer = self.text_buffer();
         let caret = self.caret_line() as u32;

@@ -1,17 +1,11 @@
-//! A pane's find, replace and go-to-line bar.
+//! A find, replace and go-to-line bar for each pane.
 //!
-//! One bar per pane rather than one per tab or one per window: a pane owns the document it is
-//! showing, so a split searches two notes at once, each with its own query, its own mode and its
-//! own open state. It is a revealed row between the pane's tab bar and its document, which pushes
-//! the document down rather than covering it.
+//! Pane ownership lets split documents keep separate queries, modes and visibility. The
+//! revealed row pushes the document down instead of covering it.
 //!
-//! Because it outlives any one tab, the bar drives the tab from the outside — `Tab` keeps its
-//! query, its matches and the caret moves, this file keeps the widgets — and it re-targets
-//! whenever the pane's tab in front changes. Re-targeting leaves the old tab's marks alone: the query and
-//! the highlight belong to the tab, so a note opened from a search hit is still marked when the
-//! reader comes back to it. While presenting there is no buffer to search, so the same widgets
-//! address the rendered preview through [`PreviewOp`] instead; that indirection is also what keeps
-//! this file from having to know what an `App` is.
+//! Tabs own query state, matches and caret moves; the bar owns widgets and retargets on tab
+//! switches without clearing old matches. Presentation mode searches the rendered preview
+//! through [`PreviewOp`], keeping the bar independent of `App`.
 
 use crate::editor::Tab;
 use crate::recall::{self, QUERIES, REPLACEMENTS};
@@ -21,9 +15,8 @@ use gtk::{gdk, glib};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
-/// Match Case, Match Whole Word and Use Regular Expression, in the order the find bar and the
-/// Search pane both show them: text rather than icons, since Adwaita has no glyph for any of the
-/// three, and VS Code's `Aa`, `Word` and `.*` are what a user arriving from there already reads.
+/// Shared text labels for case, whole-word and regex toggles.
+/// Adwaita has no suitable glyphs; Aa, Word and .* follow familiar editor conventions.
 pub const TOGGLES: [(&str, &str); 3] = [
     ("Aa", "Match Case"),
     ("Word", "Match Whole Word"),
@@ -61,17 +54,14 @@ pub enum PreviewOp {
     Next,
     Previous,
     Clear,
-    /// A line or a page to show. `commit` is the Return that ends the entry rather than the live
-    /// preview under a half-typed number, which matters to a PDF: only a committed jump is worth
-    /// remembering, or Back walks the digits back one at a time.
+    /// Show a line or page; `commit` records only confirmed jumps, avoiding one history entry per typed digit.
     Line {
         line: u32,
         commit: bool,
     },
 }
 
-/// What the bar needs from the window. Three closures, so `find.rs` never names `App`; all three
-/// answer for the bar's own pane, not for whichever pane has the keyboard.
+/// Pane-local window operations supplied as closures so find.rs remains independent of App.
 pub struct Wiring {
     /// Whether something other than this pane's editor — the rendered preview, or a PDF — is what
     /// the user is looking at, so find and go-to are addressed there instead.
@@ -92,8 +82,7 @@ pub enum Mode {
     Goto,
 }
 
-/// A tab the bar is pointed at, with the handler watching its line count, which goes when the bar
-/// is pointed elsewhere, or they accumulate one per tab switch.
+/// Searched tab and its line-count handler, disconnected on retargeting to avoid accumulating handlers.
 type Watch = (Rc<Tab>, glib::SignalHandlerId);
 
 pub struct Bar {
@@ -110,18 +99,14 @@ pub struct Bar {
     lines: gtk::Label,
     /// The tab being searched, and what is watching it.
     target: RefCell<Option<Watch>>,
-    /// What the bar last wrote into the query box on the tab's behalf, waiting for the delayed
-    /// `search-changed` that follows it. A sidebar jump sets the tab's query and deliberately
-    /// leaves it unpainted; running it here as a search of the reader's own would light every
-    /// match and step the caret off the place the jump just revealed.
+    /// Programmatically set query awaiting its delayed search-changed signal.
+    /// Distinguish sidebar jumps from user searches so query sync cannot repaint all matches or move the caret.
     synced: RefCell<Option<String>>,
     /// Set while the bar itself moves the caret, so the resulting count notification does not
     /// walk the label back to the value it had before the jump.
     busy: Cell<bool>,
-    /// Whether this run of the bar has already recorded where it started. The first search, step
-    /// or committed go-to marks the place and the rest of the walk does not, so Back returns to
-    /// where the search began rather than to the previous hit. Reset by opening and by closing,
-    /// the second because `F3` works with the bar shut.
+    /// Whether this find run recorded its start.
+    /// Record once for searches, steps and committed jumps; reset on open/close so F3 with a closed bar also works.
     marked: Cell<bool>,
     wiring: OnceCell<Wiring>,
 }
@@ -376,11 +361,8 @@ impl Bar {
         let _ = self.wiring.set(wiring);
     }
 
-    /// Point the bar at the tab that just came to the front of its pane.
-    ///
-    /// The old tab keeps its query and its marks: they are the tab's, not the bar's, so a note
-    /// opened from a search hit is still marked after a switch away and back. Only the handler
-    /// watching its length goes, or they accumulate one per tab switch.
+    /// Retarget the bar to the pane's selected tab without clearing the old query or highlights.
+    /// Disconnect only the old length handler so handlers cannot accumulate.
     pub fn retarget(self: &Rc<Self>, tab: Option<Rc<Tab>>) {
         if let Some((old, lines)) = self.target.borrow_mut().take() {
             old.buffer.disconnect(lines);
@@ -413,14 +395,11 @@ impl Bar {
         self.refresh_count();
     }
 
-    /// `tab` matched its query again, and the readout follows. The query is the tab's, so it can
-    /// change without the bar being touched — a sidebar jump hands the tab the text it landed on
-    /// — and where it did (`query`) the box follows it too, or the bar would say one thing while
-    /// `F3` stepped through another. Only then: text typed into the box waits out its
-    /// `search-changed` delay before the tab has it, and an edit or a scroll matched meanwhile
-    /// would put the old query back over it. Nothing is written when the box already says it,
-    /// which is what keeps the bar's own searches from coming back round to it. A tab this bar is
-    /// no longer pointed at is none of its business.
+    /// Update the readout when the current tab rematches; update the entry only if `query` changed.
+    ///
+    /// External query changes must reach the field so F3 agrees with it. Routine rematches must
+    /// not overwrite text waiting for the entry's debounce. Skip equal text to avoid feedback,
+    /// and ignore tabs the bar no longer targets.
     fn found(&self, tab: &Rc<Tab>, query: bool) {
         if !self.tab().is_some_and(|mine| Rc::ptr_eq(&mine, tab)) {
             return;
@@ -439,10 +418,8 @@ impl Bar {
         options([case, word, regex])
     }
 
-    /// Over the rendered preview and a PDF, Match Case and Match Whole Word follow as WebKit's
-    /// find and pdfium's do — whole words being word starts in the preview, which the tooltip
-    /// says — and Regular Expression is shown off-limits rather than quietly ignored, neither
-    /// having one, keeping what it was set to for the next note.
+    /// Apply supported case and whole-word options to preview or PDF search.
+    /// Preview whole-word means word starts. Disable unsupported regex without losing its saved state.
     fn sync_toggles(&self) {
         let presenting = self.presenting();
         let [_, word, regex] = &self.toggles;

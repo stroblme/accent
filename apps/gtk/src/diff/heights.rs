@@ -1,11 +1,8 @@
-//! What a column knows of its lines' natural heights from one relayout to the next, so a pass
-//! measures only the lines something has changed since: see `Columns::relayout`.
+//! Cache natural line heights so relayout measures only changed lines.
 //!
-//! A line's height changes with its text, with a tag that sizes text applied to it or taken off
-//! it, with such a tag's own properties, and with whatever lays out every line: the width, the
-//! margins, the tab width, the line spacing, the font. The first three are heard as they happen
-//! ([`listen`]), the last is compared on every pass ([`Known::ready`]). The padding the comparison
-//! lays itself and the runs it hides are not changes of a line's own height.
+//! Text, sizing tags and tag properties invalidate individual lines through [`listen`].
+//! Width, margins, tabs, spacing and font invalidate the layout through [`Known::ready`].
+//! Comparison padding and hidden runs do not change a line's natural height.
 
 use adw::prelude::*;
 use gtk::glib;
@@ -22,9 +19,8 @@ use super::pad::is_pad;
 pub(super) enum Height {
     /// Never measured, or its text has changed since.
     Unknown,
-    /// A figure GTK has still to confirm: one measured in a layout of our own, or one from before
-    /// something GTK has to lay the line out again for — a tag that sizes text, a new layout, its
-    /// padding, the line shown again.
+    /// Height awaiting GTK confirmation after fallback measurement or
+    /// a change requiring layout, such as sizing tags, padding or revealing.
     Pending(i32),
     /// GTK's own figure, nothing having changed since.
     Laid(i32),
@@ -47,8 +43,8 @@ impl Height {
     }
 }
 
-/// `removed` lines from `line` on replaced by `added` unknown ones: what an edit does to the
-/// lines it touches. The rest keep their figures.
+/// Replace `removed` cached lines at `line` with `added` unknown heights,
+/// retaining unaffected measurements.
 pub(super) fn splice(lines: &mut Vec<Height>, line: usize, removed: usize, added: usize) {
     let end = (line + removed).min(lines.len());
     lines.splice(
@@ -87,9 +83,9 @@ impl Layout {
     }
 }
 
-/// One column's heights, by line of its buffer. A cell each, because the handlers [`listen`]
-/// connects run while a pass holds the lines: a tag the pass lays is looked up in `sizes` and,
-/// being the comparison's own, touches nothing else.
+/// Cached height cells per buffer line. Cells allow [`listen`] handlers
+/// to run during a pass; comparison tags found in `sizes` do not
+/// invalidate natural heights.
 #[derive(Default)]
 pub(super) struct Known {
     pub(super) lines: RefCell<Vec<Height>>,
@@ -99,12 +95,10 @@ pub(super) struct Known {
 }
 
 impl Known {
-    /// Get the lines ready for a pass over `view`, whose text the rows say starts each line at
-    /// `starts` (see `line_starts`), and say whether they can be used: not where the buffer counts
-    /// lines the rows do not, breaking a line at U+2029 too, nor where the rows are for a text the
-    /// buffer no longer holds — a keystroke the host has not laid yet, after which the rows'
-    /// offsets measure the wrong lines. Every line is pending where the layout has changed since
-    /// the last pass, and lines that are not the buffer's — an edit missed — are measured afresh.
+    /// Prepare cached heights for `view` using character line `starts`; report whether usable.
+    ///
+    /// Reject rows that disagree with buffer text or line counts, including U+2029 breaks.
+    /// Layout changes mark every line pending; missed edits force fresh measurement.
     pub(super) fn ready(
         &self,
         view: &sourceview5::View,
@@ -175,9 +169,8 @@ impl Known {
     }
 }
 
-/// Whether `tag` sets anything that changes the size of the text it covers, other than the
-/// comparison's own padding and hidden runs. An underline does not: Pango leaves a line's extents
-/// alone for it, though GTK lays the line out again.
+/// Check sizing properties excluding comparison padding and hidden-run
+/// tags. Underlines leave Pango line extents unchanged despite GTK relayout.
 fn sizes_text(tag: &gtk::TextTag) -> bool {
     if is_pad(tag) || tag.name().as_deref() == Some(TAG_GAP) {
         return false;
@@ -208,9 +201,8 @@ fn sizes_text(tag: &gtk::TextTag) -> bool {
         || tag.is_insert_hyphens_set()
 }
 
-/// Keep `known` in step with `buffer`: its lines spliced as text goes in and out, and pending
-/// where a tag that sizes text goes on or comes off, or such a tag changes. The handlers, for the
-/// caller to disconnect.
+/// Track edits and sizing-tag application, removal and property changes
+/// in `known`. Return handlers for the caller to disconnect.
 pub(super) fn listen(
     buffer: &sourceview5::Buffer,
     known: &Rc<Known>,

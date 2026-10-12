@@ -24,9 +24,8 @@ impl PdfTab {
         self.ask(Request::Save(None));
     }
 
-    /// The same as the tab closes, holding the tab until the write is done: its answer is what
-    /// sends a remote vault's copy back to the host (`connect_saved`), and a tab already gone
-    /// would never hear it. What an erase hid goes first, the history ending ([`Request::Close`]).
+    /// Save on tab close while retaining the tab until completion, so `connect_saved` can upload
+    /// a remote copy. [`Request::Close`] first removes ink hidden by the ending history.
     pub fn flush_closing(self: &Rc<Self>) {
         let (tx, rx) = channel();
         self.ask(Request::Close(Some(tx)));
@@ -66,10 +65,9 @@ impl PdfTab {
         ));
     }
 
-    /// Take the right to start sending the written-out file somewhere. `false` when one is
-    /// already on its way: that one is marked to go again rather than a second starting beside
-    /// it, so a burst of strokes costs two transfers and the far end is never more than one
-    /// behind.
+    /// Claim an upload, or return `false` and schedule another pass if one is running. Coalesce
+    /// saves during transfer to avoid concurrent uploads and keep the remote at most one
+    /// transfer behind.
     pub fn claim_upload(&self) -> bool {
         if self.uploading.replace(true) {
             self.upload_again.set(true);
@@ -126,16 +124,11 @@ impl PdfTab {
         self.unsent.set(false);
     }
 
-    /// Re-read the file, keeping the page, the scroll and the zoom. A rebuilt PDF is the reason
-    /// this exists: a LaTeX loop should not send the reader back to page one.
+    /// Reload after [`SETTLE`] without losing page, scroll or zoom, supporting PDF rebuilds
+    /// during LaTeX editing. Each change postpones the reload until writing settles.
     ///
-    /// Once the file has been left alone for [`SETTLE`], not at once: every report of a change
-    /// pushes the reload back, so a file still being written is read once, when it is done.
-    ///
-    /// A write of our own is not a reason: the document in memory *is* what was written, and
-    /// re-reading it would drop annotations made since. There is no `own: true` to ride on the
-    /// way a note's save has one, because the bytes never went through the vault — so the etag
-    /// of what we wrote is what tells the two apart.
+    /// Ignore the tab's own saved etag: its in-memory document already contains that write, and
+    /// reloading could discard newer strokes.
     pub fn refresh(self: &Rc<Self>) {
         if self.saved.get().is_some()
             && accent_core::fs::Etag::of(&self.path()).ok() == self.saved.get()

@@ -160,7 +160,7 @@ fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Binary PPM (P6). No image crate for a spike that only needs eyeballs on the output.
+/// Binary PPM (P6) for visual inspection without an image dependency.
 fn write_ppm(path: &std::path::Path, img: &RgbaImage) -> Result<()> {
     let mut buf = Vec::with_capacity(img.data.len() / 4 * 3 + 32);
     buf.extend_from_slice(format!("P6\n{} {}\n255\n", img.width, img.height).as_bytes());

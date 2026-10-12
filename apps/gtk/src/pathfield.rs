@@ -1,7 +1,6 @@
-//! A path entry with the folders it could go into listed under it as it is typed.
+//! Complete folder paths below an entry, including paths on remote machines.
 //!
-//! Not file operations: the connect dialog completes a path on another machine with the same
-//! widget, and the only thing the two callers share is the shape of the list.
+//! Callers supply listings, keeping the widget independent of file operations.
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -12,12 +11,10 @@ const PAGE: usize = 5;
 /// How many folders a path entry offers at once before the list stops.
 const COMPLETIONS: usize = 12;
 
-/// The whole texts a half-typed path could be completed to: every name in `folders` that carries
-/// on from the last segment, with the rest of the path kept in front of it and a `/` on the end so
-/// the next segment can be typed straight away.
+/// Complete the final path segment from `folders`, preserving the prefix and adding `/`.
 ///
-/// Folders only. The last segment is the file's own name, which is being invented rather than
-/// looked up, so nothing can complete it and a file would only be a name to collide with.
+/// Only folders are candidates: the final file name is being chosen, so existing files
+/// would suggest collisions rather than destinations.
 pub(crate) fn completions(typed: &str, folders: &[String]) -> Vec<String> {
     let typed = typed.trim();
     let (head, leaf) = match typed.rsplit_once('/') {
@@ -48,12 +45,10 @@ enum Step {
     Pass,
 }
 
-/// Which of those a key press asks for, from the list's state alone.
+/// Choose a completion action from the key and list state.
 ///
-/// Return applies only where a row has been arrowed to; with nothing selected it falls through to
-/// the dialog's default response, so an entry holding a finished path still confirms on Return
-/// rather than growing a trailing slash. Tab is the accept that needs no aim, Escape closes the
-/// list before it closes the dialog, and anything held with a modifier is somebody else's chord.
+/// Return accepts only an explicitly selected row, otherwise confirming the dialog. Tab
+/// accepts without selection; Escape closes the list first. Modified keys belong to callers.
 fn completion_key(
     key: gdk::Key,
     mods: gdk::ModifierType,
@@ -93,8 +88,8 @@ fn completion_key(
     }
 }
 
-/// The scroll offset that brings a row at `top..top + height` into a `page`-tall view showing
-/// `value` onwards: as little movement as shows the row, and nothing at all when it is in view.
+/// Minimum scroll adjustment showing the row at `top..top + height`, within a `page`-tall viewport.
+/// Return current `value` when already visible.
 fn scroll_to(value: f64, page: f64, top: f64, height: f64) -> f64 {
     if top < value {
         top
@@ -105,29 +100,18 @@ fn scroll_to(value: f64, page: f64, top: f64, height: f64) -> f64 {
     }
 }
 
-/// A path entry with the folders it could go into listed under it as it is typed.
+/// Build a folder-completing path entry with a list revealed inside the form.
 ///
-/// GTK4 deprecated `GtkEntryCompletion` and shipped nothing in its place. A popover is the shape
-/// `start::host_field` reaches for, but not here: a completion list stays up while the keyboard is
-/// still in the entry, and in a dialog this small every popover GTK will fit lands on top of
-/// Cancel and Rename. So the list is a revealer inside the form — it pushes the buttons down
-/// instead of covering them, and it needs no grab, no hand-parenting and no guessing about where
-/// there is room. The folder button beside the entry is the same list on demand, for an entry
-/// nothing is typed in yet.
+/// GTK4 has no replacement for GtkEntryCompletion. An inline revealer avoids a popover
+/// covering dialog buttons or taking focus; the folder button opens it without typing.
 ///
-/// The keyboard stays in the entry and drives the list from there: Down opens it and steps into
-/// it, the arrows walk it, Tab takes the selected row or else the first, Return takes a row that
-/// was arrowed to and otherwise leaves the dialog to confirm itself, and Escape puts the list away
-/// before it closes anything. [`completion_key`] is that rule, on its own and tested.
+/// The entry keeps focus: Down opens and walks the list, arrows navigate, Tab accepts a
+/// selected or first row, Return accepts only explicit selection, and Escape hides the list.
+/// [`completion_key`] defines and tests this rule.
 ///
-/// The entry expands because the list is what decides how wide the dialog is: the candidates set
-/// the scroller's minimum width and it reaches the row, so an entry that did not take that width
-/// would sit at its natural size with the surplus dead beside it.
-///
-/// `complete` answers with whole texts the entry could hold, so every bit of path arithmetic stays
-/// with the caller. It may answer with nothing while it is still finding out — a listing on a
-/// worker thread, or a host that has not replied — and [`look_again`] is how it comes back once it
-/// knows.
+/// Candidate widths determine the dialog width, which the entry fills. `complete` supplies
+/// whole entry texts, keeping path arithmetic with the caller. While listings are pending it
+/// may return nothing; [`look_again`] refreshes the list when they arrive.
 pub(crate) fn path_field(
     entry: &gtk::Entry,
     tooltip: &str,
@@ -295,23 +279,19 @@ fn aim(list: &gtk::ListBox, scroller: &gtk::ScrolledWindow, to: Option<usize>) {
     ));
 }
 
-/// Run a path entry's completion again, for an answer that arrived after the keystroke that asked
-/// for it. The entry's own `changed` is the one path everything watching it already takes — the
-/// list, and in the connect dialog the check that enables Connect — so a late answer needs no
-/// second channel, and nothing has to hold a closure that would hold it back.
+/// Refresh late path completions through the entry's existing `changed` signal.
+/// This updates both the list and validation without retaining another callback cycle.
 pub(crate) fn look_again(entry: &gtk::Entry) {
     entry.emit_by_name::<()>("changed", &[]);
 }
 
-/// `FOCUS_WITHIN` rather than `has_focus`, which is always false here: a GTK4 `GtkEntry` is a
-/// wrapper whose inner `GtkText` is the widget that actually takes the keyboard.
+/// Test FOCUS_WITHIN because GtkEntry's inner GtkText, not its wrapper, owns keyboard focus.
 pub(crate) fn typing_here(entry: &gtk::Entry) -> bool {
     entry.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN)
 }
 
-/// The list shows itself in answer to typing, not over a dialog nobody has touched: it opens only
-/// while the entry has the keyboard and holds something to complete. An entry that is still empty
-/// keeps its folders behind the button, which is insensitive when there are none.
+/// Show completion only for focused, nonempty entries.
+/// Empty entries expose folders through the button; disable it when there are no candidates.
 fn show_completions(button: &gtk::ToggleButton, entry: &gtk::Entry, empty: bool) {
     button.set_sensitive(!empty);
     button.set_active(!empty && typing_here(entry) && !entry.text().trim().is_empty());

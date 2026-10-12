@@ -1,21 +1,12 @@
-//! The diagnostics drill: what pressing the status bar's count keeps out of the text, and what it
-//! deliberately leaves behind.
+//! Probe diagnostic visibility toggles while retaining status counts and hover text.
 
 use super::*;
 use accent_api::{Diagnostic, Pos, Range, Severity};
 
-/// `ACCENT_BENCH_DIAG=<rel_code_file>` opens a code file, hands its tab the answer a language
-/// server would publish — an error, a warning and a hint — and prints what the status bar says,
-/// whether the count is a control, and how much of that answer the text is carrying. Then it
-/// presses the count twice, printing the same each time.
-///
-/// `counted` and `hover` must not change across the three lines: the readout and the pointer are
-/// what a hidden diagnostic is still readable through. `underlined` and `marks` must go to 0 on
-/// the press and come back on the second — as do the messages at the ends of the lines, which the
-/// same pass adds and which the provider has no way to count back.
-///
-/// The server is not waited for: a real publish would replace what this hands over, so point the
-/// drill at a file no language server here answers for, or read the first line only.
+/// `ACCENT_BENCH_DIAG=<rel_code_file>` injects an error, warning and hint, then toggles
+/// visibility twice. `counted` and `hover` must remain unchanged; `underlined`, `marks`
+/// and end-of-line messages disappear and return. Use a file without a running language
+/// server, whose real publish could replace the injected diagnostics.
 pub(super) fn bench_diagnostics(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -61,18 +52,9 @@ pub(super) fn bench_diagnostics(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Where the gutter last drew the caret's highlight, beside where the caret really is: the
-/// line-number column's own current-line mark, which a code tab has and which has to follow every
-/// way the caret moves.
-///
-/// `caret` and `gutter` must name the same line in all four steps. They did not before the
-/// renderer was told to redraw itself on a caret move: GTK4 keeps a widget's render node until
-/// that widget is invalidated, a caret move invalidates the view and not the gutter renderer
-/// inside it, and the highlight stayed on the line the caret had left until the pointer entered
-/// the column and changed its opacity.
-///
-/// The numbers are turned on first, whatever the scratch config says: a hidden renderer draws
-/// nothing, and `gutter` then reads `None`.
+/// Check that `caret` and `gutter` report the same line after four caret moves.
+/// GTK caches the gutter render node separately, so caret moves must invalidate it.
+/// Enable line numbers first; a hidden renderer cannot report its painted line.
 fn bench_gutter(tab: &Rc<Tab>) {
     tab.set_line_numbers(true);
     let step = |label: &str| {
@@ -97,12 +79,9 @@ fn bench_gutter(tab: &Rc<Tab>) {
     step("home");
 }
 
-/// An error whose message is too long for its line's room, then typing at the end of that line:
-/// `cut` is the characters of the message shown and `fits` those the line has room for, which
-/// must agree as published, as typed (read before the frame that shows the keystroke) and once
-/// settled. As typed they did not: the message was cut again only by a publish or by the
-/// width's own refit 150 ms after a layout, and ran past the column's edge until then. The file's own text goes back at the end, but the typing has marked the tab,
-/// which writes it on its way out: point the drill at a scratch vault (`make vault VAULT=/tmp/…`).
+/// Type after an overlong diagnostic message and require `cut` to equal `fits`
+/// before the next frame and after settling, catching delayed clipping updates.
+/// Use a scratch vault (`make vault VAULT=/tmp/…`): restored text still saves on quit.
 fn bench_refit(tab: &Rc<Tab>) {
     let own = tab.text();
     let mut long = diagnostic(Severity::Error, 0, 0, 1);
@@ -132,12 +111,9 @@ fn bench_refit(tab: &Rc<Tab>) {
     tab.set_text(&own);
 }
 
-/// An error on line 2, then a line typed in above it with no publish after: the lines its
-/// underline, gutter mark and end-of-line message are on, as published, as typed, and once the
-/// width refit's 150 ms debounce has passed. All three must say 3 from the typing on. The message
-/// said 2 throughout, GtkSourceView pinning it to a line number, and once settled the other two
-/// did as well: the view notifies its width on every layout, and the refit laid the publish again
-/// at its old positions.
+/// Insert a line above a diagnostic on line 2 without republishing. Its underline,
+/// gutter mark and message must all move to line 3 immediately and remain there
+/// after the 150 ms width-refit debounce.
 fn bench_moved(tab: &Rc<Tab>) {
     let own = tab.text();
     tab.set_diagnostics(vec![diagnostic(Severity::Error, 2, 0, 4)]);

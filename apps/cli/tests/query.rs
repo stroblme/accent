@@ -1,5 +1,5 @@
-//! The read-only subcommands open the vault as the app does, so what they print is the index
-//! brought up to date with the disk, under the app's own scan policy and search default.
+//! Read-only commands must refresh the index using the app's scan policy and search defaults
+//! before answering.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

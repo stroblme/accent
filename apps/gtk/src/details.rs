@@ -1,10 +1,8 @@
-//! The Info pane's Details section, filled from what the window already holds about the file in
-//! front: its size and time from the tab's etag or one stat of the disk, and what its kind adds.
-//! A shell in front has what its holder says about it instead.
+//! Fill the Info pane's Details from the active document's cached facts or one disk stat.
+//! Shells use their holder's facts instead.
 //!
-//! No Created row: `statx`'s birth time is missing on the musl `accent-cli` a remote vault runs,
-//! and accent's own save (a temporary file renamed over the old one), Syncthing and most editors
-//! replace the inode, so where there is one it reads as the last save.
+//! Created time is omitted: remote musl lacks birth time, and atomic saves, Syncthing and
+//! other editors replace inodes, making available birth times describe the last replacement.
 
 use super::*;
 use sidebar::{Fact, Group};
@@ -52,12 +50,10 @@ impl App {
         sidebar.set_details(&groups);
     }
 
-    /// Ask the disk for the size and time of the file in front where no tab holds them — a PDF,
-    /// an image, a status page — once per file, and show them when they land. A round trip on a
-    /// remote vault, so on a worker.
+    /// Fetch missing file size and time once per file on a worker, then update Details.
     ///
-    /// A shell's holder is asked instead, every time: what runs in a shell changes with no file
-    /// to say so.
+    /// Remote stats cost a round trip. Shells instead query their holder every time because
+    /// foreground commands can change without a file event.
     pub(crate) fn stat_details(self: &Rc<Self>) {
         if !self
             .sidebar

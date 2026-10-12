@@ -64,11 +64,9 @@ impl Index {
             .optional()?)
     }
 
-    /// Every link in the vault that points at a *page and selection* of this PDF.
-    ///
-    /// This is where a highlight lives: the note holds it, the index finds it, and the viewer
-    /// paints it. There is no annotations table, because the index is a disposable cache and a
-    /// table nothing could rebuild would be wiped by the next schema bump.
+    /// Links selecting a page and text range of this PDF, used to paint highlights. Highlights
+    /// live in notes so the disposable index can rebuild them; no unrebuildable annotation table
+    /// is needed.
     pub fn pdf_links(&self, rel_path: &str) -> Result<Vec<PdfLink>> {
         let mut st = self.conn.prepare_cached(
             "SELECT s.rel_path, l.byte_start, l.anchor, l.alias

@@ -1,15 +1,10 @@
-//! The Git pane: what changed, what is staged, and where the history went.
+//! The Git pane's changes, staging and history through `accent_api::git`.
 //!
-//! Everything here comes from `accent_api::git`, which drives the user's own `git` binary. A
-//! `git status` on a cold cache takes long enough to drop frames, so every call runs on
-//! `gio::spawn_blocking` and only its answer reaches the main thread. Refreshes are debounced and
-//! coalesced: a save, a watcher event and a `.git` write in the same moment cost one `git status`.
+//! Git calls run on workers because a cold `git status` can block frames. Debounced,
+//! coalesced refreshes turn simultaneous saves and watcher events into one status query.
 //!
-//! One [`Panel`], spread over this directory: the struct and the window-facing queries live here,
-//! and each sibling adds the `impl Panel` block for one part of the pane — [`refresh`] the refresh
-//! that feeds it, [`branch`] the branch popover, [`changes`] the changed-files list, [`log`] the
-//! history, [`actions`] the commands that write, [`compare`] the diffs a row opens, [`fetch`] the
-//! worker's half.
+//! [`Panel`] and window-facing queries live here. Siblings implement refresh, branches,
+//! changes, history, writing commands, comparisons and worker reads.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -42,13 +37,9 @@ use branch::{branch_line, branch_model, branch_parts, head_name, local_name};
 use compare::Watch;
 use log::same_head;
 
-/// How much of git one refresh asks for.
-///
-/// A save moved the working tree and nothing else, so it costs a `git status` per repository. A
-/// write inside `.git` — a commit, a checkout, a fetch — moved the repository, so the history,
-/// the branches and the submodules are read again with it. Only a walk that found or lost
-/// directories is a reason to go looking for repositories, which is a `git rev-parse` per indexed
-/// directory carrying a `.git`. The order is what a coalesced burst takes the maximum of.
+/// Refresh depth: status for worktree changes, repository data for `.git` changes, and discovery
+/// for added or removed directories. Ordered so coalesced requests take the deepest required
+/// refresh.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Depth {
     /// `git status`, and nothing else.
@@ -78,9 +69,8 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 /// refresh, with a `git rev-parse` per directory carrying a `.git` on top.
 const REDISCOVER: Duration = Duration::from_secs(3);
 
-/// Arrows going out and coming back, which is what a sync is. The same name the sidebar gives the
-/// pane's own tab, and for the same reason: `network-transmit-receive-symbolic` is a pair of
-/// arrows in Adwaita but a network device in WhiteSur, so a Sync button drew as a port.
+/// Sync arrows shared with the sidebar tab. Avoid `network-transmit-receive-symbolic`, which
+/// WhiteSur renders as a device rather than arrows.
 const SYNC_ICON: &str = "mail-send-receive-symbolic";
 
 /// How tall the commit message box may grow before it scrolls, in px: about eight lines at the
@@ -273,10 +263,8 @@ pub struct Panel {
     /// so a Sync asked for mid-fetch waits for it — `git::FETCH_TIMEOUT` at most — rather than
     /// racing it for the remote-tracking refs, which git refuses with `cannot lock ref`.
     fetch_lock: Arc<std::sync::Mutex<()>>,
-    /// Whether the last background fetch did not go through. Not a toast: a fetch nobody asked
-    /// for that fails every five minutes because the laptop is on a train would be a notification
-    /// every five minutes. The Sync button's tooltip carries it instead, which is where a reader
-    /// goes to ask why the counts beside it have not moved.
+    /// Whether background fetch failed. Show it in the Sync tooltip rather than repeatedly
+    /// notifying about unattended network failures.
     fetch_failed: Cell<bool>,
     /// Whether the vault's repositories have been fetched since the window opened them. The first
     /// fetch waits for the first refresh, because until then there is no repository to fetch.
@@ -302,7 +290,7 @@ pub struct Panel {
     /// Whether the changes list is grouped by folder. A copy of the `git_tree` preference, which
     /// the Changes header's toggle and the Preferences switch both write.
     tree: Cell<bool>,
-    /// The [`folder_key`]s whose contents are folded away. Kept across a refresh, because a save
+    /// The `folder_key`s whose contents are folded away. Kept across a refresh, because a save
     /// schedules one and folding a folder must survive it.
     collapsed: RefCell<HashSet<String>>,
     /// A press is down over the changes list, so its rows are held where they are until the
@@ -865,12 +853,9 @@ fn short(oid: &str) -> String {
     oid.chars().take(7).collect()
 }
 
-/// The line one changed file is shown on — icon, status letter, name, directory — in the changes
-/// list and under an expanded history row alike. Whatever comes after the directory, the changes
-/// list's action buttons, is appended by the caller, and the binders find them by sibling order.
-/// The icon leads so that under a folder row it lands in the column a sibling folder draws its
-/// own icon in (`changes::FILE_INSET`). The directory is made by the first file bound to the line
-/// that has one to show ([`dir_label`]).
+/// Shared changed-file row: icon, status, name and directory. Callers append actions; binders
+/// use sibling order. Align the icon with tree-folder icons through `changes::FILE_INSET`, and
+/// create [`dir_label`] lazily.
 fn file_line() -> gtk::Box {
     let icon = gtk::Image::new();
     let letter = gtk::Label::builder().width_chars(1).build();
@@ -1149,11 +1134,8 @@ fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
     })
 }
 
-/// A row's buttons in a revealer that makes them, with `build`, the first time it reveals them, and
-/// keeps them. A list makes rows for its first 200 items whether anyone points at them or not, and
-/// picking another repository has GTK take every one of them apart again, so only the rows someone
-/// has been on pay for their buttons. The keyboard landing on a row reveals them
-/// ([`reveal_on_hover`]), so they are there before Tab moves on to them.
+/// Build row action buttons on first reveal and retain them. Avoid constructing unused buttons
+/// for every list item; focus reveals them before Tab navigation through [`reveal_on_hover`].
 fn revealed_actions(
     item: &gtk::ListItem,
     build: impl Fn(&gtk::ListItem) -> gtk::Box + 'static,
@@ -1217,15 +1199,8 @@ fn peek<T: 'static, R>(object: Option<glib::Object>, read: impl FnOnce(&T) -> R)
     ))
 }
 
-/// A list store filled [`FILL_CHUNK`] rows at a time, the first at once and each of the rest from an
-/// idle, so the frames in between are drawn.
-///
-/// A list view makes a row for up to 200 of the items its store holds, and one of ours costs
-/// ~0.25 ms of widgets to build and bind and about half that again to lay out in the next frame —
-/// GTK's work, which only fewer widgets per row would cut. Spliced at once, a pick onto a
-/// repository with 2 000 changes and a page of history was 80-130 ms of main thread before the
-/// next frame (release, Xvfb, 2026-09-30); ten rows are 2-7 ms, and the rows past a store's first
-/// 200 make no widgets at all.
+/// Fill a store in [`FILL_CHUNK`] batches, first immediately and then on idle. Bounded widget
+/// construction gives the main loop frames between large list updates.
 #[derive(Default)]
 struct Fill(Rc<RefCell<Option<glib::SourceId>>>);
 
@@ -1234,17 +1209,12 @@ struct Fill(Rc<RefCell<Option<glib::SourceId>>>);
 type Run = (u32, u32, Vec<glib::BoxedAnyObject>);
 
 impl Fill {
-    /// Replace each of `runs` — sorted, apart — in `store`: its first chunk at once, from the
-    /// bottom up so that the positions above a splice still hold, and the rest a chunk per turn,
-    /// the lowest run first. Each chunk goes in before the rows that will follow its run once every
-    /// run is in, the end of the store where nothing does, however many rows went in above
-    /// meanwhile (a commit expanded). A chunk due while `hold` says so is not spliced, and the rest
-    /// is left to whoever lets go; `done` runs once every item is in.
+    /// Splice sorted, disjoint `runs` from bottom to top so original positions remain valid.
+    /// Insert later chunks before their following rows, one chunk per turn. Pause while `hold`
+    /// is true; `done` runs when all items land.
     ///
-    /// Runs rather than one span from the first change to the last: GTK keeps its focus, and the
-    /// row its scroll is anchored to, inside a span that replaces them, no further in than the
-    /// first chunk reaches. A Stage spliced from the Staged section down to the row clicked half
-    /// a list below, and the list scrolled up to the section.
+    /// Separate runs retain untouched focus and scroll anchors, unlike replacing one span across
+    /// distant changes.
     fn splice(
         &self,
         store: &gio::ListStore,
@@ -1330,12 +1300,8 @@ fn row_stack() -> gtk::Stack {
         .build()
 }
 
-/// Show the child `name` of a list row's stack, built by `build` the first time the row is bound as
-/// one, and hand it back to be filled.
-///
-/// A list view makes a row for up to 200 of its items at once, and nearly every row of a list is
-/// one kind — 2 000 changed files are 2 000 entries, a page of history 200 commits — so building
-/// every kind a row can be up front was most of what one cost to make.
+/// Build a row layout on its first binding, then return it for filling. Avoid constructing every
+/// possible layout when most rows use just one kind.
 fn layout<W: IsA<gtk::Widget>>(stack: &gtk::Stack, name: &str, build: impl FnOnce() -> W) -> W {
     let child = match stack.child_by_name(name).and_downcast::<W>() {
         Some(child) => child,
@@ -1349,11 +1315,9 @@ fn layout<W: IsA<gtk::Widget>>(stack: &gtk::Stack, name: &str, build: impl FnOnc
     child
 }
 
-/// A part of a list row that most of the items bound to it leave out, `found` where the row has
-/// one: made with `make` the first time an item bound to the row shows it, and only hidden after.
-/// Handed back to be filled where it is shown. A list makes rows for its first 200 items and a
-/// pick of another repository has GTK take them apart again, a hidden widget costing that as much
-/// as a shown one: a commit row with every part made up front is twice the widgets it shows.
+/// Create an optional row part with `make` only when first shown, then hide and reuse it.
+/// `found` retrieves an existing part. Lazy construction avoids paying for unused widgets across
+/// large recycled lists.
 fn part<W: IsA<gtk::Widget>>(found: Option<W>, shown: bool, make: impl FnOnce() -> W) -> Option<W> {
     if let Some(found) = &found {
         found.set_visible(shown);
@@ -1427,13 +1391,9 @@ fn own_repository(path: &str) -> bool {
     path.ends_with('/')
 }
 
-/// A path split into the directory and the file name, both borrowed. A file at the top level has
-/// an empty directory rather than a `.`, because the row shows the string as it is.
-///
-/// git reports an untracked nested repository as one entry ending in `/`. That slash belongs to the
-/// name — it is what tells the row apart from a file — so the split ignores it and the name keeps
-/// it; otherwise the name would come out empty and the whole row would read as its dimmed
-/// directory label.
+/// Borrow directory and filename, with an empty directory at the root. Preserve a trailing slash
+/// in nested-repository names so they remain distinct from files and do not produce an empty
+/// label.
 fn split_name(path: &str) -> (&str, &str) {
     let body = path.strip_suffix('/').unwrap_or(path);
     match body.rsplit_once('/') {

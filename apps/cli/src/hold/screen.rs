@@ -26,12 +26,9 @@ pub fn parser(rows: u16, cols: u16) -> Parser {
     Parser::new_with_callbacks(rows, cols, SCROLLBACK, Title::default())
 }
 
-/// Resize the model as a terminal would. vt100 drops the bottom rows when the grid gets shorter,
-/// which is where the prompt and the latest output are; a terminal pushes the top ones into the
-/// history instead. So when the cursor would fall off, scroll up by as much first (`CSI S` puts
-/// the top rows in the history) and move the cursor up with the text. The shell's own screen is
-/// resized that way even while a full-screen program hides it, since it comes back on exit.
-/// `rows` and `cols` must not be zero.
+/// Resize without losing the prompt: scroll top rows into history before shrinking if the cursor
+/// would fall off, then move the cursor with the text. Resize the hidden shell screen too so it
+/// restores correctly after a full-screen program exits. `rows` and `cols` must be nonzero.
 pub fn resize(p: &mut Parser, rows: u16, cols: u16) {
     // `?47` switches grids without clearing either, which `?1049` would do.
     // ponytail: here and in `replay`, sequences of ours go through the shell's own parser, so one
@@ -77,11 +74,9 @@ pub fn replay(p: &mut Parser) -> Vec<u8> {
     out
 }
 
-/// The history of the shell's own screen, oldest line first, each line on its own and ending with
-/// its attributes reset. vt100 only shows the history a screenful at a time, through the
-/// scrollback offset, so it is read in pages. Then as many newlines as it takes to scroll the last
-/// of it off the screen: the terminal's history then holds these lines and nothing else, and the
-/// screen drawn next starts from a blank one.
+/// Replay shell history oldest first with attributes reset per line. Read vt100 scrollback in
+/// pages, then add newlines to move it fully into terminal history before painting a blank
+/// screen.
 fn history(p: &mut Parser, out: &mut Vec<u8>) {
     let screen = p.screen_mut();
     let rows = usize::from(screen.size().0);

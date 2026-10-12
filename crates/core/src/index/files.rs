@@ -8,21 +8,12 @@ use rusqlite::{OptionalExtension, params};
 use std::path::Path;
 
 impl Index {
-    /// Record what search leaves out, so a query can leave it out.
+    /// Replace search exclusions with git-ignored entries and `[search] exclude` paths in one
+    /// transaction. Clearing first restores paths no longer excluded; an empty set includes
+    /// everything.
     ///
-    /// `entries` is git's own answer (`Panel::ignored`, vault-relative) plus whatever the user
-    /// named in `[search] exclude`: one set, because they answer the same question and a query
-    /// has one column to read. A wholly ignored directory arrives from git as **one** entry with
-    /// a trailing slash rather than a row per file inside it, which is why matching the entry and
-    /// its subtree is enough and why this is tens of statements rather than thousands. The prefix
-    /// test is a range on the `rel_path` unique index, the same shape
-    /// [`remove_file_batched`](Self::remove_file_batched) uses, because a `LIKE` would fall back
-    /// to a full scan under SQLite's default case-insensitive `LIKE`.
-    ///
-    /// One transaction, and the whole column is cleared first: a path that stopped being excluded
-    /// has no entry to carry the news, so the set is replaced rather than merged. An empty
-    /// `entries` therefore un-excludes everything, which is exactly right for a vault whose
-    /// repository went away.
+    /// Trailing-slash directory entries cover their descendants. Indexed `rel_path` ranges avoid
+    /// the full scans a case-insensitive `LIKE` would require.
     pub fn set_excluded(&mut self, entries: &[String]) -> Result<()> {
         let tx = self.write_tx()?;
         tx.execute(
@@ -74,11 +65,8 @@ impl Index {
         Ok(out)
     }
 
-    /// Direct children of `prefix` ("" = vault root). Lazy tree: one level per call.
-    ///
-    /// Matches on the indexed `parent_dir` column, so the cost is proportional to the number of
-    /// children returned. The previous `substr(rel_path, ...)` prefix test was unsargable and made
-    /// every expansion a full scan of the vault.
+    /// Direct children of `prefix` (`""` for vault root), one lazy-tree level per call. The
+    /// indexed `parent_dir` lookup keeps cost proportional to returned children.
     pub fn list_files(&self, prefix: &str) -> Result<Vec<FileRow>> {
         let mut st = self.conn.prepare_cached(
             "SELECT id, rel_path, kind, title, size, mtime_ns FROM files
@@ -584,10 +572,8 @@ mod tests {
         assert_eq!(hits(&ix, true).len(), 4);
     }
 
-    /// Git reports a wholly ignored directory as one entry, so a file created inside it leaves
-    /// the exclusion set unchanged and no second [`Index::set_excluded`] ever comes back to mark
-    /// the row. The row has to be excluded as it is indexed, or the artefact stays in search
-    /// until something unrelated moves the set.
+    /// New files inside an already-excluded directory must inherit exclusion during indexing;
+    /// the unchanged exclusion set will not trigger another [`Index::set_excluded`].
     #[test]
     fn a_file_added_under_an_ignored_directory_is_excluded_as_it_is_indexed() {
         let (vault, db) = ignore_fixture();

@@ -1,8 +1,5 @@
-//! The vault as Android holds it.
-//!
-//! One object for the whole app, opened once and kept for as long as the vault is. Every method
-//! is one line over the façade; what this adds is the narrowing — no git, no language servers, no
-//! remote — and the event drain, which is the one call that blocks on purpose.
+//! Android vault handle retained for the vault lifetime. Wrap the façade
+//! without git, language servers or remote access; add a blocking event drain.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -26,14 +23,10 @@ pub struct Vault {
 
 #[uniffi::export]
 impl Vault {
-    /// Open the vault at `root`, with no filesystem watcher.
-    ///
-    /// Returns as soon as the index is open, which on a warm cache is immediate: the walk that
-    /// brings it level with the files runs on the vault's own thread and reports itself through
-    /// [`Event::Progress`] and [`Event::Reconciled`].
-    ///
-    /// Nothing arrives on its own afterwards — inotify over emulated storage drops events — so
-    /// the app calls [`Vault::rescan`] when it comes back to the foreground.
+    /// Open `root` without a filesystem watcher, returning once the index opens.
+    /// The worker scans asynchronously and emits [`Event::Progress`] and
+    /// [`Event::Reconciled`]. Call [`Vault::rescan`] on foregrounding because
+    /// inotify on emulated Android storage drops events.
     #[uniffi::constructor]
     pub fn open(root: String) -> Answer<Self> {
         let (inner, events) =
@@ -67,11 +60,8 @@ impl Vault {
         Ok(self.inner.resume_indexing()?)
     }
 
-    /// Everything the vault has said since this was last asked, waiting up to `timeout_ms` for
-    /// the first one.
-    ///
-    /// Blocks, so it is never called from the main thread. An empty answer means the timeout ran
-    /// out with nothing to say, which is what most of them are.
+    /// Drain events, waiting up to `timeout_ms` for the first. Blocks: call
+    /// off the main thread. An empty result means the timeout expired.
     pub fn next_events(&self, timeout_ms: u64) -> Vec<Event> {
         let events = self.events.lock().unwrap_or_else(|e| e.into_inner());
         let first = match events.recv_timeout(Duration::from_millis(timeout_ms)) {
@@ -92,10 +82,9 @@ impl Vault {
         Ok(Note { text, etag })
     }
 
-    /// Write `text` to `rel`, refusing if the file has changed since `expected` was taken.
-    ///
-    /// `expected` is `None` only for a file being created. A refusal is
-    /// [`AccentError::ChangedOnDisk`], carrying what is on disk now.
+    /// Save `text` at `rel`, requiring the `expected` etag. Use `None` only
+    /// when creating a file. [`crate::ffi::AccentError::ChangedOnDisk`] carries the
+    /// current disk etag after refusal.
     pub fn save(&self, rel: String, text: String, expected: Option<Etag>) -> Answer<Etag> {
         Ok(self.inner.save(&rel, &text, expected)?)
     }
@@ -130,8 +119,8 @@ impl Vault {
         self.inner.asset(&rel)
     }
 
-    /// An absolute path on this device for a file that has to be opened as bytes — a PDF, an
-    /// image. On a local vault this is just the vault root joined with `rel`.
+    /// Return an absolute device path for PDF or image byte readers,
+    /// resolved within the local vault.
     pub fn path_of(&self, rel: String) -> Answer<String> {
         Ok(self.inner.fetch(&rel)?.to_string_lossy().into_owned())
     }
@@ -187,21 +176,20 @@ impl Vault {
         Ok(self.inner.file_paths(include_ignored)?)
     }
 
-    /// The notes links name that are not there yet, by the path creating each would give it:
-    /// what the switcher lists after the files.
+    /// Missing linked notes by their creation paths, listed after existing
+    /// files in the switcher.
     pub fn missing_notes(&self) -> Answer<Vec<String>> {
         Ok(self.inner.missing_notes()?)
     }
 
-    /// The notes in the folders git ignores, which the index never walks: what the switcher lists
-    /// behind the files it holds. `fresh` walks those folders again; otherwise they are the last
-    /// walk's.
+    /// Ignored-folder notes listed after indexed files. Walk again if `fresh`;
+    /// otherwise reuse the cached listing.
     pub fn ignored_notes(&self, fresh: bool) -> Answer<Vec<String>> {
         Ok(self.inner.ignored_notes(fresh)?)
     }
 
-    /// Every front matter alias with the note that carries it, by alias: the names the switcher
-    /// also finds a note by. A link still resolves by the file's name alone.
+    /// Frontmatter aliases and their notes, for switcher lookup. Aliases do
+    /// not replace filenames as link targets.
     pub fn note_aliases(&self) -> Answer<Vec<NoteAlias>> {
         Ok(self
             .inner
@@ -216,9 +204,9 @@ impl Vault {
         Ok(self.inner.resolve_link(&target)?)
     }
 
-    /// Which file following a link to `target` opens: what [`Vault::resolve_link`] says, or else
-    /// the file creating the note would write, when it is on disk in a tree the index does not
-    /// hold — a gitignored `build/`, a `node_modules`. `None` when there is nothing there.
+    /// Resolve `target`, falling back from [`Vault::resolve_link`] to its
+    /// creation path on disk in unindexed trees, such as ignored `build/` or
+    /// `node_modules`. `None` means the file is absent.
     pub fn follow(&self, target: String) -> Answer<Option<String>> {
         Ok(self.inner.follow(&target)?)
     }
@@ -246,8 +234,8 @@ impl Vault {
         Ok(self.inner.template_targets()?)
     }
 
-    /// Make the note a template's `accent-target:` names, or find the one it already made, and
-    /// say where it is. `None` when the template names no destination.
+    /// Create or find a template's `accent-target:` and return its path.
+    /// `None` means the template has no destination.
     pub fn note_from_template(&self, template: String) -> Answer<Option<String>> {
         Ok(self
             .inner
@@ -265,9 +253,8 @@ impl Vault {
         Ok(self.inner.template_target(&template)?)
     }
 
-    /// What a template's `accent-target:` says as written, `Daily/{{date}}.md` before today fills
-    /// it in: how a dated destination, the daily note's, is told from a fixed one. `None` when the
-    /// template says nothing about where its notes go.
+    /// Read unexpanded `accent-target:` (for example, `Daily/{{date}}.md`)
+    /// to distinguish dated from fixed destinations. `None` if absent.
     pub fn template_raw_target(&self, template: String) -> Answer<Option<String>> {
         let (text, _) = self.inner.read(&template)?;
         Ok(accent_core::template::parse(&text).target)
@@ -278,8 +265,8 @@ impl Vault {
 mod tests {
     use super::*;
 
-    /// New from Template… opens the note the template made: its path comes back, and the same
-    /// one when it is asked again, which is what makes a dated target a daily note.
+    /// Verify template creation returns the same path on repeated requests,
+    /// preserving daily-note behavior.
     #[test]
     fn a_template_hands_back_the_note_it_made() {
         let root = tempfile::tempdir().unwrap();

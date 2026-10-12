@@ -1,14 +1,10 @@
-//! glibc's allocator, told to give back what the app frees.
+//! Keep freed PDF tiles from accumulating in glibc arenas.
 //!
-//! By default glibc raises the size from which it maps a block on its own to the largest such
-//! block freed so far, so after the first few 1 MiB PDF tiles every later one comes out of an
-//! arena, and an arena keeps what is freed in it for the next allocation. Reading a 552-page PDF
-//! through and closing it left 537 MB resident that way, and 194 MB with the threshold held and
-//! a trim after the close (`ACCENT_BENCH_MEMORY`).
+//! Glibc raises its mmap threshold after large frees, sending later tiles into arenas that
+//! retain memory. Holding the threshold and trimming after close reduced resident memory
+//! from 537 MB to 194 MB in a 552-page PDF drill (`ACCENT_BENCH_MEMORY`).
 
-/// Map every block of 128 KiB and up on its own, so freeing one unmaps it. That is where glibc
-/// starts anyway; setting it is what stops glibc raising it.
-///
+/// Fix glibc's mmap threshold at 128 KiB so large frees unmap blocks instead of raising the threshold.
 // ponytail: each such block now costs a mapping and its page faults. The cairo renderer copies
 // every tile it draws, every frame, which made 1.6 s more system time over the 38 s deep-zoom
 // drill; GL took no more. If it shows, leave the threshold alone and trim on an idle timer instead.
@@ -20,8 +16,7 @@ pub fn tune() {
     };
 }
 
-/// Hand the kernel the free pages left between blocks still in use, in a second: after a PDF tab
-/// or a window has closed, once the frame that still painted it and its threads have gone too.
+/// Trim freed allocator pages after a one-second delay for closed views and workers to finish.
 pub fn trim_soon() {
     #[cfg(target_env = "gnu")]
     gtk::glib::timeout_add_seconds_local_once(1, || {

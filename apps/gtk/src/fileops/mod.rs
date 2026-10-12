@@ -1,14 +1,10 @@
-//! Creating, renaming, moving and trashing notes and folders from the tree.
+//! Dialogs and wiring for creating, renaming, moving and trashing files and folders.
 //!
-//! Every call that touches the vault lives in [`accent_api::Vault`]; what is here is the dialogs
-//! and the wiring between them. Like `sidebar` and `palette`, this module never sees the app:
-//! everything it needs arrives as closures in [`Ops`], so `main` can hand it tabs and toasts
-//! without a dependency cycle.
+//! [`accent_api::Vault`] performs file operations. [`Ops`] supplies closures for tabs and
+//! toasts, keeping this module independent of app state.
 //!
-//! DESIGN.md decides the shapes. A toast reports something that happened and is over; an
-//! `AdwAlertDialog` appears only where the choice can lose data (rewriting links, deleting for
-//! good); buttons and titles use header capitalisation, and an item takes an ellipsis only where
-//! it needs more input before it can act (Upload Files…, Download…).
+//! DESIGN.md reserves alerts for choices that can lose data and toasts for completed actions.
+//! Titles and buttons use header capitalisation; ellipses indicate further input.
 
 pub(crate) mod clipboard;
 mod menu;
@@ -226,11 +222,8 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
     focus_name(&entry, None);
 }
 
-/// New folder inside `dir` ("" is the vault root).
-///
-/// A name carrying `/` is a path relative to `dir`, as it is in New File and in Rename, and the
-/// levels it names are made with it — `Vault::create_dir` is `mkdir -p`. This was the one dialog
-/// left refusing a slash, so `a/b` took two trips through it.
+/// Create a folder under `dir` (`""` for vault root). Slash-separated names create all missing
+/// levels through `Vault::create_dir`, matching New File and Rename.
 pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
     let entry = name_entry("Folder name", "");
     let form = form();
@@ -285,15 +278,11 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
     focus_name(&entry, None);
 }
 
-/// New blank PDF in `dir` ("" is the vault root), to draw on rather than to read.
+/// Create a blank PDF drawing under `dir` (`""` for vault root). Pick a fixed page size;
+/// additional pages extend the notebook without growing a nonstandard MediaBox.
 ///
-/// The size is picked here and fixed afterwards: a page is paper, and paper does not grow. When
-/// a drawing runs off the end, Add Page After puts another page of the same size under it — which
-/// is what makes the file a notebook every PDF reader shows correctly, rather than one growing
-/// `/MediaBox` only we understand.
-///
-/// Written through the vault, so on a remote one it lands on the host, and the free name the
-/// dialog offers is a round trip per name tried there: it is found on a worker first.
+/// Write through the vault so remote files reach the host. Find the free suggested name on a
+/// worker because each remote lookup is a round trip.
 pub fn new_drawing(ops: &Rc<Ops>, dir: &str) {
     let (ops, dir) = (ops.clone(), dir.to_string());
     glib::spawn_future_local(async move {
@@ -550,17 +539,11 @@ fn template_picker(templates: &[String]) -> Option<gtk::DropDown> {
 
 // --------------------------------------------------------------------------------- renaming
 
-/// Rename a note or folder, and move it: a typed name carrying `/` is a path relative to the
-/// folder the file is in, `..` included, so `../Archive/note.md` moves the file as well as names
-/// it. That is the keyboard's move — `F2`, and the only one an assistive technology can drive now
-/// that Move to… is gone — and it goes through the same [`plan`] every other move does.
+/// Rename or move a path through [`plan`]. Slash-separated names are relative to the current
+/// parent, including `..`; create missing destination folders. Use the typed extension,
+/// confirming a note's loss of `.md` through [`confirm_demote`].
 ///
-/// The name is used exactly as typed, as New File's is: `note.md` becomes `main.rs` if that is
-/// what was asked for. A note that loses its `.md` stops being a note, which is the one rename
-/// that asks first ([`confirm_demote`]). The folders a path names are created with it.
-///
-/// A file's extension starts outside the selection, so typing replaces the stem only, and a
-/// folder's name is selected whole, which is what every file manager does.
+/// Select a file's stem while retaining its extension; select a folder's whole name.
 pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
     let note = is_markdown(basename(rel));
     let from = rel.to_string();
@@ -617,12 +600,9 @@ fn path_dialog(
     focus_name(&entry, Some(selected));
 }
 
-/// A note that loses its `.md` keeps its place in the vault and is still searched and opened, but
-/// it stops being a note: it opens as plain text, and its own links and tags are no longer read.
-///
-/// It gets a dialog of its own because the Update Links one cannot cover it: the links that name
-/// the note by its stem still find it, so there is nothing to rewrite and the rename would
-/// otherwise go through in silence.
+/// Confirm removing a note's `.md`: the file remains searchable and openable as plain text, but
+/// its links and tags stop being analysed. Link-update confirmation cannot cover this because
+/// stem links may still resolve without rewrites.
 fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
     let body = format!(
         "Links to {} keep pointing at it, but it opens as plain text: its own links and tags are no longer read.",
@@ -648,15 +628,9 @@ fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
     );
 }
 
-/// Move notes and folders into another directory of the same vault, keeping their names: a row
-/// dragged in the tree, the marked set dragged with it, or a Cut pasted. However many there are,
-/// it is one plan and one Update Links? question, because the links between them are rewritten
-/// together.
-///
-/// Where a drop may land at all is [`move_dest`]'s decision, taken while the pointer is still
-/// moving so a row that cannot take what is over it never lights up. What is left to refuse here
-/// is a name the destination already holds, and a batch is refused whole for it rather than moved
-/// in part.
+/// Move a set into another vault directory without changing names, using one plan and
+/// link-update confirmation so inter-note links move together. [`move_dest`] validates drop
+/// targets during drag; destination collisions reject the whole batch.
 pub fn move_all(ops: &Rc<Ops>, moves: Vec<(String, String)>) {
     let (vault, ops) = (ops.vault.clone(), ops.clone());
     glib::spawn_future_local(async move {
@@ -731,12 +705,8 @@ pub fn move_to(ops: &Rc<Ops>, rels: Vec<(String, bool)>) {
     focus_entry(&entry, |entry| entry.set_position(-1));
 }
 
-/// Ask the vault what the moves would touch, then either do them or confirm the link rewrites
-/// first.
-///
-/// The question is index reads and, on a remote vault, a round trip, so it is asked on a worker
-/// thread the way [`download`] and [`upload`] send their bytes: a rename must not freeze the
-/// window for as long as the host takes to answer.
+/// Build the move plan on a worker, then execute or confirm link rewrites. Index reads and
+/// remote round trips must not block the window.
 fn plan(ops: &Rc<Ops>, moves: Vec<(String, String)>, verb: &'static str) {
     // `plan_moves` reads the backlinks out of the index, so during the first reconcile it finds
     // none — and an empty rewrite list is also what skips the confirmation dialog, so the rename
@@ -1016,12 +986,9 @@ fn several(rels: &[String]) -> String {
     }
 }
 
-/// Whether an open document's key goes with `trashed`: the path itself, or anything inside it
-/// when a whole folder is deleted. The key of a file outside the vault is absolute and the key of
-/// a diff or a terminal is not a path at all, so neither ever matches a vault-relative one.
-///
-/// An empty `trashed` is the vault root, which has no Move to Trash item and must never be read
-/// as "everything": the guard is what keeps a bug there from closing every tab in the window.
+/// Whether a document key lies at or below `trashed`. Absolute external files and non-path tab
+/// keys do not match vault-relative paths. Reject an empty path so an erroneous root trash
+/// cannot close every tab.
 pub fn trashed_with(trashed: &str, key: &str) -> bool {
     !trashed.is_empty()
         && key
@@ -1163,16 +1130,9 @@ fn with_home(root: &Path, rel: &str, home: Option<&Path>) -> String {
     crate::start::abbreviate(&path, home)
 }
 
-/// Make the folders a typed path names, `mkdir -p` style, so a destination that does not exist yet
-/// is created the way New Folder would rather than reported as a bare OS error.
-///
-/// `Vault::create_dir` resolves through the same guard the typed path already passed, so a `../`
-/// path that leaves the vault is still refused.
-///
-/// ponytail: `create_dir_all` is not transactional, so a failure part way leaves behind whatever
-/// levels it did manage. They are named rather than cleaned up — deleting a directory because a
-/// deeper one could not be made is the more dangerous of the two guesses, and one of the levels
-/// may have been there all along.
+/// Create destination parents with `mkdir -p`, preserving the typed-path vault guard. If
+/// creation fails partway, report existing levels rather than deleting directories that may
+/// predate the operation.
 pub(crate) fn make_parents(vault: &Vault, rel: &str) -> Result<(), String> {
     let dir = parent_dir(rel);
     if dir.is_empty() || vault.exists(dir) {
@@ -1256,15 +1216,9 @@ fn focus_name(entry: &gtk::Entry, stem: Option<i32>) {
     }
 }
 
-/// A refresh that is only known once the field holding it exists, which is the knot a completion
-/// answering later has to tie: the field is built from the completion, and the completion has to
-/// be able to say "look again".
-/// The path entry the two name dialogs share, completing against the vault's own listing.
-///
-/// `base` is the folder a typed path is relative to. Listings are asked for on a worker thread and
-/// cached per folder, so a vault on another machine completes without a round trip on the
-/// keystroke and a local one answers off the index; a folder that has not answered yet offers
-/// nothing until it does.
+/// Shared path entry for New File and Rename, relative to `base`. Worker lookups cache folder
+/// listings, keeping remote completion off keystroke round trips. Unanswered folders offer no
+/// suggestions until their listing arrives.
 fn vault_path_field(entry: &gtk::Entry, vault: &Arc<Vault>, base: &str) -> gtk::Widget {
     let folders: Rc<RefCell<HashMap<String, Option<Vec<String>>>>> =
         Rc::new(RefCell::new(HashMap::new()));

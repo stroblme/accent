@@ -1,8 +1,7 @@
-//! Safe read/write for Syncthing-synced, symlinked vaults. See plan "Save" row.
+//! Safe reads and atomic saves for Syncthing-synced, symlinked vaults.
 //!
-//! Save model is VS Code's: the editor holds an etag from the last read, and a save that
-//! finds a different etag on disk is refused so the UI can offer a diff instead of clobbering
-//! a change that Syncthing (or another device) pulled in behind our back.
+//! An etag from the last read prevents saving over external changes and lets the UI offer a
+//! diff.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Read as _, Write};
@@ -51,15 +50,11 @@ pub fn digest(bytes: &str) -> Digest {
     blake3::hash(bytes.as_bytes())
 }
 
-/// The file at `path`, opened, and its etag, taken from the handle before anything is read: a
-/// writer renaming a file into place leaves the bytes and the etag both of the file opened, and
-/// one writing in place moves the mtime past the etag, so a writer that raced the read costs a
-/// refused save rather than a silent overwrite. A stat of the path after the read paired the
-/// bytes of the file opened with the etag of the one renamed over it.
+/// Open a regular file and take its etag from the handle before reading. This keeps bytes and
+/// etag tied to the same inode across renames; concurrent in-place writes cause a refused save.
 ///
-/// Only a regular file is opened: a FIFO or a device has no end to read to. The open does not
-/// block, so a FIFO is refused rather than waited on until something writes to it; a regular
-/// file ignores the flag.
+/// Nonblocking open rejects FIFOs without waiting for a writer; devices and other non-regular
+/// files are also rejected.
 fn open_stamped(path: &Path) -> io::Result<(std::fs::File, std::fs::Metadata)> {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -201,17 +196,13 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
     write_bytes(path, text.as_bytes(), expected)
 }
 
-/// The same atomic save for bytes: a PDF an annotation was written into, a new drawing, an image
-/// pasted into a note.
+/// Atomic byte save sharing [`write_note`]'s etag checks, symlink resolution and ownership
+/// preservation.
 ///
-/// Split out of [`write_note`] rather than duplicated, so a PDF gets the etag gate, the symlink
-/// resolution and the preserved ownership a note has always had.
-///
-/// The etag is checked once the bytes are written and synced, right before the rename, and the
-/// saves of one file in this process take turns at the two ([`turn`]): of saves holding the same
-/// etag, the first lands and the others are refused. Another process (Syncthing, a second accent)
-/// can still replace the file between that check and the rename, and its write is then lost:
-/// Linux has no rename that replaces a file only while it is still the one checked.
+/// The etag is checked after writing and syncing, immediately before rename. [`turn`] serialises
+/// this check and rename within the process, so only one save with a given etag succeeds.
+/// Another process can still replace the file between check and rename; Linux offers no
+/// conditional replacement rename.
 pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<Etag> {
     let failed = |e| Error::io(path.display(), e);
     // Resolve symlinks first: writing through a link must replace the link *target*, otherwise the
@@ -258,14 +249,9 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
     Ok(Etag::from_meta(&file.metadata().map_err(failed)?))
 }
 
-/// A temporary file in `parent` for a save to write into, no more open to others than the file it
-/// replaces (`existing`) while it holds the bytes.
-///
-/// Created with that file's mode, or with 0666 for a new one as `File::create` would, the umask
-/// applying to both: a 0600 file's bytes never wait in a 0644 temp file, and a new file gets the
-/// mode a new note gets (0644 under the usual 022) rather than tempfile's own 0600, an image
-/// nobody else on a shared vault could open. What the umask took from an existing file's mode is
-/// put back before the rename.
+/// Create a save temporary in `parent` with `existing`'s mode, or 0666 for a new file, subject
+/// to umask. This keeps private content private while allowing new files to inherit normal
+/// shared-vault permissions. Existing permissions removed by umask are restored before rename.
 fn temp_file(
     parent: &Path,
     existing: Option<&std::fs::Metadata>,
@@ -277,11 +263,9 @@ fn temp_file(
         .tempfile_in(parent)
 }
 
-/// The turn a save of `canonical` takes at its etag check and its rename, so two saves of one file
-/// in this process cannot both pass the check before either renames. It is held for a `stat` and a
-/// `rename`, never the write or the fsync. One lock per stripe of paths rather than per path, so
-/// there is no table of paths to clear: two files sharing a stripe only wait a rename for each
-/// other.
+/// Serialise a file's etag check and rename within this process, excluding writes and fsync.
+/// Fixed lock stripes avoid a path-lock registry; collisions wait only for another check and
+/// rename.
 fn turn(canonical: &Path) -> MutexGuard<'static, ()> {
     static TURNS: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
     let mut hash = DefaultHasher::new();
@@ -306,13 +290,10 @@ pub fn create_note(path: &Path, text: &str) -> Result<Etag> {
     write_note(path, text, None)
 }
 
-/// Move a file or directory, refusing to overwrite an existing target.
+/// Move a file or directory without overwriting an existing target. Symlinks themselves move,
+/// preserving external targets.
 ///
-/// `std::fs::rename` moves a symlink itself rather than what it points at, which is what a vault
-/// wants: renaming a linked-in note must not copy the target into the vault.
-///
-/// ponytail: the existence check races a concurrent create, and a move across mount points still
-/// fails with `EXDEV`. `renameat2(RENAME_NOREPLACE)` closes the first, copy-then-delete the second.
+/// The existence check can race a concurrent create. Cross-mount moves fail with `EXDEV`.
 pub fn rename(from: &Path, to: &Path) -> Result<()> {
     if to.symlink_metadata().is_ok() {
         return Err(Error::AlreadyExists(to.display().to_string()));

@@ -5,24 +5,15 @@ use crate::look::Look;
 use accent_core::config::Theme;
 use webkit6::prelude::*;
 
-/// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` opens `<rel_png>`, zooms it one step off the fit
-/// so it asks for a size of its own, then copies `<rel_other_png>` over it — an image of another
-/// size changing under an open tab, which is what a re-exported figure is — and prints what the
-/// picture asks for, what it is drawn at and what the readout says either side of the reload.
+/// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms off fit, replaces the file with
+/// a differently sized image and prints requested/drawn sizes and zoom readout. This
+/// checks that reload updates size requests derived from the old paintable.
 ///
-/// A fitted image was already covered by the reload drills of 8facc35; what a zoom adds is the
-/// size request, which is worked out from the paintable and so is of the file that has gone.
-///
-/// `=zoom:<rel_svg>,<rel_svg>,…` instead steps each SVG in thirty times, then forty more, then
-/// back to the fit, printing the picture just after each run and once the zoom has settled, with
-/// how long the drawing at the new zoom took to land: it is drawn once per run, at the last step.
-///
-/// `=anchor:<rel>` instead zooms the image around a point two fifths into the view, as a
-/// Ctrl+wheel there does, forty steps in from the fit and ten out, then once in by the chord,
-/// printing after each where in the image the point is (`under`, in fractions of it), and the
-/// middle of the view for the chord. Once the image is larger than the view, neither moves. Then
-/// two pinches around the same point, to one and a half times the zoom and back to half of that,
-/// handed the zoom the fingers reached as a pinch hands it over (`App::zoom_image_to`).
+/// `=zoom:<rel_svg>,…` steps each SVG in 30 times, then 40, then fits; print immediate
+/// and settled state and render latency. Each run should render only its final zoom.
+/// `=anchor:<rel>` zooms 40 steps in and 10 out around a point two fifths into the view,
+/// then by chord about the centre. Print `under` fractions to check anchor stability.
+/// Repeat pinches to 1.5× zoom and half that value (`App::zoom_image_to`).
 pub(super) fn bench_image(app: &Rc<App>, arg: &str) {
     if let Some(rels) = arg.strip_prefix("zoom:") {
         return zoom_svgs(app, rels);
@@ -197,9 +188,7 @@ fn texture_of(paintable: &gdk::Paintable) -> Option<gdk::Texture> {
         })
 }
 
-/// What the picture in front holds: the file's own size, the size it asks the scroller for, the
-/// size it is drawn at, the texture it is drawn from, the times it was sent to be drawn, and the
-/// readout over it.
+/// Print original/requested/drawn/texture sizes, render count and zoom readout.
 fn image_state(app: &Rc<App>, when: &str) {
     let Some(Doc::Image(image)) = app.active_doc() else {
         println!("bench image no_tab {when}");
@@ -229,12 +218,10 @@ fn image_state(app: &Rc<App>, when: &str) {
     );
 }
 
-/// `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…` opens each image under Dark, printing how long it took
-/// to appear (decoded, classified and recoloured), then walks it through Light, Dark and
-/// Solarized, printing what the classifier said of it, whether the tab shows it recoloured, its
-/// size and its texture's, the pixel at (2,2) of that texture and the paintable's type — then the
-/// same with Invert Image Colours on. `ms` is the worker's recolouring of the decoded texture, timed by calling it
-/// here.
+/// `ACCENT_BENCH_IMAGE_LOOK=<rel>,…` measures initial decode/classify/recolour time
+/// under Dark, then prints classification, recolouring, image/texture sizes, pixel
+/// (2,2) and paintable type under Light, Dark and Solarized, with inversion too.
+/// `ms` times worker recolouring of the decoded texture.
 pub(super) fn bench_image_look(app: &Rc<App>, rels: &str) {
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
     let app = app.clone();
@@ -322,30 +309,18 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
     );
 }
 
-/// `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` shows a note in the split view and prints, for every
-/// image on the page, the pixel WebKit painted two in from its corner and at its centre, with how
-/// many requests the page has made so far: after the first render, after a render of the same
-/// text, under Light, Dark and Solarized, and then with every image on it inverted. Each side of a
-/// conflict block gets a line too: its class, caption, height and the tints the two are painted
-/// in. With `ACCENT_BENCH_SHOTS=<dir>` each step's whole page is saved there as a PNG.
+/// `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` prints image corner/centre pixels and request
+/// counts across repeated renders, themes and inversion. Print conflict classes,
+/// captions, heights and tints too. `ACCENT_BENCH_SHOTS=<dir>` saves page PNGs.
 ///
-/// `=hold:<rel_note>` instead prints where each image is on screen and stays up for 40 s, printing
-/// the inverted images and the page's requests every two seconds, for an XTEST right-click on an
-/// image and a pick from its menu.
-///
-/// `=time:<rel_note>` instead renders the note five times over and prints, for each, how long the
-/// render held the main thread (`render_ms`), until its page was up (`shown_ms`), and the
-/// longest the main loop went without turning from the render until 200 ms past the load
-/// (`stall_ms`), which is how long typing would wait on the preview; then whether, of the note
-/// and a word rendered at once, the word asked for last is what the page shows (`latest`).
-///
-/// `=change:<rel_note>,<rel_img>,<rel_other>` instead copies `<rel_other>` over `<rel_img>` once
-/// the note shows, a figure exported again under the preview, and prints the page either side.
-/// `=gone:<rel_note>,<rel_img>[,<rel_to>]` removes `<rel_img>` instead, or renames it to
-/// `<rel_to>`. On a remote vault the file is changed on the host, over ssh.
-///
-/// `=type:<rel_note>[,<word>]` types into the note instead, on a scratch vault, and prints what a
-/// re-render costs and what it keeps (`preview::bench_preview_type`).
+/// - `=hold:<rel_note>` reports image positions and waits 40 s for XTEST menu input,
+///   printing inversion and requests every 2 s.
+/// - `=time:<rel_note>` renders five times, reporting `render_ms`, `shown_ms`, `stall_ms`
+///   through 200 ms after load, and whether the latest simultaneous render wins.
+/// - `=change:<note>,<img>,<other>` replaces an image; `=gone:<note>,<img>[,<to>]` deletes
+///   or renames it. Remote changes run on the host to exercise its watcher.
+/// - `=type:<note>[,<word>]` types into a scratch note to measure rerender cost and
+///   retained state ([`preview::bench_preview_type`]).
 pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
     if let Some(arg) = rel.strip_prefix("type:") {
         return bench_preview_type(app, arg);
@@ -411,8 +386,7 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Every image on the preview's page: its address, its box in the document and whether it has
-/// finished loading.
+/// List preview image addresses, document bounds and loading status.
 pub(super) async fn page_images(app: &Rc<App>) -> Vec<(String, f64, f64, f64, f64, bool)> {
     let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
         return Vec::new();

@@ -1,10 +1,9 @@
-//! Opening a tab: the view and the buffer a tab is built on, and everything [`open`] ties to
-//! them — the gutters, the page around the view, the tags, and the signals that drive the tab.
+//! Build tab views, buffers, page layout, gutters, tags and editing signals.
 
 use super::*;
 
-/// A buffer and a view over `text`, set up for `flavour`: what the editor and a comparison's
-/// read-only companion have in common, so the two sides of a diff render one note alike.
+/// Build a buffer/view over `text` for `flavour`, sharing rendering
+/// with read-only diff companions so both columns match.
 pub(super) fn build(
     flavour: Flavour,
     language: Option<sourceview5::Language>,
@@ -82,14 +81,11 @@ pub(super) fn build(
     (view, buffer)
 }
 
-/// Open `key` in a new tab of `tabs`, with `text` already read from disk.
+/// Build a tab for `key` with already-read `text`.
 ///
-/// The bytes are read by the caller rather than here, because deciding what a file is — text,
-/// binary, too large — is what picks the kind of tab in the first place, and by the time we are
-/// called that question is settled.
-///
-/// `key` is vault-relative, or absolute for a file from outside the vault; `root` is the vault's
-/// and is only used to build the path and the tooltip, so an absolute key simply ignores it.
+/// The caller reads bytes to choose text, binary or oversized document handling before this
+/// point. `key` is vault-relative or absolute for loose files; `root` supplies paths and
+/// tooltips only for relative keys.
 pub fn open(
     root: &Path,
     key: &str,
@@ -257,7 +253,7 @@ pub fn open(
     tab
 }
 
-/// The gutters [`open`] gives the view: the line numbers, the change bars, the diagnostics and the
+/// The gutters [`open()`] gives the view: the line numbers, the change bars, the diagnostics and the
 /// fold chevrons.
 fn gutters(
     view: &sourceview5::View,
@@ -434,8 +430,8 @@ fn tags(view: &sourceview5::View, buffer: &sourceview5::Buffer) -> Tags {
     }
 }
 
-/// The two gutter icons, and what they say when the pointer rests on one. Installed once the tab
-/// is built because the tooltip reads the tab's own diagnostics back.
+/// Install gutter icons and tooltips after tab construction, since
+/// tooltips read the tab's stored diagnostics.
 fn mark_tooltips(tab: &Rc<Tab>) {
     for (category, icon) in [
         (diagnostics::MARK_ERROR, "dialog-error-symbolic"),
@@ -458,8 +454,8 @@ fn mark_tooltips(tab: &Rc<Tab>) {
     }
 }
 
-/// What a new width or a scroll redraws: the column cap, the sticky title, the end-of-line
-/// messages and the find bar's matches. `width` is [`Frame::width`].
+/// Refresh column cap, sticky title, line messages and find highlights
+/// after width or scroll changes. `width` is [`Frame::width`].
 fn follow_layout(tab: &Rc<Tab>, width: &gtk::DrawingArea) {
     // The column is a share of the editor's width, so the cap has to be recomputed whenever that
     // width changes: a window resize, a paned drag, the sidebar, a split, the minimap. One hook

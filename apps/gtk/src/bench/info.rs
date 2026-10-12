@@ -6,16 +6,11 @@ use vte4::TerminalExt as _;
 /// Long enough for a file to open and the References answer, 300 ms behind it, to land.
 const SETTLE: Duration = Duration::from_millis(1500);
 
-/// `ACCENT_BENCH_INFO=<rel>[,<rel>…]` brings the Info pane to the front, prints it before any tab
-/// is open, opens the Details section, then opens each file in turn and prints the pane again
-/// once the file's answers have landed: the page it shows, each section as
-/// `Title:open|shut|hidden` with its count, the dividers as `position/height`, and the Details
-/// rows as `Group.Name=value`. `terminal` shuts Details and opens a shell instead, which unfolds
-/// it, and prints it again with `sleep 30` typed into it, which the Details section hears of from
-/// the shell's own reports; the file after it finds Details shut again.
-/// Last, over the last file, it drags the upper divider to 200 px and folds the sections as
-/// clicks on their headers would, printing each fold: the divider comes back to 200 px with all
-/// three open again.
+/// `ACCENT_BENCH_INFO=<rel>[,<rel>…]` opens each file and prints Info after answers land:
+/// section state/counts, divider positions/heights and `Group.Name=value` details.
+/// `terminal` checks auto-expansion and live details with `sleep 30`, then restoration
+/// of the prior fold state. Fold/unfold all sections after setting a 200 px divider;
+/// its position must return to 200 px.
 pub(super) fn bench_info(app: &Rc<App>, rels: &str) {
     app.show_pane("info");
     let (app, rels) = (app.clone(), rels.to_string());

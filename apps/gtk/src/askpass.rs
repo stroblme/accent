@@ -1,13 +1,9 @@
-//! The dialog ssh asks its questions through.
+//! Answer OpenSSH prompts in an Accent dialog without a separate askpass executable.
 //!
-//! OpenSSH will not prompt on a terminal accent does not have: it spawns `$SSH_ASKPASS` with the
-//! prompt as `argv[1]`, takes the answer from that program's stdout and reads a non-zero exit as a
-//! cancel, and `SSH_ASKPASS_REQUIRE=force` makes it do so even where a terminal exists. The program
-//! it spawns is accent itself, re-entered through `ACCENT_ASKPASS`: one binary to install and one
-//! binary to upload to a remote, and the question is then asked in accent's own window instead of
-//! by a second program the user never installed. The trap is `SSH_ASKPASS_PROMPT=confirm`, which
-//! ssh sets when the answer it wants is `yes` or `no` — an unknown host key — rather than a secret:
-//! answering that one with a password field hands ssh a passphrase where it waits for a word.
+//! SSH re-enters this binary through `ACCENT_ASKPASS`, passes the prompt in `argv[1]` and reads
+//! the answer from stdout; a non-zero exit cancels. `SSH_ASKPASS_REQUIRE=force` enables this
+//! path even with a terminal. `SSH_ASKPASS_PROMPT=confirm` selects a yes/no host-key dialog
+//! instead of a secret entry.
 
 use crate::dialogs::{alert, choose};
 use adw::prelude::*;
@@ -16,32 +12,24 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
-/// Set on the ssh process by whoever spawns it, and the only sign that this process is answering
-/// ssh rather than opening a vault: argv here is ssh's, so there is nothing else to recognise.
+/// Environment marker identifying an SSH askpass launch, since SSH owns the argument vector.
 const ASKPASS: &str = "ACCENT_ASKPASS";
-/// What ssh puts in the environment when it wants a word rather than a secret.
+/// SSH environment key distinguishing yes/no confirmation from secret prompts.
 const PROMPT_KIND: &str = "SSH_ASKPASS_PROMPT";
-/// Not accent's application id, and `NON_UNIQUE` on top of it. Either alone would do — the flag
-/// keeps this process from handing its arguments to a running accent, the id keeps the two from
-/// being taken for one another at all — and both are cheap next to an askpass that silently
-/// activates the editor instead of asking. The cost is a generic icon in the window switcher for
-/// as long as the dialog is up, there being no desktop file under this id.
+/// Separate application ID for askpass, also using `NON_UNIQUE` to avoid activating the editor.
+/// There is no desktop file for this ID, so the window switcher uses a generic icon.
 const APP_ID: &str = "io.github.stroblme.Accent.Askpass";
 /// The response that answers; "cancel" is the other one in both dialogs.
 const CONFIRM: &str = "confirm";
 /// What ssh reads as a go-ahead for a confirmation, and what it reads as a refusal.
 const YES: &str = "yes";
 const NO: &str = "no";
-/// What the compositor calls the window. The heading says what is being asked; the title says who
-/// is asking, which is the question a dialog arriving out of nowhere actually raises. Spelled as
-/// the desktop file and the metainfo spell it, and as the vault-less window title does: the
-/// lower-case `accent` is prose about the project, not the name a switcher shows.
+/// Askpass window title matching the desktop application name.
+/// The heading identifies the question; the title identifies its source.
 const TITLE: &str = "Accent";
 
-/// Answer ssh's question, if this process was spawned to answer one.
-///
-/// `None` on every normal launch, which leaves `main` untouched. `Some` means ssh is waiting on our
-/// stdout and nothing else may happen in this process.
+/// Answer an SSH askpass launch, or return `None` for a normal launch.
+/// `Some` reserves this process for SSH's stdout response.
 pub fn maybe_run() -> Option<glib::ExitCode> {
     std::env::var_os(ASKPASS)?;
     let prompt = std::env::args()
@@ -153,8 +141,7 @@ fn secret_dialog(prompt: &str, entry: &gtk::PasswordEntry) -> adw::AlertDialog {
     dialog
 }
 
-/// Return is Unlock, since the entry activates the default response. The peek icon stays: a
-/// passphrase typed blind into a dialog ssh is already waiting on is a retry nobody enjoys.
+/// Return activates Unlock; retain the peek icon so users can check a typed passphrase.
 fn secret_entry() -> gtk::PasswordEntry {
     gtk::PasswordEntry::builder()
         .show_peek_icon(true)

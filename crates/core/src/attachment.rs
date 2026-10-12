@@ -1,5 +1,5 @@
-//! Where an image pasted or dropped into a note goes, and what the note calls it. Obsidian's rules,
-//! so a vault kept in both apps files and embeds its images the same way.
+//! Obsidian-compatible attachment paths and embeds, so both apps organise pasted images
+//! consistently.
 
 use crate::path::{basename, parent_dir, resolve};
 

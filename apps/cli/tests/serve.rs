@@ -1,7 +1,5 @@
-//! `accent-cli serve` is what runs on a remote host, so the two things that matter are that it
-//! answers over the pipe and that it goes away when the pipe does. A server left behind is the
-//! zombie process this phase exists to avoid, and no unit test can see it: the process has to be
-//! real.
+//! Test the real remote server process: it must answer over the pipe and exit when stdin closes,
+//! leaving no server behind.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};

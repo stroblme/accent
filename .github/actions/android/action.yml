@@ -1,0 +1,40 @@
+name: Android toolchain
+description: Rust with both Android targets, cargo-ndk, a JDK, Gradle and the SDK packages the build reads
+runs:
+  using: composite
+  steps:
+    # rust-analyzer and rust-src: `make android-check` runs accent-api's LSP tests too.
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy, rust-analyzer, rust-src
+        targets: aarch64-linux-android, x86_64-linux-android
+    - uses: Swatinem/rust-cache@v2
+    - uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '21'
+    # Restores ~/.gradle/caches and ~/.gradle/wrapper and saves them after the job; it needs no
+    # project path, as its init scripts apply to any later Gradle run. `basic` is the MIT
+    # provider; the default is proprietary. Its key hashes `**/*.gradle*`, the wrapper properties and a
+    # root-level `gradle/*.versions.toml`, so a bump in `android/gradle/libs.versions.toml`
+    # alone keeps the old entry and downloads the new versions on every run.
+    - uses: gradle/actions/setup-gradle@v6
+      with:
+        cache-provider: basic
+    # The action installs only platform-tools by default. These are what the build reads:
+    # `compileSdk` 37.2, AGP 9.4's default build-tools, the NDK. The NDK is AGP 9.4's default, so
+    # Gradle strips the libraries with the same NDK cargo-ndk linked them with. r27+ links 16 KB
+    # pages by default; `.cargo/config.toml` asks for them anyway.
+    - uses: android-actions/setup-android@v4
+      with:
+        packages: platform-tools platforms;android-37.2 build-tools;36.0.0 ndk;28.2.13676358
+        # Otherwise every licence is printed in full, some 800 lines ahead of the build's own.
+        log-accepted-android-sdk-licenses: false
+    # For cargo-ndk and the Makefile's readelf. The runner's own pair points at r27, and
+    # cargo-ndk warns when the two disagree.
+    - shell: bash
+      run: |
+        echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+        echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+    - shell: bash
+      run: cargo install cargo-ndk --locked

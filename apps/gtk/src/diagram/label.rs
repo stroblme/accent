@@ -1,9 +1,8 @@
-//! Editing a label: the note editor, floated over the cell, holding the label as Markdown.
+//! Edit labels as Markdown in the note editor overlaid on the cell.
 //!
-//! A draw.io label is an HTML fragment; the crate turns it into Markdown and back
-//! (`accent_drawio::label`), so a label is written the way a note is, with the same styling,
-//! spellcheck and font. Per-run colours and sizes a label had are given up once it is edited:
-//! the cell's own font colour and size then apply, which is what the Properties pane sets.
+//! `accent_drawio::label` converts HTML to Markdown and back, sharing note styling,
+//! spellcheck and font. Editing drops per-run colours and sizes; the cell's font
+//! settings from Properties then apply.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -25,17 +24,15 @@ const LINE_HEIGHT: f64 = 1.2;
 
 pub struct LabelEditor {
     pub cell: CellId,
-    /// Where the label sits on the page and how big its font is there, both in document units.
-    /// The editor is put back over them whenever the canvas moves under it, so a scroll or a
-    /// zoom carries the edit along instead of finishing it.
+    /// Label position and font size in document units. Reposition the editor on
+    /// scroll and zoom so editing continues as the canvas moves.
     pub place: Rect,
     pub font_size: f64,
     view: sourceview5::View,
     buffer: sourceview5::Buffer,
     frame: gtk::ScrolledWindow,
-    /// The layer the editor is placed in: a `GtkFixed` takes the negative offsets a margin
-    /// cannot, so a label scrolled off the top or the left is clipped by the overlay rather than
-    /// pinned to the edge.
+    /// `GtkFixed` overlay supports negative offsets, letting offscreen labels clip
+    /// instead of pinning to the viewport edge.
     layer: gtk::Fixed,
     /// The note font preference, and the provider carrying it at the size last placed at.
     family: Option<String>,
@@ -53,18 +50,17 @@ pub fn label_zoom(px: f64, doc_pt: f64) -> f64 {
     (px / doc_px.max(1.0)).clamp(0.6, 3.0)
 }
 
-/// The box the editor is given over a label `at` on screen, its text `px` tall: the label's own,
-/// grown evenly round it to a word's width and a line's height. The corner may be off the
-/// canvas, where the overlay clips it — a label scrolled past the edge is gone, not pinned to it.
+/// Editor bounds around screen position `at`, expanded to a word's width and
+/// line's height for text size `px`. Allow offscreen corners so the overlay clips
+/// the editor rather than pinning it to the edge.
 fn box_at(at: Rect, px: f64) -> (f64, f64, f64, f64) {
     let (w, h) = (at.w.max(MIN_WIDTH), at.h.max(px * LINE_HEIGHT));
     (at.x - (w - at.w) / 2.0, at.y - (h - at.h) / 2.0, w, h)
 }
 
-/// Where the editor goes over a label laid out at `rect`, aligned `valign`: a label inside its
-/// shape is edited in the box within the shape's spacing. draw.io lowers a top-aligned label 5
-/// units past it and lifts a bottom-aligned one 1 (`mxText.baseSpacingTop`/`Bottom`), which
-/// would hang the editor over the shape's bottom edge.
+/// Editor bounds for a label inside its shape's spacing. Account for draw.io's
+/// 5-unit top and 1-unit bottom baseline shifts (`mxText.baseSpacingTop`/`Bottom`)
+/// to avoid extending the editor beyond the shape.
 pub fn label_box(rect: Rect, valign: VAlign, inside: bool) -> Rect {
     use accent_drawio::scene::{BASE_SPACING_BOTTOM, BASE_SPACING_TOP};
     let dy = match (inside, valign) {
@@ -158,9 +154,8 @@ impl LabelEditor {
         self.view.grab_focus();
     }
 
-    /// Put the editor over `at` (widget coordinates) with its text `px` tall: where it opens,
-    /// and where it goes again on every scroll and zoom of the canvas. Nothing here touches the
-    /// focus, so the keyboard and what was typed stay where they are.
+    /// Position the editor at widget `at` with text size `px`, on open and on scroll
+    /// or zoom. Preserve focus and typed text while repositioning.
     pub fn place_at(&self, at: Rect, px: f64) {
         let (x, y, w, h) = box_at(at, px);
         self.frame.set_size_request(w as i32, h as i32);
@@ -246,10 +241,8 @@ pub fn wire_keys(editor: &Rc<LabelEditor>, finish: impl Fn() + 'static) {
     editor.view.add_controller(keys);
 }
 
-/// Finish the label on a press over space that takes no keyboard — the header bar's background,
-/// the status bar — which moves no focus and so tells the editor nothing. In the capture phase,
-/// so it hears the press wherever it lands, and claiming no sequence, so the click still does
-/// whatever it was for.
+/// Finish editing on clicks in non-focusable chrome, which emits no focus change.
+/// Capture the press anywhere in the window without claiming it so its action continues.
 pub fn wire_press(editor: &Rc<LabelEditor>, finish: impl Fn() + 'static) {
     let Some(root) = editor.frame.root() else {
         return;
@@ -394,8 +387,8 @@ impl DiagramTab {
         );
     }
 
-    /// Put the label editor away, writing what was typed into the cell. Safe to call twice:
-    /// taking the editor off the canvas moves the focus, which calls it again.
+    /// Commit the label and close its editor. Reentrant-safe: removing the widget
+    /// changes focus and can call this again.
     pub fn finish_label(self: &Rc<Self>) {
         let Some(editor) = self.label.borrow_mut().take() else {
             return;

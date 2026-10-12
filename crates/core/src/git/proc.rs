@@ -1,6 +1,5 @@
-//! How every call in the `git` module runs `git`: the plain wait a local query gets, the bounded
-//! one a transfer, a commit and a switch get, and what a command that talks to a remote is told so
-//! it gives up on a dead link.
+//! Git subprocess execution: direct waits for local queries, bounded waits for transfers and
+//! user hooks, and network settings that detect dead links.
 
 use super::Error;
 use std::io::{Read, Write};
@@ -12,16 +11,12 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Run one `git` command in `root` and hand back its stdout.
+/// Run git in `root` and return stdout.
 ///
-/// `readonly` is not a hint: it sets `GIT_OPTIONAL_LOCKS=0`, and without it `git status` refreshes
-/// and rewrites `.git/index`. The GTK layer watches the repository, sees that write, asks for a
-/// status to explain it, and the two chase each other forever. Every query passes `true`.
-///
-/// It waits for ever, which is right for reading a local repository: this is a `git status` per
-/// save, and the poll interval [`bounded`] wakes on would be latency on every one of them.
-/// Everything that talks to a network — and the commit and the switches, which run the user's own
-/// hooks and filters — goes through [`bounded`] instead.
+/// Queries must set `readonly` to disable optional index writes (`GIT_OPTIONAL_LOCKS=0`),
+/// preventing status-refresh loops triggered by the repository watcher. Local reads wait without
+/// polling; network operations, commits and switches use [`bounded`] because they can stall or
+/// run user programs.
 pub(super) fn run(root: &Path, args: &[&str], readonly: bool) -> Result<Vec<u8>, Error> {
     let out = command(root, args, readonly)
         .stdin(Stdio::null())
@@ -51,15 +46,13 @@ pub(super) fn command(root: &Path, args: &[&str], readonly: bool) -> Command {
     cmd
 }
 
-/// How git's ssh learns that a link has died: a probe every 5 s, given up on after three go
-/// unanswered, so 15 s; and 10 s to connect at all. Without it ssh waits as long as the kernel
-/// does, and a link that dropped without closing is two hours of that.
+/// SSH probes every 5 s and gives up after three unanswered probes (15 s); connection attempts
+/// time out after 10 s. This avoids the kernel's long dead-link timeout.
 const SSH: &str = "ssh -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o ConnectTimeout=10";
 
-/// The same 15 s for https, as TCP keepalive on curl's socket: probes from 5 s idle, 5 s apart, two
-/// unanswered. Only an idle socket is probed, so a link that drops with data still in flight is
-/// left to the bound on the call; and a git that predates the variables ignores them. Each is
-/// beside the name of the `http.keepAlive*` setting it would override, as `git config` spells it.
+/// HTTPS keepalive probes start after 5 s idle and repeat every 5 s, stopping after two
+/// unanswered probes (15 s). In-flight stalls rely on the call timeout; older git versions may
+/// ignore these variables. Corresponding `http.keepAlive*` keys are noted beside each variable.
 const KEEPALIVE: [(&str, &str, &str); 3] = [
     ("GIT_HTTP_KEEPALIVE_IDLE", "keepaliveidle", "5"),
     ("GIT_HTTP_KEEPALIVE_INTERVAL", "keepaliveinterval", "5"),
@@ -148,20 +141,12 @@ pub(super) fn checked(out: Output) -> Result<Output, Error> {
     Ok(out)
 }
 
-/// How long a fetch may run before it is killed.
-///
-/// Fetching is the one call here that talks to a network, and `GIT_TERMINAL_PROMPT=0` only stops
-/// it hanging on a *prompt*: a host that accepts the connection and then says nothing holds the
-/// thread it runs on for as long as ssh's own timeout, which is minutes. A background fetch is a
-/// convenience, so it is bounded and its answer is allowed to be "not this time".
+/// Background fetch timeout. Noninteractive prompts alone cannot prevent stalled network calls
+/// from holding a worker.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// How long a transfer the user asked for may run before it is killed.
-///
-/// Longer than [`FETCH_TIMEOUT`] because somebody is watching it: a large push over a slow link is
-/// not a hang, and cutting it off would be worse than waiting. Bounded all the same, because the
-/// UI holds the Sync button insensitive for the whole call — a pull that will never answer would
-/// otherwise pin it for the life of the process, and pin the thread it runs on with it.
+/// User transfer timeout, longer than [`FETCH_TIMEOUT`] to allow large pushes over slow links
+/// while preventing a stalled call from holding the worker and Sync button indefinitely.
 pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often the wait below looks at the child. Short enough that a quick fetch is not padded,
@@ -203,19 +188,12 @@ pub fn interrupt(root: &Path) {
     }
 }
 
-/// Run one git command and wait for it, stopping it after `cap`, or on [`interrupt`] where
-/// `stoppable` names its repository.
+/// Run git until completion, `cap`, or [`interrupt`] when `stoppable` identifies a repository.
+/// `what` names the command in errors.
 ///
-/// The wait is ours rather than `Command`'s, which waits for ever. Everything that talks to a
-/// network needs to be able to give up — `GIT_TERMINAL_PROMPT=0` only stops it hanging on a
-/// *prompt*, and a host that accepts the connection and then says nothing holds the thread it runs
-/// on for as long as ssh's own timeout — and so does a commit, whose hooks are the user's own
-/// programs. `what` names the command in the refusal.
-///
-/// git runs in a session of its own, so it has no terminal to prompt on and everything it starts —
-/// a hook, ssh, `git-remote-https` — shares its process group, which is what [`end`] signals. Its
-/// output is read while it runs: a pipe holds 64 KiB, and a git with more to say would otherwise
-/// block on it until the cap.
+/// Bounds prevent network stalls and hanging hooks from holding workers indefinitely. A separate
+/// session disables terminal prompts and groups helpers for [`end`] to signal. Output is drained
+/// concurrently so full pipes cannot block git.
 pub(super) fn bounded(
     mut cmd: Command,
     stdin: Option<&[u8]>,

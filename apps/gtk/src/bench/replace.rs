@@ -3,32 +3,23 @@
 use super::files::until;
 use super::*;
 
-/// A word nothing in a vault would already hold, so the rewrite reaches one note and one note
-/// only — and, being one match, applies without the confirmation Xvfb cannot answer.
+/// Unique fixture word restricting replacement to one note, avoiding the multi-file
+/// confirmation that Xvfb cannot answer.
 const MARKER: &str = "zzreplacemarker";
 /// The note the drill writes and takes away again, so it never rewrites anything of the reader's.
 const NOTE: &str = "accent-bench-replace.md";
 /// Long enough for a rewrite or an undo, and the query the pane asks again behind it.
 const SETTLE: Duration = Duration::from_millis(1200);
 
-/// `ACCENT_BENCH_REPLACE=1` writes a note holding one unique word, searches for it with the
-/// replace row open, presses Replace All and prints what the pane lists before and after.
+/// `ACCENT_BENCH_REPLACE=1` creates a note with a unique word and invokes Replace All.
+/// Require `before page=results rows=1`, `after page=empty rows=0`, and Undo
+/// `undone page=results rows=1` with the word restored. Replace again, modify the
+/// file externally, then Undo: `undo_skipped` must preserve the external edit.
+/// `replaced_again` must contain one "Replaced" toast so its Undo targets the latest edit.
 ///
-/// `before` must be `page=results rows=1` and `after` `page=empty rows=0`: the rows standing
-/// after the rewrite are the ones the new text answers for.
-///
-/// Then it presses the toast's Undo (`App::undo_replace`, which Xvfb cannot click): `undone` must
-/// read `page=results rows=1` with the marker back in the note. Last it replaces again, edits the
-/// note behind the pane's back and undoes once more: `undo_skipped` must keep the edit, since a
-/// note changed since the rewrite is never written over. Each line ends on the toasts standing,
-/// and `replaced_again` must hold one "Replaced" toast: a rewrite takes the one before it away,
-/// whose Undo would now undo the newer one.
-///
-/// One note is all a drill can rewrite — two would raise the confirmation Xvfb cannot answer —
-/// and one note is also the case where the worker has indexed the rewrite before the requery
-/// reaches the main loop anyway. So this covers the chain, not the race the requery used to
-/// lose: that one is `replace_all_rewrites_every_match_and_reindexes` in accent-api, which
-/// greps the instant the call returns.
+/// This single-note drill avoids the confirmation Xvfb cannot answer. It checks the
+/// UI chain; `replace_all_rewrites_every_match_and_reindexes` in accent-api checks
+/// index consistency immediately on return.
 pub(super) fn bench_replace(app: &Rc<App>) {
     let path = app.root().join(NOTE);
     if let Err(e) = std::fs::write(&path, format!("a line holding {MARKER} once\n")) {

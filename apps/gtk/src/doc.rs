@@ -1,10 +1,7 @@
-//! What an open tab is.
+//! A common document model for every open tab.
 //!
-//! A tab used to mean a note: [`editor::Tab`] carried the buffer, the etag and the banner, and
-//! images lived in a second list with no state at all, which is why they were left out of the
-//! session and never followed a rename. Everything that can be opened is a [`Doc`] now, so one
-//! dispatcher opens all of them and the session, rename, close and theme paths have a single
-//! list to walk.
+//! [`Doc`] gives session, rename, close and theme handling one list to traverse, including
+//! images and other non-text documents.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -28,16 +25,15 @@ pub struct Viewer {
     /// How far the document is zoomed, `None` while it is fitted to the window. Only an image
     /// has one: a status page draws at a size nobody chose.
     pub zoom: Cell<Option<f64>>,
-    /// An image's file on this machine and the texture it was decoded to, so a restyle recolours
-    /// without reading it again (none for an SVG: `look::Shown`). `None` while it is being read,
-    /// and on a status page.
+    /// Cached raster file and texture for restyling without rereading. SVGs use `look::Shown`.
+    /// `None` while loading or for a status page.
     pub image: RefCell<Option<(PathBuf, Option<gdk::Texture>)>>,
     /// The look, inversion, display scale and drawn zoom (`look::drawn_zoom`) the image was last
     /// asked to be shown under, so a restyle that changes none of them does nothing.
     pub look: Cell<Option<(Look, bool, i32, f64)>>,
     /// Counts the times the image was sent to be shown, so only the last one's answer lands.
     pub shows: Cell<u32>,
-    /// The image's own size, in pixels: an SVG's as it is drawn, a photo's the right way up.
+    /// Intrinsic image size in pixels, using rendered SVG size or EXIF-oriented raster dimensions.
     pub size: Cell<Option<(i32, i32)>>,
     /// The monitor on a loose image, which nothing else watches (`App::watch_loose`).
     pub monitor: RefCell<Option<gio::FileMonitor>>,
@@ -62,8 +58,7 @@ impl Viewer {
     }
 }
 
-/// One open document. `Text` is both prose and code: the flavour lives on the tab, because
-/// everything around it (etag, autosave, find, zoom) is the same for a note and a source file.
+/// One open document. Text flavour stays on the tab because notes and code share etag, autosave, find and zoom.
 #[derive(Clone)]
 pub enum Doc {
     Text(Rc<Tab>),
@@ -92,8 +87,7 @@ impl Doc {
         }
     }
 
-    /// Not a file. A diff is a view of two texts and a terminal is a running shell; neither is a
-    /// recent note or has anywhere to be pointed by a rename.
+    /// Whether the document has no file: diffs and shells cannot be renamed or recorded as recent notes.
     pub fn is_transient(&self) -> bool {
         matches!(self, Doc::Diff(_) | Doc::Terminal(_))
     }
@@ -177,8 +171,7 @@ pub fn file_name(key: &str) -> &str {
     accent_core::path::basename(key)
 }
 
-/// What a path opens as, decided by its name alone. Whether a `Text` file really is text is a
-/// question for its bytes, which only the opener has.
+/// Document kind from the path name; the opener still checks text candidates by their bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Note,
@@ -199,8 +192,7 @@ pub fn kind_of(key: &str) -> Kind {
     }
 }
 
-/// Whether a file written under `to` opens as something other than the tab made for `from`: the
-/// extension picks the kind, the flavour and the language, so a different one wants a new tab.
+/// Whether saving `from` as `to` changes kind, flavour or language and requires a new tab.
 pub fn opens_differently(from: &str, to: &str) -> bool {
     let extension = |key: &str| Path::new(key).extension().map(|e| e.to_ascii_lowercase());
     extension(from) != extension(to)

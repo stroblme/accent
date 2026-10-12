@@ -1,10 +1,7 @@
-//! The drawing tools, as a ring that floats over the page.
+//! A movable drawing-tool ring over the page, with options on an outer orbit.
 //!
-//! Round buttons orbiting a hub, dragged around the pane by that hub, with the tool in hand's
-//! options on a second orbit outside them. The ring knows its tools only through [`Tool`]; what
-//! the options are and do is the owning tab's (`pdf/ring.rs` for a PDF's widths and colours). It
-//! is an overlay child of that tab rather than a bar in the chrome, because the reader puts it
-//! wherever the part of the page they are working on is not.
+//! [`Tool`] supplies the tools; the owning tab supplies their options. Keeping the ring in
+//! the tab's overlay lets readers move it away from the area they are working on.
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
@@ -38,9 +35,8 @@ pub struct Ring<T: Tool> {
     /// Where the ring's top-left corner sits in the pane, which is what the overlay's margins are
     /// set from.
     at: std::cell::Cell<(f64, f64)>,
-    /// Whether the reader has dragged it. Until they have, the ring goes back to its corner
-    /// every time it is shown, which is how it finds that corner at all: the pane has no width to
-    /// measure against until it has been allocated.
+    /// Whether the reader moved the ring. Otherwise place it in its default corner whenever shown,
+    /// after allocation provides the pane size.
     moved: std::cell::Cell<bool>,
 }
 
@@ -159,10 +155,8 @@ impl<T: Tool> Ring<T> {
         self.moved.get().then(|| self.at.get())
     }
 
-    /// Put the ring where the window last had it, or in its own corner if nobody has moved it.
-    ///
-    /// The top right: the page is read from the left, and a right-handed reader's hand comes in
-    /// from the bottom right, so the top right is the corner in the way of neither.
+    /// Restore the ring's saved position or default to the top right.
+    /// That corner avoids left-to-right reading and a drawing hand entering from the bottom right.
     fn place(&self, remembered: Option<(f64, f64)>) {
         let (x, y) = match remembered.filter(|_| self.moved.get()) {
             Some(at) => at,
@@ -182,10 +176,8 @@ impl<T: Tool> Ring<T> {
         self.root.set_visible(visible);
     }
 
-    /// Show which tool is in hand. The buttons fire actions, so this only reflects the state; it
-    /// must not toggle them back or pressing one would fight its own handler.
-    ///
-    /// While a tool is in hand the others dim, so the options on the outer orbit read as its own.
+    /// Reflect the active tool without firing actions again, avoiding feedback with button handlers.
+    /// Dim other tools so outer-orbit options clearly belong to the active one.
     pub fn set_tool(&self, tool: T) {
         let holding = tool != T::none();
         for (held, button) in &self.buttons {

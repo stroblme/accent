@@ -1,20 +1,12 @@
-//! The wire framing: `Content-Length` headers and a JSON body, as LSP defines it.
-//!
-//! Headers are read one line at a time until the blank line, then exactly as many bytes as the
-//! length announced. Servers vary in the small things — an extra `Content-Type`, a lone `\n`
-//! instead of `\r\n`, a differently cased header name — so all three are tolerated here rather
-//! than in every caller.
+//! LSP `Content-Length` framing for JSON bodies. Accept extra `Content-Type` headers, LF line
+//! endings and case-insensitive header names here so callers share server-compatibility
+//! handling.
 
 use std::io;
 
-/// The most a single message may announce. A server that says it is about to send a gigabyte has
-/// either lost framing or is not a language server, and either way the allocation is the damage:
-/// the length is read from the wire before a byte of the body is.
-///
-/// Four times `accent-core`'s `fs::MAX_TEXT` (16 MiB), the largest document accent will open at
-/// all, so a `didChange` carrying one whole and JSON-escaped still fits. Spelled out rather than
-/// linked: this crate does not depend on that one, and an intra-doc link to it resolves to
-/// nothing.
+/// Maximum announced body length, checked before allocation to bound malformed-message memory
+/// use. Four times accent-core's 16 MiB text limit leaves room for a whole JSON-escaped
+/// document.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};

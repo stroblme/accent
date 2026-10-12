@@ -51,12 +51,9 @@ pub enum Reply {
     /// The file was read: these are its page sizes. The first one arrives when the document is
     /// opened, which is why a tab can be on screen before anything is known about it.
     Reloaded(Vec<(f32, f32)>),
-    /// A page was put in, taken out or moved: the document's page sizes again, and the edit, which
-    /// says where each page the tab holds anything of went — for an Undo, the inverse of the edit
-    /// it took back, a deleted page put back being an insert. Not [`Reply::Reloaded`], which
-    /// throws away every render of a document that has been replaced — here every page is still
-    /// the page it was, only under another number. `step` names the history's step, the same for
-    /// the edit, its Undo and its Redo.
+    /// Page sizes and remapping after an edit, including its inverse for Undo. Retain surviving
+    /// renders instead of [`Reply::Reloaded`]'s full invalidation. `step` is stable across the
+    /// edit, Undo and Redo.
     Repaged {
         sizes: Vec<(f32, f32)>,
         edit: pdf::PageEdit,
@@ -86,9 +83,8 @@ pub enum Reply {
         undo: bool,
         redo: bool,
     },
-    /// This much of this page's annotations changed, in page points, so what is cached of that
-    /// part of it is of the old page. A stroke is a few square inches of a page: re-rendering
-    /// only the tiles it touches is one tile of work per pen lift rather than a dozen.
+    /// Changed annotation area in page points. Invalidate only intersecting tiles so a small
+    /// stroke does not rerender the viewport.
     PageChanged(usize, pdf::Rect),
     /// The file now on disk is ours, and this is its etag — which is how the tab tells its own
     /// write from someone else's and does not reload over strokes drawn since.
@@ -103,9 +99,8 @@ pub enum Reply {
     Changed,
 }
 
-/// Which part of a tab asked for tiles. Each asks again only when its own list changes, so a
-/// batch dropped for another asker's newer one was never asked for again: the reading view kept
-/// a page blank while the thumbnail strip was being scrolled.
+/// Identify the view requesting tiles so a newer request replaces only its own batch. Other
+/// views may not request unchanged tile lists again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Asker {
     Reader,

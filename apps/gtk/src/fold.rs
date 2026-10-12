@@ -1,16 +1,8 @@
-//! Folding: hiding a block behind the line that opens it.
+//! Hide blocks behind their opening lines using an invisible tag and gutter chevrons.
 //!
-//! GtkSourceView 5.20 has no folding of its own, so this is a `GtkTextTag` with `invisible` set
-//! and a gutter renderer with a chevron in it. A fold hides whole lines — everything from the
-//! start of the line after the header to the start of the line after the block — so the header
-//! keeps its own newline and stays a row of its own, and the hidden lines leave no empty rows
-//! behind them. Hiding a line's text but not its newline is what does leave one, which is what
-//! the gutter's zero-height guards were written against.
-//!
-//! One tag for every fold in a buffer, not one per fold: `GtkTextTagTable` is a per-buffer
-//! namespace and a tag per block would be a tag churned on every re-analysis. The cost is that
-//! two nested folds merge into one tagged run, so unfolding the outer one also unfolds the inner
-//! (ponytail: nobody has asked to keep an inner fold shut while its parent opens).
+//! GtkSourceView 5.20 provides no folding. Whole-line ranges preserve the header's newline
+//! and leave no empty rows. One shared tag avoids per-block churn during re-analysis;
+//! unfolding an outer block also unfolds any nested folds because tagged runs merge.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -25,14 +17,12 @@ use sourceview5::subclass::prelude::*;
 /// The tag every folded run carries.
 pub const TAG: &str = "fold";
 
-/// What a click on a chevron runs. Stored behind an `Rc` so it can be cloned out of its cell
-/// before it runs, the way every hook on a tab is.
+/// Fold-chevron callback stored in Rc so invocation releases its cell borrow before re-entry.
 type Toggle = RefCell<Option<Rc<dyn Fn(i32)>>>;
 /// Width of the chevron column, and the icon drawn in it.
 const WIDTH: i32 = 14;
 const ICON: i32 = 12;
-/// How present the chevron is: it is a control, but it sits next to every foldable line, so it
-/// whispers until it is looked for. Same step back the line numbers take.
+/// Idle chevron opacity, matching dim line numbers until the control is hovered.
 const ALPHA: f32 = 0.4;
 
 /// Install the fold tag. Called for every flavour: a note folds its sections as a source file
@@ -106,14 +96,10 @@ pub fn is_folded(buffer: &gtk::TextBuffer, line: i32) -> bool {
     }
 }
 
-/// Show `iter` if anything is hiding it. Every jump that moves the caret goes through this, so an
-/// outline row or a search hit inside a folded block opens it rather than landing out of sight.
+/// Reveal `iter` for jumps into folded blocks or collapsed comparison runs.
 ///
-/// Two things hide text in this window: the editor's own fold, and the run a comparison collapses
-/// between two hunks. A hit inside either used to land in invisible text, so both are opened here
-/// — and a comparison keeps its run open by itself for as long as the caret is in it.
-///
-/// Says whether it opened anything: lines that had no height, which GTK has yet to measure.
+/// Both hidden-text mechanisms must open so navigation cannot land out of sight. Return
+/// whether any newly visible lines need GTK to measure them.
 pub fn reveal(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
     let mut opened = false;
     for tag in hiding(buffer, iter) {
@@ -131,9 +117,8 @@ pub fn hiding(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> Vec<gtk::TextTa
     hiders(buffer).filter(|tag| iter.has_tag(tag)).collect()
 }
 
-/// The line `count` lines below `at`'s, above for a negative count, passing over the lines that
-/// hidden text covers: to Up and Down a shut block is its header line alone, and a caret never
-/// lands inside it. Where the text runs out first, the last line reached, and `false`.
+/// Move `count` visible lines from `at`, backwards for negative counts, skipping hidden runs.
+/// At document bounds return the last reached line and `false`.
 pub fn line_by(at: &gtk::TextIter, count: i32) -> (i32, bool) {
     let mut line = *at;
     for _ in 0..count.abs() {
@@ -146,10 +131,8 @@ pub fn line_by(at: &gtk::TextIter, count: i32) -> (i32, bool) {
     (line.line(), true)
 }
 
-/// Where a caret on a line that a fold or a comparison's collapsed run hides goes instead, or
-/// `None` where its line is shown: the end of the line above the run, a shut fold's header, or the
-/// start of the line below where the run begins the text. GTK's own moves end on such a line where
-/// nothing is shown past it: Down at the end of the text with a shut block there.
+/// Move a caret out of hidden text to the preceding line end or, at document start, the following line start.
+/// Return `None` for visible lines. This corrects GTK moves into hidden text at document bounds.
 pub fn shown(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> Option<gtk::TextIter> {
     let start = line_start(buffer, at.line());
     if hiding(buffer, &start).is_empty() {
@@ -163,9 +146,8 @@ pub fn shown(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> Option<gtk::TextIt
     visible_line(&mut below, true).then_some(below)
 }
 
-/// `gtk_text_iter_forward_visible_line`, or its backward twin where `forward` is false. GTK walks
-/// hidden text a character at a time, 15 ms Down over a shut block of 20 000 lines; this jumps a
-/// hidden run by its tag's toggle.
+/// Step a visible line forwards or backwards, jumping hidden runs by tag toggles.
+/// GTK's character-by-character hidden-text walk is too slow for large folds.
 pub fn visible_line(at: &mut gtk::TextIter, forward: bool) -> bool {
     let buffer = at.buffer();
     let moved = match forward {
@@ -195,18 +177,14 @@ pub fn visible_line(at: &mut gtk::TextIter, forward: bool) -> bool {
     true
 }
 
-/// Whether GTK 4.22 aborts when asked for the iter at buffer `y` of `view` (see
-/// [`whole_lines`]): the line it finds there holds hidden text and `y` is below that line's top,
-/// so `gtk_text_layout_get_iter_at_position` hands the line's whole byte count to a walk that
-/// counts visible bytes only and runs on into the lines after. Such a line is found where one is
-/// left partly hidden, and in the frames after lines are hidden — a fold shut, a comparison's run
-/// collapsed — which keep the height they were drawn at until GTK measures them again.
-/// `line_at_y` finds the same line without that walk.
+/// Detect coordinates where GTK 4.22's hidden-text iter lookup would abort (see [`whole_lines`]).
 ///
-/// GTK first clamps `y` into the layout's height, so `y` can be past the line it finds: past the
-/// end of the text, or anywhere when that height has gone wrong (a comparison's padding once
-/// overflowed it to below zero, which finds the first line for every `y`). The walk aborts there
-/// all the same, but on the buffer's last line, where it runs off the end of the text instead.
+/// When `y` lies below a hidden line's top, GTK passes a full byte count to a visible-byte
+/// walk, which runs beyond the line. Partial hiding or stale heights after a fold can cause
+/// this. `line_at_y` finds the same line without that walk.
+///
+/// GTK clamps `y` to layout height first; invalid heights or coordinates past the document
+/// can also trigger the failure on the last line.
 pub fn aborts_at(view: &impl IsA<gtk::TextView>, y: i32) -> bool {
     let (start, top) = view.line_at_y(y);
     let (_, height) = view.line_yrange(&start);
@@ -236,8 +214,7 @@ fn hiders(buffer: &gtk::TextBuffer) -> impl Iterator<Item = gtk::TextTag> {
         .flatten()
 }
 
-/// Where `tag` lies in `buffer`, as character offsets: taking a tag off is a change to the
-/// buffer, which iterators do not outlive.
+/// Read `tag` ranges as character offsets because removing tags invalidates buffer iterators.
 fn runs(buffer: &gtk::TextBuffer, tag: &gtk::TextTag) -> Vec<(i32, i32)> {
     let mut runs = Vec::new();
     let mut at = buffer.start_iter();
@@ -250,16 +227,11 @@ fn runs(buffer: &gtk::TextBuffer, tag: &gtk::TextTag) -> Vec<(i32, i32)> {
     runs
 }
 
-/// Show whatever part of a line an edit has left hidden, so hidden text keeps to whole lines.
+/// Reveal partially hidden lines after edits so hidden ranges stay on whole lines.
 ///
-/// Deleting the newline at either edge of a hidden run joins a visible line to a hidden one:
-/// Delete at the end of a folded heading, Backspace at the start of the line after the fold, and
-/// the same at a comparison's collapsed run. GTK 4.22 aborts on such a line. Asked for the iter at
-/// a point in the line's pixels-below-lines — which GtkSourceView asks at the top and bottom of
-/// the screen on every frame, for its annotations — `gtk_text_layout_get_iter_at_position` hands
-/// `gtk_text_iter_set_visible_line_index` the line's whole byte count, hidden bytes included; that
-/// walks on into the lines after and dies with "Byte index … is off the end of the line". So the
-/// joined text shows, and the rest of the run stays hidden.
+/// Deleting a boundary newline joins visible and hidden text. GTK 4.22 iter lookups count
+/// all bytes but walk visible bytes, aborting past the line. Reveal the joined line while
+/// leaving the rest of the folded or collapsed run hidden.
 fn whole_lines(buffer: &gtk::TextBuffer) {
     for tag in hiders(buffer) {
         let mut cuts = Vec::new();
@@ -294,14 +266,10 @@ pub fn unfold_all(buffer: &gtk::TextBuffer) {
     }
 }
 
-/// Keep what is hidden in step with the server's new analysis of the file.
+/// Reconcile hidden runs with the server's new block analysis.
 ///
-/// A shut block keeps to the text it hid. GTK carries a hidden run through every edit around it,
-/// wherever the lines move, and text put next to the run — typed, pasted or a template — is not
-/// part of it, so that text stays in sight although the block now reaches over it. A run is only
-/// ever cut back, to where its block ends now. One whose header line opens no block any more — the
-/// header rewritten or deleted, or a line put between the two — has nothing left to open it from,
-/// so it opens.
+/// Existing runs follow edits without hiding new adjacent text. Trim runs to new block ends;
+/// reveal runs whose header no longer opens a block, so every hidden run remains reachable.
 pub fn resync(buffer: &gtk::TextBuffer, folds: &[Fold]) {
     let Some(tag) = tag(buffer) else {
         return;
@@ -318,10 +286,7 @@ pub fn resync(buffer: &gtk::TextBuffer, folds: &[Fold]) {
     }
 }
 
-/// The innermost fold covering `line`, which is the one a Fold command at the caret means.
-///
-/// Innermost is the latest header at or before the line: a nested block always opens after the
-/// one that contains it.
+/// Find the innermost fold covering `line` by its latest header at or before the line.
 pub fn containing(folds: &[Fold], line: u32) -> Option<&Fold> {
     folds
         .iter()
@@ -365,8 +330,7 @@ impl Renderer {
         *self.imp().on_toggle.borrow_mut() = Some(Rc::new(f));
     }
 
-    /// Take the chevron's colour from the resolved theme foreground and re-look-up the icons,
-    /// which is what an icon-theme change needs. Called from `Tab::restyle` and on every map.
+    /// Resolve foreground colour and reload icons for styling and icon-theme changes.
     pub fn restyle(&self, view: &impl IsA<gtk::Widget>) {
         let fg = view.as_ref().color();
         // Held above the same floor a list marker is: a chevron nobody can find is a fold nobody

@@ -1,13 +1,10 @@
-//! `explore`: a question answered in one call with the files it is about, best first, each as a
-//! card — its outline, the links going out of it and coming in, and the sections holding the
-//! question's words verbatim and line-numbered — within a budget of characters, the files past
-//! it named below the cards.
+//! Answer a vault question with ranked file cards: outlines, links, backlinks and matching
+//! sections quoted with line numbers, within a character budget. Omitted files are named after
+//! the cards.
 //!
-//! Ranked from the index alone. A path, a `[[link]]` or a `#tag` in the question names its files
-//! outright. The other words find files by their rank over all of them, and each of those scores
-//! again by its best passage, a few lines holding the most of the words; a heading holding a word
-//! adds to its note; and a file linked to or from two of the best is pulled up beside them, as
-//! codegraph's glue is.
+//! Explicit paths, wikilinks and tags select files directly. Other words rank indexed files and
+//! their best passages; matching headings add weight, and links shared with two top files
+//! promote neighbours.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -407,9 +404,9 @@ fn rank(s: &Shared, q: &Query) -> Result<(Ranked, Vec<Seed>), String> {
     Ok((found, seeds))
 }
 
-/// Score each candidate by its best passage, [`PASSAGE`] lines holding the most of `words`, a
-/// word fewer of the candidates hold counting for more, and keep the lines of its best few:
-/// a question is answered by a paragraph, which a long file's rank over the words buries.
+/// Score candidates by their best [`PASSAGE`]-line span, giving rarer words more weight, and
+/// retain the best passage lines. Passage scoring prevents relevant paragraphs from being buried
+/// by whole-file ranking.
 fn passages(
     s: &Shared,
     words: &[String],

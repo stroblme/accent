@@ -1,5 +1,5 @@
-//! A cell's style string (`rounded=1;fillColor=#dae8fc;html=1;`): parsed so that it writes back
-//! exactly as it came, and resolved against draw.io's default stylesheet for drawing.
+//! Parse style strings without losing their original form, and resolve draw.io
+//! defaults for drawing.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -58,9 +58,8 @@ impl Style {
         self.items.iter().any(|(k, v)| k == name && v.is_none())
     }
 
-    /// The style as drawn: draw.io's defaults for a vertex or an edge, then each named style and
-    /// pair in order (`mxStylesheet.getCellStyle`). A pair set to `none` removes the key, which
-    /// is how `fillColor=none` comes to mean "no fill".
+    /// Resolve vertex or edge defaults, then named styles and pairs in order
+    /// (`mxStylesheet.getCellStyle`). `none` removes a key, so `fillColor=none` disables fill.
     pub fn resolve(&self, edge: bool) -> Resolved {
         let mut map: HashMap<String, String> = HashMap::new();
         let put = |pairs: &[(&str, &str)], map: &mut HashMap<String, String>| {
@@ -221,9 +220,8 @@ const DEFAULT_EDGE: &[(&str, &str)] = &[
     ("fontColor", "default"),
 ];
 
-/// The named styles of `styles/default.xml` a cell can carry as a bare token. The ones that only
-/// name a shape are here so that the shape is known to be unsupported rather than taken for a
-/// rectangle.
+/// Named styles from `styles/default.xml`. Shape-only styles identify unsupported
+/// shapes so they are not drawn as rectangles.
 fn named_style(name: &str) -> Option<&'static [(&'static str, &'static str)]> {
     const TEXT: &[(&str, &str)] = &[
         ("fillColor", "none"),
@@ -330,8 +328,8 @@ impl Resolved {
     }
 }
 
-/// A number as a file writes it, spaces around it allowed. `None` for anything else, infinities
-/// and NaN included, which would otherwise carry into every coordinate worked out from them.
+/// Parse a number with optional surrounding spaces. Reject NaN and infinities
+/// to keep invalid values out of coordinate calculations.
 pub(crate) fn parse_num(v: &str) -> Option<f64> {
     v.trim().parse::<f64>().ok().filter(|n| n.is_finite())
 }
@@ -430,9 +428,8 @@ impl Color {
     }
 }
 
-/// The named colours of CSS Color Module Level 4 (`red`, `rebeccapurple`), sorted so that a
-/// lookup is a binary search. `transparent` is not here: it is the only keyword that is not an
-/// RGB triple.
+/// CSS Color Module Level 4 named colours, sorted for binary search.
+/// `transparent` is handled separately because it is not an opaque colour.
 const NAMED: &[(&str, u32)] = &[
     ("aliceblue", 0xf0f8ff),
     ("antiquewhite", 0xfaebd7),

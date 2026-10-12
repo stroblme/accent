@@ -1,13 +1,10 @@
-//! OSC 52, the copy a program asks of the terminal it runs in: Codex and Claude Code copy through
-//! it, and over ssh it is the only way they can.
+//! Capture OSC 52 clipboard copies from local or remote shells because VTE does not implement
+//! them.
 //!
-//! VTE ignores it (0.84 lists it among the sequences it does not implement), so `attach`, which
-//! every shell's output passes through, here and on a host alike, picks the copy out on its way
-//! past. It keeps the copy beside the holder under the shell's id and raises the valueless
-//! `vte.ext.accent.clipboard` termprop, VTE's way of telling its application something; the tab
-//! then takes the copy with `accent-cli clip <id>`, over the master on a host. A termprop cannot
-//! carry the copy itself: VTE caps a value at 2 KiB and keeps only the last value of a burst. The
-//! sequence goes on to the terminal untouched, and a query (`?`) is never answered.
+//! `attach` stores the copy by shell ID and raises the valueless `vte.ext.accent.clipboard`
+//! termprop; the tab retrieves it through `accent-cli clip <id>`. The copy cannot use a termprop
+//! value: VTE limits it to 2 KiB and retains only the last value of a burst. Forward the
+//! original sequence unchanged and never answer queries (`?`).
 
 use std::io::{self, Write};
 use std::path::PathBuf;

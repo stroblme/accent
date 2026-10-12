@@ -1,5 +1,5 @@
-//! The page a tab draws its text on: the font and zoom, the gutters and the column cap, the
-//! line-number gutter, the minimap and the sticky block title over the top of the view.
+//! Document-page font, zoom, margins, column cap, line numbers, minimap
+//! and sticky block title.
 
 use super::{Flavour, Tab, line_end};
 use crate::{highlight, lang, wrap};
@@ -9,31 +9,26 @@ use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// Monospace by default, so code fences, tables and wikilinks line up. GNOME ships it with the
-/// interface fonts, and `Reset` in preferences comes back here.
+/// Default monospace font for aligned fences, tables and wikilinks.
+/// GNOME ships it; Preferences Reset restores it.
 const DEFAULT_FAMILY: &str = "Adwaita Mono";
-/// The page at 100 %: side gutters and the room above and below the text. [`Tab::set_page`]
-/// scales them with the zoom along with the column, so zooming keeps the page's proportions
-/// instead of squeezing the text into unchanged gutters.
+/// Page gutters and vertical margins at 100% zoom. [`Tab::set_page`] scales
+/// them with text and column width to retain page proportions.
 pub(super) const GUTTER: i32 = 48;
 const TOP: i32 = 24;
 const BOTTOM: i32 = 96;
-/// The narrowest the document column is ever capped at, in 100 % pixels. A percentage of a
-/// narrow editor can ask for less than a line worth reading; this leaves 384 px of text between
-/// the gutters, which measures ~52 characters in the GNOME document font. It only ever applies
-/// below 1600 px of editor, because the preferences row's minimum is 30 %.
+/// Minimum capped column width at 100% zoom: 384 text pixels, about 52
+/// GNOME-font characters. Prevent unreadably narrow percentage columns;
+/// the 30% preference minimum makes it apply only below 1600 editor pixels.
 const COLUMN_FLOOR: i32 = 480;
-/// How muted an unhovered line number is, as an opacity over the view's background. The style
-/// scheme already draws the gutter in a grey of its own, so this is a step back from that rather
-/// than the whole distance; 0.6 is the alpha `highlight::restyle` gives quotes.
+/// Opacity of unhovered line numbers over the background, muting the
+/// scheme's gutter colour further. Match quote alpha in `highlight::restyle`.
 const DIM: f64 = 0.6;
 
-/// The clamp's maximum for a column that is `percent` of an editor `available` pixels wide.
+/// Compute a `percent` column cap from `available` editor pixels, with [`COLUMN_FLOOR`].
 ///
-/// Floored at [`COLUMN_FLOOR`] so a narrow window keeps a readable line, then scaled by the zoom
-/// like the rest of the page: the percentage is of the editor at 100 %, and zooming in widens the
-/// cap until it exceeds the editor and the column simply fills it, which is what the fixed 800 px
-/// cap did too.
+/// Scale the cap with zoom so it eventually fills a narrow editor, while the floor retains
+/// a readable line width.
 fn column_max(available: i32, percent: u32, zoom: f64) -> i32 {
     let wanted = f64::from(available) * f64::from(percent) / 100.0;
     (wanted.max(f64::from(COLUMN_FLOOR)) * zoom).round() as i32
@@ -41,26 +36,17 @@ fn column_max(available: i32, percent: u32, zoom: f64) -> i32 {
 
 // -------------------------------------------------------------------------------- line numbers
 
-/// How many digits the last line's number needs. The column is as wide as that many of the
-/// font's widest digit, so it cannot change width as the view scrolls.
+/// Digit count of the last line, sized with the widest glyph so gutter
+/// width stays stable while scrolling.
 fn digits(line_count: i32) -> usize {
     line_count.max(1).to_string().len()
 }
 
-/// A line-number gutter: every line numbered, dimmed, and lifted to full strength while the
-/// pointer is in the gutter.
+/// Install dim line numbers that brighten on pointer hover.
 ///
-/// Headings are numbered like everything else. Their `#` markers hang in the 48 px page gutter
-/// (`highlight::hang`), which is a column away from the numbers, so the two read as two margins
-/// rather than as two things in one place.
-///
-/// Dimmed by the widget's own opacity rather than by a colour, because a gutter renderer has no
-/// colour to set: composited over the view's background that is the same thing as the foreground
-/// at an alpha, which is how `highlight::restyle` dims everything else. The pointer takes it back
-/// to the full strength it was drawn at before, which is the style scheme's own gutter grey.
-///
-/// The numbers are laid out and drawn by [`numbers`]. The renderer is a child of the view, so the
-/// per-tab `accent-doc-N` font provider reaches it and the zoom follows.
+/// Heading markers occupy a separate page gutter. Renderer opacity dims numbers without
+/// requiring a colour API; [`numbers`] draws them. The view's per-tab font provider reaches
+/// the renderer so numbering follows zoom.
 pub(super) fn line_numbers(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -120,16 +106,11 @@ pub(super) fn painted_cursor(renderer: &sourceview5::GutterRenderer) -> Option<u
         .and_then(numbers::Numbers::painted_cursor)
 }
 
-/// The line numbers: a plain gutter renderer that lays each number out and draws it itself, as
-/// `GtkSourceGutterRendererText` would, the caret's line in the scheme's `current-line-number`
-/// colour and weight.
+/// Draw line numbers with the caret line's scheme colour and weight.
 ///
-/// Each number is drawn level with the first line of its text rather than at the top of the
-/// line's cell. The two differ where a comparison lays blank space above a line to keep it beside
-/// its partner (`diff::pad`): GtkSourceView aligns a renderer in the whole cell, blank included,
-/// so the number sat beside the blank, or beside the "⋯ N unchanged lines" button over it.
-/// `alignment-mode` `first` with a centred `yalign` would move the numbers of lines with text,
-/// but it takes an empty line's cell whole, and a blank line is the commonest line in a note.
+/// Align to the text's first baseline rather than the padded cell: comparison alignment
+/// adds blank space above rows, and GtkSourceView's alignment includes that space even
+/// for empty lines.
 mod numbers {
     use gtk::prelude::*;
     use gtk::subclass::prelude::*;
@@ -160,15 +141,14 @@ mod numbers {
         }
     }
 
-    /// How far below the top of its cell a line's text starts, beyond the view's own spacing: the
-    /// padding a comparison gave it, and 0 anywhere else.
+    /// Extra text offset below the cell top: comparison padding, otherwise zero.
     fn blank_above(view: &gtk::TextView, line: &gtk::TextIter) -> i32 {
         let (top, _) = view.line_yrange(line);
         (view.iter_location(line).y() - top - view.pixels_above_lines()).max(0)
     }
 
-    /// What the caret's number is drawn with, as GtkSourceView has it: the scheme's
-    /// `current-line-number` foreground where it names one, and bold unless it says otherwise.
+    /// Caret-number attributes: scheme `current-line-number` foreground
+    /// and bold unless explicitly disabled.
     fn caret_attributes(buffer: Option<sourceview5::Buffer>) -> pango::AttrList {
         let attributes = pango::AttrList::new();
         let Some(scheme) = buffer.and_then(|buffer| buffer.style_scheme()) else {
@@ -209,9 +189,8 @@ mod numbers {
         pub struct Numbers {
             pub digits: Cell<usize>,
             pub pass: RefCell<Option<Pass>>,
-            /// Which line this renderer last drew as the caret's. Read by `ACCENT_BENCH_DIAG`,
-            /// where the point is that a gutter nothing invalidated still says the line the
-            /// caret has left.
+            /// Last painted caret line for `ACCENT_BENCH_DIAG`, detecting stale
+            /// gutters after caret movement.
             #[cfg(feature = "bench")]
             pub cursor: Cell<Option<u32>>,
         }
@@ -304,13 +283,10 @@ mod numbers {
     }
 }
 
-/// Name the font `zoom` scales for the views called `name`, replacing the provider from last time.
+/// Replace the font provider for views named `name`, scaled by `zoom`.
 ///
-/// At the default zoom and with no font of its own a note needs no provider at all: the
-/// display-wide document font rule already says exactly the right thing. Zooming has to name a
-/// font anyway, because CSS has no way to scale a size it cannot see. Code names its font every
-/// time: the display-wide rule installed for prose is the GNOME *document* font, and a source
-/// file wants the monospace one instead.
+/// Default notes use the display-wide rule. Zoomed notes need explicit sizes because CSS
+/// cannot scale an inherited size; code always names its monospace font.
 pub(crate) fn install_font(
     slot: &RefCell<Option<gtk::CssProvider>>,
     flavour: Flavour,
@@ -348,9 +324,8 @@ pub(crate) fn install_font(
     }
 }
 
-/// The page's margins at `zoom`: the side gutters and the room above and below the text, scaled
-/// with it as [`Tab::set_page`] explains. A comparison of two texts that are not files lays its
-/// two views out on the same page.
+/// Zoom-scaled page margins, shared by standalone comparison views
+/// ([`Tab::set_page`]).
 pub(crate) fn set_margins(view: &sourceview5::View, zoom: f64) {
     let scale = |base: i32| (f64::from(base) * zoom).round() as i32;
     view.set_left_margin(scale(GUTTER));
@@ -359,11 +334,9 @@ pub(crate) fn set_margins(view: &sourceview5::View, zoom: f64) {
     view.set_bottom_margin(scale(BOTTOM));
 }
 
-/// A per-view CSS name, so the font override can be one provider per tab.
-///
-/// ponytail: `#name` is the only per-widget CSS hook GTK 4 still offers — `StyleContext` and its
-/// `add_provider` are deprecated since 4.10 — and the font is a global preference, so one
-/// display-wide provider would do. Swap for that if the provider count ever matters.
+/// Per-view CSS name for a tab's font provider. GTK 4 deprecated per-widget
+/// `StyleContext::add_provider` in 4.10, leaving `#name` as the hook.
+/// A display-wide provider is an option if per-tab provider count matters.
 pub(crate) fn next_view_name() -> String {
     thread_local! {
         static NEXT: Cell<u32> = const { Cell::new(0) };
@@ -374,12 +347,10 @@ pub(crate) fn next_view_name() -> String {
     })
 }
 
-/// The editor's default font: Adwaita Mono at the size of the GNOME document font, and what
-/// `main::install_document_font` puts on every editor until a preference overrides it.
+/// Default to Adwaita Mono at the GNOME document-font size.
 ///
-/// The family is ours and the size still follows the system. DESIGN.md used to take the document
-/// font whole on the grounds that notes are prose, but a vault is prose with code fences, tables
-/// and wikilinks in it, and none of those line up in a proportional face.
+/// Monospace keeps fences, tables and wikilinks aligned while the size follows the system;
+/// preferences can override it.
 pub fn default_font() -> String {
     let mut desc =
         pango::FontDescription::from_string(&adw::StyleManager::default().document_font_name());
@@ -387,9 +358,8 @@ pub fn default_font() -> String {
     desc.to_str().to_string()
 }
 
-/// Which opener a sticky block title shows for the line at the top of the view: the innermost of
-/// the two candidates, and none at all where the only one is the top line itself, which the
-/// reader can already see.
+/// Choose the innermost sticky-block opener, omitting one on the top
+/// visible line because its text is already shown.
 fn sticky_opener(top: i32, heading: Option<i32>, fence: Option<i32>) -> Option<i32> {
     [heading, fence]
         .into_iter()
@@ -398,13 +368,10 @@ fn sticky_opener(top: i32, heading: Option<i32>, fence: Option<i32>) -> Option<i
         .max()
 }
 
-/// Family and point size of a font description, with our own defaults where it is silent, scaled
-/// by `zoom`. Rounded to two decimals so stepping the zoom does not write `12.100000000000001pt`.
+/// Extract family and point size with shared defaults, scaled by `zoom` to two decimals.
 ///
-/// The one place either is decided. `main::install_document_font` writes the display-wide rule
-/// through this too, at zoom 1.0: the extraction used to be written out a second time there with a
-/// different fallback family, so a description with no family of its own would have produced two
-/// different faces.
+/// Display-wide and per-tab rules use this function so missing descriptions cannot choose
+/// different faces; rounding avoids floating-point noise in CSS.
 pub(crate) fn font_css(name: &str, selector: &str, zoom: f64) -> String {
     let desc = pango::FontDescription::from_string(name);
     let family = desc
@@ -434,20 +401,16 @@ impl Tab {
         self.rehang();
     }
 
-    /// Scale the page with the text. Zoom used to touch the font alone, so a zoomed-in column
-    /// held fewer characters between gutters that stayed 48 px wide, and the heading markers,
-    /// which `highlight::hang` measures against the left margin, ran out of gutter to hang in the
-    /// way h5 and h6 already do. Scaling the gutters and the clamp together with the font keeps
-    /// the page proportional, so zooming reads as moving closer rather than as a narrower column.
+    /// Scale text, gutters and column cap together to preserve page proportions
+    /// and enough gutter space for hanging heading markers while zooming.
     fn set_page(&self, zoom: f64) {
         self.zoom.set(zoom);
         set_margins(&self.view, zoom);
         self.set_clamp();
     }
 
-    /// Cap the column at its share of the editor's current width. Called on every resize as well
-    /// as on a zoom or a preference change, because the share is of a width nothing reports until
-    /// the window has been laid out.
+    /// Recompute the percentage column cap after allocation, resize, zoom or
+    /// preference changes, once the editor width is known.
     pub(super) fn set_clamp(&self) {
         // The scroller's own width, not the horizontal adjustment's page size: with the view as
         // the scrollable child that page size *is* the clamped column, so it would feed back.
@@ -469,9 +432,8 @@ impl Tab {
         self.set_clamp();
     }
 
-    /// Re-measure the hanging heading markers and the wrap indents from the next idle. A CSS font
-    /// change only reaches the view's pango context once the frame clock has validated the style,
-    /// and gtk4-rs 0.11 exposes no `css_changed` vfunc to hang this off.
+    /// Remeasure markers and wrap indent from the next idle, after frame-clock
+    /// CSS validation updates Pango. gtk4-rs 0.11 exposes no `css_changed` vfunc.
     pub fn rehang(self: &Rc<Self>) {
         glib::idle_add_local_once(glib::clone!(
             #[weak(rename_to = tab)]
@@ -491,8 +453,7 @@ impl Tab {
         ));
     }
 
-    /// Numbers in the left gutter, outside the 48 px page gutter the heading markers hang in. The
-    /// preference decides for every text tab, code as well as prose.
+    /// Toggle line numbers for all text tabs, outside the 48 px heading-marker gutter.
     pub fn set_line_numbers(&self, on: bool) {
         self.numbers.set_visible(on);
     }
@@ -518,8 +479,8 @@ impl Tab {
         painted_cursor(&self.numbers)
     }
 
-    /// The minimap stands in for the scrollbar rather than sitting next to it, which is what
-    /// VS Code's code map does and what keeps the document column from losing width twice.
+    /// Replace the scrollbar with the minimap so the document does not lose
+    /// width to both.
     pub fn set_minimap(&self, on: bool) {
         self.map.set_visible(on);
         let vertical = match on {
@@ -530,14 +491,10 @@ impl Tab {
             .set_policy(gtk::PolicyType::Automatic, vertical);
     }
 
-    /// Scroll the viewport by `n` lines, leaving the caret where it is. The adjustment's own
-    /// `step_increment` is a tenth of a page in GtkTextView rather than a line, so the height
-    /// comes from the first visible line instead.
+    /// Scroll by `n` visible-line heights without moving the caret.
     ///
-    /// `line_at_y` and not `iter_at_location`: the latter answers with whether the position is
-    /// *over text*, and buffer x 0 is the page gutter at every scroll position, so it returned
-    /// nothing and this scrolled by nothing. `line_at_y` takes the y alone and clamps, which also
-    /// covers the top of the document, where y is the negative of the top margin.
+    /// GtkTextView's adjustment step is a fraction of a page, not a line. Use `line_at_y` because
+    /// `iter_at_location` rejects page-gutter coordinates; y-only lookup also clamps top margins.
     pub fn scroll_lines(&self, n: i32) {
         let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
         // The display line's height and not the paragraph's: `iter_location` measures the caret
@@ -550,8 +507,7 @@ impl Tab {
         adjustment.set_value(adjustment.value() + f64::from(n * height));
     }
 
-    /// The note's own answer to what the top of the view is inside: the nearest heading or the
-    /// fence the reader is inside, whichever is lower down.
+    /// Find the innermost note heading or fence enclosing the top visible line.
     fn sticky_note_line(&self, first: gtk::TextIter, top: i32) -> Option<i32> {
         // From the *end* of the top line, so a heading or a fence opening on that line is found
         // and then discarded by `sticky_opener` for being on screen already, rather than passed
@@ -579,16 +535,10 @@ impl Tab {
         sticky_opener(top, heading, fence)
     }
 
-    /// Pin the opening line of whatever block the top of the view is inside above the view, or
-    /// take it away again. VS Code's sticky scroll, and it answers the same question: what is
-    /// this, now that its first line has gone off the top.
+    /// Pin the enclosing block's opening line after it scrolls out of view.
     ///
-    /// In a note a block is a markdown heading or a fenced code block, which is exactly what the
-    /// styling pass has already marked on the buffer — so the answer is two tag-toggle searches
-    /// through the buffer's own index rather than a second parse or a walk back through the
-    /// lines. In a source file it is the innermost symbol the language server named, which is the
-    /// same question asked of the only thing that knows a language's structure. A CSV has no
-    /// blocks at all.
+    /// Note headings and fences use existing tag-toggle indices, avoiding a parse or backward
+    /// scan. Source files use language-server symbols; CSV has no blocks.
     pub fn update_sticky(&self) {
         if self.flavour == Flavour::Csv {
             return;
@@ -697,9 +647,9 @@ mod tests {
         );
     }
 
-    /// A description with no size of its own falls back to GNOME's 11 pt, zoom included, and one
-    /// with no family at all to the family the editor is written in. The display-wide rule goes
-    /// through the same function, so a second fallback here would be a second face there.
+    /// Verify missing font sizes fall back to GNOME's 11 pt, scaled by zoom,
+    /// and missing families use the editor default. Shared CSS formatting
+    /// keeps display-wide and per-tab fallbacks consistent.
     #[test]
     fn font_css_fills_in_a_missing_size() {
         assert!(font_css("Cantarell", "#doc", 2.0).contains("font-size: 22pt"));

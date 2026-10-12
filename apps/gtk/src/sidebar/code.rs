@@ -1,6 +1,7 @@
-//! The Code pane: what the language layer says holds at the caret, as sections one above the
-//! other. A proof's goals today; a debugger's variables, call stack and breakpoints are meant to
-//! join them as sections of their own, so the window, not a tab's kind, says when it shows.
+//! Show language-layer data at the active caret as independent Code pane sections.
+//!
+//! Proof goals are the first section; the window controls visibility so future debugger
+//! sections can share the pane without depending on a tab kind.
 
 use super::widgets::Section;
 use crate::widgets::{scroller, status_page};

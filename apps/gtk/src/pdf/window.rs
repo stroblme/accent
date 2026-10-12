@@ -263,15 +263,10 @@ impl App {
         self.active_doc()?.pdf().cloned()
     }
 
-    /// A PDF that has just been written out goes back to the host, on a remote vault.
-    ///
-    /// The render thread saves into the file it was handed, which there is the ssh cache copy:
-    /// until this runs the document on the host has none of the ink. Blocking ssh I/O, so it is a
-    /// worker like every other remote call, and one at a time per tab — the strokes that land
-    /// while it is out collapse into one more upload after it. A copy with nothing unsent sends
-    /// nothing, so a tab just opened asks too: an earlier one, or the last session, may have left
-    /// strokes the host never took. The tab is held until the answer, which a tab closed after its
-    /// last stroke still has to hear.
+    /// Upload a remote PDF's saved cache copy on a worker, one transfer at a time per tab.
+    /// Coalesce saves during upload into one more pass. Also check newly opened tabs for unsent
+    /// strokes from previous sessions. Retain the tab until completion so closing after the last
+    /// stroke still processes its reply.
     pub(crate) fn push_pdf(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
         let key = pdf.key();
         let Some(remote) = self
@@ -382,10 +377,9 @@ impl App {
         self.save_session_soon();
     }
 
-    /// Say that a PDF's changes did not reach the host, with a Retry: nothing tells the window
-    /// that the host's folder takes writes again, and a reader who has stopped drawing would
-    /// otherwise have nothing to send them with. A failure after the Retry is said again. The
-    /// toast holds the tab, which may be closing with the last strokes.
+    /// Report a failed upload with Retry, allowing recovery after drawing stops or host
+    /// permissions change. Retry re-enables error reporting; the toast retains a closing tab
+    /// until its strokes can be handled.
     fn retry_upload(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>, message: &str) {
         let (app, pdf) = (Rc::downgrade(self), pdf.clone());
         self.toast_with(message, "Retry", move || {
@@ -396,11 +390,9 @@ impl App {
         });
     }
 
-    /// A blank page to draw on, beside the note that embeds it.
-    ///
-    /// A one-page PDF and not a format of our own: a sketch is then a document every reader on
-    /// the machine can open, and the pen that draws on it is the one that draws on any other PDF.
-    /// Written through the vault, so on a remote one it lands on the host.
+    /// Create a one-page PDF sketch beside its embedding note. Standard PDF lets other readers
+    /// open it and reuses the existing pen tools. Vault writes also place remote sketches on the
+    /// host.
     pub fn insert_sketch(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
             return self.cannot("add a sketch", "no note is open");
@@ -464,12 +456,8 @@ impl App {
         });
     }
 
-    /// A drawing New Drawing has just written: open it and put the pen down, which is what it
-    /// was made for. The tab is the report that it worked.
-    ///
-    /// The pen is armed through the window action rather than by hand, so a drawing starts in
-    /// exactly the state `win.pdf-pen` leaves any other PDF in — the ring out, the tool
-    /// remembered, the status bar saying so. The tab has just opened, so it is the active one.
+    /// Open a new drawing and arm the pen through `win.pdf-pen`, sharing the normal ring, tool
+    /// state and status behaviour. The newly opened tab is active.
     pub fn open_drawing(self: &Rc<Self>, key: &str) {
         self.open_as(key, Opened::Kept);
         if self.active_pdf().is_some_and(|pdf| pdf.key() == key) {
@@ -604,10 +592,9 @@ impl App {
         self.sync_history();
     }
 
-    /// Undo and Redo in the header, while the PDF or the diagram in front has something for
-    /// either to walk, tool in hand or not: a page edit is a step as a stroke is. They come and go
-    /// as a pair, the one with nothing insensitive: hidden one at a time, Redo appearing beside
-    /// the Drawing toggle pushed Undo out from under the pointer.
+    /// Show Undo and Redo together when the active PDF or diagram has history, disabling
+    /// unavailable actions. Keeping the pair together prevents an appearing Redo button from
+    /// shifting Undo under the pointer.
     pub fn sync_history(&self) {
         let (undo, redo) = match self.active_doc() {
             Some(Doc::Pdf(pdf)) => pdf.history(),
@@ -695,12 +682,8 @@ impl App {
         }
     }
 
-    /// The same, once the notes that just changed have reached the index.
-    ///
-    /// A moment later, and not at once, because the link rows are resolved at the end of the
-    /// worker's batch while the event that a file changed is emitted inside it — and our own
-    /// saves emit nothing at all, by design.
-    ///
+    /// Refresh highlights after changed notes reach the index. Delay until the worker resolves
+    /// links at batch end; file-change events occur earlier and own saves emit no event.
     // ponytail: a timer, because there is no event for "the index is current now". The ceiling
     // is a highlight that appears a third of a second after the note is written; an
     // `Event::Indexed` from the worker is the upgrade.

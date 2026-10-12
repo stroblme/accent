@@ -1,16 +1,12 @@
-//! A drill over the answers to a note's file moving under unsaved edits.
+//! Probe save-conflict choices after external changes under unsaved note edits.
 
 use super::*;
 use pdf::online;
 
-/// `ACCENT_BENCH_ANSWER=<rel_note>` answers the three questions a note asks when its file moves
-/// under unsaved edits: Overwrite in the File Changed on Disk dialog that Ctrl+S raises, Keep
-/// Mine in the comparison the banner opens, and the Save of the banner over a file deleted on
-/// disk. Before each it rewrites or deletes the file behind the app's back — on the host, on a
-/// remote vault — and types a line into the tab. It prints how long each answer held the main
-/// loop, how long the tab took to come clean, the file's last line then and the banner left
-/// standing. It starts once the vault's first walk is done, and writes into the vault, so point
-/// it at a scratch one.
+/// `ACCENT_BENCH_ANSWER=<rel_note>` probes Overwrite, Keep Mine and saving after disk
+/// deletion. After initial indexing, externally change the file (on the host if
+/// remote) and type into the tab. Report main-loop blocking, time to become clean,
+/// final line and remaining banner. Writes files; use a scratch vault.
 pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -144,16 +140,11 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// `ACCENT_BENCH_ANSWER=same:<rel>` opens `<rel>` afresh for each way its stamp can move while
-/// its bytes stay the ones the tab read — `touch`, a copy renamed over it, the same bytes written
-/// in place, a touch the watcher reports before the typing, a touch under a Ctrl+S that goes
-/// before the watcher has spoken — and for one real change, makes it behind the tab's back as
-/// soon as the tab is up and types a line at once, as a reader typing into a note just opened.
-/// `racing` changes the file, has the tab reload it as the watcher would and types before the
-/// read is in. After the autosave it prints whether the tab was dirty on opening, the banner
-/// standing, whether a dialog is up, whether the tab came clean, the file's last line and whether
-/// the line typed is still in the buffer: only `changed` and `racing` may raise the banner, and
-/// no line typed is lost. It writes into the vault, so point it at a scratch one.
+/// `ACCENT_BENCH_ANSWER=same:<rel>` tests unchanged bytes with changed etags: touch,
+/// rename replacement, in-place rewrite, watcher-before-typing and Save-before-watcher.
+/// Also test real changes and typing while a reload is pending (`changed`, `racing`).
+/// After autosave, print dirty/dialog/banner state and file/buffer text; only real
+/// changes may raise banners, and typed text must survive. Use a scratch vault.
 pub(super) fn bench_answer_same(app: &Rc<App>, rel: &str) {
     scratch_only(app, "ACCENT_BENCH_ANSWER");
     let (app, rel) = (app.clone(), rel.to_string());

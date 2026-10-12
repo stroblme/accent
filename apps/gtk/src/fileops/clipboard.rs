@@ -1,17 +1,11 @@
-//! Cut, Copy and Paste in the file tree.
+//! File-tree Cut, Copy and Paste for local and remote vaults.
 //!
-//! Hybrid, because a vault's files are not always on this machine. A **local** vault's are, so a
-//! Copy writes the real GDK clipboard in the two forms a file manager reads — `text/uri-list`,
-//! and `x-special/gnome-copied-files` for the verb, which is the pair GNOME Files writes and
-//! reads back — and a Paste reads it, so a file crosses between accent and Files in either
-//! direction. A **remote** vault's files are on the host, where no URI from here can point at
-//! them: its Copy remembers vault-relative paths in [`Ops::clip`] and its Paste hands them to
-//! [`Vault::copy`] or to the rename plan, both of which run where the files are, so duplicating a
-//! folder costs no bytes over the link.
+//! Local copies publish `text/uri-list` and `x-special/gnome-copied-files` for interoperability
+//! with GNOME Files. Remote copies retain vault-relative paths in [`Ops::clip`], because
+//! local URIs cannot address host files; host-side copy and move avoid transferring bytes.
 //!
-//! What a Paste does with a path is decided by where it came from, not by which of the two vaults
-//! it is: a path inside this vault is copied or moved there, and anything else is a file on this
-//! machine that has to be carried in ([`transfer::import`]).
+//! Paste copies or moves paths inside the vault. Other paths name local files to import
+//! through [`transfer::import`].
 
 use super::paths::{free_path, move_dest};
 use super::{Ops, batch_to, move_all, several, transfer};
@@ -65,9 +59,8 @@ pub fn cut_all(ops: &Rc<Ops>, rows: &[(String, bool)]) {
     take(ops, rows, true);
 }
 
-/// Whether there is anything to paste, asked as the menu is built so an item that could do
-/// nothing is never drawn. The clipboard answers what it holds without a read, which is the only
-/// reason this can be a synchronous question at all.
+/// Whether clipboard formats offer files to paste. Inspect formats without reading content so
+/// menu construction stays synchronous and omits unavailable Paste.
 pub fn can_paste(ops: &Ops) -> bool {
     let formats = ops.window.clipboard().formats();
     let on_this_machine = formats.contain_mime_type(GNOME) || formats.contain_mime_type(URIS);
@@ -241,9 +234,8 @@ fn apply(ops: &Rc<Ops>, dir: &str, clip: Clip) {
     }
 }
 
-/// A Cut pasted is a move, and a move is the tree's own: the same plan, the same Update Links?
-/// question, and the same rewriting of every note that pointed at the files — once for all of
-/// them, so two notes cut together that link each other are rewritten together.
+/// Paste Cut through the same move plan and link-rewrite confirmation as tree dragging. Process
+/// the set together so links between moved notes are updated consistently.
 fn move_here(ops: &Rc<Ops>, inside: &[(String, bool)], dir: &str) {
     let (mut moves, mut refused) = (Vec::new(), Vec::new());
     for (rel, _) in inside {

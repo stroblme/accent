@@ -4,14 +4,8 @@
 
 use super::*;
 
-/// Open a PDF, leave the reader halfway down its second page, fit the page from there, and then
-/// add one after it.
-///
-/// Fit Height and Add Page After are fired as the window actions the status bar's menus, the
-/// page's own menu and the palette all fire, so a route that never reaches the tab shows up here
-/// as a zoom that did not change or a page count that did not grow. The new page is followed all
-/// the way to the file: the document is re-opened from disk at the end, which is what a second
-/// reader sees.
+/// Check Fit Height and Add Page After through window actions from halfway down page 2. Reopen
+/// the saved file to verify the added page reaches disk, as another reader would see it.
 pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -52,23 +46,15 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Page edits end to end: the first page moved below the third by the call a drop in the
-/// thumbnail strip makes, a page added before the one being read, one added after the last page
-/// and the first page deleted through the window actions — at once, no dialog being asked —
-/// each followed to the file. Then Undo walks all four back through the window's action, newest
-/// first, and Redo makes them again, the file read after each. A note linking into pages 1 to 3
-/// (a highlight, a jump, a markdown link, an HTML `href` and a reference definition) is written
-/// and opened in a tab first, without waiting for a vault still being indexed (`opened
-/// indexed=false`), whose rewrites wait for the walk; after every step its links' pages are
-/// printed as the file and the tab's buffer hold them, with what the toast said, if it said
-/// anything; it is renamed
-/// between the delete and its Undo, which finds the links the delete left by the new name. Then
-/// Delete Page and Add Page Before from the page's menu opened on the third page while the first
-/// is read, each undone, with the page being read and the pages after each. Then the items of
-/// the two
-/// menus that offer them: the page's own, without a selection and with one, and the status bar's
-/// page count, opened as a click does. What a headless run cannot reach is the pointer's half: the
-/// drag itself, the buttons on hover, the drop bar and the scroll at the strip's edge.
+/// Exercise move, insert-before, append and delete through the strip call and window actions,
+/// reopening disk after each, then Undo and Redo all four. A note links to pages 1–3 through
+/// highlights, jumps, markdown, HTML and reference definitions; report file/buffer link rewrites
+/// and toasts, including rename between deletion and Undo. Opening before initial indexing
+/// reports `indexed=false`; rewrites wait for the walk.
+///
+/// Check context-menu page targeting while another page is read, undo both commands, and report
+/// selection/no-selection page menus and the page-count menu. Real drag, hover controls, drop
+/// bar and edge scrolling require pointer tests.
 pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -182,16 +168,14 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// A PDF dropped onto another, every way in: `arg` is `<rel>,<source rel>`, both at the vault
-/// root, `rel` of several pages with a note written first linking into its pages 1 to 3. The
-/// source's row dragged from the tree through XTEST onto the gap between `rel`'s first two pages,
-/// the line there watched while the drag rests and after the drop; Undo, Redo and Undo. Then the source as a file
-/// from another application dropped before the first page, through the reading view's own file
-/// drop target, as Xvfb carries no drag between two processes; Undo. Then the source's row
-/// dragged onto `rel`'s row, and the file dropped onto that row, each appending, each undone; and
-/// `rel`'s own row dragged onto its pages, which inserts nothing. After each, the pages on disk,
-/// the note's links, what the toasts said and how many pages the vault holds, which on a remote
-/// one is the host's copy.
+/// `arg=<rel>,<source rel>` tests PDF insertion through tree-to-page XTEST drag, external
+/// file-drop target, tree-row append and external-row append, with Undo/Redo and a self-drop
+/// that inserts nothing. Both PDFs are at the vault root; destination has several pages and a
+/// note linking pages 1–3.
+///
+/// Observe the drop line while resting and after release. Report disk pages, link rewrites,
+/// toasts and vault page counts, including the host copy remotely. Xvfb cannot drag between
+/// processes, so external drops invoke the target directly.
 pub(super) fn bench_pdf_insert(app: &Rc<App>, arg: &str) {
     let Some((rel, from)) = arg.split_once(',') else {
         return bench_quit(app);
@@ -414,14 +398,10 @@ pub(super) fn bench_pdf_render(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// A document zoomed deep. `arg` is `<rel>[,<percent>]`, 800 % unless given: the break between
-/// the first two pages across the middle of the view, left alone for 20 s, each second printing
-/// how many tiles the view wants and has not got, how many on screen it shows other than sharp,
-/// how many landed in that second and how many of those had landed before — the render thread
-/// never idle and the set churning, where the cache cannot hold what the view asks for. Then a
-/// reader at that zoom: a wheel notch, a tenth of the view, every 100 ms for 10 s, and ten Page
-/// Downs of a whole view 600 ms apart, each counting the steps after which a tile on screen was
-/// not yet sharp.
+/// `arg=<rel>[,<percent>]` checks high-zoom cache churn, default 800%. Place the page break
+/// mid-view and report wanted/missing/blurry/landed/repeated tiles each second for 20 s. Then
+/// wheel by one tenth viewport every 100 ms for 10 s and Page Down ten times 600 ms apart,
+/// counting steps with unsharp visible tiles.
 pub(super) fn bench_pdf_deep(app: &Rc<App>, arg: &str) {
     let (rel, percent) = match arg.split_once(',') {
         Some((rel, percent)) => (rel.to_string(), percent.parse().unwrap_or(800.0)),
@@ -479,14 +459,11 @@ pub(super) fn bench_pdf_deep(app: &Rc<App>, arg: &str) {
     });
 }
 
-/// A PDF that will not open waits for its file and opens once the file is whole. `arg`, relative
-/// to the vault or an absolute path outside it (which no watcher reports on), is cut in half in
-/// place and opened; then written back in six pieces a quarter of a second apart, the way a LaTeX
-/// run writes; then, open, left for a page five on, cut in half under the reader and mended at
-/// once. Each step prints the waiting page's words or the pages and the page being read, how long
-/// after the last write, and how many times the file has been opened or failed to: the six pieces
-/// must cost one open, not one each. It writes into `arg`, so point it at a scratch copy of a
-/// document of a dozen pages or more.
+/// Cut `arg` in half, open it, then restore it in six pieces 250 ms apart to test settled
+/// reload. After opening, move five pages on, truncate and repair again. Report status, reading
+/// page, delay from final write and open attempts; six writes must cause one reopen. Accept
+/// vault-relative or external absolute paths. Modifies the file; use a scratch PDF with at least
+/// twelve pages.
 pub(super) fn bench_pdf_broken(app: &Rc<App>, arg: &str) {
     let (app, arg) = (app.clone(), arg.to_string());
     glib::spawn_future_local(async move {
@@ -800,13 +777,9 @@ async fn written(app: &Rc<App>) {
     }
 }
 
-/// The same document under a new name: rename it the way a dropped row does, then add another
-/// page and read the file back, then write a one-page document over it from outside.
-///
-/// The render thread owns the path it reloads from and saves to, so a rename it was never told
-/// about shows up here as a page count on disk that did not grow — the save going to a name that
-/// is no longer there. On a remote vault the cached copy has to move with the file, or the page
-/// goes up beside it as `(edited)` and the reader keeps a copy nothing refreshes.
+/// Rename an open PDF through the move path, add a page, reopen disk and overwrite it externally
+/// with one page. Verify the render thread follows its new save/reload path. Remote cached
+/// copies must move too, avoiding an `(edited)` copy beside the renamed original.
 async fn bench_pdf_renamed(app: &Rc<App>) {
     let (Some(pdf), Some(ops), Some(vault)) =
         (app.active_pdf(), app.ops().cloned(), app.vault().cloned())
@@ -900,19 +873,12 @@ fn vault_pages(app: &Rc<App>, key: &str) -> String {
     }
 }
 
-/// The etag gate on the way back to a host: a page added to a document whose host copy has
-/// moved since it was fetched must not overwrite it, and the ink must not be dropped either — it
-/// goes beside the original in the vault, as `<name> (edited).pdf`, and the tab moves onto it.
+/// Check remote etag refusal preserves both host changes and local drawing: save into `<name>
+/// (edited).pdf` and move the tab there. Stamp the cache with a nonexistent host etag to avoid
+/// watcher/refetch races.
 ///
-/// The move is made by stamping the cached copy with an etag the host never had, rather than by
-/// really writing on the host: a host-side write is reported by its own watcher, and the refetch
-/// that follows wins the race against the save under test every time. What `push` compares is
-/// the stamp against the host, so this is the same input from where it stands.
-///
-/// A second page is added after the first refusal, which is the reader who keeps drawing: it
-/// must go into that copy as any write does, neither into a numbered one nor with a toast. A note
-/// linking into pages 1 to 3 is written first, whose links must stay as they are throughout: the
-/// original keeps its pages.
+/// Add another page after refusal; it must update the same copy without numbering or another
+/// toast. A fixture note links to original pages 1–3 and must remain unchanged.
 pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -988,15 +954,12 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// The write-back's failure arm: the host will not take the upload at all, which is neither the
-/// etag refusal nor a conflict copy. The document and its folder are made read-only on the host
-/// behind the app's back, and a page is added twice: both saves fail, and only the first says so.
-/// Then the host takes writes again and the toast's Retry is pressed, which must send both pages
-/// without another stroke. A failure after that is news again; and the host's file changing
-/// while that page has not gone up (a LaTeX build, here a one-page document written over it) must
-/// not fetch over the page: it goes beside the original as `(edited)`, and the tab with it. Each
-/// `chmod` of the folder also sets off a rescan on the host, whose "Indexed …" toast is in the
-/// count: +2, +0, +1, +2 is one failure said per streak.
+/// Check remote upload failures independently of etag conflicts. Make host file/folder
+/// read-only, add two pages and report only the first failure. Restore permissions and press
+/// Retry; both pages must upload without another stroke. A later failure is reported again.
+///
+/// If the host changes while local work is unsent, preserve it in `(edited)` and move the tab
+/// there. Folder chmod also triggers indexing toasts; expected toast increments: +2, +0, +1, +2.
 pub(super) fn bench_pdf_failed(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -1083,18 +1046,14 @@ fn chmod_on_host(
         .is_ok_and(|s| s.success())
 }
 
-/// The link dropped mid-draw: a page is added and the vault's ssh master ended at once, so the
-/// save and the rewrite of the notes' page links land while the link is down. The automatic
-/// reconnect is called off, as a refusal calls it off, to keep the link down for as long as that
-/// takes. The banner says the link went, so nothing more is said; then Reconnect Now brings the
-/// vault back, and the page must reach the host and the links follow it without another stroke.
-/// A note linking into pages 1 to 3 is written first, so point it at a document of three pages
-/// or more: the page goes in after the first, so 1, 2, 3, 2, 1 become 1, 3, 4, 3, 1.
+/// Drop the SSH master immediately after adding a page and suppress automatic reconnect. Saves
+/// and link rewrites land offline without extra errors beyond the link banner. Reconnect Now
+/// must upload and rewrite without another stroke. Use at least three pages; links `1,2,3,2,1`
+/// become `1,3,4,3,1`.
 ///
-/// Then the same with the tab closed while the link is down, and the window's own record of the
-/// edit forgotten, as a new window has none: it waits beside the cached copy, the links stay as
-/// they are through the reconnect, and they follow once the document is opened again and the
-/// page reaches the host — 1, 4, 5, 4, 1, the page going in after the second.
+/// Repeat while closing the tab and forgetting window edit state. Cached work survives; links
+/// stay unchanged through reconnect and become `1,4,5,4,1` when reopening uploads the next
+/// insertion.
 pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -1327,15 +1286,10 @@ pub(super) fn bench_pdf_renaming(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// New Drawing end to end, as far as a headless run reaches: fire the window action, read what
-/// the dialog came up with, pick the last size and answer it, then say what reached the disk and
-/// what the tab it opened is holding.
-///
-/// The dialog is answered by emitting its own `response` signal rather than by pressing its
-/// button: Xvfb has no window manager, the toplevel never becomes active and a click never
-/// reaches an `AdwAlertDialog`'s buttons. What this covers is everything the button leads to —
-/// the handler, the document, the file, the tab and the tool in hand; the button itself is
-/// libadwaita's.
+/// Create New Drawing through its dialog response, choose the last size and report disk content,
+/// opened tab and active tool. Emit `response` directly because Xvfb cannot activate
+/// `AdwAlertDialog` buttons; this covers the handler and resulting document, not pointer
+/// interaction.
 pub(super) fn bench_drawing(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -1436,17 +1390,13 @@ pub(super) fn bench_sketch(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Other readers' comments on the generated vault's `Attachments/comments.pdf` (`rel`), with a
-/// note linking to its first word written first, so a note's highlight lies over one comment.
+/// Inspect generated `Attachments/comments.pdf` with a note highlight over its first word.
+/// Report tooltips, pinned popovers and suppression over annotations, non-comment marks and
+/// empty space. Tools must not open comments; an unarmed click on the note highlight opens its
+/// note.
 ///
-/// At the middle of each comment on the page, and at the marks the generator left without one —
-/// the strike-out, the typed text, the hidden note, the link on the underlined line — and an empty
-/// spot: what the tooltip shows, what a click that was not a drag pins, and whether a tooltip
-/// shows after it. Then the first comment with the pen in hand, the note's highlight with the
-/// Eraser in hand, whose click opens nothing, and with none, whose click opens the note, and the
-/// comments after Export Highlights has written the note's quote in. Last the Outline pane's list
-/// of every page's comments, and its row for the third page's: the page it goes to and what it
-/// pins.
+/// Repeat after Export Highlights, then activate the third-page comment from the Outline list
+/// and report page and popover.
 pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {

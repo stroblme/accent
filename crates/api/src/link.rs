@@ -1,14 +1,7 @@
-//! A host made ready for whatever rides its ssh master: a vault's `serve`, a held shell's
-//! `attach`.
-//!
-//! Ready means two things, and both belong to the host rather than to whoever asked: a master is
-//! up behind the socket, and the server binary this build uploads is installed there. Functions,
-//! not a type, because nothing is left to own once they are: the socket path derives from the
-//! address, and the master lives on through ControlPersist and whatever rides it.
-//!
-//! Attempts on one host take turns, and a caller that waited on one takes its outcome instead of
-//! making its own, so the three tabs of a restored terminal session cost one handshake, one check
-//! and at most one upload between them.
+//! Prepare an SSH master and server binary for vault `serve` or held-shell `attach`.
+//! Both belong to the host: the socket derives from its address, and ControlPersist
+//! keeps the master alive without a Rust owner. Serialize attempts per host and
+//! reuse their outcomes so restored tabs share a handshake and upload.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -19,17 +12,15 @@ use std::sync::{Arc, Mutex};
 use crate::ssh::{self, Url};
 use crate::{Error, Result, locked};
 
-/// How much of the server binary goes out per write, and therefore how often the progress bar
-/// moves while it is uploading.
+/// Upload chunk size, controlling progress-report frequency.
 const CHUNK: usize = 256 * 1024;
 
 /// The musl-static `accent-cli` this machine uploads, one build per architecture, and what it is
 /// known by on a host.
 #[derive(Debug, Clone)]
 pub struct Server {
-    /// The blake3 of the builds together, which names whichever of them a host has: see
-    /// [`ssh::server_path`]. One name for every architecture, so a shell's path on a host is known
-    /// before the host has said what it is.
+    /// Combined blake3 hash naming all architecture builds ([`ssh::server_path`]),
+    /// so a shell knows the remote path before learning the host architecture.
     pub hash: String,
     builds: Vec<Build>,
 }
@@ -66,8 +57,8 @@ impl Server {
     }
 }
 
-/// The server builds, hashed once per build rather than once per connection: 8 MB of blake3 each
-/// is not free, and every tab on a host asks for its name.
+/// Cache server hashes per build to avoid hashing megabytes for every tab
+/// connection.
 pub fn server() -> Result<Server> {
     /// The files as they were when they were hashed: a rebuild changes a length or an mtime.
     type Stamp = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
@@ -176,13 +167,9 @@ fn unreadable(path: &Path, e: std::io::Error) -> Error {
     Error::Remote(format!("{}: {e}", path.display()))
 }
 
-/// One ssh invocation, with the environment that makes a prompt reach a dialog instead of a
-/// terminal nobody is looking at.
-///
-/// `SSH_ASKPASS` points at accent itself: the app re-runs as its own askpass helper when it
-/// sees `ACCENT_ASKPASS`, so there is one binary to install and the dialog looks like the
-/// rest of the window. `REQUIRE=force` is what makes ssh use it even when it can see a
-/// terminal, which it can — the app was very likely started from one.
+/// Configure SSH prompts to use the app's askpass dialog instead of a terminal.
+/// `SSH_ASKPASS` reruns accent with `ACCENT_ASKPASS`; `REQUIRE=force` uses it
+/// even if the app was started from a terminal.
 pub(crate) fn command(argv: &[String]) -> Command {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -281,12 +268,9 @@ fn upload(
     .map_err(|e| Error::Remote(format!("cannot install the server: {e}")))
 }
 
-/// Run `argv` with `input` on its stdin, a chunk at a time, telling `progress` the bytes written
-/// so far of `total`.
-///
-/// A write that fails is ssh having ended already, so what it said on stderr is the reason, not
-/// the broken pipe the write found. ssh's own failure, exit status 255 rather than the command's,
-/// is the link that went: [`Error::Offline`], as a call over a dead link is.
+/// Run `argv` and stream `input` in chunks, reporting bytes written of `total`.
+/// On write failure, use SSH stderr rather than the resulting broken-pipe error.
+/// SSH exit 255 maps to [`Error::Offline`]; other failures belong to the command.
 pub(crate) fn send(
     argv: &[String],
     mut input: impl Read,
@@ -332,8 +316,7 @@ fn mb(bytes: usize) -> String {
 
 // ------------------------------------------------------------------- one at a time
 
-/// The attempts on one host. Its lock is held for the length of an attempt, which is what makes
-/// them take turns.
+/// Per-host attempts, serialized by a lock held throughout the attempt.
 #[derive(Default)]
 struct Host {
     /// How many attempts have ended, which tells a caller whether one ended while it waited.
@@ -349,19 +332,16 @@ struct Ended {
 }
 
 impl Ended {
-    /// Whether a caller that waited for this attempt may take its outcome as its own: only for
-    /// the same master, and never a quiet failure for a caller that may prompt, whose passphrase
-    /// might get through where `BatchMode` gave up.
+    /// Allow reuse only for the same master. A caller allowed to prompt must
+    /// retry a quiet failure, since its passphrase may succeed where BatchMode failed.
     fn answers(&self, ctl: &Path, quiet: bool) -> bool {
         self.ctl == ctl && (self.outcome.is_ok() || quiet || !self.quiet)
     }
 }
 
-/// Run `work` for the host `authority` names, unless an attempt on it that ends while this caller
-/// waits its turn can answer for it.
-///
-/// Keyed by the authority rather than the socket because the upload is the host's: two masters
-/// to one host, a vault window's and a terminal window's, must not upload over each other.
+/// Run `work` unless a compatible attempt completed while this caller waited.
+/// Key by host authority, not socket, so separate vault and terminal masters
+/// cannot upload over each other.
 fn once(authority: &str, ctl: &Path, quiet: bool, work: impl FnOnce() -> Result<()>) -> Result<()> {
     static HOSTS: Mutex<Vec<(String, Arc<Host>)>> = Mutex::new(Vec::new());
     let host = {

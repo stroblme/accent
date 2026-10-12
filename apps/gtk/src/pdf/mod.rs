@@ -1,17 +1,13 @@
-//! The PDF stack: the widget a document is painted in, the tab that owns the file, and the
-//! thread that renders it.
+//! PDF rendering, reading and editing, separated from the window's commands.
 //!
-//! `geometry` lays the pages out, `cache` holds the rendered tiles, `tools` is the drawing
-//! tools' pure geometry and `ring` their options on the drawing ring, `protocol` is what crosses
-//! the channel to the render thread, `view` is the widget and `tab` the reader around it, with
-//! `input` wiring its views, menu and keys to it, `reply` taking the render thread's answers,
-//! `disk` its file's saves and reloads and `comment` showing what other readers wrote on a page.
-//! `organize` moves, inserts and deletes pages from the thumbnail strip, `drop` puts another PDF's
-//! pages in where it is dropped on the pages, `export` writes the copy Export as PDF and Print
-//! hand on, and `source` is the page's half of SyncTeX. `window` is the window's side of a PDF
-//! tab: opening one and the PDF commands. Nothing under `view` calls pdfium.
+//! `render` owns pdfium on a worker; `protocol` carries requests and replies. `view` paints
+//! cached tiles without calling pdfium; `geometry` lays them out and `cache` budgets them.
+//! `tab` owns reading state, with `input`, `reply` and `disk` handling input, results and files.
+//! `tools` and `ring` provide drawing geometry and options; `comment` shows annotations.
+//! `organize` and `drop` edit pages, `export` writes print/export copies, `source` supplies
+//! SyncTeX, and `window` integrates PDF tabs and commands with the app.
 //!
-//! The names below are what the rest of the window says `pdfview::` and `pdftab::` to reach.
+//! Re-exports preserve the window's `pdfview::` and `pdftab::` names.
 
 pub mod cache;
 mod comment;

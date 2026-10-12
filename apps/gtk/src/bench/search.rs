@@ -17,40 +17,15 @@ const LOOK: Duration = Duration::from_millis(2);
 /// How long after the last keystroke they wait, at most, for the queries still running to land.
 const DRAIN: Duration = Duration::from_secs(30);
 
-/// `ACCENT_BENCH_SEARCH=<query>[:<n>]` puts `<query>` in the Search pane, then writes `n` files
-/// holding it twice — one note unless the tail says otherwise, every second file a `.txt` rather
-/// than a note — and takes them away again, printing what the pane lists at each step and what
-/// the Replace All button says. The whole cycle runs twice: once under ranked full text, and once
-/// with the replace row open, which is the exact scan Replace All needs.
+/// `ACCENT_BENCH_SEARCH=<query>[:<n>]` writes then removes `n` marker files, alternating notes
+/// and `.txt`, each with two matches. Repeat ranked, exact-with-replace and hidden-pane
+/// catch-up. Expected `before=removed` and `added` has `2n` more rows. For a unique term: 0, 2n,
+/// 0; exact Replace All counts match, while ranked remains disabled at 0.
 ///
-/// `before` and `removed` must match, and `added` must have `2n` rows more: a row is a match and
-/// not a file, in either mode. That is the pane following the vault without the box being
-/// touched. Pass a word the vault does not already hold and the steps read `rows=0`, `rows=2n`,
-/// `rows=0` in both modes.
-///
-/// The button counts only under the exact scan, where it must say what the rewrite would touch:
-/// with such a word, `Replace All (0)` at `grep`, `grep_removed` and `away_removed`, and
-/// `Replace All (2n)` at `grep_added` and `away_added`, the `.txt` files included — Replace All
-/// rewrites every indexed file, not only the notes. The ranked steps read `Replace All (0)`, not
-/// pressable.
-///
-/// The last two steps stage the same batch with the *Files* pane in front instead, so
-/// `away_added` and `away_removed` are the catch-up a pane that was not on screen owes when it
-/// comes back: `rows=2n` and `rows=0` again, not the rows it was left with.
-///
-/// `RUST_LOG=accent=debug` prints `sidebar query … grep=… ms=…` for every query the run makes, so
-/// the `grep=true` lines after the `grep` step are what a requery nobody asked for costs in exact
-/// mode, and `<n>` is how many files the settled batch behind one of them touched.
-///
-/// `ACCENT_BENCH_SEARCH=type:<query>` is a different drill: it types `<query>` a character at a
-/// time, faster than the pane waits for, and prints the rows each time they change, with the
-/// milliseconds since the last keystroke: first the prefix rows, then the mid-word rows appended
-/// below them once the typing has stopped; `last_key running=` is how many queries for the
-/// prefixes typed before were still on worker threads at the last keystroke, and `settled` when
-/// the rows last changed and when nothing was running any more (`drained_ms`). `=walk:<query>`
-/// does the same with All on, where the walk past the index appends its rows last, under
-/// `Not Indexed`, and prints them once more with All off again (`all_off`). `RUST_LOG=accent=debug` prints one `sidebar pass` line per pass for
-/// the whole query, not one per character.
+/// `type:<query>` types faster than debounce and reports prefix results, later mid-word results,
+/// `last_key running` and drained timings. `walk:<query>` enables All, appends `Not Indexed` and
+/// reports `all_off` afterward. `RUST_LOG=accent=debug` shows per-query timing and one `sidebar
+/// pass` per full-query pass.
 pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("seed:") {
         return bench_seed(app, rel);
@@ -519,21 +494,13 @@ fn more_note() -> String {
     format!("{NOTE}-15more.md")
 }
 
-/// `ACCENT_BENCH_SEARCH=more:<query>[:<n>]` writes a note holding `<query>` on `n` lines (12
-/// unless the tail says otherwise) — five rows and a "+N more in this file" under them — beside
-/// thirty files holding it twice, so the list scrolls, puts the tail row in the middle of the
-/// list and opens it the way a click does. Once ranked, then with the replace row open.
+/// `ACCENT_BENCH_SEARCH=more:<query>[:<n>]` opens a capped file's tail among thirty two-hit
+/// files, ranked then exact. Default `n` is 12. Expected row count grows by N−1, capped at 100
+/// additional matches with another tail if needed; counts, tabs, scroll, row position and
+/// selection stay stable. Requery retains expansion; a capitalised new query resets it.
 ///
-/// Each prints `before` and `after`: the rows, the count line, the tabs open, the list's scroll,
-/// how far down the list the tail row sat and the row now in its place sits, and which row is
-/// selected. `after` must list `rows` + N − 1 (at most 100 more, and a tail row again past
-/// that), with the count, the tabs, the scroll, the place and the selection as they were. Then
-/// `requery` asks the same question again, as a change in the vault does, and must list the file
-/// open still; `reset` asks for the query in capitals, a new question with the same matches, and
-/// must list it shut.
-///
-/// `=click:` is the same drill with a real press: it prints `aim <x> <y>`, where the tail row is
-/// on the screen, and waits 20 s for `build-aux/xtest.py <display> "move <x> <y>; down; up"`.
+/// `=click:` prints `aim <x> <y>` and waits 20 s for `build-aux/xtest.py <display> "move <x>
+/// <y>; down; up"`.
 fn bench_more(app: Rc<App>, query: String, lines: usize, click: bool) {
     let Some(sidebar) = app.sidebar.get() else {
         return bench_quit(&app);

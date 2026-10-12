@@ -1,30 +1,23 @@
-//! What the editor does with Return, Tab, Backspace and a bracket: continue a list, close a
-//! fence, pair a delimiter, line up a table and walk its cells.
+//! Markdown typing helpers for lists, fences, pairs and tables.
 //!
-//! The decisions are plain functions over the current line, so they are testable without a
-//! display; [`install`] is the only part that needs a widget. Nothing here parses the note:
-//! `markdown::analyze` works on the whole buffer and its spans are thrown away after the
-//! highlighting pass, so a per-keystroke lookup would mean re-parsing. A list marker is visible in
-//! the line itself, and "am I inside a code fence" is already on the buffer as a tag. A table is
-//! the lines holding a pipe around the caret's, laid out by `markdown::table_key`.
+//! Pure functions inspect the current line so decisions can be tested without a display;
+//! `install` supplies widget integration. Re-parsing the whole note per key is unnecessary:
+//! list markers are local, code fences are tagged, and `markdown::table_key` inspects nearby
+//! pipe-delimited lines.
 //!
-//! Every edit runs inside one `begin_user_action`/`end_user_action`, so one Ctrl+Z undoes it.
-//! Which presses reach [`on_key`] at all is `editor::keys`'s decision: a completion popup and a
-//! column of carets both own Return, and neither wants a list marker inserted underneath them.
+//! Each edit is one user action for Undo. `editor::keys` decides which presses reach
+//! [`on_key`], giving completion and multiple carets priority.
 
 use crate::editor::{caret, line_end, line_prefix};
 use accent_core::markdown::{TableKey, table_key};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
-/// Delimiters that close themselves when typed. Markdown emphasis is deliberately absent: a `*`
-/// that grew a second `*` under the caret would be in the way far more often than it helped.
+/// Auto-paired delimiters. Omit Markdown emphasis because inserted partners often obstruct typing.
 const PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
 
-/// Delimiters that only wrap an existing selection. Backtick is here rather than in [`PAIRS`]
-/// because auto-closing it makes ```` ``` ```` impossible to type: the second backtick would step
-/// over the first one's partner and the third would open a new pair, and the fence rule below
-/// would never see a line it recognises.
+/// Selection-only wrapping delimiters.
+/// Backticks must not auto-pair because stepping over partners prevents typing triple-backtick fences.
 const WRAPPERS: [char; 4] = ['*', '_', '~', '`'];
 
 /// What Return does to the line it was pressed on.
@@ -50,11 +43,9 @@ pub enum Pair {
     Plain,
 }
 
-/// How Return should carry on from `line`, which is the current line up to the caret.
+/// Continue `line` before the caret on Return, preserving indentation.
 ///
-/// Recognised: `-`/`*`/`+` bullets, `N.` and `N)` enumerations, `- [ ]` and `- [x]` task items,
-/// and `>` quotes, each keeping its indent. A task item always continues unchecked; an
-/// enumeration counts on.
+/// Recognise bullet, numbered, task and quote markers. Tasks continue unchecked; numbers increment.
 pub fn continuation(line: &str) -> Option<Continue> {
     let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
     let rest = &line[indent.len()..];
@@ -98,9 +89,7 @@ pub fn continuation(line: &str) -> Option<Continue> {
     None
 }
 
-/// How Return carries on from `line` in front matter, which is YAML: a sequence item, `- ` and
-/// its indent (`tags:` written as a list), starts the next one, and an empty one ends the
-/// sequence as an empty item ends a list. Nothing else there carries on.
+/// Continue YAML frontmatter sequence items with their indentation; empty items end the sequence.
 pub fn sequence_item(line: &str) -> Option<Continue> {
     let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
     let body = line[indent.len()..].strip_prefix("- ")?;
@@ -110,18 +99,12 @@ pub fn sequence_item(line: &str) -> Option<Continue> {
     })
 }
 
-/// The column a wrapped row of `line` starts at. Where `markers` says the line is a note's and it
-/// opens with a list, task or quote marker, that is behind the marker and the space after it, so
-/// the wrap lines up under the item's text. Otherwise an indented line hangs one `level` deeper
-/// than its indent, VS Code's `wrappingIndent: "indent"`, so the wrap cannot pass for the next
-/// line; a line with no indent, which is most prose and every top-level line of code, is 0.
+/// Return the starting column for wrapped rows of `line`.
 ///
-/// The markers are [`continuation`]'s and are read the same way. What differs is that this
-/// measures the marker the line already carries rather than writing the next one, so `9)` is the
-/// three columns it takes and not the four `10)` would. A tab reaches the next multiple of
-/// `tab_width`, which is where the view draws what follows it.
-///
-/// Indent, bullet, digits and `>` are all ASCII, so the byte count is the character count.
+/// With `markers`, note lists, tasks and quotes wrap behind their existing marker. Other
+/// indented lines wrap one `level` deeper to distinguish continuations; unindented lines
+/// start at 0. [`continuation`] shares marker parsing, but this measures the current marker,
+/// not the next number. Tabs advance to multiples of `tab_width`; marker syntax is ASCII.
 pub fn wrap_column(line: &str, tab_width: usize, level: usize, markers: bool) -> usize {
     match wrap_head(line, tab_width, markers) {
         (0, "") => 0,
@@ -130,10 +113,8 @@ pub fn wrap_column(line: &str, tab_width: usize, level: usize, markers: bool) ->
     }
 }
 
-/// What a wrapped row of `line` hangs behind, in two parts: the column its indent reaches, and
-/// the list, task or quote marker after it with the spaces behind it, empty where there is none
-/// or `markers` says the line is not a note's. [`wrap_column`] counts the marker in columns;
-/// `wrap::measure` lays it out in the view's font, where a proportional face's `-` is no space.
+/// Return indent column and following marker text for wrapped rows.
+/// [`wrap_column`] counts columns; wrap::measure uses styled marker widths for proportional fonts.
 pub fn wrap_head(line: &str, tab_width: usize, markers: bool) -> (usize, &str) {
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
     let columns = line[..indent].bytes().fold(0, |column, byte| match byte {
@@ -147,13 +128,10 @@ pub fn wrap_head(line: &str, tab_width: usize, markers: bool) -> (usize, &str) {
     (columns, &line[indent..indent + marker])
 }
 
-/// Whether `line` holds nothing but its indent and a list, task or quote marker: what Return on a
-/// list item leaves behind, and the one line a suggestion is never painted on, because there is
-/// nothing there yet to suggest the rest of.
+/// Whether `line` contains only indent and a list, task or quote marker, or bare indent.
 ///
-/// Read through [`continuation`], which already decides what "a marker and nothing after it"
-/// means — that is what it ends a list on — so the two cannot drift apart. A line of bare indent
-/// counts too: there is nothing on it either.
+/// Ghost text is suppressed here because there is no content to complete. [`continuation`]
+/// shares the same empty-marker rule used to end lists.
 pub fn marker_only(line: &str) -> bool {
     match continuation(line) {
         Some(Continue::Unlist) => true,
@@ -162,13 +140,10 @@ pub fn marker_only(line: &str) -> bool {
     }
 }
 
-/// What Tab inserts at the head of `line` to indent the item on it: the marker's own width in
-/// spaces, or one tab where the line is already indented with them. `None` where there is no
-/// marker to step past — prose, or a blank line — which leaves the key to the view.
+/// Return Tab's indent for an item on `line`, or `None` to leave prose and blank lines to the view.
 ///
-/// What is written after the marker makes no difference; Obsidian and VS Code both indent an item
-/// from anywhere on its line. The step is the marker's width, so the nested item starts where its
-/// parent's text does and where a wrap of the parent already hangs ([`wrap_column`]).
+/// Use the marker's width in spaces, or one tab for tab-indented lines, so nested text aligns
+/// with the parent's text and wrapped rows ([`wrap_column`]). Caret position does not matter.
 pub fn list_indent(line: &str) -> Option<String> {
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
     let width = marker_width(&line[indent..]);
@@ -179,9 +154,8 @@ pub fn list_indent(line: &str) -> Option<String> {
     }
 }
 
-/// The width of the list or quote marker `rest` opens with, the spaces after it included, or 0
-/// where it opens with none. A task item's `[ ]` is content and not marker: the request is that a
-/// wrap lines up under the line's first character, which is the bracket.
+/// Return the opening list/quote marker width including spaces, or 0.
+/// Task brackets are content, so wrapping aligns beneath the opening bracket.
 fn marker_width(rest: &str) -> usize {
     let head = if rest.starts_with(['>', '-', '*', '+']) {
         1
@@ -212,12 +186,10 @@ fn task_body(body: &str) -> Option<&str> {
     Some(rest.strip_prefix(' ').unwrap_or(rest))
 }
 
-/// What typing `ch` should do. `next` is the character the caret sits in front of, `selection`
-/// whether there is one to wrap.
+/// Choose the effect of typing `ch`; `next` is the character after the caret, and `selection` allows wrapping.
 ///
-/// A pair is only opened in front of whitespace, a closing delimiter or the end of the line:
-/// typing `(` right before a word is far more often the start of a correction than of a
-/// parenthesis, and a `)` appearing mid-word has to be deleted again.
+/// Open pairs only before whitespace, closing delimiters or line ends, avoiding unwanted
+/// closing characters when correcting text inside a word.
 pub fn pair(ch: char, next: Option<char>, selection: bool) -> Pair {
     if selection {
         return match surround(ch) {
@@ -247,19 +219,15 @@ fn surround(ch: char) -> Option<(char, char)> {
         .or_else(|| WRAPPERS.contains(&ch).then_some((ch, ch)))
 }
 
-/// Whether Backspace between `prev` and `next` should take both: an empty pair this module put
-/// there is deleted as one, so undoing a mistyped bracket is one key rather than two.
+/// Delete an empty delimiter pair with one Backspace rather than leaving its closing partner.
 pub fn deletes_pair(prev: char, next: Option<char>) -> bool {
     PAIRS
         .iter()
         .any(|(open, close)| *open == prev && next == Some(*close))
 }
 
-/// Whether Return at the end of `line` should write the fence that closes the block it opens.
-/// `rest` is the buffer text after the caret.
-///
-/// The line has to be a lone opener (`` ``` `` plus an info string), and the fences below it have
-/// to be even in number: an odd count means one of them already closes this block.
+/// Whether Return should close a lone fence opener before `rest`.
+/// An odd number of later fences means a closer already exists; only an even count needs insertion.
 pub fn closes_fence(line: &str, rest: &str) -> bool {
     if !opens_fence(line) {
         return false;
@@ -305,13 +273,10 @@ pub fn on_key(
     }
 }
 
-/// Tab on a line that opens a list, a task, an enumeration or a quote indents that item by the
-/// width of its marker, so it starts where its parent's text does — the column [`continuation`]
-/// writes the marker at, and the one a wrap of the parent hangs at. Anywhere else the key is the
-/// view's.
+/// Indent a list, task, enumeration or quote with Tab from anywhere on its line.
 ///
-/// The whole line is read, not the part in front of the caret: the item is indented from anywhere
-/// on it. The indent goes in at the head of the line, so the caret keeps its place in the text.
+/// The marker's width aligns nested content with the parent's text and wraps. Insert at
+/// line start to preserve the caret's text position; other lines leave Tab to the view.
 fn on_tab(view: &sourceview5::View) -> glib::Propagation {
     if in_table(view, TableKey::Tab) {
         return glib::Propagation::Stop;
@@ -470,10 +435,9 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
     glib::Propagation::Stop
 }
 
-/// Tab, Shift+Tab or Return with the caret in a table and nothing selected: the table laid out
-/// again with its columns lined up, as one undo step with the row the key adds or takes away, and
-/// the caret where the key sends it (`markdown::table_key`). Says whether the caret was in one.
-/// A column of carets never gets here: it takes these keys first (`editor::keys`).
+/// Handle Tab, Shift+Tab or Return in an unselected table through markdown::table_key.
+/// Realignment and row changes form one undo step; return whether handled.
+/// Multi-caret dispatch takes these keys first.
 fn in_table(view: &sourceview5::View, key: TableKey) -> bool {
     let buffer = view.buffer();
     let at = caret(&buffer);

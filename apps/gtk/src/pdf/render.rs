@@ -16,14 +16,11 @@ use gtk::glib;
 use super::protocol::{Request, fresh_id};
 use super::{Highlights, LOWRES_W, PdfView, Reply, TILE, TileKey, Want};
 
-/// Open `path` on a thread of its own and answer for it until the sender is dropped.
+/// Open and own `PdfDoc` on the render thread until its sender is dropped. All pdfium calls
+/// share a process-wide lock because concurrent calls abort.
 ///
-/// The thread owns the `PdfDoc` for its whole life, opening included. Nothing else may touch
-/// pdfium while it runs: the library is serialised by one process-wide lock, and two threads
-/// inside it abort the process.
-///
-/// A file that will not open — a LaTeX run that failed, or has not finished writing it — does not
-/// end the thread: it says why and waits for the tab to ask for the file again.
+/// Opening failure reports the reason and waits for a reload request, allowing incomplete LaTeX
+/// output to recover.
 pub fn spawn(path: PathBuf, view: glib::SendWeakRef<PdfView>) -> Result<Sender<Request>, String> {
     if !pdf::available() {
         return Err("libpdfium was not found".to_string());
@@ -77,11 +74,8 @@ fn wait(rx: &Receiver<Request>, path: &mut PathBuf) -> bool {
     false
 }
 
-/// The glyphs of the pages this thread has read, kept until the document is re-read.
-///
-/// Extracting a page's text is most of a `Highlights` request, and that fires 300 ms after every
-/// note save; the same page is asked for again by a drag over it and again by an export. pdfium's
-/// own search keeps its own page text, so a query does not come through here.
+/// Cache extracted page glyphs until reload, sharing the costly extraction between highlights,
+/// selection and export. PDF search uses pdfium's separate text cache.
 type Glyphs = HashMap<usize, Vec<pdf::Glyph>>;
 
 /// One page's glyphs, read once. `None` for a page whose text pdfium would not give us, which is
@@ -97,29 +91,19 @@ fn glyphs_of<'a>(doc: &PdfDoc, cache: &'a mut Glyphs, page: usize) -> Option<&'a
     }
 }
 
-/// Every page's size in points, which is all the widget needs to lay the document out.
-///
-/// One pdfium call for the whole document, not one per page: asking a loaded page for its size
-/// costs a full parse of that page, and 1 554 of those is eleven seconds before anything appears.
+/// Read page sizes without loading page content, avoiding expensive full-page parses before
+/// layout.
 fn page_sizes(doc: &PdfDoc) -> Vec<(f32, f32)> {
     doc.page_sizes().unwrap_or_default()
 }
 
-/// The render thread.
+/// Process requests in a stack, checking new work before every tile or searched page. Only newer
+/// work of the same kind and asker replaces a batch ([`interrupt`]); other work suspends it
+/// until the detour finishes.
 ///
-/// One request at a time, with one twist: before every tile and every searched page it drains the
-/// queue, so a batch that has been overtaken is put aside rather than finished into a viewport
-/// nobody is looking at any more. Only a request of the same kind from the same asker abandons
-/// it — see [`interrupt`] — and the queue is a stack, so the newest work is always what runs next
-/// and what is put aside resumes after it.
-///
-/// Dropping an interrupted batch instead loses it for good. Nothing re-asks: the widget sends a
-/// list of tiles again only when that list changes, and the tab sends a query again only when the
-/// text does, so a tile nobody rendered stayed blurry and a search pushed aside reported the
-/// matches of the pages it had reached and no more.
-///
-/// It returns when the tab goes away, with `None`, or with the path it was reading once a reload
-/// finds the file will not open, the tab told so: the document goes with it.
+/// Retain suspended batches because unchanged tile lists and queries may never be requested
+/// again. Return `None` when the tab closes, or the document path after a failed reload reports
+/// its error.
 fn render_loop(
     mut doc: PdfDoc,
     mut path: PathBuf,
@@ -635,15 +619,9 @@ fn repaged(
     send(view, Reply::Repaged { sizes, edit, step });
 }
 
-/// Put `newer` at the top of the queue, and `rest` — what the interrupted batch has left to do —
-/// under it or not at all.
-///
-/// Only a request of the same kind from the same asker takes a batch over: a newer viewport makes
-/// that view's old tiles pointless, and a newer query makes the old query's remaining pages
-/// pointless. It also drops any older remainder of its own still waiting further down, which is
-/// the one a batch put aside earlier left there. Anything else — a link, a page's glyphs, an
-/// outline, a reload, or the tiles another view of the document wants — is a short detour, and
-/// the batch resumes once it is done.
+/// Push `newer` above the unfinished `rest`. Same-kind work from the same asker replaces the
+/// batch and removes its older queued remainders. Other requests are detours, after which the
+/// batch resumes.
 fn interrupt(queue: &mut Vec<Request>, rest: Request, newer: Request) {
     // Only a batch replaces anything waiting, and `rest` is always one: a newer link is no reason
     // to drop an older one.

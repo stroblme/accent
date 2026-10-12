@@ -1,15 +1,12 @@
-//! The folders git ignores, which the index never walks, reached by Go to File, `[[` completion
-//! and a link all the same.
+//! Verify ignored notes remain reachable through Go to File, completion and links.
 
 use super::*;
 use accent_api::Pos;
 
-/// `ACCENT_BENCH_SWITCHER=ignored:<rel>` wants a scratch vault whose `.gitignore` names a folder
-/// holding `Deep Note.md`, and a note `<rel>` reading `[[Deep Note]] [[Nowhere]]` with `[[Deep` on
-/// its second line. Once the vault is indexed it prints how long a fresh walk of the ignored
-/// folders took and how many notes it found (`ignored_walk`), Go to File's first rows for
-/// `Deep Note`, the hints the note gets, what `[[Deep` completes to, and the tab following
-/// `[[Deep Note]]` lands on.
+/// `ACCENT_BENCH_SWITCHER=ignored:<rel>` needs an ignored folder with `Deep Note.md`
+/// and a note `<rel>` containing `[[Deep Note]] [[Nowhere]]` and `[[Deep` on line two.
+/// After indexing, print ignored-folder walk time/count, Go to File rows, hints,
+/// completion and the tab opened by following `[[Deep Note]]`. Use a scratch vault.
 pub(super) fn bench_ignored(app: &Rc<App>, rel: &str) {
     let Some(vault) = app.vault().cloned() else {
         return bench_quit(app);

@@ -1,5 +1,5 @@
-//! Points, rectangles and paths in page units: pixels at zoom 1, y growing downwards, angles in
-//! degrees clockwise, which is how draw.io stores all three.
+//! Geometry in draw.io page units: pixels at zoom 1, y increasing downwards,
+//! angles in clockwise degrees.
 
 /// A point on the page.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -93,8 +93,8 @@ impl Rect {
     }
 }
 
-/// `p` turned `degrees` clockwise about `centre`, in `mxUtils.getRotatedPoint`'s order of
-/// operations, so a rotated terminal's routes agree with draw.io's to the last bit.
+/// Rotate `p` clockwise about `centre`, preserving `mxUtils.getRotatedPoint`
+/// operation order so terminal routing matches draw.io's floating-point results.
 pub fn rotate(p: Point, centre: Point, degrees: f64) -> Point {
     if degrees == 0.0 {
         return p;
@@ -200,8 +200,8 @@ pub fn rotate_path(path: &mut [PathCmd], centre: Point, degrees: f64) {
     map_path(path, |p| rotate(p, centre, degrees));
 }
 
-/// Segments a curve is cut into by [`flatten`]. Enough for hit testing and bounds at any zoom
-/// the canvas allows; painting uses the real curves.
+/// Curve subdivision count for hit testing and bounds at supported zooms.
+/// Painting uses the original curves.
 const CURVE_STEPS: usize = 8;
 
 /// `path` as polylines, one per subpath; a closed subpath ends on its first point again.

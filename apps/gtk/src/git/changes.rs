@@ -118,16 +118,12 @@ impl Panel {
         });
     }
 
-    /// Draw the changes list from what the last refresh learned, and nothing else: what the
-    /// grouping preference and a folder row both need, neither being a reason to ask git again.
+    /// Rebuild from cached status for grouping and folder toggles, without another git query.
+    /// Splice only [`changed_runs`] through [`Fill`] so unchanged rows retain focus and
+    /// press/release handling.
     ///
-    /// Only the runs of rows that differ are spliced, a few at a time ([`changed_runs`], [`Fill`]):
-    /// a save, a watcher event and the `.git` write a Stage makes each land a refresh that mostly
-    /// says what is on screen already, and a row spliced out from under a press loses its release
-    /// — which is how Stage clicks went missing. So a row has to carry
-    /// everything its binding draws; the one thing it does not, the view, empties the list in
-    /// [`Panel::set_tree`]. Nothing moves while a press is down over the list, a fill under way
-    /// included: its release redraws.
+    /// Rows must carry all binding data; [`Panel::set_tree`] resets the list for the view mode
+    /// they do not carry. Defer fills while a press is held, then redraw on release.
     pub(super) fn rebuild_changes(&self) {
         if self.pressed.get() {
             return;
@@ -203,14 +199,9 @@ impl Panel {
     }
 }
 
-/// Turn a folder row's chevron where it stands, and its item with it, so that the redraw its
-/// activation asks for splices only the rows under it. Spliced out itself, the row took the
-/// keyboard focus with it, which landed wherever GTK put it, and a new row stood in its place
-/// without the mark the press left on the old one ([`reveal_on_hover`]), so its buttons came out
-/// with the pointer gone.
-///
-/// The row is the one with the keyboard focus, which the press or the key that activated it gave
-/// it; where the focus is on anything else, the redraw replaces the row as it does any other.
+/// Update the focused folder row's item and chevron in place before splicing its children.
+/// Replacing that row would lose keyboard focus and its hover/press state. Rows without focus
+/// follow normal replacement.
 fn turn(view: &gtk::ListView, item: glib::Object, path: &str, open: bool) {
     let (focus, view) = (view.root().and_then(|root| root.focus()), view.upcast_ref());
     let stack = focus
@@ -345,11 +336,9 @@ enum Act {
     Discard,
 }
 
-/// A row's Stage / Unstage / Discard buttons, the same three on a file and on a folder. They show
-/// while the pointer or the keyboard is on the row, and [`fit`] picks which of them the row offers.
-/// In a revealer, which is what keeps them from reserving their width while they are away
-/// ([`reveal_on_hover`]), and which makes them the first time it reveals them
-/// ([`revealed_actions`]): they are eight of a row's thirteen widgets.
+/// Stage, Unstage and Discard buttons for file and folder rows, filtered by [`fit`]. Reveal on
+/// hover or focus without reserving hidden width, and build lazily through [`revealed_actions`]
+/// to reduce row widgets.
 fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
     let panel = panel.clone();
     revealed_actions(item, move |item| {
@@ -361,7 +350,7 @@ fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
     })
 }
 
-/// The three buttons of [`actions`], each acting on whatever row `item` holds when it is pressed.
+/// The three buttons of [`actions()`], each acting on whatever row `item` holds when it is pressed.
 fn action_buttons(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     for (icon, tooltip, act) in [
@@ -385,7 +374,7 @@ fn action_buttons(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     actions
 }
 
-/// The buttons inside an [`actions`] revealer, once it has revealed them.
+/// The buttons inside an [`actions()`] revealer, once it has revealed them.
 fn buttons(revealer: Option<gtk::Widget>) -> Option<gtk::Box> {
     revealer
         .and_downcast::<gtk::Revealer>()?
@@ -538,7 +527,7 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
     }
 }
 
-/// Which of a row's [`actions`] it shows: on a folder, none in Merge Conflicts, for the reason its
+/// Which of a row's [`actions()`] it shows: on a folder, none in Merge Conflicts, for the reason its
 /// header has no Stage All — a conflict is resolved one file at a time; on a file, none for a
 /// repository of its own; on a submodule none at all.
 fn fit(buttons: &gtk::Box, row: &Row) {
@@ -564,7 +553,7 @@ fn fit(buttons: &gtk::Box, row: &Row) {
     }
 }
 
-/// Which of the [`actions`] a file or folder row offers in `section`. Staging a conflicted file
+/// Which of the [`actions()`] a file or folder row offers in `section`. Staging a conflicted file
 /// is how git is told it is resolved, so Stage is there for it too; unstaging one is not a thing
 /// the pane offers. Discard is for the working tree alone, and only where everything the row
 /// stands for can go ([`discardable`]).
@@ -580,12 +569,8 @@ fn offer(actions: &gtk::Box, section: Section, discardable: bool) {
     }
 }
 
-/// Whether Discard can take `entry` back, `key` being its path as the app names it.
-///
-/// ponytail: an untracked file outside the vault cannot, because the only thing to do with it is
-/// delete it and the trash hook takes vault keys; a folder with one under it offers no Discard
-/// either. `git clean` is the upgrade, and it wants a confirmation naming the files it removes
-/// for good.
+/// Whether Discard can restore `entry`. Untracked files outside the vault are unsupported
+/// because the trash hook accepts vault keys; folders containing them also offer no Discard.
 fn discardable(entry: &Entry, key: &str) -> bool {
     !own_repository(&entry.path) && (entry.x != '?' || !Path::new(key).is_absolute())
 }
@@ -671,12 +656,8 @@ fn folder_key(section: Section, dir: &str) -> String {
     format!("{section:?}/{dir}")
 }
 
-/// One section's entries grouped by folder.
-///
-/// Folders come before files at each level and both sets are sorted, which is the order the Files
-/// pane's own listing has. A chain of folders with a single child each lands on one row —
-/// `src/deep` — as VS Code does it, because a column of rows with one child says nothing. Nothing
-/// under a collapsed folder is emitted at all: the list is rebuilt on every toggle.
+/// Group one section by folder, sorting folders before files at each level. Compress
+/// single-child chains into one path row and omit collapsed contents, keeping the tree compact.
 fn grouped(
     entries: &[&Entry],
     section: Section,

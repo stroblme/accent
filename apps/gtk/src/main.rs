@@ -1,10 +1,8 @@
-//! accent desktop app: GTK4 + libadwaita shell.
+//! Accent desktop application: GTK4 and libadwaita.
 //!
-//! `accent --help` lists the launch forms, which [`shell::Shell::command_line`] reads. Without a
-//! path the last vault opens again, or the start screen when there is none. On a vault,
-//! [`accent_api::Vault`] opens the index and the tree is filled straight from it, while the
-//! worker thread reconciles and watches in the background. The window is never blocked, and every
-//! change the vault reports arrives here as an [`Event`].
+//! [`shell::Shell::command_line`] handles launch forms from `accent --help`. Without a path,
+//! the last vault or start screen opens. [`accent_api::Vault`] supplies the indexed tree
+//! immediately; background reconciliation and watching report changes as [`Event`]s.
 
 mod actions;
 mod askpass;
@@ -130,16 +128,12 @@ const PDF_LINKS: Duration = Duration::from_millis(300);
 /// How often the tree may be re-read while the first index is still running, in microseconds:
 /// often enough that a cold start fills in as it goes, rarely enough to stay off the main loop.
 const TREE_REPAINT: i64 = 250_000;
-/// Tracing target for the save/etag decisions, so a conflict reported in a real session can be
-/// read back afterwards: `RUST_LOG=accent::saves=debug accent <vault>` records every write with
-/// the etag it expected and the one it wrote, and every watcher report with the etag the tab
-/// holds against the one on disk. Its own target, because the answer is a handful of lines and
-/// `accent=debug` is a wall of them.
+/// Save/etag tracing for conflict diagnosis: `RUST_LOG=accent::saves=debug accent <vault>`
+/// records expected/written etags and watcher comparisons without unrelated debug output.
 const SAVES: &str = "accent::saves";
 
-/// Startup milestones: `RUST_LOG=accent=debug accent <vault>` prints ms since process start at
-/// "main", "tree populated", "window mapped"/"presented" and "reconcile done". Keeping these makes
-/// a regression in time-to-window visible without reaching for a profiler.
+/// Log startup milestone times with `RUST_LOG=accent=debug accent <vault>` to track
+/// window latency without a profiler.
 static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
 fn ms() -> u128 {
@@ -229,42 +223,35 @@ type Work = Box<dyn FnOnce(&Rc<App>, &Rc<Tab>)>;
 
 /// Something to do with a tab once it is open: see [`App::with_tab`].
 struct Waiting {
-    /// What was asked for, as [`App::cannot`] says it, for when the file turns out never to
-    /// become a tab and the work is dropped. `None` for a session restore, which asks after every
-    /// tab it remembered, PDFs and images included, and notices a drop by itself
-    /// (`session::Asked`).
+    /// Failure context for pending tab work ([`App::cannot`]); session restores use
+    /// `None` because `session::Asked` tracks failed opens itself.
     what: Option<String>,
     run: Work,
 }
 
 struct App {
-    /// What the window was opened on, and is remembered by. A cell, so a window that changes what
-    /// it is remembered by has one assignment to make.
+    /// Window identity in a cell so saving a named session can replace it.
     key: RefCell<shell::WindowKey>,
     /// The vault this window is on, or `None` for a window opened on a file or on shells instead
     /// of a folder: no index, no watcher, and every tab keyed by an absolute path.
     ///
     /// `Arc`, not `Rc`: the sidebar's search runs its queries on a worker thread.
     vault: Option<Arc<Vault>>,
-    /// The process's other windows, for the one thing a window cannot answer alone: a tab dragged
-    /// in from another one. Weak, because the shell owns this `App`.
+    /// Weak references to other window states for tab transfers; the shell owns their lifetime.
     shell: std::rc::Weak<Shell>,
     config: Rc<RefCell<Config>>,
     window: adw::ApplicationWindow,
-    /// Every open pane, in the order they were created. The arrangement itself lives in the
-    /// widget tree under `root`; this is only what has to be iterated over.
+    /// Panes in creation order for iteration; the widget tree under `root` owns their arrangement.
     panes: RefCell<Vec<Rc<Pane>>>,
     /// The pane a note opens into and the one the find bar and the preview follow.
     active_pane: RefCell<Rc<Pane>>,
     title: adw::WindowTitle,
     toasts: Rc<toasts::Toasts>,
-    /// How many toasts this window has put up. For the drills: "it says so once rather than once
-    /// a save" is a count.
+    /// Toast count for drills checking that repeated events do not duplicate messages.
     #[cfg(feature = "bench")]
     toasted: Cell<usize>,
-    /// Raised across the window when a remote vault stops answering, with a way back. A banner
-    /// rather than a toast because it is a state that persists and needs a decision, and one
-    /// across the window rather than per tab because it is every tab that is affected.
+    /// Persistent reconnect banner for all tabs when a remote vault stops answering.
+    /// Use a banner because the disconnected state needs a decision.
     connection: adw::Banner,
     /// The automatic reconnect that banner counts down to.
     retry: reconnect::Retry,
@@ -273,17 +260,13 @@ struct App {
     connect: connect::Bar,
     /// The bar along the bottom of the editor column: progress, branch, file type, word count.
     statusbar: statusbar::Bar,
-    /// Every open tab, whatever it holds. A `Vec`, not a map: a rename retargets an open tab,
-    /// so its key is not a stable one.
+    /// Open tabs in a vector because renames can change their keys.
     docs: RefCell<Vec<Doc>>,
     /// Work waiting for a tab that is still being opened, by key: see [`App::with_tab`].
     awaiting: RefCell<HashMap<String, Waiting>>,
-    /// What each diagram still being opened is to show once it is up, by key: the label a search
-    /// hit found ([`App::open_label`]) or the page a link names.
+    /// Pending diagram search-hit cell or linked page, by opening tab key ([`App::open_label`]).
     revealing: RefCell<HashMap<String, open::Reveal>>,
-    /// The keys a double click in the Files tree kept while the first click's read was still out
-    /// (a slow host, a large file): kept once their tab lands ([`App::mark_opened`]), forgotten
-    /// once their open fails.
+    /// Double-click pin requests held until a slow open lands ([`App::mark_opened`]); discard on failure.
     keep_on_landing: RefCell<HashSet<String>>,
     /// The pane a restored tab goes into, by key, until it has one: see [`App::tabs_for`].
     placing: RefCell<HashMap<String, std::rc::Weak<Pane>>>,
@@ -298,38 +281,30 @@ struct App {
     sidebar: OnceCell<sidebar::Sidebar>,
     /// The Git pane, in a vault window whose sidebar has one. Set once, with the sidebar.
     git: OnceCell<Rc<git::Panel>>,
-    /// The exclusion set the index was last given — git's ignored paths and the `[search]
-    /// exclude` list as one — and `None` until a refresh has written one. Kept so that the write,
-    /// which is a few thousand `UPDATE`s, happens when the set moves rather than on every save.
+    /// Last applied git/search exclusion set, `None` before refresh. Cache it to avoid
+    /// thousands of unchanged `UPDATE`s on every save.
     excluded: RefCell<Option<HashSet<String>>>,
-    /// The References request in flight. Replaced rather than queued: the caret moves faster
-    /// than a server answers.
+    /// Latest References request; replace pending work as the caret moves to cancel stale queries.
     references: RefCell<Option<glib::JoinHandle<()>>>,
     /// The goals request in flight, replaced the same way.
     goals: RefCell<Option<glib::JoinHandle<()>>>,
-    /// The file whose size and time the Details section last asked the disk for, and the answer:
-    /// `None` while it is coming, or for a file that is gone (`App::stat_details`).
+    /// Last Details stat target/answer; `None` while pending or missing (`App::stat_details`).
     details_stat: RefCell<Option<(String, Option<Etag>)>>,
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on idle once the window is up, so the first open of Preferences is quick too.
     preferences: OnceCell<settings::Preferences>,
-    /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
-    /// at startup by someone who only ever writes. Let go once out of sight for a while
-    /// (`preview_idle`), and built again the next time it is shown.
+    /// Lazily created preview so text-only startup avoids a WebKit process. Release
+    /// after hidden idle and recreate on demand (`preview_idle`).
     preview: RefCell<Option<preview::Preview>>,
     /// The pending release of the preview, from when it went out of sight.
     preview_idle: widgets::Debounce,
-    /// The images Invert Image Colours has turned round, by key, until the app quits: in their
-    /// tabs and in the preview alike, which reads it as it serves each image.
+    /// Session-only inverted-image keys shared by image tabs and preview serving.
     inverted_images: Rc<RefCell<HashSet<String>>>,
-    /// The diagrams whose pictures on the web may be downloaded, by key: the reader said Load on
-    /// the diagram's banner. Kept in the session, and read by the preview as it serves an embed.
+    /// Diagram keys with Load permission for web images; persisted in session and shared with embeds.
     web_images: Rc<RefCell<HashSet<String>>>,
     /// Whether this window has said that its shells are not held (no `accent-cli` beside it).
     told_unheld: Cell<bool>,
-    /// Every file and every tag in the vault, as the palette lists them. Kept warm in the
-    /// background rather than asked for when the dialog opens: on a remote vault that question
-    /// costs a round trip, and the palette is a thing that has to appear instantly.
+    /// Palette corpus kept warm on a worker so opening it does not wait for a remote round trip.
     corpus: RefCell<Corpus>,
     /// Sidebar on the left, editor column on the right; drag the handle to resize.
     split: gtk::Paned,
@@ -366,32 +341,24 @@ struct App {
     /// widening it puts back, which is also what the session saves.
     collapsed: Cell<Option<Collapsed>>,
     chrome_hidden: Cell<bool>,
-    /// True while Back or Forward is walking a pane's history, so the selection change and the
-    /// caret move it makes are not recorded as places of their own — which would clear the
-    /// forward side the moment Back used it.
+    /// Suppress history recording during Back/Forward so the jump cannot clear forward history.
     navigating: Cell<bool>,
-    /// Whether a reconcile has finished, so the index can be trusted for backlinks. A real flag
-    /// rather than the status label, which is also hidden before the first `Progress` arrives.
+    /// Index-ready flag for backlinks, independent of progress-label visibility.
     reconciled: Cell<bool>,
     /// The keys whose bytes are on their way from a host ([`App::local_copy`]). Their count is the
     /// status bar's line meanwhile, so a PDF among them is not yet "Opening the document…".
     fetching: RefCell<HashSet<String>>,
-    /// The page edits of each PDF the notes have still to follow, by its key: the document's
-    /// rather than its tab's, so a tab closed first leaves them to the next ([`relink::Relinks`]).
+    /// Pending PDF link rewrites owned by document key so they survive tab closure ([`relink::Relinks`]).
     relinks: RefCell<HashMap<String, Rc<RefCell<relink::Relinks>>>>,
-    /// Whether the stored tabs have been put back. A remote vault answers nothing until it is
-    /// connected, so its window waits for `Event::Connected` to restore them, and this is what
-    /// keeps a later reconnect from restoring them a second time over the tabs already open.
+    /// Restore tabs after the first remote connection; prevent subsequent reconnects from duplicating them.
     restored: Cell<bool>,
     /// Whether the close under way is Reload Window's, which opens what this window showed again
     /// once it has gone ([`App::reload`]).
     reloading: Cell<bool>,
-    /// The folders Reload has asked the vault to walk, whose walks end in a toast: a walk of a
-    /// folder nobody asked for (a `.gitignore` saved below the root) ends in none.
+    /// Explicit folder-reload requests that need completion toasts; automatic scans remain silent.
     reloads: RefCell<Vec<String>>,
-    /// The tab `setup-menu` named, so the tab context menu acts on the page that was
-    /// right-clicked rather than on the selected one. `None` once the popup is gone, which is
-    /// what makes the same actions work from the palette.
+    /// Context-menu target rather than selected tab; clear after closing the menu so
+    /// shared palette actions use the active tab.
     menu_page: RefCell<Option<adw::TabPage>>,
     /// The pinned tabs, in whichever panes they are: see [`App::is_pinned`].
     pinned: RefCell<Vec<adw::TabPage>>,
@@ -404,12 +371,10 @@ struct App {
     /// The pending session write. First-wins ([`widgets::Debounce::call_once`]): a steady stream
     /// of edits must not push the write off indefinitely.
     session: widgets::Debounce,
-    /// Files this window showed and commands it ran, most recent first. The palette leads with
-    /// them, so opening a file is remembered as well as editing it; the index only knows mtime.
+    /// MRU files and commands for palette ranking; record opens because the index only knows mtimes.
     recent_files: RefCell<Vec<String>>,
     recent_commands: RefCell<Vec<String>>,
-    /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
-    /// rebind has to rebuild it: see [`fill_captured`].
+    /// Window-captured editor chords; rebuild the controller on rebinding (`actions::fill_captured`).
     captured: gtk::ShortcutController,
 }
 
@@ -430,32 +395,26 @@ impl App {
             .map_or_else(|| PathBuf::from("/"), |v| v.root())
     }
 
-    /// The machine this window's vault is on, or "" when it is this one. In the subtitle
-    /// whatever is open, because "which machine am I editing on" is not a question a window
-    /// should ever leave to the tab that happens to be selected.
+    /// Vault host shown in the subtitle regardless of active tab; empty for local files.
     fn host(&self) -> String {
         self.vault()
             .and_then(|v| v.remote().map(|r| r.url().host.clone()))
             .unwrap_or_default()
     }
 
-    /// Whether `key` is a file on another machine, where no file manager here can show it. A
-    /// loose tab's key is a path on this one, whatever the vault is.
+    /// Whether `key` belongs to the remote host; loose tabs stay local even in a remote-vault window.
     fn on_host(&self, key: &str) -> bool {
         !doc::is_loose_key(key) && self.vault().is_some_and(|v| v.is_remote())
     }
 
-    /// Whether this window's vault is one on another machine that is not answering: still being
-    /// connected to, or dropped. Nothing it holds can be read while that is true, and everything
-    /// asked for meanwhile is asked again on `Event::Connected`.
+    /// Whether the remote vault is connecting or disconnected; retry pending reads on `Event::Connected`.
     fn offline(&self) -> bool {
         self.vault()
             .and_then(|v| v.remote())
             .is_some_and(|r| r.state() != accent_api::remote::State::Connected)
     }
 
-    /// The connection to a remote vault went away. Every tab keeps what it holds — the buffer is
-    /// the only copy of an unsaved edit — and saving fails with a toast until this clears.
+    /// Preserve tab buffers during disconnection; unsaved edits live there, and save failures show toasts.
     fn show_connection_banner(&self, why: &str) {
         self.connection.set_title(why);
         self.connection.set_button_label(Some("Reconnect"));
@@ -490,14 +449,12 @@ impl App {
         self.toasts.add(toast);
     }
 
-    /// A failure, in the one shape every failure toast takes: "Cannot <what>: <why>". A reason
-    /// that runs to several lines is a dialog's, not a toast's.
+    /// Show a failure as `Cannot <what>: <why>`; multiline explanations belong in dialogs.
     fn cannot(&self, what: &str, why: impl std::fmt::Display) {
         self.toast(&format!("Cannot {what}: {why:#}"));
     }
 
-    /// The file operations the tree, the tab menus and the palette share. `None` without a vault:
-    /// creating, renaming and trashing are all things done to a vault, not to a lone open file.
+    /// Shared vault file operations for tree, tab menus and palette; `None` in standalone-file windows.
     fn ops(&self) -> Option<&Rc<fileops::Ops>> {
         self.ops.get()
     }
@@ -511,8 +468,7 @@ impl App {
         ops
     }
 
-    /// The active tab, if it is one with a buffer. Everything that edits, saves, finds or
-    /// previews goes through here, so an image or a PDF simply makes those actions no-ops.
+    /// Active text tab for buffer operations; other document kinds leave these actions inactive.
     fn active(&self) -> Option<Rc<Tab>> {
         self.active_doc()?.tab().cloned()
     }
@@ -527,8 +483,7 @@ impl App {
         self.doc_of(&self.pane())
     }
 
-    /// What `pane` is showing, active or not. A pane's find bar asks all four of these questions
-    /// about its own pane, so none of them may go through the active one.
+    /// Document in `pane`, independently of active-pane state, for its own find bar.
     fn doc_of(&self, pane: &Pane) -> Option<Doc> {
         self.doc_for_page(&pane.tabs.selected_page()?)
     }
@@ -541,9 +496,7 @@ impl App {
         self.doc_of(pane)?.pdf().cloned()
     }
 
-    /// Point a pane's find bar at whatever it is showing now, and put it away where that is a
-    /// shell: there is no buffer to point at, so the bar would sit over a terminal holding a
-    /// query nothing answers. It comes back the way any other tab gets it, with the chord.
+    /// Retarget Find to the pane's document; hide it over shells because VTE owns their scrollback.
     fn retarget_find(&self, pane: &Pane) {
         pane.find.retarget(self.tab_of(pane));
         if self.shows_shell(pane) {
@@ -558,9 +511,7 @@ impl App {
             .is_some_and(|doc| doc.terminal().is_some())
     }
 
-    /// `Ctrl+F` and its two neighbours. The bar belongs to the pane, so the chord opens the one in
-    /// the pane the reader is in and leaves the other pane's query and open state alone — and
-    /// over a shell it opens nothing at all, there being nothing of ours to search there.
+    /// Open Find in the active pane, preserving other panes' queries; ignore shells.
     fn open_find(&self, mode: find::Mode) {
         let pane = self.pane();
         if self.shows_shell(&pane) {
@@ -599,8 +550,7 @@ impl App {
         self.active().is_some_and(|a| Rc::ptr_eq(&a, tab))
     }
 
-    /// Every open tab, cloned out: the callbacks below reach back into `open`, and a live borrow
-    /// across them would be a panic waiting to happen.
+    /// Clone tab handles before callbacks so reentry into `open` cannot conflict with a live borrow.
     fn open_tabs(&self) -> Vec<Rc<Tab>> {
         self.docs
             .borrow()
@@ -737,8 +687,7 @@ impl App {
         }
     }
 
-    /// Fit the Info pane to the tab in front: its sections for a file, Tags only over a markdown
-    /// note, Details alone over a shell, and a status page for a comparison or no tab at all.
+    /// Select Info sections by active document: file details, note tags, shell details or an empty state.
     fn sync_info(&self) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
@@ -880,10 +829,8 @@ impl App {
         }
     }
 
-    /// Whether the Outline pane is on screen with its "No Language Server" page up for `tab`.
-    /// The caller is the Go to Definition toast, which says the same thing: the reader is told
-    /// once. Kept beside [`App::sync_outline`], which is what decides that page is shown — an
-    /// empty outline on a tab whose server is missing.
+    /// Whether Outline already shows No Language Server for `tab`, so Go to Definition
+    /// can avoid a duplicate message. Match [`App::sync_outline`]'s empty/missing-server state.
     fn outline_says_missing(&self, tab: &Rc<Tab>) -> bool {
         self.sidebar_column.is_visible()
             && self.sidebar.get().is_some_and(|s| s.is_showing("outline"))
@@ -891,10 +838,8 @@ impl App {
             && tab.lang.outline().is_empty()
     }
 
-    /// Select the Outline row of the heading or symbol the caret is in and scroll it into view,
-    /// as VS Code's Follow Cursor does; on a PDF the bookmark the page being read is under, on a
-    /// diagram the page shown. Nothing while the pane is out of sight: showing it calls this
-    /// again, and it catches up then.
+    /// Follow the caret's heading/symbol, PDF bookmark or diagram page and scroll it
+    /// into view. Skip hidden Outline; showing it catches up.
     fn follow_outline(&self) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
@@ -1006,23 +951,11 @@ impl App {
         self.statusbar.set_selected(text.as_deref());
     }
 
-    /// Re-colour what this window paints itself rather than through GTK's CSS, after the theme or
-    /// the accent moved: the notes' tags and schemes, both sides of a comparison, the PDF pages,
-    /// the images, the preview and the shells.
+    /// Restyle custom-painted content after theme or accent changes, before the next paint.
     ///
-    /// Never inside the change itself. `AdwStyleManager` raises `notify::dark` *before* it swaps
-    /// the stylesheet on the display, so for the whole of that emission `view.color()` still
-    /// resolves to the theme being left — and half of what this pass writes is mixed from that
-    /// foreground: a note's list markers, heading markers, quotes and code backgrounds, the
-    /// gutter's change bars, the diagnostic underlines, the fold chevrons, a comparison's row
-    /// tints and the preview's own CSS. Run there, every one of them came out in the outgoing
-    /// theme, which on a light-to-dark switch is near-black ink on a near-black page.
-    ///
-    /// Nor on an idle after it: the frame that paints the new stylesheet ran first, the new page
-    /// under the old theme's tags (`ACCENT_BENCH_THEME`'s `painted`). The pass runs in that
-    /// frame's layout phase instead, after the window's own handler has validated the new style
-    /// and before anything is painted, and what it changes is laid out again within the frame. A
-    /// window with no frame clock has not been on screen, and takes it on an idle.
+    /// AdwStyleManager notifies before installing new CSS, so synchronous colour reads still
+    /// see the old theme. An idle can be too late for the next frame. Use its layout phase,
+    /// after style validation and before paint; fall back to an idle when no frame clock exists.
     fn restyle_all(self: &Rc<Self>) {
         let app = Rc::downgrade(self);
         let restyle = move || {
@@ -1051,8 +984,7 @@ impl App {
         clock.request_phase(gdk::FrameClockPhase::LAYOUT);
     }
 
-    /// The pass itself, once the cascade has settled. Split out only so the deferral above is the
-    /// one thing [`App::restyle_all`] says.
+    /// Restyle after the CSS cascade settles; deferral stays in [`App::restyle_all`].
     fn restyle_now(self: &Rc<Self>) {
         for tab in self.open_tabs() {
             tab.restyle();
@@ -1066,9 +998,7 @@ impl App {
         }
     }
 
-    /// Show the PDFs, the diagrams and the images, in their tabs and in the preview, in the
-    /// colours the theme and Preferences ask for now: part of a restyle, and all a recolouring
-    /// switch redoes.
+    /// Apply theme/Preferences recolouring to file tabs and preview; used by restyling and kind toggles.
     fn recolour_files(self: &Rc<Self>) {
         // A PDF is rendered in the theme's colours rather than recoloured, so this is a re-render
         // of whatever is on screen.
@@ -1108,15 +1038,12 @@ impl App {
         }
     }
 
-    /// A shell in a new tab of the active pane, at the vault root — the directory everything else
-    /// in the window is measured from. A window with no vault opens one at home.
+    /// Open a shell in the active pane at the vault root, or home without a vault.
     fn open_terminal(self: &Rc<Self>) {
         self.open_terminal_at(None);
     }
 
-    /// The same, at a directory of the caller's choosing: `accent --terminal <dir>` is the only
-    /// one that has one, so `win.terminal` keeps going through `open_terminal` and the action,
-    /// the menu and the palette entry are all untouched.
+    /// Open at the explicit `accent --terminal <dir>` directory; ordinary New Terminal uses the vault root.
     fn open_terminal_at(self: &Rc<Self>, cwd: Option<PathBuf>) {
         // A remote vault's shell opens on the remote, unless the caller named a directory here:
         // `accent --terminal <dir>` means this machine whatever window it lands in.
@@ -1145,9 +1072,7 @@ impl App {
         }
     }
 
-    /// New Remote Terminal…: the Open Remote form, asking which host and where on it. Filled in
-    /// with the shell in front when that one is on a host, else with this window's own address,
-    /// so another shell beside the first is a keypress away.
+    /// Show the host/path form, prefilled from the active remote shell or remote vault.
     fn choose_remote_terminal(self: &Rc<Self>) {
         let at = match self.active_doc() {
             Some(Doc::Terminal(term)) => term.at().and_then(|at| ssh::parse(&at).ok()),
@@ -1177,9 +1102,7 @@ impl App {
         );
     }
 
-    /// The shell `key` names, held on the host `at` names. It rides this window's vault's master
-    /// when the vault is on that host, so a remote vault's shells cost no connection of their
-    /// own, and the host's own master otherwise.
+    /// Open held shell `key` on `at`, reusing the vault master on the same host or a host-specific master.
     fn remote_shell(&self, at: ssh::Url, key: &str) -> Result<terminal::Shell, String> {
         let link = match self.vault().and_then(|v| v.remote()) {
             Some(remote) if remote.url().authority() == at.authority() => remote.url().clone(),
@@ -1209,8 +1132,7 @@ impl App {
         self.open_shell(key.to_string(), shell, Opened::Restored);
     }
 
-    /// The one door into a shell tab, new or restored. A restored one lands in the pane the
-    /// session put it in, behind whatever that pane shows, and does not take the keyboard.
+    /// Shared shell opener; restored shells use their saved pane without taking focus or replacing its active tab.
     fn open_shell(self: &Rc<Self>, key: String, shell: terminal::Shell, how: Opened) {
         use vte4::TerminalExt as _;
         // Said once per window, the first time a shell here could have been held and was not.
@@ -1308,8 +1230,7 @@ impl App {
         });
     }
 
-    /// The branch of the repository the active document sits in, which for a nested repository is
-    /// not the vault's own. A comparison tab is no file, so it keeps whatever was showing.
+    /// Show the active file's repository branch, including nested repositories; comparisons retain the prior readout.
     fn sync_branch(&self) {
         let Some(git) = self.git.get() else {
             return;
@@ -1322,8 +1243,7 @@ impl App {
             .set_branch(git.branch_label(key.as_deref()).as_deref());
     }
 
-    /// A git refresh landed. The single place the window reacts to one, so everything that has to
-    /// follow the repository is added here rather than wired into the pane.
+    /// Apply all window updates after Git refresh in one place rather than separate pane hooks.
     fn on_git_changed(self: &Rc<Self>) {
         let (Some(sidebar), Some(git)) = (self.sidebar.get(), self.git.get()) else {
             return;
@@ -1346,10 +1266,7 @@ impl App {
         });
     }
 
-    /// What search leaves out: git's answer and the `[search] exclude` list, as one set. This is
-    /// where the two meet, so a git refresh and a change to the list both come here, and it is
-    /// also what gives a vault with no repository an exclusion mechanism at all — a refresh lands
-    /// whether or not it found one.
+    /// Combine git ignores and `[search]` exclusions, including vaults without a repository.
     fn sync_excluded(self: &Rc<Self>, git: &git::Panel) {
         let mut excluded = git.ignored();
         excluded.extend(self.config.borrow().search.exclude.iter().cloned());
@@ -1445,8 +1362,7 @@ impl App {
         }
     }
 
-    /// The palette's Toggle Minimap. The switch in Preferences is the other way to the same
-    /// preference, and both reach every window.
+    /// Toggle the shared Minimap preference in every window, as Preferences does.
     fn toggle_minimap(&self) {
         {
             let mut config = self.config.borrow_mut();
@@ -1464,9 +1380,7 @@ impl App {
         });
     }
 
-    /// Hand the Search pane what the editor has selected, so Ctrl+Shift+F and Ctrl+Shift+H search
-    /// for it. With nothing selected the box keeps what it holds, the way VS Code does: the word
-    /// under the caret is deliberately not a fallback.
+    /// Seed Search from selected text; without selection preserve its query, without falling back to the caret word.
     fn seed_search(&self) {
         let Some(text) = self.active().and_then(|tab| tab.selected_search()) else {
             return;
@@ -1513,12 +1427,10 @@ impl App {
             .map(|d| d.key())
     }
 
-    /// The vault file the tab context menu is over, where there is one for Rename and Move to
-    /// Trash to act on.
+    /// Return the vault file targeted by an open tab menu, for Rename and Trash.
     ///
-    /// `None` when no tab menu is up — which is what leaves those two on the tree's selection
-    /// where they came from a chord or the palette — and for the tabs neither can reach: a shell
-    /// and a comparison are no file at all, and a loose one is outside the vault they act in.
+    /// Without a menu, those commands use tree selection. Shells, comparisons and loose files
+    /// cannot be targeted because these operations belong to the window's vault.
     fn menu_file(&self) -> Option<String> {
         let page = self.menu_page.borrow().clone()?;
         let doc = self.doc_for_page(&page)?;

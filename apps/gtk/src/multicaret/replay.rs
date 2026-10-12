@@ -1,11 +1,11 @@
-//! A column of carets edited as one: a key replayed at every caret, the undo steps the column
-//! records, and carets merging where their selections meet.
+//! Replay edits at all carets in one undo step, preserving selection state
+//! and merging overlapping carets.
 
 use super::*;
 
 impl View {
-    /// Up or Down by `count` lines of the document. The column the caret is aiming for outlives
-    /// the lines it crosses, so a trip over a short line and back lands where it started.
+    /// Move by `count` document lines while retaining the goal column across
+    /// shorter lines, so returning restores the original column.
     pub(super) fn move_by_lines(&self, count: i32, extend: bool) {
         let imp = self.imp();
         self.reset_im_context();
@@ -42,9 +42,8 @@ impl View {
         self.scroll_mark_onscreen(&insert);
     }
 
-    /// One key press, at every caret. Called by `editor::keys`, and by the headless check that
-    /// drives the carets the way that dispatcher does, which is the only way to see them without
-    /// a screen.
+    /// Dispatch one press at every caret, shared by `editor::keys` and
+    /// headless drills.
     pub(crate) fn press(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
         if !self.has_carets() {
             return glib::Propagation::Proceed;
@@ -208,9 +207,9 @@ impl View {
         }
     }
 
-    /// How far Page Up and Page Down move a column: the lines of the document on screen, a shut
-    /// block's header without the lines it hides. And where the primary caret sits among them, 0
-    /// at the top and 1 at the bottom, so the view can scroll by the same page and leave it there.
+    /// Return visible document-line count for paging, excluding folded bodies,
+    /// and the primary's viewport fraction (0 top, 1 bottom) to retain it
+    /// after scrolling the same page.
     fn page(&self) -> (i32, f64) {
         let rect = self.visible_rect();
         let (mut row, _) = self.line_at_y(rect.y());
@@ -224,9 +223,9 @@ impl View {
         (lines.max(1), align.clamp(0.0, 1.0))
     }
 
-    /// Move one caret to `at`, its anchor with it unless `extend` holds the anchor where it is.
-    /// The primary through GTK's own calls: `move_mark` on the insert mark alone extends its
-    /// selection, and `place_cursor` carries the selection bound along.
+    /// Move a caret to `at`, retaining its anchor only with `extend`. Use GTK
+    /// primary-caret calls: moving insert alone extends; `place_cursor`
+    /// moves both insert and selection bound.
     fn put(&self, mark: &gtk::TextMark, anchor: &gtk::TextMark, at: &gtk::TextIter, extend: bool) {
         let buffer = self.buffer();
         if *mark == buffer.get_insert() && !extend {
@@ -251,8 +250,7 @@ impl View {
         lines
     }
 
-    /// Open one undo step made at every caret: the edits and caret moves from here on are the
-    /// column's own, and where the carets and their selections stood is kept for Undo.
+    /// Begin a column-owned undo step and retain carets/selections for Undo.
     fn begin_step(&self) -> (Vec<Span>, i32) {
         let before = (self.spans(), self.buffer().char_count());
         self.imp().busy.set(true);
@@ -260,8 +258,8 @@ impl View {
         before
     }
 
-    /// Close the step [`Self::begin_step`] opened: record it for Undo and Redo if it edited the
-    /// text, merge the carets it drove together and settle the column.
+    /// Finish the step: record text edits for undo/redo, merge converged
+    /// carets and settle the column.
     fn end_step(&self, (before, length): (Vec<Span>, i32)) {
         let buffer = self.buffer();
         let imp = self.imp();
@@ -282,8 +280,8 @@ impl View {
         self.settle();
     }
 
-    /// Solid again from here, back to GTK's caret if the column has collapsed into one, and the
-    /// primary caret on screen.
+    /// Restore solid carets, hand back to GTK if only one remains and
+    /// keep the primary visible.
     fn settle(&self) {
         match self.has_carets() {
             true => self.blink_on(),
@@ -293,11 +291,10 @@ impl View {
         self.queue_draw();
     }
 
-    /// `op` once on each run of lines in `runs`, from the bottom up so that a run's line numbers
-    /// still hold when its turn comes, as one undo step: Duplicate Line, Delete Line and Insert
-    /// Line Below at a column (`editor::lines`, which says what a run is). `op` edits lines
-    /// `first` to `last` and answers where the carets whose selections start in them go, or
-    /// `None` where the edit already took them there.
+    /// Apply `op` to each inclusive line run bottom-up in one undo step,
+    /// preserving earlier line numbers. Return the destination for carets
+    /// whose selections start in the run, or `None` if edits already moved
+    /// them. Used by column commands in `editor::lines`.
     pub(crate) fn each_block(
         &self,
         runs: &[(i32, i32)],
@@ -336,8 +333,8 @@ impl View {
         self.replace_selections(&vec![""; self.pairs().len()]);
     }
 
-    /// Put `pieces` at the carets top to bottom, each in place of its caret's selection, as one
-    /// undo step. Refused on a read-only view, as [`Self::replay`] is.
+    /// Replace selections with `pieces` top to bottom in one undo step.
+    /// Refuse read-only views, as [`Self::replay`] does.
     fn replace_selections(&self, pieces: &[&str]) {
         if !self.is_editable() {
             return;
@@ -355,10 +352,9 @@ impl View {
         self.end_step(opened);
     }
 
-    /// Undo (`back`) or Redo at a column, which keeps the column. GTK puts the text back and one
-    /// caret with it; the column's record of the step puts every caret and its selection where the
-    /// step found them, or, going forward, where it left them. A step with no record — made
-    /// before the column — leaves the carets wherever the text took them.
+    /// Undo/redo while retaining the column. GTK restores text and one caret;
+    /// our record restores all selections before/after the step. Unrecorded
+    /// steps predating the column leave carets where restored text carries them.
     fn step_history(&self, back: bool) {
         let buffer = self.buffer();
         let imp = self.imp();
@@ -382,16 +378,11 @@ impl View {
         self.settle();
     }
 
-    /// The carets of the step the text has just come back to, its record moved onto the other
-    /// stack along with any record GTK took back with it.
+    /// Restore carets for the text reached by Undo or Redo and transfer records between stacks.
     ///
-    /// GTK can put back more than one of the column's steps at once: an edit that changed the text
-    /// at a single caret — `Ctrl+Delete` with another caret at the end of the buffer, Backspace
-    /// with one at the start — is a plain action in its history rather than a group, and it joins
-    /// a plain action onto the one before it the way it joins typing. The column keeps a record
-    /// per edit either way, so records are taken off until one of them describes the text that
-    /// came back, by the length [`Self::end_step`] recorded it at. Every record taken off moves to
-    /// the other stack, so the way forward takes the same ones back.
+    /// GTK can merge single-caret-effective edits into one history action. Pop column records
+    /// until [`Self::end_step`]'s recorded length matches restored text, moving all popped records
+    /// so Redo follows the same grouped steps.
     fn take_step(&self, back: bool) -> Option<Vec<Span>> {
         let length = self.buffer().char_count();
         let imp = self.imp();
@@ -416,8 +407,8 @@ impl View {
         }
     }
 
-    /// Put the column back as `spans` has it, the primary first. Made afresh, since carets that
-    /// merged after the step was recorded are back.
+    /// Rebuild the primary-first column from `spans`, restoring carets
+    /// merged since the recorded step.
     pub(super) fn put_carets(&self, spans: &[Span]) {
         let buffer = self.buffer();
         let imp = self.imp();

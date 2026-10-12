@@ -1,7 +1,6 @@
-//! What a tab does to whole lines: the clipboard's line cut and copy, Insert Line Below,
-//! duplicate and delete, the comment toggle, wrapping, and the template snippets whose Tab stops
-//! are walked through the text they inserted. The plain-text middle-click paste sits beside the
-//! cut and copy. The line commands and the line cut and copy act at every caret of a column.
+//! Whole-line cut/copy, insertion, duplication, deletion, comments and wrapping.
+//! Line commands apply at every caret; plain-text middle-click paste avoids
+//! carrying buffer tags. Templates use snippet Tab stops.
 
 use super::{Tab, caret, line_end};
 use crate::{comment, multicaret};
@@ -17,10 +16,9 @@ fn leading_indent(line: &str) -> &str {
     &line[..end]
 }
 
-/// The last line Duplicate Line copies, from the lines the selection starts and ends on and the
-/// column it ends in. Every line it touches, except that a selection ending at the very start of a
-/// line leaves that line out: VS Code's rule, so lines selected whole with Shift+Down are copied
-/// without the one below them.
+/// Last selected line for Duplicate Line, excluding a line touched only
+/// at column zero. This keeps Shift+Down whole-line selections from
+/// copying the following line (VS Code semantics).
 fn last_copied(first: i32, last: i32, end_column: i32) -> i32 {
     match last > first && end_column == 0 {
         true => last - 1,
@@ -28,8 +26,8 @@ fn last_copied(first: i32, last: i32, end_column: i32) -> i32 {
     }
 }
 
-/// A line as the clipboard should carry it: with the newline back that a last line does not have
-/// of its own, so pasting it opens a line rather than splicing into the one under the caret.
+/// Include a trailing newline even for the final line, so whole-line
+/// paste inserts a line instead of splicing into existing text.
 fn paste_ready(line: &str) -> String {
     match line.ends_with('\n') {
         true => line.to_string(),
@@ -37,8 +35,7 @@ fn paste_ready(line: &str) -> String {
     }
 }
 
-/// Line `line`, from its start to the start of the next one, so the trailing newline is part of
-/// it except on a last line that has none.
+/// Read `line` including its newline, except for an unterminated final line.
 fn line_bounds(buffer: &gtk::TextBuffer, line: i32) -> (gtk::TextIter, gtk::TextIter) {
     let start = buffer
         .iter_at_line(line)
@@ -56,8 +53,8 @@ fn column(view: &sourceview5::View) -> Option<&multicaret::View> {
         .filter(|view| view.has_carets())
 }
 
-/// Line ranges, first and last, sorted and made one where they share a line, so that no line is
-/// taken twice. Ranges that only meet stay apart: carets on neighbouring lines are two lines.
+/// Sort and merge inclusive line ranges that overlap, avoiding duplicate
+/// operations. Keep merely adjacent ranges separate.
 fn runs(mut ranges: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
     ranges.sort_unstable();
     let mut runs: Vec<(i32, i32)> = Vec::new();
@@ -70,8 +67,8 @@ fn runs(mut ranges: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
     runs
 }
 
-/// The runs of lines a column's carets cover: each caret's selection by [`last_copied`]'s rule,
-/// the caret's own line where it has none.
+/// Line runs covered by column selections ([`last_copied`]), using each
+/// caret's line when it has no selection.
 fn covered(column: &multicaret::View) -> Vec<(i32, i32)> {
     let ranges = column
         .selections()
@@ -84,9 +81,8 @@ fn covered(column: &multicaret::View) -> Vec<(i32, i32)> {
     runs(ranges)
 }
 
-/// The lines one caret's selection covers, first and last, by [`last_copied`]'s rule: what the
-/// line commands take with no column of carets up. With nothing selected that is the caret's own
-/// line.
+/// Inclusive selected-line range ([`last_copied`]), or the caret's line
+/// without selection, for commands outside a caret column.
 fn selected_lines(buffer: &gtk::TextBuffer) -> (i32, i32) {
     let (from, end) = buffer.selection_bounds().unwrap_or_else(|| {
         let at = caret(buffer);
@@ -104,9 +100,8 @@ fn any_selected(column: &multicaret::View) -> bool {
     column.selections().iter().any(|(start, end)| start != end)
 }
 
-/// What a cut or copy at a column takes, VS Code's two cases: each caret's selection, joined by
-/// newlines top to bottom, a caret with nothing selected giving an empty line; or, where no caret
-/// has anything selected, every caret's whole line.
+/// Column clipboard text: join selections top to bottom, including empty
+/// caret selections, or copy whole lines when no caret selects text.
 fn column_text(view: &sourceview5::View, column: &multicaret::View) -> String {
     if !any_selected(column) {
         return whole_lines(view);
@@ -120,8 +115,8 @@ fn column_text(view: &sourceview5::View, column: &multicaret::View) -> String {
     texts.join("\n")
 }
 
-/// What a cut or copy with nothing selected takes: the caret's whole line, or every caret's in a
-/// column, each once and top to bottom, as VS Code copies them.
+/// Copy each caret's whole line once in top-to-bottom order when no text
+/// is selected, following VS Code semantics.
 fn whole_lines(view: &sourceview5::View) -> String {
     let buffer = view.buffer();
     let lines = match column(view) {
@@ -137,9 +132,8 @@ fn whole_lines(view: &sourceview5::View) -> String {
         .collect()
 }
 
-/// Delete lines `first` to `last` whole, the last one's newline with them. A last line with no
-/// newline of its own takes the one separating it from the line above, or deleting it would leave
-/// the blank line it used to sit on.
+/// Delete inclusive lines and their newlines. For an unterminated final
+/// line, remove the preceding newline too so no blank line remains.
 fn delete_lines(buffer: &gtk::TextBuffer, first: i32, last: i32) {
     let (mut start, _) = line_bounds(buffer, first);
     let (_, mut end) = line_bounds(buffer, last);
@@ -149,12 +143,10 @@ fn delete_lines(buffer: &gtk::TextBuffer, first: i32, last: i32) {
     buffer.delete(&mut start, &mut end);
 }
 
-/// Repeat lines `first` to `last` below themselves.
+/// Duplicate lines `first` through `last` below themselves.
 ///
-/// The copy is inserted *above* the lines, at the start of the first one, and that is what moves
-/// the carets and the selection down onto it: their marks have right gravity, so text put in front
-/// of them carries them along onto the lower of the two blocks. It also means a last line with no
-/// newline of its own needs no special case.
+/// Insert before the original lines so right-gravity caret and selection marks move to the
+/// lower block. This also handles a final line without a newline.
 fn copy_down(buffer: &gtk::TextBuffer, first: i32, last: i32) {
     let Some(mut from) = buffer.iter_at_line(first) else {
         return;
@@ -174,9 +166,9 @@ fn open_below(buffer: &gtk::TextBuffer, line: i32) -> gtk::TextIter {
     at
 }
 
-/// VS Code's Copy Line Down: the lines the selection touches ([`last_copied`]) are repeated below
-/// themselves, and the caret and the selection move down onto the copy, in the same columns. At a
-/// column, every run of lines the carets cover ([`covered`]), each onto its copy.
+/// Duplicate covered lines below and move caret/selection to the copy
+/// at the same columns (VS Code Copy Line Down). At a caret column,
+/// apply to each [`covered`] run.
 pub(crate) fn duplicate_line(view: &sourceview5::View) {
     if !view.is_editable() {
         return;
@@ -195,9 +187,8 @@ pub(crate) fn duplicate_line(view: &sourceview5::View) {
     view.scroll_mark_onscreen(&buffer.get_insert());
 }
 
-/// Delete every line the selection covers ([`selected_lines`]), or at a column every line the
-/// carets cover, each once. VS Code's rule, and Duplicate Line's: the selected lines in both
-/// cases, the caret's own where there is no selection.
+/// Delete selected lines ([`selected_lines`]) or each column-covered line
+/// once, using caret lines when nothing is selected.
 pub(crate) fn delete_line(view: &sourceview5::View) {
     if !view.is_editable() {
         return;
@@ -215,11 +206,9 @@ pub(crate) fn delete_line(view: &sourceview5::View) {
     buffer.end_user_action();
 }
 
-/// VS Code's Insert Line Below: open a line under the caret's and put the caret on it, at the
-/// same indent, so a list item or an indented block carries on where it was. That is the idiom
-/// `typing.rs` already uses on Return; continuing the marker itself is Return's job, not this
-/// one's, because this is also how a line is opened *out* of a list. At a column, a line under
-/// each run of lines the carets cover, with every caret of the run moved onto it.
+/// Insert an equally indented line below, moving the caret there without
+/// continuing list markers; this also lets users leave a list. At a column,
+/// insert below each covered run and move its carets onto the new line.
 pub(crate) fn newline_below(view: &sourceview5::View) {
     if !view.is_editable() {
         return;
@@ -238,11 +227,10 @@ pub(crate) fn newline_below(view: &sourceview5::View) {
     view.scroll_mark_onscreen(&buffer.get_insert());
 }
 
-/// `text` with the language's comment markers put on or taken off, or `None` where the language
-/// names none. GtkSourceView carries the markers in its metadata but does no toggling of its own,
-/// so the text goes out to [`crate::comment`] and comes back as one replacement. Line comments go
-/// on where `on` says, a column having decided over all its lines, or where `text` is not all
-/// commented already.
+/// Toggle language comment markers in `text` via [`crate::comment`], since
+/// GtkSourceView metadata provides markers without a toggle. `None` means
+/// no markers. `on` forces line-comment state; otherwise infer it from
+/// whether all text is already commented.
 fn toggled(text: &str, language: &sourceview5::Language, on: Option<bool>) -> Option<String> {
     if let Some(marker) = language.metadata("line-comment-start") {
         let on = on.unwrap_or_else(|| !comment::commented(text, &marker));
@@ -255,10 +243,8 @@ fn toggled(text: &str, language: &sourceview5::Language, on: Option<bool>) -> Op
     Some(comment::toggle_block(text, &open, &close))
 }
 
-/// Comment or uncomment lines `first` to `last` whole — a marker goes in front of a line, never
-/// in front of a word — replacing only the characters that actually change, so a caret in those
-/// lines keeps its column instead of riding to the end of a wholesale replacement. `on` as for
-/// [`toggled`].
+/// Toggle comments on whole lines, replacing only changed characters to
+/// preserve caret columns. `on` follows [`toggled`].
 fn toggle_run(
     buffer: &gtk::TextBuffer,
     first: i32,
@@ -279,8 +265,8 @@ fn toggle_run(
     }
 }
 
-/// How many characters `old` and `new` share at the front and at the back without the two runs
-/// overlapping. What is left between them is all a replacement has to touch.
+/// Count nonoverlapping shared prefix/suffix characters, leaving only
+/// the changed middle for replacement.
 fn shared(old: &str, new: &str) -> (usize, usize) {
     let head = old
         .chars()
@@ -299,9 +285,8 @@ fn shared(old: &str, new: &str) -> (usize, usize) {
     (head, tail)
 }
 
-/// Replace `old`, which is what stands between `start` and `end`, with `new`, touching only the
-/// run of characters where the two differ ([`shared`]): the head and tail they share are left
-/// where they are, and so is every mark inside them.
+/// Replace `old` between `start` and `end` with `new`, touching only
+/// the differing middle ([`shared`]) to preserve marks in shared text.
 fn splice(
     buffer: &gtk::TextBuffer,
     mut start: gtk::TextIter,
@@ -321,10 +306,9 @@ fn splice(
     buffer.insert(&mut start, &middle);
 }
 
-/// Comment or uncomment the lines the selection covers with the language's own markers, inside a
-/// single user action so one Ctrl+Z undoes the whole thing. At a column, every run of lines the
-/// carets cover ([`covered`]), the column staying up; whether line comments go on or come off is
-/// decided once over all of them, as VS Code does, so a column half commented is commented whole.
+/// Toggle selected or column-covered lines in one undo step. Retain the
+/// column and choose line-comment state once across all runs, so a mixed
+/// selection becomes fully commented (VS Code semantics).
 pub(crate) fn toggle_comment(view: &sourceview5::View) {
     if !view.is_editable() {
         return;
@@ -369,22 +353,12 @@ pub(crate) fn toggle_comment(view: &sourceview5::View) {
     }
 }
 
-/// Cut and copy, always as plain text, and VS Code's whole-line cut and copy: with nothing
-/// selected, `Ctrl+X` and `Ctrl+C` take the caret's whole line, its newline with it, so a later
-/// paste puts a line back instead of a fragment. At a column they take every caret's selection,
-/// or every caret's line where none has one ([`column_text`]), and the cut deletes what it took as
-/// one undo step, the column staying up.
+/// Cut and copy plain text, using whole lines when no caret has a selection.
 ///
-/// No key handling, and no accelerator either — DESIGN.md's never-bind list keeps `Ctrl+X`/`C`
-/// for the widget. Both chords and the context menu emit these two signals, and each handler runs
-/// before the inherited one. With a selection it stops that one, which would put a `GtkTextBuffer`
-/// on the clipboard: pasting that back applies the copy's tags after the highlighter has re-tagged
-/// the text, so a heading's or a bold's stayed on the paste's last run. Without a selection the
-/// inherited one does nothing at all; selecting the line and letting it have the line instead
-/// would work for the cut and leave the copy selected.
-///
-/// After a whole-line cut the caret is where the deletion left it, at the start of the following
-/// line; VS Code lands on the same line but keeps the column.
+/// Multi-caret operations combine selections or lines and cut in one user action, retaining
+/// the column. Signal handlers cover shortcuts and menus without application accelerators.
+/// Bypass GTK's rich-buffer copy so pasted tags cannot override fresh highlighting.
+/// Whole-line cut leaves the caret at the following line's start.
 pub(crate) fn line_clipboard(view: &sourceview5::View) {
     view.connect_copy_clipboard(|view| {
         let buffer = view.buffer();
@@ -432,16 +406,10 @@ pub(crate) fn line_clipboard(view: &sourceview5::View) {
     menu_items(view);
 }
 
-/// Put GTK's own Cut and Copy back on the context menu when nothing is selected, so the menu
-/// reaches the whole-line idiom the chords have.
+/// Enable Cut and Copy in the context menu without a selection for whole-line operations.
 ///
-/// Both items activate by emitting the two signals above, so the path is already the right one;
-/// what stopped them is that `gtk_text_view_do_popup` calls
-/// `gtk_text_view_update_clipboard_actions` on its way to the menu, and that leaves the two
-/// actions disabled while the buffer has no selection (GTK 4.22). Enabling them has to happen
-/// *after* the popup that disabled them, which is what the idle is for; a menu item follows its
-/// action's enabled state while it is on screen, so it is sensitive before the popover has
-/// finished coming up.
+/// GTK 4.22 disables the actions while building the popup. Re-enable from an idle afterwards;
+/// menu items follow action state before the popover finishes appearing.
 fn menu_items(view: &sourceview5::View) {
     let click = gtk::GestureClick::builder()
         .button(gdk::BUTTON_SECONDARY)
@@ -467,8 +435,7 @@ fn menu_items(view: &sourceview5::View) {
     view.add_controller(keys);
 }
 
-/// Enable the two items once the menu this press or key is opening is up. A cut on a read-only
-/// view is left out, as GTK leaves it out: there is nothing there to take away.
+/// Enable menu Cut/Copy after popup creation; omit Cut for read-only views.
 fn arm_menu_items(view: &sourceview5::View) {
     let view = view.clone();
     glib::idle_add_local_once(move || {
@@ -477,12 +444,10 @@ fn arm_menu_items(view: &sourceview5::View) {
     });
 }
 
-/// A secondary click puts the caret where it lands before the menu opens, as VS Code does, so
-/// the menu is about the place clicked: Cut and Copy with nothing selected take that line, Paste
-/// goes there, and the spelling suggestions are that word's. One landing on a selection, any of a
-/// column's, leaves everything where it is, the menu then being about the selection; one landing
-/// off them all lets a column of carets go, down to the one at the click. In the capture phase
-/// and unclaimed, so GTK's own gesture still opens the menu, after this.
+/// Move the caret on secondary click before opening the context menu.
+///
+/// Clicks inside any selection preserve it; clicks outside a caret column end it and target
+/// the clicked line. An unclaimed capture handler lets GTK open its normal menu afterwards.
 pub(crate) fn caret_to_click(view: &sourceview5::View) {
     let click = gtk::GestureClick::builder()
         .button(gdk::BUTTON_SECONDARY)
@@ -498,8 +463,8 @@ pub(crate) fn caret_to_click(view: &sourceview5::View) {
     view.add_controller(click);
 }
 
-/// The caret to the press at widget `x`, `y` of `view`, unless it lands on a selection
-/// ([`caret_to_click`]). Placed as a middle-click paste lands ([`pressed_at`]).
+/// Move the caret to widget coordinates unless inside a selection
+/// ([`caret_to_click`]), using the paste-position rule ([`pressed_at`]).
 pub(crate) fn place_at_click(view: &sourceview5::View, x: f64, y: f64) {
     let (x, y) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
     let at = pressed_at(view, x, y);
@@ -521,11 +486,9 @@ pub(crate) fn place_at_click(view: &sourceview5::View, x: f64, y: f64) {
     buffer.place_cursor(&at);
 }
 
-/// Middle-click paste, as plain text like every other way in. GTK's own reads the primary
-/// selection as a `GtkTextBuffer`, and when that is this buffer's selection it inserts it run by
-/// run with each run's tags: the highlighter re-derives its own, but a fold's tag came along and
-/// hid part of the paste behind no chevron. In the capture phase and claimed, so the view's own
-/// gesture never sees the press.
+/// Claim middle-click paste in capture and insert plain text. GTK rich
+/// buffer paste carries tags, including folds that would hide pasted
+/// text without a chevron.
 pub(super) fn primary_paste(view: &sourceview5::View) {
     let click = gtk::GestureClick::builder()
         .button(gdk::BUTTON_MIDDLE)
@@ -547,9 +510,9 @@ pub(super) fn primary_paste(view: &sourceview5::View) {
     view.add_controller(click);
 }
 
-/// The place a press at buffer `x`, `y` means, as GTK's own gesture takes it: the character under
-/// it, or the end or start of the row it is beside. `iter_at_location` answers only over text, so
-/// beside a row that row is found by walking the paragraph's display rows down to `y`.
+/// Resolve buffer coordinates to a character or adjacent row start/end,
+/// matching GTK. Outside text, walk paragraph display rows to `y` because
+/// `iter_at_location` answers only over glyphs.
 pub(crate) fn pressed_at(view: &sourceview5::View, x: i32, y: i32) -> gtk::TextIter {
     if let Some(at) = crate::fold::iter_at_location(view, x, y) {
         return at;
@@ -568,8 +531,8 @@ pub(crate) fn pressed_at(view: &sourceview5::View, x: i32, y: i32) -> gtk::TextI
     row
 }
 
-/// Insert the primary selection at `at` as text, hidden text included as a copy takes it. Onto
-/// the view's own selection it is nothing, as in GTK: that selection is what would be pasted.
+/// Insert primary-selection plain text at `at`, including hidden text.
+/// As in GTK, do nothing when targeting the view's own selection.
 pub(crate) fn paste_primary(view: &sourceview5::View, at: &gtk::TextIter) {
     let buffer = view.buffer();
     if buffer
@@ -619,13 +582,10 @@ fn snippet(text: &str, stops: &[usize]) -> sourceview5::Snippet {
     snippet
 }
 
-/// The text between the stops, then each stop as an empty chunk numbered from one; plain text
-/// carries -1, which is what GtkSourceView reads as "not a stop". A stop off a character
-/// boundary, which the renderer never produces, is skipped rather than trusted.
+/// Build snippet chunks: plain text numbered -1 and empty stops numbered from one.
 ///
-/// Last, an empty chunk numbered 0 at the end, which is where Tab past the last stop goes.
-/// Without one GtkSourceView 5.20 moves the caret there itself with no chunk current, and its own
-/// caret handler then fails an assertion (`_gtk_source_snippet_insert_set`).
+/// Skip invalid character-boundary stops. End with an empty stop 0: GtkSourceView 5.20 can
+/// otherwise fail its current-chunk assertion when Tab leaves the final stop.
 fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
     let mut out = Vec::new();
     let mut byte = 0;
@@ -649,8 +609,8 @@ fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
 }
 
 impl Tab {
-    /// Wrap long lines, or stop. Every tab starts wrapped and can be told otherwise for as long
-    /// as it is open, which is the escape hatch for a file whose columns are the point.
+    /// Toggle per-tab wrapping, enabled initially. Disable it for files whose
+    /// column layout must remain visible.
     pub fn toggle_wrap(&self) {
         self.view.set_wrap_mode(match self.view.wrap_mode() {
             gtk::WrapMode::None => gtk::WrapMode::WordChar,
@@ -680,11 +640,9 @@ impl Tab {
         toggle_comment(&self.view);
     }
 
-    /// Put the caret on a template's first `{{cursor}}` and make the rest Tab stops.
-    ///
-    /// GtkSourceView can only walk stops through text a snippet inserted, so with more than one
-    /// the note's text is put back through a snippet: the same bytes, not undoable and not dirty,
-    /// because nothing about the file changed. `byte` offsets, as the template renderer counts.
+    /// Place the caret at the first template `{{cursor}}` and turn later
+    /// byte offsets into Tab stops. GtkSourceView requires snippet-inserted
+    /// text, so reinsert unchanged bytes without undo or dirty state.
     pub fn place_stops(&self, stops: &[usize]) {
         let text = self.text();
         match stops {
@@ -758,8 +716,7 @@ mod tests {
         );
     }
 
-    /// What a whole-line cut or copy puts on the clipboard: a line, newline included, so the
-    /// paste that follows it opens a line of its own.
+    /// Verify whole-line clipboard text ends in a newline so paste creates a line.
     #[test]
     fn a_copied_line_carries_its_newline() {
         assert_eq!(paste_ready("- item\n"), "- item\n");
@@ -771,8 +728,8 @@ mod tests {
         assert_eq!(paste_ready("\n"), "\n", "an empty line is still a line");
     }
 
-    /// What the line commands take at a column: every line a caret covers, each once, and carets
-    /// on neighbouring lines two runs rather than one.
+    /// Verify column line commands visit each line once and keep adjacent
+    /// caret runs separate.
     #[test]
     fn covered_lines_are_taken_once_and_neighbours_stay_apart() {
         assert_eq!(runs(vec![(2, 2), (0, 0), (1, 1)]), [(0, 0), (1, 1), (2, 2)]);
@@ -780,8 +737,7 @@ mod tests {
         assert_eq!(runs(vec![(4, 4), (4, 4)]), [(4, 4)]);
     }
 
-    /// A comment marker going on or coming off changes one run of a line, and the head and tail
-    /// around it are what a caret in the line hangs on to.
+    /// Verify comment edits preserve shared text around markers for caret tracking.
     #[test]
     fn a_toggled_line_is_replaced_only_where_it_differs() {
         assert_eq!(shared("    a();", "    // a();"), (4, 4));

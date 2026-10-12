@@ -1,14 +1,7 @@
-//! The bar along the bottom of the editor column.
+//! Show progress and document facts below the editor: kind, length, zoom and repository.
 //!
-//! It says what is happening (indexing, opening), what the file is, how long it is and how far
-//! it is zoomed, the readout being the control that puts the zoom back. All of
-//! that used to be spread across the header bar, where it competed with the vault name and the
-//! note path; a document's own facts belong under it, not beside its title. The branch is the
-//! repository the document sits in, which is not always the vault's own.
-//!
-//! The whole bar fades with the chrome, the unsaved dot included: it is a footer of facts about a
-//! document nobody is looking at while they are writing into it, and an exception would be one
-//! thing left lit under a window that is otherwise out of the way.
+//! Keeping these below the document avoids competing with its title and vault name. The
+//! zoom readout resets zoom. The entire bar, including the unsaved dot, fades with the chrome.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -18,8 +11,7 @@ use std::time::Duration;
 use gtk::glib;
 use gtk::prelude::*;
 
-/// What the vault's line says while it is paused. One string, because [`crate::App::sync_opening`]
-/// borrows the slot for a PDF and has to put this back: no further progress will.
+/// Paused-indexing text restored after PDF opening borrows the progress slot, since no new progress will arrive.
 pub const PAUSED: &str = "Indexing paused";
 
 /// What the vault's own indexing is doing, which is what the control beside the line offers.
@@ -38,20 +30,15 @@ pub enum Indexing {
 pub struct Bar {
     row: gtk::Box,
     progress: gtk::Label,
-    /// What the writers of the [`Bar::progress`] label have each said, so none erases another:
-    /// the vault's own work, the copies to and from a host, and a background job in a language
-    /// provider. The copies are a list because two can overlap, and the first to finish must not
-    /// clear the other.
+    /// Independent vault, transfer and language-provider progress sources.
+    /// Retain overlapping transfers separately so one completion cannot clear another.
     vault_busy: RefCell<Option<String>>,
     transfers: RefCell<Vec<String>>,
-    /// The language server the tab in front waits on, once its start has taken a second, and
-    /// how far it has checked the tab after, which has no answer about the lines below meanwhile.
+    /// Delayed language-server startup and subsequent checking progress for the active tab.
     starting: RefCell<Option<String>>,
     checking: RefCell<Option<String>>,
     provider_busy: RefCell<Option<String>>,
-    /// Stop while the vault is indexing, Resume while it is paused, nothing otherwise. It sits
-    /// beside [`Bar::progress`] and belongs to the vault's line alone: a transfer and the
-    /// suggestion index, which share that slot, have nothing to stop.
+    /// Indexing Stop/Resume control beside progress. Transfers and suggestion indexing cannot be stopped here.
     index: gtk::Button,
     index_label: gtk::Label,
     indexing: Cell<Indexing>,
@@ -61,10 +48,8 @@ pub struct Bar {
     kind: gtk::Label,
     /// The dot a dirty tab wears, so one symbol means "unsaved" wherever it appears.
     unsaved: gtk::Label,
-    /// The document's own count, and the button around it. A code tab's diagnostic count is also
-    /// the switch that keeps them out of the text, and a PDF's page count opens the page commands,
-    /// so the readout is a control there and plain text everywhere else — a word count has nothing
-    /// to press.
+    /// Document count and optional control: diagnostics toggle or PDF page menu.
+    /// Word counts remain plain readouts.
     words: gtk::Label,
     facts: gtk::Button,
     /// The zoom readout, which is also the control that resets it.
@@ -153,9 +138,7 @@ impl Bar {
         self.show_busy();
     }
 
-    /// What the vault's own indexing is doing, and so what the control beside its line offers.
-    /// Separate from [`set_progress`], because that slot is also where a transfer and the
-    /// suggestion index write and neither of those can be stopped.
+    /// Set vault indexing state independently from the shared progress text, since other jobs cannot be stopped.
     ///
     /// [`set_progress`]: Self::set_progress
     pub fn set_indexing(&self, state: Indexing) {
@@ -204,9 +187,8 @@ impl Bar {
         self.show_busy();
     }
 
-    /// A copy to or from the host has started (`running`) or ended: "Downloading a.pdf…". A file's
-    /// size is not asked for, so one file says that it runs rather than how far it has got; a
-    /// batch counts its files ([`Bar::retell_transfer`]). A close waiting for git says so here too.
+    /// Start or end a transfer readout, also used while closing waits for Git.
+    /// Single files report activity without stat calls; batches count files through [`Bar::retell_transfer`].
     pub fn set_transfer(&self, text: &str, running: bool) {
         {
             let mut transfers = self.transfers.borrow_mut();
@@ -241,10 +223,8 @@ impl Bar {
         }
     }
 
-    /// One line for all of them, and the vault's own work wins: opening a document or reading the
-    /// vault is what the reader is waiting for. A copy they asked for comes next, the latest one
-    /// still running, then the start of the tab in front's server and its check, and a suggestion
-    /// index last, being a convenience nobody asked about.
+    /// Choose progress text by priority: vault work, newest transfer, active server startup/checking, then suggestions.
+    /// Keep user-requested work ahead of background conveniences.
     fn show_busy(&self) {
         let vault = self.vault_busy.borrow();
         let transfers = self.transfers.borrow();
@@ -263,18 +243,15 @@ impl Bar {
         );
     }
 
-    /// The branch of the repository holding the active document, "• main ↑1 ↓2": the branch, how
-    /// far it has drifted from its upstream, and — behind the same dot a dirty tab wears — whether
-    /// it has anything uncommitted. Composed by [`crate::git::Panel::branch_label`], which is the
-    /// only thing that knows any of it.
+    /// Show the active document repository's branch, upstream counts and uncommitted-work dot.
+    /// [`crate::git::Panel::branch_label`] owns composition and shares the unsaved dot symbol.
     pub fn set_branch(&self, branch: Option<&str>) {
         set(&self.branch_label, branch);
         self.branch.set_visible(branch.is_some());
     }
 
-    /// Whether a sync is running. The branch greys out for the duration, a second click having
-    /// nothing to start, and its tooltip says why; the spinner is the Git pane's, in place of its
-    /// own Sync button.
+    /// Dim the branch control while syncing and explain its disabled state in the tooltip.
+    /// The Git pane owns the spinner.
     pub fn set_syncing(&self, on: bool) {
         self.branch.set_sensitive(!on);
         self.branch
@@ -286,13 +263,10 @@ impl Bar {
         set(&self.kind, text);
     }
 
-    /// The document's own count, whatever it counts: a note's words, a code tab's errors and
-    /// warnings, a PDF's page. One slot, because a tab has one such fact and it is the same
-    /// corner of the bar.
+    /// Show the document's count: words, diagnostics or PDF page, in the shared count slot.
     ///
-    /// `press` is what pressing it does, said in the tooltip, or `None` for a count that is only
-    /// a readout. Without one the slot keeps the pointer and the keyboard out rather than going
-    /// insensitive: a dimmed count reads as a count that is out of date.
+    /// `press` supplies its action and tooltip, or `None` for a readout. Readouts disable input
+    /// without dimming, since insensitive styling would imply a stale count.
     pub fn set_facts(&self, text: Option<&str>, press: Option<&str>) {
         set(&self.words, text);
         self.facts.set_visible(text.is_some());
@@ -306,8 +280,7 @@ impl Bar {
         &self.facts
     }
 
-    /// Whether the document has edits the disk does not. Nothing is shown when it is saved: a
-    /// bar that says "Saved" all day is a bar nobody reads.
+    /// Show the unsaved dot only while the document differs from disk.
     pub fn set_unsaved(&self, unsaved: bool) {
         self.unsaved.set_visible(unsaved);
     }
@@ -340,15 +313,11 @@ fn holds_popover(widget: &impl IsA<gtk::Widget>) -> bool {
         .any(|w| (w.is::<gtk::Popover>() && w.is_visible()) || holds_popover(&w))
 }
 
-/// A readout that is also a control: flat and label-only, so it reads as the rest of the bar
-/// rather than as a button parked in it.
+/// Build a flat label button matching the status bar's readouts.
 ///
-/// `.accent-bar-button` is what keeps the bar one height. A button's minimum is 24 px plus 5 px of
-/// padding either side, and a box is as tall as its tallest child whatever its alignment, so one
-/// of these appearing pushed the bar from 29 px to 46 px. The class pins it to the caption's own
-/// line height; it stays a button, so it keeps its focus, its role and its tooltip.
-///
-/// `action` is `None` for a button the window connects by hand rather than through the action map.
+/// `.accent-bar-button` fixes the caption line height so normal button minimums cannot
+/// stretch the bar. Button focus, role and tooltip remain intact. `action` may be `None`
+/// when the window connects the handler directly.
 fn bar_button(child: &impl IsA<gtk::Widget>, action: Option<&str>, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::builder()
         .child(child)
@@ -386,9 +355,8 @@ fn set(label: &gtk::Label, text: Option<&str>) {
     }
 }
 
-/// Words as a reader counts them, which is whitespace-separated runs. Markdown markers ride along
-/// on the words they mark, so a heading's `#` is not a word of its own but `- item` counts the
-/// dash; close enough for a readout that exists to show a draft growing.
+/// Count whitespace-separated runs for a draft-growth readout.
+/// Standalone list dashes count; heading markers attached to words do not.
 pub fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
 }
@@ -444,9 +412,8 @@ impl Bytes {
         self.total.store(total, Ordering::Relaxed);
     }
 
-    /// `what` ("Downloading paper.pdf") and how far it has got, as the connection bar counts the
-    /// server's upload: "Downloading paper.pdf… 12.3/80.0 MB". `None` until a byte has moved,
-    /// so a copy that turns out to be current says nothing at all.
+    /// Format `what` and transferred bytes, or `None` before any bytes move.
+    /// Current cached files therefore produce no transfer readout.
     pub fn line(&self, what: &str) -> Option<String> {
         let (done, total) = (
             self.done.load(Ordering::Relaxed),
@@ -457,9 +424,8 @@ impl Bytes {
     }
 }
 
-/// Wait for `work`, keeping its line on the bar to what `line` says every [`TICK`]: put up with
-/// `say(text, true)` once there is one, changed in place with `retell`, and taken down with
-/// `say(text, false)` when the work is over, which is also what ends the timer.
+/// Await `work` while updating its status line every [`TICK`].
+/// Start and finish use `say(text, running)`; `retell` updates in place, and completion stops the timer.
 pub async fn counting<T>(
     say: impl Fn(&str, bool) + 'static,
     retell: impl Fn(&str, &str) + 'static,
@@ -498,18 +464,14 @@ pub async fn counting<T>(
     answer
 }
 
-/// Where the reader is in a PDF, which is what that tab has to say where a note has its word
-/// count. `page` is 0-based, the way the viewer counts them, and the readout is not.
-///
-/// `None` until the document is open: a PDF whose pages are not known yet would otherwise read
-/// "Page 1 of 0" for as long as it takes to load.
+/// Format 0-based `page` as a 1-based PDF readout.
+/// Return `None` before page counts arrive to avoid displaying Page 1 of 0.
 pub fn page_label(page: usize, count: usize) -> Option<String> {
     (count > 0).then(|| format!("Page {} of {count}", page + 1))
 }
 
-/// The readout for a code tab: what the language is, then how the bytes are encoded and how the
-/// lines end. Only code says the last two — a note is UTF-8 with LF endings or it would not be a
-/// note, and a readout that never changes is chrome for nothing.
+/// Format code language, encoding and line endings.
+/// Notes omit encoding and endings because they always use UTF-8 and LF.
 pub fn code_label(language: Option<&str>, encoding: &str) -> String {
     format!("{} · {encoding}", language.unwrap_or("Plain Text"))
 }

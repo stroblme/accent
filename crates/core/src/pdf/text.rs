@@ -95,12 +95,8 @@ pub fn selection_link(glyphs: &[Glyph], rel_pdf_path: &str, sel: &Selection) -> 
     }
 }
 
-/// Put the selected text into a link as its alias: `[[f.pdf#page=1&selection=…|the text]]`.
-///
-/// The alias is what a reader sees in the note and what re-anchors the highlight when the
-/// selection numbers no longer fit the document, so it is the text and not a label. Newlines
-/// collapse — a link is one line — and the three characters that would end the link early are
-/// dropped rather than escaped, because a wikilink has no escape for them.
+/// Use selected text as the wikilink alias for display and re-anchoring after document changes.
+/// Collapse newlines and drop characters that terminate wikilinks, since they cannot be escaped.
 pub fn link_with_alias(link: &str, text: &str) -> String {
     let alias: String = text
         .split_whitespace()

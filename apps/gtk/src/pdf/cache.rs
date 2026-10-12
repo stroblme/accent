@@ -16,14 +16,9 @@ pub const LOWRES_W: i32 = 256;
 /// Tile bytes held before the least recently used are dropped.
 const BUDGET: usize = 256 << 20;
 
-/// The same for the low-resolution stand-ins, which used to be kept for the life of the tab: at
-/// 370 KB each (256 x 362 x 4 for A4) a 500-page document strip-scrolled from end to end held
-/// 177 MB of them, and twice that once the reader had seen it in both light and dark.
-///
-/// A quarter of [`BUDGET`], which is about 180 A4 pages. The most that can be on screen at once
-/// is far less: the reading view paints one viewport of prefetch either side of the one being
-/// read, which at the 10 % minimum zoom and a 2 000 px-tall viewport is 48 pages, and the strip
-/// beside it another 20. Eviction therefore never reaches a page either view is painting.
+/// Low-resolution texture budget, one quarter of [`BUDGET`]. Bounds memory when scrolling long
+/// documents in multiple themes while retaining more pages than either view can display or
+/// prefetch.
 const LOWRES_BUDGET: usize = 64 << 20;
 
 /// One tile of one page at one scale, in one colour scheme.
@@ -37,11 +32,8 @@ pub struct TileKey {
     pub theme: Theme,
 }
 
-/// Textures already rendered, dropped least-recently-used first once they outgrow their budget.
-///
-/// Two maps and two budgets, because the two kinds of texture are wanted for different lengths of
-/// time: a tile is one square of one page at one zoom and is stale the moment the zoom changes,
-/// while a stand-in is a whole page at a fixed size and stays useful at every zoom.
+/// LRU texture cache with separate budgets for zoom-specific tiles and fixed-size stand-ins that
+/// remain useful across zoom changes.
 #[derive(Default)]
 pub struct Cache {
     tiles: HashMap<TileKey, (gdk::MemoryTexture, u64)>,
@@ -107,12 +99,9 @@ impl Cache {
         self.lowres_bytes -= drop_oldest(&mut self.lowres, self.lowres_bytes, LOWRES_BUDGET);
     }
 
-    /// The document's pages were put in, taken out or reordered, and `map` says where each went.
-    ///
-    /// Every render is still of the page it was rendered from, only under another number: it
-    /// follows its page, and what was rendered of a deleted page goes. Clearing instead would
-    /// paint every page on screen, and the whole thumbnail strip, blank until it rendered again.
-    /// A new generation, so a view asks again for tiles it had asked for under the old numbers.
+    /// Remap cached renders after page edits, dropping deleted pages and advancing the
+    /// generation. Retaining surviving textures avoids blank pages and thumbnails during
+    /// rerendering.
     pub fn repage(&mut self, map: impl Fn(usize) -> Option<usize>) {
         let page = |p: u32| map(p as usize).map(|p| p as u32);
         self.generation += 1;
@@ -151,16 +140,10 @@ impl Cache {
         self.lowres_bytes = 0;
     }
 
-    /// Forget what was rendered of one page, **except** its tiles at the scale and scheme now on
-    /// screen, which stay to be painted while their replacements render.
-    ///
-    /// What a stroke or an exported highlight invalidates: the page it landed on is drawn
-    /// differently now and every other page is exactly as it was, so dropping the whole cache
-    /// would re-render the viewport and its prefetch after every stroke. What is kept is stale
-    /// and is asked for again — see [`PdfView::refresh_page`] — but painting yesterday's render
-    /// of a page for the 30 ms its replacement takes is invisible, where painting blank paper is
-    /// the flash this exists to avoid. Everything else is going spare: nobody is looking at a
-    /// render at another zoom, and keeping it would paint the old page after the next one.
+    /// Invalidate one page while retaining tiles at the visible scale and scheme until
+    /// replacements arrive. This avoids flashes after ink or highlight changes without
+    /// rerendering unrelated pages. Retained stale tiles are requested again by
+    /// [`super::PdfView::refresh_page`]; other scales are dropped to prevent later stale display.
     pub fn forget_page_except(&mut self, page: u32, scale_milli: u32, theme: Theme) {
         self.generation += 1;
         let (tiles, lowres) = (&mut self.bytes, &mut self.lowres_bytes);
@@ -263,14 +246,9 @@ pub(super) fn tiles_across(pixels: i32) -> i32 {
 /// A part of the content in logical pixels: its span across and its span down.
 pub(super) type Area = ((f64, f64), (f64, f64));
 
-/// The part of the content whose tiles are asked for, from the part on screen, at `sf` device
-/// pixels to a logical one: a viewport more above and below, where a reader goes next and where
-/// Page Down lands, and a tile more either side, a page wider than the view being panned across
-/// far less than it is read down.
-///
-/// Not every tile of every page near the screen, which is what was asked for until 2026-09-30: at
-/// 800 % an A4 page is 228 MB of tiles, two pages of it overflowed [`BUDGET`], and the cache
-/// dropped what it had just rendered to make room for the rest, for as long as the page was open.
+/// Tile request area in logical pixels at device scale `sf`: one viewport above and below, and
+/// one tile on each side. Limiting requests to this area prevents high-zoom page renders from
+/// exceeding [`BUDGET`] and causing eviction/rerender loops.
 pub(super) fn reach((across, down): Area, sf: i32) -> Area {
     let tile = f64::from(TILE) / f64::from(sf);
     let tall = down.1 - down.0;
@@ -309,10 +287,9 @@ mod tests {
         assert_eq!(tiles_within(100.0, (2000.0, 3000.0), 2, 4), 4..4);
     }
 
-    /// What a view asks for has to fit in what eviction leaves, three quarters of the budget, or
-    /// it drops tiles still wanted and they are rendered again for ever. The largest view there
-    /// is today, 3840 x 2160 device pixels on a 4K screen at 2x, with a page break across it,
-    /// which cuts a row of tiles in two.
+    /// Requested tiles must fit within eviction's three-quarter budget to avoid rerender loops.
+    /// Exercise a 3840 × 2160 device-pixel viewport at 2× with a page break splitting a tile
+    /// row.
     #[test]
     fn a_4k_view_and_its_reach_fit_the_budget() {
         let (across, down) = reach(((0.0, 1920.0), (0.0, 1080.0)), 2);

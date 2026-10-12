@@ -1,13 +1,8 @@
-//! Meld's connectors between a comparison's columns: a strip of its own between each two, with a
-//! band across it for every run of rows where the two differ, from the rows the left column has
-//! lines in to the rows the right one has. The rows are level, so a band runs straight where both
-//! cover the same rows and curves where one covers fewer: a merge side's one line fanning out to
-//! the whole conflict block it is part of in the file, an added line narrowing to the point it went
-//! in at. A band's buttons — a hunk's, a conflict block's — sit at its top, one to a half of the
-//! strip.
+//! Connector bands and action buttons between comparison columns.
 //!
-//! Drawn from the grid the last relayout laid ([`Columns`]), again on every relayout and scroll,
-//! the buttons laid only on the bands near the view ([`Links::claim`]).
+//! Bands join differing row ranges, curving when columns cover different rows. [`Columns`]
+//! supplies the layout; scrolling and relayout redraw bands, while [`Links::claim`] positions
+//! buttons only near the viewport.
 
 use adw::prelude::*;
 use gtk::{gdk, graphene};
@@ -19,9 +14,9 @@ use super::Pane;
 use super::columns::{Columns, reaching};
 use super::pool::hand_out;
 
-/// The room each of `n` columns gives up for the strips: an outer column all of it to its one
-/// strip, a middle one half to either of its two, so their text stays equally wide. Either way a
-/// strip is about 45 px and the divider wide, room for a button in each half.
+/// Reserve strip space equally across `n` columns: all of an outer
+/// column's share to one strip, half of a middle column's to each.
+/// Keep text widths equal with roughly 45 px plus divider per strip.
 fn share(n: usize) -> i32 {
     match n {
         2 => 22,
@@ -29,8 +24,8 @@ fn share(n: usize) -> i32 {
     }
 }
 
-/// The rows a band joins in the column on the strip's left and in the one on its right. An empty
-/// range is a column with no line in the run, which the band narrows to a point at.
+/// Left/right row ranges joined by a band. An empty range narrows
+/// that end to a point.
 pub(super) type Run = [Range<usize>; 2];
 
 /// Where a band starts and ends, `(top, bottom)`, on the strip's left and on its right.
@@ -51,13 +46,12 @@ pub(super) type Act = Rc<dyn Fn(usize, usize, usize)>;
 struct Slot {
     button: gtk::Button,
     at: Rc<Cell<(usize, usize, usize, usize)>>,
-    /// What it shows, dressed again only when that changes: a keystroke lays every run again.
+    /// Cached button appearance, updated only on changes during per-keystroke relayout.
     dress: Cell<Option<Dress>>,
 }
 
-/// The rows of `run` each column of a strip has lines in, `has(k, row)` saying whether column `k`
-/// (0 on the strip's left, 1 on its right) has one: from its first to its last, or none at the
-/// run's start where it has no line at all.
+/// Find each strip column's row span in `run` using `has(k, row)`
+/// (0 left, 1 right). Columns without lines return an empty start range.
 pub(super) fn run_of(run: &Range<usize>, has: impl Fn(usize, usize) -> bool) -> Run {
     [0, 1].map(|k| {
         let first = run.clone().find(|&r| has(k, r));
@@ -76,13 +70,12 @@ pub(super) struct Links {
     /// Each column as it was before it gave up its share: where its title and text are.
     roots: Vec<gtk::Widget>,
     runs: RefCell<Vec<Vec<Band>>>,
-    /// Each strip's fill and outline at its left edge and at its right: a band shades from the
-    /// tint of the column on its left to that of the one on its right.
+    /// Fill and outline at each strip edge, shading bands between column tints.
     tints: RefCell<Vec<[(gdk::RGBA, gdk::RGBA); 2]>>,
     /// Per strip, the button each half carries on every band with a key, if any.
     dress: RefCell<Vec<[Option<Dress>; 2]>>,
-    /// The buttons, handed out to the bands near the view on every lay and as the view moves on,
-    /// the ones left over hidden.
+    /// Pool buttons for bands near the viewport on relayout and scroll;
+    /// hide unused slots.
     slots: RefCell<Vec<Slot>>,
     /// What the host does with a press, asked at the press.
     act: Rc<RefCell<Option<Act>>>,
@@ -90,19 +83,17 @@ pub(super) struct Links {
     placing: Rc<Cell<bool>>,
 }
 
-/// Where a band's buttons go down its strip, `h` tall: at the band's top, held at the top of the
-/// text while the band is beside it, and gone once its bottom is under them, before they would be
-/// carried off over the columns' title rows, which the strip's overlay spans too. `top` and
-/// `bottom` are the band's, over both its ends; `text` is where the text starts below the titles.
+/// Position an `h`-tall button at the band top, clamped below title rows
+/// to `text`. Hide it when the band bottom cannot contain it, preventing
+/// buttons from scrolling over titles. `top`/`bottom` span both band ends.
 fn button_y(top: i32, bottom: i32, text: i32, h: i32) -> Option<i32> {
     let y = top.max(text).min(bottom.max(top + h) - h);
     (y >= text).then_some(y)
 }
 
 impl Links {
-    /// Room for a strip between each two of `panes`. The paned splits the columns in the ratio of
-    /// their widths, which `Columns` makes one, so each giving up the same room keeps their text
-    /// equally wide. A strip straddles the divider between its columns, and is drawn over it.
+    /// Reserve space for strips between `panes`, equally shrinking column text.
+    /// Draw each strip across its divider; [`Columns`] equalizes widths.
     pub(super) fn new(panes: &mut [Pane]) -> Links {
         let n = panes.len();
         let share = |c: usize| match c == 0 || c == n - 1 {
@@ -174,9 +165,9 @@ impl Links {
         self.relaid();
     }
 
-    /// Hand the buttons out to the bands with a key that reach into `lo..hi` of the grid
-    /// `columns` laid last, in its pixels, and hide the rest (see [`hand_out`]): a long file's
-    /// thousands of hunks held the main loop for seconds with a button each laid and placed.
+    /// Pool buttons for keyed bands intersecting grid pixels `lo..hi`
+    /// ([`hand_out`]). Avoid laying thousands of offscreen hunk buttons
+    /// and blocking the main loop.
     pub(super) fn claim(&self, columns: &Columns, lo: i32, hi: i32) {
         let (runs, dress, grid) = (
             self.runs.borrow(),
@@ -259,10 +250,9 @@ impl Links {
         }
     }
 
-    /// Where `widget` goes, if it is a strip button: centred in its half of its strip, down it as
-    /// [`button_y`] has it, and off the overlay, which clips it away, while its band is not laid
-    /// or [`button_y`] has it gone.
-    /// `None` leaves the drawing over all of the overlay.
+    /// Center a strip button in its half and place it via [`button_y`].
+    /// Clip absent/offscreen bands outside the overlay; `None` leaves the
+    /// full-overlay drawing unchanged.
     fn place(&self, columns: &Columns, widget: &gtk::Widget) -> Option<gdk::Rectangle> {
         // ponytail: a search per button per allocation, over the few near the view.
         let slots = self.slots.borrow();
@@ -302,11 +292,9 @@ impl Links {
         self.area.queue_draw();
     }
 
-    /// The rows moved: the strips drawn again, and their buttons put where the bands are now
-    /// from an idle, once the frames under way are done. Placing them allocates the overlay again,
-    /// and asked for from GTK's own layout or painting — a view keeping its top line as it is
-    /// allocated, a view's snapshot moving the scroll — that asked for another frame, in which GTK
-    /// moved the scroll again: two columns trading it back and forth never came to rest.
+    /// Redraw bands after row changes and place buttons from an idle after
+    /// current frames finish. Overlay placement during GTK layout/painting
+    /// would queue another frame and cause endless scroll feedback between columns.
     pub(super) fn relaid(&self) {
         self.area.queue_draw();
         if self.shown() == 0 || self.placing.replace(true) {
@@ -329,9 +317,7 @@ impl Links {
         Some((f64::from(left.x() + left.width()), f64::from(right.x())))
     }
 
-    /// Every strip: the page's ground over the room and the divider in it, then below the titles
-    /// each band, a curve from the top of its rows on the left to theirs on the right, down, and
-    /// back by the bottoms.
+    /// Paint strip ground/divider, then curved row-connector bands below titles.
     fn draw(&self, columns: &Columns, cr: &gtk::cairo::Context, height: i32) {
         let page = crate::highlight::page(adw::StyleManager::default().is_dark());
         let height = f64::from(height);
@@ -414,10 +400,9 @@ impl Links {
         &self.area
     }
 
-    /// Where the shown strip buttons on screen are and where the columns are, as `[x, y, width,
-    /// height]` on the overlay, how many of those buttons overlap a column, and how many are not
-    /// where their bands have them, for the bench: 0 and 0 are the claim, buttons standing on no
-    /// text, at the top of their bands.
+    /// Return visible button/column rectangles `[x, y, width, height]` in
+    /// overlay coordinates, plus overlap and stale-position counts. Both
+    /// counts must be zero: buttons stay off text and at band tops.
     #[cfg(feature = "bench")]
     pub(super) fn rects(&self, columns: &Columns) -> (Vec<[i32; 4]>, Vec<[i32; 4]>, usize, usize) {
         let rect = |r: graphene::Rect| [r.x(), r.y(), r.width(), r.height()].map(|v| v as i32);
@@ -483,8 +468,8 @@ fn dress_button(button: &gtk::Button, (icon, label, tip): Dress) {
     ]);
 }
 
-/// Where `run` of strip `i` starts and ends, in `to`'s pixels: where the grid has its rows,
-/// through the view of the column each end faces.
+/// Convert strip `i`'s run endpoints through their facing column views
+/// to grid positions in `to` pixels.
 fn end(i: usize, run: &Run, columns: &Columns, to: &impl IsA<gtk::Widget>) -> Option<Ends> {
     let grid = columns.grid.borrow();
     let y = |c: usize, row: usize| -> Option<i32> {

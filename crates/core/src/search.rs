@@ -1,9 +1,5 @@
-//! The three match modes of a VS Code search box, compiled into one regular expression.
-//!
-//! Match Case, Match Whole Word and Regular Expression are independent toggles, but every
-//! combination of them is still just a pattern over the note text. Collapsing them here means the
-//! index, the replace pass and the UI all work with a single `Regex` instead of branching on three
-//! booleans three times over.
+//! Compile Match Case, Match Whole Word and Regular Expression toggles into one pattern so
+//! search, replacement and UI callers share matching semantics.
 
 use regex::RegexBuilder;
 pub use regex::{NoExpand, Regex};

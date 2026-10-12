@@ -1,9 +1,6 @@
-//! `accent-cli hold` keeps shells between windows, so what matters is what no unit test can see:
-//! that a real shell on a real pty runs, comes back with its screen after its terminal went away,
-//! ends when told to, and that the holder leaves nothing behind once the last shell is gone.
-//!
-//! The protocol is spoken by hand, as tests/serve.rs does, so this checks the wire and not our
-//! own client. `attach`'s raw mode and SIGWINCH need a terminal and are checked by hand.
+//! Integration tests for real held shells, pty replay, termination and holder cleanup. Speak the
+//! wire protocol directly to avoid testing through the client. Raw mode and SIGWINCH require
+//! manual terminal checks.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -198,9 +195,7 @@ fn a_shell_that_cannot_start_says_why_and_leaves_no_holder() {
     holder.assert_gone();
 }
 
-/// Close Tab in the moment between a tab's `attach` connecting and the holder starting its shell:
-/// the kill arrives first and finds nothing to end. The HELLO after it must not start a shell
-/// that nobody will ever attach to again.
+/// A kill arriving before HELLO must prevent creation of a shell after its tab closes.
 #[test]
 fn a_shell_killed_before_it_started_never_starts() {
     let Some(holder) = Holder::start("early") else {
@@ -222,8 +217,7 @@ fn a_shell_killed_before_it_started_never_starts() {
     assert!(held.stdout.is_empty(), "{held:?}");
 }
 
-/// The same with no holder running: the kill has to start one, or the `attach` on its way would
-/// start it, and the shell with it, after the kill had found nobody to tell.
+/// With no holder running, kill must start one to record the request before a pending attach.
 #[test]
 fn a_kill_with_no_holder_running_still_comes_first() {
     let Some(mut stopped) = Holder::start("none") else {

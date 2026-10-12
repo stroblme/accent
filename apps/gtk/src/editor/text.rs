@@ -1,8 +1,6 @@
-//! The three questions every part of the editor asks a buffer: where the caret is, where a line
-//! ends, and what the caret has in front of it on its own line.
+//! Shared caret, line-end and line-prefix queries.
 //!
-//! Generic over the buffer type, because half the callers hold a `sourceview5::Buffer` and the
-//! other half the plain `GtkTextBuffer` a widget hands them.
+//! Generic buffers support both `sourceview5::Buffer` and widget-provided `GtkTextBuffer`s.
 
 use gtk::glib;
 use gtk::prelude::*;
@@ -13,10 +11,8 @@ pub(crate) fn caret(buffer: &impl IsA<gtk::TextBuffer>) -> gtk::TextIter {
     buffer.iter_at_mark(&buffer.get_insert())
 }
 
-/// The end of `line`, before its newline, clamped to what the buffer has.
-///
-/// `forward_to_line_end` runs on to the next line from an empty one, so a line that is already at
-/// its end is left alone.
+/// Return the clamped line end before its newline. Avoid `forward_to_line_end`
+/// on empty lines, where it would advance to the next line.
 pub(crate) fn line_end(buffer: &impl IsA<gtk::TextBuffer>, line: i32) -> gtk::TextIter {
     let buffer = buffer.as_ref();
     let line = line.clamp(0, (buffer.line_count() - 1).max(0));
@@ -29,8 +25,7 @@ pub(crate) fn line_end(buffer: &impl IsA<gtk::TextBuffer>, line: i32) -> gtk::Te
     at
 }
 
-/// The text on `iter`'s line up to `iter`: the indent, the list marker and whatever has been
-/// typed after them.
+/// Text from the line start to `iter`, including indent and list marker.
 pub(crate) fn line_prefix(
     buffer: &impl IsA<gtk::TextBuffer>,
     iter: &gtk::TextIter,

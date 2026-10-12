@@ -1,9 +1,8 @@
-//! The canvas a diagram is drawn and edited on: a scrollable widget painting one page's display
-//! list, with the selection, its handles and whatever a drag is doing drawn over it.
+//! Scrollable display-list canvas with selection, handles and drag feedback.
 //!
-//! It never changes the diagram. A gesture ends in an [`Edit`] handed to the tab, which applies
-//! it to the model and hands back a new [`Sheet`]; so one gesture is one undo step, and the
-//! widget is a picture of the page plus a pointer. The scrolling is [`crate::scrollable`]'s.
+//! Gestures emit [`Edit`]s; the tab updates the model and supplies a new [`Sheet`].
+//! Keeping edits outside the widget makes each gesture one undo step. Scrolling uses
+//! [`crate::scrollable`].
 
 mod drag;
 mod overlay;
@@ -123,9 +122,8 @@ impl DiagramView {
         self.imp().sheet.borrow().clone()
     }
 
-    /// Paint the page in `tint`'s colours from now on: its labels are laid out again, their run
-    /// colours being in their layouts, and a drag's preview is built again; the page itself, its
-    /// formulas and its pictures stay as they are.
+    /// Change canvas tint, rebuilding coloured label layouts and drag previews.
+    /// Keep the model, formula snapshots and pictures unchanged.
     pub fn set_tint(&self, tint: Tint) {
         let imp = self.imp();
         if imp.tint.replace(tint) != tint {
@@ -229,9 +227,9 @@ impl DiagramView {
         self.imp().scroll.set_scroll(at);
     }
 
-    /// Whether the drawing goes on below the view (`down`) or above it. The last [`GAP`] is the
-    /// margin round it, nothing to read: a stroke on the page's edge, which widens the drawing a
-    /// pixel past a fitted page, does not take a notch of its own.
+    /// Whether drawing remains below (`down`) or above the viewport, excluding [`GAP`].
+    /// Ignoring the margin prevents a stroke just beyond a fitted page from consuming
+    /// an extra scroll notch.
     pub fn has_room(&self, down: bool) -> bool {
         let Some(v) = self.imp().scroll.v() else {
             return false;

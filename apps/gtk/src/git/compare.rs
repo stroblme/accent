@@ -6,10 +6,9 @@ use accent_api::git::{Comparison, Sides};
 use accent_core::diff;
 
 impl Panel {
-    /// Open the comparison a row stands for. Both sides are read in one worker hop, because two
-    /// would show the file mid-write if it changed between them. Only the last row clicked opens:
-    /// reads land in whatever order the workers finish them, and two rows clicked within one read
-    /// put the first in front, a staged or deleted file's preview closing the other's tab.
+    /// Read both comparison sides in one worker hop and open only the last clicked row. This
+    /// avoids separate reads across file changes and out-of-order workers replacing a newer
+    /// preview.
     pub(super) fn compare(self: &Rc<Self>, rel: &str, key: &str, sides: Sides) {
         let repo = {
             let state = self.state.borrow();
@@ -591,14 +590,9 @@ fn side(what: &Comparison, vault: &Vault, rev: &str, rel: &str) -> Result<Blob, 
     }
 }
 
-/// The file on disk, as the working-tree side of a comparison.
-///
-/// A repository above the vault root gives its files absolute keys ([`vault_key`]), and
-/// `Vault::read_text` refuses those: it resolves through `Local::join`, which rejects a path
-/// with a root component rather than escape the vault. Such a file is read directly instead,
-/// which is right because a key is only absolute when the file is outside the vault — and
-/// impossible on a remote vault, where "outside the vault" is on the other machine and the
-/// toast has to say so rather than diff against nothing.
+/// Read the disk side of a comparison. Vault files use `Vault::read_text`; absolute keys outside
+/// a local vault are read directly because `Local::join` rejects rooted paths. Remote files
+/// outside the vault are refused rather than treated as empty.
 fn worktree(what: &Comparison, vault: &Vault) -> Result<Blob, String> {
     let outside = Path::new(&what.key).is_absolute();
     // Outside the vault on a remote vault is on the other machine, and the path would name

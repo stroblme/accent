@@ -104,10 +104,8 @@ impl Panel {
     }
 }
 
-/// The heading over the branch popover's remote rows. A row that is not a branch, so nothing
-/// activates it and the keyboard passes it by. Inset by the 17 px Adwaita gives a text button
-/// either side of its label, so it sits over the names below it rather than out at the row's
-/// edge; small and dim, because every name under it is already a bold button label.
+/// Non-activatable heading for remote branches. Match the text buttons' 17 px inset so it aligns
+/// with names, using small dim type to distinguish it from branch rows.
 fn remote_heading() -> gtk::ListBoxRow {
     let label = gtk::Label::builder()
         .label("Remote")
@@ -209,13 +207,9 @@ fn branch_text(b: &Branch) -> Option<String> {
     })
 }
 
-/// The whole branch readout the status bar shows: the branch, its ahead and behind counts, and
-/// the dot in front when the repository has work that is not committed.
-///
-/// The dot leads and is the very character a dirty tab wears, so one symbol means "there is
-/// something here that is not written down" wherever it appears. What it counts is every record
-/// `git status` produced, untracked files included ([`Status::dirty`]), so it and the Git pane's
-/// changes list are the same answer.
+/// Status-bar branch, ahead/behind counts and leading dirty dot. Use the tab's dot symbol and
+/// [`Status::dirty`] so the indicator agrees with the Git changes list, including untracked
+/// files.
 pub(super) fn branch_line(status: &Status) -> Option<String> {
     let text = branch_text(&status.branch)?;
     Some(match status.dirty() {

@@ -6,36 +6,27 @@ use super::*;
 /// One process, one config, one window per vault.
 pub struct Shell {
     pub config: Rc<RefCell<Config>>,
-    /// The config as it was last put into effect, so the next one can tell what moved
-    /// ([`Changed`]). `config` itself is edited in place before it is applied.
+    /// Last applied config for [`Changed`] comparisons; the shared config may already contain edits.
     pub applied: RefCell<Config>,
     /// The write [`Shell::save_config_soon`] has scheduled and not yet done.
     pub config_write: RefCell<Option<glib::SourceId>>,
     /// Watches `config.toml` for someone else's edits ([`Shell::watch_config`]); kept only so it
     /// lives as long as the shell.
     pub config_monitor: RefCell<Option<gio::FileMonitor>>,
-    /// Whether the file has been found not to parse and that has been said, so it is said once
-    /// until the file parses again.
+    /// Suppress repeated invalid-config messages until the file parses again.
     pub config_broken: Cell<bool>,
-    /// The open windows, and the only strong reference to each one's state: an entry is dropped
-    /// in `forget` when the window closes, which is what releases the vault and its worker thread.
-    /// Each carries what it was opened on (`App::key`), so a vault-less one is found again by its
-    /// kind.
+    /// Sole strong window-state references; `forget` releases vaults and workers after close.
     pub windows: RefCell<Vec<Rc<App>>>,
-    /// The start screen while one is up, so New Window presents it again instead of stacking a
-    /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
+    /// Weak start-screen handle so New Window raises the existing screen; GTK owns its lifetime.
     pub start: glib::WeakRef<adw::ApplicationWindow>,
     /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
     /// somewhere to put it. See [`Landing`].
     pub landing: RefCell<Option<Landing>>,
-    /// Whether the accelerator table is currently narrowed to [`reserved`] for a focused shell.
-    /// One flag, not one per window, because the table is the application's: a window keeping
-    /// its own left every other window without its chords while a shell here had the keyboard.
+    /// Application-wide shell-focus shortcut state; one flag because all windows share the accelerator table.
     pub shell_keys: Cell<bool>,
 }
 
-/// What a window in [`Shell::windows`] was opened on: a vault, by its `Vault::key`, a terminal
-/// session by its `terminal://<name>` key, or no vault at all, as one of the [`Loose`] kinds.
+/// Window identity: vault key, named `terminal://<name>` session or unkeyed [`Loose`] kind.
 #[derive(Clone, PartialEq)]
 pub enum WindowKey {
     Vault(PathBuf),
@@ -72,9 +63,7 @@ impl WindowKey {
     }
 }
 
-/// The two windows with no vault (DESIGN.md, Window without a vault), one of each at most. The
-/// launch that builds one decides which it is, for good: a shell or a file opened in it by hand
-/// afterwards stays in it without making it the other kind.
+/// One terminal and one documents window for launches; later manual opens do not change their kind.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Loose {
     /// Where every `accent --terminal` opens its shell.
@@ -82,15 +71,12 @@ pub enum Loose {
     /// Where every file from outside the open vaults opens: `accent <file>`, or the file
     /// manager's Open With.
     Documents,
-    /// One built by Open in New Window or Move to New Window for the file it names, as many as
-    /// were asked for. Never the documents window a launch looks for, so a file handed over by
-    /// the file manager does not join one.
+    /// Dedicated window for an explicit Open/Move to New Window; excluded from launch-window reuse.
     Apart,
 }
 
-/// What Reload Window opens again: the key the window was on, the session it had, which only a
-/// window without a state file needs handed over, and its size and state, which no state file
-/// keeps. GTK 4 cannot place a window, so where it appears is the compositor's to say.
+/// Reload snapshot: key, unsaved session for unkeyed windows, size and state.
+/// GTK4 leaves positioning to the compositor.
 struct Reopen {
     key: WindowKey,
     session: Session,
@@ -118,23 +104,18 @@ type AppAction = fn(&Rc<Shell>, &adw::Application);
 /// one write. The session's beat.
 const CONFIG_WRITE: Duration = Duration::from_secs(1);
 
-/// A tab let go over a pane, waiting for `AdwTabView::create-window` to spend it.
+/// Record the tab drop target until AdwTabView's `create-window` handler can attach it.
 ///
-/// libadwaita detaches a dragged page from its view for the length of the drag, and neither
-/// `attach_page` nor the page's own view is public, so nothing can give a page a view back except
-/// the `create-window` handler, which libadwaita calls on the source view when a drop outside its
-/// own tab bars has finished. Our drop zones therefore take the drop and record where it landed;
-/// the handler hands back the tab view named here and libadwaita does the attaching.
+/// Libadwaita temporarily detaches dragged pages and exposes no public reattach method.
+/// Drop zones record the destination; `create-window` returns that view for libadwaita to use.
 pub struct Landing {
     app: Rc<App>,
     pane: Rc<Pane>,
     zone: Zone,
 }
 
-/// The costly parts of putting a config into effect, each true only where its inputs moved. The
-/// theme swaps the display's style provider and restyles every widget, a font re-measures every
-/// tab, the vault settings are a `hello` to each remote host, and the shortcuts are the whole
-/// accelerator table; everything else is a cheap switch that is simply set again.
+/// Changed-input flags for expensive config work: theme restyling, font layout,
+/// remote settings and accelerator rebuilds. Cheap switches can always be reapplied.
 #[derive(Debug, Default, PartialEq)]
 pub struct Changed {
     pub theme: bool,
@@ -163,14 +144,10 @@ impl Changed {
 }
 
 impl Shell {
-    /// The actions that outlive the window firing them: Open Local… and Open Remote… both land a
-    /// vault that may not be this window's, Close Vault takes the current window away, and Quit
-    /// takes them all, so none of them can live on a window the way the `win.` actions do.
-    /// Registered once on the application, where the shell is in scope.
+    /// Register application actions that can open or close windows and therefore outlive them.
     ///
-    /// Each one records itself in the active window's recently-run list on the way through, which
-    /// is what the `win.` trampoline in [`install_actions`] does for everything else: an action
-    /// the palette lists has to be an action the palette can learn.
+    /// Record actions in the active window's recent-command list so palette ranking learns
+    /// from them, matching the window-action trampoline in [`install_actions`].
     pub fn install_app_actions(self: &Rc<Self>, gtk_app: &adw::Application) {
         // GNOME Shell offers New Window in the launcher's context menu only when it finds an
         // `app.new-window` action, the `new-window` desktop action, or one of the SingleWindow
@@ -196,20 +173,17 @@ impl Shell {
         }
     }
 
-    /// Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
-    /// down without emitting `close-request`, which is where unsaved buffers get written and
-    /// where a failed save gets to stop the exit. The application ends on its own once the last
-    /// window is gone, so a window that refuses to close also refuses to quit. The command was
-    /// recorded before the windows go: the session is written by each window's own
-    /// `close-request`, which runs after this and carries the entry with it.
+    /// Quit by closing windows so `close-request` can save buffers or refuse failed saves.
+    ///
+    /// Direct application quit bypasses this protection. The process ends after the last window
+    /// closes; record the command first so each window's session save includes it.
     fn quit(self: &Rc<Self>, gtk_app: &adw::Application) {
         for window in gtk_app.windows() {
             window.close();
         }
     }
 
-    /// The [`App`] behind a window, for the app-scoped actions: they are fired at the application
-    /// and have to find the window that asked before they can record anything on it.
+    /// Resolve the active window state for application actions and their usage recording.
     fn app_at(&self, window: &gtk::Window) -> Option<Rc<App>> {
         self.windows
             .borrow()
@@ -226,10 +200,7 @@ impl Shell {
         }
     }
 
-    /// Put a config into effect in every window. There is one config per process, so a preference
-    /// changed in one window — in its dialog or anywhere else (`App::config_changed`) — is the
-    /// same preference in all of them. Measured against the last one applied, so a switch does
-    /// not restyle every widget the way a theme change has to.
+    /// Apply shared preferences to every window, comparing prior values to avoid unnecessary restyling.
     pub fn apply_config(&self, config: &Config) {
         let changed = Changed::between(&self.applied.replace(config.clone()), config);
         // The theme is the display's rather than a window's, so it goes on once.
@@ -246,9 +217,7 @@ impl Shell {
         }
     }
 
-    /// Write the config a moment from now, once for every change made before then, the way a
-    /// window's session is written. The config is the process's, so the timer is too: a window
-    /// that closes meanwhile takes nothing with it.
+    /// Debounce config writes process-wide so bursts share one write and window closure cannot cancel it.
     pub fn save_config_soon(self: &Rc<Self>) {
         if self.config_write.borrow().is_some() {
             return;
@@ -271,9 +240,7 @@ impl Shell {
         }
     }
 
-    /// Take in what someone else writes to `config.toml` while accent runs — a hand edit, most
-    /// likely — as it lands. Accent's own writes come back through here too and are told apart by
-    /// their text ([`Config::reread`]).
+    /// Watch external config edits; [`Config::reread`] distinguishes echoes of accent's own writes.
     pub fn watch_config(self: &Rc<Self>) {
         let file = gio::File::for_path(accent_core::config::config_path());
         let monitor = match file.monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE) {
@@ -295,10 +262,8 @@ impl Shell {
         self.config_monitor.replace(Some(monitor));
     }
 
-    /// `config.toml` changed on disk. A change that parses is put into effect like any other
-    /// (only what it moved is redone) with accent's own unwritten changes kept on top, and is not
-    /// written back unless those need it. One that does not parse is left alone and said once;
-    /// accent keeps its running config and writes nothing until the file parses again.
+    /// Merge valid external config with pending local edits and apply only changes.
+    /// Report invalid input once, retain current settings and suspend writes until it parses.
     fn config_file_changed(self: &Rc<Self>) {
         let reread = self.config.borrow().reread();
         match reread {
@@ -340,13 +305,11 @@ impl Shell {
         }
     }
 
-    /// Close Vault: hand this window's vault back and land on the start screen.
+    /// Close the vault window and present the start screen first.
     ///
-    /// The window goes rather than being emptied out. The vault, its worker thread and its WebKit
-    /// process all hang off the window's [`App`], so closing the window is what releases them, and
-    /// it is the path a user closing the window already takes. The cost is the window's geometry,
-    /// which the next vault takes from the defaults again. The start screen is presented first, so
-    /// the application never stands at zero windows and quits out from under us.
+    /// Closing releases the App-owned vault, worker and preview resources through the normal
+    /// window-close path. Presenting first prevents last-window application shutdown; a later
+    /// vault starts with default geometry.
     fn close_vault(self: &Rc<Self>, gtk_app: &adw::Application) {
         let Some(window) = gtk_app.active_window() else {
             return;
@@ -364,19 +327,11 @@ impl Shell {
         window.close();
     }
 
-    /// Let go of a window's [`App`] once the close is certain. This is the only strong reference
-    /// to it, so the vault, its worker thread and its WebKit process all go with it.
+    /// Release the shell's sole strong [`App`] reference once window close is certain.
     ///
-    /// ponytail: the `App` goes here, the vault a moment later — the tree's model and the sidebar's
-    /// panes hold their own `Arc<Vault>` inside widgets, so the last one drops when GTK destroys
-    /// the window, or when a query still on a worker thread returns, and `Vault`'s `Drop` joins the
-    /// worker there. That holds only while no handler keeps its own widget alive: one strong
-    /// capture of the widget it is connected to, or of one around it, keeps a closed window's
-    /// vault open until the process exits, which `ACCENT_BENCH_CLOSE=1` checks for. Closing a
-    /// second into `testvault`'s 2.7 s cold reconcile blocked the main loop for 2.3 s, with the
-    /// window already off screen. `Vault::drop` names the fix (a cancellation flag on
-    /// `reconcile`); until a vault is opened and closed often enough for that pause to be felt,
-    /// one stalled close is cheaper than the flag.
+    /// Widgets and in-flight queries can retain vault references until they finish. Handlers must
+    /// not capture their own widgets strongly; `ACCENT_BENCH_CLOSE` checks closed
+    /// window retention. Vault drop joins its worker and may wait for a running reconcile.
     fn forget(&self, window: &adw::ApplicationWindow) {
         let mut windows = self.windows.borrow_mut();
         let Some(i) = windows.iter().position(|app| &app.window == window) else {
@@ -493,13 +448,10 @@ impl Shell {
         code
     }
 
-    /// Open Local…: this machine's folder picker, straight away, from whichever window asked — a
-    /// remote one too, whose own folders are Open Remote…'s. The folder is a vault in a window of
-    /// its own, as every vault is.
+    /// Open the local folder picker immediately from any window, including a remote one.
     ///
-    /// It used to land on the start screen, which then showed a button that opened this dialog —
-    /// a screen in the way of the thing it was asking for. The start screen is still what a bare
-    /// launch with no vault lands on, where it also lists the recent ones.
+    /// The selected vault gets its own window. The start screen remains for launches without
+    /// a vault, avoiding an extra screen before an explicitly requested picker.
     fn choose_local(self: &Rc<Self>, gtk_app: &adw::Application) {
         let parent = gtk_app.active_window();
         let dialog = gtk::FileDialog::builder().title("Open Vault").build();
@@ -512,12 +464,10 @@ impl Shell {
         });
     }
 
-    /// Open Remote…: the same host-and-path form the start screen asks with, over whichever
-    /// window is in front. A remote vault is opened, keyed and remembered exactly as a local one
-    /// is, so there is nothing here but the address.
+    /// Show the shared host/path form over the active window for Open Remote.
     ///
-    /// Over a remote window the form starts at that window's host and path, its folders asked for
-    /// at once: the way to the host's other folders, and to the right one after a mistyped path.
+    /// Remote windows prefill their host and path and request folders immediately, making other
+    /// host folders and mistyped paths easy to reach.
     fn choose_remote(self: &Rc<Self>, gtk_app: &adw::Application) {
         let Some(window) = gtk_app.active_window() else {
             return;
@@ -568,12 +518,10 @@ impl Shell {
         self.start.set(Some(&window));
     }
 
-    /// Remove from Recents, from the start screen or the Open Recent picker, and run `removed`
-    /// once the row may go. A vault goes at once: the list is all that remembers it. A terminal
-    /// session's shells are running, so it is asked about first, over the list, and they end on
-    /// the spot: read out of its state file before that goes. A session open in a window goes as
-    /// Close Session would take it, less the start screen, the reader being elsewhere: the window
-    /// closes unnamed, which ends its shells and writes nothing.
+    /// Remove a recent entry and call `removed` when its row may disappear.
+    ///
+    /// Vault entries need no teardown. Terminal sessions require confirmation and shell shutdown
+    /// before deleting state. Open sessions close unnamed, ending shells without saving state.
     pub(crate) fn remove_recent(&self, over: &gtk::Widget, key: &Path, removed: Box<dyn FnOnce()>) {
         let Some(name) = terminal::session_name(key) else {
             start::forget_vault(&self.config, key);
@@ -603,10 +551,7 @@ impl Shell {
         );
     }
 
-    /// Open a vault picked on the start screen or in one of the dialogs that stand in for it, and
-    /// close the start screen if one is up: it has done its job whichever window asked. It is
-    /// reached through the shell rather than captured, which keeps the start screen's own
-    /// callback out of a cycle with the window it lives in.
+    /// Open the chosen vault and close the start screen through the shell to avoid callback ownership cycles.
     fn open_from_start(self: &Rc<Self>, gtk_app: &adw::Application, root: PathBuf) {
         self.open_vault(gtk_app, root, None);
         if let Some(window) = self.start.upgrade() {
@@ -614,14 +559,11 @@ impl Shell {
         }
     }
 
-    /// One vault, one window (VS Code's rule): a vault that already has a window raises it rather
-    /// than opening a second one on the same index, session and watcher. New Window lands on the
-    /// start screen instead, where a vault without a window yet is picked.
+    /// Open one window per vault or terminal-session key, raising an existing window if present.
     ///
-    /// `root` is what the vault is keyed by: a directory, or an `ssh://` address for one on
-    /// another machine. The two are one list, one rule and one window each — and a terminal
-    /// session's `terminal://<name>` is a third kind of key in the same list, whose `note` is a
-    /// directory to add a shell at.
+    /// `root` is a directory, `ssh://` address or `terminal://<name>`. Sharing one keyed window
+    /// avoids duplicate index, watcher and session ownership. For sessions, `note` adds a shell
+    /// in the named directory.
     pub fn open_vault(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -642,9 +584,7 @@ impl Shell {
         self.add_window(gtk_app, key, note);
     }
 
-    /// Build a window on `key` — a vault, or one of the windows with no vault — and take charge
-    /// of it. The only place a window joins `windows`, so the handler that takes it out again is
-    /// written once.
+    /// Build and register window `key` through one ownership path with shared teardown.
     fn add_window(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -676,9 +616,7 @@ impl Shell {
         Some(app)
     }
 
-    /// Open what a window being reloaded showed in a window of its own, once the old one has gone
-    /// and taken its vault's watcher and worker with it ([`Self::forget`]). The application is
-    /// held meanwhile: the old window may have been its last.
+    /// Reopen after the old vault worker/watcher drops ([`Self::forget`]); hold the application through the gap.
     fn reopen_soon(self: &Rc<Self>, gtk_app: &adw::Application, again: Reopen) {
         let hold = gtk_app.hold();
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
@@ -710,8 +648,7 @@ impl Shell {
         }
     }
 
-    /// The window a page belongs to, and what it holds. libadwaita's tab drag hands a page to any
-    /// window in the process, so this is how the receiving one finds out where it came from.
+    /// Find the source window/document when libadwaita transfers a tab across windows.
     fn owner_of(&self, page: &adw::TabPage) -> Option<(Rc<App>, Doc)> {
         self.windows
             .borrow()
@@ -719,12 +656,10 @@ impl Shell {
             .find_map(|app| Some((app.clone(), app.doc_for_page(page)?)))
     }
 
-    /// A page has landed in `into`'s tab view that `into` knows nothing about: either a tab
-    /// dragged out of another window, or one of its own a moment before it is registered.
+    /// Inspect an unknown attached page on an idle to distinguish transfers from local opens.
     ///
-    /// From an idle rather than here, because `page-attached` fires inside libadwaita's own drop
-    /// handling, which is still holding the page — and because a page this window has just built
-    /// is attached before it reaches `docs`, so the second look is what tells the two apart.
+    /// Libadwaita still holds the page during its drop handler, and newly built pages attach
+    /// before entering `docs`; deferring allows both operations to finish.
     fn adopt_soon(self: &Rc<Self>, into: &Rc<App>, page: &adw::TabPage) {
         let (shell, into, page) = (Rc::downgrade(self), Rc::downgrade(into), page.clone());
         glib::idle_add_local_once(move || {
@@ -765,13 +700,10 @@ impl Shell {
         Some(at.tabs.clone())
     }
 
-    /// A page has been attached to `pane`, which is where a drag ends. Two things may be owed:
-    /// what the drop asked for — a split at an edge, the end of the bar in the middle — and, for
-    /// a page out of another window, the move into this window's bookkeeping.
+    /// Finish a page attachment: apply its drop placement and adopt cross-window bookkeeping.
     ///
-    /// Either waits for an idle, because this runs inside libadwaita's drag handling: re-parenting
-    /// the pane it is emitting from fails GTK's own assertion, and the attach has not selected
-    /// the page yet.
+    /// Defer to an idle because libadwaita is still handling the drag and selecting the page;
+    /// reparenting its emitting pane immediately would violate GTK assertions.
     pub fn landed(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, page: &adw::TabPage) {
         let zone = self
             .landing
@@ -793,13 +725,10 @@ impl Shell {
         }
     }
 
-    /// Move a tab from the window it was dragged out of into the window it was dropped on.
+    /// Move a dragged tab between vault windows by saving and reopening its absolute file path.
     ///
-    /// One vault never has two windows, so the note always comes from another vault: it is
-    /// adopted as an absolute-path tab, the files-outside-a-vault model (DESIGN.md, Window
-    /// without a vault). It edits and saves; it gets no index, backlinks or wikilinks here. The
-    /// buffer is written out first, because the receiving window opens the *file* — a drag is a
-    /// focus change, and a focus change always saves.
+    /// One vault has one window, so the receiving window adopts it as a loose file without index
+    /// or backlinks. Save first because the destination opens disk bytes, matching focus-change saves.
     fn adopt_page(self: &Rc<Self>, into: &Rc<App>, page: &adw::TabPage) {
         // Gone again, or one of `into`'s own that had not reached `docs` when it was attached.
         if into.pane_of(page).is_none() || into.doc_for_page(page).is_some() {
@@ -819,8 +748,7 @@ impl Shell {
         into.close_page(page);
     }
 
-    /// Open in New Window: `path` in a window of its own with no vault, built for it whether or
-    /// not another window shows the file already (DESIGN.md, Window without a vault).
+    /// Open `path` in a dedicated standalone window, even if another window already shows it.
     pub fn open_apart(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -833,8 +761,7 @@ impl Shell {
         Some(app)
     }
 
-    /// Move to New Window: `page` leaves `from` for a window of its own with no vault, written out
-    /// first as a tab dragged into another window is ([`Self::adopt_page`]).
+    /// Save and reopen `page` in a dedicated standalone window ([`Self::adopt_page`]).
     pub fn move_apart(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -882,9 +809,7 @@ impl Shell {
         inside.or_else(|| self.loose_window(gtk_app, Loose::Documents))
     }
 
-    /// The window with no vault of this `kind`, built if this is the first thing to want one since
-    /// the last one closed. One of each, so a second shell joins the terminal window as a tab and
-    /// a second loose file the documents window.
+    /// Reuse or create the unkeyed window of `kind` so launches group loose documents and terminals separately.
     pub fn loose_window(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -928,9 +853,8 @@ that host, and its NOTE a path in it. DIR may be an ssh:// address, for a shell
 on that host. A session NAME not seen before is made.
 ";
 
-/// What the launching process answers itself, before `app.run` hands the arguments to the
-/// running instance, whose terminal is not the caller's: `--help`, `--version`, and an option
-/// nothing reads, which would otherwise be taken for a file name. `None` lets the launch go on.
+/// Handle help, version and unknown options before forwarding to the running
+/// instance, whose stdout belongs to a different caller. `None` continues launch.
 pub fn local_command_line(
     args: impl Iterator<Item = std::ffi::OsString>,
 ) -> Option<glib::ExitCode> {
@@ -949,9 +873,7 @@ pub fn local_command_line(
     None
 }
 
-/// Where `accent --terminal` was pointed: the first argument that is not one of the flags, or
-/// `None` for the bare form. Pure, so the parsing is a test rather than a manual run; whether the
-/// path is a directory is the caller's question, because only it can resolve one.
+/// First non-flag terminal argument, or `None`; callers validate and resolve the directory.
 fn terminal_cwd(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
     args.iter()
         .skip(1)
@@ -959,9 +881,7 @@ fn terminal_cwd(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
         .find(|arg| !arg.to_str().is_some_and(|arg| FLAGS.contains(&arg)))
 }
 
-/// A path named on the command line, resolved against the *invoking* process's directory, not
-/// this one's: a second `accent notes/x.md` is forwarded here by the single instance, whose cwd
-/// is its own. `None`, said on stderr, where it names nothing.
+/// Resolve launch paths against the invoking process's cwd, since single-instance forwarding changes context.
 fn resolve(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) -> Option<PathBuf> {
     let Some(path) = command_line.create_file_for_arg(arg).path() else {
         // `printerr_literal` needs glib 2.80, which this build does not enable; a local
@@ -974,8 +894,7 @@ fn resolve(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) ->
         .ok()
 }
 
-/// The argument after a folder as that vault's NOTE: its vault-relative path, where it names a
-/// file inside the vault from the vault's root or in full. `None` leaves it a path of its own.
+/// Resolve a NOTE argument within its named vault; `None` leaves it an independent path.
 fn note_in(root: &Path, arg: &std::ffi::OsStr) -> Option<String> {
     let path = root.join(arg);
     let rel = path.strip_prefix(root).ok()?.to_str()?.to_string();
@@ -1023,10 +942,7 @@ pub fn movable(app: &App, doc: &Doc) -> bool {
     !doc.is_transient() && !app.on_host(&doc.key())
 }
 
-/// The file `doc` holds in `from`, written out for another window to open: a tab moving between
-/// windows goes there as its file, so an edit still in its buffer would be left behind. `Err`
-/// says why it cannot move, and then nothing has changed — a move must never be the thing that
-/// loses an edit.
+/// Save `doc` before another window reopens its file, preventing lost buffered edits; return errors without moving.
 fn written_out(from: &Rc<App>, doc: &Doc) -> Result<PathBuf, String> {
     let key = doc.key();
     if !movable(from, doc) {

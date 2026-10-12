@@ -123,18 +123,13 @@ fn spread(values: &mut [f64]) -> (f64, f64) {
     (median, values.last().copied().unwrap_or(f64::NAN))
 }
 
-/// `ACCENT_BENCH_COMPARE=large:<rel>`: compares `<rel>` in its tab with a copy changed throughout
-/// ([`variant`]; `=large:every:<rel>`, on every line), then lays the diff again five times, types
-/// three characters into a changed line and takes them out again, re-reads the other side twice,
-/// drags the divider 200 px and back, and presses Show All Unchanged Lines and lets it go. Each
-/// step prints how long its own call held the main loop (`call_ms`), how long until the rows were
-/// laid (`settle_ms`), the longest the main loop went without turning meanwhile (`held_ms`), when
-/// the rows on screen were last seen uneven (`level_ms`, 0 for never) and what the relayout passes
-/// did (`Compare::passes`), and once open how many stretches of the
-/// editor's text are emphasised; the last
-/// line, the median and the worst of `held_ms` per kind of step, and for a
-/// CSV whether its cells carry the column tags a pass over all of it gives them. The file is
-/// saved after the typing, as it was, so point it at a scratch copy.
+/// `ACCENT_BENCH_COMPARE=large:<rel>` compares a file with distributed changes;
+/// `large:every:<rel>` changes each line. Relayout five times, type/undo three characters,
+/// reread twice, resize 200 px each way and toggle unchanged lines.
+///
+/// Report `call_ms`, `settle_ms`, `held_ms`, `level_ms` (0 when never uneven), relayout passes
+/// and emphasis spans; summarise median/worst stalls by step. CSV checks compare column tags
+/// with a full pass. Restores and saves the file; use a scratch copy.
 pub(in crate::bench) fn bench_compare_large(app: &Rc<App>, rel: &str) {
     let (every, rel) = match rel.strip_prefix("every:") {
         Some(rel) => (true, rel),

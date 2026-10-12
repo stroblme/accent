@@ -1,7 +1,5 @@
-//! The widgets and timers more than one pane was building the same way: an empty state, a
-//! scroller, a list factory of plain labels, the two timers — a pulsing progress bar and a
-//! keystroke debounce — that every searching pane needs a copy of, and the handler slot a tab's
-//! hooks are kept in.
+//! Shared empty states, scrollers, label factories, progress pulses, search debounces and
+//! handler slots, keeping pane construction consistent.
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -9,12 +7,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-/// The shared empty state of every pane. A full-size `AdwStatusPage` is drawn for a window, not
-/// for a 200 px column: `.compact` takes the icon from 128 to 96 px, drops the title a step and
-/// halves the margins from 36 to 24.
+/// Build a compact empty state for narrow panes.
 ///
-/// ponytail: libadwaita has no smaller variant than `.compact`, so if it still crowds a narrow
-/// sidebar the next dial is an app CSS rule shrinking the icon inside `statuspage.compact`.
+/// AdwStatusPage's `.compact` reduces icon, title and margins compared with a window-sized
+/// status page.
 pub(crate) fn status_page(icon: &str, title: &str, description: &str) -> adw::StatusPage {
     let page = adw::StatusPage::builder()
         .icon_name(icon)
@@ -26,8 +22,7 @@ pub(crate) fn status_page(icon: &str, title: &str, description: &str) -> adw::St
     page
 }
 
-/// A list's scroller: it takes the height it is given and never scrolls sideways, because
-/// everything put in one of these ellipsizes instead.
+/// Height-filling list scroller without horizontal scrolling; rows ellipsize instead.
 pub(crate) fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     gtk::ScrolledWindow::builder()
         .vexpand(true)
@@ -36,18 +31,11 @@ pub(crate) fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
         .build()
 }
 
-/// Give `view` its `model`, and keep the list where it is whenever the model takes away the row
-/// holding the keyboard focus.
+/// Set `view`'s model while preserving scroll when its focused row disappears.
 ///
-/// GTK finds a removed widget's focus a new home after the next paint, from the top of the window
-/// (`GtkWindow`'s `TAB_FORWARD`), and in a list that is its first row, scrolled to: a Stage click,
-/// whose row leaves Changes, or a file made or removed around the row last clicked put the Git
-/// and Files lists back at their top. The focus goes instead to the row GTK now keeps in that
-/// place, which is where the reader was, so nothing scrolls; taking it cancels the window's own
-/// search.
-///
-/// Two handlers, one either side of the view's own, which `set_model` connects: the first sees
-/// whether a row has the focus while it is still there, the second whether it is there still.
+/// GTK otherwise moves focus to the first row after painting, scrolling lists to the top.
+/// Handlers before and after `set_model`'s handler retain focus at the removed row's position
+/// and cancel that fallback search.
 pub(crate) fn set_model(view: &gtk::ListView, model: &impl IsA<gtk::SelectionModel>) {
     let (model, held) = (
         model.upcast_ref::<gtk::SelectionModel>(),
@@ -71,9 +59,8 @@ pub(crate) fn set_model(view: &gtk::ListView, model: &impl IsA<gtk::SelectionMod
     });
 }
 
-/// Before `row` is taken out of its list box, hand the keyboard, where the row holds it, to the
-/// row showing after it, or else the one before, or else to `fallback`: GTK would give it to the
-/// first thing in the window it can focus, and scroll there (see [`set_model`]).
+/// Move focus before removing a focused row: next visible row, previous or `fallback`.
+/// Avoid GTK's fallback to the window's first focusable widget and resulting scroll jump.
 pub(crate) fn hand_on_focus(row: &gtk::ListBoxRow, fallback: &impl IsA<gtk::Widget>) {
     if !row.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN) {
         return;
@@ -95,11 +82,8 @@ fn has_focus(view: &gtk::ListView) -> bool {
         .is_some_and(|focus| focus.is_ancestor(view))
 }
 
-/// A factory whose row `setup` builds and `bind` fills, each handed the row as its own type.
-///
-/// The two downcasts every list factory was writing out: `GtkSignalListItemFactory` hands its
-/// closures a `GObject`, and the child comes back as a `GtkWidget`. `setup` is given the item as
-/// well, for a row whose drawing reads the object bound to it.
+/// Typed row setup/binding for list factories, centralizing GObject/widget downcasts.
+/// Pass the list item to setup for rows whose drawing uses the bound object.
 pub(crate) fn factory<W: IsA<gtk::Widget>>(
     setup: impl Fn(&gtk::ListItem) -> W + 'static,
     bind: impl Fn(&W, &gtk::ListItem) + 'static,
@@ -141,21 +125,11 @@ pub(crate) fn row_text(item: &gtk::ListItem) -> Option<String> {
         .map(|s| s.string().to_string())
 }
 
-/// Hang a menu off `host`, pointed at `anchor` in `host`'s coordinates, and show it.
+/// Show a menu on `host` at `anchor` and return its popover for close notifications.
 ///
-/// The popover comes back so a caller can hear it close: the tree holds its row highlight for as
-/// long as its menu is up (`tree::Tree::pin`).
-///
-/// A popover parented by hand stays parented until it is unparented by hand — but not while it is
-/// closing. `closed` is emitted from inside the item's own `clicked`, and an unparented widget
-/// has no path to the action group on the host, so unparenting there drops whatever the click
-/// just asked for: it is what made the status bar's Fit Height do nothing. The idle runs once the
-/// click is over.
-///
-/// The keyboard goes back on `closed`, before the item's action runs, to the widget that had it:
-/// GTK hands it from the closing menu to a widget above the host (over a diagram, the pane's
-/// `GtkPaned`), which no document's keys reach, so a diagram's Ctrl+Z after its menu's Paste did
-/// nothing. An action that moves the keyboard on, such as Edit Label, still does.
+/// Unparent on an idle after `closed`: closing occurs inside the item's click, and removing
+/// the parent sooner loses the host action group before dispatch. Restore prior focus on
+/// close so document keys work again; actions may then move focus elsewhere.
 pub(crate) fn popup_menu(
     host: &impl IsA<gtk::Widget>,
     menu: &gio::Menu,
@@ -177,8 +151,7 @@ pub(crate) fn popup_menu(
     popover
 }
 
-/// Add or take away a style class. Row widgets are recycled, so the branch that takes it off
-/// again is never the one to leave out.
+/// Set or clear a style class so recycled rows never retain stale state.
 pub(crate) fn set_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
     match on {
         true => widget.add_css_class(class),
@@ -186,10 +159,9 @@ pub(crate) fn set_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
     }
 }
 
-/// Keep a press on `button` to the button, for one laid over a text view. GtkButton claims its
-/// press only on release, so the view under it saw the press too, put its caret under the pointer
-/// and took the keyboard. The claim is made in a group with the button's own click, which a
-/// gesture claiming alone would deny; and the click leaves the keyboard where it was.
+/// Claim overlaid button presses with its click gesture before release, preventing
+/// the underlying text view from moving the caret or taking focus. Group the gestures
+/// so the claim does not deny the button's own click.
 pub(crate) fn claim_press(button: &gtk::Button) {
     let claim = gtk::GestureClick::new();
     claim.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -207,9 +179,7 @@ pub(crate) fn claim_press(button: &gtk::Button) {
     button.set_focus_on_click(false);
 }
 
-/// The class on a revealer of a row's hover buttons ([`hover_revealer`]): the only revealers
-/// [`reveal_on_hover`] opens and shuts, so it never touches one a row holds for its own ends (an
-/// `AdwEntryRow`'s apply button sits in one).
+/// Mark button revealers for [`reveal_on_hover`] so unrelated revealers remain untouched.
 const HOVER_ACTIONS: &str = "accent-hover-actions";
 
 /// The marker class on a row whose buttons already follow its hover ([`reveal_on_hover`]).
@@ -224,24 +194,12 @@ pub(crate) fn hover_revealer() -> gtk::Revealer {
     revealer
 }
 
-/// Show a row's buttons while the pointer or the keyboard is on it, and give them no width at all
-/// the rest of the time, so the name beside them reads out to the whole width of the pane and is
-/// cut short only where there is really something to give way to. A `GtkRevealer` does both: shut,
-/// it measures nothing, and it slides them in and out at full opacity, the same way whether the
-/// pointer or the focus is what let them go. The Git pane's rows and the diagram Properties
-/// pane's rows share it, each holding its buttons in a [`hover_revealer`].
+/// Reveal row buttons for pointer hover or keyboard focus, reserving no width when hidden.
 ///
-/// Watched on the row itself: that is the widget GTK marks with PRELIGHT while the pointer is
-/// anywhere on it and with FOCUS_WITHIN while one of its buttons has the keyboard — and in a list
-/// it is the one the keyboard lands on first, so Tab reveals the buttons it would otherwise never
-/// be able to reach.
-///
-/// A click gives the row the focus as well, taking it back even from a button pressed inside it,
-/// and that focus is the pointer's: it keeps the buttons no longer than the pointer stays, or a
-/// commit clicked open would keep them out until the focus went somewhere else. So a press marks
-/// the row until both the pointer and the focus have left it. GTK's FOCUS_VISIBLE cannot tell the
-/// two apart: it outlasts a key by three seconds whatever is clicked meanwhile, and then drops
-/// what the keyboard reached.
+/// A [`hover_revealer`] slides full-opacity buttons while names use available space. Watch
+/// row PRELIGHT and FOCUS_WITHIN so keyboard navigation reveals controls before Tab needs
+/// them. Pointer-created focus retains buttons only while hovered; remember presses until
+/// both focus and pointer leave. FOCUS_VISIBLE alone cannot distinguish these cases reliably.
 pub(crate) fn reveal_on_hover(row: &impl IsA<gtk::Widget>) {
     let row = row.upcast_ref::<gtk::Widget>();
     // Once per row widget, which in a list is recycled and bound again and again. The class is
@@ -309,9 +267,8 @@ pub(crate) fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
 /// How long a switch crossfades and a page fades in (DESIGN.md, Motion).
 pub(crate) const FADE_MS: u32 = 150;
 
-/// Fade `widget` in from nothing over [`FADE_MS`], easing out. It is libadwaita's animation, which
-/// lands at once with `gtk-enable-animations` off or the widget unmapped. It keeps itself until it
-/// is done: one let go part way would leave the widget part transparent.
+/// Fade in over [`FADE_MS`] with libadwaita easing; finish immediately when animations
+/// are disabled or unmapped. Retain the animation until completion to avoid partial opacity.
 pub(crate) fn fade_in(widget: &impl IsA<gtk::Widget>) {
     let target = adw::PropertyAnimationTarget::new(widget.upcast_ref::<gtk::Widget>(), "opacity");
     let fade = adw::TimedAnimation::new(widget, 0.0, 1.0, FADE_MS, target);
@@ -321,9 +278,7 @@ pub(crate) fn fade_in(widget: &impl IsA<gtk::Widget>) {
     fade.play();
 }
 
-/// A progress bar stepped by a timer of ours, GTK4 having no indeterminate mode (DESIGN.md,
-/// Loading). Every timer it starts is removed when the work ends and when the bar's window
-/// closes: a leaked `glib::timeout` keeps firing.
+/// Timed progress pulse because GTK4 has no indeterminate mode; cancel timers when work or its window ends.
 pub(crate) struct Pulse {
     bar: gtk::ProgressBar,
     /// Shared with the timer's own closure, so it can clear the slot when it stops itself.
@@ -344,13 +299,10 @@ impl Pulse {
         }
     }
 
-    /// Step the bar every `every`, drawing it once `after` steps have passed — held back so a
-    /// wait that is over before anyone notices never draws a bar at all. Opacity rather than
-    /// visibility: the bar keeps its height either way, so nothing under it jumps when a wait
-    /// starts.
+    /// Pulse every `every`, showing the bar after `after` steps to suppress brief waits.
     ///
-    /// Already running is left alone rather than restarted: a restart would hold the bar at the
-    /// start of its trough for as long as the messages keep coming.
+    /// Use opacity to preserve layout. An active pulse is not restarted, so repeated messages
+    /// cannot keep it permanently at the start of its cycle.
     pub(crate) fn start(&self, every: Duration, after: u32) {
         if self.running() {
             return;
@@ -388,16 +340,14 @@ impl Pulse {
     }
 }
 
-/// One pending call at a time, replaced on every keystroke: long enough to swallow a burst,
-/// short enough to feel immediate (DESIGN.md, Motion).
+/// Debounce repeated requests into one pending call after activity settles.
 pub(crate) struct Debounce {
     delay: Duration,
     pending: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl Drop for Debounce {
-    /// A pane that goes away takes its pending call with it: a late timeout must not touch a
-    /// closed window.
+    /// Cancel pending timeouts when the pane drops so they cannot access a closed window.
     fn drop(&mut self) {
         self.cancel();
     }
@@ -422,12 +372,10 @@ impl Debounce {
         *self.pending.borrow_mut() = Some(id);
     }
 
-    /// Run `f` once the delay has passed, unless a call is already waiting: the first one wins.
+    /// Run `f` after the delay unless already pending, preserving the first request.
     ///
-    /// The other half of [`call`](Self::call). A restart is right where the latest input is the
-    /// one to answer (a query, a render); first-wins is right where the work reads the current
-    /// state whenever it runs, and a burst must not push it off indefinitely — writing the
-    /// session, for one, which a steady stream of edits would otherwise never get to.
+    /// Unlike [`call`](Self::call), this prevents repeated requests from postponing state-based
+    /// work such as session saving indefinitely.
     pub(crate) fn call_once(&self, f: impl FnOnce() + 'static) {
         if self.pending.borrow().is_none() {
             self.call(f);
@@ -442,12 +390,10 @@ impl Debounce {
     }
 }
 
-/// The one handler a tab's `connect_*` sets and the tab calls back on: `F` is its signature,
-/// `dyn Fn(&Rc<Tab>)` for most.
+/// A tab callback slot with signature `F`, usually `dyn Fn(&Rc<Tab>)`.
 ///
-/// A handler is free to reach back into the tab that called it, setting or firing a hook of its
-/// own, so it is cloned out of the cell before it runs ([`Hook::get`]), never called with the
-/// cell borrowed.
+/// Clone the handler before invoking it ([`Hook::get`]) so callbacks can re-enter and update
+/// hooks without borrowing the cell recursively.
 pub(crate) struct Hook<F: ?Sized>(RefCell<Option<Rc<F>>>);
 
 impl<F: ?Sized> Default for Hook<F> {

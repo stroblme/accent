@@ -1,13 +1,8 @@
-//! Git's conflict markers in an editor, decorated as VS Code decorates them: each block's current
-//! side tinted green and its incoming side blue, with Accept Current, Accept Incoming and Accept
-//! Both above it.
+//! Decorate Git conflict blocks with tinted sides and Accept Current, Incoming and Both.
 //!
-//! Knows nothing about tabs: it is handed a view and its buffer, and finds the blocks again
-//! whenever the host analyses the text — on the keystroke up to 16 KB, on the debounce above. In
-//! between, the tints move with the text as tags do. The buttons are overlays in buffer
-//! coordinates, as a comparison's are (`diff.rs`), so they scroll with the text; they sit in a
-//! band the block's first line is given above itself, and are laid again after each find and
-//! whenever GTK reflows the lines.
+//! The host re-analyses text immediately up to 16 KB and after a debounce above that. Tags
+//! move with edits between analyses. Overlay buttons use buffer coordinates and reserved
+//! space above each block, so they follow scrolling and reflow without depending on tabs.
 
 use crate::{
     diff,
@@ -39,14 +34,12 @@ const TINTS: [&str; 6] = [
 const BAND: &str = "conflict-band";
 /// Space between the buttons and the band's edges.
 const GAP: i32 = 3;
-/// A side's lines and its marker line: the alphas a comparison gives a changed row and the words
-/// that changed in it. The base, which neither side keeps, is the foreground at half of each.
+/// Side and marker opacity matching diff row and word emphasis; the base uses half-strength foreground.
 const BODY_ALPHA: f32 = 0.16;
 const HEAD_ALPHA: f32 = 0.35;
 
-/// The current, base and incoming sides' tints, each with its marker line's, from the resolved
-/// foreground and laid over `page`: the editor's tags and the preview's boxes (`preview.rs`)
-/// alike. The incoming side is the theme's own blue where it has one ([`theme::incoming_on`]).
+/// Resolve current, base and incoming tints for editor tags and preview boxes over `page`.
+/// Use [`theme::incoming_on`] when the theme supplies its own incoming blue.
 pub(crate) fn tints(fg: gdk::RGBA, page: gdk::RGBA) -> [(gdk::RGBA, gdk::RGBA); 3] {
     let side = |hue| {
         (
@@ -75,9 +68,7 @@ pub struct Conflicts {
     band: Cell<bool>,
     /// Where each block the last find saw starts, in characters.
     starts: RefCell<Vec<i32>>,
-    /// One row of buttons per block, the `i`th serving the `i`th block. Kept, as a comparison
-    /// keeps its own (`diff::Pool`): GTK has no way to take an overlay back off a text view, so a
-    /// row no block needs is hidden.
+    /// Reusable button rows indexed by conflict block. GTK cannot remove text-view overlays, so unused rows hide.
     rows: RefCell<Vec<gtk::Widget>>,
     pending: RefCell<Option<glib::SourceId>>,
 }
@@ -120,9 +111,8 @@ impl Conflicts {
         this
     }
 
-    /// Find the blocks in the text as it stands and tint them, their buttons laid once GTK has
-    /// laid the lines. Nothing to do for a text that had none and has none: the find is a search
-    /// for `<<<<<<<` then.
+    /// Find current conflict blocks, tint them and position buttons after line layout.
+    /// If both old and new text have no markers, skip further work.
     pub fn find(&self) {
         if !self.enabled.get() {
             return;
@@ -189,8 +179,7 @@ impl Conflicts {
         at.is_some_and(|at| self.resolve(|span| span.start == at, take))
     }
 
-    /// Take every tint off, and the band from the lines that have one. Only from those: a band is
-    /// a height, and taking a tag like that off the whole buffer has GTK lay every line out again.
+    /// Remove tints and button-band tags only from affected lines to avoid whole-buffer relayout.
     fn unmark(&self) {
         let (start, end) = self.buffer.bounds();
         for name in TINTS {
@@ -321,9 +310,8 @@ impl Conflicts {
         self.resolve(|span| span.contains(&caret), take)
     }
 
-    /// Replace the first block `pick` accepts — handed each one's characters — with what `take`
-    /// keeps of it, as one undo step, from the text as it stands rather than as the last find saw
-    /// it. `false` when `pick` accepts none, or the view takes no edits.
+    /// Resolve the first current block accepted by `pick`, as one undo step.
+    /// Return `false` without a match or in a read-only view.
     fn resolve(&self, pick: impl Fn(Range<i32>) -> bool, take: Take) -> bool {
         if !self.view.is_editable() {
             return false;
@@ -338,10 +326,8 @@ impl Conflicts {
         true
     }
 
-    /// Resolve every block with `take`, as one undo step: Accept All Current and Accept All
-    /// Incoming. Only the stretch from the first block to the last is rewritten, so the caret and
-    /// the folds either side of it stay put. `false` when there is none, or the view takes no
-    /// edits.
+    /// Resolve all blocks with `take` in one undo step.
+    /// Rewrite only first-to-last conflict spans to retain surrounding caret/folds; return `false` without editable blocks.
     pub fn accept_all(&self, take: Take) -> bool {
         if !self.view.is_editable() {
             return false;

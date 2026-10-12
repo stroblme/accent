@@ -1,7 +1,5 @@
-//! accent-lsp: a Language Server Protocol client with no UI in it.
-//!
-//! The protocol types are our own, transcribed for what accent reads (see `types.rs`); the
-//! transport is a child process over stdio on the shared [`runtime`].
+//! UI-independent LSP client with the response types accent uses and stdio child-process
+//! transport on the shared [`runtime()`].
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -14,12 +12,8 @@ pub mod types;
 pub use client::{Client, DEADLINE, Error, Notification, Notifications, STARTING};
 pub use runtime::runtime;
 
-/// A path as the protocol wants it: `file://` and percent-encoding for everything that is not an
-/// unreserved character or a separator.
-///
-/// Hand-rolled rather than pulled in as a dependency because this and [`from_uri`] are the whole
-/// of accent's business with URLs — the paths are local, so there is no host, query or fragment
-/// to get right.
+/// Encode a local path as a percent-encoded `file://` URI. Implemented locally because URI
+/// conversion is limited to paths without hosts, queries or fragments.
 pub fn to_uri(path: &Path) -> String {
     let mut uri = String::from("file://");
     for byte in path.as_os_str().as_encoded_bytes() {

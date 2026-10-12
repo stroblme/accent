@@ -4,11 +4,8 @@
 use super::*;
 
 impl App {
-    /// The pane the reader is in, which a note opens into: the one holding the keyboard, or
-    /// where the keyboard is in no pane, the last one it or a pick of a tab was in. Every way into
-    /// a pane gives it the keyboard — a click into its document or its tab bar, a tab moved or
-    /// revealed there — and a tab coming to the front of a pane the keyboard is not in leaves it
-    /// alone (`wire::wire_pane`), so the two are one.
+    /// Choose the focused pane, or the last activated pane when focus is elsewhere.
+    /// Background pane selections do not change where new notes open.
     pub fn pane(&self) -> Rc<Pane> {
         self.active_pane.borrow().clone()
     }
@@ -23,7 +20,7 @@ impl App {
             .cloned()
     }
 
-    /// The active pane's tab view. Every `self.tabs` of the single-pane window went through here.
+    /// Return the active pane's tab view.
     pub fn tabs(&self) -> adw::TabView {
         self.pane().tabs.clone()
     }
@@ -32,10 +29,8 @@ impl App {
         self.panes.borrow().iter().find(|p| p.has(page)).cloned()
     }
 
-    /// Bring a page to the front of whichever pane holds it, and make that pane the active one.
-    /// A note that is already open is never opened twice, so this is what "open" does for it.
-    /// The keyboard goes with it from another pane — a link followed to a note open beside it —
-    /// and stays in the sidebar, where a list being walked keeps it.
+    /// Select an already-open page and activate its pane.
+    /// Move focus across panes when following a link, but retain sidebar focus while navigating its lists.
     pub fn reveal_page(&self, page: &adw::TabPage) {
         if let Some(pane) = self.pane_of(page) {
             pane.tabs.set_selected_page(page);
@@ -53,10 +48,8 @@ impl App {
         }
     }
 
-    /// Close Tabs in Pane: every tab of the active pane but the pinned ones, which VS Code spares
-    /// too, each as Close Tab closes it, so one whose edits cannot be written is asked about and
-    /// may stay. The least recently used first, so the tab in front stays there until it goes
-    /// itself.
+    /// Close unpinned tabs in the active pane through the normal save-and-confirm path.
+    /// Close least-recently-used first to preserve the active tab until its turn.
     pub fn close_pane_tabs(&self) {
         let pane = self.pane();
         for page in pane.recent().iter().rev() {
@@ -66,13 +59,10 @@ impl App {
         }
     }
 
-    /// `Ctrl+Tab` and `Ctrl+Shift+Tab`: one step through the active pane's tabs in the order they
-    /// were last used. Per pane, because a pane owns its tab view and its bar is what says which
-    /// notes are in it; a window-wide order would have to move the keyboard across a split, which
-    /// is not what a split is for.
+    /// Step through the active pane's MRU tabs with Ctrl+Tab or Ctrl+Shift+Tab.
     ///
-    /// Held a moment, the chord lists the pane's tabs on a card over it; a quick flip to the last
-    /// note shows nothing.
+    /// Pane-local cycling keeps focus within the split. Holding the chord shows a switcher;
+    /// a quick flip to the previous tab shows none.
     pub fn cycle_tab(self: &Rc<Self>, forward: bool) {
         let pane = self.pane();
         if let Some(page) = pane.step(forward) {
@@ -122,9 +112,8 @@ impl App {
         }
     }
 
-    /// Ctrl came up, or the window stopped being the active one mid-chord: whichever pane was
-    /// cycling commits the tab it landed on. Every pane rather than the active one, because a
-    /// chord started in one pane and abandoned in another must not leave a cursor behind.
+    /// Finish every pane's cycle on Ctrl release or window deactivation.
+    /// Checking all panes prevents abandoned cycles after focus crosses a split.
     pub fn end_cycle(&self) {
         for pane in self.panes.borrow().iter() {
             pane.end_cycle();
@@ -201,11 +190,8 @@ impl App {
         pane.nav.borrow_mut().record(place, Instant::now());
     }
 
-    /// `Alt+Left` / `Alt+Right` and the mouse's side buttons: one step through the active pane's
-    /// history. It may switch tabs inside the pane; it never moves the keyboard to another one.
-    ///
-    /// Entries whose document has left the pane are stepped over rather than dropped on the
-    /// floor, which is what a tab dragged into a neighbouring pane leaves behind.
+    /// Step pane-local history for Alt+Left/Right and side mouse buttons.
+    /// Skip entries whose documents transferred out of the pane without moving focus to another pane.
     pub fn navigate(self: &Rc<Self>, forward: bool) {
         let pane = self.pane();
         let Some(mut here) = self.here(&pane) else {
@@ -259,13 +245,10 @@ impl App {
         true
     }
 
-    /// Put the pane on the tab its reader was on before `page`, in time for `page` to go.
+    /// Select the previous MRU tab before detaching `page`.
     ///
-    /// Here rather than after the detach, because `AdwTabView` moves the selection to the left
-    /// neighbour itself the moment the selected page leaves — and by the time anything could
-    /// correct that, the neighbour is the newest thing in the history and the answer is lost.
-    /// Selecting first means the page that is closing is no longer the selected one, so
-    /// libadwaita has nothing to pick.
+    /// Libadwaita otherwise selects the left neighbour immediately, updating history before the
+    /// fallback can be chosen. Preselection prevents that automatic choice.
     pub fn select_survivor(&self, page: &adw::TabPage) {
         let Some(pane) = self.pane_of(page) else {
             return;
@@ -287,9 +270,7 @@ impl App {
 
     // --- pinned tabs ---------------------------------------------------------------------
 
-    /// Whether `page` is pinned: held at the start of its pane's bar, after the tabs pinned
-    /// before it. The window's rather than the pane's, so a pinned tab moved into another pane is
-    /// still pinned there.
+    /// Whether the window marks `page` as pinned, surviving transfers between panes.
     pub fn is_pinned(&self, page: &adw::TabPage) -> bool {
         self.pinned.borrow().contains(page)
     }
@@ -302,9 +283,7 @@ impl App {
         }
     }
 
-    /// Pin or unpin `page` where it is: a pinned tab is a kept one, never a preview, and either
-    /// way it moves to the boundary between the pinned tabs and the rest — the end of the pinned
-    /// ones, or the start of the others.
+    /// Pin or unpin `page`, keeping it and moving it to the pinned/unpinned boundary.
     pub(crate) fn set_pinned(self: &Rc<Self>, page: &adw::TabPage, pin: bool) {
         let Some(pane) = self.pane_of(page) else {
             return;
@@ -341,8 +320,7 @@ impl App {
         }
     }
 
-    /// The same once the tab view is done with `page`: a reorder or an attach is reported from
-    /// inside libadwaita's own drag handling, which a reorder of ours must not cut across.
+    /// Restore pinned ordering on an idle after libadwaita finishes its reorder or attach handling.
     pub fn hold_pinned_soon(self: &Rc<Self>, pane: &Rc<Pane>, page: &adw::TabPage) {
         let (app, pane, page) = (Rc::downgrade(self), Rc::downgrade(pane), page.clone());
         glib::idle_add_local_once(move || {
@@ -354,8 +332,7 @@ impl App {
 
     // --- panes ---------------------------------------------------------------------------
 
-    /// A new, empty pane beside `at`. The caller has to put something in it: an empty pane closes
-    /// itself as soon as a page leaves it, but one that never held a page has nothing to react to.
+    /// Create an empty pane beside `at`; the caller must populate it because it has no detach event to close it.
     pub(crate) fn split_beside(self: &Rc<Self>, at: &Rc<Pane>, side: Side) -> Rc<Pane> {
         let pane = Pane::new(&tab_menu());
         wire_pane(self, &pane);
@@ -366,8 +343,8 @@ impl App {
         pane
     }
 
-    /// Move `page` into a new pane beside `at`. Splitting a pane's only note off it would empty
-    /// the pane, which closes it again, so that one is refused rather than done and undone.
+    /// Move `page` into a new pane beside `at`, refusing the source pane's sole tab.
+    /// Otherwise empty-pane teardown would immediately undo the split.
     pub fn split_page(self: &Rc<Self>, at: &Rc<Pane>, side: Side, page: &adw::TabPage) {
         // A page in no pane of ours: a drag still in flight, which libadwaita has detached from
         // its view. `Shell::landed` waits for the attach before asking for a split, so this is
@@ -400,9 +377,8 @@ impl App {
         self.split_page(&at, side, &page);
     }
 
-    /// Move the tab into the pane on `side`, or split one off when there is none that way. The
-    /// fallback is what makes the chord worth having in the common single-pane window, where
-    /// there is nowhere to move to yet; `win.split-*` stays the always-split.
+    /// Move a tab into the neighbouring pane on `side`, splitting if none exists.
+    /// This makes movement useful from a single pane; split actions always create a pane.
     pub fn move_tab(self: &Rc<Self>, side: Side) {
         let Some(page) = self
             .menu_page
@@ -439,9 +415,8 @@ impl App {
         self.focus_document(to);
     }
 
-    /// Move Divider: one step of the divider of the nearest split around the active pane that
-    /// runs across `side`'s axis, towards `side` (`panes::divider_step`), kept inside what the
-    /// panes' own minimum sizes allow. A window with no such split has nothing to move.
+    /// Step the nearest divider on `side`'s axis, respecting pane minimum sizes.
+    /// No-op if there is no matching split.
     pub fn move_divider(&self, side: Side) {
         let (orientation, _) = panes::arrange(side);
         let forward = matches!(side, Side::Right | Side::Down);
@@ -458,9 +433,8 @@ impl App {
         }
     }
 
-    /// A tab dropped on the middle of `pane`: at the end of its bar and with the keyboard, where
-    /// [`Self::move_tab`] leaves one. libadwaita has already attached and selected it, at the
-    /// front, the one position `create-window` can put a page in.
+    /// Finish a middle drop by moving the tab to the bar's end and focusing it.
+    /// Libadwaita initially attaches through create-window at the front.
     pub fn move_in(&self, pane: &Pane, page: &adw::TabPage) {
         if !pane.has(page) {
             return;
@@ -506,9 +480,8 @@ impl App {
         self.sync_active();
     }
 
-    /// Make `pane` the one notes open into, reporting whether that was a change. Syncing the
-    /// title, the backlinks and the preview is the caller's, because the commonest caller is a
-    /// page selection that has to sync whether the pane changed or not.
+    /// Activate `pane` for future opens and return whether it changed.
+    /// Callers sync title, references and preview even if only its selected page changed.
     pub fn set_active_pane(&self, pane: &Rc<Pane>) -> bool {
         if Rc::ptr_eq(&self.active_pane.borrow(), pane) {
             return false;
@@ -518,9 +491,7 @@ impl App {
         true
     }
 
-    /// Every pane's bar but the active one's draws its selected tab as an outline rather than a
-    /// fill (`.accent-idle-pane`), so a split says which pane the keyboard and the next note go
-    /// to. A lone pane is the active one and keeps its fill.
+    /// Outline selected tabs in inactive panes so the next-open and keyboard destination is visible.
     fn mark_active_pane(&self) {
         let active = self.pane();
         for pane in self.panes.borrow().iter() {
@@ -529,21 +500,11 @@ impl App {
         }
     }
 
-    /// Give the keyboard to what `pane` is showing, so a document moved into it takes the caret
-    /// with it.
+    /// Focus the document shown in `pane` after moving a tab into it.
     ///
-    /// Without this the focus stays behind: the pane the tab came from selects its survivor while
-    /// the moved child still holds the keyboard, so libadwaita hands it to *that* document, and a
-    /// transfer that empties the pane drops the focus altogether. Everything a focused view draws
-    /// — the caret, GtkSourceView's current-line highlight — is then in the pane the reader has
-    /// just left, and the next keystroke goes there too.
-    ///
-    /// The document's own widget rather than the page's child: `grab_focus` on a container takes
-    /// the first thing in it that will have it, which for a note is whatever its banner is showing
-    /// and for a shell is the scroller around vte, which cannot hear a keystroke. An image and a
-    /// status page have no keys of their own beyond scrolling and a button, and take it in their
-    /// page; a two-blob comparison in its right column: the keyboard has to be in the pane the
-    /// reader went to, or it would stay the other pane's.
+    /// Otherwise libadwaita can leave focus on the source pane's survivor or drop it entirely.
+    /// Focus the document widget directly: container focus may select a banner or non-input
+    /// scroller. Images and status pages use their page; blob comparisons use the right column.
     pub(crate) fn focus_document(&self, pane: &Pane) {
         let widget: gtk::Widget = match self.doc_of(pane) {
             Some(Doc::Text(tab)) => tab.view.clone().upcast(),
@@ -593,7 +554,7 @@ impl App {
     }
 
     /// A tab or a vault path let go over `pane`. `true` when it was taken; a tab is taken but
-    /// only recorded, and `create-window` moves it (see [`Landing`]).
+    /// only recorded, and `create-window` moves it (see [`editor::Landing`]).
     pub fn dropped(self: &Rc<Self>, pane: &Rc<Pane>, zone: Zone, value: &glib::Value) -> bool {
         if value.get::<adw::TabPage>().is_ok() {
             // A dragged page has left its view, and libadwaita gives it one again through the

@@ -1,21 +1,18 @@
-//! The `Ctrl+/` comment toggle, as plain string work.
+//! Language-aware `Ctrl+/` comment toggling over plain strings.
 //!
-//! The markers come from the GtkSourceView language's metadata, so this module never needs to
-//! know which language it is looking at — and never needs to touch a buffer.
+//! Markers come from GtkSourceView language metadata, keeping this logic independent of
+//! languages and text buffers.
 
-/// Whether every non-blank line of `text` carries `marker` already, which is when a toggle takes
-/// it off: a selection only half commented is commented whole. Asked once over all the lines
-/// before any is changed, so a column of carets goes one way, as VS Code's does.
+/// Whether all nonblank lines already carry `marker`, deciding one toggle direction for all carets.
+/// Partially commented selections are commented in full.
 pub fn commented(text: &str, marker: &str) -> bool {
     text.split('\n')
         .filter(|l| !l.trim().is_empty())
         .all(|l| l.trim_start().starts_with(marker))
 }
 
-/// `text`, whose lines are the ones the user selected, with a line comment put on (`on`) or taken
-/// off. It goes on at the shallowest indentation in the selection so the block stays aligned, and
-/// comes off with one space after it. Blank lines are left alone, and the trailing newline
-/// structure of the input is preserved.
+/// Add (`on`) or remove line comments in selected `text`, preserving blank lines and trailing newlines.
+/// Insert at the shallowest indentation to align the block; removal also takes one following space.
 pub fn comment_lines(text: &str, marker: &str, on: bool) -> String {
     // `split('\n')` and `join("\n")` round-trip exactly, trailing newline included.
     let lines: Vec<&str> = text.split('\n').collect();
@@ -64,11 +61,9 @@ pub fn toggle_block(text: &str, start: &str, end: &str) -> String {
     }
 }
 
-/// Byte length of a line's indentation.
+/// Indentation length in bytes, counting spaces and tabs only.
 ///
-/// ponytail: spaces and tabs only, which is what code indents with. That keeps the offset an
-/// ASCII boundary, so slicing a line at it can never split a character; an exotic indent (a
-/// no-break space, say) is simply treated as content.
+/// ASCII whitespace guarantees a safe slicing boundary; other whitespace is treated as content.
 fn indent(line: &str) -> usize {
     line.len() - line.trim_start_matches([' ', '\t']).len()
 }

@@ -1,0 +1,107 @@
+name: Release
+
+# Three numbers, so the APK's versionCode below can be read off the tag.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  apk:
+    name: android app
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/android
+      # Gradle reads ORG_GRADLE_PROJECT_* as project properties (`android/app/build.gradle.kts`).
+      # Android installs an update only over a lower versionCode, so it has to grow with the tag.
+      - name: Version from the tag
+        run: |
+          IFS=. read -r major minor patch <<< "${GITHUB_REF_NAME#v}"
+          echo "ORG_GRADLE_PROJECT_versionName=$major.$minor.$patch" >> "$GITHUB_ENV"
+          # ponytail: two digits each for minor and patch; widen once either passes 99.
+          echo "ORG_GRADLE_PROJECT_versionCode=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_ENV"
+      - run: make apk-release
+      # With the repository's keystore, so each release installs over the last. It holds one key,
+      # so apksigner needs no alias, and that key shares the store's password.
+      - name: Sign
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          [ -n "$KEYSTORE" ] || { echo "::error::the ANDROID_KEYSTORE secret is not set"; exit 1; }
+          base64 -d <<< "$KEYSTORE" > "$RUNNER_TEMP/release.jks"
+          for apk in android/app/build/outputs/apk/release/app-*-release-unsigned.apk; do
+            abi=$(basename "$apk" -release-unsigned.apk)
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/release.jks" \
+              --ks-pass env:KEYSTORE_PASSWORD --out "accent-$GITHUB_REF_NAME-${abi#app-}.apk" "$apk"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: accent-apk
+          path: accent-*.apk
+          if-no-files-found: error
+
+  # The servers a remote vault uploads, which the Flatpak ships but cannot build: the Rust
+  # extension has no musl targets (see the manifest's accent-server module).
+  server:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: pipx install cargo-zigbuild
+      - run: make server
+      - uses: actions/upload-artifact@v7
+        with:
+          name: server
+          path: target/*-unknown-linux-musl/release/accent-cli
+          if-no-files-found: error
+
+  flatpak:
+    name: desktop app
+    needs: server
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+      # Back where `make server` left them, which is where the manifest looks.
+      - uses: actions/download-artifact@v8
+        with:
+          name: server
+          path: target
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: build-aux/io.github.stroblme.Accent.yml
+          bundle: accent-${{ github.ref_name }}-x86_64.flatpak
+          cache-key: flatpak-builder-${{ github.sha }}
+
+  release:
+    needs: [apk, flatpak]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # `accent-*` leaves the server artifact out; the Flatpak action names its own after the bundle.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: accent-*
+          merge-multiple: true
+      - run: gh release create "$GITHUB_REF_NAME" accent-* --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

@@ -1,14 +1,11 @@
-//! A PDF's page edits carried into what names its pages by number: the notes' links into it, and
-//! the places Back and Forward keep in it.
+//! Carry PDF page edits into note links and Back/Forward locations.
 //!
-//! The notes are rewritten through the vault, where the files are, as a rename's links are
-//! (`Vault::repage_links`); the page edit is already made by then, so there is nothing to ask.
+//! Notes are rewritten through `Vault::repage_links` after the page edit. Remote notes update
+//! only after upload succeeds: the host still has old pages until then, and an `(edited)`
+//! conflict copy does not replace them.
 //!
-//! On a remote vault the notes follow an edit only once the upload carrying it has landed on the
-//! host: until then the host's file has the old pages, and an upload that goes beside it as
-//! `(edited)` leaves it with them for good. The edits still to follow are the document's rather
-//! than its tab's, so a tab closed meanwhile leaves them to the next, and on a remote vault they
-//! are kept beside the cached copy, as its stamp is, for the next window.
+//! Pending edits belong to the document, surviving tab closes; remote edits are stored beside
+//! the cached file so the next window can finish them.
 
 use crate::doc;
 use crate::pdftab::PdfTab;
@@ -21,13 +18,10 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-/// The notes' links following one document's page edits, which the window runs
-/// (`App::relink`): one rewrite at a time, in the order the edits were made, since each reads
-/// what the one before it wrote.
+/// Serialize link rewrites in edit order because each reads the previous rewrite's output.
 #[derive(Default)]
 pub(crate) struct Relinks {
-    /// The edits still to follow, oldest first, each numbered in the order it was made and with
-    /// its history step.
+    /// Pending edits in sequence order, with undo-history steps.
     queue: VecDeque<(u64, PageEdit, u32)>,
     /// The number the next edit takes.
     next: u64,
@@ -39,8 +33,7 @@ pub(crate) struct Relinks {
     landed: u64,
     /// A rewrite is out on a worker.
     running: bool,
-    /// The links each delete left naming the page it took out, by its step: what the Undo that
-    /// puts the page back keeps where they are.
+    /// Deleted-page links by history step, preserved for undo to restore their targets.
     left: HashMap<u32, Vec<KeptLink>>,
 }
 
@@ -57,9 +50,7 @@ impl Relinks {
         }
     }
 
-    /// The oldest edit whose notes may follow now, unless a rewrite is already out. An insert
-    /// that puts back the page a delete took out keeps the links that delete left naming it; a
-    /// new blank page has none.
+    /// Take the oldest eligible edit unless busy; restored pages retain deleted-page links, new blank pages have none.
     fn take(&mut self) -> Option<Taken> {
         let &(n, edit, step) = self.queue.front().filter(|(n, ..)| *n < self.landed)?;
         if self.running {
@@ -83,15 +74,13 @@ impl Relinks {
         }
     }
 
-    /// The upload went beside the document as `(edited)`, which the edits not yet on the host
-    /// went into: the original keeps its pages, so its notes keep naming them.
+    /// Discard edits uploaded as an `(edited)` conflict copy; original-page links must keep their targets.
     fn refused(&mut self) {
         let landed = self.landed;
         self.queue.retain(|(n, ..)| *n < landed);
     }
 
-    /// What is kept beside the cached copy: the edits still to follow and the links the deletes
-    /// among them left for the Undos among them. `None` once nothing is left to follow.
+    /// Encode pending edits and deleted-page links for undo; `None` removes completed queue state.
     fn encode(&self) -> Option<Vec<u8>> {
         if self.queue.is_empty() {
             return None;
@@ -104,9 +93,7 @@ impl Relinks {
         serde_json::to_vec(&(edits, left)).ok()
     }
 
-    /// What [`encode`](Self::encode) kept, read back as edits in the file, none of them on the
-    /// host yet as far as this run knows. Their steps are numbered afresh: the history that made
-    /// them is gone, and this run may hand out the same numbers.
+    /// Restore cached edits as written but not uploaded; assign fresh history steps because prior undo history is gone.
     fn decode(bytes: &[u8]) -> Relinks {
         type Kept = (Vec<(PageEdit, u32)>, Vec<(u32, Vec<KeptLink>)>);
         let Ok((edits, left)) = serde_json::from_slice::<Kept>(bytes) else {
@@ -139,10 +126,7 @@ fn renamed(key: &str, from: &str, to: &str) -> Option<String> {
 }
 
 impl App {
-    /// The pages of `pdf` were edited, or an edit walked back or forward by Undo or Redo (`step`
-    /// names it either way). The places in it follow at once; the notes linking into it are
-    /// queued to follow behind the rewrites already out, on a remote vault once the edit's upload
-    /// has landed ([`pages_landed`](Self::pages_landed)).
+    /// Update reading locations immediately; queue note-link rewrites after remote upload ([`pages_landed`](Self::pages_landed)).
     pub(crate) fn repaged(self: &Rc<Self>, pdf: &Rc<PdfTab>, edit: PageEdit, step: u32) {
         let (key, count) = (pdf.key(), pdf.page_count());
         // A place on the page that went is on the one that took its place, as the reader is.
@@ -209,9 +193,7 @@ impl App {
         }
     }
 
-    /// `from` was renamed or moved to `to`: the edits still to follow of the documents at or
-    /// under it go with them, as their cached copies did (`Remote::moved`), and the links a page
-    /// delete left are found again by their note's path at its Undo.
+    /// Carry pending edits through rename/move, then resolve deleted-page links by their renamed note paths for undo.
     pub(crate) fn relinks_renamed(&self, from: &str, to: &str) {
         let mut all = self.relinks.borrow_mut();
         let moved: Vec<_> = (all.keys())
@@ -279,17 +261,13 @@ impl App {
         found.map(|(key, _)| key.clone())
     }
 
-    /// Rewrite the notes for the oldest page edit of `key` that may follow, unless a rewrite is
-    /// already out, whose landing runs this again.
+    /// Rewrite notes for the oldest eligible page edit of `key`, one rewrite at a time.
     ///
-    /// One the host was never asked, the link being down, goes back to the front of the queue
-    /// for [`relink_all`](Self::relink_all), and nothing is said: the banner says the link went.
-    /// One the link dropped under may have been carried out, and is not asked again: twice would
-    /// move the links twice.
+    /// Unsent disconnected requests return to the queue for [`relink_all`](Self::relink_all).
+    /// Requests interrupted after dispatch are not retried because they may have applied,
+    /// and repeating them would shift links twice.
     ///
-    /// None goes out before a walk of the vault has finished, the first or one stopped from the
-    /// status bar: the index has not got every note linking in, and a note it missed would keep
-    /// its old numbers for the next edit to move from there. A rename is refused until then.
+    /// Wait for a complete vault walk so every linking note is indexed before page renumbering.
     fn relink(self: &Rc<Self>, key: &str) {
         let (Some(vault), Some(ops)) = (self.vault().cloned(), self.ops().cloned()) else {
             return;
@@ -341,16 +319,13 @@ impl App {
         });
     }
 
-    /// Say what a rewrite did or waits for, in place of what the last one for this document said:
-    /// a burst of Undos would otherwise stack a toast each, all but the last out of date.
+    /// Replace each document's rewrite toast so bursts of undo cannot stack stale reports.
     fn relinked(&self, key: &str, message: &str) {
         self.add_toast(Toast::new(message).key(format!("relink {key}")));
     }
 }
 
-/// What the toast says after the notes followed a page edit: how many links moved in how many
-/// notes, how many name the page that went, and what could not be rewritten or reloaded. `None`
-/// when the edit touched no link.
+/// Report affected links/notes, deleted-page targets and rewrite/reload failures; `None` if no link changed.
 fn relink_message(report: &RepageReport, unsaved: usize) -> Option<String> {
     let plural = |n: usize, one: &str, many: &str| match n {
         1 => format!("1 {one}"),

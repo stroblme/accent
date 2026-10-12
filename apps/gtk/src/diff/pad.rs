@@ -1,11 +1,9 @@
-//! The blank space that keeps the two columns level: how much each row needs, and the
-//! padding tags that lay it on a paragraph.
+//! Paragraph padding that aligns comparison-column rows.
 
 use adw::prelude::*;
 
-/// The blank space above a paragraph, and below the last, that keeps the two columns level: one
-/// tag per pixel count, named this plus the count, so a paragraph's padding can be read back off
-/// the buffer. See [`carried`].
+/// Pixel-count padding tag prefix, allowing current paragraph padding
+/// to be read from the buffer ([`carried`]).
 const PAD_ABOVE: &str = "diff-pad-above-";
 const PAD_BELOW: &str = "diff-pad-below-";
 /// A paragraph GTK has not laid out since its text or its padding changed: see [`measure`].
@@ -17,22 +15,17 @@ pub(super) const UNMEASURED: &str = "diff-unmeasured";
 pub(super) struct Pads {
     pub(super) above: Vec<i32>,
     pub(super) below: Vec<i32>,
-    /// What no line of this column can carry because it has none at all — a file a commit added,
-    /// seen from before it — which is the whole of the other column's height.
+    /// Whole peer height when this column has no line to carry padding,
+    /// such as the old side of an added file.
     pub(super) rest: i32,
 }
 
-/// From the natural height of every row on each side — `None` where a side has no visible line
-/// there — the space each side adds so that row `i` starts at the same height on both, and the
-/// top of every row in that shared grid. `extra` is space both sides leave at a row on purpose,
-/// which is where a hidden run's button goes.
+/// Compute per-side padding and shared row tops from natural heights and `extra` space.
 ///
-/// A line shorter than its partner leaves the difference under it, so two paired lines start on
-/// the same row; a row with no line on a side leaves all of it. The space goes below the side's
-/// line before it where that line is a change (`changed`, per row), so a change and the blank
-/// that levels it are one tinted block, and above the side's next line otherwise; what is left
-/// after the last line goes below it, or to `rest` on a side with no line. This is the whole
-/// correctness surface of the alignment, so it is a plain function over plain numbers.
+/// `None` means no visible line. Shorter lines pad below; missing lines reserve the full row.
+/// Place blank space below a preceding change to keep its tint contiguous, otherwise above
+/// the next line. Trailing space goes below the last line or into `rest` on empty sides.
+/// Pure arithmetic keeps alignment correctness testable without a display.
 pub(super) fn padding(
     columns: &[Vec<Option<i32>>],
     extra: &[i32],
@@ -77,27 +70,15 @@ pub(super) fn padding(
     (pads, tops)
 }
 
-/// The natural height of one line of `buffer` as `view` lays it out, wrapping and all, with
-/// `padded` — the pixels this module has put above and below it — taken back off. The flag
-/// says the figure is an estimate.
+/// Measure a line's natural height, subtracting `padded`, and report whether estimated.
 ///
-/// GTK's own figure is used once it has one: a validated line's height is the paragraph's Pango
-/// extent rounded once, margins on. GTK validates lazily, though, and reports 0 for a line it
-/// has not reached, so until then the height is measured inside the paragraph — the first and
-/// last character's positions come from the same layout, so their difference is right to
-/// within the pixel a wrapped paragraph's per-line rounding can add — and the caller asks again
-/// once GTK has caught up. A paragraph the buffer counts as several lines (U+2029) is measured
-/// that way too, since GTK's figure would be for its first line alone.
+/// Use validated GTK heights when available. Lazy layout returns zero before validation;
+/// measure character positions within the paragraph meanwhile. U+2029 multi-line paragraphs
+/// also need this path because GTK's figure covers only their first line.
 ///
-/// So is one marked [`UNMEASURED`], until GTK's figure agrees with it: GTK keeps the height it
-/// last laid a line out at until it lays it out again, so its figure for a line just edited is
-/// the old text's, and one for a paragraph just re-padded, less the padding it carries now, is
-/// off by the change. Read as it was, the relayout run on a keystroke itself padded the other
-/// column for the old text, and a relayout run before GTK had laid out a re-padded paragraph
-/// moved its padding by the change again on every pass.
-///
-/// Not in a `fresh` pass, one run after GTK's own layout idles: GTK has laid every line out again
-/// by then, so its figure is the line's as it is, and the mark goes.
+/// [`UNMEASURED`] marks edited or repadded lines whose cached GTK height still reflects old
+/// text or padding. Estimate until agreement, or clear the mark on a `fresh` pass after
+/// layout idles, preventing stale heights from repeatedly shifting padding.
 pub(super) fn measure(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -140,8 +121,7 @@ pub(super) fn measure(
     }
 }
 
-/// The height of one line in `view`'s own font, its spacing included: what a line no pass has
-/// measured yet stands at until one does.
+/// Fallback line height in the view font, including spacing, until measured.
 pub(super) fn one_line(view: &sourceview5::View) -> i32 {
     let (_, height) = view.create_pango_layout(Some("X")).pixel_size();
     height + view.pixels_above_lines() + view.pixels_below_lines()
@@ -156,9 +136,8 @@ fn unmark(buffer: &sourceview5::Buffer, tag: &gtk::TextTag, first: gtk::TextIter
 
 #[cfg(feature = "bench")]
 thread_local! {
-    /// The lines [`measure`] was asked for, by how it answered: GTK's figure, or a layout of its
-    /// own because GTK had none, because the line was [`UNMEASURED`], or because it is several
-    /// (U+2029). The bench's counters read and reset it.
+    /// Measurement-source counters: GTK or fallback layout for absent,
+    /// [`UNMEASURED`] or U+2029-split lines. Drills read and reset them.
     pub(super) static MEASURED: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
 }
 
@@ -171,9 +150,8 @@ fn tally(how: usize) {
     });
 }
 
-/// Mark the lines `from..to` touches [`UNMEASURED`], from the newline before the first of them,
-/// so that text typed at a line's start lands inside the mark: what a comparison does to an edit
-/// on its way into the buffer, and to a paragraph it re-pads.
+/// Mark lines touched by `from..to` [`UNMEASURED`], including the preceding
+/// newline so insertion at a line start inherits the tag.
 pub(super) fn unmeasured(
     buffer: &impl IsA<gtk::TextBuffer>,
     from: &gtk::TextIter,
@@ -186,13 +164,10 @@ pub(super) fn unmeasured(
     buffer.apply_tag_by_name(UNMEASURED, &start, &end);
 }
 
-/// The padding the paragraph starting at `at` carries, above and below, over the view's own
-/// margins.
+/// Read paragraph padding above and below `at`, beyond the view's margins.
 ///
-/// Read off the buffer rather than remembered, because it is what GTK's figure for the line
-/// includes: a line keeps the height it was last laid out at until GTK lays it out again, even
-/// after an edit or a tag change, so taking off anything but the padding it really carries
-/// measures it wrong. Rows renumber after an edit, but the tags move with the text.
+/// Buffer tags describe what GTK's cached height includes and move with edits. Remembered
+/// row padding would mismeasure lines before GTK revalidates them.
 pub(super) fn carried(view: &sourceview5::View, at: &gtk::TextIter) -> (i32, i32) {
     let (mut above, mut below) = (0, 0);
     // Lowest priority first, so where a paste has left two, the one GTK uses is read last.
@@ -207,9 +182,8 @@ pub(super) fn carried(view: &sourceview5::View, at: &gtk::TextIter) -> (i32, i32
     (above, below)
 }
 
-/// What [`carried`] reads off the paragraph starting at each of `starts`, which ascend, for all of
-/// them in one walk over the padding tags' own toggles: reading every paragraph's tags took 430 ms
-/// a relayout at 120,000 rows a column (2026-10-08).
+/// Read padding for ascending `starts` in one tag-toggle walk, avoiding
+/// per-paragraph tag lookup costs on large comparisons.
 pub(super) fn carried_all(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -259,23 +233,15 @@ pub(super) fn carried_all(
         .collect()
 }
 
-/// Give the paragraph `from..to` (its newline included) `above` pixels of padding above it and
-/// `below` under it, where its first character does not carry exactly that already: a paragraph
-/// left alone is not laid out again. `true` when it was not left alone.
+/// Set paragraph padding to `above` and `below`; return whether it changed.
 ///
-/// GTK reads a paragraph's spacing off its first character alone, but the tags cover the newline
-/// before the paragraph and the paragraph itself up to its own newline. Text typed at its start
-/// lands inside them — text inserted where a tag begins does not take the tag — and so does the
-/// character left when the first is deleted, where tags on the first character alone were lost
-/// to either edit and the line was laid out bare for a frame. The paragraph's own newline is left
-/// out because a tag ending at the next line's start is taken by text typed there. The first
-/// paragraph has no newline before it, and one under a blank line leaves that line's newline to
-/// it: [`reclaim`] makes up for both.
+/// GTK reads spacing from the first character. Tags start at the preceding newline and end
+/// before the paragraph's own newline so insertions and first-character deletion retain
+/// padding without affecting the next line. First paragraphs and paragraphs below blank
+/// lines need [`reclaim`] because the preceding newline is unavailable.
 ///
-/// A blank line is laid out with the spacing its one character carries, so a paragraph's tags on
-/// it padded the blank line too, and a relayout run before GTK had laid it out again took both of
-/// the paragraph's pads off the blank line's height and gave them to the paragraph as padding
-/// above: twice the padding on every such pass, until a line's height overflowed GTK's `int`.
+/// Do not tag a blank line's sole newline with its successor's padding: stale layout would
+/// subtract that padding twice and grow alignment until GTK's height overflowed.
 pub(super) fn pad(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -320,28 +286,18 @@ pub(super) fn is_pad(tag: &gtk::TextTag) -> bool {
         .is_some_and(|name| name.starts_with(PAD_ABOVE) || name.starts_with(PAD_BELOW))
 }
 
-/// The lines a change can have pushed a padding tag out of: the one the caret is in, which is
-/// where typing lands, and the first, which has no newline before it whoever wrote into it.
+/// Lines whose padding an edit may displace: the caret line and first
+/// line, which has no preceding newline to carry the tag.
 pub(super) fn reclaim(buffer: &sourceview5::Buffer) {
     reclaim_line(buffer, &buffer.start_iter());
     reclaim_line(buffer, &buffer.iter_at_mark(&buffer.get_insert()));
 }
 
-/// Put text typed at the start of `line` back under the paragraph's padding.
+/// Restore padding over text inserted at the start of `line`.
 ///
-/// [`pad`] starts a paragraph's tags at the newline before it, so text typed at its start lands
-/// inside them. Two paragraphs cannot both own that newline, though: the first line of all has
-/// none, and the newline before a paragraph under a blank line is the blank line's only
-/// character, which [`pad`] leaves to the blank line. There the tags begin at the
-/// paragraph's own first character and a character typed ahead of them goes in outside: GTK lays
-/// the line out bare for a frame, and the relayout, finding no padding on its first character,
-/// measures it at the height it had last been laid out at, padding and all. Stretched back over
-/// what was typed, the tags cover the first character again and say what GTK last used.
-///
-/// Only there: in any other line a tag beginning inside it is what is left of the paragraph an
-/// edit joined onto it, and stretched back it gave the joined line that paragraph's padding until
-/// the next relayout took it off again. The line's own tags are the ones that end with it: the
-/// next paragraph's begins at this line's newline as well, and runs on past it.
+/// First lines and lines below blanks lack a preceding newline for [`pad`] to tag, so new
+/// text can fall outside padding. Extend only tags ending with this line; other tags may
+/// belong to a joined or succeeding paragraph and must not be reclaimed.
 fn reclaim_line(buffer: &sourceview5::Buffer, line: &gtk::TextIter) {
     let mut start = *line;
     start.set_line_offset(0);
@@ -375,9 +331,8 @@ fn ends_by(at: &gtk::TextIter, tag: &gtk::TextTag, to: &gtk::TextIter) -> bool {
     end <= *to
 }
 
-/// The tag named `prefix` plus `px`, which sets that many pixels above or below a paragraph.
-/// `pixels-above-lines` on a tag replaces the view's default rather than adding to it, so `px`
-/// is the base margin plus the pad.
+/// Create a `prefix`+`px` padding tag. `px` includes the base margin
+/// because `pixels-above-lines` replaces rather than adds to view defaults.
 fn pad_tag(buffer: &sourceview5::Buffer, prefix: &str, px: i32) -> gtk::TextTag {
     let name = format!("{prefix}{px}");
     let table = buffer.tag_table();

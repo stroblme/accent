@@ -1,10 +1,8 @@
-//! The Search pane: the box, the toggles, the replace row and the query loop behind them.
+//! Search widgets and an asynchronous vault-query loop.
 //!
-//! Search runs off the main loop. [`Data::search`] is called on a worker thread, so a full-vault
-//! query never costs a keystroke; a bar pulsing above the results says one is running and the
-//! previous results stay on screen until the new ones arrive. A query cannot be called back once
-//! it is out, so a newer one simply supersedes it: each carries the number it was asked under,
-//! and an answer arriving under a newer number is dropped rather than painted.
+//! [`Data::search`] runs on a worker to keep typing responsive. A pulsing bar reports work;
+//! old results remain until replacement results arrive. Request numbers discard superseded
+//! answers because an in-flight query cannot be cancelled.
 
 use super::{OnOpen, Target};
 use crate::dialogs::confirm;
@@ -35,29 +33,19 @@ const PULSE: Duration = Duration::from_millis(80);
 /// keeps an `AdwAlertDialog` for; the one match the pane is already showing struck through is the
 /// case where the preview *is* the confirmation.
 const CONFIRM_ABOVE: usize = 1;
-/// How many pulses a query has to outlive before its bar is drawn at all (DESIGN.md, Loading).
-/// Nothing else in the window starts a search, so a query the user did not ask for — the requery
-/// a changed file triggers under a finished search — is over inside this and never draws one:
-/// on the generated 40k-file vault, 0.8–11 ms ranked and 50–67 ms as the exact scan. The one
-/// query there that does outlive it is the reader's own first exact scan on an index the page
-/// cache has not got yet, which reads every body off the disk (459 ms) and is worth reporting.
+/// Progress-display delay (DESIGN.md, Loading). Short queries and settled refreshes finish
+/// before it, avoiding flashes; longer cold-index scans show progress.
 const SHOW_AFTER: u32 = 2;
-/// How long a ranked answer stands before its two slower halves are asked for — the files that
-/// hold it mid-word, and with All on the walk past the index — counted from when it was asked.
-/// That is [`DEBOUNCE`] after the last keystroke, so the two start some 400 ms after the typing
-/// stops. The walk took 132 ms on the generated 40k-file vault and a mid-word query up to 140 ms,
-/// too slow for every keystroke, and a query typed past in the meantime asks for neither.
+/// Delay slower mid-word and unindexed passes until the ranked answer settles. Skip them if
+/// typing supersedes the query, avoiding expensive work on every keystroke.
 const WIDEN_AFTER: Duration = Duration::from_millis(350);
 /// The heading over the rows All's walk found past the index.
 const NOT_INDEXED: &str = "Not Indexed";
 /// The heading over the rows that hold a ranked query inside a word, which says where the prefix
 /// hits above them end.
 const INSIDE_WORDS: &str = "Inside Words";
-/// Most rows one opened "+N more" row lists; any left over stay behind a tail row of their own,
-/// which opens the same way. A step the reader can take in, by the user's choice: a file with
-/// thousands of matches is walked a hundred at a time rather than poured into the list, and a
-/// one-character pattern over a megabyte of minified code — a million matches — costs nothing
-/// until it is asked for.
+/// Maximum matches per tail-row expansion. Retain another tail row for the rest so large files
+/// expand in manageable batches instead of filling the list.
 const MORE_AT_ONCE: usize = 100;
 /// One query, already compiled. Built on the main thread from what the search box says, so an
 /// invalid pattern is reported without a worker thread being spent on it.
@@ -459,10 +447,8 @@ struct Search {
     body: gtk::Stack,
     view: gtk::ListView,
     results: gio::ListStore,
-    /// Which question the rows on screen are meant to answer. Every query takes the next number
-    /// before it starts, so an answer arriving under a newer one is dropped instead of painted:
-    /// a slow first query — a remote vault, or an All walk — used to hold every keystroke typed
-    /// after it until it landed. Atomic, because a walk reads it from its own threads to stop.
+    /// Atomic query generation. Drop answers superseded by newer text rather than holding later
+    /// keystrokes behind a slow worker; walk threads also read it to stop early.
     generation: Arc<AtomicU64>,
     /// How many queries are on worker threads. A query cannot be called back, so the count comes
     /// down as each one lands, whether its answer was wanted or not.
@@ -510,12 +496,9 @@ impl Search {
             .then(|| self.replace_entry.text().to_string())
     }
 
-    /// Run the pulse timer while a query is on a worker thread, and show the bar once that query
-    /// has run long enough to be worth reporting.
-    ///
-    /// Opacity rather than visibility: the bar keeps its height either way, so results do not jump
-    /// down a few pixels the moment a query starts. And it is shown late rather than at once,
-    /// because a bar that appears and goes in the same breath reads as a flash, not as progress.
+    /// Pulse during worker queries and reveal after the progress delay. Keep the bar allocated
+    /// through opacity so results do not shift, and delay display to avoid flashes on quick
+    /// queries.
     fn set_busy(&self, busy: bool) {
         match busy {
             // A pulse already running is left where it is: restarting it on every keystroke —
@@ -629,16 +612,11 @@ impl Search {
         });
     }
 
-    /// Add the slower halves of a ranked answer once it has stood for [`WIDEN_AFTER`]: the files
-    /// that hold the query mid-word, in the order the trigram index gives them, then, with All
-    /// on, what the walk finds past the index under [`NOT_INDEXED`]. Each goes below what is
-    /// already listed, in that order, into whatever room the rows above left.
+    /// After [`WIDEN_AFTER`], append mid-word results then All's unindexed results in the
+    /// remaining row budget. They lack comparable FTS statistics, so prefix results stay first.
     ///
-    /// Neither can be ranked against the prefix rows — a trigram match has no term statistics
-    /// and a walked file has no FTS row — so both come after them. A newer question cancels all
-    /// of it: the wait ends without asking, a walk already running reads the generation before
-    /// each file and stops, and an answer that lands anyway is dropped, so it never shows under
-    /// a query asked after it.
+    /// A newer query cancels pending passes and stops walks through the generation check;
+    /// discard replies that still arrive afterward.
     fn widen_soon(
         self: &Rc<Self>,
         key: Key,
@@ -845,14 +823,9 @@ impl Search {
         }
     }
 
-    /// Open a tail row: list the matches it counts in its place, the first of them where it was,
-    /// so the pointer that opened it rests on a match and the rows above do not move.
-    ///
-    /// They are found again in the file's text, on a worker thread — a remote vault's file
-    /// crosses the link — the way the rows above them were found, past the last of those. A
-    /// newer answer landing meanwhile has taken the tail row away with the rows it replaced, and
-    /// the rows found for it are dropped: the row is looked for by identity, not by position,
-    /// which the tails opened before it have moved.
+    /// Expand a tail row in place with matches after its last listed byte, preserving rows above
+    /// and pointer position. Read the file on a worker, including remote transfer. Locate the
+    /// tail by identity and discard results if a newer answer removed it.
     fn expand(self: &Rc<Self>, tail: glib::BoxedAnyObject) {
         let (rel, more) = {
             let row = tail.borrow::<Row>();
@@ -938,12 +911,9 @@ impl Search {
         self.apply.set_sensitive(total > 0);
     }
 
-    /// Rewrite the vault, then ask the same question again so the rows show what is there now.
-    ///
-    /// The rewrite is one fsync per note and runs on a worker thread; 245 notes took 1.9 s on the
-    /// generated vault and 3.3k took 35 s, all of which the main loop used to spend frozen. The
-    /// pane marks itself busy for the duration instead — the bar pulses, Replace All goes
-    /// insensitive, and a query typed meanwhile waits for the writes rather than racing them.
+    /// Run Replace All on a worker, then refresh the query. Mark the pane busy, pulse progress
+    /// and disable replacement while writes run; queries typed meanwhile wait to avoid racing
+    /// files being rewritten.
     fn replace_all(self: &Rc<Self>) {
         // Compiled and thrown away: the vault is asked in the same terms the box holds, and this
         // is only here to refuse a pattern that does not compile before anything is asked.
@@ -1045,12 +1015,9 @@ fn fts_rows(hits: Vec<SearchHit>, query: &str) -> Vec<Row> {
     rows
 }
 
-/// One row per match, with the diff against the replacement when there is one, and a tail row
-/// under a file whose matches the per-file cap cut short.
-///
-/// ponytail: the replacement is computed by running `re` over the matched text again, which is
-/// what makes `$1` expand in the preview. A pattern whose groups depend on context outside the
-/// match would preview wrongly; the regex crate has no lookaround, so today that cannot happen.
+/// Build regex-match rows with optional replacement previews and per-file tail rows. Re-run `re`
+/// over matched text to expand capture groups; context-dependent groups would be unsupported,
+/// and the regex crate has no lookaround.
 fn grep_rows(
     hits: Vec<Match>,
     re: &Regex,

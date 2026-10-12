@@ -6,20 +6,14 @@ use super::*;
 /// One press of Zoom In or Zoom Out, in percent: a tenth of the document font.
 const ZOOM_STEP: i64 = 10;
 
-/// How long an image's zoom is left alone before an SVG is drawn again at it, the drawing before
-/// enlarged meanwhile: a run of steps draws once, at the last.
+/// Debounce SVG rerendering after zoom steps, scaling the previous image while waiting.
 const ZOOM_SETTLE: Duration = Duration::from_millis(300);
 
 impl App {
-    /// Step an image's zoom, or, with `None`, put it back to fitting the window.
+    /// Step image zoom, or reset to fit with `None`.
     ///
-    /// Reset is the fit, which is how the tab opened. The step is taken from the tab's own zoom
-    /// rather than from the size it asked the picture for: a pixel width is a whole number, and a
-    /// zoom read back out of one lands short of the tenth it was, which is enough for the next
-    /// step to be the zoom the image is already at.
-    ///
-    /// A step keeps what is under `at` (a point in the scroller, the pointer's) where it is, as a
-    /// PDF page does; a chord has no pointer and keeps the middle of the view, as a diagram does.
+    /// Use stored zoom rather than rounded pixel sizes so each step advances. Keep the content
+    /// under `at` fixed, or the viewport centre for keyboard zoom.
     pub fn zoom_image(
         self: &Rc<Self>,
         image: &Rc<doc::Viewer>,
@@ -73,9 +67,7 @@ impl App {
         );
     }
 
-    /// Zoom is the document's, never the chrome's: DESIGN.md leaves the interface font to the
-    /// system, and this is the reading size of one note. Presentation mode is the same WebView,
-    /// so it is zoomed along with the preview.
+    /// Zoom document content and preview/presentation together; leave interface fonts to the system.
     pub fn set_zoom(self: &Rc<Self>, zoom: f64) {
         let zoom = clamp_zoom(zoom);
         self.zoom.set(zoom);
@@ -95,17 +87,10 @@ impl App {
         self.save_session_soon();
     }
 
-    /// The zoom readout in the status bar: the document zoom for a text tab, the shell's own for a
-    /// terminal, and the PDF's own for a PDF, which fits to the window rather than counting
-    /// percentages.
+    /// Update the zoom readout to match [`App::zoom_action`]'s supported document kinds.
     ///
-    /// A document at 100 % has nothing to say, so the readout goes rather than leaving a control
-    /// saying nothing is going on; the same for a shell at its own size. A PDF always shows one:
-    /// fitting is a zoom too, and it is what clicking the readout goes back to. So does an image,
-    /// for the same reason. A status page and a diff show nothing at all, because no zoom reaches
-    /// them — the readout used to fall through to the window's document zoom and say "120 %" over
-    /// a picture drawn at its own size. It matches the same six variants [`App::zoom_action`]
-    /// does, so the readout and the chords cannot disagree.
+    /// Text and shells hide the readout at their default size. PDFs and images always show it
+    /// because reset means fit; status pages and diffs have no zoom readout.
     pub fn refresh_zoom(&self) {
         let label = match self.active_doc() {
             Some(Doc::Pdf(pdf)) => pdf.zoom_label(),
@@ -178,12 +163,10 @@ pub fn set_image_zoom(picture: &gtk::Picture, zoom: Option<f64>) -> Option<(i32,
     size
 }
 
-/// Scroll an image's scroller so that what is under `at` is under it again once the picture in
-/// it is `size`, by [`zoomed_scroll`].
+/// Adjust image scrolling to keep content under `at` after resizing to `size`.
 ///
-/// The viewport takes the picture's new size only when it is next allocated, and meanwhile
-/// clamps a value to the old one, so the adjustments are handed the new extent first: the
-/// picture's, or the viewport's own while the picture is the smaller, as the viewport will.
+/// Set adjustment extents before values because allocation still has the old size and would
+/// clamp too early. Bounds use at least the viewport size.
 fn keep_under(scroller: &gtk::ScrolledWindow, size: (i32, i32), at: (f64, f64)) {
     for (adjustment, size, at) in [
         (scroller.hadjustment(), size.0, at.0),
@@ -212,14 +195,12 @@ pub fn picture_of(page: &adw::TabPage) -> Option<gtk::Picture> {
     }
 }
 
-/// Zoom in tenths, between half size and triple. Rounded as well as clamped, so stepping does
-/// not drift into 0.7999999999999999 and a hand-edited state file cannot ask for 0.
+/// Clamp font zoom to 0.5–3.0 and round to tenths to prevent drift and invalid saved sizes.
 pub fn clamp_zoom(zoom: f64) -> f64 {
     ((zoom * 10.0).round() / 10.0).clamp(0.5, 3.0)
 }
 
-/// The range a PDF, a diagram and an image zoom in, as a multiple of their own size: below a tenth
-/// nothing is legible, and past eight times one PDF page is hundreds of megabytes of tiles.
+/// Shared scale bounds: below 0.1× is unreadable; above 8× PDF tile memory grows excessively.
 pub const MIN_SCALE: f64 = 0.1;
 pub const MAX_SCALE: f64 = 8.0;
 
@@ -232,15 +213,10 @@ pub fn clamp_scale(scale: f64) -> f64 {
     }
 }
 
-/// One step in or out from `zoom`: the next multiple of [`ZOOM_STEP`], so a PDF fitted to the
-/// window at 137 % lands on 140 % rather than 147 %. Shared with `pdfview`, so a chord, a wheel
-/// notch and a pinch mean the same amount of zoom whichever kind of tab is in front.
+/// Step `zoom` to the next [`ZOOM_STEP`] multiple, shared by chords, wheels and pinches.
 ///
-/// Counted in whole percent, the readout's own unit. A zoom read back off a rendered size (an
-/// `f32` layout scale, a pixel width) is a hair off the tenth it was; counted in fractions of a
-/// step, a hair under made that tenth the next one, and the step returned its own input. Rounded
-/// to a percent it is that tenth again, and a step always moves the zoom by half a percent at
-/// least.
+/// Round to whole percent before stepping: floating-point or pixel-size roundoff can
+/// otherwise select the current step again. Each result moves by at least half a percent.
 pub fn stepped_zoom(zoom: f64, out: bool) -> f64 {
     let percent = (zoom * 100.0).round() as i64;
     let next = match out {
@@ -250,37 +226,27 @@ pub fn stepped_zoom(zoom: f64, out: bool) -> f64 {
     next as f64 / 100.0
 }
 
-/// Where one axis scrolls to so that a zoom keeps what is under the pointer under it: the point
-/// `at` into the viewport, scrolled to `offset`, stays the same fraction of the content as that
-/// grows from `was` long to `now`. Clamping is the adjustment's, since a point near the edge of
-/// content smaller than the viewport cannot stay put.
+/// Keep viewport point `at` over the same content fraction as size changes from
+/// `was` to `now`. Leave clamping to the adjustment when edges prevent anchoring.
 pub fn zoomed_scroll(at: f64, offset: f64, was: f64, now: f64) -> f64 {
     (offset + at) * now / was.max(1.0) - at
 }
 
-/// How many whole steps `dy` completes, given the fraction earlier deltas left over. A
-/// smooth-scroll device sends one wheel notch as several fractional deltas, and one notch is one
-/// step wherever the wheel zooms.
+/// Accumulate fractional smooth-scroll deltas so one wheel notch yields one zoom step.
 pub fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
     let total = accum.get() + dy;
     accum.set(total.fract());
     total.trunc() as i32
 }
 
-/// Ctrl+scroll on `widget` steps whatever it is that zooms there: `step(true)` is one step out,
-/// `step(false)` one step in. One notch is one step, the same amount the chords move.
+/// Step zoom on Ctrl+scroll: `step(true)` zooms out and `step(false)` zooms in.
 ///
-/// A zoom that keeps what is under the pointer where it is — which is what a PDF page does and
-/// what a font size has no use for — reads where the pointer is from [`track_pointer`], or from
-/// the motion controller a canvas has already: a scroll event carries no widget coordinate.
+/// Each controller accumulates smooth deltas independently so widgets cannot share notch
+/// remainders. Non-Control events pass through. Scroll lacks coordinates; anchored zoom
+/// uses [`track_pointer`] or the canvas's motion controller.
 ///
-/// Each controller owns its own accumulator, because a smooth-scroll device sends one notch as
-/// several fractional deltas and two widgets sharing the remainder would zoom each other. Without
-/// Control the event is passed on untouched, so a plain scroll still scrolls whatever it scrolled.
-///
-/// The phase is the caller's. A text view wants `Bubble`, ahead of the scrolled window around it;
-/// WebKit and VTE answer a Ctrl+scroll themselves, with a zoom of their own that neither the
-/// readout nor the session would know about, so those two have to be beaten to it in `Capture`.
+/// Callers choose phase: Bubble precedes text scrollers; Capture overrides WebKit and VTE's
+/// private zoom handling so readouts and sessions track the result.
 pub fn zoom_on_wheel(
     widget: &impl IsA<gtk::Widget>,
     phase: gtk::PropagationPhase,
@@ -324,19 +290,15 @@ pub fn track_pointer(widget: &impl IsA<gtk::Widget>) -> Rc<Cell<Option<(f64, f64
     at
 }
 
-/// The zoom a pinch has reached: the zoom it began at times `scale`, on the nearest tenth, the
-/// step every other zoom takes. GTK gives the scale against the fingers' spread when the pinch
-/// began, so it is the whole pinch so far and never a step to add to the last one.
+/// Round `initial_zoom × scale` to tenths; GTK pinch scale is cumulative, not an incremental step.
 pub fn pinched_zoom(start: f64, scale: f64) -> f64 {
     (start * scale * 10.0).round() / 10.0
 }
 
-/// Two fingers on `widget` zoom it: `from()` is read as the pinch begins, and `to(zoom, at)` is
-/// handed each new [`pinched_zoom`] with the point between the fingers, which is what stays put.
+/// Apply two-finger zoom from `from()` through `to(zoom, at)`, anchored between the fingers.
 ///
-/// Nothing is handed on until the fingers reach another tenth, so a pinch re-lays the page out
-/// once a tenth rather than on every event, and fingers resting on a page fitted at 137 % leave
-/// it there rather than snapping it to 140 %.
+/// [`pinched_zoom`] emits only new tenths, limiting relayout and leaving an untouched fitted
+/// zoom such as 137 % unchanged.
 pub fn zoom_on_pinch(
     widget: &impl IsA<gtk::Widget>,
     from: impl Fn() -> f64 + 'static,

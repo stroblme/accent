@@ -1,9 +1,6 @@
-//! The vault on this machine: three SQLite connections, the worker that owns the writing one,
-//! and the path arithmetic every method here goes through.
-//!
-//! [`Local`] is what a local [`Vault`](crate::Vault) is, and it is also the whole of what
-//! `accent-cli serve` answers with on a remote host — the rpc dispatch calls exactly these
-//! methods. The file operations are in [`files`], the index reads in [`index`].
+//! Local vault storage: three SQLite connections, one writing worker and
+//! shared path validation. [`Local`] also serves remote RPC requests through
+//! `accent-cli serve`; [`files`] handles files and [`index`] handles queries.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -29,12 +26,11 @@ pub(crate) use index::list_dir;
 /// One open vault: the index, the watcher, and the worker thread that owns both writers.
 pub(crate) struct Local {
     root: PathBuf,
-    /// The caller's connection. The mutex is not about contention (WAL readers never block):
-    /// it is what makes `Local` `Send + Sync`, which uniffi will need in Phase 3.
+    /// Caller read connection. The mutex makes `Local` `Send + Sync`,
+    /// including for UniFFI callers.
     index: Mutex<Index>,
-    /// A reader of its own for the sidebar's search, which runs on a worker thread. A regex scan
-    /// of every note holds its connection for as long as it takes, and the main thread's
-    /// `list_dir` and `backlinks` must never queue behind one on the same mutex.
+    /// Dedicated search reader so long regex scans on a worker cannot hold
+    /// the mutex needed by main-thread `list_dir` and `backlinks`.
     search: Mutex<Index>,
     /// The Search pane's turn on `search`: how many of its queries have been asked, and whether
     /// one of them is running there now ([`Local::supersede`]).
@@ -45,9 +41,9 @@ pub(crate) struct Local {
     /// The language providers answering for the open documents.
     pub(crate) lang: std::sync::Arc<language::Languages>,
     tx: Sender<Msg>,
-    /// Raised to stop the walk the worker is in the middle of, saying why: [`worker::PAUSE`] or
-    /// [`worker::CLOSE`]. A flag rather than a message because the worker only reads its inbox
-    /// between write batches, and the scan half of a walk has no batches at all.
+    /// Scan-interrupt flag: [`worker::PAUSE`] or [`worker::CLOSE`]. The inbox
+    /// is unavailable during scanning and read only between write batches,
+    /// so interruptions cannot use messages.
     stop: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
     /// What the last Replace All rewrote, as it was before: [`Local::undo_replace`]'s to write
@@ -169,13 +165,10 @@ impl Local {
         Ok(())
     }
 
-    /// Stop the walk that is running, keeping everything it has already written.
-    ///
-    /// This is a pause, not a cancel: the index is a diff of the disk, so the next walk — the one
-    /// [`resume_indexing`](Self::resume_indexing) asks for, or simply the next time the vault is
-    /// opened — indexes what is left instead of starting over. Until then the vault is usable and
-    /// says so: the reconcile it ends reports [`ReconcileStats::stopped`], and nothing else in the
-    /// worker will walk again on its own.
+    /// Pause the walk while keeping indexed rows. The vault remains usable
+    /// and reports [`ReconcileStats::stopped`]. Resume explicitly with
+    /// [`resume_indexing`](Self::resume_indexing) or reopen to index the remainder;
+    /// other worker triggers cannot restart it.
     ///
     /// [`ReconcileStats::stopped`]: accent_core::index::ReconcileStats::stopped
     pub fn stop_indexing(&self) {
@@ -200,23 +193,16 @@ impl Local {
         Ok(())
     }
 
-    /// Join `rel` to the vault root, refusing anything that would land outside it. Every
-    /// path-taking method goes through this: the GTK app sanitises its own input, but an
-    /// `accent-target:` of `../Outside/x.md` arrives here straight from a template, and Phase 2's MCP
-    /// server and Phase 3's Android bindings call the façade with whatever their caller said.
-    ///
-    /// The test is deliberately lexical and never `canonicalize`s: a vault links external
-    /// directories in on purpose, so resolving would reject the very paths the walk indexed and
-    /// a note reached through a directory symlink has to stay openable.
+    /// Resolve `rel` inside the root, validating every path-taking operation,
+    /// including template, MCP and Android input. Check lexically rather than
+    /// canonicalizing so deliberately linked external directories remain readable.
     pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
         Local::join(&self.root, rel)
     }
 
-    /// [`resolve`](Self::resolve) for a file a rewrite across the vault is about to write —
-    /// Replace All, a move's link updates, a page edit's — refusing one a symlink takes outside
-    /// the root. Readers follow such a link, since a vault links folders in on purpose; a rewrite
-    /// that nobody aimed at the file must not reach through one into `~/.bashrc`. One
-    /// `canonicalize` per file written.
+    /// Resolve a bulk-rewrite target and reject symlink escapes with one
+    /// `canonicalize`. Reads may follow linked external folders, but Replace All,
+    /// move rewrites and page edits must not write outside the vault indirectly.
     pub(crate) fn resolve_inside(&self, rel: &str) -> Result<PathBuf> {
         let path = self.resolve(rel)?;
         let real = path
@@ -258,14 +244,9 @@ impl Local {
         locked(&self.search)
     }
 
-    /// Run one of the Search pane's queries on the search connection, superseding the ones asked
-    /// before it: the one running there is interrupted and those still waiting give up, each
-    /// answering with an error nobody reads, since the pane has moved past them. Every keystroke
-    /// in the box is a query, and each used to run to its end before the next could start, so the
-    /// rows for what was typed last came after all of them.
-    ///
-    /// Only these queries are stopped: the git pane's directory list and a Replace All's file list
-    /// share the connection and always run to their end.
+    /// Run a search query, interrupting the previous query and skipping stale
+    /// waiters so rows for the latest typing appear promptly. Git directory
+    /// and Replace All file-list queries share the connection but are not cancelled.
     fn supersede<T>(
         &self,
         query: impl FnOnce(&Index) -> accent_core::Result<T>,
@@ -298,16 +279,10 @@ impl Local {
         }
     }
 
-    /// Wait until the worker has taken in every message posted before this one.
-    ///
-    /// The index has one writer and it is the worker, so a caller that has just written files is
-    /// ahead of it: the updates are posted and the write returns. Anyone whose very next move is
-    /// to read those files back *out of the index* — the Search pane asking its question again
-    /// after a Replace All — waits here rather than reading rows that are one batch old.
-    ///
-    /// The caller must already be off the main loop: the worker may be in the middle of a walk,
-    /// and this then waits for the batch that walk is on. A worker that has gone answers nothing,
-    /// which is no reason to fail a write that already reached the disk.
+    /// Wait until the worker indexes every preceding message, so queries after
+    /// file writes or Replace All see current rows. Call off the main loop: a
+    /// scan can delay the reply until its current batch ends. A dead worker
+    /// does not fail a write that already reached disk.
     pub(crate) fn settle_index(&self) {
         let (reply, answer) = channel();
         if self.tx.send(Msg::Settled(reply)).is_err() || answer.recv().is_err() {
@@ -317,14 +292,10 @@ impl Local {
 }
 
 impl Drop for Local {
-    /// Stop the worker before the vault goes away, so no thread outlives the window that opened it.
-    ///
-    /// A walk in progress stops as [`stop_indexing`](Self::stop_indexing) stops it, keeping what
-    /// it wrote, so closing never waits for a cold index; the next open carries on from there.
-    ///
-    /// ponytail: the stopped walk still resolves the links of what it indexed (~0.3 s at 19 000
-    /// files of `make vault`). Skipping it would need the index to remember that its links are
-    /// stale, since the next walk reads those files as unchanged and resolves only what it adds.
+    /// Stop and join the worker before dropping the vault. Interrupt active
+    /// scans while retaining rows for the next open. Stopped scans still resolve
+    /// links for indexed files; skipping this would leave stale links that the
+    /// next diff would not revisit.
     fn drop(&mut self) {
         // First, so the walk winds down while the language servers stop.
         self.stop.store(worker::CLOSE, Ordering::Relaxed);

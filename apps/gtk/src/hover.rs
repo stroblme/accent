@@ -1,14 +1,8 @@
-//! What a language server says about the symbol under the pointer, and what is wrong with it.
+//! Show language-server hover text and all diagnostics at the pointer position.
 //!
-//! One label: the server's own answer, then every diagnostic covering that position. All four
-//! severities, because the two quiet ones say nothing on screen — a dangling `[[wikilink]]` draws
-//! a dim underline and nothing else, and the hover is where its message is read.
-//!
-//! Servers answer in markdown and GtkSourceView's hover shows a `GtkLabel`, which speaks Pango
-//! markup and nothing else. The two overlap in bold, italic and monospace and in nothing more, so
-//! everything else is flattened rather than approximated: a heading is a bold line, a link is its
-//! own text, a list loses its bullets. A hover is three lines of a signature and a sentence about
-//! it, not a document.
+//! Information and hints have no visible messages elsewhere, so the hover includes them.
+//! GtkSourceView uses a Pango label: markdown bold, italic and monospace survive; headings
+//! become bold lines, links retain their text, and lists lose bullets.
 
 use crate::editor::Tab;
 use gtk::subclass::prelude::*;
@@ -17,28 +11,22 @@ use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
 use std::rc::Rc;
 
-/// How wide a hover or a signature is let grow before it wraps. A signature is the longest thing
-/// in either and 80 characters is where one stops being read left to right.
+/// Maximum hover/signature width in characters, keeping long signatures readable.
 pub const WIDTH: i32 = 80;
 
-/// The fewest characters a hover wraps at. A link near the window's right edge would otherwise get
-/// a ribbon a few words wide; this one leaves the window instead, and GTK keeps it on the screen.
+/// Minimum hover width; narrow edge space should shift the popup rather than wrap every few words.
 const NARROWEST: i32 = 30;
 
-/// How many characters wide and how many pixels tall a hover may grow, given the room from where
-/// its text starts to the window's right edge and the window's height, where a character is
-/// `char_width` wide: what fits in the room, less two characters of the hover's own padding, within
-/// [`NARROWEST`] and [`WIDTH`]; and half the window, past which it scrolls. Half, because the hover
-/// sits above or below the text it is about, and one of the two has that much room wherever the
-/// text is.
+/// Return hover width in characters and height in pixels for the available window space.
+///
+/// Width reserves two characters of padding and clamps to [`NARROWEST`]..=[`WIDTH`]. Height
+/// is half the window, ensuring room above or below the target; overflow scrolls.
 fn bounds((room, window): (i32, i32), char_width: i32) -> (i32, i32) {
     let chars = room / char_width.max(1) - 2;
     (chars.clamp(NARROWEST, WIDTH), window / 2)
 }
 
-/// [`bounds`] for a hover over `view` about the text from `start`, measured in the view's font,
-/// which the hover's text inherits. GtkSourceView starts the hover's text where the hovered word
-/// starts, so that is where the room is measured from.
+/// Measure [`bounds`] from the hovered word's start in `view`, using its inherited font.
 fn limits(view: &sourceview5::View, start: &gtk::TextIter) -> (i32, i32) {
     // Unbounded off screen, where nothing is hovered anyway.
     let Some(root) = view.root() else {
@@ -54,8 +42,7 @@ fn limits(view: &sourceview5::View, start: &gtk::TextIter) -> (i32, i32) {
     bounds((root.width() - x, root.height()), char_width)
 }
 
-/// `md` as Pango markup. Every run of text is escaped, so a C++ signature full of `<` and `&`
-/// cannot turn the label into a parse error and blank the hover.
+/// Convert `md` to escaped Pango markup so server text cannot break the hover label.
 pub fn markup_of(md: &str) -> String {
     let mut out = String::new();
     let escaped = |out: &mut String, text: &str| out.push_str(&glib::markup_escape_text(text));
@@ -137,8 +124,7 @@ mod provider_imp {
 
     #[derive(Default)]
     pub struct Provider {
-        /// Weak for the reason the completion provider's is: the view holds the provider and the
-        /// tab holds the view.
+        /// Weak tab reference: the tab owns the view, which owns this provider.
         pub tab: RefCell<Weak<Tab>>,
     }
 

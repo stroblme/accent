@@ -306,20 +306,12 @@ impl Index {
             .query_row("PRAGMA data_version", [], |r| r.get(0))?)
     }
 
-    /// Every write transaction in this file, and `BEGIN IMMEDIATE` rather than rusqlite's default
-    /// `BEGIN DEFERRED` because the busy timeout above only works this way.
+    /// Begin an immediate write transaction so lock contention waits under the busy timeout.
+    /// Deferred transactions that read before writing can fail immediately with `SQLITE_BUSY`
+    /// during lock promotion.
     ///
-    /// A deferred transaction takes its write lock on the first statement that needs one. When
-    /// that statement follows a read — [`upsert`] looks up `content_hash` before it writes — the
-    /// transaction is already holding a read snapshot, and promoting it while another connection
-    /// holds the write lock is a deadlock SQLite refuses to wait on: it returns `SQLITE_BUSY`
-    /// straight away and never calls the busy handler. That is the "database is locked" the
-    /// indexer reported on every save while the git refresh wrote the ignore set on another
-    /// thread. Taking the lock up front makes the same collision a wait of a few microseconds.
-    ///
-    /// The schema is asked again here: another build sharing the index (the app, `accent-cli mcp`)
-    /// may have rebuilt it since this connection opened it, and rows written now would be this
-    /// build's idea of them under that build's number.
+    /// Recheck the schema because another build sharing the cache may have rebuilt it since this
+    /// connection opened.
     fn write_tx(&mut self) -> Result<rusqlite::Transaction<'_>> {
         let tx = self
             .conn
@@ -404,10 +396,8 @@ mod tests {
     use std::fs;
     use std::time::Instant;
 
-    /// The `!BUG` this file's `write_tx` exists for: an index write that collides with another
-    /// connection's must **wait** for it, not fail. Before `BEGIN IMMEDIATE` this returned
-    /// `SQLITE_BUSY` in under 2 ms, because `upsert` reads `content_hash` before it writes and
-    /// SQLite will not let a busy handler block a read-to-write promotion.
+    /// Concurrent writers must wait rather than fail during read-to-write lock promotion;
+    /// [`Index::write_tx`] takes the write lock before reading.
     #[test]
     fn a_write_waits_for_another_writer_instead_of_reporting_a_locked_database() {
         let (vault, db) = fixture();
@@ -442,10 +432,8 @@ mod tests {
         );
     }
 
-    /// The bump to schema 10 as a user meets it: an index the previous version wrote is dropped
-    /// whole and built again, and the query the new schema exists for answers on what came back.
-    /// A vault of 41.7k files pays this once, so the failure that matters is a half-migration —
-    /// the new table missing while `user_version` says it is there.
+    /// An old cache must rebuild completely, including tables required by the new queries;
+    /// `user_version` must not describe a partially rebuilt schema.
     #[test]
     fn an_index_from_the_previous_schema_is_rebuilt_whole() {
         let (vault, db) = fixture();

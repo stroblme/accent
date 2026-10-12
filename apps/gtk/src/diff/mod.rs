@@ -1,17 +1,9 @@
-//! Side-by-side comparison: the diff as highlighting laid over two buffers.
+//! Side-by-side comparison through tags and overlays on two buffers.
 //!
-//! Knows nothing about vaults, tabs or git. It is handed two panes, each a view over a buffer,
-//! and one of the buffers may be the user's own editor. The buffers are the source of truth on
-//! both sides — a pane that is typed into is never rewritten, only re-tagged — and everything
-//! the comparison shows is a tag or an overlay: the row tints and word emphasis, the unchanged
-//! runs hidden behind a "⋯ N lines" button, the blank space that keeps row `i` beside row `i`
-//! once one side has grown, and the connectors between the columns with the buttons that take a
-//! hunk across.
-//!
-//! Alignment used to be empty filler lines in the text, which had to be stripped back out of an
-//! edited pane and meant rewriting the buffer under the caret whenever the columns drifted. It is
-//! `pixels-above-lines` now, so an edit costs a re-diff and a pass of tags and nothing the undo
-//! stack can see.
+//! Buffers remain authoritative, including an editable pane. Tags and overlays provide
+//! row and word emphasis, hidden unchanged runs, alignment and hunk actions without
+//! rewriting text. `pixels-above-lines` padding replaces filler lines, so alignment changes
+//! cannot affect the undo stack. Vault, tab and Git integration stay with callers.
 
 use accent_core::diff::{self, DiffLine, Op, Row};
 use adw::prelude::*;
@@ -42,40 +34,34 @@ const TAG_ADDED: &str = "diff-added";
 const TAG_REMOVED: &str = "diff-removed";
 const TAG_ADDED_EMPH: &str = "diff-added-emph";
 const TAG_REMOVED_EMPH: &str = "diff-removed-emph";
-/// The runs of unchanged lines a changes-only view hides. Its own tag rather than `fold.rs`'s,
-/// so the editor's fold bookkeeping never mistakes a hidden run for a block it folded.
+/// Separate tag for comparison-hidden unchanged runs, preventing
+/// `fold.rs` bookkeeping from treating them as editor folds.
 pub(crate) const TAG_GAP: &str = "diff-gap";
 /// Unchanged lines kept on each side of a change, as `git diff` keeps them.
 const CONTEXT: usize = 3;
-/// Bytes of the two texts together up to which a lay diffs them where it is rather than on a
-/// worker, which answers a frame late at best: about a millisecond's diff with half of the lines
-/// changed (2026-10-08), and room for both sides of a note the editor lays again on every
-/// keystroke (16 KB, `editor::INSTANT`).
+/// Combined-text byte threshold for immediate diffing, avoiding worker
+/// frame latency while fitting per-keystroke note refreshes
+/// (`editor::INSTANT`, 16 KB per side).
 const ON_THE_SPOT: usize = 64 * 1024;
-/// How long a diff on a worker may spend refining changed lines word by word, where one made here
-/// gets [`diff::REFINE`]: room for every pair of a long file rewritten throughout (200 ms for
-/// 120,000 of them, 2026-10-08).
+/// Worker word-refinement budget, larger than immediate [`diff::REFINE`]
+/// so long files changed throughout can refine every pair.
 const REFINE_ON_WORKER: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Row backgrounds. This is the one place DESIGN.md's "only accent, foreground and is_dark" rule
-/// bends: a diff has to read as green and red, and libadwaita publishes its success/error colours
-/// as CSS variables only, which GTK will resolve in a stylesheet but not hand back to Rust. So the
-/// hue is a fixed weight and everything else is derived: it is mixed with the theme foreground,
-/// which pulls the tint dark on a light theme and light on a dark one, then laid down at a low
-/// alpha over the view background so the text on top keeps its contrast either way.
+/// Derive green/red diff backgrounds from fixed hues mixed with the theme foreground.
+///
+/// Libadwaita exposes success/error colours only as CSS variables, unavailable to Rust.
+/// Foreground mixing and low alpha preserve text contrast on light and dark backgrounds.
 pub(crate) const ADDED_HUE: (f32, f32, f32) = (0.15, 0.70, 0.35);
 pub(crate) const REMOVED_HUE: (f32, f32, f32) = (0.80, 0.20, 0.25);
-/// Not a diff colour: the amber a warning is underlined in (`diagnostics.rs`). It lives beside
-/// the other two because they are one palette and are mixed by the same [`tint`].
+/// Shared amber warning hue (`diagnostics.rs`), mixed through [`tint`].
 pub(crate) const WARNING_HUE: (f32, f32, f32) = (0.85, 0.60, 0.10);
-/// Nor this: the blue a conflict block's incoming side is tinted in (`conflict.rs`), its current
-/// side taking the green, as VS Code tints the two.
+/// Shared blue incoming-conflict hue (`conflict.rs`); current uses green.
 pub(crate) const INCOMING_HUE: (f32, f32, f32) = (0.20, 0.50, 0.90);
 /// Share of the tint that is the hue; the rest is the foreground.
 const HUE_MIX: f32 = 0.65;
 const CHANGE_ALPHA: f32 = 0.16;
-/// The words that actually differ, in the same hue over the row's own background. Emphasis is
-/// colour only: bold would change advance widths and pull the two panes out of alignment.
+/// Word emphasis uses colour only: bold would change glyph widths
+/// and misalign comparison columns.
 const EMPH_ALPHA: f32 = 0.35;
 
 /// Which of the two texts a pane shows: `Old` is the left column.
@@ -100,8 +86,8 @@ pub struct Pane {
     pub buffer: sourceview5::Buffer,
     pub scroller: gtk::ScrolledWindow,
     pub flavour: Flavour,
-    /// The buttons laid over this view. Handed in rather than made here because they outlive
-    /// a comparison on a view that does: see [`Pool`].
+    /// Reusable overlay buttons supplied externally because their view
+    /// can outlive a comparison ([`Pool`]).
     pub pool: Rc<Pool>,
 }
 
@@ -131,8 +117,8 @@ pub fn header(title: &str, trailing: Option<&gtk::Widget>) -> gtk::Box {
     row
 }
 
-/// A read-only column over `text`, titled: every side that is not the user's own editor. `name`
-/// is the widget name the font and zoom CSS is written for, see [`editor::companion`].
+/// Build a titled read-only column; `name` shares editor font/zoom CSS
+/// ([`editor::companion`]).
 pub fn pane(
     title: &str,
     flavour: Flavour,
@@ -162,20 +148,17 @@ pub fn pane(
     }
 }
 
-/// What a companion holds: `\n` line endings, as the editor's own buffer does, so a line's
-/// character count is the same to the diff and to the buffer.
+/// Normalize companion line endings to LF, matching editor buffers
+/// so diff and buffer character counts agree.
 pub(crate) fn normalise(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 
-/// Where each line of `text` starts, in characters, with the text's end appended so line `n`
-/// (1-based) always spans `starts[n - 1]..starts[n]`, its line ending included. A line ends where
-/// `similar` ends one: at `\n`, at `\r\n`, and at a `\r` on its own, so the diff's line numbers
-/// index this.
+/// Return character line starts plus text end, so 1-based line `n` spans
+/// `starts[n - 1]..starts[n]`, including its ending.
 ///
-/// Counted in characters and not taken from the buffer's own line numbers: `GtkTextBuffer`
-/// breaks a line at U+2029 too, and the diff does not, so a note carrying one puts the two
-/// numberings permanently out of step. A character offset means the same thing to both.
+/// Match `similar`'s LF, CRLF and CR breaks. Buffer line numbers also split at U+2029 and
+/// can diverge, while character offsets remain compatible.
 fn line_starts(text: &str) -> Vec<i32> {
     let mut starts = vec![0];
     let mut chars = text.chars().peekable();
@@ -208,17 +191,15 @@ fn differing(a: &str, b: &str) -> (usize, usize, usize) {
     (start, na - end, nb - end)
 }
 
-/// The lines, 1-based and inclusive, a selection of the characters `from..to` covers, `starts`
-/// being [`line_starts`]: the one it begins in to the one holding its last character, so a
-/// selection taken to the start of the next line does not take that line too.
+/// Inclusive one-based lines covered by character selection `from..to`,
+/// using [`line_starts`]. Exclude a line touched only at its start.
 fn lines_between(starts: &[i32], from: i32, to: i32) -> RangeInclusive<usize> {
     let line = |at: i32| starts[..starts.len() - 1].partition_point(|&s| s <= at);
     line(from)..=line((to - 1).max(from))
 }
 
-/// Where the first change starts on `side`, in characters: its first line of the first hunk, or,
-/// where that hunk only takes lines away from `side`, its next line after it. `starts` is `side`'s
-/// [`line_starts`]. `None` when nothing differs.
+/// First changed character offset on `side`, using its [`line_starts`].
+/// For removal-only hunks, use the next line. `None` means no differences.
 fn first_change(lines: &[DiffLine], rows: &[Row], starts: &[i32], side: Side) -> Option<i32> {
     let hunk = diff::hunks(lines, rows).into_iter().next()?;
     let next = rows[hunk.start..]
@@ -227,9 +208,8 @@ fn first_change(lines: &[DiffLine], rows: &[Row], starts: &[i32], side: Side) ->
     Some(next.map_or(*starts.last()?, |n| starts[n - 1]))
 }
 
-/// The lines a selection of exactly `hunk` covers: `side`'s lines in it, or the other side's where
-/// it only takes lines out of `side`'s. A selection reads whole rows ([`diff::apply_lines`]), so
-/// either covers the hunk whole.
+/// Lines selecting exactly `hunk`, using `side` or its peer for removals
+/// without lines on `side`. [`diff::apply_lines`] operates on whole rows.
 fn hunk_lines(
     lines: &[DiffLine],
     rows: &[Row],
@@ -320,9 +300,8 @@ pub(crate) fn tint(hue: (f32, f32, f32), fg: gdk::RGBA, alpha: f32) -> gdk::RGBA
     )
 }
 
-/// [`tint`] at full alpha as a GTK CSS colour, for a widget's text: the same mix with the colour
-/// the widget inherits, its alpha dropped as `tint` drops it, which GTK resolves per widget and
-/// again on every theme change.
+/// Format full-alpha [`tint`] as CSS, mixing with inherited widget colour
+/// and resolving again on theme changes.
 pub(crate) fn css_tint(hue: (f32, f32, f32)) -> String {
     let byte = |v: f32| (v * 255.0).round();
     format!(
@@ -334,8 +313,8 @@ pub(crate) fn css_tint(hue: (f32, f32, f32)) -> String {
     )
 }
 
-/// Re-derive the row backgrounds from the resolved theme foreground. Once the view is mapped
-/// and again on every `notify::dark`, exactly as `highlight::restyle` does for the editor.
+/// Update row backgrounds from the theme foreground on map and
+/// `notify::dark`, matching `highlight::restyle`.
 fn restyle_tags(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     let fg = view.color();
     let table = buffer.tag_table();
@@ -356,10 +335,9 @@ fn restyle_tags(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     emph(TAG_REMOVED_EMPH, tint(REMOVED_HUE, fg, EMPH_ALPHA));
 }
 
-/// Two columns with a diff laid over them. Built once over two buffers and kept in step with
-/// them from then on: [`Compare::refresh`] re-reads both and re-tags, and nothing here writes
-/// into a buffer except the hunk buttons, which edit the user's side as the user would. The rows
-/// are laid out level, the scroll is shared and the reader's place is kept by [`Columns`].
+/// Maintain a diff over two buffers, refreshing tags with [`Compare::refresh`].
+/// Only hunk actions edit the user's buffer. [`Columns`] aligns rows,
+/// shares scroll and preserves the reading position.
 pub struct Compare {
     weak: Weak<Compare>,
     columns: Rc<Columns>,
@@ -373,9 +351,8 @@ pub struct Compare {
     rows: RefCell<Vec<Row>>,
     /// [`line_starts`] of each side's text.
     starts: RefCell<[Vec<i32>; 2]>,
-    /// Edits made to either buffer, counted before they land: whether the diff kept above is
-    /// still the texts' is told by the count it was made at (`diffed`), and a worker's diff is
-    /// out for the count in `asked`.
+    /// Buffer edit generation, compared with `diffed` for current results
+    /// and `asked` for an in-flight worker diff.
     edits: Cell<u64>,
     diffed: Cell<Option<u64>>,
     asked: Cell<Option<u64>>,
@@ -383,10 +360,8 @@ pub struct Compare {
     lays: Cell<u64>,
     /// The row ranges hidden right now, each with the key it can be opened by.
     hidden: RefCell<Vec<(Range<usize>, usize)>>,
-    /// Lines the user asked to see, every line of each run they opened, by their number on the
-    /// side that is not typed into, which survives the edits that move everything else. A run
-    /// holding one stays open, so an edit that splits a run or merges it with another hides
-    /// nothing that was shown.
+    /// Explicitly opened peer-side lines, stable across editor changes.
+    /// Keep any run containing one open after splits or merges.
     opened: RefCell<HashSet<usize>>,
     /// Show All Unchanged Lines, in the title row: while it is down nothing is hidden.
     unfold: gtk::ToggleButton,
@@ -394,9 +369,8 @@ pub struct Compare {
     /// Each pane's context menu as [`Compare::offer`] left it, and the one it replaced, to put
     /// back when the comparison goes. Empty until something is offered.
     offered: RefCell<Vec<(gio::Menu, Option<gio::MenuModel>)>>,
-    /// What to run once the rows have been laid again. The hidden runs move with every lay — a
-    /// keystroke, a side re-read, a run opened — and what is drawn per line rather than per
-    /// character has to follow them: see [`Compare::on_laid`].
+    /// Relayout callback for line-based overlays such as diagnostics,
+    /// which must follow changing hidden runs ([`Compare::on_laid`]).
     laid: RefCell<Option<Box<dyn Fn()>>>,
 }
 
@@ -567,13 +541,10 @@ impl Compare {
         buffer.text(&s, &e, true).to_string()
     }
 
-    /// Replace the text of a pane that is not the user's, and lay the diff over both again. The
-    /// same text again is nothing to do: a refresh lands on every save.
+    /// Replace changed lines of a non-user pane and refresh the comparison.
     ///
-    /// Only the lines that differ are replaced, as one step nothing can undo, as `set_text` was:
-    /// the rest keep their layout, which GTK and the columns otherwise worked out again for every
-    /// line. A line replaced by a line keeps its newline, so the lines below keep their place, and
-    /// is marked for GTK to lay out again ([`UNMEASURED`]), its old height being the old text's.
+    /// Skip unchanged text and use a non-undoable edit, preserving unaffected layout. Replaced
+    /// lines retain newlines and receive [`UNMEASURED`] because cached heights describe old text.
     pub fn set_side(&self, side: Side, text: &str) {
         debug_assert_ne!(
             self.editable,
@@ -646,20 +617,17 @@ impl Compare {
         Some(*facing.start() as i32 - 1..=*facing.end() as i32 - 1)
     }
 
-    /// Re-read both buffers and lay the diff over them: the tints, the emphasis, the hidden runs
-    /// and the buttons. Nothing in either buffer's text is touched.
+    /// Refresh both buffers' diff tags, emphasis, hidden runs and buttons
+    /// without changing their text.
     pub fn refresh(&self) {
         self.lay(false);
     }
 
-    /// Put `entries` on both panes' context menus, there while the pane has a selection: each an
-    /// action `diff.<name>`, its label, and what it does, which is handed that pane's side, the
-    /// lines of its text the selection covers (1-based, inclusive) and both texts as they stand.
-    /// Once per comparison: [`Compare::leave`] takes them off again.
+    /// Add selection-only context actions `diff.<name>` to both panes until [`Compare::leave`].
     ///
-    /// The entries join whatever menu the view had, which on the editor is the spell checker's
-    /// suggestions, and hide rather than grey out: `hidden-when` follows the action, and the
-    /// action follows the selection, so a menu opened from the keyboard is right too.
+    /// Callbacks receive side, inclusive 1-based lines and current texts. Extend existing menus,
+    /// including spelling suggestions, and hide unavailable actions rather than dim them;
+    /// action state also handles keyboard-opened menus.
     pub fn offer(&self, entries: Vec<(&str, &str, OnLines)>) {
         if !self.offered.borrow().is_empty() {
             return;
@@ -710,9 +678,8 @@ impl Compare {
         }
     }
 
-    /// Put `buttons` on each hunk, in the strip's left half and its right: each an icon, its
-    /// accessible name, its tooltip, and what it does, which is handed the hunk's lines as
-    /// [`Compare::offer`]'s entries are handed a selection's.
+    /// Add left/right hunk buttons with icons, accessible names, tooltips
+    /// and actions over hunk lines, as [`Compare::offer`] handles selections.
     pub fn offer_hunks(&self, buttons: Vec<(&'static str, &'static str, &'static str, OnLines)>) {
         *self.hunk_buttons.borrow_mut() = buttons
             .into_iter()
@@ -724,8 +691,8 @@ impl Compare {
         self.refresh();
     }
 
-    /// What the button in `half` of the strip does on hunk `i`. Nothing while the texts have
-    /// changed since the last diff: its hunks are where the lines were.
+    /// Run strip `half`'s button for hunk `i`. Ignore stale diffs after
+    /// text changes because hunk line ranges no longer apply.
     fn press(&self, i: usize, half: usize) {
         if !self.current() {
             return;
@@ -745,10 +712,9 @@ impl Compare {
         }
     }
 
-    /// Run the button named `label` on the hunk holding the editor's caret, or ending at the
-    /// caret's line, as a deletion just above it does: the palette's way to a hunk's buttons.
-    /// `false` where there is no such hunk or button, or as [`Compare::press`], no diff yet of
-    /// the texts as they stand.
+    /// Run the named hunk action at the editor caret, including a deletion
+    /// ending there, for palette commands. Return false for missing actions,
+    /// hunks or current diffs ([`Compare::press`]).
     pub fn act_at_caret(&self, label: &str) -> bool {
         let Some(mine) = self.editable.filter(|_| self.current()) else {
             return false;
@@ -792,19 +758,12 @@ impl Compare {
         }
     }
 
-    /// [`Compare::refresh`], and with `opening`, the one [`Compare::new`] makes: that one also
-    /// puts the editor's caret on the first change, so the comparison opens on what changed
-    /// with every unchanged run folded, the one the caret was in included.
+    /// Refresh alignment, moving the caret to the first change for `opening` comparisons.
     ///
-    /// The texts are diffed again only once either has changed since the last diff. After an
-    /// edit, where they are longer than [`ON_THE_SPOT`] together, that is done on a worker: the
-    /// columns lay nothing until it answers, the rows staying as they were laid, and are laid
-    /// then; an answer for texts that changed while it was out is dropped, the lay that change
-    /// asks for diffing them again. The first lay diffs here, before the columns are shown: laid
-    /// from a worker over shown columns, 120,000 rows changed throughout held the main loop for
-    /// 11–16 s, where the whole first lay here takes under 2 s (2026-10-10). So does a side read
-    /// again ([`Compare::set_side`]). A diff made here refines what the main loop can spare and
-    /// leaves the rest to a worker ([`Compare::diff_here`]).
+    /// Re-diff only changed text. Large edits above [`ON_THE_SPOT`] run on a worker while old rows
+    /// remain; stale results are discarded. Initial layout and [`Compare::set_side`] diff before
+    /// showing columns to avoid expensive updates of visible long comparisons. [`Compare::diff_here`]
+    /// refines within the main-loop budget and sends remaining refinement to a worker.
     fn lay(&self, opening: bool) {
         let edits = self.edits.get();
         if !self.current() {
@@ -822,9 +781,8 @@ impl Compare {
         self.apply(opening);
     }
 
-    /// Diff `old` and `new`, the texts as they stand, here: the changed lines refined for
-    /// [`diff::REFINE`], and the diff made again on a worker with room for all of them where that
-    /// was too short, the rows laid again when it answers.
+    /// Diff current text locally with [`diff::REFINE`]. If refinement times
+    /// out, recompute on a worker with a larger budget and relayout on return.
     fn diff_here(&self, old: String, new: String) {
         let edits = self.edits.get();
         let diffed = Diffed::of(&old, &new, diff::REFINE);
@@ -835,8 +793,8 @@ impl Compare {
         }
     }
 
-    /// Diff `old` and `new`, the texts as they stand, on a worker, and lay the rows once it
-    /// answers, unless they have changed since.
+    /// Diff on a worker and relayout when it returns, discarding results
+    /// if text changed meanwhile.
     fn diff_on_worker(&self, old: String, new: String) {
         let edits = self.edits.get();
         self.asked.set(Some(edits));
@@ -1062,27 +1020,24 @@ impl Compare {
         }
     }
 
-    /// Run `f` whenever the rows have been laid again, and once now: the hidden runs have just
-    /// moved, and anything drawn per line — the editor's end-of-line diagnostics — has to be laid
-    /// again over the lines that are left. One at a time; asking again replaces it.
+    /// Set one relayout callback and invoke it now. Line-based overlays
+    /// such as diagnostics must follow surviving rows after hidden runs move.
     pub fn on_laid(&self, f: impl Fn() + 'static) {
         f();
         *self.laid.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Open the hidden run keyed `key`, as its button does, with the scroll held where it was
-    /// until the rows are laid: the rows above stay, and the run opens downwards from the button's
-    /// row. Left to GTK, each view keeps its own top line in place as the lines above it grow,
-    /// both on the one scroll they share, so a run opened at the top of the view scrolled it by
-    /// twice its height, and by twice the height laid so far while GTK caught up.
+    /// Open `key` while holding scroll until rows settle, expanding downward
+    /// from the button. Prevent peer views' independent top-line corrections
+    /// from doubling the shared-scroll movement during lazy layout.
     fn open_run(&self, key: usize) {
         self.columns.hold_scroll();
         self.open_lines(key);
         self.refresh();
     }
 
-    /// Note every line of the hidden run keyed `key` as one the user asked to see: the run's rows
-    /// are unchanged lines, so its lines on the side not typed into count up from the key.
+    /// Retain the hidden run's stable peer-side lines as explicitly opened,
+    /// counting unchanged lines from `key`.
     fn open_lines(&self, key: usize) {
         let rows = self
             .hidden
@@ -1095,10 +1050,9 @@ impl Compare {
             .extend(key..key + rows.unwrap_or(1));
     }
 
-    /// Every run opened, as Show All Unchanged Lines goes down, or every one hidden again as it
-    /// comes up, those opened one by one too, but for the one holding the caret. The caret's line
-    /// stays where it is on screen; with the caret off screen, the line at the top of the view
-    /// stays there, as a re-read side's does ([`Compare::set_side`]).
+    /// Toggle all unchanged runs, including individually opened ones, except
+    /// the caret run. Preserve the caret's viewport position, or the top
+    /// line when the caret is offscreen ([`Compare::set_side`]).
     fn toggle_all(&self) {
         if !self.columns.opening() {
             let top = || {
@@ -1114,9 +1068,8 @@ impl Compare {
         self.refresh();
     }
 
-    /// Make the editor's side read `text`, as one undo step that rewrites only the stretch between
-    /// what the two share at either end, so the caret and the folds outside it stay put. Nothing
-    /// without an editor's side.
+    /// Replace editable-side text in one undo step, touching only the differing
+    /// middle to retain unaffected carets and folds. Ignore without an editor.
     pub fn rewrite_mine(&self, text: &str) {
         let Some(mine) = self.editable else {
             return;
@@ -1135,10 +1088,9 @@ impl Compare {
         self.refresh();
     }
 
-    /// Take the tints, the emphasis and the hidden runs off `side`, which a refresh lays down
-    /// again. The padding stays, and the relayout changes only the rows whose padding moved:
-    /// taking it all off made GTK lay every padded row out without it for a frame, which is what
-    /// flashed on every keystroke and nudged the scroll range.
+    /// Clear diff tints, emphasis and hidden tags on `side`, retaining padding.
+    /// Relayout changes only moved padding; removing it all would flash
+    /// unpadded rows and disturb scroll range on each keystroke.
     fn clear_marks(&self, side: Side) {
         let buffer = &self.pane(side).buffer;
         let (start, end) = buffer.bounds();
@@ -1153,8 +1105,7 @@ impl Compare {
         }
     }
 
-    /// Everything off both panes: what leaving a comparison does before the panes part. A diff
-    /// still out is dropped when it answers.
+    /// Clear both panes before separating them; discard any pending diff result.
     pub fn leave(&self) {
         self.asked.set(None);
         for side in [Side::Old, Side::New] {
@@ -1211,11 +1162,9 @@ impl Compare {
         )
     }
 
-    /// The same, for the run hiding `offset` in the editable pane: `true` when one was opened.
-    ///
-    /// What a jump into the run does, and Go to Line's preview, which moves no caret for
-    /// [`Compare::lay`] to keep the run open around: taking the tag off that side's buffer alone
-    /// would show the lines under the other side's "unchanged lines" button.
+    /// Open the run hiding editable `offset`, returning whether one opened.
+    /// Reveal both columns and retain the run for caret-free Go to Line previews;
+    /// removing only editor tags would expose lines under the peer's button.
     pub fn open_hiding(&self, offset: i32) -> bool {
         let Some(side) = self.editable else {
             return false;
@@ -1248,9 +1197,8 @@ impl Compare {
         true
     }
 
-    /// Put the other side's lines of `hunk` into the editable buffer: in place of its own lines,
-    /// or after them with `keep_own`. One undo step, and one edit like any the user makes, so
-    /// the host's own change handling runs and lays the diff over the result.
+    /// Replace editable hunk lines with the peer's, or append with `keep_own`,
+    /// in one undo step. Normal host edit handling refreshes the resulting diff.
     fn take(&self, hunk: Range<usize>, keep_own: bool) {
         let Some(mine) = self.editable else {
             return;
@@ -1332,9 +1280,8 @@ mod tests {
         assert_eq!(differing("same", "same"), (4, 4, 4));
     }
 
-    /// U+2029 is an ordinary character to the diff and a line break to `GtkTextBuffer`, so a
-    /// line number and a buffer line stop agreeing the moment a note carries one. Every line is
-    /// addressed by character offset instead.
+    /// Verify character-offset addressing for U+2029, which GTK counts as
+    /// a line break while the diff treats it as ordinary text.
     #[test]
     fn a_line_is_found_by_counting_characters_not_by_its_number() {
         assert_eq!(

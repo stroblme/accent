@@ -8,14 +8,10 @@ use accent_core::markdown;
 const REFERENCES: Duration = Duration::from_millis(300);
 
 impl App {
-    /// Fill the References section for the active document: a note's backlinks, what refers to
-    /// the symbol under the caret in any other text, and wherever that is nothing — a PDF, an
-    /// image, a diagram, a text file no language server answers for — the files that link to this
-    /// one. The section's title says which of the two it lists.
+    /// Fill References with note backlinks, code-symbol references or links to the active file.
     ///
-    /// Debounced and cancellable, because on a code tab it follows the caret: the previous
-    /// request is dropped, which is what cancels it at the server rather than leaving it to be
-    /// answered and thrown away.
+    /// The title distinguishes symbol references from file backlinks. Debounce caret-driven
+    /// requests and drop superseded ones to cancel server work.
     pub fn refresh_references(self: &Rc<Self>) {
         if let Some(handle) = self.references.borrow_mut().take() {
             handle.abort();
@@ -82,9 +78,7 @@ impl App {
         *self.references.borrow_mut() = Some(handle);
     }
 
-    /// Ask the References section again where it follows the caret: a code tab's references are
-    /// about the symbol under it. Only while the section is on screen, since nobody is reading it
-    /// otherwise; so the section coming back on screen asks too, the caret having moved meanwhile.
+    /// Refresh caret-based references only while visible; reopening catches up with hidden caret moves.
     pub fn follow_references(self: &Rc<Self>) {
         let code = matches!(self.active_doc(), Some(Doc::Text(tab)) if !tab.flavour().is_note());
         let live = self.sidebar_column.is_visible()
@@ -97,8 +91,7 @@ impl App {
         }
     }
 
-    /// Put a list of locations in the References section and show it. What a definition with
-    /// more than one answer does, rather than the window picking one of them.
+    /// Show multiple definition targets in References instead of choosing one implicitly.
     fn show_locations(self: &Rc<Self>, found: &[Location]) {
         // First: opening a shut section asks for its rows, which these then replace.
         self.show_section("references");
@@ -111,13 +104,10 @@ impl App {
         }
     }
 
-    /// Go to Definition: the chord, `F12` and a Ctrl+click in the view all end up here.
+    /// Handle Go to Definition from shortcuts, F12 and Ctrl+click.
     ///
-    /// A bare URL in any text goes to the browser ahead of the server: it is not a symbol.
-    /// Everything else is a question for the tab's language server, whether the tab holds a note
-    /// or a source file. A note's is the index, which answers a link with the file it names, the
-    /// file New File would write where nothing answers to it, or the URL it links out to — about
-    /// the text as it stands, which the link table a long note re-analyses after a pause is not.
+    /// Open bare URLs before querying a provider. Notes query the index against current text,
+    /// returning a file, a New File destination or an external URL; cached link tables may lag typing.
     pub fn go_to_definition(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
             return;
@@ -208,11 +198,8 @@ impl App {
     }
 }
 
-/// The References section's rows: `path:line`, one-based, in the order the server answered.
-///
-/// `per_path` keeps one row per file, which is what a note's backlinks have always been — a note
-/// that links to the open one three times is one backlink, not three. A code tab wants every
-/// occurrence, so it asks for none of that.
+/// List server locations as one-based `path:line` rows. `per_path` deduplicates
+/// note backlinks by file; code references retain every occurrence.
 fn reference_rows(found: &[Location], per_path: bool) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
     let mut paths: Vec<&str> = Vec::new();
@@ -252,8 +239,7 @@ pub fn reference_icon(row: &str) -> &'static str {
     crate::doc::icon_for(row.rsplit_once(':').map_or(row, |(path, _)| path))
 }
 
-/// What the References section says when it has nothing to list. Any file in the vault has
-/// backlinks; any other text has references to whatever the caret is on as well.
+/// Empty-state text distinguishing file backlinks from text-symbol references.
 fn references_empty(doc: Option<&Doc>) -> &'static str {
     match doc {
         Some(doc) if doc.is_transient() || doc.is_loose() => {
@@ -271,15 +257,10 @@ fn references_empty(doc: Option<&Doc>) -> &'static str {
 /// A place in a PDF a link names: the page, and the selection on it if it names one.
 pub type PdfAnchor = (usize, Option<[usize; 4]>);
 
-/// The character range `bytes` names in `text`, or `None` when it names no range this text has.
+/// Convert byte range `bytes` in `text` to a character range, or `None`.
 ///
-/// The index reports byte offsets and `GtkTextBuffer` addresses characters, so a search hit has to
-/// be counted across before it can be pointed at. Out of bounds and mid-character are both `None`
-/// rather than a guess: the file on disk has moved on from what was indexed, and a caret dropped
-/// somewhere near the old place is worse than one left where it was.
-///
-/// ponytail: counting the text in front of the match is fine for a note opened by a click; a real
-/// byte-to-iter map belongs on `Tab` if anything ever needs one per keystroke.
+/// Reject out-of-bounds and mid-character offsets because disk text may differ from the
+/// index; leaving the caret is safer than guessing a stale location.
 pub fn char_range(text: &str, bytes: Range<usize>) -> Option<Range<usize>> {
     let start = text.get(..bytes.start)?.chars().count();
     Some(start..start + text.get(bytes)?.chars().count())

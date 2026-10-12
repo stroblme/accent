@@ -1,8 +1,8 @@
 // Derived from draw.io js/grapheditor/Graph.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
-//! Placeholders: a cell whose object has `placeholders="1"` shows `%name%` in its label as the
-//! value of `name` on it or the nearest object above it, and `%page%`, `%pagenumber%`,
-//! `%date%` and their kin as the page and the moment it is shown in. They are filled in only as
-//! the page is drawn; the model, the label editor and the index keep what is written.
+//! Expand `%name%` labels from the nearest object attribute when `placeholders="1"`;
+//! resolve `%page%`, `%pagenumber%` and date/time placeholders from display context.
+//! Expansion happens only when drawing so the model, label editor and index retain
+//! the source text.
 
 use std::borrow::Cow;
 
@@ -31,8 +31,8 @@ impl Default for Context {
     }
 }
 
-/// A moment and the local time zone it is read in; the toolkit reads its clock, the crate does
-/// the calendar.
+/// Time and local UTC offset supplied by the toolkit; calendar conversion stays
+/// independent of the toolkit's clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Now {
     /// Milliseconds since the Unix epoch.
@@ -41,8 +41,7 @@ pub struct Now {
     pub offset_minutes: i32,
 }
 
-/// The label `cell` of `page` shows: with its placeholders filled in when its object asks for
-/// them, else as written.
+/// Expand placeholders in `cell`'s label when enabled; otherwise return it unchanged.
 // Graph.getLabel, Graph.js 10913-10924; Graph.convertValueToString, Graph.js 12295-12336
 pub(crate) fn label<'a>(page: &Page, cell: &'a Cell, ctx: &Context) -> Cow<'a, str> {
     let Value::Object { attrs, .. } = &cell.value else {
@@ -94,8 +93,8 @@ fn replace(page: &Page, cell: &Cell, text: &str, ctx: &Context) -> String {
     out
 }
 
-/// Where the placeholder starting at the `%` at `at` ends, one past its closing `%`, if one
-/// starts there (`Graph.placeholderPattern`: `%(date\{.*\}|[^%\{\}"'=;]+)%`).
+/// The byte after the closing `%` of a placeholder at `at`, if present
+/// (`Graph.placeholderPattern`: `%(date\{.*\}|[^%\{\}"'=;]+)%`).
 fn placeholder_end(text: &str, at: usize) -> Option<usize> {
     let rest = &text[at + 1..];
     // `date{…}` reaches the last `}%` on its line, the regex's `.*` being greedy.
@@ -176,9 +175,8 @@ fn inherited<'a>(page: &'a Page, cell: &'a Cell, name: &str) -> Option<&'a str> 
     None
 }
 
-/// A name draw.io fills in for every cell: the page and the moment it is shown in
-/// (`Graph.getGlobalVariable`, Graph.js 10987-11010, and the editor's own, EditorUi.js
-/// 16218-16250).
+/// Resolve page and time variables shared by all cells (`Graph.getGlobalVariable`,
+/// Graph.js 10987-11010; EditorUi.js 16218-16250).
 // ponytail: `%filename%` is not filled in; the crate is not told the file's name.
 fn global(name: &str, page: &Page, ctx: &Context) -> Option<String> {
     match name {

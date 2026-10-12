@@ -1,28 +1,18 @@
-//! The completion popup against real providers, typed into a tab the way a key press types
-//! (`ACCENT_BENCH_COMPLETE`): the note index's links and tags, and a language server's members.
+//! Exercise real note and language-server completions through the editor key path.
 
 use super::*;
 use crate::completion::{self, Session};
 
-/// `=note:<rel>` and `=code:<rel>[,<typed>]`, on a scratch vault under `/tmp` only: they type.
+/// `=note:<rel>` and `=code:<rel>[,<typed>]` type into files; use a scratch vault under `/tmp`.
 ///
-/// `note:` writes `complete-one.md` (tagged `#complete-tag`) and `complete-two.md`, then types into
-/// the note at `rel`: `[[` and the rows it opens, `complete-t` one character at a time and what
-/// it narrows to, Down and Tab and the line that leaves (`[[complete-two]]`, the `]]` the pair
-/// left eaten once, however much was typed since the popup opened), Ctrl+Z, and the same for
-/// `#c`.
-///
-/// `code:` types `typed` (`s.g` unless given) into the first blank line of the file at `rel`, one
-/// character at a time, writing a C `main` there first where there is no such file, and prints
-/// the rows after each character; then Down and the selected
-/// row's documentation, Return and the file's first line with the caret's (what the row brought
-/// with it: an import), Ctrl+Z and the same two lines, and last `x` and `.` 50 ms apart, the
-/// second superseding the first's request at the server (`fake-lsp cancelled` under
-/// `RUST_LOG=accent_lsp::stderr=debug`). Against `build-aux/fake-lsp.py`, configured for the
-/// file's language, every line is fixed (`make drills`); against a real server it is what that
-/// server answers, which with `typed` naming an unimported symbol shows its import landing.
-///
-/// Each step's latency from the keystroke to the rows is a `time complete …` line.
+/// `note:` creates completion fixtures, narrows `[[` and `#c` suggestions, accepts
+/// with Down/Tab and undoes. Bracket completion must consume the existing `]]` once.
+/// `code:` types `typed` (default `s.g`) into a blank line, creating a C fixture if
+/// absent. Print rows, selected documentation, accepted imports and undo results.
+/// Requests from `x` and `.` 50 ms apart test cancellation (`fake-lsp cancelled` with
+/// `RUST_LOG=accent_lsp::stderr=debug`). `build-aux/fake-lsp.py` gives fixed output for
+/// `make drills`; real servers can exercise imports for unimported symbols.
+/// Each step prints `time complete …` latency from keystroke to rows.
 pub(super) fn bench_complete(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_COMPLETE");
     let (app, arg) = (app.clone(), arg.to_string());
@@ -210,8 +200,7 @@ fn bench_rows(session: &Rc<Session>) -> (Vec<String>, Option<u32>) {
     }
 }
 
-/// One character as a key press types it: the chain first (a bracket's pair is `typing`'s),
-/// the character itself where nothing in the chain took the key.
+/// Run a character through editor key handlers before inserting it if unhandled.
 fn bench_char(tab: &Rc<Tab>, c: char) {
     let name = match c {
         '[' => "bracketleft".to_string(),
@@ -241,7 +230,7 @@ async fn bench_key(tab: &Rc<Tab>, session: &Rc<Session>, step: &str, key: gdk::K
     );
 }
 
-/// Until nothing is asked or waited for, and a frame on.
+/// Wait for pending requests and one further frame before probing settled output.
 async fn bench_settle(session: &Rc<Session>) {
     glib::timeout_future(Duration::from_millis(30)).await;
     for _ in 0..500 {

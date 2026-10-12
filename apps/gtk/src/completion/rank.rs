@@ -1,4 +1,4 @@
-//! What the popup lists and what a key does to it, decided without a widget.
+//! Pure completion ranking and popup-key decisions, independent of widgets.
 
 use accent_core::fuzzy::{Corpus, Query};
 use gtk::gdk;
@@ -16,11 +16,9 @@ pub(super) struct Candidate<'a> {
     pub corpus: Corpus,
 }
 
-/// The candidates that match what was typed, best first, by index.
-///
-/// Those whose filter starts with what was typed lead, as the word being finished; then the
-/// better match; then the provider's own order, which is a server's ranking or a note's shortest
-/// path. The matching is [`Query::as_typed`]: in the order typed, any case, `cafe` finding `café`.
+/// Rank matching candidate indices by prefix, match quality, then provider
+/// order (server rank or note path length). [`Query::as_typed`] preserves
+/// typed order while ignoring case and matching `cafe` to `café`.
 pub(super) fn rank(candidates: &[Candidate]) -> Vec<usize> {
     // One query per distinct text typed, which is one or two however many items there are: the
     // items of an answer mostly start where the word does.
@@ -54,9 +52,9 @@ fn starts_with(text: &str, prefix: &str) -> bool {
         .all(|p| text.next() == Some(p))
 }
 
-/// Which characters of `label` a row emboldens: where what was typed matches it, from after the
-/// last character that opens a link, a heading, a tag or a path segment (`[[Notes/De` against
-/// `Deep`), since the label leaves those out.
+/// Character indices to bold in `label`, matching only after the last
+/// link, anchor, tag or path separator omitted from the label
+/// (for example, `[[Notes/De` against `Deep`).
 pub(super) fn highlight(label: &str, typed: &str) -> Vec<u32> {
     let needle = typed.rsplit(['[', '#', '(', '/']).next().unwrap_or(typed);
     if needle.is_empty() {
@@ -73,13 +71,11 @@ fn is_identifier(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Whether what was just typed opens the popup, and with which trigger character: `before` is the
-/// line up to the caret.
+/// Determine whether typing after `before` opens completion and which trigger applies.
 ///
-/// The character just typed is one the provider asked to be told about (`.`, `[`); or a word has
-/// grown to `min_word` characters, one in code and two in prose, where a single letter matches
-/// half the dictionary; or a word was started straight after a trigger, the `t` of `#t`, which a
-/// note answers at once although the `#` alone was a heading.
+/// Provider triggers, words reaching `min_word`, or a word starting after a trigger qualify.
+/// Prose waits for two letters to avoid broad dictionary matches; code uses one, and `#t`
+/// can complete immediately even though bare `#` denotes a heading.
 pub(super) fn opens(before: &str, triggers: &[char], min_word: usize) -> Option<Option<char>> {
     let last = before.chars().next_back()?;
     if triggers.contains(&last) {
@@ -111,11 +107,9 @@ pub(super) enum Step {
     Pass,
 }
 
-/// Which [`Step`] a press asks for, from the popup's selection and its number of rows.
-///
-/// Nothing is selected until an arrow picks a row, but for a Lean abbreviation typed out in full
-/// ([`accent_api::Completion::preselect`]); Up from the first row goes back to none. Return and
-/// Tab accept a selected row and are the editor's otherwise.
+/// Map popup keys to [`Step`]. Start unselected except exact Lean
+/// abbreviations ([`accent_api::Completion::preselect`]); Up from first
+/// returns to none. Return/Tab accept only a selected row.
 pub(super) fn step(
     key: gdk::Key,
     state: gdk::ModifierType,

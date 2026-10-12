@@ -26,12 +26,9 @@ pub(super) fn delimited(
     }
 }
 
-/// Style the whole range (delimiters included) and dim the delimiters on top.
-///
-/// The delimiters are read back rather than assumed, like [`delimited`] does: an event range
-/// need not start where its opening delimiter does — pulldown-cmark reports the math in
-/// `[[$|é$]]` as starting inside the alias — and counting `n` bytes in from an end that is not
-/// a delimiter can cut a character in half.
+/// Style the whole range and dim its delimiters. Read markers from source because parser ranges
+/// may start inside an alias, as in `[[$|é$]]`; assumed delimiter offsets could split UTF-8
+/// characters.
 pub(super) fn wrapped(
     out: &mut Vec<Span>,
     text: &str,
@@ -95,12 +92,9 @@ pub(super) fn heading_marker(text: &str, r: &Range<usize>) -> Option<Range<usize
     Some(r.start..i)
 }
 
-/// The closing `---` (or `...`) line of a frontmatter block, when the block's range reaches it.
-///
-/// The range's last three bytes are not it: the parser can end a block short of its delimiter
-/// (an indented `---` inside a list item), and taking them anyway can cut a character in half.
-/// Reading the delimiter back is also the only thing that keeps the marker off the trailing
-/// newline the range carries.
+/// Locate a frontmatter block's closing `---` or `...` only when its range includes it. Source
+/// validation handles truncated parser ranges without splitting UTF-8 or marking the trailing
+/// newline.
 pub(super) fn meta_close(text: &str, r: &Range<usize>) -> Option<Range<usize>> {
     let end = trim_eol(text, r).end;
     let start = text[r.start..end].rfind('\n').map(|i| r.start + i + 1)?;

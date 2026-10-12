@@ -1,8 +1,6 @@
-//! accent-cli: index | scan | search | backlinks | tags | stats. Works without the GUI.
-//! These only read the vault — the one thing they write is the cache db, which they bring up to
-//! date through the same façade, scan policy and defaults as the app before they answer. `mcp`
-//! serves the vault to an agent. Also what runs behind the window: `serve` on a remote host, and
-//! `hold`, `attach`, `kill`, `held` and `clip`, which keep the terminal tabs' shells alive between
+//! Headless vault queries, MCP serving, remote RPC and persistent-shell commands. Queries update
+//! only the cache index using the app's scan policy and defaults; `mcp` exposes reads and writes
+//! to agents. `serve` runs on remote hosts, while holder commands preserve shells across
 //! windows.
 
 mod hold;
@@ -32,7 +30,7 @@ struct Common {
     /// Vault root directory.
     #[arg(long)]
     vault: PathBuf,
-    /// Index database. Defaults to $XDG_CACHE_HOME/accent/<hash-of-vault-path>.db
+    /// Index database. Defaults to `$XDG_CACHE_HOME/accent/<hash-of-vault-path>.db`
     #[arg(long)]
     db: Option<PathBuf>,
 }
@@ -107,17 +105,14 @@ enum Cmd {
         #[command(flatten)]
         common: Common,
     },
-    /// Serve one vault as JSON-RPC over stdin and stdout.
-    ///
-    /// This is what runs on a remote host: the desktop uploads this binary, starts it over ssh,
-    /// and drives the whole façade through the pipe. It answers until stdin closes, which is what
-    /// happens when the window goes away, or until a client that pinged has said nothing for 90 s,
-    /// which is what a dropped link looks like from here. Nothing is left behind on the host.
+    /// Serve a vault over stdio JSON-RPC for the desktop's SSH remote backend. Exit when stdin
+    /// closes, or after 90 s without messages from a client that has pinged, so dropped links do
+    /// not leave servers behind.
     Serve {
         /// Vault root directory.
         #[arg(long)]
         vault: PathBuf,
-        /// Index database. Defaults to $XDG_CACHE_HOME/accent/<hash-of-vault-path>.db
+        /// Index database. Defaults to `$XDG_CACHE_HOME/accent/<hash-of-vault-path>.db`
         #[arg(long)]
         db: Option<PathBuf>,
     },

@@ -13,14 +13,10 @@ use crate::style::Resolved;
 /// `mxConstants.ARROW_SIZE`: a flex arrow's head is `ARROW_SIZE / 5 · 3` long by default.
 const ARROW_SIZE: f64 = 30.0;
 
-/// A `flexArrow` edge: a filled, stroked band along `points` with its heads.
-///
-/// `mxArrowConnector.paintEdgeShape` (mxArrowConnector.js 124-417) with `FlexArrowShape`'s
-/// widths (Shapes.js 3990-4018): the band's outbound side is walked first, then its inbound side
-/// back, each waypoint's corner on the mitre of the two segments, or with `rounded=1` bent round
-/// it by a quad on the outer side. `curved=1` walks a fine polyline along the curved line
-/// instead, cut where the heads begin. A bent band is mitred at most 1.42 times its stroke and
-/// its heads stroked again at 4, as the JS does.
+/// Draw a filled, stroked `flexArrow` band and its heads (`mxArrowConnector.paintEdgeShape`,
+/// `FlexArrowShape`). Traverse both sides, using mitres or outer quadratics for
+/// `rounded=1`. With `curved=1`, follow a sampled curve trimmed at the heads.
+/// Use draw.io's mitre limits: 1.42 for the band, 4 for the heads.
 pub fn flex_arrow(points: &[Point], style: &Resolved, stroke_width: f64) -> Vec<Part> {
     if points.len() < 2 {
         return Vec::new();

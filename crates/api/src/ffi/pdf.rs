@@ -1,14 +1,7 @@
-//! One open PDF, with everything a reader and a pen need.
-//!
-//! The desktop keeps this behind a thread per document, because pdfium is serialised by one
-//! process-wide lock and a GTK widget must never wait on it. The rule is the same here, but the
-//! thread is the caller's: every method takes the session's own lock and then pdfium's, so any
-//! thread may call and none may be the main one. A caller that wants its tiles in order runs
-//! them on one worker of its own; that is also the only cancellation there is, since uniffi
-//! offers none and a call is never interrupted once it has begun. A tile is small enough for
-//! that to be the right unit.
-//!
-//! The undo ledger is `accent_core::pdf::ledger`, the same one the desktop render thread walks.
+//! PDF reading and ink editing using the desktop's `accent_core::pdf::ledger`.
+//! Methods lock the session, then pdfium's process-wide lock; call off the
+//! main thread. Use one caller-owned worker for ordered tiles. UniFFI cannot
+//! interrupt calls, so cancellation happens between operations.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,8 +16,8 @@ use crate::ffi::convert::{
 };
 use crate::ffi::error::{AccentError, Answer};
 
-/// A selection link with the selected text as its alias, which is what Copy Link puts on the
-/// clipboard: `[[f.pdf#page=1&selection=…|the text]]`. See [`pdf::link_with_alias`].
+/// Selection wikilink with quoted-text alias for Copy Link:
+/// `[[f.pdf#page=1&selection=…|the text]]`. See [`pdf::link_with_alias`].
 #[uniffi::export]
 pub fn link_with_alias(link: String, text: String) -> String {
     pdf::link_with_alias(&link, &text)
@@ -32,8 +25,8 @@ pub fn link_with_alias(link: String, text: String) -> String {
 
 struct State {
     doc: PdfDoc,
-    /// Where it was opened from, and the stamp the last read or write left. Both `None` for a
-    /// document opened from bytes, which has no file behind it to save into.
+    /// Source path and last read/write etag. Both are `None` for byte-backed
+    /// documents, which cannot save to a file.
     path: Option<PathBuf>,
     etag: Option<Etag>,
     ink: Ink,
@@ -83,10 +76,9 @@ impl PdfSession {
         PdfSession::of(PdfDoc::open(&path)?, Some(path))
     }
 
-    /// Open a document from bytes: a `content://` URI, where there is no path to read.
-    ///
-    /// It cannot [`save`](Self::save); the caller writes what [`save_bytes`](Self::save_bytes)
-    /// hands back, through whatever gave it the bytes.
+    /// Open bytes, such as from a `content://` URI without a file path.
+    /// [`save`](Self::save) is unavailable; write [`save_bytes`](Self::save_bytes)
+    /// through the source that supplied the bytes.
     #[uniffi::constructor]
     pub fn open_bytes(bytes: Vec<u8>) -> Answer<Self> {
         if !pdf::available() {
@@ -148,8 +140,8 @@ impl PdfSession {
         self.with(|s| Ok(convert::all(s.page_glyphs(page as usize)?.to_vec())))
     }
 
-    /// The wikilink a selection of glyphs makes, plus the quads and the quoted text that
-    /// re-anchor it when the numbers no longer fit the document.
+    /// Build a glyph-selection wikilink, quads and quoted text for reanchoring
+    /// when numeric positions no longer match.
     pub fn selection_link(
         &self,
         rel: String,
@@ -193,10 +185,9 @@ impl PdfSession {
         })
     }
 
-    /// Where the note links that highlight this document land today, by the desktop's rules
-    /// ([`pdf::highlight_quads`]), in page order. `link` is the index into `links`, so a caller
-    /// may hand over one page's links or all of them; a link whose selection is not four numbers
-    /// lands nowhere.
+    /// Resolve highlight links in page order using [`pdf::highlight_quads`].
+    /// `link` indexes the supplied `links`, whether for one page or all pages.
+    /// Selections without four numbers are omitted.
     pub fn link_highlights(&self, links: Vec<PdfLink>) -> Vec<LinkHighlight> {
         let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let State { doc, glyphs, .. } = &mut *s;
@@ -220,10 +211,9 @@ impl PdfSession {
             .collect()
     }
 
-    /// What Print hands on, as the desktop's does: the document as it now stands, its ink
-    /// included, with the note links that land written in as `/Highlight` annotations in `rgba`
-    /// (`0xRRGGBBAA`), each carrying the text its link quotes. The bytes of a file of its own;
-    /// this document gains nothing and stays as dirty as it was.
+    /// Export current PDF bytes, including ink and note-link `/Highlight`
+    /// annotations in `rgba` (`0xRRGGBBAA`) with quoted text. Leave the open
+    /// document and its dirty state unchanged.
     pub fn copy_with_highlights(&self, links: Vec<PdfLink>, rgba: u32) -> Answer<Vec<u8>> {
         self.with(|s| {
             let links: Vec<_> = links
@@ -254,8 +244,8 @@ impl PdfSession {
         self.with(|s| Ok(convert::all(s.doc.outline()?)))
     }
 
-    /// Every hit of `text` on one page, each as the lines it runs over. One page per call, so a
-    /// caller walking a long document can stop between them.
+    /// Search one page for `text`, returning each hit's line regions. Page-sized
+    /// calls let long-document searches stop between pages.
     pub fn search(&self, page: u32, text: String) -> Answer<Vec<SearchLine>> {
         self.with(|s| {
             let found = s.doc.search(page as usize, &text, Default::default())?;
@@ -263,8 +253,8 @@ impl PdfSession {
         })
     }
 
-    /// What other readers wrote on one page ([`PdfDoc::comments`]), each over its areas in page
-    /// points. Read, never written, as on the desktop.
+    /// Read other viewers' comments ([`PdfDoc::comments`]) with areas in page
+    /// points. Comments are not written, as on desktop.
     pub fn comments(&self, page: u32) -> Answer<Vec<pdf::Comment>> {
         self.with(|s| Ok(s.doc.comments(page as usize)?))
     }
@@ -276,7 +266,7 @@ impl PdfSession {
 
     // -------------------------------------------------------------------------------- drawing
 
-    /// Draw a stroke through `points`, in page points. How much of the page that changed.
+    /// Draw a stroke through page-point `points` and return the changed area.
     pub fn add_stroke(&self, page: u32, points: Vec<Point>, style: InkStyle) -> Answer<pdf::Rect> {
         self.with(|s| {
             let page = page as usize;
@@ -290,12 +280,9 @@ impl PdfSession {
         })
     }
 
-    /// Erase along the line from `from` to `to`: the first stroke it crosses, whole or cut in
-    /// two, depending on `partial`.
-    ///
-    /// One stroke per call, so a drag calls until it gets `None` back. `joined` folds the call
-    /// into the gesture before it, which is what makes one drag one Undo: false for the first
-    /// hit of a drag, true after.
+    /// Erase the first stroke crossed from `from` to `to`, whole or split
+    /// according to `partial`. Repeat until `None` for a drag. Set `joined`
+    /// false on the first hit and true thereafter to make the drag one Undo.
     pub fn erase_at(
         &self,
         page: u32,
@@ -350,17 +337,17 @@ impl PdfSession {
         })
     }
 
-    /// Walk the last gesture back, and say which page each of its steps changed and how much.
+    /// Undo the last gesture, returning changed pages and areas for its steps.
     pub fn undo(&self) -> Vec<PageArea> {
         self.walk(false)
     }
 
-    /// Walk the last gesture Undo took back forward again.
+    /// Redo the last undone gesture.
     pub fn redo(&self) -> Vec<PageArea> {
         self.walk(true)
     }
 
-    /// Whether Undo, and then Redo, has anything to walk.
+    /// Whether undo and redo are available.
     pub fn history(&self) -> History {
         let s = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let (undo, redo) = s.ink.history();
@@ -374,10 +361,8 @@ impl PdfSession {
 
     // ---------------------------------------------------------------------------------- saving
 
-    /// Write the document back where it was opened from, refusing if it has changed under us.
-    ///
-    /// `None` when there was nothing to write. A document opened from bytes has no file to write
-    /// to and fails here; use [`save_bytes`](Self::save_bytes).
+    /// Save to the source path, rejecting external changes. `None` means
+    /// nothing changed. Byte-backed documents must use [`save_bytes`](Self::save_bytes).
     pub fn save(&self) -> Answer<Option<Etag>> {
         self.with(|s| {
             if !s.ink.dirty {
@@ -559,9 +544,8 @@ mod tests {
         out.into_bytes()
     }
 
-    /// A note's links land where their numbers say and keep the index they were handed at, one
-    /// that is not four numbers included; a followed link locates its glyphs, and numbers that
-    /// fit no line locate nothing.
+    /// Verify link quads preserve input indices, invalid selections locate
+    /// nothing, and followed links locate current glyphs.
     #[test]
     fn a_note_link_lands_and_a_followed_link_is_located() {
         if !pdf::available() {
@@ -597,8 +581,8 @@ mod tests {
         assert!(s.locate(0, vec![1, 2]).is_err());
     }
 
-    /// What Print hands on: the document as it stands, its unsaved ink in, with each note link
-    /// that lands written in as a highlight quoting it, while the open document gains nothing.
+    /// Verify Print includes unsaved ink and quoted link highlights without
+    /// modifying the open document.
     #[test]
     fn a_print_copy_carries_the_ink_and_the_note_highlights() {
         if !pdf::available() {

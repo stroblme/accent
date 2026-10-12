@@ -44,15 +44,9 @@ pub(super) fn child_path(dir: &str, name: &str) -> String {
     }
 }
 
-/// Where a paste of `name` lands in `dir`, given what is already there.
-///
-/// The name itself while nothing holds it, and otherwise GNOME's own mark, carried by the stem so
-/// the extension still says what the file is: `notes.md`, `notes (copy).md`, `notes (copy 2).md`.
-/// A folder takes it at the end — the dot in `Archive.2024` starts no extension, which is the rule
-/// Rename's selection already follows.
-///
-/// Takes the lookup rather than the vault, so the arithmetic is testable and so the caller can
-/// keep every `stat` it costs on the worker thread: each one is a round trip on a remote vault.
+/// Choose a free paste name in `dir`, adding GNOME's `(copy)` suffix and number when needed.
+/// Insert it before file extensions but after whole folder names. A supplied lookup keeps remote
+/// stats on the caller's worker and makes naming testable.
 pub(super) fn free_path(
     dir: &str,
     name: &str,

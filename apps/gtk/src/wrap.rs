@@ -1,22 +1,14 @@
-//! Wrapped rows that carry on under their line's own indent rather than at the left margin, in
-//! every text tab: behind a note's list or quote marker, and one indent level deeper than any other
-//! indented line ([`typing::wrap_column`]).
+//! Indent wrapped rows behind list or quote markers, or one level beyond a line's indent
+//! ([`typing::wrap_column`]).
 //!
-//! GtkTextView has no wrap indent of its own. What it has is a paragraph tag's `indent`, which
-//! Pango reads as a hanging indent when it is negative: the first row stays where it was and every
-//! wrapped row starts that many pixels right of it, the trick `highlight::hang` pulls heading
-//! markers into the gutter with. A tag's indent is pixels and not a function of the line it lands
-//! on, so there is one tag per column, `wrap1`..`wrap32`, each given its width in the view's font by
-//! [`measure`]; a line that would hang deeper hangs at the last. A note's list and quote markers
-//! hang at their own width rather than a column's, which in a proportional face is not their
-//! character count in spaces: a tag per indent and marker, `wrap2:- `, made the first time a line
-//! asks for it and measured with the marker laid out as the note draws it ([`marker_tag`]).
+//! GtkTextView has no wrap-indent API; negative paragraph indents provide hanging indents.
+//! Column tags (`wrap1`..`wrap32`) use widths measured in the view's font. Marker tags measure
+//! the styled marker itself, so proportional fonts align correctly; deeper columns are capped.
 //!
-//! A line's paragraph values are the ones on its first character, so that is the character
-//! [`retag`] checks, and a tag goes on whole lines. [`follow`] keeps the tags in step with the text:
-//! every line once, then only the lines each insertion or deletion touched, so a keystroke costs
-//! the same in a long file as in a short one. A note's fenced block is code, and its lines wrap as
-//! code does whatever they open with; [`refence`] follows the styling pass that finds the fences.
+//! Paragraph properties come from the first character, so tags cover whole lines and
+//! [`retag`] checks that character. [`follow`] retags only edited lines, keeping keystroke
+//! work independent of file length. [`refence`] follows styling changes so fenced lines
+//! wrap as code even when their text was not edited.
 
 use crate::{highlight, typing};
 use gtk::pango;
@@ -27,13 +19,11 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-/// The deepest column a wrap hangs at: a line seven levels into four-space code, or a paragraph
-/// under three tabs in a note.
+/// Deepest supported wrap column.
 const COLUMNS: usize = 32;
 
-/// How much of a line [`retag`] reads. Its column is capped at [`COLUMNS`], which this many
-/// characters of indent always reach, with room for a marker behind a shallower one; a minified
-/// file's one long line is not copied out on every keystroke.
+/// Maximum prefix read by [`retag`], enough to reach [`COLUMNS`] plus a marker.
+/// Bounding it avoids copying minified lines on each keystroke.
 const HEAD_CHARS: i32 = COLUMNS as i32 + 16;
 
 fn name(column: usize) -> String {
@@ -57,14 +47,11 @@ fn is_wrap(tag: &gtk::TextTag) -> bool {
 }
 
 thread_local! {
-    /// Each marker's width in Pango units, by the font and the space's width it was laid out at:
-    /// every restyle measures the tags again, and a font that has not changed is a lookup.
+    /// Cached marker widths in Pango units, keyed by font and space width to reuse unchanged restyles.
     static WIDTHS: RefCell<HashMap<(String, i32, String), i32>> = RefCell::new(HashMap::new());
 }
 
-/// Create the tags in `buffer`'s table (idempotent). Before anything a flavour installs: a note's
-/// heading tags set an indent of their own, and a tag added later outranks an earlier one, which
-/// is how an indented ATX heading keeps the hang that pulls its `#` markers out.
+/// Create wrap tags before flavour tags so heading indentation outranks them. Idempotent.
 pub fn install(buffer: &sourceview5::Buffer) {
     let table = buffer.tag_table();
     for column in 1..=COLUMNS {
@@ -74,11 +61,8 @@ pub fn install(buffer: &sourceview5::Buffer) {
     }
 }
 
-/// Give every tag its width in `view`'s font, a space per column: the unit GtkSourceView sets its
-/// tab stops in, so a tab-indented line lines up exactly, and in the monospaced face code always
-/// has and a note has by default, every character's advance. A marker tag adds its marker as laid
-/// out ([`hang`]). Called again on every font or zoom change. A tag whose width has not moved is
-/// left alone, because setting one lays out again every line it is on.
+/// Measure tags in `view`'s font, using spaces for columns and [`hang`] for marker widths.
+/// Remeasure after font or zoom changes, updating only changed widths to avoid line relayout.
 pub fn measure(view: &sourceview5::View) {
     let space = space(view);
     let table = view.buffer().tag_table();
@@ -111,10 +95,8 @@ fn space(view: &sourceview5::View) -> i32 {
     view.create_pango_layout(Some(" ")).size().0
 }
 
-/// The indent that hangs a line's wrapped rows behind `marker`, `columns` into the line: the
-/// marker laid out in the view's font as the note draws it, its bullet or number bold (the
-/// `listmarker` tag), a quote's `>` italic with the rest of the quote, the spaces after either
-/// plain. In a monospaced face that is the marker's width in spaces, as a column tag's.
+/// Hanging indent behind `marker` at `columns`, measured with the note's styled marker.
+/// Bullets/numbers are bold, quote markers italic and following spaces plain.
 fn hang(view: &sourceview5::View, space: i32, columns: usize, marker: &str) -> i32 {
     let font = view
         .pango_context()
@@ -142,8 +124,7 @@ fn hang(view: &sourceview5::View, space: i32, columns: usize, marker: &str) -> i
     -pango::units_to_double(space * columns as i32 + width).round() as i32
 }
 
-/// The tag a note's line hangs behind `marker` with, `columns` into it, made the first time a line
-/// asks for it. Under every other tag, as the column tags are, so a heading's hang outranks it.
+/// Create a marker wrap tag lazily, below other tags so heading indentation wins.
 fn marker_tag(view: &sourceview5::View, columns: usize, marker: &str) -> gtk::TextTag {
     let table = view.buffer().tag_table();
     let name = marker_name(columns, marker);
@@ -157,10 +138,8 @@ fn marker_tag(view: &sourceview5::View, columns: usize, marker: &str) -> gtk::Te
     tag
 }
 
-/// Tag every line of `view` now, and from then on the lines each edit touches: an insertion's
-/// lines, and the line a deletion joins. A new tab width or indent width moves every indented
-/// line's column, so it retags them all. `markers` says the text is a note's, whose list and quote
-/// markers set their own hang.
+/// Tag current lines and retag insertion/deletion lines. Retag all after tab or indent width changes.
+/// `markers` enables note-specific list and quote indentation.
 pub fn follow(view: &sourceview5::View, markers: bool) {
     let buffer = view.buffer();
     let tags = tags(&buffer);
@@ -199,11 +178,8 @@ fn tags(buffer: &gtk::TextBuffer) -> Rc<[gtk::TextTag]> {
         .collect()
 }
 
-/// Run `restyle`, a note's styling pass, then retag the lines it put into a fence or took out of
-/// one. The pass moves the `codeblock` tag a fence's lines are known by without an edit on them —
-/// typing a fence open takes in every line below it — so no insertion or deletion retags them.
-/// Only the runs of fenced lines that differ before and after are retagged: a pass that opens or
-/// closes nothing costs two walks over the tag's toggles.
+/// Run `restyle` and retag only changed fenced-line runs.
+/// Styling can change fence membership without editing those lines, so normal edit hooks miss it.
 pub fn refence<T>(view: &sourceview5::View, restyle: impl FnOnce() -> T) -> T {
     let before = fences(view);
     let styled = restyle();
@@ -237,9 +213,8 @@ fn fences(view: &sourceview5::View) -> Vec<Range<i32>> {
     runs
 }
 
-/// The runs that differ between two lists of them: every run of either past what the two have
-/// in common at the front and at the back. A line in none of them is in a fence in both or in
-/// neither.
+/// Return runs differing after trimming shared prefixes and suffixes.
+/// Other lines are fenced in both lists or neither.
 fn moved<'a>(
     before: &'a [Range<i32>],
     after: &'a [Range<i32>],
@@ -257,12 +232,10 @@ fn moved<'a>(
         .chain(&after[..after.len() - tail])
 }
 
-/// Give each of lines `first..=last` the tag its column wants.
+/// Retag lines `first..=last` for their wrap columns.
 ///
-/// An edit's few lines are checked one by one, and only a line whose first character carries the
-/// wrong tag is touched. A longer range, a whole file's or a paste's, loses the tags it has in one
-/// removal each, is read as one string and gets its tags back a run of equally deep lines at a
-/// time: past as many lines as there are tags, that is the cheaper of the two.
+/// Small edits update only incorrect tags. Large ranges remove existing tags once and apply
+/// runs of equal indentation, which is cheaper beyond the number of tags.
 fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: i32, last: i32) {
     let buffer = view.buffer();
     let tab_width = view.tab_width() as usize;

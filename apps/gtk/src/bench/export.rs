@@ -1,5 +1,4 @@
-//! Export as PDF and Print, with the file chooser and the print system left out: what each one
-//! writes is read back.
+//! Read back exports and print copies, bypassing file chooser and print-system input.
 
 use super::*;
 use accent_core::pdf::{InkStyle, PdfDoc};
@@ -17,12 +16,10 @@ pub(super) fn bench_export(app: &Rc<App>, arg: &str) {
     }
 }
 
-/// A PDF with a stroke in the file and a note linking two selections on its first page, exported
-/// into `$TMPDIR` as Export as PDF… does once its chooser has answered, then onto itself, which
-/// is refused. Then Print's copy, and Print itself as far as its dialog, which is closed
-/// unanswered. Every copy is read back against the source — pages, highlights and ink — and the
-/// source is compared byte for byte with what it was before. The source is written to, so this
-/// wants a scratch vault (`make vault VAULT=/tmp/<name>`).
+/// Add ink and two linked selections to a PDF, export into `$TMPDIR`, reject exporting
+/// over the source, and inspect Print's copy before cancelling its dialog. Compare
+/// pages, highlights and ink; require source bytes unchanged by export/print.
+/// Fixture setup writes the source, so use `make vault VAULT=/tmp/<name>`.
 fn bench_export_pdf(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -139,11 +136,10 @@ async fn bench_print_dialog(app: &Rc<App>, pdf: &Rc<pdftab::PdfTab>, file: &Path
     );
 }
 
-/// A note as Export as PDF… and Export as HTML… write it once their choosers have answered, into
-/// `$TMPDIR`, each read back: the PDF's head, its pages and whether its first holds the note's
-/// first heading, that page drawn beside it as `<stem>.png` for a look; the HTML's leftovers of
-/// the app, its inlined images, diagrams, formulas and scripts. Then Print…, as far as its dialog,
-/// which is answered Cancel, and whether the busy line went with it.
+/// Export a note as PDF and HTML into `$TMPDIR` and read them back. Inspect PDF
+/// header/pages/first heading and write `<stem>.png` for review; inspect HTML images,
+/// diagrams, formulas, scripts and app-specific remnants. Cancel Print and check the
+/// busy indicator clears.
 fn bench_export_note(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());

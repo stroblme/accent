@@ -1,9 +1,8 @@
-//! Images pasted or dropped into a note. The file is written where the vault's
-//! `attachment_folder` says, through the vault so that a host takes it as well, and the note gets
-//! Obsidian's embed of it, `![[Pasted image 20260925143012.png]]`, where the caret or the drop was.
+//! Store pasted or dropped images in the vault's `attachment_folder` and insert wikilink
+//! embeds at the paste or drop location. Vault writes also support remote attachments.
 //!
-//! Only images, and only in a note of the window's vault: a code tab, a loose note and anything
-//! else on the clipboard or in a drag keep GTK's own paste and drop.
+//! Only notes in the window's vault participate; other tabs and clipboard or drag content
+//! use GTK's normal paste and drop handling.
 
 use super::*;
 use accent_core::attachment;
@@ -168,8 +167,8 @@ fn images(value: &glib::Value) -> Option<Vec<PathBuf>> {
     })
 }
 
-/// Put each image in the vault, or find it there, and say what the note at `note` calls it: the
-/// embeds of those that landed, and why the first one that did not stopped the rest.
+/// Store or reuse images in the vault and return embeds relative to `note`.
+/// On failure, retain completed embeds and report the first error that stopped the batch.
 fn store(vault: &Vault, note: &str, incoming: Incoming) -> (Vec<String>, Option<String>) {
     let dir = attachment::folder(&vault.config().attachment_folder, note);
     let embed = |rel: &str| {

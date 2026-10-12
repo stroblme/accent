@@ -1,14 +1,10 @@
-//! The popup's widgets: the rows, and the selected row's documentation beside them, in a popover
-//! over the text that never takes the keyboard.
+//! Completion rows and selected documentation in a popover above the text.
 //!
-//! The popover is parented to the view like the signature's: not autohiding, so it neither grabs
-//! the pointer nor the keyboard, and nothing in it can be focused, so the caret stays in the text
-//! while the list is walked with the arrows the view hands over (`editor::keys`). A click on a row
-//! is taken by the row itself before the list could select it and move the focus.
+//! The non-autohiding, unfocusable popover leaves keyboard and pointer control with the view.
+//! Rows handle clicks before the list can move focus; `editor::keys` supplies keyboard input.
 //!
-//! GTK 4.22 presents a popover at the size it has when it is pointed somewhere and does not shrink
-//! it with its content afterwards (ISSUES.md), so every change of size is followed by pointing it
-//! again ([`present`]).
+//! GTK 4.22 does not shrink a presented popover with its content (ISSUES.md), so size changes
+//! reposition it through [`present`].
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -18,20 +14,17 @@ use gtk::{gdk, gio, glib, pango};
 
 use super::rank::MAX_ROWS;
 
-/// The widest the documentation reads, in characters: narrower than a hover, as it sits beside a
-/// list rather than on its own.
+/// Documentation width cap in characters, narrower than standalone hover
+/// because it sits beside the completion list.
 const DOC_WIDTH: i32 = 48;
 
-/// What the CSS (`build::install_chrome_css`) gives the popover's contents and a row on their
-/// left, and the room a kind icon and the gap after it take: how far a row's label sits right of
-/// the popover's edge, which is how far the popover goes left for the label to stand under what
-/// was typed.
+/// Popover/row left padding and icon/gap width from CSS
+/// (`build::install_chrome_css`), used to align labels under typed text.
 pub(crate) const CONTENTS_PADDING: i32 = 4;
 pub(crate) const ROW_PADDING: i32 = 6;
 const ICON_ROOM: i32 = 16 + 6;
 
-/// A row's padding above and below its text, and the least its text may take, also the CSS's:
-/// what the list's height is worked out from before a row has been laid out to measure.
+/// CSS row padding and minimum text height for sizing before GTK layout.
 pub(crate) const ROW_PADDING_Y: i32 = 3;
 pub(crate) const ROW_TEXT_MIN: i32 = 20;
 
@@ -54,11 +47,11 @@ pub(super) struct Popup {
     pane: gtk::Box,
     doc_scroll: gtk::ScrolledWindow,
     doc: gtk::Label,
-    /// The editor's font at the tab's zoom, which every label is set in: CSS does not carry it
-    /// from the view into a popover.
+    /// Zoomed editor font for row labels, explicitly carried into the popover
+    /// because CSS does not inherit it from the view.
     font: Rc<RefCell<Option<pango::FontDescription>>>,
-    /// The widest the list has been since the popup came up: typing narrows the rows, and a
-    /// popup that shrank with them would jump under the caret.
+    /// Maximum width during this popup session, avoiding jumps as typing
+    /// narrows the rows.
     widest: Rc<Cell<i32>>,
     /// The frame callback measuring the rows as laid out, while one is waiting for a frame.
     measure: Rc<RefCell<Option<gtk::TickCallbackId>>>,
@@ -164,9 +157,8 @@ impl Popup {
         self.popover.is_mapped()
     }
 
-    /// Show `rows` under `at`, a rectangle in the view's widget coordinates: the start of what
-    /// the rows complete. `selected` is the row to keep selected, if any. Never with no rows:
-    /// an empty popover is presented 0 px tall, which GDK refuses with a critical.
+    /// Show nonempty `rows` at view rectangle `at`, preserving `selected`.
+    /// Reject empty lists because GDK treats a 0 px popover as a critical.
     pub(super) fn show(&self, at: gdk::Rectangle, rows: Vec<Row>, selected: Option<u32>) {
         if rows.is_empty() {
             return self.hide();
@@ -206,8 +198,8 @@ impl Popup {
         self.measure();
     }
 
-    /// [`MAX_ROWS`] rows tall, a row being the font's line and the CSS's padding: right for the
-    /// first frame, before any row has been laid out.
+    /// Estimate initial height from [`MAX_ROWS`], font line height and CSS
+    /// padding before row allocation.
     fn estimate(&self) {
         let font = self.font.borrow();
         let metrics = self.popover.pango_context().metrics(font.as_ref(), None);
@@ -216,8 +208,8 @@ impl Popup {
         set_tall(&self.rows, &self.doc_scroll, row * MAX_ROWS as i32);
     }
 
-    /// On the next frame, once the rows are laid out: [`MAX_ROWS`] of them tall as they are, and
-    /// never narrower than the list has been, presented again if either changed.
+    /// After the next frame, use measured row heights up to [`MAX_ROWS`]
+    /// and retain maximum width; present again only if dimensions changed.
     fn measure(&self) {
         if let Some(waiting) = self.measure.take() {
             waiting.remove();
@@ -284,8 +276,8 @@ impl Popup {
         }
     }
 
-    /// The selected row's documentation as Pango markup, or `None` to put the pane away. Either
-    /// changes the popup's size, so it is presented again.
+    /// Set selected-row docs as Pango markup or hide with `None`, then
+    /// present the resized popover again.
     pub(super) fn set_doc(&self, markup: Option<&str>) {
         if let Some(markup) = markup {
             self.doc.set_markup(markup);
@@ -329,9 +321,9 @@ fn present(popover: &gtk::Popover) {
     }
 }
 
-/// A vertical scrollbar where the content is taller than its scrolled window may grow, and none
-/// otherwise: one that may show holds the window at least its own length tall, about two rows,
-/// which a single row or a line of documentation would otherwise be given.
+/// Show a vertical scrollbar only when content exceeds the height cap.
+/// A potentially visible scrollbar otherwise forces tiny lists or
+/// one-line docs to roughly two rows tall.
 fn scrollbar(overflows: bool) -> gtk::PolicyType {
     match overflows {
         true => gtk::PolicyType::Automatic,
@@ -356,8 +348,8 @@ fn font_attrs(font: &pango::FontDescription) -> pango::AttrList {
     attrs
 }
 
-/// A row's widgets, built once per row the list recycles: the kind icon, the label, and the
-/// detail, dimmed. A press on one accepts it; binding only ever sets what the row shows.
+/// Reusable row widgets: kind icon, label and dimmed detail. Click accepts;
+/// binding only updates displayed state.
 fn factory(
     accept: Rc<dyn Fn(u32)>,
     font: Rc<RefCell<Option<pango::FontDescription>>>,

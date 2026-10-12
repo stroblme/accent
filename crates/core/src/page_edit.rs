@@ -1,8 +1,5 @@
-//! One change to a PDF's pages, and where it takes every page number.
-//!
-//! Outside `pdf` because what names a page by its number is not only the viewer: the notes do
-//! too (`[[paper.pdf#page=3]]`), and a host with no pdfium rewrites them
-//! ([`crate::markdown::repage_links`]).
+//! PDF page edits and page-number remapping. Kept outside `pdf` so hosts without pdfium can
+//! update note links through [`crate::markdown::repage_links`].
 
 use serde::{Deserialize, Serialize};
 

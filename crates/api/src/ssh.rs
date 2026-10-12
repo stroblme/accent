@@ -1,14 +1,9 @@
-//! The vocabulary for driving the system `ssh` binary against a remote vault: addresses, quoting,
-//! socket paths and argument vectors.
-//!
-//! One background ControlMaster per address carries everything that follows — the RPC session, a
-//! terminal tab, a port forward — so the user authenticates once and their own `~/.ssh/config`,
-//! ProxyJump and agent apply, because it is their `ssh` doing the work rather than a reimplementation
-//! of it. The trap is that ssh succeeds *without* the master: pointed at a dead socket it quietly
-//! opens a direct connection and then blocks on a passphrase prompt that has no terminal to appear
-//! on, which is why the one-shot commands force `BatchMode=yes`.
-//!
-//! Nothing here spawns a process. It builds strings, so all of it is testable without a network.
+//! Build system-SSH addresses, shell quoting, socket paths and arguments.
+//! One ControlMaster carries RPC, shells and forwards so authentication is
+//! shared and the user's SSH config, ProxyJump and agent apply. One-shot
+//! commands force BatchMode: SSH otherwise falls back from a dead socket to
+//! a new connection that could hang on an invisible prompt. All functions
+//! build strings without spawning processes, so tests need no network.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -27,10 +22,8 @@ pub struct Url {
     pub path: PathBuf,
 }
 
-/// Parse `ssh://[user@]host[:port]/absolute/path`.
-///
-/// The error is a sentence fragment shown to the user, so it names what is wrong with the address
-/// they typed rather than what the parser wanted to see.
+/// Parse `ssh://[user@]host[:port]/absolute/path`. Errors are displayable
+/// fragments describing what is wrong with the entered address.
 pub fn parse(url: &str) -> crate::Result<Url> {
     parsed(url).map_err(|why| accent_core::Error::Invalid(why).into())
 }
@@ -118,8 +111,8 @@ pub fn is_remote_path(p: &Path) -> bool {
 }
 
 impl Url {
-    /// What goes on the ssh command line as the destination. Never the port: that is `-p`, because
-    /// `host:port` would be read as a path by scp-style parsing.
+    /// SSH destination without the port, which travels separately as `-p`;
+    /// `host:port` would be interpreted as an scp-style path.
     pub fn destination(&self) -> String {
         match &self.user {
             Some(user) => format!("{user}@{}", self.host),
@@ -161,29 +154,24 @@ impl std::fmt::Display for Url {
     }
 }
 
-/// Wrap one word for a remote login shell. Everything inside single quotes is literal to POSIX sh
-/// except the closing quote itself, so each `'` leaves the quotes, is backslash-escaped, and the
-/// quoting resumes.
+/// Quote one word for POSIX remote shells. Single quotes preserve literal
+/// text; escape each embedded quote outside the quoted region.
 pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 // ------------------------------------------------------------ control socket
 
-/// Where the ControlMaster for `url` keeps its socket: `<runtime dir>/accent/<16 hex of the url>`.
-///
-/// A `sockaddr_un` holds 108 bytes on Linux, path and terminator together, so the name is a short
-/// hash rather than anything readable — `%C` and friends produce paths that overflow on a long
-/// host or a long user name and fail with "too long for Unix domain socket".
+/// ControlMaster socket at `<runtime dir>/accent/<16 hex of the url>`.
+/// A short hash fits Linux's 108-byte `sockaddr_un` path including terminator,
+/// even when host or user names are long.
 pub fn control_path(url: &Url) -> PathBuf {
     runtime_dir().join("accent").join(id(url))
 }
 
-/// `$XDG_RUNTIME_DIR` when set and absolute, else the temp dir.
-///
-/// Deliberately not `config::xdg`, whose fallback is `$HOME/<something>`: a home directory may be
-/// on NFS, where a socket cannot be bound, and it is not wiped at logout, so a stale socket would
-/// outlive the session that made it. The temp dir is the right second choice for a socket.
+/// Use absolute `$XDG_RUNTIME_DIR`, otherwise the temp directory. Avoid
+/// `config::xdg`'s home fallback: home may use NFS (no sockets) and retain
+/// stale sockets beyond logout.
 fn runtime_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -214,20 +202,12 @@ fn base(url: &Url, ctl: &Path) -> Vec<String> {
     argv
 }
 
-/// Start the background master, or adopt the one already running, and exit.
-///
-/// `ControlMaster=auto` rather than `yes` because only `auto` unlinks a stale socket and reuses a
-/// live master; `yes` logs "ControlSocket ... already exists, disabling multiplexing", exits 0, and
-/// leaves no master behind — a success that breaks everything after it.
-///
-/// `ControlPersist=60` rather than `yes` because a crashed app must not leak a master forever. The
-/// timer only counts idle time, and `serve` holds a session for as long as the vault is open, so a
-/// working remote never reaches it. Closing the vault leaves the master that minute on purpose, so
-/// a reopen within it is quick.
-///
-/// `quiet` is for an attempt nobody asked for, the window's own reconnect after a dropped link:
-/// `BatchMode=yes` makes a key that wants a passphrase fail that attempt rather than raise a
-/// dialog over whatever the reader is doing. An attempt someone asked for may prompt.
+/// Start or reuse a background master. `ControlMaster=auto` reuses live
+/// masters and removes stale sockets; `yes` can succeed without creating one.
+/// `ControlPersist=60` prevents permanent leaks after crashes and allows quick
+/// reopens; an active `serve` session keeps the master non-idle.
+/// Use `quiet` for automatic reconnects: BatchMode refuses passphrase prompts
+/// without interrupting the user. Explicit attempts may prompt.
 pub fn master(url: &Url, ctl: &Path, quiet: bool) -> Vec<String> {
     let mut argv = base(url, ctl);
     if quiet {
@@ -257,15 +237,11 @@ pub fn master(url: &Url, ctl: &Path, quiet: bool) -> Vec<String> {
     argv
 }
 
-/// One command on the host for a dialog that has not connected yet — the folder completion in the
-/// Open Remote form, which dials out so a path can be typed against the real machine.
-///
-/// `BatchMode=yes` is the whole point: the user has not pressed Connect, so a passphrase or a
-/// host-key question is the one thing this must never produce. Agent or key auth, or nothing at
-/// all. `ControlMaster=auto` on a socket of the caller's own — never [`control_path`], which an
-/// open vault may be using — lets the first call make the master every later one reuses, and it
-/// can be shut down with [`exit`] when the dialog closes. `ConnectTimeout` is the caller's and is
-/// short: a field that goes quiet is worse than one that never completes.
+/// Probe remote folders before Open Remote connects. BatchMode permits only
+/// noninteractive authentication, avoiding premature passphrase or host-key
+/// prompts. A caller-owned socket with `ControlMaster=auto` reuses probe
+/// connections without touching a vault master; [`exit`] closes it with the
+/// dialog. The caller supplies a short `ConnectTimeout` for responsive completion.
 pub fn probe(url: &Url, ctl: &Path, seconds: u32, command: &str) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.extend([
@@ -284,8 +260,7 @@ pub fn probe(url: &Url, ctl: &Path, seconds: u32, command: &str) -> Vec<String> 
     argv
 }
 
-/// The completion probe's own socket, so a dialog can never take down the master an open vault on
-/// the same host is talking through.
+/// Separate probe socket, so closing a dialog cannot stop an open vault's master.
 pub fn probe_path(url: &Url) -> PathBuf {
     runtime_dir()
         .join("accent")
@@ -298,16 +273,14 @@ pub fn exit(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "exit")
 }
 
-/// Ask whether a master is up behind `ctl`. It only talks to the socket, so it answers at once
-/// and never dials out: the question to settle before paying for a handshake. It is not asked
-/// whether the host still opens sessions on that connection, which only a command over it can
-/// tell.
+/// Check the master socket without dialing out, before paying for a handshake.
+/// This does not prove the host still accepts sessions; only a command can.
 pub fn check(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "check")
 }
 
-/// Retire the master behind `ctl`: it takes no new sessions and gives up its socket for another
-/// master, but the sessions it carries, a shell's, keep going until they end, and then so does it.
+/// Retire a master without interrupting its active shells. Release its
+/// socket and refuse new sessions; exit after existing sessions end.
 pub fn stop(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "stop")
 }
@@ -394,11 +367,8 @@ fn insert_forward(argv: &mut Vec<String>, f: Forward) {
     argv.insert(at + 1, spec);
 }
 
-/// Run one command on the remote over the existing master and collect its output.
-///
-/// `BatchMode=yes` is what makes a missing master an error instead of a hang: without it ssh falls
-/// back to a fresh connection and asks for a passphrase or a host-key confirmation on a stdin that
-/// belongs to the app, not to a terminal, and the call never returns.
+/// Run a command over the master and collect output. BatchMode prevents
+/// SSH fallback to a new connection from blocking on a prompt with no terminal.
 pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.push("-o".to_string());
@@ -410,17 +380,11 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
     argv
 }
 
-/// A terminal tab's end of the shell `id` held on the host, started in `url`'s path if the host
-/// does not hold it yet. `server` is a path expression from [`server_path`].
-///
-/// `-t` forces a pty, which a remote command does not get by default: `attach` relays one, and
-/// without it the host's end has no terminal to put in raw mode or to take a size from. `-e none`
-/// because the pty makes `~` ssh's escape character, and `~.` typed at the start of a line in the
-/// shell would end the attach instead of reaching the shell. No `BatchMode`: should the master be
-/// gone, a prompt in the tab is one the reader can answer.
-///
-/// A path that is not there — a typo in the address — starts the shell at the login's home, which
-/// is the holder's own fallback, so a window opened at a mistyped path still gets one.
+/// Attach to held shell `id`, starting it in `url`'s path if absent. `server`
+/// is a [`server_path`] shell expression. Force a pty with `-t` for raw mode
+/// and sizing, and disable SSH escapes with `-e none` so `~.` reaches the shell.
+/// Allow prompts in the tab if its master is gone. Missing vault paths use
+/// the holder's login-home fallback.
 pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.extend(["-t", "-e", "none"].map(String::from));
@@ -435,9 +399,8 @@ pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
 
 // ------------------------------------------------------- server provisioning
 
-/// The machines a server is built for, as `uname -m` names them on Linux: the musl target of
-/// each is `<arch>-unknown-linux-musl`, and a host of any other kind is refused rather than sent
-/// a binary it cannot run.
+/// Supported Linux `uname -m` names, each built as `<arch>-unknown-linux-musl`.
+/// Reject other hosts instead of uploading an incompatible binary.
 pub const SERVER_ARCHES: [&str; 2] = ["x86_64", "aarch64"];
 
 /// Where the uploaded `accent-cli` lives on the remote, relative to the login's home.
@@ -449,13 +412,8 @@ pub fn server_name(hash: &str) -> String {
     format!("accent-cli-{hash}")
 }
 
-/// The remote path as a *shell expression*: `$HOME` is left unquoted on purpose so the remote shell
-/// expands it — we cannot know the home directory before we have asked. `hash` is hex, so nothing
-/// in the rest of the path needs quoting.
-///
-/// ponytail: a home directory containing a space would break this. Every remote that can run a
-/// headless server has a POSIX home path, and the alternative is quoting gymnastics around a
-/// variable that must stay expanded.
+/// Remote server path as a shell expression. Leave `$HOME` unquoted for
+/// remote expansion; `hash` is hex. Home paths containing spaces are unsupported.
 pub fn server_path(hash: &str) -> String {
     format!("$HOME/{SERVER_DIR}/{}", server_name(hash))
 }
@@ -466,28 +424,19 @@ pub fn hash_of(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex()[..16].to_string()
 }
 
-/// What a host is, `uname -sm` (`Linux x86_64`), and how many bytes of the server it holds, `0`
-/// for none, one line each: which build it takes, and whether it has it already, so a second
-/// connection skips the upload. The size is counted because a host may still hold a short file
-/// under the final name from before [`install_server_cmd`] counted its bytes; failing the count,
-/// the next install replaces it.
-///
-/// An answer on stdout rather than an exit status, so that a session which never ran the test —
-/// refused by the host, or cut off — is not taken for a server that is missing.
+/// Probe `uname -sm` and installed-server byte count (zero if absent), one per
+/// stdout line. Check size to reject truncated binaries left by older builds.
+/// Use stdout rather than exit status so a failed session is not mistaken
+/// for a missing server.
 pub fn have_server_cmd(hash: &str) -> String {
     let installed = server_path(hash);
     format!("uname -sm; if test -x {installed}; then wc -c < {installed}; else echo 0; fi")
 }
 
-/// Read the binary, `size` bytes of it, from stdin and install it.
-///
-/// The write goes to a dotted temp name first and is renamed into place: `cat >` straight onto the
-/// final path would make a half-uploaded binary `test -x`-visible, and the next launch would exec
-/// it. `cat` takes an upload cut short for its end, so the bytes are counted before the rename,
-/// and a short file is removed rather than installed under a name every later connection trusts.
-/// Older builds are swept afterwards rather than before, so a failed upload leaves the working
-/// server where it was. The temp name starts with a dot, which is why the sweep's glob cannot
-/// match it.
+/// Install exactly `size` stdin bytes through a dotted temporary file.
+/// Check length before renaming so a partial upload is never executable under
+/// the trusted final name. Sweep older builds only after success, preserving
+/// the working server on failure; the dotted temporary escapes the sweep glob.
 pub fn install_server_cmd(hash: &str, size: usize) -> String {
     let dir = format!("$HOME/{SERVER_DIR}");
     let name = server_name(hash);
@@ -502,18 +451,12 @@ pub fn install_server_cmd(hash: &str, size: usize) -> String {
     )
 }
 
-/// Read a file, `size` bytes of it, from stdin into `path`, the way a save here writes one.
-///
-/// `cat >` straight onto the file emptied it first, so a link that dropped half way through an
-/// upload left the host a torn copy and nothing of the original. The bytes go to an `.accent-`
-/// file beside it instead, which the watcher never reports, and are counted before it is renamed
-/// over the file, as [`install_server_cmd`] does for the server. A symlink is written through to
-/// its target and an existing file keeps its mode; a new one gets the umask's, as `cat >` gave it.
-/// A folder that takes no new file is named as the reason, rather than the shell's complaint
-/// about a temporary the reader never heard of.
-///
-/// `replace` is for a file that is being written back: one moved or deleted on the host while the
-/// bytes were on their way is left gone, where the rename would bring it back under the old name.
+/// Write exactly `size` stdin bytes atomically to `path`. Use an unwatched
+/// `.accent-` temporary beside it, check length, then rename so interrupted
+/// uploads preserve the original. Follow symlinks, keep existing modes and
+/// use umask for new files. Errors name the destination folder.
+/// With `replace`, leave a file moved or deleted during upload absent
+/// instead of recreating it under its old name.
 pub fn put_cmd(path: &str, size: u64, replace: bool) -> String {
     let path = quote(path);
     let gone = match replace {
@@ -556,13 +499,10 @@ pub fn held_cmd(server: &str) -> String {
 
 // --------------------------------------------------------------------- cache
 
-/// The musl-static `accent-cli` this machine uploads to an `arch` host ([`SERVER_ARCHES`]), if
-/// this build has one.
-///
-/// Looked for beside the running binary under `../lib/accent`, then in the workspace's own musl
-/// output, the order that lets a user run from an install and a developer from `target/` without
-/// either having to configure anything. It is a separate build from the `accent-cli` on `$PATH`,
-/// which is linked against this machine's glibc and would not start on an older host.
+/// Find the musl-static server for `arch` ([`SERVER_ARCHES`]), or none if absent.
+/// Search installed `../lib/accent`, then workspace musl output, supporting
+/// installed and development launches without config. The local glibc-linked
+/// `accent-cli` may not run on older hosts.
 pub fn server_binary(arch: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // Up the ancestors rather than one fixed step: the installed layout puts us in `bin/` beside
@@ -590,19 +530,16 @@ pub fn cache_dir(url: &Url) -> PathBuf {
         .join(id(url))
 }
 
-/// Where the etag each cached file was fetched at is kept: `<id>.etag`, a tree of its own beside
-/// the cache. A stamp beside its file (`a.etag` for `a.pdf`) was shared by `a.pdf` and `a.png`,
-/// and a vault file called `x.etag` was overwritten by its own; the ones an older build left
-/// there are orphans now.
+/// Separate `<id>.etag` tree for cached-file stamps. Keeping stamps outside
+/// the file tree prevents collisions between extensions and vault `.etag` files.
+/// Older adjacent stamps are orphaned.
 fn stamp_dir(url: &Url) -> PathBuf {
     cache_dir(url).with_extension("etag")
 }
 
-/// Join a remote-relative path onto the cache, refusing anything that would land outside it.
-///
-/// `rel` comes back over the wire, so a `..` in it is the remote deciding where this machine
-/// writes. The test is the lexical walk `Vault::resolve` does, for the same reason: it never
-/// touches the filesystem, so it works on paths that do not exist yet.
+/// Join a wire-supplied remote path to the cache, rejecting lexical escapes.
+/// Do not touch the filesystem, so validation also works for missing paths.
+/// This prevents a remote `..` from choosing an arbitrary local write target.
 pub fn cache_path(url: &Url, rel: &str) -> Option<PathBuf> {
     inside(cache_dir(url), rel)
 }
@@ -612,9 +549,8 @@ pub fn stamp_path(url: &Url, rel: &str) -> Option<PathBuf> {
     inside(stamp_dir(url), rel)
 }
 
-/// Where the page edits made in `rel`'s cached copy wait for the notes to follow them (the
-/// window's `Relinks`): its [`cache_path`] in a tree of its own, `<id>.relink`, as the stamps
-/// have theirs.
+/// Pending cached-PDF page edits for note relinking (`Relinks`), stored via
+/// [`cache_path`] in a separate `<id>.relink` tree.
 pub fn relink_path(url: &Url, rel: &str) -> Option<PathBuf> {
     inside(cache_dir(url).with_extension("relink"), rel)
 }

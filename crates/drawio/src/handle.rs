@@ -2,9 +2,9 @@
 // mxEdgeSegmentHandler.js and mxElbowEdgeHandler.js, and js/grapheditor/Graph.js (Apache-2.0,
 // Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for
 // accent; see crates/drawio/NOTICE.
-//! draw.io's handles between the ends of a selected edge: which ones its style gives it, where
-//! they sit on its route, and the waypoints a drag of one leaves it with. All points are absolute
-//! page units, `px` being a screen pixel's worth; the ends are [`crate::edit::set_end`]'s.
+//! Edge-handle selection, placement and waypoint editing matching draw.io.
+//! Coordinates are absolute page units; `px` is one screen pixel. Endpoint edits
+//! use [`crate::edit::set_end`].
 
 use crate::geom::{Point, Rect, distance_to_segment};
 use crate::style::Resolved;
@@ -78,9 +78,8 @@ pub struct Terminal {
     pub pinned: bool,
 }
 
-/// The handles of an edge of `kind` routed along `route`, each where it sits and whether it
-/// is faded: a virtual bend, and a handle of an edge with no waypoints of its own (draw.io's
-/// `virtualBendOpacity`).
+/// Place handles of `kind` along `route`. Fade virtual bends and handles on edges
+/// without explicit waypoints, matching draw.io's `virtualBendOpacity`.
 pub fn knobs(kind: Kind, route: &[Point], has_waypoints: bool) -> Vec<(Knob, Point, bool)> {
     if route.len() < 2 {
         return Vec::new();
@@ -160,9 +159,8 @@ pub fn segments(route: &[Point]) -> Vec<Point> {
     route.to_vec()
 }
 
-/// The pointer as an edge handle takes it (`mxEdgeHandler.getPointForEvent`): an axis within
-/// 2 px of a shape's middle or of a point of the route (a floating end's excepted) goes onto it,
-/// and else onto the grid.
+/// Snap each pointer axis within 2 px of a terminal centre or route point, excluding
+/// floating endpoints; otherwise snap to the grid (`mxEdgeHandler.getPointForEvent`).
 pub fn aim(
     p: Point,
     route: &[Point],
@@ -204,9 +202,9 @@ pub fn aim(
     at
 }
 
-/// The waypoints while segment `index` of [`segments`] is dragged to `point`
-/// (`mxEdgeSegmentHandler.getPreviewPoints`): the inner points, the dragged segment's two moved
-/// across to the pointer. One left inside the shape at either end is the pointer twice.
+/// Preview dragging segment `index` to `point` (`mxEdgeSegmentHandler.getPreviewPoints`):
+/// move its two inner endpoints across to the pointer. If an endpoint remains inside
+/// a terminal, use the pointer twice.
 pub fn segment_points(
     pts: &[Point],
     index: usize,
@@ -248,10 +246,9 @@ pub fn segment_points(
     result
 }
 
-/// The waypoints a segment drag leaves (`mxEdgeSegmentHandler.updatePreviewState`): the corners
-/// of `routed`, the edge as routed through [`segment_points`], a straight run's inner points
-/// merged away. A straight edge keeps the pointer twice, and one turned from straight up and
-/// down to routed keeps its ends' heights (`before` being its route when the drag began).
+/// Finalize segment-drag waypoints from `routed`, merging collinear inner points
+/// (`mxEdgeSegmentHandler.updatePreviewState`). Straight edges retain the pointer
+/// twice; a vertical edge routed by the drag retains the endpoint heights from `before`.
 pub fn merged_points(
     routed: &[Point],
     point: Point,
@@ -298,11 +295,9 @@ pub fn merged_points(
     result
 }
 
-/// The waypoints while a bend is dragged to `point` (`mxEdgeHandler.getPreviewPoints`): waypoint
-/// `Knob::Bend` moved, or one inserted at `Knob::Virtual`. A bend dropped on another handle
-/// (`handles`, within `reach`) goes, and so does one that straightens its segment within
-/// `tolerance` of the line between its neighbours, the route's ends taken at their shapes'
-/// middles where they float.
+/// Move a bend or insert a virtual bend at `point` (`mxEdgeHandler.getPreviewPoints`).
+/// Remove bends dropped within `reach` of another handle, or within `tolerance` of
+/// the line between neighbours. Floating endpoints use terminal centres.
 #[allow(clippy::too_many_arguments)]
 pub fn bend_points(
     waypoints: &[Point],

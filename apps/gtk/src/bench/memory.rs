@@ -1,22 +1,14 @@
-//! A long session in miniature: every kind of tab opened and closed, comparisons, the preview,
-//! shells and windows, each block repeated, printing what outlived its close and how the resident
-//! size moved over the block.
+//! Measure memory retention and surviving objects across repeated tab and window lifecycles.
 
 use super::*;
 use webkit6::prelude::WebViewExt;
 
-/// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` first reads the PDF through, hides it,
-/// brings it back and closes it, printing what the process holds untrimmed ([`read_through`];
-/// point it at a few hundred pages). Then it runs each block `rounds` times (5 by default): a
-/// note, a source file, a PDF and a diagram (a sample with a formula, written to
-/// `memory.drawio`) opened and closed; the note compared with its disk copy and left; the note in
-/// Split view and back; a shell opened and closed; a second window showing the note in Split
-/// view, closed. After each block it prints `bench memory <block>` with the resident size in kB
-/// before it and after each round (`rss=`), the same once malloc has handed its free pages back
-/// (`trimmed=`), the threads by name, the child processes with their resident size, and what
-/// outlived its close (`alive=`): the tab's `Rc`, its page and widget, a diagram's WebKit view, a
-/// PDF's two views, a text tab's view and buffer, the comparison's other column, the window and
-/// its `App`. Writes, so only on a scratch vault.
+/// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` measures PDF read-through
+/// ([`read_through`]; use a few hundred pages), then repeated open/close cycles for
+/// notes, code, PDFs, diagrams, comparisons, split previews, shells and windows.
+/// Default rounds: 5. `bench memory <block>` reports RSS kB (`rss`), after malloc
+/// release (`trimmed`), thread/child-process counts and surviving objects (`alive`).
+/// Writes `memory.drawio`; use a scratch vault.
 pub(super) fn bench_memory(app: &Rc<App>, arg: &str) {
     // The windows this opens run the hooks too.
     if app.vault().is_none() {
@@ -153,14 +145,11 @@ pub(super) fn bench_memory(app: &Rc<App>, arg: &str) {
     });
 }
 
-/// `ACCENT_BENCH_WEBIDLE=<note>`: WebKit views let their processes go once unused, after the two
-/// seconds [`crate::preview::idle_for`] gives under this drill. Prints the WebKit processes under
-/// this one, each with its PSS in kB: at the start; with `note` in Split view, its caret two
-/// thirds down; with Split view left long enough, and whether the window still has a preview; with
-/// Split view back, the rendered note's length and scroll either time and whether they agree.
-/// Then a diagram with a formula typeset, how many formulas the typesetter holds, and the same
-/// once it has been left alone, and once a second diagram's formula is typeset after that. Writes
-/// `webidle.drawio` and `webidle-2.drawio`, so point it at a scratch vault.
+/// `ACCENT_BENCH_WEBIDLE=<note>` checks WebKit process release after the drill's
+/// 2 s idle interval ([`crate::preview::idle_for`]). Print process PSS before/during/
+/// after split preview and compare rendered length and scroll when reopened. Check
+/// formula typesetting before/after idle and in a second diagram. Writes
+/// `webidle.drawio` and `webidle-2.drawio`; use a scratch vault.
 pub(super) fn bench_webidle(app: &Rc<App>, note: &str) {
     for (rel, formula) in [("webidle.drawio", "x^2"), ("webidle-2.drawio", "y^3")] {
         let sample = super::diagram::SAMPLE.replace("x^2", formula);
@@ -399,8 +388,7 @@ impl Block {
 }
 
 unsafe extern "C" {
-    /// Hand the free pages of every malloc arena back to the kernel: what is left is what is
-    /// still allocated, or pages it is scattered over.
+    /// Return free malloc pages to the kernel to distinguish live allocation from cached pages.
     fn malloc_trim(pad: usize) -> i32;
 }
 

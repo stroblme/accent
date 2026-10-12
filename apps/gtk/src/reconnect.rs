@@ -1,11 +1,8 @@
-//! Coming back after a dropped link without being asked.
+//! Reconnect automatically after an established remote link drops.
 //!
-//! A remote window that was connected and lost it tries again on its own, after 1, 2, 4, 8 and
-//! 16 seconds and then every 30, each attempt a quiet one that cannot raise a prompt. The banner
-//! counts down to the next ("Lost the connection to host · Reconnecting in 8 s"), and its
-//! Reconnect Now is the attempt that may ask for a passphrase. A first connection that failed,
-//! an outage that has outlasted ten minutes, and a host that refuses the vault keep the plain
-//! Reconnect button: there was nothing to come back to, or it is not coming back by itself.
+//! Quiet attempts wait 1, 2, 4, 8 and 16 seconds, then 30 seconds, and stop after ten minutes.
+//! The banner counts down; Reconnect Now may prompt for a passphrase. Initial failures and
+//! host refusals keep a manual Reconnect button because automatic retries cannot help.
 
 use super::*;
 
@@ -25,8 +22,7 @@ pub fn backoff(n: u32) -> Duration {
 pub struct Retry {
     /// Whether the vault has ever answered: only a link that was up is worth waiting for.
     was_up: Cell<bool>,
-    /// When the link went, for [`GIVE_UP`]. Kept until the vault answers again, so once the
-    /// attempts have stopped a failed Reconnect does not start them over.
+    /// Drop time for [`GIVE_UP`], retained until reconnection so failed manual retries do not reset it.
     since: Cell<Option<Instant>>,
     /// What the banner says was lost, across the failed attempts that follow it.
     lost: RefCell<String>,
@@ -84,8 +80,7 @@ impl App {
         self.count_down(Instant::now() + backoff(n));
     }
 
-    /// The host will not serve the vault. No attempt of ours changes that, so none is counted
-    /// down to: the banner keeps the plain Reconnect, for after someone has fixed the host.
+    /// Stop automatic retries after a host refusal; keep manual Reconnect for host-side repairs.
     pub fn connection_refused(&self, why: &str) {
         self.retry.stop();
         self.show_connection_banner(why);
@@ -101,8 +96,7 @@ impl App {
         }
     }
 
-    /// Say when the next attempt is, every second until it is made. The tick holds the window
-    /// weakly, so a window closed mid-count stops it within the second.
+    /// Update the reconnect countdown every second. Weak window ownership stops ticks after closure.
     fn count_down(self: &Rc<Self>, at: Instant) {
         self.say_count(at);
         self.connection.set_button_label(Some("Reconnect Now"));

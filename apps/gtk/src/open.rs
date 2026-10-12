@@ -1,20 +1,15 @@
-//! Opening a file into a tab: the only door into one. What a key opens as, the worker read, the
-//! image, diff and status tabs, and adopting the result into a pane. A PDF's tab is opened in
-//! `pdf::window`, beside the window's PDF commands, and Replace All is in `replace`.
+//! Dispatch file opens, read on workers and adopt text, image, diff or status tabs into panes.
+//! PDF opening lives in `pdf::window`; Replace All lives in `replace`.
 
 use super::*;
 use accent_api::Error;
 use accent_core::Error as Core;
 
-/// Why a tab was opened, which decides whether it stays.
+/// Opening intent determines whether a tab replaces a preview or stays open.
 ///
-/// A tab opened by browsing — a click in the sidebar tree, a search hit, a Git row, a wikilink
-/// followed — is a `Preview`: the next such open closes it and takes its place, so clicking down
-/// a list of notes to see what is in them leaves one tab rather than twenty. Anything the reader
-/// named is `Kept`: the palette, Open File…, a drop, a rename and the command line, where the
-/// file was asked for by name and the tab is meant to stay. A preview tab becomes a kept one the
-/// moment it is edited, its own tab is double-clicked, or it is moved to another pane, all three
-/// being the reader saying they want to keep it.
+/// Browsing tree, search, Git or wikilink results uses `Preview` to avoid accumulating tabs.
+/// Palette, Open File, drops, renames and command-line opens use `Kept`. Editing,
+/// double-clicking or moving a preview into another pane keeps it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Opened {
     Kept,
@@ -25,8 +20,7 @@ pub enum Opened {
     /// Kept, and pinned: a pinned tab dragged in from another window, which is opened here afresh
     /// (`Shell::adopt_page`) and lands at the end of its pane's pinned tabs.
     Pinned,
-    /// Kept, and the `n`th of the files a launch named together, which keep the order they were
-    /// named in, the last one in front, whichever tab lands first (see [`App::land_in_order`]).
+    /// Keep the nth launch file in requested order, selecting the last regardless of read completion order.
     Launched(usize),
     /// Kept, and split off its pane on that side once it lands: a tree row dropped on a pane's
     /// edge (see [`App::open_beside`]).
@@ -34,12 +28,10 @@ pub enum Opened {
 }
 
 impl App {
-    /// Open anything, from the tree, the palette, a link, a drop, the session or the command
-    /// line. This is the only door into a tab.
+    /// Open files from all entry points through one dispatcher.
     ///
-    /// What a file opens as is decided by its name first, and then by its bytes when the name
-    /// says "text": a `.png` that is really random bytes is still an image tab, but a `.py` full
-    /// of NULs is a status page rather than a screen of garbage.
+    /// Names choose the document kind; text candidates are checked by bytes so binary source
+    /// files become status pages rather than unreadable editor buffers.
     pub fn open_path(self: &Rc<Self>, key: &str) {
         self.open_as(key, Opened::Kept);
     }
@@ -77,12 +69,10 @@ impl App {
         }
     }
 
-    /// A preview tab has arrived: it replaces whichever tab this pane was previewing before, and is
-    /// kept at once where its row in the Files tree was double-clicked before it came. A pinned
-    /// one is pinned here, and a launch's is put among the others it named.
+    /// Adopt an arriving preview, replacing the pane's previous one and applying keep or pin state.
     ///
-    /// The old tab goes after the new one is in place, so the pane never stands empty and closes
-    /// itself out from under the note arriving in it.
+    /// Insert the new tab before closing the old one so the pane cannot close while briefly
+    /// empty. Earlier tree double-clicks keep the arriving tab; launch tabs retain named order.
     pub(crate) fn mark_opened(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
         // A label or a page a diagram waits to show, which a file that turned out to be text
         // drops.
@@ -121,10 +111,8 @@ impl App {
         }
     }
 
-    /// Put the tab of the `at`th file a launch named ahead of the first one named after it that
-    /// has already landed in its pane, and the last one named in front. A PDF's tab is up at once
-    /// and a text tab only once its read is, so the bar would otherwise hold them in the order
-    /// they landed, the last to land in front.
+    /// Insert each arriving launch tab before later-named tabs already present; select the last requested file.
+    /// PDFs and worker-read text arrive at different times, so completion order cannot define bar order.
     fn land_in_order(&self, page: &adw::TabPage, at: usize) {
         self.launched.borrow_mut().push((at, page.downgrade()));
         let Some(pane) = self.pane_of(page) else {
@@ -161,11 +149,8 @@ impl App {
         }
     }
 
-    /// A text file in an editor tab, unless its bytes say it is not one after all.
-    ///
-    /// The read happens on a worker thread, so opening a note on a remote vault does not hold the
-    /// window for the round trip — measured at ~60 ms to the host this was developed against,
-    /// which is four frames. Locally it lands in the same turn of the loop and nothing changes.
+    /// Read text on a worker before opening an editor, or choose another tab kind from the bytes.
+    /// Remote round trips must not block the window.
     fn open_text(self: &Rc<Self>, key: &str, path: &Path, flavour: Flavour, how: Opened) {
         // A loose file has no vault to ask, so it still reads its own absolute path.
         let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
@@ -365,12 +350,10 @@ impl App {
         });
     }
 
-    /// Show an image tab's file under the look in force, decoded and recoloured off the main
-    /// loop: read from `read` when given (opening, a reload), else recoloured again from the
-    /// texture it was read to, which a restyle that changes nothing for this image skips.
+    /// Decode or recolour an image off-thread using `read` or its cached texture.
     ///
-    /// Only the latest call's answer lands, and a read that lands under a look that has moved on
-    /// since asks again, so a theme change or an inversion while a large file decodes is kept.
+    /// Skip unchanged appearances and apply only the latest result. If appearance changed while
+    /// decoding, request another render so theme changes and inversions are retained.
     pub(crate) fn show_image(self: &Rc<Self>, image: &Rc<doc::Viewer>, read: Option<PathBuf>) {
         let reading = read.is_some();
         let (path, original) = match read {
@@ -439,8 +422,7 @@ impl App {
         });
     }
 
-    /// Invert Image Colours over `key`: recolour it if the theme leaves it alone, show it as it
-    /// is if the theme recolours it, in its tabs and in the preview, until the app quits.
+    /// Toggle key's image appearance in tabs and preview for this process, reversing theme recolouring.
     pub(crate) fn invert_image(self: &Rc<Self>, key: &str) {
         {
             let mut inverted = self.inverted_images.borrow_mut();
@@ -454,14 +436,10 @@ impl App {
         self.reshow_preview_image(key);
     }
 
-    /// Hand `landed` the path on *this* machine holding `key`'s bytes, for the readers that cannot
-    /// work with anything else: the PDF engine and an image. That is the file itself on a local
-    /// vault and a copy fetched over ssh on a remote one, a transfer of however long the file
-    /// takes, so the asking is on a worker; a loose key is already a path here.
+    /// Resolve `key` to local bytes for PDF and image readers, then call `landed`.
     ///
-    /// While a host's bytes come, the status bar counts them ("Downloading paper.pdf… 12.3/80.0
-    /// MB"), and a PDF's "Opening the document…" waits for them (`sync_opening`). A cached copy
-    /// that is current moves nothing and says nothing.
+    /// Local and loose files need no transfer; remote files download on a worker with status
+    /// progress. Current cached copies are silent. PDF opening waits until the download finishes.
     pub(crate) fn local_copy(
         self: &Rc<Self>,
         key: &str,
@@ -561,12 +539,10 @@ impl App {
         self.adopt_viewer(Doc::Status, &key, &status, "dialog-warning-symbolic", how);
     }
 
-    /// A comparison of two texts that are not files, as a tab. `key` says which comparison it is,
-    /// so asking for the same one twice brings the tab already showing it up to date rather than
-    /// stacking a second copy; `file` is the name behind it, which decides how it is coloured.
-    /// It opens as the pane's preview, like a file clicked in the tree: a list of changed files
-    /// is exactly the surface that would otherwise stack a tab per click. A `restored` one goes
-    /// into the pane the session restore keeps for it, kept and behind what that pane shows.
+    /// Open or refresh a blob comparison keyed by `key`, using `file` for syntax styling.
+    ///
+    /// Git-row comparisons use preview tabs to avoid accumulating one per click. Restored
+    /// comparisons remain kept, behind the session's selected tab in their restored pane.
     pub fn open_diff(
         self: &Rc<Self>,
         key: &str,
@@ -633,11 +609,8 @@ impl App {
         viewer
     }
 
-    /// Open a note over the place in it a sidebar row named, so it opens on the match rather than
-    /// at the top and the match is revealed where it lands.
-    ///
-    /// Every row that leads here — a search hit, a tag — is a single click in the sidebar, so
-    /// the note opens as a preview and the next such click takes the same tab.
+    /// Open a sidebar search/tag hit as a preview and reveal its range after loading.
+    /// Successive browsing hits reuse the preview tab.
     pub fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<sidebar::Target>) {
         self.mark();
         match at {
@@ -665,10 +638,8 @@ impl App {
         }
     }
 
-    /// Open diagram `rel` on the label a search found at byte `at` of its labels' text (one line
-    /// each, as the index holds them): its page, the cell selected and in view. A diagram goes up
-    /// once a worker has read it, so one not open yet shows the label when it arrives
-    /// ([`mark_opened`](Self::mark_opened)).
+    /// Open diagram `rel` at the cell matching byte offset `at` in indexed label lines.
+    /// Reveal its page and cell once a pending worker read lands ([`mark_opened`](Self::mark_opened)).
     fn open_label(self: &Rc<Self>, rel: &str, at: usize) {
         self.reveal_in_diagram(rel, Box::new(move |_, tab| reveal_label(tab, at)));
     }
@@ -711,10 +682,8 @@ impl App {
         });
     }
 
-    /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
-    /// No name is the note on screen, as `[[#Heading]]` writes it. A name nothing in the vault
-    /// answers to, in the index or on disk (`Vault::follow`), offers New File with that very path
-    /// typed in, which is how a note gets written by being linked to first.
+    /// Resolve written wikilink targets by shortest matching path; empty names target the current note.
+    /// Missing files offer New File with the requested path, allowing links to create notes.
     pub fn open_target(self: &Rc<Self>, target: &str) {
         let Some(vault) = self.vault() else {
             return self.needs_vault("follow a link");
@@ -777,9 +746,7 @@ impl App {
         }
     }
 
-    /// A link named a heading or a block `tab` does not have: the caret goes to its top, and a
-    /// toast says why it is there rather than where the link pointed. Go to Definition and a
-    /// click in the preview both end here.
+    /// Report missing heading/block anchors and place the caret at the top for definition and preview jumps.
     pub fn no_heading(&self, tab: &Tab, anchor: &str) {
         tab.goto_pos(accent_api::Pos::default());
         let name = doc::file_name(&tab.rel()).to_string();
@@ -790,10 +757,8 @@ impl App {
         self.toast(&format!("No {what} {anchor} in {name}"));
     }
 
-    /// Show the page and selection an anchor names, if the tab just opened is that PDF.
-    ///
-    /// Called straight after the tab is opened rather than through `on_tab`, which waits for a
-    /// *text* tab: `open_pdf` has already pushed the document by the time it returns.
+    /// Apply a PDF anchor immediately after opening its tab.
+    /// on_tab waits for text editors, while open_pdf registers its document before returning.
     pub fn show_pdf_anchor(&self, key: &str, anchor: Option<PdfAnchor>) {
         let Some((page, selection)) = anchor else {
             return;
@@ -803,17 +768,12 @@ impl App {
         }
     }
 
-    /// Where `key` really is: the key to open it under, and the path to read.
+    /// Resolve the opening key and read path using the vault's lexical containment rule.
     ///
-    /// Wikilink targets come out of note content, so `![[../../../../etc/passwd]]` reaches
-    /// `open_path` from the preview and has to be stopped here rather than by the reader. The
-    /// check is the vault's own lexical one: canonicalising would refuse a note reached through
-    /// one of the directory symlinks a vault links in on purpose, which the walk indexed and the
-    /// tree is already showing.
-    ///
-    /// Whether the file is there is not asked here: on a remote vault that is a round trip on the
-    /// main thread before every open. The reader's worker finds out anyway, and says so through
-    /// [`cannot_open`](Self::cannot_open).
+    /// Reject escaping wikilinks here, since note content reaches this entry point directly.
+    /// Avoid canonicalisation so intentionally indexed directory symlinks still work. Existence
+    /// checks stay on the reader's worker to avoid a remote round trip on the main thread;
+    /// [`cannot_open`](Self::cannot_open) reports failure.
     pub(crate) fn locate(&self, key: &str) -> Option<(String, PathBuf)> {
         if doc::is_loose_key(key) {
             let path = PathBuf::from(key);
@@ -869,11 +829,8 @@ impl App {
         );
     }
 
-    /// A tab on a file from outside this window's vault says so on its own tab, so saving it is
-    /// never a surprise and it is obvious why it has no backlinks.
-    /// A monitor on a loose file, which nothing else watches: the vault's worker only reports on
-    /// its own tree. A write to it — another window's ink, a LaTeX run — reaches its PDF or image
-    /// tab as a change to a vault's file does (`changed_on_disk`). `None` for a file of the vault.
+    /// Mark loose-file tabs and watch their files because the vault worker cannot report outside its tree.
+    /// Changes reach PDF/image tabs through changed_on_disk; vault files return None.
     pub(crate) fn watch_loose(self: &Rc<Self>, key: &str, path: &Path) -> Option<gio::FileMonitor> {
         if !doc::is_loose_key(key) {
             return None;
@@ -1068,10 +1025,8 @@ impl App {
         }
     }
 
-    /// The tab view a new tab for `key` goes into: the pane the session restore put it in, while
-    /// that pane is still open, and otherwise the active one. A restore is the one open that
-    /// knows its pane before the tab exists, and a text tab only exists once the worker's read
-    /// lands, so the pane is looked up here rather than the tab moved there afterwards.
+    /// Choose restored pane placement for `key` while available, otherwise the active pane.
+    /// Worker-read text tabs need this lookup on arrival instead of moving after construction.
     pub(crate) fn tabs_for(&self, key: &str) -> adw::TabView {
         let placed = self.placing.borrow_mut().remove(key);
         match placed
@@ -1083,12 +1038,10 @@ impl App {
         }
     }
 
-    /// Put a page that has just been added to a pane in front of it, unless the session restore
-    /// opened it: which tab is in front of a restored pane is [`App::put_back`]'s to say.
+    /// Select a new page unless [`App::put_back`] owns its restored selection.
     ///
-    /// Selecting it fires `selected-page`, whose handler runs `sync_active`. The first page in a
-    /// pane is selected as it is added, before its document is in `docs`, so that one gets no
-    /// notify from here and is synced by hand instead.
+    /// Selection normally triggers `sync_active`. A pane's first page is selected before its
+    /// document enters `docs`, so sync it manually when no new notification fires.
     pub fn select_new_page(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
         let Some(pane) = self.pane_of(page) else {
             return;
@@ -1108,11 +1061,9 @@ impl App {
         }
     }
 
-    /// Run `f` on the tab holding `key`, opening the file first when it has none. An open is a
-    /// worker read, so `f` may run later, from [`App::adopt`]; a file that turns out not to be
-    /// text never gets there, and its `f` is dropped where that is decided, so it cannot run on
-    /// a later open of the same key. `what` is what the reader asked for — "compare", "go to" —
-    /// which is what such a drop is said with, so the ask does not simply vanish.
+    /// Run `f` on key's text tab, opening it first if needed.
+    /// Worker opens may call later through [`App::adopt`]. Non-text results discard queued work
+    /// with the requested `what` reason, preventing callbacks from reaching a later unrelated open.
     pub fn with_tab(
         self: &Rc<Self>,
         key: &str,
@@ -1132,9 +1083,7 @@ impl App {
         self.open_as(key, how);
     }
 
-    /// Drop the work waiting on `key`, saying what it was: the file has turned out to be
-    /// something no `Tab` is made for, so a comparison or a jump asked for on it would otherwise
-    /// go no further than the tab that did open.
+    /// Discard pending text-tab work for `key` with its request reason when the file opens as another kind.
     fn drop_awaiting(&self, key: &str, why: &str) {
         let waiting = self.awaiting.borrow_mut().remove(key);
         if let Some(what) = waiting.and_then(|waiting| waiting.what) {
@@ -1153,8 +1102,7 @@ fn reveal_label(tab: &Rc<crate::diagram::DiagramTab>, at: usize) {
     }
 }
 
-/// Which editor a text file gets. Only CSV is special: its columns are coloured instead of it
-/// being handed to a language, because `csv.lang` would tint numbers and strings underneath.
+/// Choose text editor styling; CSV uses column colours instead of csv.lang token colours.
 fn flavour_of(key: &str) -> Flavour {
     match doc::file_name(key).rsplit_once('.') {
         Some((_, ext)) if ext.eq_ignore_ascii_case("csv") => Flavour::Csv,

@@ -1,6 +1,5 @@
-//! The vault-relative names the façade makes up or takes apart, on top of the plain arithmetic
-//! in [`accent_core::path`]: what a template's target is called, what a conflict copy is called,
-//! and which of them are worth offering the user.
+//! Vault-relative template and conflict names built on [`accent_core::path`],
+//! including which conflict copies the UI can offer to resolve.
 
 use crate::Result;
 
@@ -21,8 +20,8 @@ pub(crate) fn with_md(rel: &str) -> String {
     }
 }
 
-/// `(original, conflict copy)` for every `*.sync-conflict-*` file whose original still exists.
-/// A copy of a note that has since been deleted is nothing the resolve UI can act on.
+/// `(original, conflict copy)` for each `*.sync-conflict-*` file with an existing
+/// original. Deleted originals cannot be resolved by the UI.
 pub(crate) fn conflict_pairs(index: &Index) -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     for copy in index.conflicts()? {
@@ -47,8 +46,8 @@ pub fn conflict_original_rel(copy: &str) -> Option<String> {
     })
 }
 
-/// What [`Vault::adopt_conflict`] calls the version it replaces: Syncthing's own naming, with
-/// `accent` where the device id would be, so the vault treats it as the conflict copy it is.
+/// Name the version [`crate::Vault::adopt_conflict`] replaces using Syncthing's format,
+/// with `accent` as the device id, so the vault recognizes it as a conflict copy.
 pub(crate) fn accent_conflict_name(name: &str, now: chrono::NaiveDateTime) -> String {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),

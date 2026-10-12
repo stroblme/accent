@@ -1,8 +1,6 @@
-//! A diagram off the canvas: a page painted as the canvas paints it (`paint::prim`), in the
-//! file's own colours on its own page colour (`Tint::FILE`) whatever the theme on screen, into a
-//! render node that cairo draws. Export as PDF…, PNG… and SVG…, Print… and a note's embed all
-//! come through here (DESIGN.md, Diagram): fills, lines and text stay vectors in a PDF or an
-//! SVG, and a formula or a picture goes in as the image the canvas paints.
+//! Shared diagram rendering for exports, printing and note embeds (`paint::prim`).
+//! Use file colours and paper (`Tint::FILE`) independently of the screen theme.
+//! Keep fills, strokes and text as PDF/SVG vectors; formulas and pictures remain images.
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -22,10 +20,8 @@ const PDF_POINT: f64 = 0.75;
 /// Pixels per page unit in an exported PNG: sharp on a display at twice the scale.
 const PNG_SCALE: f64 = 2.0;
 
-/// Content units per page unit a page is painted at, before cairo takes it to its size: GSK's
-/// cairo path draws a scaled picture through an image of that many pixels per page unit, so a
-/// formula goes in at the detail it is typeset at and a picture at no less, whatever the
-/// output's own scale.
+/// Render detail in content units per page unit. GSK's cairo path rasterizes scaled
+/// images at this resolution so formulas retain typeset detail regardless of output scale.
 const DETAIL: f64 = super::math::RENDER_ZOOM;
 
 /// How long a page's formulas may take to be typeset before it goes out with their source.
@@ -207,9 +203,7 @@ pub fn fit(area: (f64, f64), paper: (f64, f64)) -> (f64, f64, f64) {
     (scale, dx, dy)
 }
 
-/// The name an export of diagram `key` is offered under, after draw.io's: the diagram's name
-/// without its extension, and `page`'s after a hyphen when there is one to tell the file's pages
-/// apart by.
+/// Suggested export name: file stem plus a hyphenated page name when present, matching draw.io.
 pub fn export_name(key: &str, page: Option<&str>, extension: &str) -> String {
     let name = accent_core::path::basename(key);
     let lower = name.to_ascii_lowercase();

@@ -1,11 +1,7 @@
-//! The provider that answers for a note: the index is the language server.
-//!
-//! A wikilink is a definition, a backlink is a reference, a heading is a symbol, and a link the
-//! index cannot resolve is a diagnostic. Everything the editor used to do to a note through its
-//! own code paths happens here instead, so a note and a source file are asked the same questions.
-//!
-//! The pure half sits at the top and is tested without a vault; the provider below only reads
-//! the index and the open documents.
+//! Index-backed language provider for notes: links are definitions, backlinks
+//! are references, headings are symbols and unresolved links are diagnostics.
+//! The shared interface lets the editor query notes like source files.
+//! Pure transformations precede the provider and can be tested without a vault.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -48,14 +44,10 @@ pub(crate) enum Trigger {
     Tag,
 }
 
-/// The trigger the caret is inside, where it starts in `head`, and what has been typed since.
-///
-/// `head` is the current line from its start up to the caret, so nothing here looks at the rest
-/// of the note. `[[` is tried first, which is what makes the `#` of `[[Note#Heading]]` an anchor
-/// rather than a tag, and a link's destination next, which does the same for `[text](#Heading)`.
-///
-/// `None` means there is nothing to complete: no trigger on the line, a `#` run that opens the
-/// line (an ATX heading marker), or a tag the caret has moved past.
+/// Find the completion trigger, its offset in `head`, and the typed suffix.
+/// `head` ends at the caret. Prefer `[[`, then markdown destinations, so
+/// anchor `#` characters are not tags. Return `None` for no trigger, ATX
+/// heading markers or tags the caret has passed.
 pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
     if let Some(start) = head.rfind("[[") {
         let prefix = &head[start + 2..];
@@ -127,12 +119,9 @@ pub(crate) fn block_links(text: &str, lead: &str, close: &str, replace: Range) -
 /// A PDF's bookmarks as `(title, page index)`, flattened depth-first.
 pub(crate) type Outline = Vec<(String, Option<usize>)>;
 
-/// `[[paper.pdf#page=N]]` for each of a PDF's bookmarks, labelled by the bookmark's title.
-///
-/// `outline` is the document's, flattened depth-first, as `(title, page index)`. A bookmark with
-/// no title has nothing to be named by and one that names no page has nowhere to go, so neither
-/// is offered — the way a heading with no text is left out. The page in the anchor counts from 1,
-/// which is what [`markdown::pdf_anchor`] reads back.
+/// Offer `[[paper.pdf#page=N]]` bookmark rows from depth-first `outline`
+/// (title, zero-based page index). Skip untitled or pageless bookmarks.
+/// Anchors use one-based pages, as [`markdown::pdf_anchor`] expects.
 pub(crate) fn page_links(
     outline: &[(String, Option<usize>)],
     note: &str,
@@ -159,8 +148,8 @@ pub(crate) fn page_links(
 }
 
 impl PdfPages {
-    /// The bookmarks as [`page_links`] rows where `outline` could be read, and the question
-    /// itself, unanswered, where it could not: [`pdf_outline`] reads `None` with no PDF reader.
+    /// Return [`page_links`] when [`pdf_outline`] can read bookmarks; otherwise
+    /// defer the question to a side with a PDF reader.
     pub(crate) fn answer(self, outline: Option<Outline>) -> Completions {
         match outline {
             Some(outline) => Completions {
@@ -175,8 +164,8 @@ impl PdfPages {
     }
 }
 
-/// What the index knows a link in the note `rel` by. A markdown link names its file from the
-/// note's own folder, so it becomes a vault path first, as it did when the index stored it.
+/// Normalize a link in `rel` for the index: markdown paths are relative
+/// to the source note's folder and must become vault paths.
 fn target_of(rel: &str, link: &markdown::Link) -> String {
     match link.kind {
         LinkKind::Markdown => path::resolve(parent_dir(rel), &link.target),
@@ -184,10 +173,9 @@ fn target_of(rel: &str, link: &markdown::Link) -> String {
     }
 }
 
-/// What a hint asks the index about a link in `rel`, or `None` when it is not the index's to
-/// judge: a URL, a pure `#anchor`, and a markdown link that climbs past the root, which
-/// [`path::resolve`] would otherwise fold back into the vault. A leading `/` is the vault root,
-/// as the index, Go to Definition and the preview read it.
+/// Return an index-checkable target in `rel`. Exclude URLs, pure anchors
+/// and markdown paths escaping the vault, which [`path::resolve`] would
+/// otherwise fold back inside. A leading `/` means the vault root.
 fn checked_target(rel: &str, link: &markdown::Link) -> Option<String> {
     let judged = match link.kind {
         LinkKind::Wiki | LinkKind::Embed => true,
@@ -208,19 +196,10 @@ pub(crate) fn link_names(rel: &str) -> (String, String) {
     }
 }
 
-/// Paths matching what has been typed, and whether there were more than fit.
-///
-/// The query is matched *anywhere* in the path and need not be contiguous, because it is
-/// [`fuzzy`]'s match — the matcher the palette and the file switcher use: `[[work]]` offers
-/// `Projects/Rework.md` and `[[dpwk]]` offers `deep-work.md`. It is taken as typed, though
-/// ([`fuzzy::Query::as_typed`]): its words in order, which is how the popup narrows the same rows
-/// as the link is typed on. What starts with the query still
-/// comes first — that is the file the reader most likely means — then the better match, then the
-/// shortest path, so a note at the root beats one buried under three directories.
-///
-/// The `more` half is what makes the popup ask again as the word grows. It used to say the list
-/// was complete while handing back twenty of several hundred paths, so the popup narrowed those
-/// twenty client-side and everything else stayed unreachable however much was typed.
+/// Rank path candidates using [`fuzzy::Query::as_typed`], preserving word
+/// order while allowing noncontiguous matches anywhere in the path. Prefer
+/// prefixes, then match quality, then shorter paths. Return whether the list
+/// was capped so the popup requeries as typing narrows the candidates.
 pub(crate) fn path_candidates(paths: &[String], query: &str) -> (Vec<String>, bool) {
     let (hits, more) = ranked_paths(paths, query);
     (hits.into_iter().map(|i| paths[i].clone()).collect(), more)
@@ -249,10 +228,8 @@ fn ranked_paths(paths: &[String], query: &str) -> (Vec<usize>, bool) {
     (hits.into_iter().map(|(_, _, _, i)| i).collect(), more)
 }
 
-/// Tags matching what has been typed, in the order the index hands them over: most used first.
-///
-/// Matched the same way a path is, so `#bc` offers `a/bc`: a tag is one word but a nested one is
-/// several, and the part that is remembered is rarely the first.
+/// Match tags like paths, allowing suffix matches such as `#bc` for `a/bc`.
+/// Preserve index order, with most-used tags first.
 pub(crate) fn tag_candidates(tags: &[(String, i64)], prefix: &str) -> (Vec<String>, bool) {
     let mut matcher = fuzzy::Query::as_typed(prefix, fuzzy::Corpus::Words);
     let hits: Vec<String> = tags
@@ -378,9 +355,8 @@ pub(crate) struct Notes {
     ignored: Arc<Ignored>,
 }
 
-/// What one kind of link completion ranks: `paths`, whose first `named` are files, the notes in
-/// the folders git ignores (at `ignored`) and notes only linked to so far (`missing`), and after
-/// those one name per entry of `aliases`.
+/// Completion paths: the first `named` entries are files, followed by ignored
+/// notes (`ignored`), missing linked notes (`missing`), then alias names.
 struct Corpus {
     paths: Vec<String>,
     ignored: std::ops::Range<usize>,
@@ -431,13 +407,9 @@ impl Notes {
         })
     }
 
-    /// The paths a `[[` completion ranks (`wiki`), or the ones a `![[` or a `](` does, read out
-    /// of the index once and then kept while [`Index::data_version`] says nothing has been
-    /// written: a reconcile, a save or a move reads them again at the next keystroke.
-    ///
-    /// The popup asks on every keystroke while its answer is cut at the cap, and reading 39 012
-    /// paths out of SQLite was most of what each one cost on the generated 40k-file vault: 59 ms
-    /// a keystroke for `](` and `![[`, 30 ms for `[[`, where ranking them is a few.
+    /// Cache path-completion corpora until [`Index::data_version`] or the ignored
+    /// listing changes. `wiki` ranks notes/PDFs; embed and markdown completions
+    /// rank all files. Avoid rereading thousands of paths on each capped-list keystroke.
     fn corpus(&self, index: &Index, wiki: bool) -> Result<Arc<Corpus>> {
         let version = index.data_version()?;
         let listing = self.ignored.listing(false);
@@ -518,11 +490,9 @@ impl Notes {
         });
     }
 
-    /// One hint per link in `rel` the index cannot resolve: a wikilink by its name, a markdown
-    /// link by the vault path it names from the note's folder. Anchors are not checked.
-    ///
-    /// Then one warning per formula the preview cannot render. A warning and not an error: the
-    /// converter rejects some valid LaTeX it does not support.
+    /// Hint for each unresolved link in `rel`, using normalized vault paths
+    /// for markdown links; anchors are unchecked. Warn about formulas the
+    /// preview cannot render rather than marking valid unsupported LaTeX as errors.
     fn diagnose(&self, rel: &str, text: &str) -> Result<Vec<Diagnostic>> {
         let a = markdown::analyze(text);
         let (links, targets): (Vec<&markdown::Link>, Vec<String>) = a
@@ -780,11 +750,9 @@ impl Notes {
         }
     }
 
-    /// `[[note#Heading]]` for each heading of the note `note` names, or of this one when it names
-    /// none — `[[note#^id]]` for each block id instead once a `^` is typed — and
-    /// `[[paper.pdf#page=N]]` for each bookmark when what it names is a PDF. The link keeps the
-    /// target as it was typed; one the index cannot find offers nothing, and so does a file that is
-    /// neither.
+    /// Complete headings or `^id` blocks while retaining the typed target.
+    /// An empty target uses this note; PDF targets offer bookmark page anchors.
+    /// Missing targets and other file types offer nothing.
     fn heading_links(
         &self,
         rel: &str,
@@ -925,9 +893,9 @@ impl Notes {
         }])
     }
 
-    /// The file a link the index cannot place names in a tree the walk never enters — a
-    /// gitignored `build/`, a `node_modules` — which is the one New File would otherwise write
-    /// ([`path::linked_path`]). Asked of the disk here, on the host that has the files.
+    /// Check disk for a target in an unindexed tree such as ignored `build/`
+    /// or `node_modules`, before offering New File ([`path::linked_path`]).
+    /// Run beside the files, including on a remote host.
     fn unwalked(&self, asked: &str) -> Option<String> {
         let path = path::linked_path(asked);
         Local::join(&self.root, &path)
@@ -977,9 +945,8 @@ impl Language for Notes {
         Ok(())
     }
 
-    /// A hint here is about the index, not about the text: a `[[link]]` is dangling until the
-    /// note it names exists. So a reconcile is a reason to say it all again, with the text the
-    /// editor last sent rather than what is on disk.
+    /// Refresh hints against the last editor text after reconciliation, since
+    /// a dangling link may resolve after its target appears without a source edit.
     fn rediagnose(&self, rel: &str) -> Result<()> {
         let text = locked(&self.docs).get(rel).cloned();
         if let Some(text) = text {
@@ -1035,8 +1002,8 @@ impl Language for Notes {
     }
 }
 
-/// A question the index could not answer is answered with nothing: a note whose file has just
-/// been renamed away must not take the popup, the outline and the folds down with it.
+/// Return an empty answer on index-query failure, so a recently renamed
+/// file cannot break completion, outlines or folds.
 fn or_empty<T: Default>(what: &str, r: Result<T>) -> T {
     r.unwrap_or_else(|e| {
         tracing::debug!("notes {what}: {e}");
@@ -1044,10 +1011,9 @@ fn or_empty<T: Default>(what: &str, r: Result<T>) -> T {
     })
 }
 
-/// The [`Outline`] of the PDF at `path`, or `None` where there is no PDF reader to ask.
-///
-/// One open of one file, on the thread the keystroke came in on and behind pdfium's global lock,
-/// so it happens only once the prefix already resolves to a `.pdf`.
+/// Read the PDF [`Outline`], or `None` without a PDF reader. Open once
+/// on the request thread under pdfium's global lock, only after the prefix
+/// resolves to a `.pdf`.
 #[cfg(feature = "pdf")]
 pub(crate) fn pdf_outline(path: &Path) -> Result<Option<Outline>> {
     Ok(Some(
@@ -1059,8 +1025,8 @@ pub(crate) fn pdf_outline(path: &Path) -> Result<Option<Outline>> {
     ))
 }
 
-/// Without the `pdf` feature there is no pdfium binding to ask, which is `accent-cli serve` on a
-/// host: the question goes back to the window ([`PdfPages`]).
+/// Defer bookmarks through [`PdfPages`] when built without `pdf`, as on
+/// host `accent-cli serve`.
 #[cfg(not(feature = "pdf"))]
 pub(crate) fn pdf_outline(_path: &Path) -> Result<Option<Outline>> {
     Ok(None)
@@ -1083,8 +1049,8 @@ fn empty_item() -> Completion {
     }
 }
 
-/// The note `rel` holds as a hover shows it: its title in bold, then its first lines that say
-/// something, with the frontmatter skipped, and the opening heading too when it is the title.
+/// Format a hover with the title in bold and first nonempty content lines.
+/// Skip frontmatter and an opening heading that repeats the title.
 fn preview(note: &str, rel: &str) -> String {
     let a = markdown::analyze(note);
     let title = a.title.unwrap_or_else(|| stem(rel));
@@ -1382,10 +1348,8 @@ mod tests {
         assert_eq!(labels(), ["Other", "Otherwise"]);
     }
 
-    /// The popup narrows the rows again as the link is typed on, keeping a row only while what
-    /// was typed since the `[[` matches its `filter`. The provider ranks a note by its path with
-    /// the extension on, so the filter has to carry the extension as well, or `[[Other.md` ranked
-    /// the note and the popup then dropped it.
+    /// Keep the extension in completion `filter` to match the ranked path.
+    /// Otherwise the popup drops a valid row when typing `[[Other.md`.
     #[test]
     fn a_typed_extension_keeps_the_note_row() {
         let vault = tempfile::tempdir().unwrap();
@@ -1654,8 +1618,8 @@ mod tests {
         assert!(tag_candidates(&tags, "z").0.is_empty());
     }
 
-    /// The two halves of "[[...]] gets no suggestions": a query in the middle of a name has to
-    /// match, and a list that was cut has to say so or the popup never asks again.
+    /// Verify matches inside names and incomplete-list reporting, which keeps
+    /// the popup querying beyond the initial cap.
     #[test]
     fn a_query_matches_anywhere_and_a_full_list_says_it_is_not_all_of_them() {
         let paths: Vec<String> = ["Rework.md", "Projects/Groundwork.md", "Beta.md"]

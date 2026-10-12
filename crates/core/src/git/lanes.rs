@@ -101,21 +101,14 @@ pub(super) fn parse_refs(decorations: &str) -> Vec<Ref> {
     refs
 }
 
-/// Lay commits out on a graph, one column per line of history.
+/// Lay out history in one forward pass, with one slot per open graph column. Each commit claims
+/// a waiting or free column, assigns columns to parents, and passes unrelated edges through.
+/// `--topo-order` ensures children precede parents.
 ///
-/// The state is one slot per column holding the oid that column is *waiting* for. A commit claims
-/// the column already waiting for it (or a free one if nothing is), its parents claim columns for
-/// the rows below, and everything else passes straight through. Because `--topo-order` guarantees
-/// children come before parents, one forward pass is enough — no lookahead, no second walk.
-///
-/// Freed columns are reused, so a history of two branches never drifts rightwards: the width of
-/// the drawing stays the number of lines of history actually open at that row.
-///
-/// Each column also carries the name of the branch it draws, taken from the first decorated
-/// commit on it and handed down its first parents, so a branch merged into it by fast-forward
-/// does not rename it. Where several columns end at one commit, the commit carries its own column
-/// on and the others are the branches that forked from it: the graph's own reading, one line
-/// going straight on and the rest joining it.
+/// Freed columns are reused to keep width proportional to concurrent history lines. Branch names
+/// descend from the first decorated commit through first parents, surviving fast-forward merges.
+/// When columns converge, the commit's own column continues and the others represent branches
+/// forked there.
 pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
     let mut lanes: Vec<Option<Lane>> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());

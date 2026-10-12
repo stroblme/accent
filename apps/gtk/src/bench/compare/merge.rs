@@ -3,32 +3,21 @@
 use super::*;
 use crate::diff::merge::BASE;
 
-/// The merge view end to end (`=merge:<rel>`). It makes a repository in the vault root and merges
-/// two branches that change `<rel>`, sixty lines, at lines 10, 30 and 50 both, and line 58 on the
-/// incoming side alone, which git merges by itself; the block at line 30 is then given a base, as
-/// `merge.conflictStyle = diff3` writes one. It activates the file's Merge Conflicts row and
-/// prints, once the view has settled: the side columns' titles, the rows, the blocks, the hidden
-/// runs and the buttons, and `misaligned=0`, the claim, with the caret's line (`opened`); the
-/// strips as laid (`strip`: their buttons against the columns, `over=0 stale=0` the claim, see
-/// `Columns::strip`); how many lines of each side are tinted (`tints`), every side line beside a
-/// block among them; how wide each column and each strip between them is (`widths`, the columns
-/// one width); where each connector between the columns ends, against where the rows it joins are
-/// drawn (`links`, `off=0` the claim), holding three seconds for a screenshot (`hold`); a word
-/// typed into the first block (`typed`); the first block taken by the Accept Current arrow on its
-/// band (`current`, and `tints` again), the next by its Accept Incoming arrow (`incoming`), the
-/// last by its Accept Both (`both`), each with the lines it left. The three are pressed through
-/// the real pointer: `aim <x> <y>`, after the strip as laid then, is the middle of each, for
-/// `build-aux/xtest.py :N "move <x> <y>; focus; down; up"` within ten seconds. Then the left
-/// column switched to the base (`base`); Show
-/// All Unchanged Lines down and up (`all`); a divider dragged (`resize`, and `links` again), and
-/// the view scrolled (`scrolled`, the connectors once more); and the view left (`left`). Then it
-/// opens again from the row and is left and put back as a session restore puts it (`restored`, with
-/// the sides the session kept); undo brings the three blocks back (`undone`), Accept All Incoming
-/// takes every one (`all_incoming`), one undo brings all three back (`all_undone`), Accept All
-/// Current takes them again (`all_current`), and Mark Resolved stages the file and ends the view
-/// (`resolved`). Last, a working-tree comparison of `b.md` that a second merge, with `--autostash`,
-/// leaves unmerged becomes its merge (`switched`), and the row of `c.md`, which that merge's
-/// incoming side deleted, opens the file with a toast (`deleted`). Point it at a throwaway vault.
+/// `=merge:<rel>` exercises a real conflict view. Use a throwaway vault: creates a repository
+/// and merges a 60-line file conflicting at lines 10, 30 and 50, with an incoming-only line 58
+/// and a diff3 base in the middle block.
+///
+/// Report titles, rows, blocks, hidden runs, controls, tints, widths and connectors. Expected
+/// alignment: `misaligned=0`, strip `over=0 stale=0`, connectors `off=0`. Hold 3 s for a
+/// screenshot.
+///
+/// Type in the first block, then Accept Current, Incoming and Both through XTEST. Each `aim <x>
+/// <y>` gives a button centre for `build-aux/xtest.py :N "move <x> <y>; focus; down; up"` within
+/// 10 s. Switch to base, toggle unchanged lines, resize and scroll, checking connectors again.
+///
+/// Reopen and restore the view, undo resolutions, exercise both Accept All commands and their
+/// undo, then Mark Resolved. A second autostash merge checks conversion of a working-tree
+/// comparison (`switched`) and a deleted incoming side (`deleted`).
 pub(in crate::bench) fn bench_compare_merge(app: &Rc<App>, rel: &str) {
     app.show_pane("git");
     let (app, rel) = (app.clone(), rel.to_string());

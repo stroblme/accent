@@ -1,11 +1,8 @@
-//! A draw.io diagram in a tab: the model, the page on screen, the selection, and the hooks the
-//! window listens on.
+//! Diagram tabs: model, displayed page, selection and window hooks.
 //!
-//! The format work is `accent-drawio`'s; the canvas (`view.rs`) paints a page and turns gestures
-//! into [`Edit`]s. This is where an edit is applied — through [`DiagramTab::edit`], the one door
-//! every change goes through, which is what makes each one an undo step, marks the tab dirty
-//! and schedules the autosave. Its label editing is in `label`, the Properties pane's half in
-//! `props`, and the canvas's menu, keys and wheel in `input`.
+//! `accent-drawio` owns the format; the canvas emits [`Edit`]s. [`DiagramTab::edit`]
+//! applies each change with undo, dirty tracking and autosave. `label` handles label
+//! editing, `props` the Properties pane, and `input` menus, keys and scrolling.
 
 pub mod embed;
 pub mod export;
@@ -49,8 +46,8 @@ pub struct DiagramTab {
     banner: adw::Banner,
     /// "This diagram links images from the web", while it does and the reader has not said Load.
     web_banner: adw::Banner,
-    /// Whether the pictures the diagram links from the web are downloaded and drawn: the reader
-    /// said Load, now or in another session (the window's `web_images`).
+    /// Permission to download web images, granted here or restored from the window's
+    /// `web_images` session state.
     web: Cell<bool>,
     /// The canvas's overlay: the ring and the label editor float over the page in it.
     overlay: gtk::Overlay,
@@ -58,21 +55,19 @@ pub struct DiagramTab {
     ring: Rc<tools::DiagramRing>,
     /// The frame callback waiting to put the ring out, while one is.
     ring_tick: RefCell<Option<gtk::TickCallbackId>>,
-    /// The Properties pane's content for this diagram, which the sidebar shows while it is in
-    /// front.
+    /// Properties content shown while this diagram is the active tab.
     props: Rc<props::Props>,
     /// The label being edited, while one is.
     label: RefCell<Option<Rc<label::LabelEditor>>>,
     spellcheck: Cell<bool>,
     /// The editor font preference, which the label editor writes in.
     font: RefCell<Option<String>>,
-    /// Whether the ring is out. A diagram's own, and out when it opens: a diagram is a surface
-    /// to draw on, where a PDF is one to read.
+    /// Whether the tool ring is visible. Starts visible because a diagram opens for
+    /// drawing, unlike a PDF.
     ring_shown: Cell<bool>,
     /// Where the diagram was left while presentation shows it, `None` otherwise.
     presenting: Cell<Option<DiagramPlace>>,
-    /// Invert Diagram Colours: painted the other way round from what the theme and Preferences
-    /// ask, as an inverted PDF is. This tab's alone, and kept nowhere.
+    /// Tab-local colour inversion relative to theme and Preferences; not persisted.
     inverted: Cell<bool>,
     editor: RefCell<Editor>,
     page_index: Cell<usize>,
@@ -80,20 +75,19 @@ pub struct DiagramTab {
     tool: Cell<Tool>,
     /// How the tools draw: the config's `[diagram]`, which the ring's outer orbit changes.
     options: Cell<DiagramConfig>,
-    /// The text last pasted or copied here and how many times it has been pasted since: each
-    /// paste of the same lands a grid step further (`Graph.lastPasteXml`, `pasteCounter`).
+    /// Last clipboard text and repeat-paste count, used to offset each repeat by a
+    /// grid step (`Graph.lastPasteXml`, `pasteCounter`).
     pasted: RefCell<(Option<String>, u32)>,
     /// What a note's tab keeps about its file, so the save path is the same one (`save.rs`).
     pub save: SaveState,
     /// The write an edit schedules, which a burst of edits shares.
     autosave: Debounce,
-    /// A watch on the file itself, for a diagram from outside the vault, which no vault watcher
-    /// covers. `None` for everything inside a vault, which the worker already reports on.
+    /// Monitor for files outside the vault, which the vault watcher cannot cover.
+    /// `None` for files already watched by the worker.
     monitor: RefCell<Option<gio::FileMonitor>>,
     on_zoom: TabHook,
     on_page: TabHook,
-    /// Fired just before a page switch the reader asked for, so the pane can record where they
-    /// were (Back).
+    /// Emitted before explicit page jumps so the pane records the previous position for Back.
     on_jump: TabHook,
     on_pages: TabHook,
     on_selection: TabHook,
@@ -345,9 +339,8 @@ impl DiagramTab {
         }
     }
 
-    /// The next or previous page, for a wheel pushed on past the edge of this one: read on as a
-    /// continuous PDF reads, at the zoom it was read at, onto the top of the next page or the
-    /// bottom of the one before; while presenting, fitted as every page shown then is.
+    /// Scroll into the next page's top or previous page's bottom, preserving zoom.
+    /// During presentation, fit each page instead.
     fn turn_page(self: &Rc<Self>, forward: bool) {
         if let Some(next) = self.next_page(forward) {
             let land = self.presenting.get().is_none().then_some(forward);
@@ -412,8 +405,8 @@ impl DiagramTab {
         self.ring_shown.get()
     }
 
-    /// Put the ring out or away, where the window last had one; putting it away puts the tool
-    /// down with it. While presenting it stays away, and comes out as asked afterwards.
+    /// Toggle the ring at the window's last position; hiding it clears the active tool.
+    /// Presentation hides it temporarily and restores the requested visibility afterwards.
     pub fn show_ring(&self, shown: bool, at: Option<(f64, f64)>) {
         self.ring_shown.set(shown);
         // One waiting at a time: every tab switch asks again, and a ring put away before its
@@ -445,10 +438,9 @@ impl DiagramTab {
         self.ring.at()
     }
 
-    /// Presentation shows the page as a slide: fitted, the label being edited finished, nothing
-    /// selected, the ring away with the tool in hand, and read only, so a click never draws on it
-    /// or moves it. Leaving gives back the zoom, and the scroll on the page it began on, and the
-    /// ring as it was, `at` where the window had it; the tool stays down.
+    /// Enter presentation fitted and read-only, finishing label edits and clearing
+    /// selection and tools. On exit restore zoom, the original page's scroll and ring
+    /// visibility/position; keep the tool inactive.
     pub fn set_presenting(self: &Rc<Self>, on: bool, at: Option<(f64, f64)>) {
         match (on, self.presenting.get()) {
             (true, None) => {
@@ -473,10 +465,8 @@ impl DiagramTab {
         }
     }
 
-    /// Paint the page in the colours the theme and the diagrams' switch in Preferences ask for,
-    /// the other way round while inverted: the PDF's rule (`theme::onto`). Only the canvas
-    /// changes; the file, the model and the Properties pane keep the file's colours, so the tab
-    /// never becomes dirty.
+    /// Apply theme, Preferences and inversion to the canvas (`theme::onto`). Keep the
+    /// model and Properties colours unchanged so recolouring does not dirty the file.
     pub fn restyle(&self) {
         let page = crate::theme::onto(crate::theme::recolour().diagrams, self.inverted.get());
         self.view.set_tint(paint::Tint::onto(page));
@@ -539,8 +529,8 @@ impl DiagramTab {
         }
     }
 
-    /// Apply one change to the model: the one door every edit goes through. A change the model
-    /// refuses leaves nothing behind but a log line.
+    /// Apply an edit through the shared undo, dirty-tracking and autosave path.
+    /// Rejected edits only log the error.
     pub fn edit(
         self: &Rc<Self>,
         what: impl FnOnce(&mut Editor, usize) -> Result<(), accent_drawio::Error>,
@@ -565,9 +555,8 @@ impl DiagramTab {
         self.sync_web();
     }
 
-    /// The web banner shown while the diagram links pictures from the web the reader has not
-    /// said Load for; once they have, whichever of them are not downloaded yet are, and the
-    /// page is drawn again when they come in. Asked on opening, on Load and after every change.
+    /// Show the web-image banner until Load is granted; then fetch missing images and
+    /// redraw as they arrive. Called on open, Load and model changes.
     fn sync_web(self: &Rc<Self>) {
         let urls = web::urls(self.editor.borrow().file());
         self.web_banner
@@ -703,8 +692,7 @@ impl DiagramTab {
         }
     }
 
-    /// Delete the selection as draw.io's Delete does: the edges on it stay, let go of it where
-    /// they are drawn.
+    /// Delete selected cells, disconnecting retained edges at their drawn endpoints.
     pub fn delete(self: &Rc<Self>) {
         let ids = self.selection();
         if !ids.is_empty() {
@@ -760,8 +748,8 @@ impl DiagramTab {
         }
     }
 
-    /// Copy the selection as draw.io's Copy does: its XML, as text (`clipboard::copy`). The
-    /// next paste of it lands a grid step down and right, as draw.io's does.
+    /// Copy selection XML (`clipboard::copy`); the next paste offsets it one grid
+    /// step down and right, matching draw.io.
     pub fn copy(self: &Rc<Self>) {
         let ids = self.selection();
         if ids.is_empty() {
@@ -779,8 +767,8 @@ impl DiagramTab {
         self.pasted.replace((Some(xml), 0));
     }
 
-    /// Cut the selection as draw.io's Cut does: copied, then removed, the edges on it let go
-    /// of it rather than going with it. The next paste lands where the cells were.
+    /// Copy and remove selected cells, disconnecting retained edges. The next paste
+    /// uses the original position, matching draw.io.
     pub fn cut(self: &Rc<Self>) {
         let ids = self.selection();
         if ids.is_empty() {
@@ -792,10 +780,8 @@ impl DiagramTab {
         self.edit(|e, page| e.remove(page, &ids, &shown.scene));
     }
 
-    /// Paste text read off the clipboard as draw.io's Paste does (`EditorUi.pasteXml`): a
-    /// diagram in it as its cells, anything else as a text cell at the top-left of the view;
-    /// pasting the same text again lands a grid step further each time. Selects what it
-    /// pasted.
+    /// Paste diagram XML as cells or other text as a cell at the viewport's top-left
+    /// (`EditorUi.pasteXml`). Offset repeated pastes by a grid step; select pasted cells.
     pub fn paste_text(self: &Rc<Self>, text: &str) {
         let grid = {
             let editor = self.editor.borrow();
@@ -992,8 +978,8 @@ impl DiagramTab {
         self.editor.borrow().file().to_xml()
     }
 
-    /// The model as it stands, for a save's worker to serialise: a clone costs a fraction of
-    /// [`text`](Self::text), which the main thread would otherwise wait on.
+    /// Clone the model for worker-side serialization; cheaper than [`text`](Self::text)
+    /// and avoids serialization on the main thread.
     pub fn file(&self) -> File {
         self.editor.borrow().file().clone()
     }
@@ -1017,8 +1003,7 @@ impl DiagramTab {
         self.set_title();
     }
 
-    /// The file changed on disk and the tab holds no edits: read it again, staying on the same
-    /// page and keeping whatever of the selection is still there.
+    /// Reload a clean tab, preserving its page and surviving selection.
     pub fn reload(self: &Rc<Self>, file: File, etag: Etag, digest: Digest) {
         let last = file.pages.len().saturating_sub(1);
         *self.editor.borrow_mut() = Editor::new(file);
@@ -1171,9 +1156,8 @@ impl DiagramTab {
     }
 }
 
-/// The size `text` takes as a pasted text cell's label, as Pango lays it out in draw.io's
-/// default font, wrapped at draw.io's widest pasted text (`EditorUi.maxTextWidth`), a little
-/// room around it (`Graph.updateCellSize`).
+/// Pasted-text bounds in draw.io's default font, wrapped at `EditorUi.maxTextWidth`
+/// and padded as `Graph.updateCellSize` does.
 fn text_size(widget: &impl IsA<gtk::Widget>, text: &str) -> (f64, f64) {
     /// Pasted text wider than this wraps (`EditorUi.maxTextWidth`).
     const WIDEST: i32 = 520;

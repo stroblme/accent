@@ -30,7 +30,7 @@ pub fn invert(m: Matrix) -> Matrix {
 }
 
 /// One segment of an appearance path, in top-left page points: what every ink writer hands
-/// [`PdfDoc::put_ink`], and what [`read_ink`] gives back.
+/// `PdfDoc::put_ink`, and what `read_ink` gives back.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Seg {
     Move((f32, f32)),

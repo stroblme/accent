@@ -9,23 +9,19 @@ use accent_api::git::Sides;
 /// What the palette lists before the user types anything.
 const RECENT_FILES: usize = 50;
 
-/// Commands kept in the session's recently-used list. There are only about forty of them, so a
-/// shorter list is still every command the user actually reaches for.
+/// Limit recently used commands in the session while retaining common actions.
 const RECENT_COMMANDS: usize = 20;
 
-/// Session state is cheap to lose and noisy to write, so it follows a change by a second.
+/// Session-write debounce, avoiding noisy writes while bounding recoverable state loss.
 pub(crate) const SESSION: Duration = Duration::from_secs(1);
 
 /// What the palette lists, kept warm so the dialog never waits on the vault.
 #[derive(Default)]
 pub struct Corpus {
-    /// Every file, then every note a link names that is not there yet: one list, so Go to File
-    /// ranks them together and a file that is there leads at the same score. The notes in a
-    /// folder git ignores, which the index never walks, are the last walk of those folders,
-    /// behind the files the index lists.
+    /// Files followed by unresolved note targets, ranked together with existing files winning ties.
+    /// Gitignored folders use the last explicit walk after indexed files.
     files: palette::Files,
-    /// The open palette's way to the files as they land, so a dialog opened before they did, or
-    /// before the fresh ones its own opening asked for, ranks them as soon as they are here.
+    /// Live file-list handle for the open palette, refreshing ranks when delayed listings arrive.
     open: Option<palette::Refill>,
     tags: Rc<Vec<String>>,
     /// The index's recently changed notes, up to [`RECENT_FILES`]: one refresh behind at worst,
@@ -34,13 +30,10 @@ pub struct Corpus {
 }
 
 impl App {
-    /// Re-read what the palette lists, off the main loop. Cheap enough to do on every reconcile
-    /// and every time the dialog opens, which is what keeps the answer both instant and current:
-    /// the dialog shows what is here at once, and the files that land while it is open are handed
-    /// to it.
+    /// Refresh palette files off-thread, retaining an immediately available list.
     ///
-    /// The notes in the gitignored folders are the vault's last walk of them, unless `relist`
-    /// walks them again: a walk of the whole vault, so only the dialog opening asks for one.
+    /// Reconciliation and palette opening refresh indexed files. Only opening requests `relist`
+    /// of gitignored folders because that requires a full vault walk.
     pub fn refresh_corpus(self: &Rc<Self>, relist: bool) {
         let Some(vault) = self.vault().cloned() else {
             return;
@@ -373,16 +366,13 @@ impl App {
         }
     }
 
-    /// Whether this window writes a session down and puts it back: a vault's does, and a named
-    /// terminal session's. A window opened on a file, or an unnamed one of shells, has nothing to
-    /// key one on, and is opened the same way again.
+    /// Whether a vault or named terminal window persists a session.
+    /// Loose-file and unnamed-shell windows have no persistent session key.
     pub(crate) fn keeps_session(&self) -> bool {
         self.key.borrow().saved_as().is_some()
     }
 
-    /// Save: the note or diagram in front, and in a window of shells with none in front the
-    /// session, which is all Save can mean there — asked for a name the first time, and written
-    /// at once from then on, the way a document is.
+    /// Save the active note/diagram, or save a shell-only window's session, prompting for its first name.
     pub(crate) fn save(self: &Rc<Self>) {
         if self.active().is_some() || self.active_diagram().is_some() {
             return self.save_active();
@@ -390,8 +380,7 @@ impl App {
         self.save_shells();
     }
 
-    /// Save Session: a window of shells written down under its name, asked for the first time.
-    /// Any other window has no session of shells, and a vault's writes its own as it changes.
+    /// Save Session for shell windows, naming it once. Vault windows already save session changes automatically.
     pub(crate) fn save_shells(self: &Rc<Self>) {
         let named = match &*self.key.borrow() {
             shell::WindowKey::Terminal(key) => terminal::session_name(key).map(str::to_string),
@@ -431,8 +420,7 @@ impl App {
         dialogs::focus_entry(&entry, |entry| entry.select_region(0, -1));
     }
 
-    /// Save this window as the session `name`, asked first when that replaces one saved before:
-    /// the shells it held that this window does not have end.
+    /// Save as session `name`, confirming replacement and ending old shells absent from this window.
     fn save_session_as(self: &Rc<Self>, name: &str) {
         let key = terminal::session_key(name);
         if terminal::session_name(&key).is_none() {
@@ -503,10 +491,8 @@ impl App {
         *self.key.borrow_mut() = key;
     }
 
-    /// Reload Window: close this window the way closing it always does — each edit written or
-    /// asked about, the session saved, the shells detached rather than ended — and, once it has
-    /// gone, open what it showed again in its place (`Shell::reopen`). A close stopped to ask is
-    /// still the reload's; one given up there leaves the window as it was ([`App::keep_open`]).
+    /// Reload through normal window close so saves, confirmations, session writes and shell detachment run.
+    /// After successful close, Shell::reopen restores it; [`App::keep_open`] cancels the reload.
     pub(crate) fn reload(&self) {
         self.reloading.set(true);
         self.window.close();
@@ -523,9 +509,8 @@ impl App {
         self.reloading.get()
     }
 
-    /// Close Session: end the session for good — its shells, its state file and its row in the
-    /// recent list — and leave for the start screen, as Close Vault does. Asked first, since the
-    /// shells are running.
+    /// Confirm and permanently close a terminal session, ending shells and removing state and recents.
+    /// Present the start screen afterwards, matching Close Vault.
     pub(crate) fn close_session(self: &Rc<Self>) {
         let named = match &*self.key.borrow() {
             shell::WindowKey::Terminal(key) => {
@@ -560,18 +545,14 @@ impl App {
         let _ = WidgetExt::activate_action(&self.window, "app.close-vault", None);
     }
 
-    /// Unnamed again, so the close that follows ends the shells and writes nothing; then the
-    /// session's row goes, and its file with it (`start::forget_vault`). Close Session, and Remove
-    /// from Recents on a session this window has open (`Shell::remove_recent`).
+    /// Clear the session name before closing so shells end and no state is saved.
+    /// Then remove its recent entry and state through start::forget_vault.
     pub(crate) fn forget_session(&self, key: &std::path::Path) {
         self.rekey(shell::WindowKey::Loose(shell::Loose::Terminal));
         start::forget_vault(&self.config, key);
     }
 
-    /// Let go of this window's shells as it closes. A window that keeps a session only detaches
-    /// them, and its next opening takes them up again; one that does not has nothing to take them
-    /// up again, so they end with it.
-    /// A window reloading keeps them too, for the window taking its place ([`App::reload`]).
+    /// Detach shells for saved sessions or reload; end shells when no future window can restore them.
     pub(crate) fn release_shells(&self) {
         if !self.keeps_session() && !self.reloading.get() {
             for term in self.terminals() {
@@ -600,9 +581,8 @@ impl App {
         }
     }
 
-    /// The panes as the session records them, read off the widget tree, which is the layout.
-    /// While presentation mode hides every pane but one, or a split has no size yet, there is no
-    /// ratio to read and the stored layout stands.
+    /// Read pane layout from the widget tree.
+    /// Keep stored ratios during presentation or before allocation because hidden/unsized splits have no valid ratio.
     pub(crate) fn layout(&self) -> Option<Layout> {
         let root = self
             .content
@@ -712,9 +692,7 @@ impl App {
         }
     }
 
-    /// What the empty document column says. A remote window whose host has not answered yet
-    /// says how many stored tabs are waiting for it, because an empty window with a failed
-    /// connection over it otherwise reads as a session that was lost.
+    /// Show pending stored-tab count before a remote host answers, distinguishing loading from a lost session.
     pub fn sync_placeholder(&self) {
         let Some(page) = self
             .content
@@ -754,11 +732,8 @@ impl App {
         page.set_description(Some(&body));
     }
 
-    /// Split the window the way the session left it, then open every tab into its own pane.
-    ///
-    /// The splits come first and stand empty until their tabs land: a text tab only exists once
-    /// the worker's read is back, so each open looks its pane up in `placing` (see
-    /// [`App::tabs_for`]) instead of being moved there afterwards.
+    /// Restore splits before opening tabs, recording destinations in `placing`.
+    /// Worker reads finish later, so [`App::tabs_for`] chooses the pane when each tab arrives.
     fn restore_panes(self: &Rc<Self>, layout: Layout, session: &Session) {
         let active = session.active.clone();
         let (mut placed, mut splits) = (Vec::new(), Vec::new());
@@ -889,19 +864,11 @@ impl App {
         }
     }
 
-    /// Put back what the session had in front, as far as it has landed: each pane's tabs in the
-    /// order its bar had them, whatever order the reads came back in, the pinned ones pinned
-    /// again, with its own tab selected;
-    /// then the active tab, whose pane is the one notes open into. A pane still empty with nothing
-    /// on its way has lost every note it held since, and closes, the other side of its split
-    /// taking the room.
+    /// Restore landed tabs in saved bar order, pins, pane selections and active pane.
     ///
-    /// A pane the reader has picked a tab in or moved the keyboard to since is theirs: its tabs
-    /// still go into bar order, but what it shows is left alone, and notes go on opening where the
-    /// reader last went rather than beside the active tab.
-    ///
-    /// Run once every open has been asked for, and again as each one settles (see [`Asked`]): a
-    /// pane's own tab may just have landed, and a failed one may have emptied its pane.
+    /// Reads may complete out of order; run after requests begin and after each settles
+    /// ([`Asked`]). Close panes with no tabs or pending opens. User-changed pane selections and
+    /// active pane override saved choices, while tab order still restores.
     fn put_back(self: &Rc<Self>, restore: &Restore) {
         // What it selects is not the reader's doing: see `reader_in`.
         restore.selecting.set(true);
@@ -962,10 +929,8 @@ impl App {
         restore.selecting.set(false);
     }
 
-    /// Whether what is happening now is the restore putting its tabs back rather than the reader
-    /// moving about. A restore drives the same code a reader does — it selects pages, and the
-    /// selection notify cannot tell whose selection it was — so everything downstream that means
-    /// "the reader went here" asks this: [`App::reader_in`] and the pane's back/forward history.
+    /// Whether current selections come from restoration rather than user navigation.
+    /// Selection notifications are shared, so history and [`App::reader_in`] use this guard.
     pub(crate) fn restoring(&self) -> bool {
         self.restore
             .borrow()
@@ -1025,10 +990,8 @@ pub struct Restore {
     selecting: Cell<bool>,
 }
 
-/// One tab a restore asked for, held by the work waiting on it in `awaiting`. A tab that fails to
-/// open drops that work without running it, and says nothing else, so the drop is when the panes
-/// are looked at again. From an idle: the drop happens inside a borrow of `awaiting`, which
-/// `put_back` reads.
+/// Track a pending restored tab and rerun pane restoration if opening fails.
+/// Drop runs from an idle because `awaiting` is borrowed when work releases; successful work already restores panes.
 struct Asked {
     app: std::rc::Weak<App>,
     restore: Rc<Restore>,
@@ -1061,12 +1024,10 @@ pub(crate) fn extent_of(paned: &gtk::Paned) -> i32 {
     }
 }
 
-/// Move each restored split's handle to its share of the split, once the split has a size.
+/// Restore split ratios once allocations exist, repeating until no handle moves.
 ///
-/// Every frame rather than once: a split inside another has its final size only after the outer
-/// handle has moved, and `GtkPaned` hands a resize out half and half rather than by share. So
-/// each frame puts every handle back at its share of what it has now, until a frame finds nothing
-/// left to move — one frame per level of nesting.
+/// Nested splits settle after outer handles move, and GtkPaned divides resize space equally
+/// rather than by ratio. Each nesting level therefore needs another frame.
 fn hold_ratios(root: &gtk::Widget, splits: Vec<(gtk::Paned, f64)>) {
     if splits.is_empty() {
         return;
@@ -1112,12 +1073,10 @@ fn sidebar_width(stored: i32) -> i32 {
     }
 }
 
-/// What a window may write before it has put the stored session back.
+/// Choose which session state a partially restored window may save.
 ///
-/// Until then its tabs, zoom and layout are the defaults it was built with, not anything the
-/// reader chose, so the stored session stands and only what the window added since is merged in.
-/// A remote window closed before its host ever answered used to write its empty tab list over
-/// the tabs it was waiting to open.
+/// Before restoration, layout and zoom are defaults. Preserve stored state and merge only
+/// new additions, avoiding empty remote windows overwriting sessions before hosts answer.
 fn unrestored(mut stored: Session, now: Session) -> Session {
     for key in now.open {
         if !stored.open.contains(&key) {

@@ -1,6 +1,6 @@
-//! explore's `precise` callers and callees: the call hierarchy of the language server the app
-//! runs for a file, asked at a declaration's name and answered back in the index's declarations.
-//! A declaration no server answers for is left to the names (`graph.rs`), and why is said once.
+//! Resolve explore callers and callees through the file's language server, mapping results to
+//! indexed declarations. Unavailable answers fall back to name matching in `graph.rs`, with the
+//! reason reported once.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -10,10 +10,8 @@ use accent_core::code::{self, Lang, SymbolKind};
 
 use super::Shared;
 
-/// How long a question waits on a language server: `starting` until it has answered once —
-/// rust-analyzer first answers on this repository 8–14 s after it starts — and `asking` after
-/// that, an agent waiting on every second; and how long one goes without a question before it
-/// is stopped, its memory (rust-analyzer: 2.5–3.4 GB here) freed for a cold start next time.
+/// Timeouts for first answers, subsequent requests and idle shutdown. Cold server startup can
+/// take seconds; idle shutdown releases substantial server memory before the next cold start.
 const WAITS: Waits = Waits {
     starting: Duration::from_secs(20),
     asking: Duration::from_secs(10),

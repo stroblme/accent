@@ -1,25 +1,16 @@
-//! The minimap beside a text tab: the document drawn small, a bar per word, under a band over
-//! the lines the view shows. It stands in for the vertical scrollbar (`Tab::set_minimap`): a
-//! press puts the line under it in the middle of the view, a press on the band takes hold of it,
-//! and either then scrolls the view with the pointer; the wheel scrolls the view. The caret never
-//! moves.
+//! A compact document map replacing the vertical scrollbar (`Tab::set_minimap`).
 //!
-//! Monochrome but for the accent: words in the foreground, a dimmer tone of it where the editor
-//! dims the text, and the accent where the editor writes in it or, in code, writes a keyword;
-//! never a syntax colour. A heading's text as a label to read, sized and indented by its level, as
-//! VS Code draws a section header; a comparison's or a conflict's row tints as the page has them.
+//! Clicks centre a line; dragging the visible band or scrolling moves the view without
+//! moving the caret. Foreground tones and accent match editor emphasis; headings remain
+//! readable labels and comparison row tints are preserved.
 //!
-//! Ours rather than GtkSourceMap, which laid the whole document out a second time in a view of
-//! its own, painted no band on GTK 4.22 and followed the adjustment its view had when it was set
-//! (ISSUES.md). Nothing here asks GTK's layout where a row is, which is where its hidden-text
-//! aborts live: the rows are [`model`]'s estimate from the characters on each line, and the band
-//! is the lines the view shows, placed on those rows.
+//! GtkSourceMap duplicates layout, has band and adjustment issues (ISSUES.md), and exposes
+//! hidden-text layout failures. [`model`] instead estimates rows from line text and places
+//! the band using visible lines.
 //!
-//! Drawn in chunks of [`CHUNK`] lines, each kept as a texture and put back at its row until
-//! something in it changes: an edit, a tag that changes how a line looks, a new width, ink, accent
-//! or screen scale. A texture rather than the rectangles themselves, which cairo paints one by
-//! one, thousands to a frame. The buffer is followed only while the map is on screen; one that
-//! changed while it was not is read whole again when it comes back.
+//! [`CHUNK`]-line textures avoid painting thousands of rectangles per frame. Edits, styling,
+//! width, colours and scale invalidate chunks. The buffer is followed only while visible;
+//! showing a map after hidden edits rebuilds it.
 
 mod model;
 
@@ -35,14 +26,14 @@ use std::ops::Range;
 const WIDTH: i32 = 100;
 /// A row's height in logical pixels; a character is one pixel wide.
 const ROW: f64 = 2.0;
-/// Lines per cached chunk. An edit draws its chunk again and a scroll the chunks coming onto the
-/// map: 32 drew a keystroke's in half the time 64 did and scrolled as cheaply, where 16 gained
-/// nothing more (`ACCENT_BENCH_MINIMAP=typing:` and `=frames:`, `map_us`).
+/// Lines per cached drawing chunk. Use 32 to reduce typing redraw cost
+/// against 64 without losing scroll performance; 16 gave no further gain
+/// (`ACCENT_BENCH_MINIMAP=typing:`/`frames:`, `map_us`).
 const CHUNK: usize = 32;
 /// How many chunks above and below the map's window are kept for a scroll to come back to.
 const KEEP: usize = 4;
-/// A heading label's size in logical pixels by level, h1 first, and how much further in each
-/// level starts: h1 largest and leftmost, as an outline reads.
+/// Heading-label sizes (h1 first) and per-level indent, forming an outline
+/// with h1 largest and leftmost.
 const LABEL_PX: [f64; 6] = [11.0, 10.0, 9.0, 8.5, 8.0, 8.0];
 const LABEL_INDENT: f64 = 4.0;
 /// GtkSourceView's tag over a comment, which the language spec names; the style tags that colour
@@ -54,9 +45,8 @@ fn label_rows(level: u8) -> u32 {
     (LABEL_PX[usize::from(level.clamp(1, 6) - 1)] * 1.35 / ROW).ceil() as u32
 }
 
-/// A word's tone: the foreground, a dimmer one where the editor dims the text (a note's markup,
-/// quotes and done tasks, a comment in code), and the accent where the editor writes in it (a
-/// note's links and tags) or, in code, where it writes a keyword.
+/// Text tone: foreground, dim for markup/quotes/tasks/comments, or
+/// accent for note links/tags and code keywords.
 #[derive(Clone, Copy, PartialEq)]
 enum Tone {
     Ink,
@@ -65,9 +55,9 @@ enum Tone {
 }
 
 impl Tone {
-    /// The tone of the text at `at`, from its highest-priority tag that has one, as the editor
-    /// paints the foreground of the highest-priority tag that sets one. `keywords` are the looks
-    /// a keyword has in the style scheme ([`keyword_looks`]).
+    /// Resolve the highest-priority foreground tag at `at`, matching editor
+    /// painting. `keywords` supplies scheme-derived keyword looks
+    /// ([`keyword_looks`]).
     fn at(at: &gtk::TextIter, keywords: &[gtk::TextTag]) -> Tone {
         for tag in at.tags().iter().rev() {
             let Some(name) = tag.name() else {
@@ -107,10 +97,9 @@ struct Paint {
     keywords: std::cell::OnceCell<Vec<gtk::TextTag>>,
 }
 
-/// Probe tags with the looks a keyword and a statement have in `buffer`'s style scheme. The
-/// highlighter's tags have no names, only the style it gave them, so a keyword's tag is the one
-/// that looks exactly like this. The scheme names the two styles, or the `def` language maps them
-/// to one it does: Adwaita's keywords are its statements.
+/// Probe keyword/statement style tags because highlighter tags have no
+/// names. Match their colour, weight and slant; use `def` language
+/// mapping when needed, as Adwaita keywords map to statements.
 fn keyword_looks(buffer: &gtk::TextBuffer) -> Vec<gtk::TextTag> {
     let Some(buffer) = buffer
         .downcast_ref::<sourceview5::Buffer>()
@@ -265,8 +254,8 @@ impl Minimap {
         self.imp().release();
     }
 
-    /// The time the map has spent drawing since this was last asked: its model brought up to the
-    /// buffer, its chunks drawn and the frame put together.
+    /// Drawing time since the last read: model synchronization, chunk
+    /// rendering and frame assembly.
     pub fn take_spent(&self) -> std::time::Duration {
         self.imp().spent.take()
     }
@@ -522,9 +511,9 @@ impl imp::Minimap {
         snapshot.pop();
     }
 
-    /// Have GtkSourceView colour the `lines` the map shows, from an idle. It colours only what its
-    /// view shows, and the map's comments are dimmed by what it colours; never from inside a
-    /// frame, since the tags it applies come back here as changes.
+    /// Queue GtkSourceView highlighting for map-visible `lines`, including
+    /// comments outside the editor viewport. Apply from an idle because
+    /// highlighting tags emit changes back to the map during drawing.
     fn highlight(&self, view: &sourceview5::View, lines: Range<usize>) {
         let Some(buffer) = view
             .buffer()
@@ -547,8 +536,8 @@ impl imp::Minimap {
         });
     }
 
-    /// A press at `y`: on the band it takes hold of it, anywhere else it first puts the row
-    /// pressed in the middle of the view, and either way the drag after it moves the band.
+    /// Grab the visible band at `y`, or first center the clicked row
+    /// in the document, then begin dragging the band.
     fn press(&self, y: f64) {
         let (Some(frame), Some(view)) = (self.frame.get(), self.view.upgrade()) else {
             return;
@@ -625,9 +614,8 @@ impl imp::Minimap {
     }
 }
 
-/// Whether `tag` changes what the map draws of a line: it hides it (a fold, a collapsed run),
-/// scales it or labels it (a heading), tints its row (a comparison, a merge, a conflict) or tones
-/// its words, a highlighter's tag among them.
+/// Check tags affecting hidden rows, heading scale/labels, row tints
+/// or word tones, including source-highlighter tags.
 fn matters(tag: &gtk::TextTag) -> bool {
     if tag.is_invisible_set() || tag.is_scale_set() || tag.is_paragraph_background_set() {
         return true;
@@ -657,8 +645,8 @@ fn rect(x: f64, y: f64, width: f64, height: f64) -> graphene::Rect {
     graphene::Rect::new(x as f32, y as f32, width as f32, height as f32)
 }
 
-/// Line `at` as the map sees it. One whose start is hidden is hidden whole: hidden text keeps to
-/// whole lines (`fold::whole_lines`).
+/// Read line `at` for the map. A hidden start hides the whole line,
+/// matching `fold::whole_lines`.
 fn measure(buffer: &gtk::TextBuffer, at: usize) -> Line {
     let Some(start) = buffer.iter_at_line(at as i32) else {
         return Line::default();
@@ -700,8 +688,8 @@ fn tint(start: &gtk::TextIter) -> Option<gdk::RGBA> {
         .find_map(|tag| tag.paragraph_background_rgba())
 }
 
-/// The characters of `text`, the line from `start` to `end`, each with its tone. Tags change only
-/// at their toggles, so the tone is looked up once per run between two.
+/// Read toned characters from `start..end`, looking up tags once per
+/// toggle-delimited run rather than per character.
 fn toned<'a>(
     text: &'a str,
     start: gtk::TextIter,
@@ -735,9 +723,9 @@ fn line_end(start: gtk::TextIter) -> gtk::TextIter {
     end
 }
 
-/// The rows of the view's first and last lines on screen, each placed by how far down it the
-/// screen's edge falls. `line_at_y` and `line_yrange` read the layout's heights and never walk a
-/// line's bytes, which is where GTK's hidden-text aborts are (ISSUES.md).
+/// Map screen edges to document rows and line fractions. Use layout-only
+/// `line_at_y`/`line_yrange`, avoiding byte walks that trigger GTK hidden-text
+/// aborts (ISSUES.md).
 fn band(view: &sourceview5::View, model: &Model) -> (f64, f64) {
     let shown = view.visible_rect();
     let row = |y: i32| {
@@ -752,8 +740,8 @@ fn band(view: &sourceview5::View, model: &Model) -> (f64, f64) {
     (row(shown.y()), row(shown.y() + shown.height()))
 }
 
-/// Scroll `view` to have the point `frac` of the way down line `at` `place` of the way down the
-/// screen: at its top for 0, in its middle for 0.5. Nothing while the whole document fits.
+/// Place line `at`'s fraction `frac` at screen fraction `place`
+/// (0 top, 0.5 middle). Ignore when the whole document fits.
 fn scroll_line_to(view: &sourceview5::View, at: usize, frac: f64, place: f64) {
     let (Some(adjustment), Some(iter)) =
         (view.vadjustment(), view.buffer().iter_at_line(at as i32))
@@ -770,8 +758,8 @@ fn scroll_line_to(view: &sourceview5::View, at: usize, frac: f64, place: f64) {
     adjustment.set_value(adjustment.value() + target - at);
 }
 
-/// Chunk `k`, drawn from its own first row down into a texture at the screen's scale: each
-/// line's row tint, then its label if it is a heading, or else its words.
+/// Render chunk `k` at screen scale: row tint, then heading label or
+/// word bars, from its first row.
 fn render(k: usize, model: &Model, view: &sourceview5::View, paint: &Paint) -> gsk::RenderNode {
     let snapshot = gtk::Snapshot::new();
     snapshot.scale(paint.scale as f32, paint.scale as f32);

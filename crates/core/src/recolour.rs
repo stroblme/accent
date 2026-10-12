@@ -1,16 +1,10 @@
-//! Recolouring onto the theme's paper and ink, and the test for which images want it.
+//! Theme recolouring shared by PDF pages, document images and SVGs. White maps to paper and
+//! black to ink while retaining chroma. Raster buffers use [`recolour`]; SVGs keep vector
+//! content through [`recolour_svg`] and [`colour_matrix`].
 //!
-//! A PDF page, a document-like image and an SVG land on one ramp: white paper becomes the
-//! theme's paper and black text its ink, while every pixel keeps its own chroma, so a coloured
-//! figure stays coloured. A rendered page or a decoded image goes through [`recolour`]; an SVG
-//! stays vector and carries the same remap as a filter ([`recolour_svg`], from
-//! [`colour_matrix`]).
-//!
-//! [`onto`] decides which page a file goes onto, from whether its kind is recoloured and whether
-//! the reader inverted it. [`classify`] decides which images are documents: a scan, plot, diagram
-//! or screenshot of text is mostly light, near-neutral paper in a handful of colours, and a photo
-//! is neither. Decoding stays with each app's own decoder; everything here takes straight-alpha
-//! RGBA8.
+//! [`onto`] combines theme and inversion preferences; [`classify`] distinguishes document images
+//! from photos by light neutral paper and limited colours. Apps decode images; this module
+//! consumes straight-alpha RGBA8.
 
 /// Rec. 709 luma weights, taken on the sRGB values as they are rather than on linear light: the
 /// ramp needs an order from ink to paper, not a measurement.
@@ -70,12 +64,9 @@ const LUMA_Q16: [u32; 3] = [13_933, 46_871, 4_732];
 /// The steps of the ramp [`recolour`] looks up, a sixteenth of a byte level each.
 const STEPS: i32 = 255 * 16;
 
-/// [`recolour_pixel`] over a whole RGBA8 buffer, in place. A PDF's page and tile renders and a
-/// decoded image all come through here, so they cannot drift apart.
-///
-/// The same remap in integers, five times faster on a tile: the luma to a sixteenth of a level,
-/// and each channel's `ink + Y·(paper − ink − 1)` at that luma looked up rather than worked out.
-/// Within a step of a byte of [`recolour_pixel`], and exactly the paper and the ink at the ends.
+/// Recolour RGBA8 in place, shared by page renders, tiles and decoded images. Integer luma and
+/// ramp lookups avoid per-pixel float arithmetic, agreeing with [`recolour_pixel`] within one
+/// byte level and exactly at paper and ink endpoints.
 pub fn recolour(data: &mut [u8], paper: [u8; 3], ink: [u8; 3]) {
     // In bytes and rounded: `ink + y·(paper − ink − 255) / STEPS`.
     let ramp: Vec<[i16; 3]> = (0..=STEPS)
@@ -110,13 +101,12 @@ pub fn onto_white(data: &mut [u8]) {
     }
 }
 
-/// [`recolour_pixel`] as a colour matrix, for a renderer that applies one itself: four rows of
-/// five, row-major, in 0..1 units with the offset last, which is `feColorMatrix`'s layout.
+/// Affine [`recolour_pixel`] matrix: four row-major rows of five values in 0..1 units, offset
+/// last, matching `feColorMatrix`.
 ///
-/// The remap is affine. With `Y` the pixel's luma, [`recolour_pixel`] computes
-/// `ink + Y·(paper − ink) + (c − Y)`, which is `c + ink + (paper − ink − 1)·Y`: row `i` is the
-/// identity row plus `paper_i − ink_i − 1` times the luma weights, offset by `ink_i`, and alpha
-/// passes through. Both round, and agree within one step of a byte, which is the f32 arithmetic.
+/// For luma `Y`, the remap is `c + ink + (paper − ink − 1)·Y`. Each row adds its ramp
+/// coefficient times the luma weights to the identity and offsets by ink; alpha passes through.
+/// Float rounding agrees within one byte level.
 pub fn colour_matrix(paper: [u8; 3], ink: [u8; 3]) -> [f32; 20] {
     let mut m = [0.0; 20];
     for i in 0..3 {

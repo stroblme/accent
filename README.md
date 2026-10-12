@@ -42,7 +42,13 @@ Accent is open source under GPL-3.0-or-later and still evolving.
 
 ## Get started
 
-On Linux, install the [desktop requirements](#desktop-requirements), then run:
+Each [release](https://github.com/stroblme/accent/releases) carries a Flatpak bundle for the desktop and signed APKs for Android:
+
+```sh
+flatpak install --user accent-<version>-x86_64.flatpak
+```
+
+To build from source on Linux, install the [desktop requirements](#desktop-requirements), then run:
 
 ```sh
 make requirements    # check local dependencies

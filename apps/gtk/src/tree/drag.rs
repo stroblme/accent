@@ -1,16 +1,12 @@
-//! Dropping onto the tree: a row dragged within it moves, files from another application are
-//! copied in, a PDF dropped onto another PDF's row puts its pages after the other's, and a shut
-//! folder a drag rests on springs open.
+//! Tree drops move internal rows, import external files or append PDFs
+//! to PDF rows. Hovering over a collapsed folder opens it after a delay.
 
 use super::*;
 
-/// What a tree-to-tree move travels as, beside the plain string a pane opens.
+/// Use GtkStringObject payloads for tree moves, alongside pane-opening strings.
 ///
-/// ponytail: a `GtkStringObject` rather than the `application/x-accent-path` mime the design note
-/// named, because `GtkDropTarget` matches on GType and never on a mime type — a mime would mean
-/// `GtkDropTargetAsync` and reading the drop's stream by hand. What the decision asks for is a
-/// type the panes do not take, and their target takes `AdwTabPage` and `String` only, so a folder
-/// offering this and nothing else cannot be dropped into a pane at all.
+/// GtkDropTarget matches GTypes; MIME payloads would require asynchronous stream handling.
+/// Panes accept only String and AdwTabPage, so folder-only move payloads cannot open panes.
 pub(super) fn move_content(rel: &str) -> gdk::ContentProvider {
     gdk::ContentProvider::for_value(&gtk::StringObject::new(rel).to_value())
 }
@@ -18,12 +14,12 @@ pub(super) fn move_content(rel: &str) -> gdk::ContentProvider {
 /// What a drop is handed to: each path a drag carried, and the path it goes to.
 pub(super) type Move = Rc<dyn Fn(Vec<(String, String)>)>;
 
-/// What a PDF dropped onto another PDF's row is handed to: the one dropped, a vault path or the
-/// absolute path of a file from another application, and the row's path.
+/// PDF append callback: dropped vault-relative or external absolute path
+/// and target row path.
 pub(super) type Append = Rc<dyn Fn(String, String)>;
 
-/// The PDF row under `target` and the one PDF of `carried` dropped onto it, which goes after its
-/// last page rather than beside it. A PDF dropped onto itself is a move as before, so refused.
+/// Find one carried PDF and a target PDF row for page append. Reject
+/// self-drops as ordinary no-op moves.
 fn appending(target: &gtk::DropTarget, carried: &[String]) -> Option<(String, String)> {
     let row = target_row(target)?.item().as_ref().and_then(decode)?;
     let pdf = |rel: &str| crate::doc::kind_of(rel) == crate::doc::Kind::Pdf;
@@ -34,8 +30,8 @@ fn appending(target: &gtk::DropTarget, carried: &[String]) -> Option<(String, St
     }
 }
 
-/// The paths a tree drag is carrying: one row, or the marked set a marked row carries along
-/// (a `GtkStringList`, which no pane takes either — there is no one note in it to open).
+/// Tree-move paths: one row or the marked set as `GtkStringList`, which
+/// panes refuse because it identifies no single file to open.
 fn dragged(value: &glib::Value) -> Vec<String> {
     if let Ok(one) = value.get::<gtk::StringObject>() {
         return vec![one.string().to_string()];
@@ -59,21 +55,17 @@ fn moves_into(paths: &[String], dir: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// How long a drag rests over a shut folder before it opens. Long enough that crossing one on the
-/// way somewhere else never opens it, short enough to read as part of the drag — the second
-/// GTK's own file chooser and Nautilus both wait.
+/// One-second folder-opening delay, matching GTK file chooser/Nautilus
+/// and avoiding expansion when a drag merely crosses a folder.
 const SPRING_OPEN: Duration = Duration::from_millis(800);
 
 /// A timer waiting to open the folder a drag is resting on.
 type Spring = Rc<crate::widgets::Debounce>;
 
-/// Open the shut folder a drag has come to rest on, so a file can be dropped into something that
-/// was not on screen when the drag began. `row` is the row under the pointer, `None` when the drag
-/// has left the target or has been dropped, which disarms the timer.
+/// Open a collapsed folder after a drag rests on its row.
 ///
-/// Per drop target, which is per row: a drag crossing three folders arms and disarms three timers,
-/// one at a time. Nothing closes the folder again — a drag that opened one and went elsewhere
-/// leaves the tree as the reader would have left it by clicking the chevron.
+/// `None` disarms the per-row timer on leaving or dropping. Leave opened folders expanded,
+/// matching a manual chevron click.
 fn spring_open(timer: &Spring, row: Option<gtk::TreeListRow>) {
     timer.cancel();
     let Some(row) = row.filter(|row| row.is_expandable() && !row.is_expanded()) else {
@@ -82,8 +74,8 @@ fn spring_open(timer: &Spring, row: Option<gtk::TreeListRow>) {
     timer.call(move || row.set_expanded(true));
 }
 
-/// The `GtkTreeListRow` a drop target on a row expander is over, and `None` for a target that is
-/// not on one — the vault row above the tree, and the list's own blank area.
+/// Tree row under an expander drop target, or `None` for the vault label
+/// and blank list area.
 fn target_row(target: &gtk::DropTarget) -> Option<gtk::TreeListRow> {
     target
         .widget()?
@@ -92,14 +84,10 @@ fn target_row(target: &gtk::DropTarget) -> Option<gtk::TreeListRow> {
         .list_row()
 }
 
-/// A drop target that moves the dragged files into the directory `dir` answers with for the
-/// pointer position — `Some("")` being the vault root — and refuses the drop where it answers
-/// `None`, or where none of them has anywhere to go there.
+/// Accept moves to `dir` at the pointer, where `Some("")` is root and `None` refuses.
 ///
-/// The refusal happens while the pointer is still moving rather than after the drop, so a row
-/// that cannot take what is over it never lights up: a folder onto itself, into what is under it,
-/// or into the folder it is already in are simply not targets. GTK's own `:drop(active)` outline
-/// on the row is then the whole of the feedback, and there is nothing else to draw.
+/// Validate while hovering so self, descendant and no-op drops never highlight as targets.
+/// GTK's active-drop outline provides all feedback.
 pub(super) fn move_target(
     on_move: &Move,
     on_append: &Append,
@@ -176,21 +164,15 @@ pub(super) fn move_target(
     target
 }
 
-/// What a drop of files from outside accent is handed to: the files, the vault-relative folder
-/// they go into ("" being the root) and whether the drag was a move, which takes the originals
-/// away.
+/// External import callback: local files, vault-relative folder (`""`
+/// for root) and move flag requesting original removal.
 pub(super) type Import = Rc<dyn Fn(Vec<PathBuf>, String, bool)>;
 
-/// A drop target for files dragged in from another application — GNOME Files, a browser's
-/// downloads — onto the same three zones a tree-to-tree move has: a folder row, a file row (its
-/// folder) and the blank area or the vault row (the root). `dir` answers with the folder for a
-/// pointer position, exactly as [`move_target`]'s does.
+/// Import external file drops onto folder rows, file-parent rows or the vault root.
 ///
-/// `GdkFileList` is the type rather than `text/uri-list`: GDK deserialises the one into the other,
-/// so this takes what every file manager offers without reading a stream by hand. A drop that
-/// offers **only** move is moved — that is Shift held in the file manager — and anything else is
-/// copied, which is what a plain drag between applications means. One PDF copied onto a PDF's row
-/// puts its pages after that PDF's instead; moved, it moves in beside it as before.
+/// `dir` uses the same zones as [`move_target`]. GDK deserialises URI lists into GdkFileList.
+/// Move-only offers move; other offers copy. A copied PDF on a PDF row appends pages instead;
+/// a moved PDF remains a file move.
 pub(super) fn import_target(
     on_import: &Import,
     on_append: &Append,
@@ -242,12 +224,10 @@ pub(super) fn import_target(
     target
 }
 
-/// The files a drop from another application carries, as paths on this machine, or `None` where
-/// it named none that way — an `ftp://` or a `trash://` URI has nothing here to copy from.
+/// Extract local paths from an external file drop, or `None` when none are local.
 ///
-/// Public because it is the half of a cross-application drop a drill can drive: Xvfb carries a
-/// drag inside one process and not between two, so `ACCENT_BENCH_DROP` builds the `GdkFileList`
-/// itself and takes it from here.
+/// FTP and trash URIs cannot be copied as local files. Expose this extraction so
+/// `ACCENT_BENCH_DROP` can supply a GdkFileList without cross-process Xvfb dragging.
 pub fn dropped_paths(value: &glib::Value) -> Option<Vec<PathBuf>> {
     let files: Vec<PathBuf> = value
         .get::<gdk::FileList>()
@@ -259,8 +239,8 @@ pub fn dropped_paths(value: &glib::Value) -> Option<Vec<PathBuf>> {
     (!files.is_empty()).then_some(files)
 }
 
-/// What a drop from another application is asking for: a move only where move is the one action
-/// it offers, which is how a file manager reports Shift being held.
+/// Choose move only for move-only external offers, as file managers
+/// report Shift drags; otherwise copy.
 fn wanted(target: &gtk::DropTarget) -> gdk::DragAction {
     let offered = target
         .current_drop()

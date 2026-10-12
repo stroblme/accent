@@ -1,5 +1,5 @@
-//! The pure half of [`super`]: positions converted between the server's column units and
-//! accent's characters, and what each of the server's answers becomes, testable without a server.
+//! Pure server-to-accent mappings for positions and responses, testable
+//! without running a language server.
 
 use std::path::Path;
 
@@ -50,8 +50,8 @@ impl Encoding {
         line.chars().take(ch as usize).map(|c| self.units(c)).sum()
     }
 
-    /// A column the server sent, as characters. A column past the line's end lands on its end,
-    /// which is what a server does when it points at the newline.
+    /// Convert a server column to Unicode scalars, clamping past line end
+    /// for positions such as a newline.
     pub(crate) fn to_char(self, line: &str, unit: u32) -> u32 {
         let mut seen = 0;
         for (i, c) in line.chars().enumerate() {
@@ -93,8 +93,8 @@ pub(crate) fn line_of(text: &str, n: u32) -> &str {
         .trim_end_matches('\r')
 }
 
-/// The numbers as the server sent them, for a file whose text is not to hand: right for every
-/// line that is plain ASCII, which is the only case where it is used.
+/// Keep server positions unchanged when text is unavailable. Used only
+/// for ASCII lines, where column encodings agree.
 pub(super) fn raw_range(r: types::Range) -> Range {
     let at = |p: types::Position| Pos {
         line: p.line,
@@ -215,13 +215,10 @@ pub(super) fn completions_of(
     }
 }
 
-/// The line a ghost-text answer suggests, or nothing.
-///
-/// Only the first item is read: ghost text shows one suggestion, and cycling through several is
-/// a UI that does not exist. A server that sends a `range` is answering about a span that starts
-/// before the caret (Copilot rewrites the word being typed); what the buffer already holds there
-/// is stripped, so the caller can always insert what comes back verbatim. A suggestion that does
-/// not begin with what is already written is refused rather than guessed at.
+/// Use the first inline-completion item because the UI shows one suggestion.
+/// For ranges starting before the caret, strip the existing prefix so
+/// callers insert the result verbatim. Reject mismatched prefixes rather
+/// than guessing how to rewrite text.
 pub(super) fn inline_of(
     answer: Option<InlineCompletionResponse>,
     text: &str,
@@ -250,8 +247,8 @@ pub(super) fn inline_of(
     }
 }
 
-/// The text between two positions of the same document, or `None` where they do not name a span
-/// of it: a range starting after the caret, or past the end.
+/// Read a document span, or `None` for invalid positions, including a
+/// start after the caret or beyond the end.
 fn between(text: &str, from: Pos, to: Pos) -> Option<String> {
     let from = byte_of(text, from)?;
     let to = byte_of(text, to)?;
@@ -274,8 +271,8 @@ pub(super) fn hover_text(c: HoverContents) -> String {
     }
 }
 
-/// Only the signature the caret is in: the popover shows one, and picking it here keeps the
-/// choice next to the `activeSignature` that decides it.
+/// Choose the active signature for the single-signature popover, keeping
+/// selection beside the server's `activeSignature` field.
 pub(super) fn signature_of(help: SignatureHelp) -> Option<Signature> {
     let active = help.active_signature.unwrap_or(0) as usize;
     let sig = help.signatures.into_iter().nth(active)?;
@@ -384,13 +381,12 @@ pub(super) fn diagnostics_of(
         .collect()
 }
 
-/// One of a server's `willRename` filters, compiled once: a glob over the absolute path, and
-/// whether it takes files (`Some(false)`), folders (`Some(true)`) or both.
+/// Compiled `willRename` filter: absolute-path glob and file/folder kind
+/// (`Some(false)`/`Some(true)`), or both.
 pub(super) type RenameFilter = (globset::GlobMatcher, Option<bool>);
 
-/// The filters a server registered for `willRename`, leaving out any for a scheme other than
-/// `file` and any glob that does not compile. `*` stops at a `/` and `**` does not, as the
-/// protocol has it.
+/// Compile file-scheme `willRename` filters, dropping invalid globs and
+/// other schemes. `*` stops at `/`; `**` crosses it, per the protocol.
 pub(super) fn rename_filters(caps: &ServerCapabilities) -> Vec<RenameFilter> {
     let registered = caps
         .workspace
@@ -428,9 +424,8 @@ pub(super) fn renamed_by(filters: &[RenameFilter], abs: &Path, is_dir: bool) -> 
         .any(|(glob, kind)| kind.is_none_or(|k| k == is_dir) && glob.is_match(abs))
 }
 
-/// A server's edits to one file as byte ranges of `text`, the positions read in the server's own
-/// encoding. `None` when one lands past the last line, which makes `text` not the text the server
-/// meant.
+/// Convert server edits to byte ranges in `text` using its encoding.
+/// `None` if a range exceeds the last line, indicating mismatched source text.
 pub(super) fn byte_edits(
     text: &str,
     edits: &[types::TextEdit],

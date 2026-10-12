@@ -1,5 +1,5 @@
-//! Arithmetic on vault-relative paths: `"a/b/c.md"` and friends, always `/`-separated and never
-//! absolute. One home for the split every layer used to redo with `rsplit_once('/')`.
+//! Shared operations on vault-relative, `/`-separated paths, avoiding repeated path splitting
+//! across layers.
 
 use crate::markdown;
 

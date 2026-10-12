@@ -1,10 +1,8 @@
-//! Print… and Export as PDF… or HTML… (DESIGN.md, Preview).
+//! Print or export notes as PDF or self-contained HTML (DESIGN.md, Preview).
 //!
-//! A note goes as its tab holds it, unsaved edits and all, into a preview of its own that is never
-//! shown ([`Preview::for_paper`]): white paper whatever the theme, its images as their files are,
-//! its diagrams drawn. Once the page is in, WebKit paginates it — for its own print dialog, or for
-//! GTK's Print to File printer, which writes the PDF — or it is read back as one self-contained
-//! HTML file. A PDF tab's print and export are `pdf::export`'s, a diagram's `diagram::export`'s.
+//! An unseen [`Preview::for_paper`] renders current text, including unsaved edits, on white
+//! paper with original images and rendered diagrams. WebKit paginates for printing or GTK's
+//! Print to File PDF output. PDF and diagram tabs use their own export modules.
 
 use super::*;
 use crate::look::{self, Look, Served};
@@ -21,8 +19,7 @@ pub enum Export {
     Svg,
 }
 
-/// Waited on before the page is taken: the diagrams the mermaid bootstrap draws, then the fonts.
-/// The images are in by then, a page's load waiting for them.
+/// Wait for Mermaid diagrams and fonts before export; page load already waits for images.
 const READY: &str = "await window.__accentDrawn; await document.fonts.ready; return true;";
 
 /// How long a page may take to be ready, so a web process that never answers ends in a toast
@@ -32,9 +29,8 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// A printout's margin on every side, LibreOffice's default: GTK's own quarter inch crowds prose.
 const MARGIN_MM: f64 = 20.0;
 
-/// The page as one file. Every image's address is made absolute, so the export can fetch it; a
-/// link into the vault, which means nothing outside the app, is left as its text, a same-page
-/// `#` anchor being kept; the note's own scripts and the scroll-sync markers are taken out.
+/// Prepare a standalone page: absolute image addresses, text-only vault links and retained local anchors.
+/// Remove preview scripts and source-line markers.
 const TAKE_HTML: &str = r#"
 document.querySelectorAll('img[src]').forEach(function (img) { img.setAttribute('src', img.src); });
 document.querySelectorAll('a[href]').forEach(function (a) {
@@ -70,10 +66,8 @@ impl App {
         }
     }
 
-    /// Export as PDF…, HTML…, PNG… and SVG…: the destination asked for on this machine, starting
-    /// in the file's own folder on a local vault, then the note, the PDF or the diagram written
-    /// there. A note has no PNG or SVG, a PDF only its PDF, a diagram no HTML, and any other tab
-    /// none.
+    /// Choose a local destination and export the supported format.
+    /// Notes support PDF/HTML, PDFs PDF, and diagrams PDF/PNG/SVG; other kinds cannot export.
     pub(crate) fn export(self: &Rc<Self>, to: Export) {
         let Some(doc) = self.menu_doc() else { return };
         let key = doc.key();
@@ -297,12 +291,11 @@ pub(crate) fn page_setup() -> gtk::PageSetup {
     setup
 }
 
-/// Start `op` with `start`, which says whether it did, and wait until it is over: whether it
-/// printed, `false` for a print never started (its dialog cancelled). The page is the caller's to
-/// hold meanwhile: WebKit reads it as it prints.
+/// Start `op` with `start` and await completion; return `false` if printing never starts.
+/// The caller must retain the page while WebKit prints.
 ///
-/// `start` runs from an idle: the print dialog and the printer lookup each run a main loop of
-/// their own, and glib aborts on a future polled inside another's poll, which that loop would do.
+/// Run `start` from an idle: print dialogs and printer lookup use nested main loops, which
+/// would otherwise re-enter a future poll and make glib abort.
 async fn printed(
     op: &webkit6::PrintOperation,
     start: impl FnOnce(&webkit6::PrintOperation) -> Result<bool, String> + 'static,
@@ -340,10 +333,8 @@ async fn printed(
     .await
 }
 
-/// The name of GTK's Print to File printer, which is how WebKit is pointed at it, and which is
-/// translated: so it is found by its backend, the one printer the file backend offers. GTK 4.22
-/// builds that backend in as `GtkPrintBackendFileBuiltin`; a GTK loading it as a module calls it
-/// `GtkPrintBackendFile`.
+/// Find GTK's translated Print to File printer by its backend rather than display name.
+/// Recognise both GtkPrintBackendFileBuiltin and modular GtkPrintBackendFile.
 fn file_printer() -> Option<String> {
     let found = Arc::new(Mutex::new(None));
     let slot = found.clone();
@@ -368,9 +359,8 @@ pub(crate) fn dest_name(dest: &Path) -> String {
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
 }
 
-/// `path` as a `data:` URI, as the preview is served it on paper (`look::serve`): a TIFF, which
-/// no browser draws, and an image its EXIF turns as a PNG; anything else as the file, typed by
-/// its name and its bytes.
+/// Serve `path` for paper export as a data URI through look::serve.
+/// Unsupported TIFF and EXIF-corrected images become PNG; others retain detected file types.
 fn data_uri(path: &Path) -> Option<String> {
     let (bytes, mime) = match look::serve(path, Look::paper(), false) {
         Served::Bytes(bytes, mime) => (bytes.to_vec(), mime.to_string()),
@@ -424,9 +414,8 @@ async fn drawn_diagrams(
     drawn
 }
 
-/// Every `accent:` image source in `html` put inside it by `fetch`, as a `data:` URI; one it
-/// cannot fetch loses its `src` rather than pointing at an address nothing outside the app can
-/// open. Any other source, a web image's, stays as it is.
+/// Embed accent-scheme images as data URIs through `fetch`; remove unavailable src attributes.
+/// External image sources remain unchanged.
 fn inline_images(html: &str, fetch: impl Fn(&str) -> Option<String>) -> String {
     const SRC: &str = " src=\"";
     let mut out = String::with_capacity(html.len());
@@ -453,8 +442,7 @@ fn inline_images(html: &str, fetch: impl Fn(&str) -> Option<String>) -> String {
     out
 }
 
-/// `html` as a file of its own: its title, a policy that runs no script whatever the note holds,
-/// and the preview's sheet, which WebKit applied from outside the page's markup.
+/// Wrap exported HTML with title, script-denying policy and the externally applied preview stylesheet.
 fn standalone(title: &str, css: &str, html: &str) -> String {
     let head = format!(
         "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'none'\">\

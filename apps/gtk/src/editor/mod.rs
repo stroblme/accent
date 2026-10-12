@@ -1,13 +1,8 @@
-//! One editor tab: a `sourceview5::View` on a note, plus its etag, banner and the debounced
-//! work that hangs off a keystroke.
+//! One editor tab: view, buffer, etag, banner and debounced editing work.
 //!
-//! Finding and replacing live in `find.rs`, one bar per window: the bar drives the tab's query
-//! from the outside, so the same widgets serve every tab and stay on screen while presentation
-//! mode has hidden the tab stack.
-//!
-//! Nothing here knows about the app. What the tab has to say goes out through a `connect_*`
-//! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
-//! and closed without `main` reaching inside it.
+//! Each pane's `find.rs` bar drives the tab's query and can also search presentation mode.
+//! Callbacks carry tab events and closures supply vault access, letting tabs move and close
+//! without depending on app state.
 
 use crate::{diagnostics, diff, fold, highlight, lang, multicaret, wrap};
 use accent_api::Error;
@@ -61,46 +56,32 @@ pub(crate) use text::{caret, line_end, line_prefix};
 
 /// How long a long note waits after the last keystroke before it is re-analysed.
 const DEBOUNCE: Duration = Duration::from_millis(150);
-/// Notes at or below this many characters get a *full* re-style on the keystroke. Measured cost
-/// of a full pass, which reads every tag back off the buffer in one walk and touches only what
-/// changed, on markup-dense text (`ACCENT_BENCH_STYLE=typing:`'s `pass_us`, best of nine,
-/// 2026-10-06): 0.2 ms at 4 KB, 0.55 ms at 15 KB, 1.15 ms at 32 KB, 2.4 ms at 64 KB, 10 ms at
-/// 256 KB. This size stays well inside a frame and still covers the notes people actually write
-/// (median 3.5 KB in the test vault). A longer note keeps the debounce for the full pass, which
-/// grows with the note — but it is not left unstyled while typing: [`highlight::apply_line`]
-/// re-tags the caret's line on every keystroke, so markup appears as it is typed the way
-/// Apostrophe does it either side of the threshold.
+/// Character limit for full styling on each keystroke.
 ///
-/// The pass is not all a keystroke here costs, so the cheaper walk did not move this: at 31 KB
-/// the median keystroke (`key_us`) took 3–6 ms with the full pass against 0.9–1.6 ms with the
-/// caret's line alone (2026-10-06).
+/// Full passes fit comfortably in a frame for short notes, but total typing costs rise before
+/// analysis alone exhausts the budget. Longer notes style the caret line immediately through
+/// [`highlight::apply_line`] and debounce the full pass.
 const INSTANT: i32 = 16 * 1024;
 /// DESIGN.md, Motion: save 1 s after the last edit. A diagram and a PDF's drawing share it.
 pub(crate) const AUTOSAVE: Duration = Duration::from_secs(1);
 /// The cursor callback drives the preview's scroll sync; 100 ms is below what the eye follows.
 const CURSOR: Duration = Duration::from_millis(100);
-/// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell
-/// before it runs: a callback is free to reach back into the tab that called it.
+/// Store callbacks in `Rc` so callers can release the cell borrow before
+/// invocation, allowing callbacks to reenter the tab.
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>)>>>;
 /// The find bar's hook, told whether the query itself changed ([`Tab::connect_found`]).
 type FoundHook = RefCell<Option<Rc<dyn Fn(bool)>>>;
 
-/// Whether a save may write the file under a tab.
+/// Whether a tab may attempt saving its current file.
 ///
-/// The one rule every save path shares. A buffer whose file moved underneath it holds the only
-/// copy of its edits *and* the answer to a question the banner is still asking, so nothing
-/// writes until that answer is given — which is the rule VS Code follows for the same reason.
-/// A clean buffer has nothing to lose and is let through: that is how the "deleted on disk"
-/// banner writes the note back.
-///
-/// The etag gate in `fs::write_note` is still the last word; this is what keeps a save from
-/// being attempted at all once the tab already knows the answer.
+/// Dirty buffers whose files moved must await the banner's decision. Clean buffers can
+/// recreate deleted files. `fs::write_note` still enforces the final etag gate.
 pub fn may_save(modified: bool, disk_changed: bool) -> bool {
     !(modified && disk_changed)
 }
 
-/// A spell checker over `buffer`, its suggestions in `view`'s context menu, switched off until
-/// told otherwise. The adapter *is* the action group its own menu items resolve through.
+/// Attach a spell checker and suggestion-menu action group to `buffer`
+/// and `view`, initially disabled.
 pub fn spell_adapter(
     buffer: &sourceview5::Buffer,
     view: &sourceview5::View,
@@ -131,15 +112,14 @@ pub fn spell_adapter(
     adapter
 }
 
-/// A save on its way to the file, as its tab keeps it: what the write was started against, and
-/// the channel its answer arrives on. There is at most one per tab.
+/// One in-flight save per tab, retaining its starting state and reply channel.
 pub struct Flight {
     /// [`SaveState::edits`] when the text was taken.
     pub started: u64,
     /// The etag the write was gated on.
     pub expected: Option<Etag>,
-    /// The etag the tab held when the write started: the one it was gated on, but for the answer
-    /// to a question about the file on disk, which writes over the file it was asked about.
+    /// Tab etag at save start, distinct from the forced-write gate when
+    /// answering a disk-conflict question.
     pub held: Option<Etag>,
     /// A Ctrl+S, which says "Saved" when it lands.
     pub explicit: bool,
@@ -152,11 +132,10 @@ pub struct Flight {
 pub enum Landing {
     /// The buffer is still what was written: clean, at the new etag.
     Clean(Etag),
-    /// The file holds what was written, but the buffer has been typed into since: still dirty,
-    /// and the next save is gated on the new etag.
+    /// Save landed, but newer buffer edits remain dirty. Gate the next save
+    /// on the new file etag.
     Behind(Etag),
-    /// A reload put other text and its own etag in the tab meanwhile, so the answer describes a
-    /// buffer that is gone and changes nothing.
+    /// A reload replaced the buffer and etag, making this save result obsolete.
     Stale,
     /// Refused or failed, for a buffer that still holds its edits.
     Failed(Error),
@@ -181,28 +160,25 @@ pub fn landing(
     }
 }
 
-/// What a tab keeps about the file under it for the save path (`save.rs`): a note's tab and a
-/// diagram's each hold one, so the two save through the same code.
+/// Shared file/save state for note and diagram tabs using `save.rs`.
 #[derive(Default)]
 pub struct SaveState {
     pub etag: Cell<Option<Etag>>,
-    /// What the file held at `etag`, the bytes the tab last read or wrote: a file whose etag
-    /// moved while it still holds them has not changed.
+    /// Digest of bytes last read or written at `etag`, identifying unchanged
+    /// contents even when the disk etag moves.
     pub digest: Cell<Option<Digest>>,
     pub modified: Cell<bool>,
-    /// Someone else changed the file under a dirty tab. Autosave stops until the user has
-    /// answered the banner, so a conflict is never resolved behind their back.
+    /// External changes under a dirty buffer block autosave until the user
+    /// answers the banner, preserving both versions.
     pub disk_changed: Cell<bool>,
-    /// Counts every change to the buffer, typed or loaded, so a save that lands can tell whether
-    /// the buffer is still the text it wrote.
+    /// Count typed and loaded buffer changes to detect edits made during a save.
     pub edits: Cell<u64>,
     /// The save on its way, if one is.
     pub flight: RefCell<Option<Flight>>,
-    /// A save asked for while one was on its way, run when that lands; `Some(true)` if any of the
-    /// asks was a Ctrl+S.
+    /// Save queued behind the current write. `Some(true)` retains any explicit
+    /// Ctrl+S request.
     pub save_again: Cell<Option<bool>>,
-    /// The watcher spoke while a save was on its way, so its stat is taken again once the save
-    /// has landed and the tab holds the etag it wrote.
+    /// Watcher event during a save; restat after landing establishes the saved etag.
     pub recheck: Cell<bool>,
 }
 
@@ -228,10 +204,8 @@ pub trait Saves: 'static {
     fn for_disk(&self) -> String;
 }
 
-/// What kind of text a tab holds.
-///
-/// Prose and code share every mechanism a tab has — the etag, autosave, find, zoom, the banner —
-/// and differ only in how they are shown, so this is a field rather than a second tab type.
+/// Text flavour. Shared save, find and banner mechanisms stay on one tab
+/// type; flavour controls rendering and Markdown-specific behavior.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Flavour {
     /// A markdown note: our own styling spans, wikilink completion, spellcheck, a capped column.
@@ -248,8 +222,7 @@ impl Flavour {
     }
 }
 
-/// The preferences a tab is built with. A struct rather than five positional arguments, which is
-/// what they were until code tabs needed a sixth.
+/// Named construction preferences, avoiding a growing positional argument list.
 pub struct Prefs {
     pub spellcheck: bool,
     pub ghost_text: bool,
@@ -267,12 +240,11 @@ pub struct Tab {
     path: RefCell<PathBuf>,
     pub view: sourceview5::View,
     pub buffer: sourceview5::Buffer,
-    /// The committed text this buffer is drawn against, and the bars in the gutter that say how
-    /// it differs. `None` when the file is in no repository, or is not tracked in one.
+    /// Committed text and diff gutter, or `None` for untracked/nonrepository files.
     head: RefCell<Option<String>>,
     marks: crate::marks::Renderer,
-    /// The page's content and the document inside it, kept so a comparison can put a paned
-    /// between the two and take it away again. See [`Tab::compare`].
+    /// Page content and document, retained so comparisons can insert and
+    /// remove a paned around the editor ([`Tab::compare`]).
     content: gtk::Box,
     document: gtk::Box,
     comparing: RefCell<Option<Comparing>>,
@@ -282,16 +254,15 @@ pub struct Tab {
     conflicts: Rc<crate::conflict::Conflicts>,
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
-    /// The width cap on the document column, sized by [`Tab::set_clamp`]. Scrollable, so the
-    /// view below it is the scrolled window's own scrollable child rather than a viewport's.
+    /// Scrollable document-width cap ([`Tab::set_clamp`]), keeping the view
+    /// as the scroller's child rather than a viewport child.
     clamp: adw::ClampScrollable,
-    /// What the cap is computed from: the document zoom and the column's percentage of the
-    /// editor's width. Kept here because the editor is also resized from the outside, and a
-    /// resize has to recompute the cap without being told the other two again.
+    /// Zoom and width percentage needed to recompute the column cap on
+    /// external editor resizes.
     zoom: Cell<f64>,
     column: Cell<u32>,
-    /// Whether ghost text is wanted here. Mirrored onto `lang.ghost` so the request path reads
-    /// one cell, and kept here so a tab built while the preference was off can be turned on.
+    /// Ghost-text preference, mirrored to `lang.ghost` for requests and
+    /// retained so already-open tabs can enable it later.
     ghost_text: Cell<bool>,
     map: crate::minimap::Minimap,
     /// The optional line-number gutter; hidden unless the preference turns it on.
@@ -300,22 +271,18 @@ pub struct Tab {
     /// something is scrolled out of sight above the first visible line.
     sticky: gtk::Label,
     sticky_bar: gtk::Box,
-    /// What this tab holds, fixed when it opened. Everything markdown-specific — the styling
-    /// spans, completion, spellcheck, the column cap, the hanging heading markers — asks this
-    /// first, so a source file gets a source editor and a note is unchanged.
+    /// Fixed text flavour, gating Markdown styling, completion, spelling,
+    /// column cap and hanging markers.
     flavour: Flavour,
-    /// The file used CRLF line endings. The buffer never sees them and every save puts them back,
-    /// so editing one line of a DOS file does not rewrite every line of it.
+    /// Original CRLF endings, normalized in the buffer and restored on save
+    /// to avoid rewriting every unchanged line.
     crlf: Cell<bool>,
-    /// The bytes were not valid UTF-8 and what is shown is a lossy reading of them. The view is
-    /// not editable, because writing the buffer back would replace every undecodable byte with a
-    /// replacement character.
+    /// Lossy UTF-8 display flag. Disable editing to preserve undecodable bytes.
     lossy: Cell<bool>,
     pub page: adw::TabPage,
     pub banner: adw::Banner,
     pub save: SaveState,
-    /// Every question standing about this file. The banner shows one of them ([`banner_alert`]);
-    /// the rest wait rather than being overwritten.
+    /// Pending file questions; show one via `banner::banner_alert` while others wait.
     alerts: RefCell<Vec<Alert>>,
     /// The find bar's query over this tab, and where it matches ([`search::Find`]).
     find: RefCell<search::Find>,
@@ -323,14 +290,10 @@ pub struct Tab {
     find_tag: gtk::TextTag,
     /// The bar last pointed at this tab, told when the query has been matched again.
     on_found: FoundHook,
-    /// Every other occurrence of what is selected, muted.
+    /// A muted tag for other occurrences of the selection, below find highlighting.
     ///
-    /// A tag of our own rather than a second `SearchContext` fed the selection, which is the
-    /// shorter way to write it: two search contexts on one buffer each keep their tag at the top
-    /// of the tag table and re-raise it as they rescan, so which of the two colours paints an
-    /// overlap is a race. Measured under `ACCENT_BENCH_OCCUR`, the find bar lost it — every match
-    /// rendered in the muted colour with the bar open on the selected word. An ordinary tag made
-    /// before the find bar's stays under it whatever either of them does.
+    /// Two SearchContexts repeatedly raise their tags and race for overlap priority. A normal
+    /// tag created before the find tag keeps occurrence hints reliably underneath.
     occurrence_tag: gtk::TextTag,
     /// What that tag is showing, so a caret move that changes nothing re-tags nothing.
     occurrence_query: RefCell<Option<String>>,
@@ -340,36 +303,31 @@ pub struct Tab {
     /// Whether that tag is painting anything, so an ordinary keystroke costs no tag walk.
     revealed: Cell<bool>,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
-    /// The note's links, each with the character range it covers. Characters and not the bytes
-    /// the parse reports them in: the pointer asks which link it is over on every motion event
-    /// while Ctrl is held, and translating a byte offset there meant copying the text up to the
-    /// pointer each time.
+    /// Note links with character ranges, converted once from parse byte offsets
+    /// to avoid copying prefix text on every Ctrl-pointer motion.
     links: RefCell<Vec<(Range<i32>, Link)>>,
-    /// A note's words, counted on the first ask after an edit: the status bar asks far more
-    /// often than the text changes. `None` until then.
+    /// Cached note word count, invalidated on edits and loaded on first ask
+    /// because status-bar queries outnumber text changes.
     words: Cell<Option<usize>>,
     /// The underline under what a Ctrl+click would follow, and what it is showing. See
     /// [`follow`].
     follow_tag: gtk::TextTag,
     follow: RefCell<Follow>,
-    /// What the language server last said about this file, and the provider that shows the loud
-    /// half of it at the ends of the lines. Kept because the gutter tooltip and the status bar
-    /// both read it back after the paint.
+    /// Stored diagnostics and line-message provider, read back by hover and
+    /// status after painting.
     diagnostics: RefCell<Vec<Diagnostic>>,
     annotations: sourceview5::AnnotationProvider,
-    /// Whether this tab's diagnostics are kept out of the text: no squiggles, no gutter marks and
-    /// no messages at the ends of the lines. What the server said is still held above, so the
-    /// hover still answers for a line and the status bar still counts them.
+    /// Hide diagnostic squiggles, gutter marks and line messages while
+    /// retaining hover details and status counts.
     diagnostics_hidden: Cell<bool>,
-    /// The end-of-line messages the last paint put up, which are fewer than the lines with one
-    /// whenever a comparison has collapsed some of them, with the whole text each was cut from:
-    /// the provider cannot be read back.
+    /// Last painted line messages with their full source text. Hidden lines
+    /// are omitted; the provider cannot supply the original text back.
     annotated: RefCell<diagnostics::Shown>,
-    /// The end-of-line messages an edit is moving a diagnostic to another line under, by the line
-    /// each is going to: laid again once the edit is in. See [`Tab::shift_diagnostics`].
+    /// Line messages to relayout after diagnostic ranges move with an edit
+    /// ([`Tab::shift_diagnostics`]).
     relay: RefCell<Option<diagnostics::Shown>>,
-    /// The blocks the server says can be hidden, and the chevrons beside their headers. What is
-    /// hidden right now lives in the buffer's own tag, not here.
+    /// Provider fold ranges and header chevrons. Actual hidden state lives
+    /// in buffer tags.
     folds: RefCell<Vec<Fold>>,
     fold_renderer: fold::Renderer,
     font: RefCell<Option<gtk::CssProvider>>,
@@ -378,11 +336,11 @@ pub struct Tab {
     monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while we replace the buffer text ourselves, so `changed` does not mark it dirty.
     loading: Cell<bool>,
-    /// How many times [`Tab::set_text`] has replaced the whole text, which puts every mark in
-    /// the buffer at its start: a history place's mark from before one says nothing.
+    /// Whole-buffer replacement count, identifying history marks invalidated
+    /// when all marks reset to the buffer start.
     replaced: Cell<u32>,
-    /// The last template pushed into the view, kept only to ask whether its stops are still being
-    /// walked: a snippet drops its buffer when it finishes, so that is the question's answer.
+    /// Last template snippet, whose retained buffer indicates its Tab stops
+    /// are still active.
     snippet: RefCell<Option<sourceview5::Snippet>>,
     /// The paste that makes a URL over a selection a link, which `Ctrl+Shift+V` holds back.
     paste_link: glib::SignalHandlerId,
@@ -392,8 +350,8 @@ pub struct Tab {
     /// A CSV's column colouring, kept between passes: see [`highlight::Csv`].
     csv: Rc<highlight::Csv>,
     autosave: crate::widgets::Debounce,
-    /// First-wins ([`crate::widgets::Debounce::call_once`]): a caret held on an arrow key must
-    /// still tell the outline where it is, rather than be pushed off for as long as it moves.
+    /// First-wins caret debounce ([`crate::widgets::Debounce::call_once`])
+    /// so held arrow keys keep updating the outline during movement.
     cursor: crate::widgets::Debounce,
     /// Whether this turn of the main loop has changed the text, and whether it has moved the
     /// caret; settled into `moved` once the turn is over (see [`Tab::note_turn`]).
@@ -412,9 +370,8 @@ pub struct Tab {
     pub lang: lang::State,
 }
 
-/// Where a reload has to put the reader back: the caret, and the line at the top of the view with
-/// where that line sat, so the same text goes back under the same edge however far the new bytes
-/// move it.
+/// Reload position: caret and top-line viewport offset, retaining the
+/// same visible text even when new bytes shift its location.
 #[derive(Clone, Copy)]
 struct Anchor {
     offset: i32,
@@ -423,11 +380,9 @@ struct Anchor {
     scrolled: f64,
 }
 
-/// The language for `path`, or `None` when GtkSourceView knows none for it.
-///
-/// The content type is guessed first and handed over with the name, which is what makes a file
-/// with no extension work: gio matches `Makefile` and `Dockerfile` by name and falls back to
-/// sniffing the bytes, so a `#!/bin/sh` script with no suffix still lands on `sh`.
+/// Detect GtkSourceView language from filename and guessed content type.
+/// This supports named extensionless files (Makefile/Dockerfile) and
+/// content-sniffed scripts such as `#!/bin/sh`.
 fn guess_language(path: &Path, text: &str) -> Option<sourceview5::Language> {
     let (content_type, _) = gio::content_type_guess(Some(path), text.as_bytes());
     sourceview5::LanguageManager::default().guess_language(Some(path), Some(&content_type))
@@ -435,8 +390,8 @@ fn guess_language(path: &Path, text: &str) -> Option<sourceview5::Language> {
 
 // ------------------------------------------------------------------------------------- helpers
 
-/// GtkSourceView paints its background from its own style scheme, so unlike every other widget in
-/// the window it has to be told about the theme explicitly.
+/// Apply the theme explicitly because GtkSourceView paints its background
+/// from its own style scheme.
 pub fn sync_scheme(buffer: &sourceview5::Buffer) {
     let id = crate::theme::scheme_id(adw::StyleManager::default().is_dark());
     let scheme = sourceview5::StyleSchemeManager::default().scheme(id);
@@ -448,11 +403,9 @@ pub fn language_for(key: &str, text: &str) -> Option<sourceview5::Language> {
     guess_language(Path::new(key), text)
 }
 
-/// Watch the file at `path` and call `f` when someone else writes it, for as long as the monitor
-/// returned is kept. `None` when the file cannot be watched.
-///
-/// Only for a tab outside every vault: inside one, the vault's own watcher reports the change
-/// and knows which writes were ours, which a bare file monitor cannot.
+/// Keep a file monitor calling `f` on external writes, or `None` if unavailable.
+/// Only loose tabs need it: vault watchers already report writes and
+/// distinguish our saves from external edits.
 pub fn watch_file(path: &Path, f: impl Fn() + 'static) -> Option<gio::FileMonitor> {
     let monitor = gio::File::for_path(path)
         .monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
@@ -485,8 +438,8 @@ impl Tab {
         self.flavour
     }
 
-    /// Point the gutter's change bars at the committed text, or take them away with `None`. The
-    /// caller is the Git pane, which is the only thing in the window that has asked git anything.
+    /// Set committed text for git change bars, or clear with `None`. The Git
+    /// pane supplies it because it already queries the repository.
     pub fn set_head(&self, head: Option<String>) {
         let showing = head.is_some();
         *self.head.borrow_mut() = head;
@@ -527,9 +480,9 @@ impl Tab {
         );
     }
 
-    /// The buffer in the shape the file should hold it: trailing whitespace off code lines, and
-    /// the line endings it arrived with. A note is written exactly as typed — two trailing spaces
-    /// are a hard line break in markdown.
+    /// Prepare save text: trim code-line trailing whitespace and restore
+    /// original line endings. Preserve note whitespace, including Markdown
+    /// hard breaks from two trailing spaces.
     pub fn for_disk(&self) -> String {
         fs::for_disk(&self.text(), self.crlf.get(), !self.flavour.is_note())
     }
@@ -571,13 +524,10 @@ impl Tab {
         self.buffer.text(&s, &e, true).to_string()
     }
 
-    /// Replace the buffer with `text` without marking the tab dirty. Callers are either loading
-    /// from disk or about to write what they just put in.
+    /// Replace buffer text without dirtying the tab during loading or a pending write.
     ///
-    /// The language layer is told all the same. `loading` is what keeps `on_changed` out of this,
-    /// and with it the edit event that would otherwise carry the news: without this a silent
-    /// reload left the server, the symbols, the folds and the diagnostics describing the text the
-    /// file used to hold until the next keystroke.
+    /// Notify the language layer explicitly because `loading` suppresses edit callbacks;
+    /// otherwise symbols, folds and diagnostics would remain stale until typing resumes.
     pub fn set_text(self: &Rc<Self>, text: &str) {
         self.save.edits.set(self.save.edits.get() + 1);
         self.replaced.set(self.replaced.get() + 1);
@@ -588,15 +538,14 @@ impl Tab {
         lang::changed(self);
     }
 
-    /// How many times the whole text has been replaced, by a reload or the like: a mark set
-    /// before the last one is at the start of the text rather than where it was.
+    /// Whole-text replacement generation, identifying marks reset by reloads.
     pub fn replaced(&self) -> u32 {
         self.replaced.get()
     }
 
-    /// Whether the buffer is being replaced by us rather than typed in. The handlers that watch
-    /// `insert-text` ask before acting: a template pushed back through the buffer is not somebody
-    /// typing an opening bracket, and should raise neither signature help nor a suggestion.
+    /// Whether programmatic text replacement is active. Insert handlers
+    /// must avoid treating templates as typed brackets that open suggestions
+    /// or signature help.
     pub(crate) fn is_loading(&self) -> bool {
         self.loading.get()
     }
@@ -608,13 +557,10 @@ impl Tab {
         self.page.set_title(&self.tab_title());
     }
 
-    /// Silent reload for a clean tab: the file changed on disk and there is nothing to lose.
+    /// Reload a clean tab on a worker and call `done` once with the result.
     ///
-    /// The bytes are read on a worker thread, the way `open.rs` reads a file into a new tab: a
-    /// watcher can fire this on any file, and a synchronous read of a large one held the window
-    /// for as long as the disk took. They come from `vault` as they did there, since on a remote
-    /// vault the tab's own path is on the host; a loose file has none and reads its path. `done`
-    /// is told how it ended, once.
+    /// Large reads must not block watcher handling. Vault files read through `vault`, including
+    /// remote paths; loose files read their own local path.
     pub fn reload_keep_cursor(
         self: &Rc<Self>,
         vault: Option<Arc<Vault>>,
@@ -735,16 +681,14 @@ impl Tab {
         &self.conflicts
     }
 
-    /// What the language server last said about this file. Replaces the previous answer whole,
-    /// which is what a publish is; an empty list clears the tab.
+    /// Replace stored diagnostics with the provider's full publish. Empty clears them.
     pub fn set_diagnostics(&self, items: Vec<Diagnostic>) {
         *self.diagnostics.borrow_mut() = items;
         self.paint_diagnostics();
     }
 
-    /// Show what the server said in the text, or keep it out of it: the counter in the status bar
-    /// is the switch. Per tab, as the count beside it is — the readout says what *this* document
-    /// has, and pressing it answers for the document it is counting.
+    /// Toggle visible diagnostics per tab through the status count, preserving
+    /// the stored answer for this document.
     pub fn hide_diagnostics(&self, hidden: bool) {
         if self.diagnostics_hidden.replace(hidden) != hidden {
             self.paint_diagnostics();
@@ -755,9 +699,8 @@ impl Tab {
         self.diagnostics_hidden.get()
     }
 
-    /// Lay the stored answer over the text, or nothing at all while it is hidden — which is the
-    /// same pass, so hiding and showing go through the code a publish does rather than a second
-    /// way of lifting the same tags.
+    /// Repaint stored diagnostics, or clear while hidden, using the same
+    /// path as provider publishes to keep tags consistent.
     pub(super) fn paint_diagnostics(&self) {
         self.lay_diagnostics(diagnostics::Shown::new());
     }
@@ -773,10 +716,9 @@ impl Tab {
             diagnostics::render(&self.view, &self.buffer, &self.annotations, painted, kept);
     }
 
-    /// Move the stored answer with an edit about to replace `from..to` with `text`
-    /// ([`diagnostics::Edit`]), so whatever lays it again before the next publish — a fold, the
-    /// count's press, a new width — lays it where the text now is, and the hover finds it there.
-    /// Not for a whole new text, which the server answers for afresh.
+    /// Shift diagnostics for an upcoming `from..to` edit ([`diagnostics::Edit`])
+    /// so hover and repaint use current positions before the next publish.
+    /// Whole-text replacement instead needs a fresh server answer.
     fn shift_diagnostics(&self, from: &gtk::TextIter, to: &gtk::TextIter, text: &str) {
         if self.loading.get() {
             return;
@@ -821,8 +763,8 @@ impl Tab {
         self.buffer.upcast_ref()
     }
 
-    /// What the server says can be folded. Whatever is hidden stays hidden if its header survived
-    /// the re-analysis, at wherever the line has moved to.
+    /// Update fold ranges while preserving hidden blocks whose headers survived,
+    /// following their current positions.
     pub fn set_folds(&self, folds: Vec<Fold>) {
         fold::resync(self.text_buffer(), &folds);
         *self.folds.borrow_mut() = folds;
@@ -844,12 +786,10 @@ impl Tab {
         self.fold_renderer.set_starts(starts);
     }
 
-    /// Hide `f`, unless a comparison is shown. Its collapsed runs hide lines too, and a line where
-    /// a run of one kind ends inside or beside a run of the other is laid out by GTK 4.22 as a
-    /// blank row: asked for the iter in that row's pixels-below-lines, as GtkSourceView asks at
-    /// the top and bottom of the screen on every frame, `gtk_text_layout_get_iter_at_position`
-    /// aborts ("Byte index … is off the end of the line"). So a comparison opens the folds and
-    /// shuts them again when it goes (`editor/compare.rs`).
+    /// Hide `f` unless a comparison is active.
+    ///
+    /// Combining editor folds and comparison-hidden runs can leave partially hidden lines that
+    /// abort GTK 4.22 iter lookup. Comparisons open folds and restore them when leaving.
     fn shut(&self, f: Fold) {
         if self.comparing.borrow().is_some() {
             return;
@@ -878,10 +818,8 @@ impl Tab {
         self.folds_changed();
     }
 
-    /// What every fold command ends with: the chevrons redrawn, and the diagnostics laid again.
-    /// A line that has just gone behind a header has no row of its own to put a message on, and
-    /// one that has come back out wants its message back — the same rule a comparison's collapsed
-    /// runs follow, and the same pass.
+    /// After fold changes, redraw chevrons and diagnostics. Hidden lines lose
+    /// messages; revealed lines regain them, as with comparison runs.
     fn folds_changed(&self) {
         self.fold_renderer.queue_draw();
         self.paint_diagnostics();
@@ -937,8 +875,8 @@ impl Tab {
         self.folds_changed();
     }
 
-    /// The user chose to lose this buffer's unsaved edits: it stops counting as dirty, so nothing
-    /// downstream tries to save it on the way out.
+    /// Discard the buffer's dirty state after the user chooses to lose edits,
+    /// preventing downstream close handlers from saving them.
     pub fn discard(&self) {
         self.save.modified.set(false);
         self.save.disk_changed.set(false);
@@ -966,9 +904,9 @@ impl Tab {
 
     // --- preferences ---------------------------------------------------------------------
 
-    /// How wide one indent is, from preferences: what a tab character is worth on screen and one
-    /// wrap level (`wrap.rs`), in a note as in code. A note's Tab still writes a literal tab or a
-    /// list item's own indent; four columns is also the tab stop CommonMark reads a note's tab at.
+    /// Set tab and wrap width from preferences for notes and code. Note Tab
+    /// still inserts a literal tab or list indent; CommonMark interprets
+    /// tabs at four-column stops.
     pub fn set_indent_width(&self, columns: u32) {
         self.view.set_tab_width(columns);
         if let Some(hosted) = self.hosted() {
@@ -1004,9 +942,9 @@ impl Tab {
         adapter.set_enabled(on);
     }
 
-    /// VS Code's Add Cursor Above / Below. Multi-caret lives on the view subclass; the tab keeps
-    /// the plain `sourceview5::View` type so nothing else has to know about it. A shut block the
-    /// view opened for the caret is followed up as a jump into one is.
+    /// Add a caret above/below via the view subclass without changing the
+    /// tab's plain view type. Restore diagnostics after any fold revealed
+    /// for the new caret.
     pub fn add_caret(&self, below: bool) {
         if let Some(view) = self.view.downcast_ref::<multicaret::View>()
             && let Some(opened) = view.add_caret(below)
@@ -1015,8 +953,8 @@ impl Tab {
         }
     }
 
-    /// JetBrains' Add Caret at Next Occurrence: with nothing selected the first press selects the
-    /// word under the caret, and each press after it adds a caret selecting the next occurrence.
+    /// Select the current word on the first press, then add a caret at each
+    /// next occurrence (JetBrains Add Caret at Next Occurrence).
     pub fn add_next_occurrence(&self) {
         let Some(view) = self.view.downcast_ref::<multicaret::View>() else {
             return;
@@ -1028,8 +966,8 @@ impl Tab {
         }
     }
 
-    /// VS Code's Select All Occurrences: a caret on every occurrence of the selection, or of the
-    /// word under the caret where nothing is selected.
+    /// Place carets at all selection occurrences, or all current-word
+    /// occurrences without a selection (VS Code semantics).
     pub fn select_all_occurrences(&self) {
         let Some(view) = self.view.downcast_ref::<multicaret::View>() else {
             return;
@@ -1042,9 +980,9 @@ impl Tab {
         }
     }
 
-    /// Select the word under the caret, or the one it has just finished, caret at its end: a word
-    /// being what Ctrl+hover underlines (`follow::word_at`), underscores and all. Selecting moves
-    /// the primary caret, which ends a column. Says whether there was a word.
+    /// Select the current or just-completed word ([`follow::word_at`]), ending
+    /// any caret column. Keep underscores and put the caret at the word end.
+    /// Return whether a word existed.
     fn select_word(&self) -> bool {
         let at = caret(&self.buffer);
         let mut before = at;
@@ -1073,8 +1011,8 @@ impl Tab {
         self.map.upcast_ref()
     }
 
-    /// Park `snippet` in the view at `at` and remember it, so a Tab pressed while its stops are
-    /// still being walked goes to the template rather than to a suggestion.
+    /// Insert and retain `snippet` at `at` so Tab visits active template
+    /// stops before accepting suggestions.
     pub(crate) fn push_snippet(&self, snippet: &sourceview5::Snippet, at: &mut gtk::TextIter) {
         self.view.push_snippet(snippet, Some(at));
         *self.snippet.borrow_mut() = Some(snippet.clone());
@@ -1085,8 +1023,8 @@ impl Tab {
         crate::completion::is_shown(self)
     }
 
-    /// Whether a template's stops are still being walked. A snippet lets its buffer go when it
-    /// finishes, which is the only thing GtkSourceView 5.20 says about it from the outside.
+    /// Check active template stops through the snippet's retained buffer,
+    /// GtkSourceView 5.20's only external completion indicator.
     pub(crate) fn snippet_active(&self) -> bool {
         self.snippet
             .borrow()
@@ -1094,8 +1032,8 @@ impl Tab {
             .is_some_and(|snippet| snippet.buffer().is_some())
     }
 
-    /// Stop walking the template's stops, leaving the rest where they are. GtkSourceView 5.20 has
-    /// no call for it but turning `enable-snippets` off, which ends every snippet in the view.
+    /// Stop all active snippets by toggling `enable-snippets`, the available
+    /// GtkSourceView 5.20 cancellation mechanism.
     pub(crate) fn end_snippet(&self) {
         self.view.set_enable_snippets(false);
         self.view.set_enable_snippets(true);
@@ -1106,8 +1044,8 @@ impl Tab {
         self.view.downcast_ref::<multicaret::View>()
     }
 
-    /// How many characters the selection holds, every caret's together. GTK's offsets count
-    /// characters, so no text is read whatever the size of the selection.
+    /// Count selected characters across carets using GTK offsets without
+    /// reading selection text.
     pub fn selected_chars(&self) -> usize {
         let spans = match self.ghost_view() {
             Some(view) => view.selections(),
@@ -1124,8 +1062,8 @@ impl Tab {
         self.ghost_text.get()
     }
 
-    /// The preference changed under an open tab. Off clears whatever is on screen at once; on
-    /// arms the path again, the vault having started its ghost session anew (`Vault::set_ghost`).
+    /// Apply a ghost-text preference change: off clears immediately; on
+    /// reenables requests against the restarted vault session (`Vault::set_ghost`).
     pub fn set_ghost_text(self: &Rc<Self>, on: bool) {
         self.ghost_text.set(on);
         self.lang.ghost.on.set(on);
@@ -1140,8 +1078,7 @@ impl Tab {
         self.link_at_iter(&caret(&self.buffer))
     }
 
-    /// The bare `http(s)://` or `mailto:` URL under the caret, in any text: what a `.txt` or a
-    /// code comment has for links, and what a note has outside its markdown ones.
+    /// Find a bare HTTP(S) or mailto URL at the caret in notes, code or plain text.
     pub fn url_at_cursor(&self) -> Option<String> {
         follow::url_under(&caret(&self.buffer)).map(|(_, url)| url)
     }
@@ -1155,8 +1092,8 @@ impl Tab {
         self.link_at_iter(&iter)
     }
 
-    /// The link covering `iter`, compared in the buffer's own coordinates: the translation from
-    /// the parse's byte ranges happened once, when the note was analysed.
+    /// Find the link covering `iter` in character coordinates, converted
+    /// once from parse byte ranges during analysis.
     fn link_at_iter(&self, iter: &gtk::TextIter) -> Option<Link> {
         let at = iter.offset();
         self.links
@@ -1192,8 +1129,8 @@ impl Tab {
         *self.on_cursor.borrow_mut() = Some(Rc::new(f));
     }
 
-    /// Cloned out of its cell before it runs: a callback may reach back into this tab, and a
-    /// live borrow here would be a panic waiting for the first re-entrant call.
+    /// Clone the callback before invoking it so reentrant tab access cannot
+    /// conflict with a live cell borrow.
     fn emit(self: &Rc<Self>, hook: &Hook) {
         let f = hook.borrow().clone();
         if let Some(f) = f {
@@ -1259,23 +1196,22 @@ impl Tab {
         self.schedule_autosave();
     }
 
-    /// Re-read the buffer once and refresh everything derived from it: the styling tags, and the
-    /// link table the Ctrl+hover underline reads. The preview listens on `on_edited` and
-    /// debounces its own re-render, so calling this per keystroke only re-arms that timer.
+    /// Read buffer text once to refresh styling and Ctrl-hover links. Notify
+    /// the preview, whose own debounce defers rerendering across keystrokes.
     fn reanalyse(self: &Rc<Self>) {
         self.analyse_text();
         self.emit(&self.on_edited);
     }
 
-    /// Everything this tab's text implies, the change bars included: what a reload or a template
-    /// needs, where the whole document has moved at once.
+    /// Refresh all text-derived state, including change bars, after whole
+    /// replacements such as reloads or templates.
     fn analyse(&self) {
         self.analyse_text();
         self.update_marks();
     }
 
-    /// The half of [`Tab::analyse`] a keystroke can afford. A note gets its styling spans and its
-    /// link table; code gets nothing, because the style scheme colours it from the language.
+    /// Apply immediate note styling and link updates within the typing budget.
+    /// Code uses language-scheme highlighting and needs no corresponding pass.
     fn analyse_text(&self) {
         match self.flavour {
             Flavour::Note => {
@@ -1303,8 +1239,7 @@ impl Tab {
         self.conflicts.find();
     }
 
-    /// Redraw the gutter's change bars from the committed text. On the debounce, not the
-    /// keystroke: it copies the whole buffer and diffs it against the committed text.
+    /// Debounce change-bar diffing because it copies the whole buffer.
     fn update_marks(&self) {
         let head = self.head.borrow();
         let Some(head) = head.as_ref() else {
@@ -1329,14 +1264,10 @@ impl Tab {
         ));
     }
 
-    /// Save now, unless the file changed underneath us: the user is looking at a banner asking
-    /// what to do about it, and writing over the answer they have not given yet is not an option.
+    /// Autosave unless a changed-on-disk banner still needs the user's decision.
     ///
-    /// A blocked autosave is a plain no-op, with the banner and the tab's dot as the only signal.
-    /// It cannot ask — a modal on every focus change and every idle second is not something
-    /// anyone can work through — and it deliberately does not write the buffer anywhere else
-    /// either: a second copy nothing in the app ever reads back is a second source of truth, and
-    /// the buffer is not going anywhere while the window is open.
+    /// Blocked saves leave the buffer and banner intact without prompting. Do not create another
+    /// recovery file that the app cannot restore; the open buffer remains the source of truth.
     fn autosave_now(self: &Rc<Self>) {
         self.autosave.cancel();
         let modified = self.save.modified.get();
@@ -1354,11 +1285,9 @@ impl Tab {
         ));
     }
 
-    /// Note that this turn of the main loop changed the text or moved the caret. A caret that
-    /// moves in the same turn as an edit is carried by it — a keystroke, a paste, an undo, which
-    /// puts the caret back after its edit — and only one that moves without an edit is a move.
-    /// An edit says so at once; a move is settled once the turn is over, since the order of the
-    /// two is the editing code's: a list continuation may place the caret before it inserts.
+    /// Record edits and caret moves within one main-loop turn. An edit marks
+    /// the caret as carried immediately; settle independent moves after the
+    /// turn, since editing code may move the caret before inserting text.
     fn note_turn(self: &Rc<Self>, edited: bool, caret: bool) {
         if edited {
             self.moved.set(false);
@@ -1385,8 +1314,7 @@ impl Tab {
         self.turn.set((was_edited || edited, was_caret || caret));
     }
 
-    /// Whether the caret was last moved — a click, an arrow key, a jump — rather than carried
-    /// along by an edit. What the Outline pane follows.
+    /// Whether the last caret movement was independent of edits, for outline following.
     pub fn caret_moved(&self) -> bool {
         self.moved.get()
     }
@@ -1411,9 +1339,8 @@ impl Saves for Tab {
 }
 
 impl Drop for Tab {
-    /// A closed tab takes its font provider and its document on the language layer with it; the
-    /// three `Debounce`s cancel whatever they are holding as they drop. The view is freed
-    /// ([`release`]).
+    /// Release the tab's font provider and language document. Dropping the
+    /// three debounces cancels pending work; [`release`] frees the view.
     fn drop(&mut self) {
         lang::detach(self);
         if let (Some(display), Some(provider)) =
@@ -1425,14 +1352,11 @@ impl Drop for Tab {
     }
 }
 
-/// Free `view`, which nothing of ours uses any more, once it has left its window.
+/// Dispose an unused, detached view from an idle to release GtkSourceView gutter cycles.
 ///
-/// GtkSourceView 5.20's gutter keeps the view of its last paint (`GtkSourceGutterLines`) until it
-/// paints again, and a view that has left its window never does: view, gutter and buffer outlived
-/// every closed tab and every comparison's read-only column. Disposing the view drops its gutters
-/// and that reference with them. A widget is disposed only unparented, so the view is taken out
-/// of its scrolled parent first; one still in a window, or in a parent of another kind, is left
-/// alone. From an idle, because a tab goes while its page is still being closed.
+/// GtkSourceView 5.20 retains its last painted view through GtkSourceGutterLines; a closed
+/// view never paints again. Unparent scrolled children before disposal, leaving attached
+/// views and other parent types untouched until safe.
 pub(crate) fn release(view: &sourceview5::View) {
     let view = view.clone();
     glib::idle_add_local_once(move || {
@@ -1457,9 +1381,8 @@ pub(crate) fn release(view: &sourceview5::View) {
 mod tests {
     use super::*;
 
-    /// The save gate, which is the one thing in this file that costs the user their writing when
-    /// it is wrong. VS Code's rule: a file that moved in the background is a question, and a save
-    /// is not an answer to it.
+    /// Verify the save gate preserves unsaved writing: external file changes
+    /// require a banner decision rather than implicit overwrite.
     #[test]
     fn a_dirty_buffer_over_a_file_that_moved_is_never_written() {
         assert!(may_save(true, false), "the ordinary save");
@@ -1474,9 +1397,8 @@ mod tests {
         assert!(may_save(false, false));
     }
 
-    /// A background save lands on a tab that may have moved on. Getting this wrong either marks
-    /// unsaved typing clean, which loses it at the next close, or trusts an etag the tab no
-    /// longer holds.
+    /// Verify late save results neither mark newer typing clean nor adopt
+    /// an etag after the tab has moved to another buffer state.
     #[test]
     fn a_landed_save_cleans_only_the_buffer_it_wrote() {
         let etag = |n| Etag {

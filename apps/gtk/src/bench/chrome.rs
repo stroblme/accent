@@ -2,13 +2,9 @@
 
 use super::*;
 
-/// Focus mode, headless: [`bench_chrome_actions`] first, then — when `notes` is `<relA>,<relB>` —
-/// both notes open, one of them split off to the right so the left pane is the one being written
-/// in and the right one has something to recede, and [`bench_chrome_levels`] and
-/// [`bench_chrome_veil`] run over them. `1` stops after the actions.
-///
-/// The actions go first because one of them is `win.save`, and an explicit save writes whatever
-/// the active tab holds, clean or not: run over the notes it would write them back into the vault.
+/// Run [`bench_chrome_actions`] before opening notes so its explicit Save cannot
+/// write them. `1` stops there; `<relA>,<relB>` opens a split and runs
+/// [`bench_chrome_levels`] and [`bench_chrome_veil`].
 pub(super) fn bench_chrome(app: &Rc<App>, notes: &str) {
     bench_chrome_actions(app);
     let Some((a, b)) = notes.split_once(',') else {
@@ -51,9 +47,7 @@ fn bench_chrome_levels(app: &Rc<App>) {
     app.config.borrow_mut().focus_mode = was;
 }
 
-/// What the chrome and the panes carry: the header's and the sidebar's fade, the active note's
-/// minimap, how many panes recede, whether the active note's line fade is on, and whether the
-/// dividers and the line along the status bar are gone.
+/// Print chrome/sidebar fade, minimap visibility, receding panes, line fade and divider visibility.
 fn chrome_state(app: &Rc<App>) -> String {
     let hidden = |w: &gtk::Widget| w.has_css_class("chrome-hidden");
     let tab = app.active();
@@ -76,15 +70,10 @@ fn chrome_state(app: &Rc<App>) -> String {
     )
 }
 
-/// The line fade on the active note at High: held for a second and a half with the caret on line
-/// 8, the line numbers on and "the" highlighted as a find-bar query, which is long enough for
-/// `import -window root` to see the veil, the gutter it leaves alone and the lines holding a
-/// match, which it leaves alone too. Then [`fade::paint`] timed over a 2 KB and a 64 KB note,
-/// with no match on screen and with one on every line. The veil is a rectangle per line on
-/// screen, and the matches are looked for a line at a time, so the sizes should cost the same.
-///
-/// `Tab::set_text` leaves the tab clean and the note's own text goes back at the end, so the
-/// tab closes as it opened and nothing asks to write it.
+/// Show High focus mode for 1.5 s with the caret on line 8, line numbers and "the"
+/// find matches, allowing a screenshot of the unfaded gutter and matches. Time
+/// [`fade::paint`] on 2 KB and 64 KB notes with and without matches; cost should depend
+/// on visible lines, not document size. Restore clean text so closing does not save.
 async fn bench_chrome_veil(app: &Rc<App>) {
     let Some(tab) = app.active() else {
         return;
@@ -141,15 +130,9 @@ async fn bench_chrome_veil(app: &Rc<App>) {
     app.config.borrow_mut().focus_mode = was;
 }
 
-/// Fire the actions the chords go through at a faded window, and print whether the chrome came
-/// back. An action on its own must not bring it back: focus mode ends on pointer motion, a scroll,
-/// Escape, a focus change or a view-mode change, and an action is none of those (DESIGN.md,
-/// Chrome auto-hide). Find is the counter-example that proves the rule — its bar takes the
-/// keyboard, so the chrome returns through `focus-widget` rather than through the activation.
-///
-/// `Ctrl+Left` and `Ctrl+Right` are printed alongside as the accelerators they are not: nothing in
-/// [`ACTIONS`] claims either chord, so they activate nothing and reach no `show_chrome` at all. If
-/// focus mode still drops on them, the cause is elsewhere.
+/// Run actions with chrome faded: activation alone must not reveal it. Find should
+/// reveal it through focus change. Print Ctrl+Left/Right separately: neither is an
+/// accelerator, so any reveal comes from another input path.
 fn bench_chrome_actions(app: &Rc<App>) {
     // Find last: it leaves its bar open for the drills after this one.
     for action in ["win.save", "win.scroll-down", "win.zoom-in", "win.find"] {
@@ -167,16 +150,10 @@ fn bench_chrome_actions(app: &Rc<App>) {
     }
 }
 
-/// Focus mode on the keys that step through a document, through the real key path: a note, the
-/// preview beside it and a PDF each get the keyboard in turn, and for every case the drill shows
-/// the chrome, prints `bench chrome_key_ready <case> <chord>` for an XTEST press of that chord
-/// (`build-aux/xtest.py :N "key <chord>"`), and a second later prints whether the chrome went.
-/// It first prints `bench chrome_keys focus_window` and waits for the window to have the X input
-/// focus, which under Xvfb is `xtest.py :N "move 700 400; focus"`.
-///
-/// The cases that must leave the chrome up: a press under a completion popup, whose arrows pick a
-/// row; one in the file tree, which is not a document; `Shift+Alt+Down`, which adds a caret; and
-/// Space in a PDF being presented, where presentation owns the chrome.
+/// Probe real document navigation keys in a note, preview and PDF. Print
+/// `bench chrome_key_ready <case> <chord>` for XTEST, then chrome visibility after 1 s.
+/// First focus with `xtest.py :N "move 700 400; focus"`. Completion-popup navigation,
+/// file-tree keys, Shift+Alt+Down and Space in PDF presentation must keep chrome visible.
 pub(super) fn bench_chrome_keys(app: &Rc<App>, rels: &str) {
     let Some((note, pdf)) = rels.split_once(',') else {
         return bench_quit(app);
@@ -293,17 +270,10 @@ async fn bench_chrome_key(app: &Rc<App>, target: &gtk::Widget, case: &str, chord
     );
 }
 
-/// The active pane, focus mode and the find bar over two panes, at High, through real input
-/// (`build-aux/xtest.py`, spawned per step): `<relA>` on the left, `<relB>` on the right with
-/// `<relC>` in front of it. A find bar opened on the left and a query typed into it, a letter
-/// typed on the right, one on the left; `<relB>`'s tab pressed in the right pane's bar with the
-/// keyboard on the left, and a letter typed; back on the left, `<relC>` opened again as a link to
-/// it would; back on the left again, `<relC>`'s file deleted, which closes its tab and brings
-/// `<relB>` to the front behind the reader's back, then a letter typed on the left and `Ctrl+F`.
-/// It prints which pane is active and which has the keyboard, which must agree, which recede,
-/// whether the left note's text fades, which find bar is open and the active pane's document,
-/// which Close Tab closes and the title names. It types into the notes and deletes `<relC>`, so
-/// point it at a scratch vault.
+/// Probe active-pane/focus agreement at High with real XTEST input: type across
+/// panes, click a background tab, reopen a linked tab, delete an active file and
+/// invoke Find. Print pane/focus, fading, find-bar and active-document state.
+/// Writes notes and deletes `<relC>`; use a scratch vault.
 pub(super) fn bench_chrome_find(app: &Rc<App>, rels: &str) {
     scratch_only(app, "ACCENT_BENCH_CHROME=find:");
     let [a, b, c] = rels.split(',').collect::<Vec<_>>()[..] else {

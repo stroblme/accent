@@ -1,30 +1,14 @@
-//! A shell in a tab.
+//! Shells as ordinary tabs, sharing pane splitting, dragging and context menus.
 //!
-//! A terminal is a document like any other: it lives in a pane's tab view, so it splits, drags
-//! between panes and windows, and takes the tab context menu with it. There is no terminal panel
-//! and no terminal-shaped hole in the layout — a shell at the bottom of the window is a pane split
-//! downwards, which is the same gesture that puts a note there.
+//! Focused terminals receive shell keys. The window keeps the subset in `actions::kept`;
+//! Forward All Keys keeps only terminal Copy and Paste. Application accelerators run before
+//! VTE controllers, so `Shell::apply_accels` must unbind the others while a terminal has focus.
 //!
-//! A focused shell owns the keyboard, and it wins by default: the window keeps only Close Tab
-//! (`Ctrl+W`), New Terminal, Go to File (`Ctrl+E`), the three zoom chords, Fullscreen and the
-//! `Ctrl+Shift` half of the action table, and everything else — `Ctrl+C`, `Ctrl+D`, `Ctrl+K`,
-//! `Ctrl+L`, `Ctrl+R` and the rest of readline — reaches the shell; with Forward All Keys on it
-//! keeps Copy and Paste in Terminal alone. The window is where that happens, not here: GTK
-//! dispatches a window's application accelerators ahead of the VTE, so nothing a controller on
-//! this widget claims can beat them, and `Shell::apply_accels` in `main` unbinds the rest of the
-//! table for as long as the active window's focus is a terminal (`actions::kept`, `has_focus`).
+//! Handlers, gestures and action groups must hold widgets weakly. GTK4 finalises by reference
+//! count; cycles retain the VTE pty and its attached process after a tab closes.
 //!
-//! Nothing hung on the shell's widgets may hold them: the page owns the scroller, the scroller owns
-//! the view, so a strong reference captured by a signal handler, a gesture or an action group the
-//! view itself carries closes a ring that closing the tab cannot cut. GTK4 finalises a widget by
-//! reference count alone — there is no `destroy` to break one from outside — and a `VteTerminal`
-//! that is never finalised never drops its `VtePty`, so the pty master stays open and the shell
-//! never gets its hangup. That is how every closed terminal tab used to leak a live shell.
-//!
-//! A shell is held by `accent-cli` now, and what runs in the tab's pty is `accent-cli attach`: a
-//! hangup detaches it and leaves the shell running for the next window to take up, and Close Tab
-//! ends it explicitly ([`Term::kill`]). A leaked view is an attach that never lets go. What a
-//! window leaves held without a session to name it in is ended at the next start ([`sweep`]).
+//! `accent-cli` holds the shell; the tab runs `accent-cli attach`. Hangup detaches, Close Tab
+//! ends it explicitly ([`Term::kill`]), and [`sweep`] ends shells no saved session names.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -42,11 +26,9 @@ use vte4::TerminalExtManual;
 
 /// Scrollback, in lines. Enough to read back a build, far short of a memory question.
 const SCROLLBACK: i64 = 10_000;
-/// Breathing room either side of the shell, off DESIGN.md's spacing scale. Not the editor's 48 px
-/// page gutter: that is a measure for prose, and a terminal is a grid that should keep its columns.
+/// Horizontal padding from DESIGN.md's spacing scale, retaining more terminal columns than prose gutters.
 const PAD: i32 = 12;
-/// The action group the two link items live in. They are not window actions: what they act on is
-/// the URL under the pointer, so there is nothing for a chord or a palette entry to name.
+/// Local action group for pointer-targeted URLs, which have no window shortcut or palette action.
 const GROUP: &str = "link";
 /// What counts as a link on the screen: an `http`, `https` or `mailto` URL, stopping before the
 /// punctuation that ends a sentence rather than swallowing it.
@@ -66,16 +48,14 @@ pub struct Term {
     lost: Cell<bool>,
     /// Whether the shell has ended, so there is nothing left for [`kill`](Self::kill) to end.
     ended: Cell<bool>,
-    /// What the holder last said about the shell ([`ask`](Self::ask)), and whether an ask is out
-    /// and another is due when it lands.
+    /// Last holder facts, in-flight request state and whether one follow-up request is due.
     holder: RefCell<Facts>,
     asking: Cell<bool>,
     again: Cell<bool>,
 }
 
-/// What the Info pane's Details says about a shell ([`Term::facts`]). The holder tells the
-/// program, PID, directory, foreground command and start (`accent-cli held`), each `None` until
-/// it has answered and where it could not tell.
+/// Shell facts for [`Term::facts`], reported by `accent-cli held`.
+/// Unknown or not-yet-returned program, PID, directory, foreground command and start fields are `None`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Facts {
     pub program: Option<String>,
@@ -97,9 +77,7 @@ impl Term {
         self.key.clone()
     }
 
-    /// What the header says under the window's name. VTE reports `user@host:dir` a moment after
-    /// the shell has started and again on every `cd`; until the first of those, where the shell
-    /// was started is the closest thing to the same answer.
+    /// Header subtitle from VTE's `user@host:dir`, falling back to the launch directory until first reported.
     pub fn subtitle(&self) -> String {
         self.view
             .window_title()
@@ -111,10 +89,8 @@ impl Term {
             })
     }
 
-    /// Where the shell is, as the session writes it down: the directory it last reported through
-    /// OSC 7 on this machine, or the one it was started in until it has reported one. OSC 7 does
-    /// not arrive over ssh, so a remote shell is where it was opened. `None` for a directory whose
-    /// name is not UTF-8, which a session file cannot hold.
+    /// Session directory from local OSC 7, falling back to the launch directory.
+    /// Remote OSC 7 does not arrive over SSH; non-UTF-8 directories return `None`.
     pub fn at(&self) -> Option<String> {
         match &self.shell {
             Shell::Local(start) => {
@@ -131,9 +107,8 @@ impl Term {
         }
     }
 
-    /// What the Info pane says about the shell: the holder's last answer, and what the tab knows
-    /// where it has none. `kept` is whether the window keeps a session to bring the shell back
-    /// in; one that does not ends its shells as it closes (`App::release_shells`).
+    /// Combine holder facts with tab-known fallbacks for Details.
+    /// `kept` means a saved session restores the shell; other windows end shells on close.
     pub fn facts(&self, kept: bool) -> Facts {
         let told = self.holder.borrow().clone();
         let (host, dir, program, held) = match &self.shell {
@@ -159,10 +134,8 @@ impl Term {
         }
     }
 
-    /// Ask the holder about the shell — off the main loop, a round trip on a host — and run
-    /// `landed` once [`facts`](Self::facts) has its answer. Asked while an ask is out, it asks
-    /// once more when that lands, so answers never cross. Nothing is asked of a shell nothing
-    /// holds, or whose link is down.
+    /// Query holder facts off-thread and call `landed` after updating [`facts`](Self::facts).
+    /// Coalesce overlapping requests into one follow-up; skip unheld or disconnected shells.
     pub fn ask(self: &Rc<Self>, landed: impl Fn(&Rc<Term>) + 'static) {
         let Some(argv) = self.shell.held().filter(|_| !self.lost.get()) else {
             return;
@@ -191,9 +164,8 @@ impl Term {
         });
     }
 
-    /// Attach again to the shell a dropped link cut this tab off from. The host still holds it and
-    /// replays its screen, history and all, so the old one is cleared first rather than shown
-    /// twice. Nothing to do for a shell that is still attached.
+    /// Reattach a disconnected shell, clearing old output before the holder replays its screen and history.
+    /// Already-attached shells need no action.
     pub fn reopen(self: &Rc<Self>) {
         if self.lost.replace(false) {
             self.view.reset(true, true);
@@ -201,9 +173,7 @@ impl Term {
         }
     }
 
-    /// End the shell for good, which is what Close Tab means: closing a window only lets go of
-    /// its shells, and they are still there when it opens again. Nothing to do for one that has
-    /// ended already.
+    /// End the shell on Close Tab; window closes only detach it for restoration. Already-ended shells are skipped.
     pub fn kill(&self) {
         if self.ended.get() {
             return;
@@ -237,10 +207,8 @@ impl Term {
         self.view.set_font(Some(&monospace()));
     }
 
-    /// How far this shell is zoomed. A terminal carries its own: it is a grid of columns, not a
-    /// page of prose, so it does not follow the document font the way the editor and the preview
-    /// do. VTE scales the font it was given, and `paint` only ever sets the description, so a
-    /// scale survives a restyle and a font change.
+    /// Terminal-local font zoom, independent of document zoom.
+    /// VTE font scaling survives restyling and font-description changes.
     pub fn zoom(&self) -> f64 {
         self.view.font_scale()
     }
@@ -268,11 +236,8 @@ impl Term {
     }
 }
 
-/// Whether the keyboard is in a shell right now: whether the focus widget of the window that has
-/// it is a `vte4::Terminal`, a leaf widget whose own focus is the whole question. Asked of the
-/// application rather than of a window because the accelerator table `Shell::apply_accels`
-/// narrows on the answer is the application's, and the window rebuilding it is not always the
-/// one with the keyboard.
+/// Whether the application's focused window has a VTE terminal as its focus widget.
+/// The accelerator table is application-wide, so rebuilding windows must use the active window's focus.
 pub fn has_focus(gtk_app: &gtk::Application) -> bool {
     gtk_app
         .active_window()
@@ -280,12 +245,10 @@ pub fn has_focus(gtk_app: &gtk::Application) -> bool {
         .is_some_and(|widget| widget.is::<vte4::Terminal>())
 }
 
-/// What a shell tab runs.
+/// The command a shell tab runs.
 ///
-/// A remote vault's shell belongs on the remote: the files are there, the repository is there,
-/// and a build the user starts in it has to see them. It is an ordinary tab either way — the
-/// same split, the same drag, the same chords — because it is the same widget with a different
-/// argument vector.
+/// Remote vaults run shells on the host so builds see the vault's files and repository.
+/// Both local and remote shells use the same tab widget.
 #[derive(Clone)]
 pub enum Shell {
     /// The user's own shell, in a directory on this machine.
@@ -318,8 +281,7 @@ impl Shell {
         })
     }
 
-    /// What lists the shells held where this one is, run on this machine: `accent-cli held`, here
-    /// or over the master on the host. `None` without `accent-cli`, when nothing holds it.
+    /// Command to list held shells locally or through the host master. `None` without `accent-cli`.
     fn held(&self) -> Option<Vec<String>> {
         match self {
             Shell::Local(_) => Some(vec![
@@ -337,8 +299,7 @@ impl Shell {
         }
     }
 
-    /// What prints the last copy a program in shell `id` made ([`take_copies`]), run on this
-    /// machine: `accent-cli clip`, here or over the master on the host.
+    /// Command to fetch shell `id`'s last clipboard copy ([`take_copies`]) locally or through the host master.
     fn clip(&self, id: &str) -> Option<Vec<String>> {
         match self {
             Shell::Local(_) => {
@@ -422,10 +383,8 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
     term
 }
 
-/// Run the shell once there is somewhere to run it: on this machine at once, and on a host once
-/// [`accent_api::link::prepare`] has a master up and the server installed there. A window of
-/// shells has no connect bar, so the tab's own screen says how far that has got, on one line
-/// written over in place.
+/// Start locally at once, or after [`accent_api::link::prepare`] installs the remote server.
+/// Shell-only windows show preparation progress in-place in the tab because they have no connect bar.
 fn start(term: &Rc<Term>) {
     let Shell::Remote { link, .. } = &term.shell else {
         return spawn(&term.view, &term.shell, id(&term.key));
@@ -486,10 +445,8 @@ pub fn install_termprops() {
     }
 }
 
-/// Put what a program in the shell copied on the clipboard: `attach` has kept the copy beside the
-/// holder, here or on the host, and raised [`CLIPBOARD`]; `accent-cli clip` hands it over as
-/// base64, off the main loop since on a host it is a round trip. Weak, for the reason [`on_exit`]
-/// is. Without `accent-cli` there is no `attach` to raise it.
+/// Fetch OSC 52 clipboard content through `accent-cli clip` off-thread, locally or remotely.
+/// [`CLIPBOARD`] signals availability; weak ownership follows [`on_exit`]. Without attach there is no signal.
 fn take_copies(term: &Rc<Term>) {
     let weak = Rc::downgrade(term);
     let signal = format!("termprop-changed::{CLIPBOARD}");
@@ -558,11 +515,9 @@ fn progress(view: &glib::SendWeakRef<vte4::Terminal>, over: &Arc<AtomicBool>, li
     });
 }
 
-/// Bring a lost shell back on a key press, through `reconnect`, which brings back the others the
-/// link took as well: a window of shells has no banner to press Reconnect on, and the tab is where
-/// the reader is looking. Not on a modifier alone, so the Ctrl of a Ctrl+W that gives up on the
-/// tab does not dial out first — which may raise a passphrase dialog. Capture phase, so the key
-/// that asks is not also typed into the shell it brings back.
+/// Reconnect a lost shell on a non-modifier key, also restoring others on the same link.
+/// Capture the key so it is not typed into the resumed shell. Ignore modifiers so Ctrl+W can
+/// close without first triggering an authentication prompt.
 pub fn on_reconnect(term: &Rc<Term>, reconnect: impl Fn(&Rc<Term>) + 'static) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -584,19 +539,14 @@ pub fn on_reconnect(term: &Rc<Term>, reconnect: impl Fn(&Rc<Term>) + 'static) {
     term.view.add_controller(keys);
 }
 
-/// Run `shell` in `view`, which may have run one before: VTE takes a new child once the last has
-/// exited.
+/// Run `shell` in `view` after any previous child exits.
 ///
-/// A local one is `accent-cli attach`, which starts the shell `id` names in the holder, or finds
-/// it there still running, and relays it into this pty: so the shell outlives the tab's pty and a
-/// closed window, and comes back when its tab does. Without `accent-cli` it is the shell itself,
-/// ending with its tab, as it always used to.
+/// `accent-cli attach` starts or resumes shell `id` in the holder so it survives tab ptys and
+/// window closes. Without `accent-cli`, the shell runs directly and ends with the tab.
 ///
-/// Not before the view is laid out ([`when_laid_out`]): the holder redraws a shell it kept at the
-/// size the attach finds its pty at, and until then that is VTE's default of 24 rows, or for a
-/// restored tab behind another no size at all. A screen replayed at the wrong size stays that way
-/// until the program in it redraws. So a restored tab behind another attaches when it is first
-/// shown, and is called "Terminal" until then; a new shell starts two frames later than it could.
+/// Wait for [`when_laid_out`] before attaching: replay at VTE's default or unsettled size
+/// persists until the program redraws. Restored background tabs attach when first shown;
+/// new tabs wait for two stable frames.
 fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
     let (cwd, argv) = match (shell, cli()) {
         (Shell::Local(cwd), Some(cli)) => (
@@ -636,13 +586,11 @@ fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
     });
 }
 
-/// Run `then` once `view` is on screen at the size it will keep: at once if it is laid out
-/// already, else once it is shown and two frames in a row have given it the same size. The
-/// second frame is for a restored split, whose handles move for a few frames before they settle
-/// (`session::hold_ratios`): a shell attached at the first of those sizes can be a dozen columns
-/// wide. GTK 4 has no signal for an allocation, so a tick callback looks each frame, but only
-/// while the view is mapped: a tab that stays behind another costs nothing while it waits. The
-/// view comes in as an argument, as nothing hung on it may hold it.
+/// Run `then` once `view` is mapped with a stable allocation, or immediately if already laid out.
+///
+/// Two equal-sized frames let restored split ratios settle before shell replay. GTK4 has no
+/// allocation signal, so mapped-only ticks detect stability without work on background tabs.
+/// The callback receives the view rather than capturing it, avoiding a reference cycle.
 fn when_laid_out(view: &vte4::Terminal, then: impl FnOnce(&vte4::Terminal) + 'static) {
     if view.is_mapped() && view.height() > 0 {
         return then(view);
@@ -675,10 +623,8 @@ fn when_laid_out(view: &vte4::Terminal, then: impl FnOnce(&vte4::Terminal) + 'st
 /// the prompt comes back.
 const SHELL_TURNS: [&str; 2] = ["vte.shell.preexec", "vte.shell.precmd"];
 
-/// Run `changed` whenever the shell says something about itself: a title, which VTE reports a
-/// moment after the shell has started and again on every `cd`; a directory (OSC 7); and, where
-/// its shell integration says so, a command starting and the prompt coming back. Weak, for the
-/// reason [`on_exit`] is.
+/// Call `changed` on title, OSC 7 directory and shell-integration command/prompt updates.
+/// Use weak ownership as in [`on_exit`].
 pub fn on_report(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
     let weak = Rc::downgrade(term);
     let report = Rc::new(move || {
@@ -706,13 +652,10 @@ pub fn on_report(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
     }
 }
 
-/// The shell exited: hand the terminal back so the caller can close its tab.
+/// Notify the caller of shell exit so it can close the tab.
 ///
-/// Except a remote shell whose link went, which the host still holds. Its tab stays, saying so,
-/// and [`Term::reopen`] attaches again on a key press, or when a remote vault's window is back;
-/// closing the tab meanwhile is what ends it. A local command's 255 is an ordinary exit. And
-/// except an `accent-cli attach` that could not do its job, whose tab stays so the line it printed
-/// can be read; `Ctrl+W` closes it.
+/// Remote disconnects retain the tab for [`Term::reopen`]; local exit 255 is ordinary exit.
+/// Failed `accent-cli attach` tabs also remain so their error can be read. Ctrl+W closes either.
 pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
     let weak = Rc::downgrade(term);
     term.view.connect_child_exited(move |view, status| {
@@ -738,17 +681,12 @@ pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
     });
 }
 
-/// What `accent-cli attach` exits with when it could not reach the holder or start the shell,
-/// rather than with the status of a shell it carried.
-///
-/// ponytail: a shell's own `exit 254` keeps its tab the same way, until `Ctrl+W`.
+/// Attach failure exit code for an unreachable holder or shell startup failure.
+/// A shell explicitly exiting 254 also retains its tab until Ctrl+W.
 const ATTACH_FAILED: i32 = 254;
 
-/// Whether ssh ended itself rather than the shell it carried: it exits 255 on its own errors, a
-/// dropped link among them, and with the remote command's status otherwise.
-///
-/// ponytail: a remote `exit 255` reads as a lost link too, and keeps its tab until a key press
-/// attaches to a shell the host no longer holds — which starts a new one — or a close.
+/// Whether SSH exited with 255, indicating connection failure rather than normal remote status.
+/// A remote shell's own exit 255 is indistinguishable and may start a new held shell on reconnect.
 fn link_lost(status: i32) -> bool {
     exited_with(status, 255)
 }
@@ -759,14 +697,10 @@ fn exited_with(status: i32, code: i32) -> bool {
     status & 0x7f == 0 && (status >> 8) & 0xff == code
 }
 
-/// What the terminal answers itself: moving between tabs, which `AdwTabView` binds at the window
-/// in the bubble phase — too late, because the shell has already turned the chord into an escape
-/// sequence by then. Copy and paste used to be here as hard-coded callbacks; they are
-/// `win.terminal-copy` and `win.terminal-paste` now, so they rebind and list in the palette.
+/// Handle tab navigation before the terminal turns it into shell input.
 ///
-/// Page Up and Page Down only. Ctrl+Tab is the window's reserved `win.next-tab`, which is
-/// dispatched before any controller of ours and walks the pane's most-recent order rather than
-/// the bar's — so a copy here never ran, and would have stepped the wrong way if it had.
+/// AdwTabView's bubble-phase Page Up/Down handling is too late for VTE. Ctrl+Tab stays with
+/// window MRU actions; terminal Copy and Paste stay in the rebindable action table.
 fn install_keys(view: &vte4::Terminal, tabs: &adw::TabView) {
     let keys = gtk::ShortcutController::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -792,11 +726,9 @@ fn install_keys(view: &vte4::Terminal, tabs: &adw::TabView) {
     view.add_controller(keys);
 }
 
-/// The shell's own context menu, the links in its output, and the click that follows one.
-///
-/// A shell writes whatever it likes to its own screen, so nothing here is trusted: only the three
-/// schemes `launchable` names ever reach the desktop, and a URL travels as a menu item's target
-/// rather than through a cell a second click could have moved under it.
+/// Install terminal menus and safe output-link handling.
+/// Only `launchable` schemes reach the desktop; action parameters retain the clicked URL
+/// even if later pointer motion changes the hover target.
 fn install_links(view: &vte4::Terminal) {
     // OSC 8, for the programs that mark their own links instead of printing a bare URL.
     view.set_allow_hyperlink(true);
@@ -902,9 +834,8 @@ fn link_actions(view: &vte4::Terminal) -> gio::SimpleActionGroup {
     group
 }
 
-/// The URL under (x, y): an OSC 8 hyperlink first, because a program that marked its own link
-/// knows better than the pattern does, and the regex match otherwise. Filtered here, so what this
-/// app will not open never reaches the menu either.
+/// Return the permitted URL at `(x, y)`, preferring OSC 8 links over regex matches.
+/// Filter before building the menu so unsupported schemes never appear.
 fn link_at(view: &vte4::Terminal, x: f64, y: f64) -> Option<String> {
     view.check_hyperlink_at(x, y)
         .or_else(|| view.check_match_at(x, y).0)
@@ -919,11 +850,8 @@ fn launch(uri: &str) {
     }
 }
 
-/// Whether a URL a shell put on the screen may be handed to the desktop at all.
-///
-/// An allowlist rather than a check for something dangerous: the output of anything running in the
-/// terminal is untrusted text, so `file:`, `javascript:` and every scheme a helper application has
-/// registered stay unopenable, whatever the pattern happened to match or an OSC 8 escape claimed.
+/// Allow only approved URL schemes from untrusted terminal output.
+/// Reject file, JavaScript and other registered helper schemes regardless of regex or OSC 8 claims.
 fn launchable(uri: &str) -> bool {
     let Some((scheme, rest)) = uri.split_once(':') else {
         return false;
@@ -935,14 +863,10 @@ fn launchable(uri: &str) -> bool {
         )
 }
 
-/// Foreground, background and the sixteen ANSI colours, all from `theme.rs`.
+/// Set foreground, background and all sixteen ANSI colours from `theme.rs`.
 ///
-/// The foreground used to be read off the widget's resolved CSS, which is how it stayed behind on a
-/// theme change: libvte styles its own widget with `color: @theme_text_color`, and that named colour
-/// is upstream of the CSS variables Solarized redeclares, so it never saw them. The palette used to
-/// be VTE's own, which is arithmetic rather than designed: its blue lands at 1.41:1 on our dark
-/// background, which is why a shell's output was hard to read. A GNOME app owes its terminal
-/// colours that work on the background it chose, so all three now come from one place.
+/// VTE's named CSS colours bypass Solarized variables, and its default palette has poor
+/// contrast on our backgrounds. A shared palette makes restyling consistent and readable.
 fn paint(view: &vte4::Terminal) {
     let dark = adw::StyleManager::default().is_dark();
     let fg = gdk::RGBA::parse(crate::theme::view_fg(dark)).ok();
@@ -966,8 +890,7 @@ fn monospace() -> pango::FontDescription {
     pango::FontDescription::from_string(&adw::StyleManager::default().monospace_font_name())
 }
 
-/// ponytail: `$SHELL` or `/bin/sh`. vte4 0.10 does not bind `vte_get_user_shell`, which is what
-/// would read the password database when the variable is unset.
+/// Use `$SHELL` or `/bin/sh`; vte4 0.10 does not bind password-database `vte_get_user_shell`.
 fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
@@ -976,9 +899,7 @@ fn user_shell() -> String {
 /// can collide with one.
 const KEY: &str = "terminal:";
 
-/// A key for a new shell: sixteen random hex digits, which is also the name the shell is held
-/// under, so it has to be unique across windows, session files and machines, not only within a
-/// window.
+/// Generate a sixteen-hex-digit shell key, unique across windows, saved sessions and machines.
 pub fn new_key() -> String {
     format!("{KEY}{:08x}{:08x}", glib::random_int(), glib::random_int())
 }
@@ -1011,19 +932,15 @@ fn id(key: &str) -> &str {
     key.strip_prefix(KEY).unwrap_or(key)
 }
 
-/// The `accent-cli` beside this binary, which is what holds the shells: `target/<profile>/` in a
-/// build, `bin/` in an install. Not `ssh::server_binary`, which finds the static build uploaded
-/// to a host.
+/// Find the holder `accent-cli` beside this executable in build or installation directories.
+/// The static remote upload binary is located separately by `ssh::server_binary`.
 pub fn cli() -> Option<PathBuf> {
     let cli = std::env::current_exe().ok()?.with_file_name("accent-cli");
     cli.is_file().then_some(cli)
 }
 
-/// End the shell `key` names, held where `at` says: Close Tab on this machine, and a saved
-/// session's shell that a session written over it leaves out. Without `accent-cli` nothing holds
-/// a shell here, and it ended with its tab.
-///
-/// On a host, over that host's own master, which is the one a window of shells rides there.
+/// End shell `key` held at `at`, locally or through the host's master.
+/// Without `accent-cli`, the local shell already ended with its tab.
 pub fn end(key: &str, at: &str) {
     if ssh::is_remote(at) {
         let url = ssh::parse(at).map_err(|e| e.to_string());
@@ -1048,15 +965,10 @@ pub fn end_stored(key: &Path) {
     }
 }
 
-/// End the shells this machine's holder keeps that no session names: what is left of a window
-/// that did not close the ordinary way — a quit, SIGTERM, a logout — or of a Close Tab whose kill
-/// died with the process. Hosts are left alone.
+/// End local held shells that no session names; leave remote hosts untouched.
 ///
-/// Once per process, before its first window, so every shell the holder lists was started by an
-/// earlier run: none of this one's can be caught between the holder starting it and its tab
-/// attaching, when it would look like one nobody has. That puts one `accent-cli held` on the way
-/// to the first frame (3–4 ms in a debug build, most of it the process start), and the sessions
-/// are read only when something is held.
+/// Run once before the first window so current shells cannot be mistaken for orphans between
+/// holder startup and tab attachment. Read sessions only when the holder lists shells.
 pub fn sweep() {
     let Some(cli) = cli() else {
         return;
@@ -1079,10 +991,8 @@ pub fn sweep() {
     }
 }
 
-/// The keys of the shells in `held` (what `accent-cli held` prints) that [`sweep`] ends: those no
-/// terminal has, which leaves another instance's alone, whose id is one accent chose, which
-/// leaves a hand-typed `accent-cli attach` alone, that `ours` says were started under this state
-/// directory, and that no session in `named` has.
+/// Select orphaned shells from `held` for [`sweep`]: unattached Accent IDs started under
+/// this state directory and absent from `named` sessions. Leave other instances and manual attaches alone.
 fn orphans(held: &str, named: &HashSet<String>, ours: impl Fn(u64) -> bool) -> Vec<String> {
     held.lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -1093,10 +1003,8 @@ fn orphans(held: &str, named: &HashSet<String>, ours: impl Fn(u64) -> bool) -> V
         .collect()
 }
 
-/// Whether process `pid` started with this process's `XDG_STATE_HOME`, where the sessions that
-/// could name it are. An instance run on a state directory of its own — a drill, `make smoke` —
-/// shares the holder whenever it shares `$TMPDIR`, and its sessions say nothing about the shells
-/// of the one the user runs.
+/// Check `pid`'s startup `XDG_STATE_HOME` against this process before sweeping shells.
+/// Drills can share a holder through TMPDIR while using unrelated session state.
 fn same_state(pid: u64) -> bool {
     let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
         return false;
@@ -1108,12 +1016,11 @@ fn same_state(pid: u64) -> bool {
     theirs == ours.as_deref().map(OsStrExt::as_bytes)
 }
 
-/// Run a kill's argument vector and wait for it on a thread of its own, so Close Tab never waits
-/// on the holder or on a host. An empty one is a shell nothing holds.
+/// Run a shell kill off the main thread so Close Tab never waits on a holder or host.
+/// An empty argument vector means no holder owns the shell.
 ///
-/// `over` is the master socket a remote shell's end goes through. One that finds the link down is
-/// kept, and run again once a connection to it is up ([`end_orphans`]): the shell would otherwise
-/// run on the host with no tab left to reach it.
+/// Remote kills use master socket `over`. Failed disconnected kills are retained for
+/// [`end_orphans`] so they cannot leave unreachable shells running.
 fn run_kill(argv: Vec<String>, over: Option<PathBuf>) {
     let Some((program, args)) = argv.split_first() else {
         return;
@@ -1152,8 +1059,7 @@ pub fn end_orphans(ctl: &Path) {
     }
 }
 
-/// The directory an OSC 7 `file://host/path` URI names, if `host` is this machine. A shell that
-/// has ssh'd somewhere reports the other machine's directory, which is no place to start one here.
+/// Decode a local-host OSC 7 directory URI. Ignore other hosts because their paths cannot launch local shells.
 fn dir_of(uri: &str, host: &str) -> Option<PathBuf> {
     let (dir, from) = glib::filename_from_uri(uri).ok()?;
     match from.as_deref() {

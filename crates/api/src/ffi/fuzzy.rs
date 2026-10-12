@@ -1,8 +1,5 @@
-//! The file switcher's ranking, as uniffi can carry it.
-//!
-//! [`accent_core::fuzzy::rank`] does the work: the same matcher and the same order as the desktop
-//! palette, which is the point — one query typed on the phone and on the laptop should offer the
-//! same note first. All this adds is the cap and the index type, since uniffi carries no `usize`.
+//! Expose [`accent_core::fuzzy::rank`] through UniFFI so mobile and desktop
+//! rank the same notes. Add only a result cap and UniFFI-compatible indices.
 
 const MAX_RESULTS: usize = 200;
 
@@ -29,8 +26,7 @@ pub fn fuzzy_rank(query: String, haystacks: Vec<String>, recent: Vec<Option<u32>
 mod tests {
     use super::*;
 
-    /// The order is the core's and tested there; what is tested here is what this adds: the cap,
-    /// and recency crossing in the ffi's own types.
+    /// Verify the FFI result cap and recency conversion; core tests cover ranking.
     #[test]
     fn a_ranking_stops_at_the_cap_and_recency_crosses() {
         let paths: Vec<String> = (0..MAX_RESULTS + 5)

@@ -1,21 +1,12 @@
-//! The completion popup, for every flavour of text tab: accent's own list over the text.
+//! Completion for every text flavour through one [`Source`] interface.
 //!
-//! One provider whatever the language — a note's `[[links]]` and `#tags` from the index, a C
-//! file's members from clangd, a word from the dictionary — through one call and in one shape
-//! ([`Source`]), so nothing here knows which it is looking at.
+//! A [`Session`] holds an answer and its popup. [`Anchor`] marks track the request position;
+//! [`rank`] narrows complete answers locally as typing continues. Incomplete answers request
+//! updates per keystroke while the current list narrows, avoiding flicker over slow links.
+//! Each item uses its own start and range, moved with edits through [`apply::Moved`].
 //!
-//! A [`Session`] is an answer and the popup showing it. The answer is asked for at the caret, with
-//! two marks left there ([`Anchor`]), and what is typed after that narrows it here ([`rank`])
-//! rather than at the provider: a server ranks once, for where it was asked. Unless it said it
-//! stopped short (`incomplete`); then every keystroke asks again, and the list on screen is
-//! narrowed meanwhile, so nothing flickers over a slow link. Each item is matched against what was
-//! typed since its own start, and accepted over its own range moved on by the typing
-//! ([`apply::Moved`]).
-//!
-//! The popup never has the keyboard: the view keeps it, and `editor::keys` offers each press to
-//! [`press`] first, which takes the arrows, Escape, and Return and Tab while a row is selected.
-//! Everything else is typed into the text as ever, list helpers and paired brackets included,
-//! and narrows the list on the way.
+//! The view retains focus. `editor::keys` offers presses to [`press`] first for arrows,
+//! Escape, and Return or Tab with a selected row; other keys keep normal typing behaviour.
 
 mod abbrev;
 mod apply;
@@ -39,12 +30,12 @@ use sourceview5::prelude::*;
 use crate::editor::{Tab, caret, line_prefix};
 use crate::{hover, lang, multicaret};
 
-/// How many rows an answer puts in the list at most. A server can answer with thousands; this
-/// many is more than anyone scrolls through, and splicing them all in on every keystroke is not.
+/// Maximum displayed rows, bounding per-keystroke splicing of servers'
+/// large answers to a practical scrollable list.
 const MOST: usize = 200;
 
-/// How long a row has to stay selected before its documentation is asked for, so arrowing down a
-/// list asks the server about the row it stops at rather than every row it passes.
+/// Selection-rest delay before resolving docs, avoiding server requests
+/// for every row crossed by arrow keys.
 const LOOK: Duration = Duration::from_millis(50);
 
 /// A pinned future, which is what every reply here is.
@@ -52,11 +43,10 @@ pub(crate) type Reply<T> = Pin<Box<dyn Future<Output = T>>>;
 
 /// Where a session's answers come from, and what it asks of the document it completes in.
 pub(crate) trait Source {
-    /// The answer at `at`, `trigger` being the character just typed when it is one the provider
-    /// asked to be told about. A provider that cannot answer answers nothing.
+    /// Request at `at` with a provider-recognized typed `trigger`, or none
+    /// if the provider cannot answer.
     fn fetch(&self, at: Pos, trigger: Option<char>) -> Reply<Completions>;
-    /// `item` with what the provider keeps back until a row is looked at or accepted: its
-    /// documentation, and an import. A provider that cannot answer hands `item` back.
+    /// Resolve deferred docs/imports, returning `item` unchanged if unavailable.
     fn resolve(&self, item: Completion) -> Reply<Completion>;
     /// The popup came up, or went.
     fn shown(&self, _up: bool) {}
@@ -71,9 +61,8 @@ pub(crate) trait Source {
     }
 }
 
-/// Where an answer was asked for: two marks at the caret then, the left one staying before what
-/// is typed there and the right one going after it, so the distance between them is what was
-/// typed since. Removed from the buffer with the answer.
+/// Left/right-gravity marks around the request caret. Their distance
+/// tracks later typing for range remapping; remove them with the answer.
 struct Anchor {
     at: Pos,
     left: gtk::TextMark,
@@ -89,9 +78,8 @@ impl Anchor {
         }
     }
 
-    /// How the text moved since the ask, or `None` when it moved in a way the answer cannot
-    /// follow: the caret off the line or back before where it was asked, or the text there
-    /// deleted from under the marks.
+    /// Map subsequent typing, or `None` if the caret left the line, moved
+    /// before the request, or text under its marks was deleted.
     fn moved(&self, buffer: &gtk::TextBuffer, caret: &gtk::TextIter) -> Option<apply::Moved> {
         let (left, right) = (
             buffer.iter_at_mark(&self.left),
@@ -137,34 +125,32 @@ pub(crate) struct Session {
     source: Box<dyn Source>,
     popup: popup::Popup,
     shown: RefCell<Option<Shown>>,
-    /// Bumped by every ask: an answer to an earlier one, or a row's resolve from it, is dropped.
+    /// Request generation, rejecting stale answers and their row resolves.
     generation: Cell<u64>,
-    /// The ask in flight, and where it was made. Replacing it aborts it, which cancels the
-    /// request at the server.
+    /// In-flight request and location. Replacement aborts it, cancelling
+    /// the server request.
     fetch: RefCell<Option<glib::JoinHandle<()>>>,
     asked_at: Cell<Option<Pos>>,
     /// The selected row's documentation being asked for.
     detail: RefCell<Option<glib::JoinHandle<()>>>,
     /// The session is editing the buffer itself, which opens nothing.
     muted: Cell<bool>,
-    /// How many times the buffer has changed: an accepted row waiting for its import is off
-    /// once this moves.
+    /// Buffer generation, cancelling deferred acceptance when typing changes text.
     edits: Cell<u64>,
     /// An accepted row waiting for what the provider kept back.
     accepting: RefCell<Option<glib::JoinHandle<()>>>,
     /// The input method holds text not committed yet: the keys are its own.
     preedit: Cell<bool>,
-    /// A look at the caret is queued for the next idle: a keystroke edits the buffer and moves
-    /// the caret, and one look covers both.
+    /// Queued idle caret check, coalescing a keystroke's edit and movement.
     queued: Cell<bool>,
-    /// The selected row was picked by [`Completion::preselect`], not by an arrow: typing on
-    /// picks again rather than keeping it.
+    /// Whether selection came from [`Completion::preselect`]; later typing
+    /// reselects it instead of preserving an arrow-selected row.
     preselected: Cell<bool>,
 }
 
 impl Session {
-    /// A session over `view`, asking `source`. Hides itself when the view goes off screen, loses
-    /// the keyboard, or starts a column of carets; `Ctrl+Space` asks at the caret.
+    /// Complete `view` through `source`, with Ctrl+Space requesting at the
+    /// caret. Hide on unmap, focus loss or a new caret column.
     pub(crate) fn new(view: &sourceview5::View, source: Box<dyn Source>) -> Rc<Session> {
         let session = Rc::new_cyclic(|me: &Weak<Session>| {
             let (accept, look) = (me.clone(), me.clone());
@@ -284,8 +270,8 @@ impl Session {
         self.shown.borrow().is_some() || self.fetch.borrow().is_some()
     }
 
-    /// Something typed opens the popup (`rank::opens`): a trigger asks afresh, and a word asks
-    /// unless there is an answer up to narrow already.
+    /// Open on eligible typing ([`rank::opens`]). Triggers requery; words
+    /// query only when no existing answer can narrow.
     fn open(self: &Rc<Self>, trigger: Option<char>) {
         if trigger.is_some() || !self.active() {
             self.ask(trigger);
@@ -369,8 +355,8 @@ impl Session {
         self.refresh(selected);
     }
 
-    /// Narrow the answer up to what was typed and show it, keeping `selected` selected; or end
-    /// the session where the caret has left what it completes.
+    /// Filter the answer by subsequent typing, preserving `selected`, or
+    /// end completion when the caret leaves its prefix.
     fn refresh(&self, selected: Option<String>) {
         let buffer = self.view.buffer();
         let caret = caret(&buffer);
@@ -533,9 +519,9 @@ impl Session {
         }
     }
 
-    /// What a key press does with the popup up, or `None` for a key that goes on to the rest of
-    /// the editor (`editor::keys`). Under a column of carets everything the popup does not take
-    /// goes to GTK at the primary caret, which ends the column, as accepting a row does.
+    /// Handle popup keys or return `None` to `editor::keys`. With a caret
+    /// column, unhandled keys reach GTK at the primary and end the column,
+    /// as accepting a row does.
     pub(crate) fn press(
         self: &Rc<Self>,
         key: gdk::Key,
@@ -571,12 +557,10 @@ impl Session {
         }
     }
 
-    /// Write the item at `row` into the text, and end the session.
+    /// Resolve and insert the item at `row`, then end the session.
     ///
-    /// An item the provider can resolve is resolved first, the buffer untouched meanwhile: what
-    /// it kept back until now includes the import a symbol from another module needs, which
-    /// rust-analyzer sends only then, and which lands in the same undo step. Typing on before
-    /// the answer is in calls the acceptance off.
+    /// Resolution can supply deferred imports, which join the insertion's undo step. Leave the
+    /// buffer unchanged while waiting; further typing cancels acceptance.
     fn accept(self: &Rc<Self>, row: u32) {
         let buffer = self.view.buffer();
         let caret = caret(&buffer);
@@ -626,8 +610,8 @@ impl Session {
         self.muted.set(false);
     }
 
-    /// The selection moved: the selected row's documentation in the pane beside the list, asked
-    /// for once it has been looked at for [`LOOK`] where the provider keeps it back.
+    /// After selection rests for [`LOOK`], resolve deferred docs and display
+    /// them beside the list.
     fn look(self: &Rc<Self>) {
         if let Some(handle) = self.detail.take() {
             handle.abort();
@@ -727,8 +711,7 @@ impl Session {
         self.popup.doc()
     }
 
-    /// Whether nothing is being asked for or waited on: no answer, documentation or accepted
-    /// row's resolve in flight, and no keystroke still to narrow by.
+    /// Whether no request, docs/acceptance resolve or idle narrowing remains.
     #[cfg(feature = "bench")]
     pub(crate) fn settled(&self) -> bool {
         self.fetch.borrow().is_none()
@@ -738,8 +721,8 @@ impl Session {
     }
 }
 
-/// What was typed between `start` and the caret at `here`: read off `line`, the caret's line up to
-/// it, where the two share it, which they nearly always do.
+/// Read typing from `start` to `here` in the caret-line prefix `line`
+/// when both positions share a line.
 fn typed_since(buffer: &gtk::TextBuffer, line: &[char], start: Pos, here: Pos) -> String {
     if start.line == here.line {
         let from = (start.character as usize).min(line.len());
@@ -830,8 +813,8 @@ impl Source for TabSource {
         })
     }
 
-    /// The suggestion goes while the popup is up; the answers it was in the way of are asked
-    /// for again once it goes, through a flush, the popup having held them back meanwhile.
+    /// Clear ghost text while the popup is shown. Flush deferred ghost
+    /// requests when it closes so unobscured suggestions are refreshed.
     fn shown(&self, up: bool) {
         let Some(tab) = self.0.upgrade() else { return };
         match up {
@@ -858,8 +841,8 @@ impl Source for TabSource {
     }
 }
 
-/// The Lean abbreviation being typed before `at`, answered from the table ([`abbrev`]) instead of
-/// the server, which has nothing to say after a backslash.
+/// Complete Lean backslash abbreviations locally ([`abbrev`]); the server
+/// has no answer for this input prefix.
 fn abbreviations(tab: &Tab, at: Pos) -> Option<Completions> {
     if lang::language_id(tab) != abbrev::LANGUAGE {
         return None;
@@ -873,8 +856,8 @@ fn abbreviations(tab: &Tab, at: Pos) -> Option<Completions> {
     Some(abbrev::rows(typed, Range { start, end: at }))
 }
 
-/// Give a tab its popup, asking its vault. Called by [`lang::attach`], which is what decides
-/// that this tab has a vault to ask at all.
+/// Install vault-backed completion after [`lang::attach`] establishes
+/// that the tab has a vault provider.
 pub fn install(tab: &Rc<Tab>) {
     let made = Session::new(&tab.view, Box::new(TabSource(Rc::downgrade(tab))));
     // What was typed is looked at once it has landed, one idle on: a single character, or the
@@ -901,8 +884,8 @@ pub(crate) fn session(tab: &Tab) -> Option<Rc<Session>> {
     tab.lang.completion.borrow().clone()
 }
 
-/// Something was typed: open the popup where it asks for one (`rank::opens`). Never unasked
-/// with the keyboard elsewhere or a column of carets up, as there is no ghost text then either.
+/// Handle typed completion triggers ([`rank::opens`]) only while focused
+/// and without a caret column, matching ghost-text eligibility.
 fn typed(tab: &Rc<Tab>) {
     let Some(session) = session(tab) else {
         return;
@@ -944,8 +927,7 @@ pub(crate) fn is_shown(tab: &Tab) -> bool {
     session(tab).is_some_and(|s| s.is_shown())
 }
 
-/// A source answering with the same items wherever it is asked: a drill's, which needs a popup
-/// and no server.
+/// Fixed-answer source for staging drill popups without a server.
 #[cfg(feature = "bench")]
 pub(crate) struct Fixed(pub Vec<Completion>);
 

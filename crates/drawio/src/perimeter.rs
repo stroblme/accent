@@ -225,9 +225,8 @@ pub fn rectangle(bounds: Rect, next: Point, orthogonal: bool) -> Point {
     p
 }
 
-/// The same for the ellipse inscribed in `bounds` (`mxPerimeter.EllipsePerimeter`). A flat
-/// ellipse, of no height or no width, is met at its centre; the JS comes to the centre too, or
-/// to NaN.
+/// Intersect the inscribed ellipse (`mxPerimeter.EllipsePerimeter`). Degenerate
+/// ellipses return their centre; the JS may instead produce NaN.
 // mxPerimeter.js 161-251
 pub fn ellipse(bounds: Rect, next: Point, orthogonal: bool) -> Point {
     let (x, y) = (bounds.x, bounds.y);
@@ -619,9 +618,9 @@ fn intersection(a0: Point, a1: Point, b0: Point, b1: Point) -> Option<Point> {
         .then(|| Point::new(a0.x + ua * (a1.x - a0.x), a0.y + ua * (a1.y - a0.y)))
 }
 
-/// JavaScript's `parseInt` of a number: its digits before the point, so truncation towards zero,
-/// except that a number under 1e-6 prints in exponent form (`1.4e-14`) and reads as its first
-/// digit. The JS feeds rounding noise through this too, so it is kept.
+/// Match JavaScript `parseInt` on numbers: truncate towards zero, except below
+/// 1e-6, where exponent notation makes it read the first digit. Retain this quirk
+/// because draw.io applies it to rounding noise.
 fn parse_int(v: f64) -> f64 {
     if v != 0.0 && v.abs() < 1e-6 {
         let first = format!("{:e}", v.abs()).as_bytes()[0] - b'0';

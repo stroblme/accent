@@ -21,7 +21,7 @@ pub enum ZOrder {
 /// Undo steps kept, as many as draw.io keeps (`mxUndoManager`'s default size).
 const UNDO_LIMIT: usize = 100;
 
-/// A file being edited: every change goes through here, is one undo step, and marks the file
+/// A diagram editor that records each change as one undo step and keeps the file
 /// dirty until [`Editor::mark_saved`].
 #[derive(Debug, Clone)]
 pub struct Editor {
@@ -30,8 +30,8 @@ pub struct Editor {
     redo: Vec<Snapshot>,
     dirty: bool,
     ids: Ids,
-    /// The layer the reader picked for new cells: kept for the session, never written and never
-    /// an undo step, as draw.io's default parent is.
+    /// Session-only layer selection for new cells; excluded from saves and undo,
+    /// as in draw.io.
     current: Option<CellId>,
 }
 
@@ -277,11 +277,10 @@ impl Editor {
         })
     }
 
-    /// Group `ids` as draw.io's Group does (`mxGraph.groupCells`): those sharing the parent of
-    /// the first in the page's order (`getCellsForGroup`), two at least, go into a new `group`
-    /// cell sized to their box (`getBoundsForGroup`), added in front of its siblings, the cells
-    /// staying where they are on the page. The group's id; `None` where there is nothing to
-    /// group.
+    /// Group at least two selected cells sharing the first cell's parent in document
+    /// order (`mxGraph.groupCells`, `getCellsForGroup`). Insert a `group` in front of
+    /// its siblings, sized to the selection bounds, preserving page positions
+    /// (`getBoundsForGroup`). Returns the group id, or `None` if nothing can be grouped.
     // mxGraph.js 4043-4150; Graph.js 13290-13345 (bounds), 18879 (the group's style)
     pub fn group(&mut self, page: usize, ids: &[CellId]) -> Result<Option<CellId>, Error> {
         self.edit(page, |p, fresh| {
@@ -359,9 +358,9 @@ impl Editor {
         })
     }
 
-    /// Paste `from`, the pages read off the clipboard, as one step: the first onto page `page`
-    /// ([`paste_into`]), and any others after the last page as pages of their own, with ids of
-    /// their own and a name where they had none. What was pasted onto `page`, to select.
+    /// Paste clipboard pages as one undo step. Import the first onto `page`
+    /// ([`paste_into`]); append the rest with fresh ids and missing names filled in.
+    /// Returns the cells pasted onto `page` for selection.
     // diagramly/EditorUi.js 11240-11330
     pub fn paste(
         &mut self,
@@ -490,15 +489,15 @@ impl Editor {
         Ok(())
     }
 
-    /// Pick layer `id` for new cells, `None` for the page's default ([`Page::default_parent`]),
-    /// which also takes them while the one picked is locked or hidden. Not an edit; the caller
-    /// lets go of it on a page switch, as draw.io's root change resets its default parent.
+    /// Select a session-only layer for new cells. `None`, locked or hidden layers use
+    /// [`Page::default_parent`]. The caller clears selection on page switches, matching
+    /// draw.io's default-parent reset.
     pub fn set_current_layer(&mut self, id: Option<CellId>) {
         self.current = id;
     }
 
-    /// The layer picked for new cells while it is still one of page `page`'s, the page's
-    /// default otherwise: the layer the Layers list marks.
+    /// The selected layer if it still belongs to `page`, otherwise the default;
+    /// used to mark the Layers list.
     pub fn current_layer(&self, page: usize) -> Option<&str> {
         let p = self.file.page(page).ok()?;
         let layers = p.layers();
@@ -559,8 +558,8 @@ impl Editor {
         })
     }
 
-    /// Change a copy of page `index` and put it in place if `change` succeeds and changed
-    /// something, the page as it was becoming the undo step.
+    /// Apply `change` to a copy of the page; commit successful changes and retain the
+    /// original as the undo step.
     fn edit<T>(
         &mut self,
         index: usize,
@@ -612,11 +611,10 @@ impl Editor {
     }
 }
 
-/// Paste `from`, a page read off the clipboard, onto `page` as draw.io's `importGraphModel`
-/// does: the cells of a page with one layer go into the layer new cells go into, moved by
-/// (`dx`, `dy`), and each layer of one with several comes as a layer of its own; every cell
-/// takes a fresh id, and a reference to a cell that was not pasted goes. What was pasted onto
-/// a layer.
+/// Import a clipboard page with fresh cell ids (`importGraphModel`). A single
+/// layer's cells go into the current insertion layer, translated by (`dx`, `dy`);
+/// a multi-layer page retains its layers. Drop references to cells not pasted.
+/// Returns the cells pasted onto a layer.
 // Graph.js 17723-17810
 fn paste_into(
     page: &mut Page,
@@ -675,9 +673,9 @@ fn paste_into(
     Ok(pasted)
 }
 
-/// Remove the topmost of `ids` and everything under them, as draw.io's Cut does
-/// (`mxGraph.removeCells` without their edges): an edge not removed with them lets go of them
-/// where `drawn` has its end (`cellsRemoved`, `disconnectTerminal`).
+/// Cut topmost selected cells and their descendants (`mxGraph.removeCells` without
+/// edges). Retained edges disconnect at their drawn endpoints (`cellsRemoved`,
+/// `disconnectTerminal`) so their geometry survives the cut.
 // mxGraph.js 5037-5210
 pub fn remove(p: &mut Page, ids: &[CellId], drawn: &Scene) -> Result<(), Error> {
     check(p, ids)?;
@@ -780,11 +778,10 @@ fn remove_with_edges(p: &mut Page, mut gone: HashSet<CellId>) {
     p.cells.retain(|c| !gone.contains(&c.id));
 }
 
-/// Ungroup `ids` as draw.io's Ungroup does: each shape among them with children hands them to
-/// its own parent (`mxGraph.ungroupCells`), where they keep their place on the page and paint in
-/// front; a group then left with no fill, line or picture goes, with its edges
-/// (`removeCellsAfterUngroup`), and a shape kept is no longer a container. What to select: the
-/// children, then the cells of `ids` still there.
+/// Reparent selected shapes' children without moving them, placing them in front
+/// (`mxGraph.ungroupCells`). Remove emptied groups with no fill, stroke or image,
+/// and their edges (`removeCellsAfterUngroup`); retained shapes cease to be containers.
+/// Returns children followed by retained selections.
 // mxGraph.js 4180-4290; Graph.js 20266; Actions.js 662-701
 pub fn ungroup(p: &mut Page, ids: &[CellId]) -> Result<Vec<CellId>, Error> {
     check(p, ids)?;
@@ -841,9 +838,8 @@ pub fn ungroup(p: &mut Page, ids: &[CellId]) -> Result<Vec<CellId>, Error> {
     Ok(chosen)
 }
 
-/// The box `cells`, siblings, take in their parent (`Graph.getBoundsForGroup`): a shape's
-/// rectangle, an edge's loose ends and waypoints; a shape placed on its parent by fractions of
-/// it counts for nothing.
+/// Sibling bounds in parent coordinates (`Graph.getBoundsForGroup`): vertex
+/// rectangles and edge endpoints/waypoints. Relative vertices do not contribute.
 fn group_bounds(p: &Page, cells: &[CellId]) -> Option<Rect> {
     let mut bounds: Option<Rect> = None;
     let mut add = |r: Rect| bounds = Some(bounds.map_or(r, |b| b.union(&r)));
@@ -874,8 +870,8 @@ fn subtree_end(p: &Page, parent: &str) -> usize {
         .map_or(p.cells.len(), |i| i + 1)
 }
 
-/// Make each of `ids`, everything under it going along, the last child of `parent`, in the
-/// page's order (`mxGraphModel.add` at the parent's child count: in front of its siblings).
+/// Append selected cells and their descendants under `parent` in document order,
+/// in front of siblings (`mxGraphModel.add` at the child count).
 fn append_to(p: &mut Page, ids: &[CellId], parent: &str) {
     let moving = with_subtrees(p, ids.iter().cloned());
     let (mut taken, rest): (Vec<Cell>, Vec<Cell>) = std::mem::take(&mut p.cells)
@@ -892,12 +888,10 @@ fn append_to(p: &mut Page, ids: &[CellId], parent: &str) {
 // The edits a drag previews, as functions of a page: the editor applies them to the page in
 // the file as one undo step, and the canvas to a copy of it while the drag is under way.
 
-/// Move cells by (`dx`, `dy`): a vertex by its position, an edge by its waypoints and end
-/// points. A cell inside another that moves goes with it, and so does an edge whose both ends
-/// move. A label on an edge stays where it is along the edge. An edge moved without the shape
-/// one of its ends is on lets go of that shape, the end staying where it is drawn and moving
-/// with the rest, as mxGraph's `disconnectOnMove` has it; `drawn` is the page's display list,
-/// which says where the ends are.
+/// Translate vertices, edge waypoints and endpoints by (`dx`, `dy`). Descendants
+/// and edges between moved terminals follow; edge labels keep their relative position.
+/// Disconnect moved edges from stationary terminals at endpoints from `drawn`,
+/// matching mxGraph's `disconnectOnMove`.
 pub fn move_cells(
     page: &mut Page,
     ids: &[CellId],
@@ -909,9 +903,9 @@ pub fn move_cells(
     Ok(())
 }
 
-/// The first half of [`move_cells`], the part that does not depend on how far: check `ids` and
-/// let the edges among them go of the shapes they leave, where `drawn` has their ends. A drag
-/// does it once and [`Moving::shift`]s a copy of the result on each frame.
+/// Validate ids and disconnect edges from stationary terminals using `drawn`.
+/// A drag prepares this once, then applies [`Moving::shift`] to a copy each frame
+/// to avoid repeating preparation.
 pub fn start_move(page: &mut Page, ids: &[CellId], drawn: &Scene) -> Result<Moving, Error> {
     check(page, ids)?;
     let top: HashSet<CellId> = topmost(page, ids).into_iter().collect();
@@ -965,11 +959,10 @@ pub fn resize(page: &mut Page, id: &str, rect: Rect) -> Result<(), Error> {
     Ok(())
 }
 
-/// Put the source end (else the target end) of edge `id` on `on`: on shape `on.0`, pinned at
-/// `constraint` when there is one and floating on its outline otherwise
-/// (`mxEdgeHandler.connect`); with no shape, dangling at the absolute point `on.1`
-/// (`changeTerminalPoint`). The `exit` or `entry` keys say which, as `setConnectionConstraint`
-/// writes them.
+/// Connect the source or target of edge `id` to shape `on.0`, pinned by `constraint`
+/// or floating on its outline (`mxEdgeHandler.connect`). Without a shape, use the
+/// absolute point `on.1` (`changeTerminalPoint`). Update the corresponding `exit`/
+/// `entry` keys (`setConnectionConstraint`).
 // mxGraph.setConnectionConstraint, mxGraph.js 7163-7213; mxEdgeHandler.js 1984-2046
 pub fn set_end(
     page: &mut Page,
@@ -1020,10 +1013,10 @@ pub fn set_end(
     Ok(())
 }
 
-/// Put the label of edge `id`, routed along `route` (absolute), at `at` (`mxEdgeHandler.moveLabel`):
-/// a relative geometry keeps where along the edge the nearest point is and how far across, in
-/// its `x` and `y`, and the rest as its offset; any other keeps the offset from the middle of its
-/// ends.
+/// Place edge `id`'s label at absolute point `at` along `route` (`mxEdgeHandler.moveLabel`).
+/// Relative geometry stores the nearest position along/across the edge in `x`/`y`,
+/// with the remainder as an offset; other geometry stores an offset from the endpoints'
+/// midpoint.
 // mxEdgeHandler.moveLabel, mxEdgeHandler.js 1924-1966
 pub fn move_label(page: &mut Page, id: &str, route: &[Point], at: Point) -> Result<(), Error> {
     check(page, [id])?;
@@ -1108,8 +1101,8 @@ pub fn set_points(page: &mut Page, id: &str, points: &[Point]) -> Result<(), Err
     Ok(())
 }
 
-/// Set (or with `None` remove) several style keys on every cell in `ids`: a connector's route
-/// is two of them.
+/// Set or remove style keys on every cell in `ids`, including keys controlling
+/// connector routing.
 pub fn set_styles(
     page: &mut Page,
     ids: &[CellId],
@@ -1124,11 +1117,9 @@ pub fn set_styles(
     Ok(())
 }
 
-/// Paste style `from` onto every cell in `ids` as draw.io's Paste Style does
-/// (`Graph.pasteCellStyles`, forced): each look key a cell draws with becomes what `from` draws
-/// with, its shape kept. A text cell takes the text keys alone, and an edge's keys go to edges
-/// only. What is written is as little as that takes: a key `from` draws without is taken off
-/// the cell, or set to `none` where the cell would still draw with it.
+/// Apply draw.io's Paste Style while preserving shapes (`Graph.pasteCellStyles`,
+/// forced). Text cells take only text keys; edge keys apply only to edges. Remove
+/// keys absent from `from`, or set them to `none` when defaults would restore them.
 // Graph.js 8404-8540; diagramly/Menus.js 910-917
 pub fn paste_style(page: &mut Page, ids: &[CellId], from: &Style) -> Result<(), Error> {
     for id in ids {
@@ -1190,8 +1181,8 @@ fn default_layer(page: &Page, current: Option<&str>) -> Result<CellId, Error> {
     }
 }
 
-/// `roots` and every cell under them. A file in draw.io's order, parents before children,
-/// takes one pass over the cells; the loop is for any other order.
+/// Collect roots and descendants. Parent-first document order needs one pass;
+/// repeat to handle other cell orders.
 pub(crate) fn with_subtrees(
     page: &Page,
     roots: impl IntoIterator<Item = CellId>,
@@ -1225,9 +1216,9 @@ pub(crate) fn topmost(page: &Page, ids: &[CellId]) -> Vec<CellId> {
         .collect()
 }
 
-/// Let go of the shapes the edges among `top` leave behind: each end whose shape is not in
-/// `moved` becomes a point of its own where `drawn` has the end now, for the move to take along.
-/// Its `exit`/`entry` keys stay, as draw.io leaves them.
+/// Disconnect moved edges from terminals absent from `moved`, using `drawn`
+/// endpoints so translation preserves their positions. Keep `exit`/`entry` keys
+/// as draw.io does.
 // mxGraph.disconnectGraph, mxGraph.js 7459-7535; mxGraph.disconnectOnMove, 1557
 fn disconnect(page: &mut Page, top: &HashSet<CellId>, moved: &HashSet<CellId>, drawn: &Scene) {
     let stays = |end: &Option<CellId>| end.as_ref().is_some_and(|id| !moved.contains(id));

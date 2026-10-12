@@ -1,6 +1,5 @@
-//! Export as PDF…, PNG… and SVG…, and Print…, for a diagram: the pages as the tab holds them,
-//! unsaved edits and all, drawn by [`render`] in the file's own colours. A PDF has every page,
-//! a PNG and an SVG the page on screen, and a printout every page, one sheet each.
+//! Export and print the current model, including unsaved edits, through [`render`]
+//! in file colours. PDF and print include all pages; PNG and SVG use the active page.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -84,8 +83,8 @@ pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
     );
 }
 
-/// A print of every page of `file`: one sheet each, the page's sheet fitted to the paper inside
-/// a note's margins, aspect kept and centred, the paper turned to the page's orientation.
+/// Print one sheet per page, aspect-preserving and centred within note margins.
+/// Match paper orientation to each page.
 pub async fn operation(
     file: &File,
     typesetter: Option<&Rc<Typesetter>>,

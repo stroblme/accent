@@ -14,12 +14,10 @@ const POINTS: [(usize, f32, f32); 6] = [
     (1, 40.0, 168.0),
 ];
 
-/// Open the PDF, say whether Go to Source and Show in PDF are offered, then for each of
-/// [`POINTS`] go to the source as the page's menu does and print where the caret landed (or the
-/// toast), and from that line show it in the PDF again, printing the line of text marked and
-/// whether it holds the point. Point it at a LaTeX build made with `-synctex=1` in a scratch
-/// vault; a source `\input` from outside the vault prints its toast. A build without a SyncTeX
-/// file prints what the palette and the `.tex` beside it say instead ([`without_synctex`]).
+/// Probe Go to Source and Show in PDF at [`POINTS`], printing source caret positions
+/// and reverse PDF highlights. Use a scratch LaTeX build with `-synctex=1`; external
+/// `\input` targets produce a toast. [`without_synctex`] checks unavailable-command
+/// labels when no SyncTeX file exists.
 pub(super) fn bench_synctex(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -97,9 +95,8 @@ pub(super) fn bench_synctex(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// accent's own writes into the PDF: a stroke leaves the build trusted, through the tab closed and
-/// opened again, and a page added takes it away, an Undo of it too, each printed as the window
-/// offers Go to Source once it has looked again, as a tab switch makes it.
+/// Ink edits must preserve SyncTeX trust across reopening. Page insertion and its
+/// undo must invalidate it; print Go to Source availability after each change.
 async fn accent_writes(app: &Rc<App>, rel: &str) {
     let saved = || glib::timeout_future(Duration::from_millis(1500));
     let offer = |step: &str| {

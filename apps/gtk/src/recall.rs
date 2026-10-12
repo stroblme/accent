@@ -1,9 +1,7 @@
-//! Up and Down in a search field recall what was searched for before, the way a shell recalls
-//! commands. One list of queries and one of replacements for the whole run, shared by every find
-//! bar and Search pane, newest first, and kept in memory only.
+//! Shared, in-memory query and replacement history for find bars and Search panes.
 //!
-//! What goes into a list is what was used — a step, a replace, a result opened — not every
-//! keystroke of a live search, which would fill it with the prefixes of each query.
+//! Up and Down recall used entries, newest first. Recording searches only when used avoids
+//! filling history with prefixes from live typing.
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -26,9 +24,7 @@ pub fn remember(list: &'static List, text: &str) {
     list.with_borrow_mut(|entries| push(entries, text));
 }
 
-/// Let Up and Down in `field` walk `list`. Plain arrows only, and taken before the field sees
-/// them: a one-line text box binds them to nothing but Meta+Up and Meta+Down, so until now they
-/// only moved the focus out of the box.
+/// Use plain Up and Down to recall entries from `list` before the field moves focus.
 pub fn attach(field: &(impl IsA<gtk::Editable> + IsA<gtk::Widget>), list: &'static List) {
     let walk = RefCell::new(Walk::default());
     let keys = gtk::EventControllerKey::new();
@@ -66,8 +62,7 @@ fn push(entries: &mut Vec<String>, text: &str) {
     entries.truncate(CAP);
 }
 
-/// One field's place in a list while Up and Down walk it, and what the field said when the walk
-/// began: the draft, which counts as the newest entry of all, so Down comes back to it.
+/// Field history cursor and saved draft; Down past the newest history entry returns to the draft.
 #[derive(Default)]
 struct Walk {
     /// The entry the field is showing, or `None` for the draft.

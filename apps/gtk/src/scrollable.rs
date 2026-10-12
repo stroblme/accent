@@ -1,7 +1,7 @@
-//! The part of `GtkScrollable` a canvas that scrolls itself shares — the PDF view and the diagram
-//! canvas: the two adjustments a scrolled window hands it, followed weakly, and pointed at the
-//! content's size. Each widget still declares the interface's four properties (GObject reads
-//! them by name), its adjustments through [`Adjustments`].
+//! Share scroll adjustments between the PDF view and diagram canvas.
+//!
+//! [`Adjustments`] follows adjustments weakly and configures their content bounds. Widgets
+//! still declare the four `GtkScrollable` properties because GObject accesses them by name.
 
 use std::cell::RefCell;
 
@@ -24,12 +24,11 @@ impl Adjustments {
         self.slots[1].borrow().clone()
     }
 
-    /// Follow `adjustment` as the horizontal one (`slot` 0) or the vertical one (1): `moved`
-    /// runs on `widget` whenever it moves, the handler on the one it replaces goes, and the
-    /// widget is laid out again. The handler holds the widget weakly: the widget holds the
-    /// adjustment, and a scrolled window going away leaves its child's adjustments set, so a
-    /// strong one kept every closed canvas alive — a PDF's rendered tiles, a diagram's WebKit
-    /// process for its formulas.
+    /// Follow horizontal (`slot` 0) or vertical (1) `adjustment`, replacing its previous handler
+    /// and requesting layout. Changes call `moved` on `widget`.
+    ///
+    /// Handlers hold widgets weakly: widgets retain adjustments after their scrolled window
+    /// closes, so strong captures would keep canvases and their rendering resources alive.
     pub fn adopt<W: IsA<gtk::Widget>>(
         &self,
         widget: &W,
@@ -76,9 +75,8 @@ impl Adjustments {
     }
 }
 
-/// The upper bound is never below the page size, which GTK asserts on and which a document
-/// smaller than the window otherwise breaks — an A4 sketch in a split pane, or any small page in
-/// a large one. There is nothing to scroll in that case either way: the value clamps to zero.
+/// Clamp adjustment upper bounds to at least page size, as GTK requires.
+/// Content smaller than its viewport has no scroll and clamps to zero.
 fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {
     let Some(adjustment) = adjustment else {
         return;

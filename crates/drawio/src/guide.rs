@@ -1,12 +1,9 @@
 // The snapping here is derived from draw.io mxgraph/src/util/mxGuide.js and the size guides of
 // js/grapheditor/Graph.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io
 // AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
-//! draw.io's guides. For a move (`mxGuide.move`): the moved box's sides and middle snap to those
-//! of the other shapes and to the page's middle, and its gaps to the shapes before and after it
-//! in a row or a column snap to the gap those keep between them. For a resize (the size guides,
-//! Graph.js 27871-28476): the size a handle changes snaps to another shape's, and otherwise the
-//! side it drags to another shape's side or middle. Each snap shows as a line, and an axis no
-//! guide takes snaps to the grid. In page units, `px` being a screen pixel's worth.
+//! Move and resize guides matching draw.io (`mxGuide.move`, Graph.js size guides).
+//! Moves snap sides, centres and equal gaps; resizes snap sizes, then sides and centres.
+//! Unsnapped axes use the grid. Coordinates are page units; `px` is one screen pixel.
 
 use crate::geom::{Point, Rect, rotate};
 
@@ -28,9 +25,8 @@ pub struct Targets<'a> {
     pub page: Option<Rect>,
 }
 
-/// `delta`, a move of `bounds`, snapped to the guides, and the lines that show them. Within the
-/// tolerance — half the grid, or [`TOLERANCE`] without one — equal distances snap first, then the
-/// sides and middles, the equal distances winning where the two disagree.
+/// Snap `delta` for `bounds` and return guide lines. Equal gaps take precedence
+/// over sides and centres within half the grid spacing, or [`TOLERANCE`] without a grid.
 pub fn snap(
     bounds: &Rect,
     delta: Point,
@@ -106,9 +102,9 @@ struct Hit {
     page: bool,
 }
 
-/// The nearest guide within `tolerance` of the moved box `b` along one axis: the middle to a
-/// middle, a side to a side or a middle, and a side to the page's middle too. The first found
-/// wins a tie, the page ahead of the shapes.
+/// Find the nearest axis guide within `tolerance`: centre-to-centre, side-to-side
+/// or side-to-centre, including the page centre. First match wins ties; the page
+/// precedes shapes.
 fn align(
     bounds: &Rect,
     b: &Rect,
@@ -155,9 +151,8 @@ fn align(
     hit
 }
 
-/// Equal distances (`mxGuide.moveDistance`): the moved box's gaps to the shapes beside it that
-/// overlap it across the axis, snapped to the gap those keep between them. The move along x and
-/// along y that does it, where one does, and the guides that show it.
+/// Snap gaps to neighbouring shapes that overlap across the axis (`mxGuide.moveDistance`).
+/// Returns optional x/y shifts and guide lines so the moved box matches their spacing.
 fn distances(
     shapes: &[Rect],
     bounds: &Rect,
@@ -192,9 +187,9 @@ fn distances(
     (equal, lines)
 }
 
-/// Where along one axis the moved box `b` starts when its gaps to the boxes in `cells` equal
-/// theirs to each other (`mxGuide.snapDistance`), and the guides that show each gap: a line
-/// [`SHIFT`] off either box with a tick at each end, beyond the first box that stays.
+/// Find the axis position where `b` has equal gaps to neighbours (`mxGuide.snapDistance`).
+/// Return that position and guides [`SHIFT`] outside the boxes, with end ticks, beyond
+/// the first stationary box.
 fn equal_gap(
     cells: Vec<Rect>,
     b: &Rect,
@@ -314,8 +309,8 @@ fn equal_gap(
     Some((result, lines))
 }
 
-/// A shape a resize may take the size of, or line a side up with: its box as it shows, and the
-/// turn the size mark on it takes (none for a quarter turn, whose box is already turned).
+/// Resize-guide candidate: displayed bounds and size-guide rotation. Quarter turns
+/// need no rotation because the displayed bounds already swap dimensions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Neighbour {
     pub rect: Rect,
@@ -345,11 +340,10 @@ pub struct Resized {
     swap: bool,
 }
 
-/// Snap `result`, `bounds` resized by dragging `sides` and in the shape's own frame (unturned),
-/// to `shapes`, the nearest first (`mxVertexHandler.union` with the size guides): a size the
-/// handle changes to the size of a shape within the tolerance (`snapSize`), and where no size
-/// snapped, on an unturned shape, a dragged side to a shape's side or middle (`snapEdges`). The
-/// side not dragged stays where it is.
+/// Snap resized `result` in the unrotated shape frame, considering `shapes` nearest
+/// first (`mxVertexHandler.union`). Match sizes within tolerance (`snapSize`);
+/// otherwise snap dragged sides of unrotated shapes (`snapEdges`). Keep undragged
+/// sides fixed.
 pub fn snap_resize(
     result: &mut Rect,
     bounds: &Rect,
@@ -465,9 +459,8 @@ pub fn snap_resize(
 }
 
 impl Resized {
-    /// The lines that show the snaps, the resized box being `shown` turned `rotation`
-    /// (`redrawSizeGuides`): a size taken marked across both boxes, and a side lined up with
-    /// another shape's by a line along both.
+    /// Draw size guides across both boxes and alignment guides along matching sides,
+    /// with `shown` rotated by `rotation` (`redrawSizeGuides`).
     pub fn lines(&self, shown: &Rect, rotation: f64) -> Vec<Line> {
         let mut lines = Vec::new();
         if let Some(n) = &self.width {

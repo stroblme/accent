@@ -1,11 +1,7 @@
-//! The left sidebar: Files / Search / Info / Git / Ports / Outline / Code / Properties in a view
-//! switcher.
+//! The Files, Search, Info, Git, Ports, Outline, Code and Properties sidebar.
 //!
-//! The pane knows nothing about the vault. The file tree arrives as a finished widget and every
-//! query goes through a closure in [`Data`], so this module never touches app state and the
-//! integration step only has to hand it the closures. Each pane gets its own half of [`Data`]:
-//! the Ports pane is built with what forwards a port and nothing else, which is what keeps a
-//! pane from being wired to machinery it never calls.
+//! Finished widgets and closures in [`Data`] supply vault integration without exposing app
+//! state. Each pane receives only the data and operations it uses.
 
 mod code;
 mod details;
@@ -34,27 +30,14 @@ use widgets::path_list;
 
 use crate::widgets::{Debounce, scroller};
 
-/// How long a list that is *on screen* holds its refresh back when the vault has moved under it:
-/// the Tags list, and the Search rows.
-///
-/// It is also what collapses a batch into one query. The window says "the vault moved" once per
-/// file the walk touched, so a Syncthing pull of 500 notes is 500 calls in one turn of the main
-/// loop and one refresh a third of a second later. What that one refresh costs is on
-/// [`Sidebar::requery_search_soon`], which is the expensive half.
-///
-/// ponytail: a timer, because there is no event for "the index is current now" — our own saves
-/// emit nothing at all, by design, and the worker takes the write in after the save has landed.
-/// The ceiling is a tag, or a row, that follows a third of a second after the note is written;
-/// the same third of a second the PDF highlights wait (`App::sync_pdf_links_soon`), and an
-/// `Event::Indexed` from the worker is what replaces all three.
+/// Debounce visible Tags and Search refreshes after vault changes. Collapses per-file events
+/// into one query and gives index writes time to settle, including own saves that emit no event.
+/// Matches the delay used for PDF highlights.
 const INDEX_SETTLE: Duration = Duration::from_millis(300);
 
-/// Arrows leaving and arriving: the pane is about what has gone out and what is still to come in.
-/// The reading is the one this pane had all along; the name is not. `network-transmit-receive`
-/// draws as two arrows in Adwaita but as a boxed device in WhiteSur, where the Git tab read as a
-/// network port — the artwork is the theme's, so a name whose glyph is arrows in both is the one
-/// to hold (DESIGN.md, Iconography). Adwaita 50 has no git, branch or history glyph at all, so
-/// this is a mail name whose drawing says the right thing.
+/// Incoming/outgoing arrows for the Git pane. Use an icon name rendered as arrows in both
+/// Adwaita and WhiteSur; `network-transmit-receive` appears as a device in WhiteSur (DESIGN.md,
+/// Iconography).
 const GIT_ICON: &str = "mail-send-receive-symbolic";
 /// Where in the file an activated row points, when it points at more than the file itself.
 #[derive(Clone)]
@@ -158,13 +141,10 @@ struct VaultPanes {
 }
 
 impl Sidebar {
-    /// `files` is the existing vault tree widget, dropped into the Files pane unchanged.
-    /// `vault` carries the tree widget and the index closures behind Files, Search and Info;
-    /// `None` builds a sidebar with only the Info pane's Details and the Outline pane, which is
-    /// what a window opened on a single file has to show. `on_open` is called with a vault-relative path when the user
-    /// activates a result, a tagged file or a reference, plus where in the note the row points
-    /// when it points at anything narrower than the file.
-    /// `on_reference` is called with a References row, which carries a line number of its own.
+    /// Build Files, Search and Info from `vault`'s tree and index closures. `None` provides only
+    /// file Details and Outline for a loose-file window. `on_open` receives the activated
+    /// vault-relative path and optional location; `on_reference` receives a row with its line
+    /// number.
     pub fn new(
         vault: Option<(gtk::Widget, Data, gtk::Widget, gtk::Paned)>,
         on_open: impl Fn(&str, Option<Target>) + 'static,
@@ -653,13 +633,8 @@ impl Sidebar {
         lines
     }
 
-    /// The tag list is out of date.
-    ///
-    /// A list out of sight — another pane in front, or the Tags section shut or hidden — only
-    /// takes the flag and refills the next time it is shown, which costs no query while the user
-    /// is looking at Files or Search. The list *on screen* has nobody to wait for, so it refills
-    /// in place — a moment later, so that what was just written has reached the index and a burst
-    /// of watcher events is one query. See [`INDEX_SETTLE`].
+    /// Mark Tags stale. Hidden lists defer querying until shown; visible lists refresh after
+    /// [`INDEX_SETTLE`] to coalesce events and wait for indexing.
     pub fn mark_tags_dirty(&self) {
         let Some(panes) = self.panes.as_ref() else {
             return;
@@ -825,24 +800,9 @@ impl Sidebar {
         }
     }
 
-    /// The vault moved under the rows on screen, so ask the question again a moment later.
-    ///
-    /// Called for every change the window hears about and for every save of its own, so the two
-    /// guards are what keep it from costing anything most of the time: a box with nothing in it
-    /// is left alone, and a pane nobody is looking at only takes the flag and asks the first time
-    /// it is shown again — the Tags list's `tags_dirty` shape, which is why neither list can be
-    /// left showing rows a change has already made wrong.
-    ///
-    /// What it costs, measured on the generated 40k-file vault (41 690 entries, 21 360 indexed
-    /// bodies) with `ACCENT_BENCH_SEARCH=<query>[:<n>]` and `RUST_LOG=accent=debug`: one settled
-    /// batch is one query however many files it touched — 0.8 ms ranked and 50 ms as the exact
-    /// scan a toggle or the open replace row switches the pane to when one note moved, 11 ms and
-    /// 63 ms when fifty did — and both are well inside the grace period before a progress bar is
-    /// drawn (`search::SHOW_AFTER`). Reading only the files the batch touched instead of every
-    /// body would buy back some 60 ms of a worker thread, which does not pay for merging a
-    /// partial scan into rows that are already up. What limits how often even that is paid is the
-    /// autosave behind it, itself 1 s after the last edit: one requery per pause in the typing,
-    /// not one per keystroke.
+    /// Refresh active search after vault changes or own saves, debounced through
+    /// [`INDEX_SETTLE`]. Empty queries do nothing; hidden panes keep a dirty flag and query on
+    /// next show. This avoids per-event work while preventing stale results.
     pub fn requery_search_soon(&self) {
         let Some(panes) = self.panes.as_ref() else {
             return;

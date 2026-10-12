@@ -1,18 +1,15 @@
-//! Accepting a row: where its edits land, the text having moved on since it was asked for.
+//! Map completion edits to current text after typing beyond the request.
 
 use accent_api::{Completion, Pos, Range, TextEdit};
 use gtk::prelude::*;
 
 use crate::lang;
 
-/// Where an answer was asked for, and how many characters have been typed there since.
+/// Track the request position and characters typed there since the answer was requested.
 ///
-/// An answer's positions are about the text it was asked about. Typing at the caret moves what
-/// is after it and nothing before it, so a position before the caret stands and one after it moves
-/// on by what was typed. Where the two meet, the end of a range decides: one starting at the
-/// caret starts before what was typed and one ending there ends after it, so the word typed since
-/// the popup opened is part of what a row replaces (`get` + `get_func` once gave `getget_func`),
-/// and so is the `]]` a note's link eats after it.
+/// Positions before the caret stay fixed; later ones shift. At the caret, range starts
+/// precede typed text and ends include it, so accepting replaces the growing prefix rather
+/// than duplicating it and still consumes trailing wikilink brackets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Moved {
     pub at: Pos,
@@ -52,8 +49,8 @@ impl Moved {
     }
 }
 
-/// What accepting an item replaces now: its range moved on by what was typed, and reaching the
-/// caret at least, should a server's range end short of it.
+/// Map the accepted range through subsequent typing, extending to at
+/// least the caret even when the server supplied a shorter end.
 pub(super) fn replaced(range: Range, moved: Moved, caret: Pos) -> Range {
     let (start, end) = (moved.start(range.start), moved.end(range.end));
     match caret.line == end.line && caret > end {
@@ -62,16 +59,15 @@ pub(super) fn replaced(range: Range, moved: Moved, caret: Pos) -> Range {
     }
 }
 
-/// `edits` in the order they can be applied without invalidating each other: last in the document
-/// first, so an edit never moves the range of one still to come.
+/// Order edits back to front so each preserves positions of later operations.
 fn ordered(mut edits: Vec<TextEdit>) -> Vec<TextEdit> {
     edits.sort_by_key(|e| std::cmp::Reverse((e.range.start, e.text.len())));
     edits
 }
 
-/// `snippet` ending in a final stop, `$0`, where it has none: GtkSourceView 5.20 moves the caret
-/// to the end itself on a Tab past the last stop with no chunk current, which fails an assertion
-/// (`_gtk_source_snippet_insert_set`), as a template without one did (`editor::lines::chunks`).
+/// Append snippet `$0` when absent, preventing GtkSourceView 5.20's
+/// `_gtk_source_snippet_insert_set` assertion on Tab past the last stop
+/// (as with `editor::lines::chunks`).
 fn with_final_stop(snippet: &str) -> String {
     let has = |stop: &str| {
         snippet
@@ -84,14 +80,11 @@ fn with_final_stop(snippet: &str) -> String {
     }
 }
 
-/// Write `item` over `range`, with `extras` beside it, all in the text's coordinates now, as one
-/// user action so one Ctrl+Z takes the whole of it back: the replaced text, the insert, and
-/// whatever import the item brought with it.
+/// Apply `item`, `range` and `extras` in current coordinates as one undoable action.
 ///
-/// The extra edits go first, wherever they are, and the item last, over `range` as marks have
-/// carried it through them: a snippet goes to `push_snippet`, which parks it in the view for its
-/// stops to be walked, and GtkSourceView reads an edit made after that as typing in its stops.
-/// Text an extra edit puts at the range's start lands before it, at its end after it.
+/// Apply extra edits first, then the item over marks adjusted through those edits. Snippets
+/// must come last because later edits would be interpreted inside their Tab stops. Extras
+/// at range boundaries remain outside the item replacement.
 pub(super) fn apply(
     buffer: &gtk::TextBuffer,
     item: &Completion,
@@ -197,9 +190,8 @@ mod tests {
         }
     }
 
-    /// Applying an edit moves everything after it, so the extra edits an item brings are applied
-    /// from the end of the document backwards and none of them is ever asked about a stale
-    /// position: an import above the caret, and one a server put after it.
+    /// Verify extra edits apply back to front at current positions,
+    /// including imports above and below the caret.
     #[test]
     fn extra_edits_are_applied_last_first() {
         let order: Vec<String> = ordered(vec![edit(0, "a"), edit(12, "c"), edit(4, "b")])

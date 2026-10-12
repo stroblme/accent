@@ -1,6 +1,5 @@
-//! The canvas's arithmetic, free of GTK so it is tested without a display: where a page point
-//! lands in the scrolled content, what fitting means, snapping to the grid, the selection's
-//! handles, and which cell a click selects.
+//! Display-independent canvas geometry for headless tests: coordinate transforms,
+//! fit, grid snapping, selection handles and hit testing.
 
 use std::collections::{HashMap, HashSet};
 
@@ -95,13 +94,9 @@ pub fn fit_scale(page: (f64, f64), viewport: (f64, f64)) -> f64 {
 /// notch scrolls, `GtkScrolledWindow` scrolling 2.5 px for each of a swipe's.
 pub const SWIPE_TURN: f64 = 40.0;
 
-/// A plain wheel pushing on past the top or bottom of the page on screen, which turns the page
-/// once it has pushed a notch's worth there, as a continuous PDF reads on into the next one.
-///
-/// Only a push made at the edge counts, so the scroll that reaches the edge never turns the page
-/// as well. A wheel turns a page a notch; a touchpad (`swipe`), whose deltas come as a stream of
-/// pixels, a page a swipe, and only by a swipe that has scrolled nothing, or one fling would
-/// read through several.
+/// Turn pages only when scrolling starts at an edge, preventing a scroll that
+/// reaches the edge from also turning it. A wheel turns once per notch; a touchpad
+/// swipe turns only if it has not scrolled or turned yet, preventing multi-page flings.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Overshoot {
     /// How far the push has gone past the edge, down positive.
@@ -153,12 +148,9 @@ pub fn snap_move(origin: Point, delta: Point, grid: f64) -> Point {
     )
 }
 
-/// [`resize_by`] for a shape turned `rotation` degrees: the pointer's move is taken into the
-/// shape's own frame, the box resized there, and the result placed so that the side the handle
-/// does not hold stays where it was on the page — draw.io's rule. On the grid, a turned shape's
-/// size snaps rather than its edges, which the placing moves off the grid anyway
-/// (`mxVertexHandler.union`, 1703-1709). `snap` then has the box in the shape's own frame, `r`
-/// beside it, before it is placed: the size guides, which work there as draw.io's do.
+/// Resize in the rotated shape's local frame, keeping the undragged side fixed on
+/// the page. Snap size rather than edges for rotated shapes (`mxVertexHandler.union`).
+/// `snap` receives the local resized box and original `r` before placement for size guides.
 pub fn resize_rotated(
     r: &Rect,
     rotation: f64,
@@ -216,11 +208,9 @@ fn bearing(centre: Point, p: Point) -> f64 {
     (p.x - centre.x).atan2(centre.y - p.y).to_degrees()
 }
 
-/// The turn a shape centred on `centre` takes when its rotate handle, at `handle` before the
-/// turn, is dragged to `pointer` (all in content coordinates): the pointer's bearing less the
-/// handle's, as `mxVertexHandler.rotateVertex` (953-992) has it. On the grid it snaps to 15°
-/// while the pointer is near the handle's circle, to 5° a little outside it and to 1° further
-/// out; `free`, to a tenth. Kept within (-180, 180].
+/// Rotation from the pointer bearing relative to the initial handle, in content
+/// coordinates (`mxVertexHandler.rotateVertex`). Snap to 15°, 5° or 1° with increasing
+/// distance from the handle circle, or 0.1° with `free`. Normalize to (-180, 180].
 pub fn rotation_to(centre: Point, handle: Point, pointer: Point, free: bool) -> f64 {
     let alpha = bearing(centre, pointer) - bearing(centre, handle);
     let raster = match pointer.distance(centre) - handle.distance(centre) {
@@ -579,10 +569,9 @@ impl Sheet {
         })
     }
 
-    /// The boxes a move of `moving`, taken hold of at `pressed`, aligns to
-    /// (`mxGraphHandler.getGuideStates` and the `isStateIgnored` draw.io gives it): the shapes
-    /// shown on its layer that share its parent, the parent, and those an edge joins it to — or
-    /// all of them when the parent holds fewer than two cells — none of them moving along.
+    /// Stationary move-guide boxes on the pressed cell's layer: siblings, parent and
+    /// connected shapes, or all shapes when the parent has fewer than two children
+    /// (`mxGraphHandler.getGuideStates`, draw.io's `isStateIgnored`).
     pub fn guide_boxes(&self, moving: &[CellId], pressed: &str) -> Vec<Rect> {
         let page = &self.page;
         let parent = page.cell(pressed).and_then(|c| c.parent.as_deref());
@@ -615,9 +604,9 @@ impl Sheet {
             .collect()
     }
 
-    /// The shapes a resize of `id` takes a size from or lines a side up with
-    /// (`mxVertexHandler.getSizeGuideStates`): the others shown on its layer and not inside it,
-    /// within `area` — guides nobody can see snap nothing — the nearest first.
+    /// Visible resize-guide candidates on `id`'s layer, excluding descendants and shapes
+    /// outside `area`, nearest first (`mxVertexHandler.getSizeGuideStates`). Offscreen
+    /// guides cannot snap.
     pub fn size_guides(&self, id: &str, area: &Rect) -> Vec<Neighbour> {
         let Some(own) = self.guide_box(id) else {
             return Vec::new();
@@ -646,9 +635,8 @@ impl Sheet {
         shapes
     }
 
-    /// The shapes shown on `id`'s layer, `id` among them: each vertex placed by a geometry of
-    /// its own (not along an edge or on its parent) that is visible, and so is everything it is
-    /// in. draw.io takes the guides from the layer new cells go into; this is `id`'s.
+    /// Visible, non-relative vertices on `id`'s layer, including `id`, with visible
+    /// ancestors. Unlike draw.io's insertion-layer guides, these use the moved cell's layer.
     fn layer_shapes(&self, id: &str) -> Vec<&accent_drawio::Cell> {
         let page = &self.page;
         let cells: HashMap<&str, &accent_drawio::Cell> =
@@ -679,10 +667,9 @@ impl Sheet {
             .collect()
     }
 
-    /// What a press at `p` is on, given what is selected already: the cell a click there
-    /// selects — the outermost group under the layer first, then one level further in on each
-    /// click after that, draw.io's group-first selection — and the selected cell under the
-    /// pointer, if there is one, which is what a drag from there moves.
+    /// Resolve click selection and drag target at `p`. Clicks enter groups one level
+    /// at a time, starting at the outermost group below a layer; drags move the already
+    /// selected cell under the pointer, matching draw.io.
     pub fn pick(&self, p: Point, tolerance: f64, selection: &[CellId]) -> Option<Pick> {
         let hit = self.scene.hit(p, tolerance)?;
         let mut chain = vec![hit];
@@ -803,11 +790,9 @@ impl Sheet {
         }
     }
 
-    /// What a connector drawn from `press` to `release` attaches to at either end. An end
-    /// dropped within `reach` of a connection point is pinned there. Otherwise it takes the
-    /// shape under it only when the other end is outside that shape: a line drawn within a
-    /// shape — a big text box, a slide's background — is a line on it, and attaching it would
-    /// start the arrow on the shape's far border and run it back through where it was drawn.
+    /// Attach connector ends within `reach` of a snap point. Otherwise attach to a shape
+    /// only if the other endpoint lies outside it: a line drawn inside a background
+    /// shape should not route from that shape's far border.
     pub fn connect_ends(
         &self,
         press: Point,

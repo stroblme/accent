@@ -16,17 +16,13 @@ impl App {
         }
     }
 
-    /// `explicit` is a Ctrl+S, which may raise a dialog. An autosave never can: interrupting
-    /// someone mid-sentence with a modal is exactly what autosave exists to avoid.
+    /// Save a tab; `explicit` permits a Ctrl+S dialog, while autosave never interrupts typing.
     ///
-    /// A buffer whose file moved underneath it is not written at all, and the save is not even
-    /// attempted ([`editor::may_save`]): the banner is holding a question and a save is not an
-    /// answer to it. Ctrl+S raises the same dialog a refused write raises, so a reflex save is
-    /// never silently dropped; an autosave says nothing beyond the banner already on screen.
+    /// [`editor::may_save`] blocks writes when the file moved underneath the buffer. Explicit
+    /// saves show the refusal dialog; autosaves leave the existing banner.
     ///
-    /// The two paths a tab leaves by — a tab closing, a window closing — deliberately do *not*
-    /// come through here. They write and then ask when the write is refused, because a buffer on
-    /// its way out has nowhere else to be kept and refusing there would lose it outright.
+    /// Tab and window closes use their own write-then-ask path: a refused closing write must
+    /// keep the buffer available rather than lose unsaved text.
     pub fn save_tab(self: &Rc<Self>, tab: &Rc<Tab>, explicit: bool) {
         if !editor::may_save(tab.save.modified.get(), tab.save.disk_changed.get()) {
             if explicit {
@@ -44,15 +40,11 @@ impl App {
         self.start_save(tab, explicit, Self::save_tab, Self::land_save, move || text);
     }
 
-    /// The save a note and a diagram share, once the tab's own save has let it through: `again`
-    /// is that save, for one asked for meanwhile, and `land` is how the tab takes the answer in.
-    /// `contents` makes what the file should hold, on the worker: a diagram's model is serialised
-    /// there rather than on the main thread.
+    /// Share asynchronous saving between notes and diagrams.
     ///
-    /// The write runs on a worker and lands later ([`Self::land_flight`]): every window shares the
-    /// one main thread, and on a remote vault a save is a round trip that held all of them, once
-    /// a second while anyone typed. One save per tab is on its way at a time; one asked for
-    /// meanwhile runs when it lands, gated on the etag it brought back.
+    /// `contents` prepares disk text on the worker; `land` applies results, and `again` repeats
+    /// a save requested in flight. One write per tab avoids crossing remote round trips; queued
+    /// saves use the returned etag when [`Self::land_flight`] applies the previous result.
     pub(crate) fn start_save<T: Saves>(
         self: &Rc<Self>,
         tab: &Rc<T>,
@@ -140,13 +132,11 @@ impl App {
         )
     }
 
-    /// Take in the save on its way for `tab`, waiting for its write if that has not finished:
-    /// `None` when there was none, else whether it did not fail. Whoever comes first applies it:
-    /// the save's own landing, or a write that has to go after it, which does not report it
-    /// because it is about to meet whatever refused this one and will say so itself.
+    /// Apply `tab`'s in-flight save, waiting if needed; return `None` if absent or its success.
     ///
-    /// `apply` is what the landing means to the tab's kind, told whether a Ctrl+S asked for it;
-    /// `recheck` is the kind's watcher handler, for a stat that waited on the save.
+    /// The first caller applies the result. A following write suppresses reporting because it
+    /// will report any refusal itself. `apply` receives whether Ctrl+S requested the save;
+    /// `recheck` handles a watcher stat deferred behind it.
     pub(crate) fn land_flight<T: Saves>(
         self: &Rc<Self>,
         tab: &Rc<T>,
@@ -210,28 +200,22 @@ impl App {
         }
     }
 
-    /// Say the vault is unreachable, unless something already is.
-    ///
-    /// A save can notice the link is down before the connection thread has reported it, and the
-    /// banner it would raise then must not overwrite the reason a real `Event::Disconnected` gave.
+    /// Report unreachable vault unless disconnection is already reported.
+    /// A save can fail before the connection event and must not overwrite its later, specific reason.
     pub(crate) fn show_offline(&self) {
         if !self.connection.is_revealed() {
             self.show_connection_banner("The vault is not answering");
         }
     }
 
-    /// The write itself, as something a worker can run, answering the etag it left and the
-    /// digest of what it wrote. What the file should hold, not what the buffer holds, is the
-    /// caller's: a code file loses its trailing whitespace and a DOS file gets its CRLFs back in
-    /// [`Tab::for_disk`].
+    /// Build a worker-side write returning its etag and content digest.
     ///
-    /// A file the etag gate refuses is read: one still holding what the tab last read or wrote
-    /// has not changed, its etag having moved alone (Syncthing setting its mtime, the same bytes
-    /// written again), and is written over at its new etag.
+    /// The caller prepares disk text, including trimming and CRLF restoration in [`Tab::for_disk`].
+    /// If the etag changed but bytes still match the previous read or write, retry at the new
+    /// etag: metadata-only changes are not conflicts.
     ///
-    /// A loose tab is not in any vault, so it writes through core directly. Same atomic save,
-    /// same etag gate; what it misses is the watcher being told the write was ours, which the
-    /// tab's own file monitor makes harmless.
+    /// Loose tabs use core's atomic etag-gated save directly; their own monitors recognise writes
+    /// without the vault watcher notification.
     pub(crate) fn writer<T: Saves>(
         &self,
         tab: &Rc<T>,
@@ -273,9 +257,8 @@ impl App {
         }
     }
 
-    /// Write the buffer before returning, and hand the error back instead of reporting it: a
-    /// caller that is about to make the buffer unreachable has to know whether the bytes landed.
-    /// A save still on its way lands first, so the two never race for the file.
+    /// Write the buffer before returning, landing any in-flight save first.
+    /// Return errors to callers making the buffer unreachable so they can prevent data loss.
     pub fn write_tab(self: &Rc<Self>, tab: &Rc<Tab>, expected: Option<Etag>) -> Result<(), Error> {
         self.land_save(tab, false);
         let written = self.writer(tab)(&tab.for_disk(), expected);
@@ -286,11 +269,8 @@ impl App {
         Ok(())
     }
 
-    /// The buffer over the file, as the answer to a question about the file on disk — Overwrite,
-    /// the Save over a deleted file, Keep Mine — gated on `expected`, the etag the question was
-    /// asked against (`None`: whatever is there now). On a worker, as a save is: on a remote
-    /// vault the write is a round trip, which held every window. A save still on its way lands
-    /// first, so the two never race for the file. `said` is the toast for a write that landed.
+    /// Write the buffer as the banner's explicit answer, gated on `expected` or any current etag with `None`.
+    /// Land prior saves first, write on a worker, and show `said` after success.
     fn write_answer(self: &Rc<Self>, tab: &Rc<Tab>, expected: Option<Etag>, said: &'static str) {
         self.land_save(tab, false);
         let text = tab.for_disk();
@@ -339,9 +319,8 @@ impl App {
         }
     }
 
-    /// [`write_tab`](Self::write_tab) gated on the tab's own etag, as it stands once any save on
-    /// its way has landed; a buffer that landing left clean has nothing more to write. For the
-    /// paths a buffer leaves by, and for a file about to move with its buffer dirty.
+    /// Write using the tab's etag after landing in-flight saves, skipping a now-clean buffer.
+    /// Used before closing or moving a dirty file.
     pub fn flush_tab(self: &Rc<Self>, tab: &Rc<Tab>) -> Result<(), Error> {
         self.land_save(tab, false);
         if !tab.save.modified.get() {
@@ -360,28 +339,14 @@ impl App {
         });
     }
 
-    /// A watcher says the file under a tab moved: `moved` runs when what is there is not what
-    /// the tab last read or wrote.
+    /// Check watcher changes off-thread and call `moved` only for different file contents.
     ///
-    /// Whose write it was is the first question. Every save is a rename into place, which a file
-    /// monitor reports as a change like anyone else's, so the etag is the only thing that tells
-    /// our own writes apart from a real one: a file still carrying the etag we wrote holds
-    /// exactly what the buffer already has. Reloading it anyway threw the view at the caret a
-    /// second after every keystroke, and on a buffer typed into since the save it raised a
-    /// "changed on disk" banner against our own bytes.
+    /// Matching saved etags identify our atomic writes, avoiding spurious reloads and banners.
+    /// Different etags with unchanged bytes update the etag without raising a conflict.
     ///
-    /// A stat that failed is not an answer and must not read as one. It used to fall in with "no
-    /// file there", which differs from any etag we hold and so raised the banner: on a remote
-    /// vault a dropped ssh connection would report a conflict over a diff holding nothing but the
-    /// user's own edits. Nothing is lost by waiting — a real change fires the watcher again, and
-    /// the etag gate refuses any save that would clobber one in the meantime.
-    ///
-    /// A file at another etag that still holds what the tab last read or wrote has not changed:
-    /// Syncthing sets a file's mtime, and writes the same bytes again, and the banner went up over
-    /// a note just opened and typed into. The tab takes its new etag.
-    ///
-    /// The stat, and the read after one that differs, run on a worker, being round trips on a
-    /// remote vault.
+    /// Failed stats provide no answer, including remote disconnects. Leave state unchanged;
+    /// future watcher events and the save etag gate still protect external changes. Reads and
+    /// stats run on workers because remote calls cost round trips.
     pub(crate) fn check_disk<T: Saves>(self: &Rc<Self>, tab: &Rc<T>, moved: fn(&Rc<Self>, &Rc<T>)) {
         let (rel, path) = (tab.key(), tab.path());
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
@@ -519,11 +484,8 @@ impl App {
         );
     }
 
-    /// A tab is on its way out and its buffer could not be written. Ask, then call `after` with
-    /// whether the tab may go: the answer decides, never the failed save.
-    ///
-    /// DESIGN.md, States: the choice can lose data either way round, so it is an `AlertDialog`
-    /// naming both losses rather than a toast behind a window that is already closing.
+    /// Ask whether an unsavable closing tab may leave, then call `after` with the decision.
+    /// Use an alert naming potential losses; save failure alone must never discard the buffer.
     pub fn ask_unsaved(
         self: &Rc<Self>,
         tab: &Rc<Tab>,
@@ -755,19 +717,11 @@ impl App {
         tab.comparing_answers(Alert::Compare);
     }
 
-    /// Raise or drop the conflict question on the tab showing `rel`, from what is on disk now.
+    /// Update the persistent conflict banner on the tab showing `rel`.
     ///
-    /// DESIGN.md, States: a conflict copy is a state that persists and needs a decision, so it is
-    /// a banner on the file it concerns rather than a toast that scrolls past. It queues behind a
-    /// "changed on disk" question rather than displacing it, and taking it down again brings that
-    /// one back instead of clearing the bar.
-    ///
-    /// `trashed` is a copy this window has just sent to the trash. The index is a worker thread
-    /// and a batch behind, so it still lists the file and the banner would otherwise linger until
-    /// `FileRemoved` caught up a few hundred milliseconds later.
-    ///
-    /// The index is asked on a worker, because every text file that opens asks, and on a remote
-    /// vault the asking is a round trip. A failed question is not an answer and changes nothing.
+    /// Conflict copies need a decision, so banners retain them and queue behind changed-on-disk
+    /// questions. `trashed` omits a copy removed by this window before the index catches up.
+    /// Query on a worker; failures leave the banner unchanged.
     pub fn sync_conflict_banner(self: &Rc<Self>, rel: &str, trashed: Option<&str>) {
         // Conflict copies are a vault idea: they are found by the index.
         let Some(vault) = self.vault().cloned() else {
@@ -919,11 +873,8 @@ impl App {
         self.sync_conflict_banner(original, Some(conflict));
     }
 
-    /// Save As…: the file in front written under a path typed in the vault's path field, and its
-    /// tab moved onto the new file (DESIGN.md, Keyboard). What the tab holds goes there, and the
-    /// original keeps what was last written to it. Only a vault's own text, diagram, PDF or
-    /// image: a loose tab, a window without a vault and a tab that is no file have no vault path
-    /// to type, so there it does nothing.
+    /// Save the active vault text, diagram, PDF or image under a new vault path and move its tab.
+    /// The original retains its last saved contents. Loose files and non-file tabs have no vault Save As.
     pub fn save_as(self: &Rc<Self>) {
         let Some(doc) = self.active_doc().filter(|doc| {
             matches!(
@@ -944,9 +895,8 @@ impl App {
         });
     }
 
-    /// Save As once the path is typed, looked at before anything is written: a folder is refused,
-    /// a file asks to be replaced — saying so when a tab has it open, which then closes without
-    /// saving — and a free path is written at once. The tab's own path is a plain Save.
+    /// Validate Save As destination: reject folders, confirm file replacement, save immediately if absent.
+    /// Replacing an open destination closes it without saving; choosing the current path performs Save.
     pub(crate) fn save_as_to(self: &Rc<Self>, doc: Doc, to: String) {
         if to == doc.key() {
             return self.save_active();
@@ -994,12 +944,11 @@ impl App {
         });
     }
 
-    /// Write what `doc` holds to `to`, then move its tab there. A save still on its way lands
-    /// first, or its answer would come back to a tab that has moved, and a comparison goes, being
-    /// about the old file. A note's relative paths are pointed back at what they named from its
-    /// new folder. A PDF's strokes are written out and the file copied: its bytes are the render
-    /// thread's. An image is copied as it is. `free` says nothing was at `to` when it was looked
-    /// at.
+    /// Save `doc` to `to` and move its tab, after applying any in-flight save.
+    ///
+    /// Close comparisons of the old file and rebase note-relative links. PDFs flush strokes
+    /// before copying render-owned bytes; images copy unchanged. `free` records that `to` was
+    /// absent when checked.
     fn write_as(self: &Rc<Self>, doc: Doc, to: String, free: bool) {
         let Some(vault) = self.vault().cloned() else {
             return;
@@ -1066,11 +1015,9 @@ impl App {
         });
     }
 
-    /// The tab once Save As has written `to`: reopened there when the extension changes what the
-    /// file opens as, and otherwise pointed at it — clean, unless it was typed into while the
-    /// write was out, which the next autosave then writes to the new file. `wrote` is a text
-    /// write's etag and digest, and whether the note's paths were rewritten on the way, which the
-    /// tab then reloads as a rename's notes are.
+    /// Adopt Save As at `to`, reopening if its extension changes kind, otherwise retargeting the tab.
+    /// Edits made during writing stay dirty for the next save. `wrote` supplies text etag/digest
+    /// and whether rebased note paths require reloading.
     fn follow_save_as(
         self: &Rc<Self>,
         doc: Doc,
@@ -1125,19 +1072,16 @@ impl App {
     }
 }
 
-/// What Save As writes: a tab's text, and whether it is a note's, a PDF's file as it is on this
-/// machine, or an image's file, which the vault copies where it is: nothing of it is waiting on
-/// this machine to be written, so on a remote vault too it is the host's copy of the host's file.
+/// Save As content: prepared text, local PDF cache bytes or vault-owned image bytes.
+/// Remote image copies stay host-side because no pending edits exist locally.
 enum Contents {
     Text(String, bool),
     File(PathBuf),
     Copy,
 }
 
-/// A text tab's `text` at `to`, the digest of what was written, and whether it was rewritten: a
-/// note's relative paths pointed back at what they named from `from`'s folder, where the index
-/// is, the host on a remote vault. A free path is claimed first, as New File claims one, which
-/// also gives the file a new file's mode rather than the write's private one.
+/// Write text from `from` to `to`, returning its digest and whether note paths were rebased.
+/// Claim free destinations first to preserve normal new-file permissions; remote rebasing runs on the host.
 fn write_text(
     vault: &Vault,
     from: &str,
@@ -1160,11 +1104,9 @@ fn write_text(
     Ok((etag, accent_core::fs::digest(written), relinked.is_some()))
 }
 
-/// A PDF's bytes at `to`. The vault copies the file where it is, except on a remote vault: there
-/// the tab reads and writes the ssh cache copy, which reaches the host by a push of its own that
-/// may still be on its way. So the cache copy goes up itself, and comes back down as `to`'s own
-/// cache copy with its stamp, or the next stroke's push would take the host's file for somebody
-/// else's change.
+/// Save PDF bytes to `to`, using the local edited cache for remote vaults.
+/// Upload and fetch the destination with its cache stamp so later strokes do not mistake the
+/// new file for an external change.
 fn copy_pdf(vault: &Vault, from: &str, local: &Path, to: &str) -> accent_api::Result<()> {
     match vault.is_remote() {
         false => vault.copy(from, to),

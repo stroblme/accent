@@ -1,9 +1,5 @@
-//! The protocol shapes accent reads, transcribed from `lsp-types`.
-//!
-//! Only the answers are typed; everything accent *sends* is a `serde_json::json!` literal, which
-//! keeps this file to the thirty-odd shapes that actually have to be understood instead of the
-//! whole specification. Nothing here refuses an unknown field: servers send more than the
-//! specification lists, and dropping the extras is the point.
+//! Response types accent uses, transcribed from `lsp-types`. Requests use JSON literals to
+//! avoid modelling unused protocol shapes; unknown response fields are accepted and ignored.
 //!
 //! Transcribed from <https://github.com/gluon-lang/lsp-types>, which is
 //!
@@ -97,9 +93,8 @@ pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
 }
 
-/// What the server admits to being able to do. The plain gates are kept as raw values because
-/// each of them is either a boolean or an options object, and accent only ever asks whether it
-/// is there — see [`on`].
+/// Server capabilities. Gates remain raw because they may be booleans or option objects; accent
+/// only checks presence through [`on`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ServerCapabilities {
@@ -266,11 +261,9 @@ pub struct Hover {
     pub range: Option<Range>,
 }
 
-/// Three shapes for one answer, two of them deprecated but still in wide use.
-///
-/// Order matters: `{kind, value}` must land on [`MarkupContent`] and `{language, value}` on a
-/// [`MarkedString::LanguageString`], and neither struct has defaulted fields, so the first match
-/// is the right one.
+/// Hover response variants, including two deprecated forms. Match order distinguishes `{kind,
+/// value}` markup from `{language, value}` language strings; required fields prevent ambiguous
+/// matches.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum HoverContents {
@@ -365,9 +358,8 @@ pub struct FoldingRange {
     pub kind: Option<String>,
 }
 
-/// A declaration in a call hierarchy. Every field the specification lists, so that the item a
-/// server answered `prepareCallHierarchy` with goes back to it whole when its calls are asked
-/// for: `data` is how a server finds it again.
+/// Full call-hierarchy item returned to the server for follow-up requests, including `data` so
+/// the server can identify the declaration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallHierarchyItem {

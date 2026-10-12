@@ -1,9 +1,8 @@
-//! Lean's backslash abbreviations: `\alpha` offers `α` and `\to` offers `→`, from vscode-lean4's
-//! own table (`data/lean/abbreviations.json`, with its NOTICE).
+//! Lean backslash abbreviations from vscode-lean4's table and NOTICE
+//! (`data/lean/abbreviations.json`).
 //!
-//! Answered here in the window rather than by the language server, which has nothing to say after
-//! a backslash: an input method needs no server, so it works before `lake serve` answers, or
-//! without one, and puts nothing on an ssh link.
+//! Local expansion works before `lake serve` answers or without a server, and avoids an SSH
+//! round trip for an input-method operation.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -15,9 +14,8 @@ use super::MOST;
 /// The GtkSourceView language whose tabs have them.
 pub(super) const LANGUAGE: &str = "lean";
 
-/// Every abbreviation's name, the text after its `\`, and what it writes, `$CURSOR` marking where
-/// the caret goes. Shortest name first, then by name: the order the rows are listed in, so `\a`
-/// shows `α` ahead of every longer name that starts the same.
+/// Abbreviation name and expansion, with `$CURSOR` placement. Sort by
+/// name length then name so `\a` offers `α` before longer prefixes.
 static TABLE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
     let json = include_str!("../../data/lean/abbreviations.json");
     let table: HashMap<String, String> = serde_json::from_str(json).expect("the table is JSON");
@@ -26,9 +24,8 @@ static TABLE: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
     table
 });
 
-/// The rows for `typed`, an abbreviation from its `\` to the caret ([`typed`]), each replacing
-/// `replace`: every entry whose name starts with what follows the `\`, labelled as it is typed
-/// beside what it writes. Cut at [`MOST`], and asked for again as the name grows.
+/// Offer prefix-matching abbreviations for `typed` ([`typed`]), replacing
+/// `replace`. Cap at [`MOST`] and requery as the prefix grows.
 pub(super) fn rows(typed: &str, replace: Range) -> Completions {
     let name = typed.strip_prefix('\\').unwrap_or(typed);
     let mut matching = TABLE.iter().filter(|(key, _)| key.starts_with(name));
@@ -64,8 +61,8 @@ fn row(key: &str, symbol: &str, replace: Range) -> Completion {
     }
 }
 
-/// `symbol` as a GtkSourceView snippet: `$CURSOR` becomes the final stop, `$0`, and the
-/// characters GtkSourceView's expansion reads in plain text, `\` and `` ` ``, are escaped.
+/// Convert `$CURSOR` to snippet `$0` and escape literal backslashes
+/// and backticks read by GtkSourceView expansion.
 fn snippet(symbol: &str) -> String {
     symbol
         .split("$CURSOR")
@@ -74,8 +71,8 @@ fn snippet(symbol: &str) -> String {
         .join("$0")
 }
 
-/// The abbreviation being typed at the end of `before`, the line up to the caret: from its `\` on,
-/// with no whitespace after it. `\\` is one, the abbreviation for a backslash.
+/// Find the whitespace-free backslash abbreviation ending at `before`'s
+/// caret. `\\` is itself the abbreviation for a backslash.
 pub(super) fn typed(before: &str) -> Option<&str> {
     let at = before.rfind('\\')?;
     let at = match before[..at].ends_with('\\') {

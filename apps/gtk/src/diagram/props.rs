@@ -1,10 +1,8 @@
-//! The Properties pane: how the selected cells look, or the page when nothing is selected.
+//! Properties for selected cells, or the page when nothing is selected.
 //!
-//! Every row writes one change through the tab, which is one undo step; spin rows wait for a
-//! burst of steps to settle first. Filling the rows from the model sets `filling`, so the
-//! notifications that causes are not taken for edits. The Position, Size and Style groups slide
-//! out Copy and Paste buttons while the pointer or the keyboard is on them, as a Git pane row
-//! does its own (`widgets::reveal_on_hover`).
+//! Each change uses the tab's undo path; spin rows debounce bursts. `filling` prevents
+//! model-to-widget notifications from becoming edits. Geometry and style groups reveal
+//! Copy/Paste buttons on hover or focus (`widgets::reveal_on_hover`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -211,8 +209,8 @@ pub struct Props {
     debounce: Debounce,
 }
 
-/// An entry row of the pane, set by Return or its apply button. Without the pencil `AdwEntryRow`
-/// shows while it is not being edited: a press on the row edits it already.
+/// Apply an entry on Return or its button. Hide the idle pencil because clicking
+/// the row already starts editing.
 pub(super) fn entry_row(title: &str) -> adw::EntryRow {
     let row = adw::EntryRow::builder()
         .title(title)
@@ -222,8 +220,8 @@ pub(super) fn entry_row(title: &str) -> adw::EntryRow {
     row
 }
 
-/// libadwaita shows and hides the pencil by its child visibility, never by `visible`, so hiding
-/// it once sticks.
+/// Hide the pencil with `visible`; libadwaita toggles child visibility, so this
+/// remains hidden through editing-state changes.
 fn hide_edit_icon(row: &adw::EntryRow) {
     let mut todo = vec![row.clone().upcast::<gtk::Widget>()];
     while let Some(widget) = todo.pop() {

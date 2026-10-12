@@ -86,9 +86,8 @@ pub(super) fn rectangle(b: Rect, style: &Resolved) -> Vec<PathCmd> {
     round_rect(b, r)
 }
 
-/// `mxSvgCanvas2D.roundrect` (mxSvgCanvas2D.js 1633-1646) writes `<rect rx ry>`, so the corners
-/// are quarter ellipses, their radii clamped to half the width and height, and no radius is a
-/// plain rectangle. The path follows SVG's own for a rounded `<rect>`.
+/// Match SVG rounded rectangles (`mxSvgCanvas2D.roundrect`): quarter-ellipse
+/// corners with radii capped at half the width and height; zero radius gives a rectangle.
 fn round_rect(b: Rect, r: f64) -> Vec<PathCmd> {
     if r <= 0.0 {
         return rect(b);

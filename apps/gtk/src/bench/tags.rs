@@ -10,14 +10,9 @@ const MARKER: &str = "zzbenchtag";
 /// the query it then runs. A local vault answers all four in a few milliseconds each.
 const SETTLE: Duration = Duration::from_millis(1200);
 
-/// `ACCENT_BENCH_TAGS=<rel_note>` writes `#zzbenchtag` into `<rel_note>`, saves, clicks the tag
-/// in the preview, takes it away and saves again, printing what the Tags section lists at each
-/// step while it is on screen.
-///
-/// `tags_before` must not hold the marker, `tags_added` must, and `tags_removed` must not: that
-/// is the section following the index in both directions without being switched away from and
-/// back. `tags_clicked` must show the section with the marker picked, where `before` picked the
-/// first tag. The note is left exactly as it was found.
+/// `ACCENT_BENCH_TAGS=<rel_note>` adds, saves, clicks and removes `#zzbenchtag`.
+/// Require the marker absent in `tags_before/removed`, present in `tags_added`, and
+/// selected in `tags_clicked`, without reopening the pane. Restore the original note.
 pub(super) fn bench_tags(app: &Rc<App>, rel: &str) {
     app.show_section("tags");
     app.open_path(rel);

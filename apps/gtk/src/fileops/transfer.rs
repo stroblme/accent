@@ -16,13 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// How many file names an upload's toast or dialog spells out before it counts instead.
 const NAMED: usize = 3;
-/// Copy `rel` out of the vault to somewhere on this machine.
-///
-/// Offered on a remote vault only. On a local one the file is already on this disk, where the
-/// file manager reaches it, so a chooser that copied it next to itself would be a way of making
-/// a second copy rather than of getting at the first.
-///
-/// The chooser asks about replacing the file it is pointed at, so nothing here does.
+/// Download a remote vault file to this machine. Local files already reside here and use the
+/// file manager instead. The destination chooser handles replacement confirmation.
 pub fn download(ops: &Rc<Ops>, rel: &str) {
     let name = basename(rel).to_string();
     let dialog = gtk::FileDialog::builder()
@@ -188,15 +183,11 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
     });
 }
 
-/// Carry files and folders from this machine into `dir`, each under a name nothing there holds
-/// yet, and take the originals away where they were cut.
+/// Copy external files or folders into `dir` under free names, removing originals after
+/// successful Cut transfers. Used by paste and external drag-and-drop on local or remote vaults.
 ///
-/// What a paste of files the vault does not hold does, on a local vault as much as on a remote
-/// one, and what a drag from another application onto the tree does: a file outside the vault has
-/// to be copied in either way. It never replaces, where Upload Files… asks about it — an upload
-/// has a chooser to ask in and a paste has nowhere to ask, so a name that is taken gets the same
-/// `(copy)` mark an in-vault paste gets. A folder is walked on this disk and made again in the
-/// vault, file by file ([`Carry`]).
+/// Never overwrite: occupied names gain `(copy)` suffixes. Recreate folders file by file through
+/// [`Carry`].
 pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
     let count = Arc::new(Count::default());

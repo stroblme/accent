@@ -1,20 +1,9 @@
-//! What a Ctrl+click would follow, underlined while Ctrl is held.
+//! Underline Ctrl+click targets while Ctrl is held.
 //!
-//! Ctrl+click has always gone to a definition, but nothing on screen said *where* it would work:
-//! the pointer turned into a hand over a `[[wikilink]]` and over nothing else, so on a source file
-//! every word looked the same as every other and the only way to find out was to click.
-//!
-//! A link is answered from the table the analysis already filled, and a bare URL from the line it
-//! is on, so either underlines on the motion event itself. The table is only the hint: a long note
-//! fills it after a pause in the typing, and the click itself asks the note's provider about the
-//! text as it stands (`App::go_to_definition`).
-//!
-//! A word in code has to be asked about, and the only thing that truly knows is the language
-//! server — underlining every identifier would say nothing, since the question is whether *this*
-//! one leads anywhere. So the pointer resting on a word for [`PROBE`] asks for its definition and
-//! the underline follows the answer. That is one request per word rested on, the same shape as the
-//! hover beside it, and the answer is remembered for as long as the pointer stays inside the word
-//! it was asked about.
+//! Analysed note links and line-local URLs provide immediate hints; clicks query current
+//! text because analysis may lag typing. Code definitions require a language-server probe
+//! after [`PROBE`], avoiding false hints on identifiers with no destination. The result is
+//! cached while the pointer stays in the word.
 
 use super::Tab;
 use crate::lang;
@@ -24,26 +13,23 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
-/// How long the pointer rests on a word before the server is asked whether it leads anywhere.
-/// Below what reads as a delay, and long enough that crossing a line of code does not ask about
-/// every word on the way.
+/// Pointer-rest delay before probing definitions, avoiding requests for
+/// every word crossed without a noticeable hover delay.
 const PROBE: Duration = Duration::from_millis(120);
 
 /// What the Ctrl+hover underline is doing right now.
 #[derive(Default)]
 pub(super) struct Follow {
-    /// The character range the tag is on, so a pointer moving inside it re-tags nothing.
+    /// Tagged character range, avoiding retagging when the pointer stays inside it.
     shown: Option<Range<i32>>,
-    /// The last word the server was asked about and what it said. A pointer wandering inside one
-    /// word asks once; leaving it and coming back asks again, because the file may have changed.
+    /// Last probed word and result. Reuse within the word, but reprobe after
+    /// leaving because the file may have changed.
     asked: Option<(Range<i32>, bool)>,
     /// The pending probe, cancelled whenever the pointer leaves what it was about to ask about.
     probe: Option<glib::SourceId>,
-    /// Bumped whenever the question changes, so an answer that arrives late is dropped rather
-    /// than underlining a word the pointer has already left.
+    /// Probe generation, used to discard answers after the pointer changes target.
     generation: u64,
-    /// Where the pointer was last seen, in the view's coordinates: pressing Ctrl without moving
-    /// has to underline what the pointer is already over.
+    /// Last view coordinates, allowing Ctrl presses to underline without pointer motion.
     pointer: Option<(f64, f64)>,
 }
 
@@ -182,8 +168,8 @@ impl Tab {
         self.view.set_cursor_from_name(Some("text"));
     }
 
-    /// Take the underline off wherever it is. Over the whole buffer rather than the range that was
-    /// stored, because an edit under a held Ctrl moves the tag with the text it is on.
+    /// Clear the underline across the buffer because edits can move tagged text
+    /// beyond the stored range.
     fn untag(&self) {
         let (start, end) = self.buffer.bounds();
         self.buffer.remove_tag(&self.follow_tag, &start, &end);
@@ -210,18 +196,16 @@ impl Tab {
     }
 }
 
-/// The identifier `at` sits in, as a range of buffer character offsets.
-///
-/// The line around the pointer is read out and scanned, so the boundary rule is one pure function
-/// with a test rather than a walk over iterators that needs a display to run.
+/// Find the identifier at `at` as buffer character offsets. Scan its line
+/// with a pure, testable boundary rule instead of display-dependent iterators.
 pub(super) fn word_at(at: &gtk::TextIter) -> Option<Range<i32>> {
     let (base, line) = line_around(at);
     let word = word_bounds(&line, at.line_offset() as usize)?;
     Some(base + word.start as i32..base + word.end as i32)
 }
 
-/// The bare URL `at` sits in, in any text — a code comment, a `.txt`, a note's prose — as a range
-/// of buffer character offsets, and the URL itself.
+/// Find the bare URL at `at` in any text, returning buffer character offsets
+/// and the URL.
 pub(super) fn url_under(at: &gtk::TextIter) -> Option<(Range<i32>, String)> {
     let (base, line) = line_around(at);
     let byte = line.char_indices().nth(at.line_offset() as usize)?.0;
@@ -241,11 +225,10 @@ fn line_around(at: &gtk::TextIter) -> (i32, String) {
     (start.offset(), start.slice(&end).to_string())
 }
 
-/// The `http(s)://` or `mailto:` URL covering byte `at` of `line`, as a byte range.
-///
-/// The terminal's rule (`terminal::LINK`): anything up to a space, a quote or an angle bracket,
-/// less the punctuation that ends the sentence around it. Those three schemes and no others, so
-/// a `file:` path written into a file is never handed to the desktop by a Ctrl+click.
+/// Find an `http://`, `https://` or `mailto:` URL covering byte `at`. Use the
+/// terminal's boundaries (`terminal::LINK`): stop at whitespace, quotes or
+/// angle brackets and trim sentence punctuation. Exclude `file:` paths
+/// from Ctrl-click desktop opening.
 fn url_at(line: &str, at: usize) -> Option<Range<usize>> {
     const SCHEMES: [&str; 3] = ["https://", "http://", "mailto:"];
     let stop = |c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`');
@@ -266,11 +249,9 @@ fn url_at(line: &str, at: usize) -> Option<Range<usize>> {
     None
 }
 
-/// The identifier covering character `at` of `line`, in characters.
-///
-/// Not GTK's own word boundaries: Pango breaks `open_at` into two words, and half an underlined
-/// identifier reads as a mistake. A word here is what a language calls one — letters, digits and
-/// underscores — which is close enough in every language a server answers for.
+/// Find the identifier covering character `at`, using letters, digits and
+/// underscores. Pango word boundaries split `open_at`, producing partial
+/// identifier underlines.
 fn word_bounds(line: &str, at: usize) -> Option<Range<usize>> {
     let part = |c: &char| c.is_alphanumeric() || *c == '_';
     let chars: Vec<char> = line.chars().collect();
@@ -292,8 +273,8 @@ fn word_bounds(line: &str, at: usize) -> Option<Range<usize>> {
 mod tests {
     use super::{url_at, word_bounds};
 
-    /// A bare URL anywhere in a line, a code comment's included, is the whole URL from any byte in
-    /// it, and stops before the punctuation that ends the sentence around it.
+    /// Verify URL detection from any interior byte, including in code comments,
+    /// excludes surrounding sentence punctuation.
     #[test]
     fn a_url_is_found_from_any_byte_in_it() {
         let line = "x = 1  # see https://e.org/a_(b)?q=1#f, then";

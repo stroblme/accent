@@ -1,10 +1,7 @@
-//! What a comparison of any number of columns stands on: one vertical scroll they share, the
-//! padding that keeps row `i` level in every column, the strips between the columns, the buttons
-//! laid over the rows, and the line the reader is on kept where it is while the rows are laid
-//! again.
+//! Shared scrolling and row alignment for any number of comparison columns.
 //!
-//! Knows nothing about diffs. The host — [`super::Compare`] — works out what each row shows in
-//! each column and hands it over as [`Rows`]; everything here is measured from the views.
+//! [`super::Compare`] supplies [`Rows`]; views supply measurements. Padding aligns rows,
+//! connector strips and overlay buttons follow them, and relayout preserves the reading line.
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
@@ -21,19 +18,19 @@ use super::pad::{
 };
 use crate::editor;
 
-/// Where the first hunk lands when a comparison opens, as a fraction of the view's height. A
-/// quarter down rather than at the top, so the lines that lead up to the change are visible too.
+/// Initial first-hunk viewport fraction: one quarter down, leaving
+/// preceding context visible.
 const FIRST_HUNK_AT: f64 = 0.25;
 
 /// Blank space a hidden run leaves behind, for the button that opens it to sit in.
 const GAP_PX: i32 = 28;
-/// How often a relayout asks again for the heights GTK had not validated yet, and how long it
-/// waits between asking: GTK validates a screenful per idle, so a few are enough for any note.
+/// Retry count and interval for heights GTK has not validated. GTK
+/// validates a screenful per idle, so a few retries cover ordinary notes.
 const SETTLE: u8 = 10;
 const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_millis(100);
-/// The least time a pass gives to measuring and padding lines before it leaves the rest to a pass
-/// at idle: see [`Columns::relayout`]. Room for a run of a few hundred lines opened, which 8 ms
-/// split over passes on a busy machine, a row left off level for two frames.
+/// Minimum measurement/padding time per pass before yielding to idle
+/// ([`Columns::relayout`]), avoiding multiple misaligned frames when
+/// opening a few hundred lines on a busy machine.
 const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Where the view is kept until the rows are laid: see [`Columns::keep`].
@@ -46,11 +43,10 @@ pub(super) enum Keep {
     /// Line `.1` of column `.0`, its row `.2` pixels below the top of the view: see
     /// [`Columns::top_line`] and [`Columns::hold_line`].
     Line(usize, usize, i32),
-    /// Line `.1` of column `.0`, its text `.2` pixels below the top of the view where GTK draws
-    /// it: the line the reader's scroll left at the top ([`Columns::let_go`]), or the caret's
-    /// ([`Columns::caret_line`]). Held as a [`Keep::Line`] is, but by its text, which a blank laid
-    /// again above it does not move, and let go where it is once the rows are laid rather than
-    /// put back from the grid.
+    /// Column `.0` line `.1` text at viewport offset `.2`, using GTK positions.
+    /// Anchor reader or caret text ([`Columns::let_go`], [`Columns::caret_line`])
+    /// so changed padding above cannot move it. Release after rows settle
+    /// instead of restoring from the grid.
     Read(usize, usize, i32),
 }
 
@@ -70,9 +66,8 @@ pub(super) struct Rows {
     pub(super) first: Option<usize>,
 }
 
-/// What a relayout measured: every row's natural height per column (`None` where the column has
-/// no visible line), the space every column leaves at a row for a hidden run's button, and where
-/// each row starts in the shared grid.
+/// Measured natural row heights per column (`None` for absent/hidden lines),
+/// hidden-button space and shared-grid row starts.
 #[derive(Default)]
 pub(super) struct Grid {
     #[cfg(feature = "bench")]
@@ -84,10 +79,9 @@ pub(super) struct Grid {
     pub(super) end: i32,
 }
 
-/// What the relayout passes did since the bench last read them ([`Columns::passes`]): how many
-/// ran and what asked for each, the lines measured as [`super::pad::MEASURED`] counts them, the
-/// lines re-padded, the columns read again whole for not adding up, and the milliseconds spent
-/// reading the padding, measuring, padding and in the longest pass.
+/// Relayout counters since [`Columns::passes`]: pass causes, measurement
+/// sources ([`super::pad::MEASURED`]), repadded lines, whole-column fallbacks
+/// and padding-read/measure/pad/longest-pass milliseconds.
 #[cfg(feature = "bench")]
 #[derive(Default)]
 pub(super) struct Passes {
@@ -114,29 +108,25 @@ pub(super) struct Columns {
     /// Per column, its lines' heights as the last passes left them: see [`Columns::relayout`].
     known: Vec<Rc<Known>>,
     pub(super) pending: RefCell<Option<glib::SourceId>>,
-    /// How many more times a relayout that had to estimate a height may ask GTK again. Reset
-    /// by every refresh; a bound, because a line GTK never validates would otherwise be asked
-    /// about forever.
+    /// Remaining retries for estimated GTK heights, reset by refresh. Bound
+    /// them so lines never validated cannot cause infinite relayout.
     settling: Cell<u8>,
     /// Whether the host's rows are waiting for a diff of texts changed since: see
     /// [`Columns::wait`].
     waiting: Cell<bool>,
-    /// Each column's own vertical adjustment, given up for the first column's while the
-    /// comparison lasts and handed back by [`Columns::leave`].
+    /// Original per-column adjustments, replaced by the first column's
+    /// shared adjustment and restored by [`Columns::leave`].
     own: Vec<gtk::Adjustment>,
     /// The bottom margin each view was last given here, and how much of it is the blank under a
     /// column with no line: see [`Columns::page_bottom`].
     bottoms: Vec<Cell<(i32, i32)>>,
-    /// Where the view is kept until a relayout has laid every row, which clears it, or the reader
-    /// scrolls ([`let_go_on_input`]). The first hunk, as the comparison is built: a diff opens on
-    /// what changed rather than on the top of a file whose first difference is four hundred lines
-    /// down. The scroll a run was opened at (see [`Columns::hold_scroll`]). The line the reader's
-    /// scroll left at the top (see [`Columns::let_go`]). After that where the view sits is the
-    /// reader's business.
+    /// Reading position held until relayout completes or [`let_go_on_input`] detects scrolling.
+    ///
+    /// Initially hold the first hunk so comparisons open on changes. Afterwards preserve the
+    /// line or scroll selected by opened runs and reader input.
     pub(super) keep: Cell<Option<Keep>>,
-    /// Whether GTK is stepping the frame's animations, and whether one of them stepped the scroll
-    /// in this frame: a scroll GTK animates moves a kept line along rather than being taken back
-    /// (see [`Columns::hold`]).
+    /// Whether GTK is animating and moved scroll this frame. Animated scroll
+    /// moves a held line instead of being undone ([`Columns::hold`]).
     ticking: Cell<bool>,
     stepped: Cell<bool>,
     /// The frame clock's handlers that hold a kept line, while one is kept.
@@ -162,10 +152,9 @@ impl Drop for Columns {
     }
 }
 
-/// Put `scroller` on `adjustment`. GTK 4.22's `set_vadjustment` leaves the overlay scrollbar's
-/// fade handler, which a realized scroller connects to its adjustment, on the one it leaves; once
-/// the scroller is freed, the next scroll of that adjustment runs the handler on freed memory.
-/// Overlay scrolling switched off and back on around the swap takes the handler along.
+/// Swap `scroller` to `adjustment` with overlay scrolling temporarily off.
+/// GTK 4.22 otherwise leaves its fade handler on the old adjustment,
+/// which can access freed memory after the scroller is disposed.
 fn swap_vadjustment(scroller: &gtk::ScrolledWindow, adjustment: &gtk::Adjustment) {
     let overlay = scroller.is_overlay_scrolling();
     scroller.set_overlay_scrolling(false);
@@ -190,8 +179,8 @@ fn split(roots: &[&gtk::Widget]) -> gtk::Paned {
     paned
 }
 
-/// Where in the grid the buttons are laid for a view `height` tall whose top is at `y`: a page
-/// above and a page below it, so a scroll of less than half a page lays none.
+/// Button grid interval for viewport `y`/`height`, extended one page
+/// above and below to avoid relaying on small scrolls.
 fn near(y: i32, height: i32) -> (i32, i32) {
     (y - height, y + 2 * height)
 }
@@ -208,14 +197,11 @@ pub(super) fn reaching<T>(
     first..items.partition_point(|item| span(item).0 < hi).max(first)
 }
 
-/// The reader scrolling anywhere in `root` — a wheel turn, a page key, Ctrl+Home or Ctrl+End, a
-/// press on a scrollbar or the minimap — ends whatever [`Columns::keep`] holds, which would
-/// otherwise take the scroll back once the rows are laid, and has the line it leaves at the top
-/// held instead, the caret's for Ctrl+Home and Ctrl+End ([`Columns::let_go`]): after the wheel
-/// turn, after the key once GTK's first layout of the lines has made the scroll a key only queues
-/// while they are not laid out, and once the press is let go. Heard in the capture phase, ahead
-/// of the scroll the input makes; the comparison's own scrolls set the adjustment and pass none of
-/// these. The root is the comparison's own, so the controllers go with it.
+/// Release [`Columns::keep`] on reader scroll input and hold the resulting top line instead.
+///
+/// Capture wheel, paging, Home/End and scrollbar/minimap presses before movement. Hold after
+/// the wheel, validated key scroll or press release; Home/End use the caret. Programmatic
+/// adjustment changes emit none of these inputs, so they cannot cancel their own hold.
 fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
     let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -279,8 +265,8 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
     root.add_controller(release);
 }
 
-/// Whether `key` is the reader scrolling: Page Up or Down, but not with Control, which switches
-/// tabs, and Ctrl+Home or Ctrl+End. An arrow that takes the caret past the edge is not.
+/// Recognize Page Up/Down without Ctrl and Ctrl+Home/End as reader scroll.
+/// Ctrl+Page switches tabs; caret-edge arrow scrolls are not handled here.
 fn scrolls(key: gdk::Key, state: gdk::ModifierType) -> bool {
     let control = state.contains(gdk::ModifierType::CONTROL_MASK);
     match key {
@@ -454,9 +440,8 @@ impl Columns {
         self.relayout(false);
     }
 
-    /// Lay nothing until the host lays its rows again: they are for texts that have changed, and
-    /// laid over the new ones they would pad lines that have moved, and settle where the view is
-    /// kept before the rows that keeping is for have come.
+    /// Defer layout until the host refreshes rows after text changes, avoiding
+    /// padding stale line positions or prematurely releasing viewport holds.
     pub(super) fn wait(&self) {
         self.waiting.set(true);
     }
@@ -472,10 +457,9 @@ impl Columns {
         self.keep.set(Some(Keep::Scroll(value)));
     }
 
-    /// The editor's caret line, and how far below the top of the view its text starts, while
-    /// that is on screen, or with `edge` at the edge of the view it is beyond, where a scroll to it
-    /// is headed: held by its text, as the reader's line is ([`Keep::Read`]), which the padding
-    /// laid again above it does not move.
+    /// Find the editor caret line and its GTK text offset while visible,
+    /// or its target view edge with `edge`. Anchor text rather than row
+    /// padding ([`Keep::Read`]) so changing blanks do not move it.
     pub(super) fn caret_line(&self, edge: bool) -> Option<Keep> {
         let mine = self.editable?;
         let (buffer, view) = (&self.panes[mine].buffer, &self.panes[mine].view);
@@ -492,9 +476,8 @@ impl Columns {
             .then_some(Keep::Read(mine, n, at))
     }
 
-    /// A new width rewraps every line, and each view keeps its own top line in place as GTK lays
-    /// them out again, all on the one scroll they share: the line at the top is held instead,
-    /// until the rows have settled at the new width.
+    /// Hold the top line across width changes until rows settle, preventing
+    /// individual columns' rewrap corrections from fighting on a shared scroll.
     fn rewrapped(&self) {
         if self.keep.get().is_none() {
             self.hold(self.top_line(self.editable.unwrap_or(self.panes.len() - 1)));
@@ -502,13 +485,10 @@ impl Columns {
         }
     }
 
-    /// Keep `keep` until the rows are laid, a kept line ([`Keep::Line`], [`Keep::Read`]) held
-    /// again after each layout GTK makes meanwhile, before it is painted: the lines GTK lays out in
-    /// the frame itself move a kept line without moving the scroll. A scroll GTK animates
-    /// meanwhile — a page key's, one to the caret — moves the kept line along instead, through
-    /// the frames it steps the scroll in: GTK steps its animations in a frame's update, which
-    /// [`Columns::ticking`] marks, and any scroll set meanwhile, a step back included, would end
-    /// the animation.
+    /// Retain `keep` until rows settle, restoring kept lines after layout and before paint.
+    ///
+    /// Animated GTK scrolling moves the hold with it. [`Columns::ticking`] marks update-phase
+    /// animation steps so restoring an adjustment cannot cancel an active animation.
     pub(super) fn hold(&self, keep: Option<Keep>) {
         self.keep.set(keep);
         let unhooked = self.hooks.borrow().is_empty();
@@ -561,11 +541,9 @@ impl Columns {
         self.hooks.borrow_mut().extend([before, update, layout]);
     }
 
-    /// The reader's input has ended what the view was kept at, if anything (`let_go_on_input`);
-    /// and once the input has made its scroll, at `after`, the line it left at the top is held
-    /// instead until the rows are laid, or with `caret` the caret's: left to GTK, each column
-    /// keeps its own top line as it lays out the lines above, all on the one scroll they share.
-    /// Nothing kept, nothing to hold: the rows were laid already. Whether something was kept.
+    /// Release a pending hold on reader input, then anchor the resulting
+    /// top line at `after`, or the caret with `caret`. Return whether a hold
+    /// existed; settled rows need no replacement hold.
     fn let_go(&self, after: Option<glib::Priority>, caret: bool) -> bool {
         let kept = self.keep.take().is_some();
         if let (true, Some(after)) = (kept, after) {
@@ -574,11 +552,9 @@ impl Columns {
         kept
     }
 
-    /// Hold the line at the top of the view, or with `caret` the caret's, at `after`, until the
-    /// rows are laid: see [`Columns::let_go`]. The caret's line is held where Ctrl+Home or
-    /// Ctrl+End scrolls it to, and put there at once: held by the top line, the lines laid out
-    /// above it meanwhile left the caret below the view, and a scroll GTK animates to where it
-    /// estimated the caret was ended a few hundred lines short of the end.
+    /// After input at `after`, hold the top or caret line until rows settle
+    /// ([`Columns::let_go`]). Place Home/End caret anchors at their destination
+    /// immediately so lazy GTK estimates cannot leave them short of file end.
     fn hold_after(&self, after: glib::Priority, caret: bool) {
         let w = self.weak.clone();
         glib::idle_add_local_full(after, move || {
@@ -597,9 +573,8 @@ impl Columns {
         });
     }
 
-    /// The line at the top of `column`, and how far below the top of the view its text starts as
-    /// GTK has it laid out: where the reader left it. [`Columns::top_line`] reads the grid
-    /// instead, which is behind GTK while the rows are laid.
+    /// Read the column's top text line and GTK viewport offset, matching
+    /// where the reader left it while [`Columns::top_line`]'s grid is stale.
     fn line_on_top(&self, column: usize) -> Keep {
         let view = &self.panes[column].view;
         let seen = view.visible_rect().y();
@@ -608,12 +583,10 @@ impl Columns {
         Keep::Read(column, line.line() as usize + 1, at)
     }
 
-    /// Where the reader is, as a line of `column`: the one in the row at the top of the view, or in
-    /// the nearest row above it that has one, and how far below the top of the view its row starts.
+    /// Return the reading line in `column` and its row's offset below the viewport top.
     ///
-    /// While a line is kept for rows not laid yet ([`Keep::Line`]), the view is where that line
-    /// puts it in the rows laid since: a tab of two texts reads both again one after the other,
-    /// and the second read kept whatever line the first had left at the scroll meanwhile.
+    /// Use the nearest row above if the top row has no line. Pending [`Keep::Line`] anchors use
+    /// their updated row position so consecutive companion reads preserve the same location.
     pub(super) fn top_line(&self, column: usize) -> Option<Keep> {
         let (rows, grid) = (self.rows.borrow(), self.grid.borrow());
         let lines = rows.lines.get(column)?;
@@ -643,15 +616,11 @@ impl Columns {
         }
     }
 
-    /// Scroll so line `n` of `column` starts `at` pixels below the top of the view where GTK has
-    /// it now, which is where it is drawn: what keeps a kept line on screen while the rows are
-    /// laid. GTK lays out the lines that opened, hid or grew above it a few at a time, and keeps
-    /// each view's own top line in place as it does, all on the one scroll they share; a scroll
-    /// held where it was showed the lines above for as long as that took. The line starts where
-    /// its row does, below the blank above it, which levels the rows before it ([`Keep::Line`],
-    /// read off the rows), or with `text` where its text does: the reader's line ([`Keep::Read`])
-    /// stays where it was seen however the blank above it is laid. Held at the blank's top, a
-    /// line kept in a column that has one stood that much too low until the rows were laid.
+    /// Place line `n` of `column` at viewport offset `at` using its current GTK position.
+    ///
+    /// Shared adjustments and lazy validation can move lines during relayout. Row anchors
+    /// ([`Keep::Line`]) include padding; reader anchors ([`Keep::Read`]) use text when `text` is
+    /// set, preserving the visible line even while blank space changes.
     fn hold_line(&self, column: usize, n: usize, at: i32, text: bool) {
         let pane = &self.panes[column];
         let Some(line) = pane.buffer.iter_at_line(n as i32 - 1) else {
@@ -679,14 +648,10 @@ impl Columns {
         }
     }
 
-    /// Put row `row` `at` pixels below the top of the view, from the rows the last relayout
-    /// measured, and let the view go. Every pane shares the vertical adjustment, so setting it
-    /// scrolls them all.
+    /// Place `row` at viewport offset `at` from the measured grid, then release its hold.
     ///
-    /// The grid rather than GTK's own figures, and not before the relayout: GTK lays lines out
-    /// lazily and the padding just laid is not in its figures yet, so a `scroll_to_mark` made as
-    /// the comparison opened landed wherever the estimates put the line, which in a long file
-    /// with its unchanged runs folded away was nowhere near it.
+    /// The shared adjustment scrolls every column. Use the relayout grid rather than lazy GTK
+    /// figures, which may not include newly applied padding.
     fn reveal(&self, row: usize, at: f64) {
         let Some(top) = self.grid.borrow().tops.get(row).copied() else {
             return;
@@ -698,8 +663,7 @@ impl Columns {
         adj.set_value(adj.value() + f64::from(top - seen.y()) - at);
     }
 
-    /// Everything of the layout off every pane: what leaving a comparison does before the panes
-    /// part, once the host has taken its own tags off.
+    /// Remove shared layout before panes separate, after host tags are cleared.
     pub(super) fn leave(&self) {
         for pane in &self.panes {
             let (start, end) = pane.buffer.bounds();
@@ -734,11 +698,10 @@ impl Columns {
         }
     }
 
-    /// Put the editor's page on the companions beside it: the margins, so the first row of each
-    /// starts level, the line spacing, and the tab width the Indent Width preference sets. The
-    /// heading markers hang in the left margin and are measured in the font, so they are hung
-    /// again where the margin moves and, with `refont`, after a font change, which only the
-    /// editor's tab hears of. The bottom margin is [`Columns::relayout`]'s.
+    /// Copy editor margins, spacing and tab width to companion columns for
+    /// aligned first rows. Remeasure heading markers after margin changes
+    /// and, with `refont`, editor font changes. Bottom margin remains owned
+    /// by [`Columns::relayout`].
     pub(super) fn follow_editor(&self, refont: bool) {
         let Some(mine) = self.editable else {
             return;
@@ -762,9 +725,8 @@ impl Columns {
         }
     }
 
-    /// The bottom margin the page gives `column`, without the blank a relayout left under a column
-    /// with no line: the editor's own, which a companion beside it takes as well. A margin
-    /// someone else has set since — the zoom — is the page's whole.
+    /// Page bottom margin excluding comparison blank space. Use the editor's
+    /// margin for companions; adopt externally changed margins, such as zoom.
     fn page_bottom(&self, column: usize) -> i32 {
         let column = self.editable.unwrap_or(column);
         let (set, blank) = self.bottoms[column].get();
@@ -778,9 +740,8 @@ impl Columns {
         self.bottoms[column].set((page + blank, blank));
     }
 
-    /// Lay the buttons — a hidden run's in every column, a band's in its strip — on the rows
-    /// [`near`] the view, and hide the rest: a long file's thousands, laid and placed all at once,
-    /// held the main loop for seconds.
+    /// Lay hidden-run and strip buttons only [`near`] the view, hiding others
+    /// to avoid main-loop stalls from thousands of offscreen hunks.
     fn lay_buttons(&self) {
         let (rows, grid) = (self.rows.borrow(), self.grid.borrow());
         // Nothing laid yet.
@@ -814,9 +775,8 @@ impl Columns {
         self.links.claim(self, lo, hi);
     }
 
-    /// Lay the buttons again once the view has come within half a page of the edge of what they
-    /// were laid for, from an idle, as the strips' are placed (see [`Links::relaid`]): the view
-    /// moves inside GTK's own layout too.
+    /// Queue an idle button relayout when scrolling within half a page of
+    /// the prior interval edge, avoiding GTK layout reentrancy ([`Links::relaid`]).
     fn follow_view(&self) {
         let seen = self.panes[0].view.visible_rect();
         let ((lo, hi), half) = (self.laid_for.get(), seen.height() / 2);
@@ -914,32 +874,16 @@ impl Columns {
         *self.pending.borrow_mut() = Some(id);
     }
 
-    /// Measure the rows in every column and pad the shorter ones, then put the buttons where the
-    /// rows now are. Idempotent: a row whose padding has not changed is left alone, so a pass
-    /// that finds nothing to do invalidates nothing and the layout settles.
+    /// Measure and pad comparison rows, position buttons and preserve the reading anchor.
     ///
-    /// Only the lines something has changed since are measured ([`Known`]): the rest keep their
-    /// figures, which a pass over 120,000 rows read again for 20 ms to 3 s on every lay and
-    /// keystroke, and in layouts of its own for seconds after one (2026-10-10). A line's figure is
-    /// GTK's once GTK has laid the line out; until then — its text, its tags or the column's
-    /// layout changed, its padding moved, shown again — it is pending. A `fresh` pass, run from an
-    /// idle, comes after GTK's own layout idles, so GTK's figure for a pending line is current. A
-    /// pass a lay runs comes before them: there a pending line keeps the figure it had, as an
-    /// estimate, and is asked about again. A line with no figure at all is measured as
-    /// [`measure`] does, in a layout of its own where GTK has none yet.
+    /// Unchanged padding stays untouched so repeated passes settle without invalidating layout.
+    /// [`Known`] caches unchanged line heights. Pending lines keep estimates until a `fresh`
+    /// pass after GTK layout idles; unmeasured lines use [`measure`]. Fresh passes also compare
+    /// column totals with GTK and re-read mismatches to catch missed or stale validation.
     ///
-    /// GTK can still hold a line at a height from before after its idles, though — the first pass
-    /// over a new comparison found the companion's first line at the old height, GTK laying it
-    /// out again only once the pass had re-padded other lines — and a change may go unheard. So
-    /// a fresh pass checks that each column adds up to what GTK has laid out, and reads the whole
-    /// column again where it does not.
-    ///
-    /// A pass measures and pads for half as long as reading the padding took, or [`SLICE`], the
-    /// rows within a page of the view first, then those above them, which put them where they are:
-    /// a line left over keeps the figure it had, or stands at [`one_line`], and keeps its padding,
-    /// and a pass at idle goes on from there. Showing all of 120,000 rows measured 220,000 lines in
-    /// layouts of their own and re-padded 96,000 in one pass of 15 s (2026-10-10); left over, GTK
-    /// lays them out in its own idles, which come first, and the passes after read its figures.
+    /// Limit work to half the padding-read time or [`SLICE`], prioritising the viewport and rows
+    /// above it. Deferred lines retain prior heights or [`one_line`] estimates and padding;
+    /// idle passes continue after GTK's own layout work, avoiding long synchronous full-file passes.
     fn relayout(&self, fresh: bool) {
         #[cfg(feature = "bench")]
         let why = match fresh {

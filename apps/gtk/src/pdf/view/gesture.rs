@@ -438,12 +438,9 @@ impl PdfView {
         }
     }
 
-    /// Like [`PdfView::page_point`], but for a point that is off the paper: the gap between two
-    /// pages, or the margin beside one.
-    ///
-    /// A drag has to keep working there, and it does not need clamping to do so — the page's own
-    /// coordinates simply run negative or past its height, and picking the glyph nearest such a
-    /// point is what a drag off the bottom of a page means anyway.
+    /// Map off-paper points to page coordinates for selection drags through margins and gaps.
+    /// Coordinates may be negative or exceed page height; nearest-glyph lookup anchors them
+    /// without clamping.
     fn nearest_page_point(&self, x: f64, y: f64) -> Option<(usize, (f32, f32))> {
         let (cx, cy) = self.content_at(x, y);
         let layout = self.imp().layout.borrow();
@@ -481,10 +478,8 @@ fn piece_of(
     }
 }
 
-/// Whether the event in hand is a stylus's, its tip or its eraser. A pen is known by its tool: on
-/// Wayland a tablet's events arrive on a logical device whose source is a mouse, and only the tool
-/// says otherwise. X11 without libwacom has no tool, and there the device's source is what says
-/// pen.
+/// Detect stylus tip or eraser events. Wayland exposes tablets as logical mouse devices, so use
+/// the tool; X11 without libwacom falls back to device source.
 fn from_stylus(controller: &impl IsA<gtk::EventController>) -> bool {
     controller
         .current_event()

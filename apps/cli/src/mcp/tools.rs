@@ -277,12 +277,11 @@ impl Server {
         .await
     }
 
-    /// A question about the vault answered in one call: start here. `query` takes plain words,
-    /// names, vault paths, `[[links]]` and `#tags` in any mix; the answer is markdown, the files
-    /// it is about best first, each with its outline, the links going out of it and coming in,
-    /// and the sections holding the words verbatim as `<line>\t<text>`, the rest named below
-    /// them. A query that is one path or one link answers with that file's whole card. Callers
-    /// and callees go by name; `precise` asks the language server instead, slower on first use.
+    /// Explore a vault question using words, names, paths, `[[links]]` and `#tags`. Returns
+    /// ranked Markdown file cards with outlines, links, backlinks and matching sections quoted
+    /// as `<line> <text>`, then names omitted files. A path or link alone returns that file's
+    /// whole card. Calls use name matching unless `precise` requests the language server, which
+    /// may be slower on first use.
     #[tool(annotations(read_only_hint = true))]
     async fn explore(
         &self,

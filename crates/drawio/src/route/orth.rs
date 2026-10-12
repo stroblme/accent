@@ -141,10 +141,9 @@ fn reverse_port_constraints(constraint: u32) -> u32 {
         | ((constraint & EAST) >> 3)
 }
 
-/// draw.io's default router. Each end leaves its terminal by a side, the one a fixed end sits
-/// on or else one facing the other terminal, with a jetty; the route pattern for the pair of
-/// sides then joins the jetties around both terminals. With waypoints, or fixed ends closer than
-/// the two jetties, SegmentConnector routes instead.
+/// Route through terminal-side jetties using draw.io's default orthogonal patterns.
+/// Fixed ends select their side; floating ends face the other terminal. Fall back
+/// to SegmentConnector for waypoints or fixed ends closer than the two jetties.
 // mxEdgeStyle.OrthConnector, mxEdgeStyle.js 1072-1646
 pub(super) fn orth_connector(
     state: &State,

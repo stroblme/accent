@@ -1,6 +1,6 @@
-//! The files in the folders git ignores, which the index never walks ([`walk::ignored_files`]):
-//! the notes among them listed by Go to File and `[[` completion, and every one of them looked
-//! for by a link the index calls dangling before it is one.
+//! Cache files in gitignored folders ([`walk::ignored_files`]). Offer ignored
+//! notes in Go to File and link completion, and resolve targets outside the
+//! index before declaring them missing.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,8 +52,8 @@ impl Listing {
     }
 }
 
-/// A vault's [`Listing`], kept between walks: Go to File opening walks again, and everything else
-/// takes the last walk's.
+/// Cache a vault's [`Listing`]. Opening Go to File refreshes it; other
+/// consumers reuse the last walk.
 pub(crate) struct Ignored {
     root: PathBuf,
     listing: Mutex<Option<Arc<Listing>>>,
@@ -67,8 +67,8 @@ impl Ignored {
         }
     }
 
-    /// The listing, walked now when `fresh` or when there has been no walk yet. The lock is not
-    /// held across the walk, so nobody asking for the kept one waits on a fresh one.
+    /// Return the cached listing, walking if `fresh` or uninitialized. Release
+    /// the lock during walks so cached readers do not wait on refreshes.
     pub(crate) fn listing(&self, fresh: bool) -> Arc<Listing> {
         if !fresh && let Some(listing) = locked(&self.listing).as_ref() {
             return listing.clone();

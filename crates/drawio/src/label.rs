@@ -1,10 +1,8 @@
-//! Label text. A draw.io label is either plain text or, with `html=1`, a small HTML fragment;
-//! both become [`Run`]s for drawing, and both go to and from Markdown for editing.
+//! Convert plain and HTML labels into drawing [`Run`]s and editable Markdown.
 //!
-//! The HTML is read tolerantly, the way a browser draws it: nothing here fails, and markup that
-//! makes no sense is kept as text. The Markdown is the small subset the label editor offers
-//! (bold, italic, underline, bullets and formulas), and [`markdown_to_html`] writes only tags
-//! that [`html_to_runs`] reads back.
+//! HTML parsing tolerates malformed markup as text. The editor supports bold, italic,
+//! underline, bullets and formulas; [`markdown_to_html`] emits only tags that
+//! [`html_to_runs`] can read back.
 
 use crate::model::attr;
 use crate::style::Color;
@@ -103,9 +101,9 @@ pub fn html_to_runs(html: &str, math: bool) -> Vec<Run> {
     if math { find_math(runs) } else { runs }
 }
 
-/// `html` cut into its markup and its text, in order and each piece as written, `true` marking
-/// text: the same reading [`html_to_runs`] makes, for a rewrite that changes a label's text and
-/// keeps its tags (`crate::text::edit_labels`). A script or a style is markup, content and all.
+/// Split HTML into original markup and text chunks (`true` marks text) so label
+/// rewrites preserve tags (`crate::text::edit_labels`). Scripts and styles, including
+/// their contents, count as markup.
 pub(crate) fn html_pieces(html: &str) -> Vec<(bool, &str)> {
     let mut pieces: Vec<(bool, &str)> = Vec::new();
     let (mut rest, mut text_from) = (html, 0);
@@ -211,11 +209,10 @@ pub fn to_markdown(label: &str, html: bool) -> String {
     }
 }
 
-/// Markdown from the label editor as the HTML a label is stored in (`html=1`). Lines are joined
-/// with `<br>`, lines starting `- ` or `* ` become a list, and emphasis becomes `<b>` and `<i>`;
-/// `<u>` passes through, formulas are kept as written and everything else is text. Only `<b>`,
-/// `<i>`, `<u>`, `<br>`, `<ul>` and `<li>` are written, so [`html_to_runs`] reads back what the
-/// editor showed.
+/// Convert editor Markdown to HTML (`html=1`): lines become `<br>`, `- ` and `* `
+/// items become lists, emphasis becomes `<b>`/`<i>`, and `<u>` and formulas pass
+/// through. Everything else is text. Emit only `<b>`, `<i>`, `<u>`, `<br>`, `<ul>` and
+/// `<li>` so [`html_to_runs`] can reproduce the edited label.
 pub fn markdown_to_html(md: &str) -> String {
     let lines = md_lines(md);
     let mut html = String::new();
@@ -497,9 +494,9 @@ enum Item<'a> {
     Other(&'a Run),
 }
 
-/// `\(…\)` and `$$…$$` as [`Run::Math`], wherever the delimiters fall among the runs. The
-/// marks inside a formula are dropped and a break in it is a space, as MathJax takes a `<br>`
-/// there. An opener without a closer stays text.
+/// Extract formulas into [`Run::Math`] even when delimiters span runs. Drop formula
+/// formatting and replace internal breaks with spaces, as MathJax handles `<br>`.
+/// Unclosed delimiters remain text.
 fn find_math(runs: Vec<Run>) -> Vec<Run> {
     let mut items = Vec::new();
     for run in &runs {
@@ -548,8 +545,8 @@ fn find_math(runs: Vec<Run>) -> Vec<Run> {
     out
 }
 
-/// Text with its bold, italic and underline markers. Whitespace at its edges goes outside them,
-/// where CommonMark needs it for the markers to count.
+/// Wrap text in emphasis markers, keeping edge whitespace outside them as
+/// CommonMark requires.
 fn emphasize(out: &mut String, text: &str, marks: &Marks) {
     let stars = match (marks.bold, marks.italic) {
         (true, true) => "***",
@@ -575,8 +572,7 @@ fn emphasize(out: &mut String, text: &str, marks: &Marks) {
     out.push_str(&text[text.trim_end().len()..]);
 }
 
-/// Text as Markdown that [`markdown_to_html`] reads back as the same text: what it would take
-/// for markup gets a backslash.
+/// Escape Markdown syntax so [`markdown_to_html`] preserves the literal text.
 fn escape_markdown(out: &mut String, text: &str) {
     for (i, c) in text.char_indices() {
         let line_start = out.is_empty() || out.ends_with('\n');

@@ -1,14 +1,8 @@
-//! The one fuzzy matcher: what every list narrowed by a typed query asks.
+//! Shared fuzzy matching for consistent desktop and Android rankings.
 //!
-//! Three callers ask it. The desktop palette and the Android file switcher rank a whole corpus
-//! with [`rank`], which is why they offer the same note first for the same query. The note
-//! completion and the completion popup score one candidate at a time with [`Query::as_typed`],
-//! because they order their rows by rules of their own — what starts with the query first — and
-//! because what is typed there is one word being written rather than a search.
-//!
-//! `nucleo-matcher` is fzf's algorithm as a library: a subsequence match with bonuses for word
-//! and path-segment starts, so `dpwk` finds `deep-work.md` and a contiguous match outscores a
-//! scattered one.
+//! [`rank`] orders whole corpora; completions use [`Query::as_typed`] and apply their own
+//! ordering. `nucleo-matcher` rewards word and path starts and contiguous matches, so `dpwk`
+//! finds `deep-work.md`.
 
 use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -91,19 +85,13 @@ impl Query {
     }
 }
 
-/// Indices of `haystacks` that match `query`, best first. Ties keep corpus order.
+/// Indices matching `query`, best first; score ties retain corpus order.
 ///
-/// A haystack whose *last segment* matches leads, because a query is nearly always the name of
-/// the thing and only rarely the folder it sits in: for "tes", `test.md` comes before `tes/t.md`.
-/// The whole path is still matched — it is what lets a folder narrow a search — it just sorts
-/// below. A haystack with no delimiter is its own last segment, so a list of labels is
-/// unaffected.
+/// Last-segment matches precede whole-path-only matches because queries usually name the file,
+/// e.g. `test.md` precedes `tes/t.md` for "tes". Labels without a delimiter form one segment.
 ///
-/// `recent` is either empty or one entry per haystack, holding how recently it was used — 0 for
-/// the most recent. Inside each of the two tiers anything used before leads, in use order, and
-/// the rest follow by score: a command run twice is what the user means by that half-typed
-/// query, however well something else scores. This is VS Code's quick-open behaviour. Where the
-/// recency comes from is the caller's business; that it outranks the score is not.
+/// `recent` is empty or has one entry per haystack, with 0 most recent. Within each tier,
+/// previously used entries lead in recency order; unused entries follow by score.
 pub fn rank(
     haystacks: &[String],
     recent: &[Option<usize>],

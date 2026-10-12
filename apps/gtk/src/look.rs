@@ -1,12 +1,11 @@
-//! How an image is shown under the theme: recoloured onto the page's paper and ink when it reads
-//! as a document, as it is when it does not, and onto the other half's page once the reader
-//! inverts it, as a PDF page is. With images left alone in Preferences, every image shows as it
-//! is and an inverted one goes onto the theme's page.
+//! Apply the same image appearance in tabs and previews.
 //!
-//! The image tab and the preview both come through here, so a figure looks the same in either.
-//! The decision is [`Look::palette`], snapshotted on the main thread where the theme lives; the
-//! decoding, the classifying and the recolouring run on a worker ([`show`], [`serve`]), with
-//! GDK's own decoders and `accent_core::recolour`.
+//! Theme recolouring puts document-like images on the page's paper and ink, leaving photos
+//! unchanged. Inversion uses the opposite theme half, as PDF pages do. Disabling recolouring
+//! leaves images unchanged and puts inverted images on the theme page.
+//!
+//! [`Look::palette`] snapshots the theme on the main thread; workers decode, classify and
+//! recolour through GDK and `accent_core::recolour` ([`show`], [`serve`]).
 
 use std::cell::{Cell, OnceCell};
 use std::collections::HashMap;
@@ -59,12 +58,11 @@ impl Look {
         }
     }
 
-    /// The paper and ink to recolour an image onto, or `None` to show it as it is.
+    /// Return recolouring paper and ink, or `None` to show the image unchanged.
     ///
-    /// The rule every recoloured file follows (`accent_core::recolour::onto`), with one say of the
-    /// image's own: the theme's recolouring takes a document and leaves a photo alone, while an
-    /// inverted image goes where the rule says whatever it shows — with images recoloured, under
-    /// Dark, whose other half is Light, it shows as it is.
+    /// Theme recolouring affects documents, leaving photos alone. Inversion applies
+    /// `accent_core::recolour::onto` regardless of content; Dark's opposite Light half shows
+    /// images unchanged when recolouring is enabled.
     pub fn palette(&self, document: bool, inverted: bool) -> Option<Page> {
         let own = self.theme.filter(|_| document || inverted);
         recolour::onto(self.images, inverted, own, self.opposite)
@@ -95,9 +93,7 @@ pub struct Shown {
     /// restyle draws again from its text, so it is held only as shown.
     pub original: Option<gdk::Texture>,
     pub texture: gdk::Texture,
-    /// The size an SVG is shown at, its own, which its texture has more pixels than: it is drawn
-    /// at the display's scale and at a zoom past 100 %. `None` for a raster, which has only its
-    /// own pixels.
+    /// SVG logical size, distinct from texture pixels rendered for display scale and zoom. `None` for rasters.
     pub size: Option<(i32, i32)>,
 }
 
@@ -111,10 +107,8 @@ impl Shown {
     }
 }
 
-/// The zoom an image is drawn at while its picture is zoomed to `zoom`, `None` being fitted: an
-/// SVG's past 100 %, so a deep zoom stays sharp, as far as [`MAX_ZOOMED`] lets one of `size`
-/// (its own, once known) go at `scale`. A raster has only its own pixels, and anything fitted or
-/// zoomed out is drawn at its own size and shown smaller.
+/// Choose SVG render zoom above 100 %, capped by [`MAX_ZOOMED`] at display `scale`.
+/// Fit and zoomed-out views render at intrinsic size; rasters have only their original pixels.
 pub fn drawn_zoom(path: &Path, zoom: Option<f64>, size: Option<(i32, i32)>, scale: i32) -> f64 {
     match (svg(path), zoom) {
         (true, Some(zoom)) => size.map_or(zoom.max(1.0), |size| capped(zoom, size, scale)),
@@ -149,9 +143,8 @@ pub fn show(
     })
 }
 
-/// [`show`] for an SVG, drawn again from its text every time, at the display's scale as GTK draws
-/// one: it is recoloured as a vector, through a filter, and a drawing costs little. The plain
-/// drawing is made only where it is the one shown: another at a deep zoom is 64 MB more.
+/// Render SVG text through a vector recolouring filter at display scale.
+/// Create a plain texture only when shown to avoid another large allocation at deep zoom.
 fn show_svg(
     path: &Path,
     look: Look,
@@ -177,9 +170,8 @@ fn show_svg(
     })
 }
 
-/// The most pixels an SVG is drawn at for a zoom: 16 megapixels, 64 MB, about twice a 4K
-/// display's. A deeper zoom into a larger drawing enlarges that rather than drawing it at any
-/// size; the display's scale alone is never cut.
+/// SVG zoom budget: 16 megapixels or 64 MB. Beyond it, enlarge the existing render.
+/// Display scale alone is never reduced.
 const MAX_ZOOMED: f64 = 16e6;
 
 /// `zoom`, at least 1, as far as [`MAX_ZOOMED`] lets a drawing of `size` go at `scale`.
@@ -188,8 +180,7 @@ fn capped(zoom: f64, (width, height): (i32, i32), scale: i32) -> f64 {
     zoom.min((MAX_ZOOMED / pixels).sqrt()).max(1.0)
 }
 
-/// An SVG drawn at `scale` times its own size, through gdk-pixbuf, as GTK draws a picture's, and
-/// `zoom` times that as far as [`MAX_ZOOMED`] goes; with that own size.
+/// Rasterise an SVG through gdk-pixbuf at display `scale` and capped `zoom`, returning its intrinsic size.
 fn rasterise(svg: &[u8], scale: i32, zoom: f64) -> Result<(gdk::Texture, (i32, i32)), glib::Error> {
     let loader = gdk_pixbuf::PixbufLoader::new();
     let size = Rc::new(Cell::new((0, 0)));
@@ -225,9 +216,8 @@ pub enum Served {
     Bytes(glib::Bytes, &'static str),
 }
 
-/// [`show`] for the preview: only an image that is recoloured, that its EXIF turns where WebKit
-/// would not, or that WebKit cannot draw (a TIFF), is decoded and encoded again, as a PNG;
-/// everything else, and anything that fails on the way, is served as the file.
+/// Serve preview images unchanged unless recolouring, EXIF correction or unsupported formats require PNG.
+/// Failures fall back to the original file.
 pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
     if svg(path) {
         return match look
@@ -301,9 +291,8 @@ fn tag(path: &Path) -> u8 {
     std::fs::File::open(path).map_or(1, |mut file| orientation::read(&mut file))
 }
 
-/// What is left of a TIFF's `tag` once GDK has decoded it. GDK hands a TIFF that is not upright
-/// to libtiff's `TIFFReadRGBAImageOriented`, which does the tag's mirroring but not its quarter
-/// turn: 2 to 4 come out upright, and 5 to 8 wanting a turn about one diagonal or the other.
+/// Remaining TIFF orientation after libtiff decoding: tags 2–4 are upright, 5–8 still need diagonal turns.
+/// `TIFFReadRGBAImageOriented` performs mirroring but not the required quarter turn.
 fn after_libtiff(tag: u8) -> u8 {
     match tag {
         5 | 7 => 5,
@@ -331,8 +320,8 @@ impl Pixels {
     }
 }
 
-/// A raster image recoloured as `look` asks, or `None` to show it as it is. `decode` is asked for
-/// the image only when the answer turns on what it shows or it is to be recoloured, and once.
+/// Recolour a raster for `look`, or return `None` to preserve it.
+/// Decode at most once and only when classification or recolouring needs pixels.
 fn recoloured(
     path: &Path,
     look: Look,
@@ -407,8 +396,7 @@ fn classified(path: &Path, measure: impl FnOnce() -> Option<Verdict>) -> Option<
     Some(verdict)
 }
 
-/// Every verdict this process has taken, by the file's path on this machine. Process-wide, so the
-/// tab and the preview classify a file once between them.
+/// Process-wide file-classification cache shared by image tabs and previews.
 fn verdicts() -> &'static Mutex<HashMap<PathBuf, (Stamp, Verdict)>> {
     static VERDICTS: OnceLock<Mutex<HashMap<PathBuf, (Stamp, Verdict)>>> = OnceLock::new();
     VERDICTS.get_or_init(Mutex::default)
@@ -497,8 +485,7 @@ mod imp {
 }
 
 glib::wrapper! {
-    /// A texture of more pixels than it is to be shown at, sized as it is to be shown: GTK's own
-    /// `GtkScaler`, which it keeps private.
+    /// Show a high-resolution texture at its logical size, matching GTK's private GtkScaler.
     pub struct Scaled(ObjectSubclass<imp::Scaled>) @implements gdk::Paintable;
 }
 
@@ -525,9 +512,8 @@ pub(crate) mod tests {
     const CREAM: Page = ([253, 246, 227], [101, 123, 131]);
     const NIGHT: Page = ([0, 43, 54], [131, 148, 150]);
 
-    /// The PDF's rule: the theme recolours a document, and inverting puts any image on the other
-    /// half's page, or shows it plain where that half has none. Only a page that is not the
-    /// window's own gets its transparent parts filled.
+    /// Verify document recolouring, opposite-half inversion and transparent-paper filling.
+    /// Only pages differing from the window background fill transparent areas.
     #[test]
     fn a_theme_recolours_a_document_and_inverting_takes_the_other_half() {
         let light = Look {

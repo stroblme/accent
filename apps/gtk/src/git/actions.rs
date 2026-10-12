@@ -1,8 +1,7 @@
-//! What the pane writes: commit, sync, the branch commands, and staging.
+//! Run commit, sync, branch and staging commands off the main thread, then refresh.
 //!
-//! Every one of them runs off the main thread and refreshes when it lands. A refusal is the
-//! user's answer, so it is said in the wording the rest of the window uses — `Cannot <what>:
-//! <why>` — and only a transcript worth reading whole gets a dialog.
+//! Failures use the window's `Cannot <what>: <why>` wording; dialogs are reserved for
+//! transcripts that need to be read in full.
 
 use super::changes::Section;
 use super::*;
@@ -20,14 +19,9 @@ pub(super) enum Fail {
 }
 
 impl Panel {
-    /// Run one git command on the selected repository off the main thread, say what happened, and
-    /// refresh.
-    ///
-    /// `what` is the verb phrase a refusal is reported with — "commit", "switch to main" — so
-    /// every failure here reads `Cannot <what>: <why>`, the wording the rest of the window uses.
-    /// `sync` marks the job as the sync, the one transfer the user waits on: the Sync button gives
-    /// way to a spinner while it runs, and [`Hooks::syncing`] greys the status bar's branch for
-    /// the same span.
+    /// Run a command on the selected repository off the main thread, report its result and
+    /// refresh. `what` completes `Cannot <what>: <why>`. `sync` shows the Sync spinner and
+    /// disables the status-bar branch through [`Hooks::syncing`].
     fn command(
         self: &Rc<Self>,
         what: String,
@@ -160,9 +154,8 @@ impl Panel {
         }
     }
 
-    /// Say why a command did not run. One toast in the window's own wording where git answered in
-    /// one line, and a dialog only where it said more than that: what `git push` puts on stderr is
-    /// the whole answer to "why did it not go", and it is too long to let scroll past.
+    /// Report one-line git refusals in a toast and longer output in a dialog, retaining the full
+    /// transfer explanation.
     fn failed(&self, what: &str, message: &str) {
         if message.lines().count() < 2 {
             return (self.hooks.toast)(&format!("Cannot {what}: {}", reason(message)));
@@ -318,12 +311,8 @@ impl Panel {
         );
     }
 
-    /// Switch the selected repository to a local branch.
-    ///
-    /// Whether that is safe is git's call: it refuses where a checkout would overwrite work that
-    /// is not committed, and that refusal is one line, so it is a toast. The refresh that follows
-    /// puts the chooser back on whatever HEAD actually is, so a refused switch does not leave it
-    /// naming a branch we are not on.
+    /// Switch local branches, letting git reject changes that would overwrite uncommitted work.
+    /// Refresh the chooser afterward so a refused switch still shows the actual HEAD.
     pub(super) fn checkout(self: &Rc<Self>, branch: String) {
         // The row a detached HEAD adds to the list is a readout, not a branch to switch to.
         if !self.state.borrow().branches.local.contains(&branch) {
@@ -358,14 +347,9 @@ impl Panel {
         );
     }
 
-    /// Branch from HEAD and switch to it in one step, which is `git switch -c`: no base picker,
-    /// because the base a reader means is the state they are looking at.
-    ///
-    /// What git would refuse in a name becomes a dash, as VS Code makes it one
-    /// ([`git::branch_name`]), and the line under the field says what will be created whenever
-    /// that is not what was typed. One already taken and a worktree the switch would clobber are
-    /// git's refusals, and they come back through [`Panel::command`], which also brings the
-    /// refresh.
+    /// Create and switch to a branch from HEAD. Normalise unsupported name characters through
+    /// [`git::branch_name`] and preview the resulting name. Git validates collisions and
+    /// worktree safety; [`Panel::command`] reports refusals and refreshes.
     pub fn create_branch(self: &Rc<Self>) {
         self.branch_menu.popdown();
         let entry = dialogs::name_entry("Branch name", "");
@@ -639,11 +623,8 @@ impl Panel {
         );
     }
 
-    /// Put HEAD on one commit, detached, so the repository can be read at that point.
-    ///
-    /// No confirmation, for the reason [`Panel::checkout`] gives: `git switch --detach` refuses
-    /// where it would clobber uncommitted work, and that refusal is the whole answer. The refresh
-    /// that follows puts `Detached at …` in the branch button and the status bar.
+    /// Check out a commit with detached HEAD. Git refuses unsafe worktree overwrites, so no
+    /// separate confirmation is needed. Refresh the branch readouts afterward.
     pub(super) fn detach(self: &Rc<Self>, oid: String) {
         let asked = oid.clone();
         self.command(
@@ -779,15 +760,12 @@ impl Panel {
             .collect()
     }
 
-    /// Discarding is the one thing here that loses work, so it asks first (DESIGN.md, States).
+    /// Confirm Discard because it loses work (DESIGN.md, States). `folder` selects a folder or
+    /// the whole section (`""`); `None` selects one file.
     ///
-    /// `folder` is the folder row it was asked from, whose `entries` are every one under it, or
-    /// `""` for the Changes header's Discard All and every entry of the section; a file's own row
-    /// passes `None` and itself. An untracked file has nothing in the index to go back to, so what
-    /// "discard" means for it is that the file itself goes — to the trash, which is at least
-    /// recoverable, and all of a folder's in one go: a folder holding nothing tracked goes whole
-    /// ([`Panel::trash_untracked`]). A remote vault has no trash, so there it is deleted, which
-    /// this one question says, and nothing asks again.
+    /// Restore tracked files from the index. Trash untracked paths, with wholly untracked
+    /// folders handled together by [`Panel::trash_untracked`]. Remote vaults delete permanently;
+    /// this confirmation states that and no second question is shown.
     pub(super) fn discard(self: &Rc<Self>, folder: Option<&str>, entries: Vec<Entry>) {
         let Some(repo) = ({
             let state = self.state.borrow();
@@ -879,11 +857,9 @@ fn to_trash(named: Vec<String>, listed: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// What the Discard confirmation says will happen. A file's own row names the file; a folder's
-/// names the folder and how many files of each kind it takes, the ones that go back to the index
-/// and the untracked ones that go to the trash, and how many repositories of their own it leaves
-/// alone; Discard All, the folder `""`, says the same of the whole section. Where there is no
-/// `trash` (a remote vault) the untracked files are deleted permanently, and it says that instead.
+/// Describe Discard for one file, a folder or the whole section (`""`): tracked files restored,
+/// untracked files removed and nested repositories left alone. Say permanent deletion when
+/// `trash` is unavailable on a remote vault.
 fn discard_body(
     what: &str,
     folder: bool,

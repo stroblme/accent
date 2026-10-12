@@ -1,11 +1,7 @@
-//! Words for prose: what the document already says, then what the dictionary knows.
-//!
-//! A note or a LaTeX file is answered by a provider that speaks its structure (wikilinks,
-//! `\cite`) and by nothing for the prose in between. This is the second source, layered under
-//! the first: the word being typed is completed from the words this document already uses, most
-//! used first, and then from the system's hunspell word list, which is the same list libspelling
-//! checks the text against. It is also the seam a model-backed suggestion would plug into: a
-//! third source in [`Layered`], answering the same shape.
+//! Prose completion layered beneath structural providers for notes and LaTeX.
+//! Offer document words by frequency, then stems from the system Hunspell
+//! dictionary used by libspelling. [`Layered`] also combines model suggestions
+//! through the same provider interface.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -39,9 +35,9 @@ fn is_word(c: char) -> bool {
     c.is_alphabetic() || c == '\''
 }
 
-/// The word the caret is at the end of: where it starts on the line, and its text. `None` when
-/// the caret is not inside one, when it is too short, or when what precedes it belongs to
-/// another provider (`\cite`, `#tag`, `[[Note`, `@key`, a path).
+/// Return the word ending at the caret, with its starting column. `None`
+/// for short or absent words and prefixes owned by structural providers
+/// (`\cite`, tags, links, citation keys or paths).
 pub(crate) fn word_before(line: &str, character: u32) -> Option<(u32, String)> {
     let chars: Vec<char> = line.chars().take(character as usize).collect();
     let start = chars
@@ -57,11 +53,8 @@ pub(crate) fn word_before(line: &str, character: u32) -> Option<(u32, String)> {
     Some((start as u32, chars[start..].iter().collect()))
 }
 
-/// Every word of `text`, spelled as the document spells it, with the key a query matches on and
-/// how often it occurs.
-///
-/// The lower-cased key is stored rather than folded per query: a completion is asked for on every
-/// keystroke and would otherwise re-case every distinct word in the document each time.
+/// Document words with original spelling, occurrence counts and cached
+/// lowercase match keys, avoiding repeated case folding on every keystroke.
 fn counts(text: &str) -> HashMap<String, (String, usize)> {
     let mut counts: HashMap<String, (String, usize)> = HashMap::new();
     for word in text.split(|c: char| !is_word(c)) {
@@ -89,15 +82,12 @@ fn dictionary_path() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// The dictionary while word suggestions are on: read on the first word asked for, and let go
-/// when they are switched off ([`forget_dictionary`]). One for the process, as the system's
-/// dictionary is.
+/// Process-wide dictionary, loaded lazily while word suggestions are on
+/// and released by [`forget_dictionary`] when disabled.
 static DICTIONARY: Mutex<Option<Arc<Vec<String>>>> = Mutex::new(None);
 
-/// The dictionary's stems, lower-cased and sorted, read if they are not held already.
-///
-/// ponytail: stems only. `abandon/DSG` is offered as `abandon`; the affixes that would make
-/// `abandoned` are not expanded. Empty where no dictionary is installed.
+/// Load sorted lowercase dictionary stems once; empty if none is installed.
+/// Affix flags are not expanded: `abandon/DSG` offers only `abandon`.
 fn dictionary() -> Arc<Vec<String>> {
     locked(&DICTIONARY)
         .get_or_insert_with(|| Arc::new(read_dictionary()))
@@ -248,19 +238,13 @@ impl Words {
 pub(crate) type Respawn =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = Option<Arc<dyn Language>>> + Send>> + Send + Sync>;
 
-/// A prose document's providers, answering as one: the primary (a language server, or the index
-/// for a note) for everything it does, with the words appended to its completion and the ghost
-/// session answering beside both. A file with no primary at all (a `.txt`, a `.tex` without
-/// texlab) still gets its words. Inside a LaTeX `\input{…}` the folder's files take the words'
-/// place.
-///
-/// The ghost session hears the document's whole life — open, change, close — because it answers
-/// about the buffer as it is now. What it does not hear is every save: it re-reads the vault on
-/// one, so it is told when the user leaves the document instead. See [`Layered::settle`].
-///
-/// A ghost session that exits, or that the vault shut down with Ghost Text, is replaced on the
-/// next suggestion by whatever the vault has then ([`Layered::ghost`]), and the primary never
-/// hears of it: what the ghost session fails to take is no one else's failure.
+/// Combine a prose document's structural provider, word completions and
+/// optional ghost session. Documents without a primary still get words;
+/// LaTeX `\input{…}` uses file candidates instead of words.
+/// The ghost session receives open/change/close but gets save notifications
+/// only on leaving the document ([`Layered::settle`]), avoiding a full vault
+/// reread on every autosave. Replace dead or disabled sessions on the next
+/// suggestion ([`Layered::ghost`]); ghost failures never affect the primary.
 pub(crate) struct Layered {
     primary: Option<Arc<dyn Language>>,
     /// The ghost session the document is open on, if it has one.
@@ -321,8 +305,8 @@ impl Layered {
         })
     }
 
-    /// Tell the ghost session something, if there is a live one. A failure is logged and goes
-    /// no further: a `merl-rt` that has exited must not take the primary's news down with it.
+    /// Notify a live ghost session. Log failures without propagating them,
+    /// so an exited `merl-rt` cannot disrupt the primary provider.
     fn tell_ghost(&self, tell: impl FnOnce(&dyn Language) -> Result<()>) {
         let ghost = locked(&self.ghost).clone();
         if let Some(ghost) = ghost.filter(|g| !g.is_dead())
@@ -332,8 +316,8 @@ impl Layered {
         }
     }
 
-    /// The ghost session to ask about `rel`: the one the document is open on while it lives,
-    /// else the vault's, and the document opened on that one as it reads now.
+    /// Get the document's live ghost session, otherwise acquire the vault's
+    /// replacement and open the current buffer on it.
     async fn ghost(&self, rel: &str) -> Option<Arc<dyn Language>> {
         let gone = match &*locked(&self.ghost) {
             Some(ghost) if !ghost.is_dead() => return Some(ghost.clone()),
@@ -392,9 +376,8 @@ impl Language for Layered {
         self.primary.as_ref().map_or(Ok(()), |p| p.saved(rel))
     }
 
-    /// The one save the ghost session is told about, and only if there was one: it re-reads the
-    /// whole vault on a `didSave`, which is a second's work on a large one. Leaving the document
-    /// is the moment where that is affordable and where it is worth doing.
+    /// Send one pending save when leaving the document. `didSave` rereads
+    /// the whole vault, so defer this costly work beyond frequent autosaves.
     fn settle(&self, rel: &str) -> Result<()> {
         if self.stale.swap(false, Ordering::Relaxed) {
             self.tell_ghost(|g| g.saved(rel));
@@ -753,10 +736,9 @@ mod tests {
         }
     }
 
-    /// A ghost session that exits is swapped for the vault's next one on the next suggestion,
-    /// the document opened on it as it reads now, while the primary hears every change
-    /// regardless. While the vault has none to give (Ghost Text off, or given up on), the
-    /// document goes without and asks again next time, so one switched on again is taken up.
+    /// Replace dead ghost sessions on the next suggestion and open the current
+    /// buffer there. Keep forwarding changes to the primary. If Ghost Text is
+    /// disabled or given up, retry acquisition on a later suggestion.
     #[test]
     fn a_ghost_session_that_exits_is_started_again_without_the_primary() {
         let (primary, first, second, third) = (

@@ -97,9 +97,9 @@ const RECTANGLE_ROUNDING_FACTOR: f64 = 0.15;
 /// Control points this far towards the corner put a cubic's midpoint on the quarter circle.
 const KAPPA: f64 = 4.0 / 3.0 * (std::f64::consts::SQRT_2 - 1.0);
 
-/// Whether [`vertex`] draws `shape` as itself: mxGraph's registry (mxCellRenderer.js 130-145)
-/// and the shapes of draw.io's General palette (Sidebar.js `addGeneralPalette`). Anything else,
-/// a stencil above all, is drawn by the scene as a stand-in.
+/// Whether [`vertex`] supports `shape`: mxGraph's registry and draw.io's General
+/// palette (`mxCellRenderer`, `Sidebar.addGeneralPalette`). Other shapes, including
+/// stencils, use a scene placeholder.
 // ponytail: mxGraph's `arrow` and `arrowConnector`, edge shapes older than `flexArrow`, are not
 // ported; such an edge is drawn as a plain connector.
 pub fn is_known(shape: &str) -> bool {
@@ -204,10 +204,9 @@ pub fn vertex(shape: &str, bounds: Rect, style: &Resolved) -> Vec<Part> {
     }
 }
 
-/// Where a label with `labelPosition` and `verticalLabelPosition` at their centre goes in
-/// `rect`, the vertex's box: shapes with a part a label should keep clear of (a callout's tail,
-/// a cube's sides under `boundedLbl=1`) give it less. `inverted` is a label laid across the
-/// shape's height (`horizontal=0`), whose `rect` has been turned to match.
+/// Bounds for a centred label inside `rect`, reduced to avoid details such as
+/// callout tails and cube sides (`boundedLbl=1`). With `inverted` (`horizontal=0`),
+/// `rect` is already rotated for text across the shape's height.
 // mxShape.getLabelBounds, mxShape.js 436-478, and the shapes' getLabelBounds/getLabelMargins
 pub fn label_bounds(shape: &str, rect: Rect, style: &Resolved, inverted: bool) -> Rect {
     use grapheditor as ge;
@@ -409,12 +408,9 @@ impl Placement {
     }
 }
 
-/// A polyline with each corner rounded by `arc` when `rounded` (`mxShape.addPoints`), closed
-/// back to its first point when `close`.
-///
-/// mxShape.js 1232-1323, without its `initialMove` argument. Each corner becomes a line stopping
-/// `arc` short of it (at most half the segment) and a quad through the corner to `arc` along the
-/// next segment.
+/// Build a polyline with optional rounded corners and closure (`mxShape.addPoints`,
+/// mxShape.js 1232-1323, without `initialMove`). Each rounded corner stops `arc`
+/// short, capped at half the segment, then uses a quadratic through the corner.
 pub fn add_points(points: &[Point], rounded: bool, arc: f64, close: bool) -> Vec<PathCmd> {
     add_points_except(points, rounded, arc, close, &[])
 }

@@ -1041,11 +1041,8 @@ fn a_purge_deletes_what_an_erase_hid_and_nothing_else() {
     assert!(!saved.contains("two lines") && !saved.contains("/Popup"));
 }
 
-/// Rendering writes into the document: pdfium generates an appearance stream for an annotation
-/// that has none — the fixture's highlight, another reader's — with a key of its own beside it,
-/// and makes the popup of every annotation with a note anew each time, as objects nothing refers
-/// to. A save leaves all of it out: the highlight is saved as it was read, and the file as it
-/// would have been unrendered; and it still draws.
+/// Rendering must not change saved annotations. Generated appearances, `PDFIUM_HasGeneratedAP`
+/// and unreferenced popup objects must be omitted while the saved file remains renderable.
 #[test]
 fn renders_leave_nothing_in_a_save() {
     let Some((dir, doc)) = open_tiny_with(true) else {

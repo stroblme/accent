@@ -1,15 +1,10 @@
-//! The widget a PDF is read in: a scrollable column of pages painted from cached tiles.
+//! Scrollable PDF pages painted from cached tiles, without file access or pdfium calls.
 //!
-//! Nothing here opens a file or calls pdfium. The widget knows the page sizes, the zoom and the
-//! textures it has been given; when it paints a page it has no tiles for, it asks for them and
-//! draws a blurred low-resolution stand-in until they arrive. `tab.rs` owns the document and the
-//! thread that answers.
+//! The widget uses page sizes, zoom and supplied textures. Missing tiles trigger requests
+//! and use blurred low-resolution stand-ins; `tab.rs` owns the document and render thread.
+//! A reading view and thumbnail view share one document.
 //!
-//! Two of these share one document: the reading view, and a narrow one beside it showing every
-//! page as a thumbnail.
-//!
-//! `paint` draws the pages, `gesture` is what the pointer does on them, and `scroll` is where the
-//! view is in the document.
+//! `paint` draws pages, `gesture` handles the pointer and `scroll` manages reading position.
 
 mod gesture;
 mod paint;
@@ -278,12 +273,9 @@ impl PdfView {
         *self.imp().on_pressed.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Called when a press turns out to have been a click rather than the start of a drag, with
-    /// the modifiers held.
-    ///
-    /// A highlight opens the note that holds it, and that must not fire on every drag that
-    /// happens to begin inside one — so it waits for the release, unlike the link handler above,
-    /// which answers on the press because following a link is what a press on one means.
+    /// Report primary-click release and modifiers only after ruling out a drag. Highlight
+    /// navigation must not fire when selection starts inside one; links retain press-time
+    /// handling.
     pub fn connect_clicked(&self, f: impl Fn(&PdfView, f64, f64, gdk::ModifierType) + 'static) {
         *self.imp().on_clicked.borrow_mut() = Some(Box::new(f));
     }
@@ -431,11 +423,9 @@ impl PdfView {
         *self.imp().on_transform.borrow_mut() = Some(Box::new(f));
     }
 
-    /// What one page holds for the eraser and the Adjust tool, read once the render thread had
-    /// answered `erases` of this view's erases. A list read before the last of them landed is of
-    /// the page before it — the view's own, taken out of and cut as it went, is truer — so it is
-    /// let go; the erase itself sends one back. A selection on that page follows its stroke by id
-    /// to wherever a move put it, or goes if the stroke did.
+    /// Apply page strokes only if their `erases` count includes this view's latest erase. Older
+    /// replies are stale relative to locally updated strokes; the erase sends a fresh list.
+    /// Follow an adjusted selection by stroke ID or clear it if deleted.
     pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>, erases: u64) {
         if erases < self.imp().erases.get() {
             return;
@@ -479,10 +469,8 @@ impl PdfView {
         }
     }
 
-    /// Draw one page again, because what it holds changed — a stroke, an erase, an export.
-    ///
-    /// Deliberately not an eviction. What is on screen keeps being painted until its replacement
-    /// arrives, so a stroke costs one re-render and no blank page in between.
+    /// Refresh changed page tiles while retaining the visible render until replacements arrive,
+    /// avoiding blank flashes after strokes, erases or export.
     pub fn refresh_page(&self, page: usize, area: accent_core::pdf::Rect) {
         let (scale_milli, theme) = self.stamp();
         self.cache()
@@ -677,11 +665,9 @@ mod imp {
         pub drop_gap: Cell<Option<usize>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
-        /// The scale, colour scheme and cache generation [`Self::asked`] was for. Every event that
-        /// makes the tiles on screen the wrong ones without changing *which* tiles are wanted
-        /// goes through here — a zoom step, a fit mode, a resize, a theme change, entering
-        /// presentation mode, a stroke or an erase on a part of the page the last change also
-        /// touched — and without it the page keeps painting its old render and never asks again.
+        /// Scale, theme and cache generation of [`Self::asked`]. Re-request unchanged tile keys
+        /// when their content changes, including after zoom, resize, theme or annotation
+        /// changes.
         pub asked_for: Cell<(u32, Theme, u64)>,
         /// What the last frame found missing, asked for or not: what a drill waits to see empty.
         #[cfg(feature = "bench")]

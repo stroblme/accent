@@ -1,11 +1,8 @@
-//! The near end of a language server: one child process, one reader task, one writer task.
+//! Language-server transport with a child process, reader and writer tasks.
 //!
-//! The shape follows `accent-api`'s JSON-RPC client (`rpc.rs`) — an id per request, a map of who
-//! is waiting, a deadline so a wedged server is a message rather than a hang — with two things
-//! LSP adds. A server may ask *us* questions, which the reader answers inline because none of
-//! them need anything but the client's own state. And a request whose future is dropped sends
-//! `$/cancelRequest`: the editor supersedes a completion on every keystroke, and telling the
-//! server to stop is what keeps a big project's analysis from queueing behind work nobody wants.
+//! Request IDs and deadlines bound pending answers. The reader handles server requests from
+//! client state; dropping a request future sends `$/cancelRequest` so superseded editor work
+//! does not queue on the server.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,14 +20,11 @@ use crate::runtime::runtime;
 use crate::types::{InitializeResult, ServerCapabilities};
 use crate::{codec, from_uri, to_uri};
 
-/// How long a request waits before giving up. The same number and the same reasoning as
-/// `rpc.rs`: longer than any answer a person would wait for, shorter than a hang.
+/// Request timeout, long enough for normal replies while bounding a stalled server.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
-/// How long the handshake waits instead (user decision 2026-10-09). A cold `lake serve` loads its
-/// package before it answers `initialize`: 3-9 s here, past 10 s on a machine busy with builds,
-/// and longer where Lake has to elaborate a `lakefile.lean` first. Missing it left the tab without
-/// a server, so it is a hang this bounds, not a person waiting on an answer.
+/// Longer handshake timeout for cold servers such as `lake serve`, which may load or elaborate a
+/// package before answering `initialize`. Bounds hangs without rejecting normal startup.
 pub const STARTING: Duration = Duration::from_secs(120);
 
 /// A message the server sent to nobody in particular and this client does not handle itself —
@@ -266,8 +260,8 @@ impl Client {
         Ok(result.capabilities)
     }
 
-    /// The orderly goodbye, on a short leash: a server that will not stop is killed rather than
-    /// left behind when the window closes.
+    /// Attempt orderly shutdown within a short timeout, then kill an unresponsive server so
+    /// window close leaves no process behind.
     pub async fn shutdown(&self) {
         let _ = tokio::time::timeout(
             Duration::from_secs(1),

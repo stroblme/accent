@@ -1,12 +1,7 @@
-//! The provider that answers for a source file: a real language server, over `accent-lsp`.
-//!
-//! Everything here is translation. The protocol counts columns in UTF-16 code units by default
-//! and names files by URI; accent counts characters and names them by vault-relative path. So the
-//! provider keeps the text of every open document — it needs it for the arithmetic anyway — and
-//! each request is one conversion out and one back.
-//!
-//! The mapping functions are pure and live in [`map`], so what a server's answer becomes is
-//! testable without a server.
+//! Language-server provider over `accent-lsp`. Translate server URIs and
+//! encoded columns (UTF-16 by default) to vault paths and Unicode scalar
+//! columns. Keep open-document text for conversions; pure mappings in
+//! [`map`] can be tested without a server.
 
 pub(super) mod map;
 
@@ -38,12 +33,12 @@ use map::{
     targets_of,
 };
 
-/// A server that answered `-32801` was asked about a document it has already seen change. It is
-/// the ordinary state of a fast typist, not a failure.
+/// Content-modified response: the document changed after the request,
+/// as expected during typing.
 const CONTENT_MODIFIED: i64 = -32801;
 
-/// What a server answers a question it calls malformed with: clangd, a question about a document
-/// it has not been told is open.
+/// Invalid-request response, used by clangd for documents not opened
+/// at the server.
 const INVALID_PARAMS: i64 = -32602;
 
 // ------------------------------------------------------------------ the provider
@@ -70,21 +65,15 @@ pub(crate) struct External {
     lean: bool,
     /// The builds' tables of contents that number texlab's outline.
     tocs: super::latex::Tocs,
-    /// Whether the server has found a declaration to answer calls about: until then, finding
-    /// none may be a project still loading, which rust-analyzer answers the same way.
+    /// Whether call hierarchy has found a declaration. Before the first
+    /// success, an empty result may mean the project is still loading.
     found_one: AtomicBool,
 }
 
-/// Start a language server for `root` and hand back what answers with it.
-///
-/// `root` is the session root (a crate, a checkout); `vault_root` is what paths are relative to.
-/// They differ whenever a vault holds more than one project.
-/// Start `argv` and wire it up as a provider.
-///
-/// `busy_as` is what a background job in this server is called in the UI, or `None` for a server
-/// whose progress is not worth showing — which is every language server: rust-analyzer reports
-/// every `cargo check` and would never let the status bar settle. The ghost session is the one
-/// that says something the reader wants, because its index is the reason a suggestion is missing.
+/// Start `argv` as a provider rooted at `root`; paths remain relative to
+/// `vault_root`, which differs in multi-project vaults. `busy_as` labels
+/// background progress, or `None` to suppress it. Only ghost indexing
+/// reports this progress; routine server checks would keep status constantly busy.
 pub(crate) async fn start(
     argv: Vec<String>,
     root: PathBuf,
@@ -129,11 +118,9 @@ pub(crate) async fn start(
     }))
 }
 
-/// Turn what the server publishes into events for the UI that can show it: diagnostics for the
-/// tabs that paint them, and — for a server named by `busy_as` — whether it is busy.
-///
-/// A server analyses more than it was asked about — rust-analyzer publishes for every file in a
-/// crate — and a diagnostic for a file nobody has open has nowhere to go, so it is dropped.
+/// Map published diagnostics to open tabs and progress to [`Event`]s for
+/// servers with `busy_as`. Drop diagnostics for unopened files, since
+/// servers may publish for an entire project and no tab can display them.
 async fn forward_notifications(
     mut notifications: Notifications,
     docs: Docs,
@@ -321,9 +308,9 @@ fn progress_of(params: &Value) -> Option<(bool, Option<String>)> {
     Some((busy, message.filter(|_| busy).map(str::to_string)))
 }
 
-/// The least time between two states of a file's check sent on as `Event::Checking`. Lean says
-/// where it is a dozen times a line (3 660 notifications, 301 lines, for a 600-line file), and
-/// over an ssh link each state sent on is a message; ten a second still reads as moving.
+/// Minimum interval between `Event::Checking` updates. Lean can emit many
+/// states per line; limiting to ten per second reduces SSH messages while
+/// keeping visible progress moving.
 const CHECKING_EVERY: Duration = Duration::from_millis(100);
 
 /// How far a server's check of one file has got, and what the UI was last told of it.
@@ -335,9 +322,8 @@ struct Check {
 }
 
 impl Check {
-    /// The lines to send on at `now`: ones the UI has not been told, at least [`CHECKING_EVERY`]
-    /// after the last. Otherwise they are held back until then ([`Check::held`]), so the UI
-    /// still ends on where the check sits.
+    /// Return changed lines at `now` after [`CHECKING_EVERY`], otherwise defer
+    /// them until [`Check::held`] so the final state still reaches the UI.
     fn due(&mut self, now: Instant) -> Option<Vec<Range<u32>>> {
         let ready = match &self.sent {
             Some((lines, at)) => *lines != self.lines && now >= *at + CHECKING_EVERY,
@@ -358,10 +344,9 @@ impl Check {
     }
 }
 
-/// The lines Lean's `$/lean/fileProgress` says are still being checked: its ranges in progress
-/// (`kind` 1, or none given) as whole lines, in order, those that overlap or touch made one.
-/// Empty once only a fatal error (`kind` 2) or nothing is left; `None` for a notification that
-/// does not read.
+/// Parse Lean `$/lean/fileProgress` into sorted whole-line ranges, merging
+/// touching or overlapping ranges with `kind` 1 (or absent). Empty when
+/// only fatal errors (`kind` 2) or no work remain; `None` for invalid data.
 fn checking_of(params: &Value) -> Option<Vec<Range<u32>>> {
     let processing = params.get("processing")?.as_array()?;
     let line = |p: &Value, at: &str| Some(p.pointer(at)?.as_u64()? as u32);
@@ -430,9 +415,8 @@ impl External {
         Ok((params, text))
     }
 
-    /// Where a URI the server named points, with the range converted against that file's text:
-    /// the open document if it is one, else one read from disk. This runs on a click, not on a
-    /// keystroke, so the read is affordable.
+    /// Resolve a server URI and convert its range using open-buffer or disk text.
+    /// Disk reads occur on navigation clicks rather than keystrokes.
     fn location(&self, uri: &str, range: types::Range) -> Option<Location> {
         let path = from_uri(uri)?;
         let rel = rel_of(uri, &self.root)?;
@@ -450,10 +434,9 @@ impl External {
         })
     }
 
-    /// A server's edits to `rel`, measured against the file on disk, which is what the server
-    /// answered about: every open document is written out before a move is planned. One whose
-    /// buffer still differs from its file is left alone rather than edited at positions that
-    /// mean something else there.
+    /// Convert server edits against disk text before a move. Buffers are saved
+    /// before planning; skip any still differing from disk rather than applying
+    /// ranges to the wrong text.
     fn file_edits(&self, rel: &str, edits: &[types::TextEdit]) -> Option<FileEdits> {
         let (text, etag) = crate::fs::read_note(&Local::join(&self.root, rel).ok()?).ok()?;
         if locked(&self.docs)
@@ -642,8 +625,8 @@ impl Language for External {
         })
     }
 
-    /// `triggerKind` is always 2, automatic: accent asks on a pause in the typing and has no
-    /// action that asks for a suggestion, so there is never a 1 to send.
+    /// Use automatic `triggerKind` 2: suggestions follow typing pauses,
+    /// with no explicit action requiring kind 1.
     fn inline_completion(&self, rel: &str, pos: Pos) -> Fut<'_, Option<String>> {
         let rel = rel.to_string();
         Box::pin(async move {
@@ -716,10 +699,9 @@ impl Language for External {
         })
     }
 
-    /// Lean's two answers, one after the other: Lean answers about a position once it has
-    /// checked that far, so the second is asked of a checked file and answered at once. A
-    /// position still unchecked at the request's deadline is an error, asked again by the window
-    /// once the check is done.
+    /// Request Lean goals and term goals in sequence. The first waits for checking
+    /// to reach the position; the second then reads checked state. A timeout
+    /// is retried by the window once checking finishes.
     fn goals(&self, rel: &str, pos: Pos) -> Fut<'_, Option<Goals>> {
         let rel = rel.to_string();
         Box::pin(async move {
@@ -813,11 +795,10 @@ impl Language for External {
         })
     }
 
-    /// A file no tab holds is asked about as it is on disk, which the server reads for itself,
-    /// and asked again opened for the question if the server calls that invalid: clangd answers
-    /// about open documents only. An error the server answers with is [`NotYet`]: rust-analyzer
-    /// answers "file not found" and "content modified" while it loads the project, and opening
-    /// the file for each of those questions would only slow it down.
+    /// Query disk state for files without tabs. If the server rejects unopened
+    /// files, open temporarily and retry (clangd). Map other refusals to
+    /// [`Error::NotYet`]: rust-analyzer may report missing or modified content during
+    /// project loading, where repeatedly opening files would slow progress.
     fn calls(
         &self,
         rel: &str,
@@ -998,9 +979,8 @@ mod tests {
         assert_eq!(check.due(start + 3 * CHECKING_EVERY), None, "nothing new");
     }
 
-    /// A server that exits — a crash, an OOM kill — leaves its marks in the gutter with nothing
-    /// left to correct them. The notification stream ending is that moment, and no process is
-    /// needed to reach it: dropping the sender is what a dead server's reader does.
+    /// Clear gutter diagnostics when the notification stream closes after a
+    /// server exit. Dropping the sender models this without a server process.
     #[test]
     fn a_server_that_exits_clears_what_it_painted() {
         let (server, notifications) = tokio::sync::mpsc::unbounded_channel();
@@ -1214,8 +1194,8 @@ mod tests {
         drop(vault);
     }
 
-    /// texlab answers the LaTeX row; what NOTEPAD asked for (`\\ref` and `\\cite` completion)
-    /// is the server's own, so this is what proves it needs nothing accent-side.
+    /// Verify texlab supplies `\ref` and `\cite` completion without
+    /// additional accent-side implementation.
     #[test]
     fn merl_suggests_the_rest_of_a_line_the_vault_has_written_before() {
         if !super::super::in_path("merl-rt") {
@@ -1457,9 +1437,8 @@ mod tests {
         drop(vault);
     }
 
-    /// rust-analyzer's `willRenameFiles`: a module renamed in its own folder takes its `mod` and
-    /// its `use` along — asked before the move, made after it — and one moved into another folder
-    /// is asked about and answered with nothing, which is rust-analyzer's own limit.
+    /// Verify rust-analyzer rename edits for same-folder modules and imports.
+    /// Cross-folder moves return no edits, reflecting the server's current limit.
     #[test]
     fn rust_analyzer_follows_a_renamed_module() {
         if !super::super::in_path("rust-analyzer") {

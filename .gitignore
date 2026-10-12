@@ -22,3 +22,4 @@ CLAUDE.md
 /android/.kotlin/
 /android/build/
 /android/local.properties
+*.jks

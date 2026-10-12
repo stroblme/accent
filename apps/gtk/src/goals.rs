@@ -6,9 +6,8 @@ use super::*;
 const GOALS: Duration = Duration::from_millis(300);
 
 impl App {
-    /// Show the Code pane while the tab in front has something for it, a proof's goals, and ask
-    /// for them. The window decides, not the tab's kind: a debugger will keep the pane up over
-    /// any tab.
+    /// Show Code for active-tab capabilities and request goals.
+    /// Window-owned visibility allows future debugger sections on any tab.
     pub fn sync_code_pane(self: &Rc<Self>) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
@@ -21,11 +20,8 @@ impl App {
         self.refresh_goals();
     }
 
-    /// Ask for the goals at the active tab's caret, while the Code pane is on screen.
-    ///
-    /// Debounced and cancellable, as [`App::refresh_references`] is. The last answer stays up
-    /// while the next is asked, so a caret move does not flash the pane; another tab coming to
-    /// the front clears it.
+    /// Request active-caret goals only while Code is visible, with debounce and cancellation.
+    /// Retain previous answers during requests to avoid flashing; clear on tab switches.
     pub fn refresh_goals(self: &Rc<Self>) {
         if let Some(handle) = self.goals.borrow_mut().take() {
             handle.abort();

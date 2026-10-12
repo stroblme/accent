@@ -1,13 +1,8 @@
-//! What the editor knows about a language server's answers.
+//! Keep each tab's language-server document and providers in sync with its buffer.
 //!
-//! One tab, one document on the vault's language layer. [`attach`] opens it and installs the
-//! providers that ask questions about it; [`changed`] keeps the server's copy in step with the
-//! buffer and re-reads what an edit invalidates; [`detach`] closes it.
-//!
-//! Nothing here blocks: every request is a `Task` awaited with `glib::spawn_future_local`, and
-//! dropping the future cancels the request at the server. The refresh after an edit is one
-//! coalescing rule for a local vault and a remote one alike — the latest edit wins, and a burst
-//! of keystrokes costs one round trip rather than one per key.
+//! [`attach`] opens and wires the document; [`changed`] updates it and refreshes invalidated
+//! answers; [`detach`] closes it. Requests run as local futures, and dropping one cancels it
+//! at the server. Coalescing edits lets the latest win with one round trip per typing burst.
 
 use crate::editor::{Flavour, Tab};
 use accent_api::{CodeSymbol, Kind, Pos, Range, Support, Symbol, SymbolKind, Vault};
@@ -20,19 +15,14 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// DESIGN.md, Motion: the symbols and folds behind the Outline pane, the sticky title and the
-/// gutter chevrons follow the last edit by 300 ms, as the preview does. The ghost text comes
-/// first and sooner, after [`GHOST`]; the rest of the wait is served after it.
+/// Post-edit symbol/fold debounce for Outline, sticky headers and chevrons, matching preview timing.
+/// Ghost text uses shorter [`GHOST`] delay; the remaining delay follows it.
 const REFRESH: Duration = Duration::from_millis(300);
 
-/// How long after the last keystroke ghost text is asked for. Short, because it is painted at
-/// the caret, where a wait is read as the suggestion being gone; the answer itself costs a
-/// fraction of a millisecond.
+/// Short ghost-text debounce so caret-local suggestions do not appear to disappear while typing.
 const GHOST: Duration = Duration::from_millis(100);
 
-/// How long a document waits on its language server before the status bar says the server is
-/// starting: a cold `lake serve` can take a minute, where rust-analyzer's or clangd's handshake is
-/// over in a fraction of a second and would only flash the line.
+/// Server-start delay before showing status, suppressing brief handshakes while reporting slow cold starts.
 const SLOW_START: Duration = Duration::from_secs(1);
 
 /// A callback the window registered, in the shape `editor.rs` uses for its own.
@@ -50,20 +40,16 @@ pub struct Hooks {
     pub on_starting: Hook,
 }
 
-/// Everything one tab knows about its document on the language layer.
-///
-/// A field on [`Tab`] rather than a map keyed by path: a tab is what opens a document and what
-/// closes it, and two tabs on one file would otherwise share one entry.
+/// Tab-owned language document state.
+/// Tab ownership pairs opening and closing without sharing entries between same-path tabs.
 #[derive(Default)]
 pub struct State {
-    /// What the provider said it could do, once the document was open. `None` until then.
-    /// Shared rather than copied: every keystroke asks it whether the character just typed opens
-    /// a popup or a signature, and the answer carries two vectors and a string.
+    /// Shared provider capabilities, `None` until open.
+    /// Avoid copying trigger vectors and strings for every typed character.
     support: RefCell<Option<Rc<Support>>>,
     /// The document's symbols, most recent answer.
     symbols: RefCell<Vec<Symbol>>,
-    /// The same symbols as the Outline pane lists them, flattened once per answer rather than
-    /// once per caret move.
+    /// Flattened symbol rows cached once per answer, avoiding repeated work on caret moves.
     rows: RefCell<Vec<Row>>,
     /// The index's declarations of a code file, which stand in for the symbols while no language
     /// server has answered with any: see [`index_outline`].
@@ -72,10 +58,8 @@ pub struct State {
     served: Cell<bool>,
     /// The pending post-edit refresh. Replaced rather than queued, so the latest edit wins.
     refresh: RefCell<Option<glib::JoinHandle<()>>>,
-    /// The buffer's own edit counter, and how far the server has been told. A bool could only
-    /// say "someone is going to send this", never "the text the server holds is that one", so a
-    /// request arriving while a flush was in flight read it as clean and asked the server about
-    /// characters it had not been given.
+    /// Buffer edit version and last sent version.
+    /// Versions distinguish an in-flight flush from text the server actually received.
     version: Cell<u64>,
     sent: Cell<u64>,
     /// The callers waiting out the flush in flight, `None` while there is none: the next caller
@@ -150,8 +134,7 @@ impl State {
     }
 }
 
-/// Where an iter is, in the coordinates every request and answer uses: a zero-based line and a
-/// column counted in characters, which is exactly what `TextIter` reports.
+/// Request position as zero-based line and character column, matching TextIter coordinates.
 pub fn pos_of(iter: &gtk::TextIter) -> Pos {
     Pos {
         line: iter.line().max(0) as u32,
@@ -159,9 +142,7 @@ pub fn pos_of(iter: &gtk::TextIter) -> Pos {
     }
 }
 
-/// The iter at `pos`, the inverse of [`pos_of`], clamped to what the buffer actually has: an
-/// answer can outlive the edit that shortened the line it was about, and an out-of-range offset is
-/// a GTK critical.
+/// Convert `pos` to a buffer iter, clamping stale server positions to avoid GTK criticals.
 pub fn iter_at(buffer: &impl IsA<gtk::TextBuffer>, pos: Pos) -> gtk::TextIter {
     let end = crate::editor::line_end(buffer, pos.line as i32);
     let mut iter = end;
@@ -169,9 +150,7 @@ pub fn iter_at(buffer: &impl IsA<gtk::TextBuffer>, pos: Pos) -> gtk::TextIter {
     iter
 }
 
-/// The LSP language id for a tab: the GtkSourceView language's own id, which is the same name
-/// (`rust`, `c`, `python`), and `markdown` for a note, whose buffer carries no language because
-/// our own styling pass does that job.
+/// LSP language ID from GtkSourceView, or markdown for locally styled notes.
 pub fn language_id(tab: &Tab) -> String {
     match tab.flavour() {
         Flavour::Note => "markdown".to_string(),
@@ -183,13 +162,10 @@ pub fn language_id(tab: &Tab) -> String {
     }
 }
 
-/// Open this tab's document on `vault` and wire the providers that read it.
+/// Open the tab's language document and wire its providers.
 ///
-/// A CSV is skipped: its columns are coloured by us and no language server speaks the format, so
-/// opening it would only cost a round trip to be told nothing.
-///
-/// A file outside every vault (`None`) has no language layer to ask: a note there is outlined from
-/// its own text ([`outline_alone`]), and anything else gets nothing.
+/// Skip CSV because styling is local and language queries add no results. Without a vault,
+/// notes use [`outline_alone`] and other files have no language-layer providers.
 pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
     if tab.flavour() == Flavour::Csv {
         return;
@@ -220,9 +196,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
     });
 }
 
-/// The buffer changed at all: the next request sends the text before it asks. Said on every
-/// edit, ahead of [`changed`], which a note over 16 K characters hears only once the typing
-/// pauses — a Go to Definition inside that pause asked about the text before it.
+/// Mark every edit unsent before debounced [`changed`] so immediate positional requests flush current text.
 pub fn edited(tab: &Tab) {
     tab.lang.version.set(tab.lang.version.get().wrapping_add(1));
 }
@@ -238,9 +212,7 @@ pub fn changed(tab: &Rc<Tab>) {
     restart(tab, REFRESH);
 }
 
-/// The buffer reached the disk. The server hears the edit first, then the save: rust-analyzer
-/// runs `cargo check` on a save and nothing else, so without this a Rust file never gets its
-/// compiler diagnostics.
+/// Notify the server of save after flushing edits, enabling save-triggered compiler diagnostics.
 pub fn saved(tab: &Rc<Tab>) {
     let Some(vault) = tab.lang.vault() else {
         return;
@@ -256,10 +228,8 @@ pub fn saved(tab: &Rc<Tab>) {
     });
 }
 
-/// Ask the index for a code file's declarations, which the Outline lists while no language
-/// server has answered with symbols: none is installed for the file, or it has not answered yet.
-/// The index holds the file as it was last saved, so this is asked when the tab opens, when a save
-/// of it lands and when the index takes in a walk or a change made elsewhere, never per keystroke.
+/// Fetch indexed declarations as fallback Outline symbols before a server answers.
+/// The index describes saved text, so refresh on opening, saving and index changes, not each keystroke.
 pub fn index_outline(tab: &Rc<Tab>) {
     let rel = tab.rel();
     if tab.flavour() != Flavour::Code
@@ -295,9 +265,8 @@ pub fn index_outline(tab: &Rc<Tab>) {
     });
 }
 
-/// The user left this document. A provider too expensive to tell about every save hears about
-/// it here instead: ghost text re-reads the vault on a save, which is a second's work on a large
-/// one and not something to do a second after every keystroke.
+/// Notify the provider on leaving the document for expensive save-related work.
+/// Vault-wide ghost-index refresh belongs here rather than every autosave.
 pub fn settle(tab: &Rc<Tab>) {
     let Some(vault) = tab.lang.vault() else {
         return;
@@ -312,9 +281,7 @@ pub fn settle(tab: &Rc<Tab>) {
     });
 }
 
-/// The index moved: ask for this document's hints again. A note flags a `[[link]]` it cannot
-/// resolve, and creating the note it names is not an edit of *this* one, so without this the
-/// hint stays until the next keystroke.
+/// Refresh hints after index changes, including newly resolvable wikilinks without edits to this note.
 pub fn rediagnose(tab: &Rc<Tab>) {
     let Some(vault) = tab.lang.vault() else {
         return;
@@ -327,8 +294,7 @@ pub fn rediagnose(tab: &Rc<Tab>) {
     });
 }
 
-/// Close the document and drop whatever is still in flight for it. Called from `Tab::drop`, so
-/// the future it spawns holds the vault handle and the path and nothing else.
+/// Close the language document and cancel requests from Tab::drop, retaining only vault and path in the future.
 pub fn detach(tab: &Tab) {
     tab.lang.signature.dismiss();
     if let Some(session) = tab.lang.completion.take() {
@@ -418,28 +384,22 @@ fn supported(tab: &Rc<Tab>, support: Support) {
     restart(tab, Duration::ZERO);
 }
 
-/// Close the document and open it again with the buffer's text: Lean's Restart File, whose
-/// server reads a file's imports when it is opened, and a restart of a server holding no other
-/// document, since the close shuts an idle session down.
+/// Close and reopen with current text for Lean Restart File, rereading imports.
+/// Closing the last document also shuts down its idle server session.
 pub fn reopen(tab: &Rc<Tab>) {
     retarget(tab, &tab.rel());
 }
 
-/// The server behind this tab was replaced. The reconnect reopened the document with the last
-/// text the tab tried to send, and an edit refused while that connection was still being made is
-/// newer: refreshing now sends it and re-reads what the new server says, rather than leaving both
-/// to the next keystroke.
+/// Flush newer edits and refresh answers after server replacement.
+/// Reconnect may have restored older text than edits refused during the connection attempt.
 pub fn resync(tab: &Rc<Tab>) {
     restart(tab, Duration::ZERO);
 }
 
-/// Send the pending edit and wait for the server to have it. Every positional request awaits
-/// this first: an answer about a text the server has not been given is an answer about the wrong
-/// characters.
+/// Flush pending edits before positional requests so answers refer to current text.
 ///
-/// Two callers meeting here — the completion, the hover, the signature and the ghost text all
-/// flush before they ask — wait for one round trip between them, and a change that fails leaves
-/// the version unsent so the next caller carries it again.
+/// Concurrent callers share one round trip. Failed changes leave the version unsent for
+/// the next caller to retry.
 pub async fn flush(tab: Rc<Tab>) {
     // Looked at again once woken: another waiter may have started the next flush by then.
     loop {
@@ -472,10 +432,8 @@ pub async fn flush(tab: Rc<Tab>) {
     }
 }
 
-/// Marks a flush as in flight for as long as it lives, and wakes whoever waited for it as it
-/// goes — a dropped future included, which is what the next keystroke does to the refresh a flush
-/// may be running inside. Without the drop the mark would outlive the request and every later
-/// flush would wait for a round trip that is no longer happening.
+/// RAII in-flight flush marker that wakes waiters on completion or cancellation.
+/// Dropped refresh futures must release it so later requests cannot wait forever.
 struct Flushing(Rc<Tab>);
 
 impl Flushing {
@@ -494,9 +452,7 @@ impl Drop for Flushing {
     }
 }
 
-/// Re-arm the post-edit refresh, dropping whatever was pending. Aborting the old future is what
-/// cancels its requests at the server, so a fast typist leaves one in flight rather than one per
-/// keystroke.
+/// Replace the pending post-edit future, cancelling old server requests so bursts retain one active refresh.
 fn restart(tab: &Rc<Tab>, delay: Duration) {
     if let Some(handle) = tab.lang.refresh.borrow_mut().take() {
         handle.abort();
@@ -510,19 +466,15 @@ fn restart(tab: &Rc<Tab>, delay: Duration) {
     *tab.lang.refresh.borrow_mut() = Some(handle);
 }
 
-/// Wait, unless there is nothing to wait for: a zero-length timeout still costs a turn of the
-/// main loop, and the callers that pass no delay want the answers now.
+/// Wait only for nonzero delays; a zero timeout still adds an unwanted main-loop turn.
 async fn pause(delay: Duration) {
     if !delay.is_zero() {
         glib::timeout_future(delay).await;
     }
 }
 
-/// Give the server the edit, then re-read what it implies: the symbols the Outline pane and the
-/// sticky title are drawn from, and the blocks that can be folded.
-///
-/// One future for both halves, so the next keystroke's abort still cancels either. `rest` is
-/// what is left of the wait once the ghost has been asked for.
+/// Flush edits then refresh symbols and folds in one cancellable future.
+/// `rest` is the remaining delay after ghost completion.
 async fn refresh(tab: Rc<Tab>, rest: Duration) {
     let Some(vault) = tab.lang.vault() else {
         return outline_alone(tab, rest).await;
@@ -605,9 +557,8 @@ fn show_symbols(tab: &Rc<Tab>, symbols: Vec<Symbol>) {
     }
 }
 
-/// The index's declarations of the file `rel` as a server's symbol tree, placed in `text`: one
-/// inside another's span is its child (a class's methods), and a run of a type's methods declared
-/// outside it is put under a row naming the type, as rust-analyzer's `impl Index` is.
+/// Convert index declarations into nested symbols positioned in `text`.
+/// Span containment creates children; out-of-type method runs receive synthetic type rows.
 fn declarations(rel: &str, decls: &[CodeSymbol], text: &str) -> Vec<Symbol> {
     let lines: Vec<&str> = text.lines().collect();
     let rust = accent_core::code::lang_of(rel) == Some(accent_core::code::Lang::Rust);
@@ -673,9 +624,8 @@ fn declaration(decls: &[CodeSymbol], at: &mut usize, lines: &[&str]) -> Symbol {
     }
 }
 
-/// Where `name` is written as a word on the first of `lines` from `first` to `last` holding it,
-/// else the start of `first`: what a jump to a declaration lands on, its name rather than its
-/// attributes or annotations.
+/// Find `name` as a word in `first..last` lines, falling back to the start of `first`.
+/// Declaration jumps should target names rather than attributes.
 pub fn name_at(lines: &[&str], first: u32, last: u32, name: &str) -> Pos {
     let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
     let span = lines.iter().enumerate().skip(first as usize);
@@ -731,12 +681,10 @@ fn flatten(symbols: &[Symbol]) -> Vec<Row> {
     rows
 }
 
-/// The row of the innermost symbol whose range holds `line`, or `None` where no symbol does.
+/// Find the innermost symbol row containing `line`, or `None`.
 ///
-/// A search rather than a walk, since it runs on every caret move: the rows are in the order of
-/// the file, so the last one to start at or before `line` is found by bisection. When that one
-/// has already ended — a caret after a function's closing brace — the answer is one of the
-/// symbols around it, because nothing that ended before it started can still hold the line.
+/// Bisection finds the last symbol starting before the caret; if it ended already, enclosing
+/// symbols are searched. This avoids a full walk on every caret move.
 fn row_at(rows: &[Row], line: u32) -> Option<usize> {
     let mut row = rows.partition_point(|r| r.lines.0 <= line).checked_sub(1)?;
     while rows[row].lines.1 < line {
@@ -745,12 +693,10 @@ fn row_at(rows: &[Row], line: u32) -> Option<usize> {
     Some(row)
 }
 
-/// The line to pin above the view when `top` is the first line on screen: the line naming the
-/// deepest symbol whose body the reader is inside and whose own head has scrolled away.
+/// Find the deepest enclosing symbol whose header scrolled above `top`, or `None`.
 ///
-/// The *selection* line rather than the range's first, because a server includes a symbol's doc
-/// comment in its range: what a reader has lost sight of is the signature, not the paragraph
-/// above it. `None` when nothing has been scrolled out of sight, which takes the bar down again.
+/// Use its selection line, since server ranges may begin at doc comments and the pinned
+/// header should show the signature.
 pub fn innermost(symbols: &[Symbol], top: u32) -> Option<u32> {
     symbols.iter().find_map(|symbol| {
         let head = symbol.selection.start.line;
@@ -762,10 +708,8 @@ pub fn innermost(symbols: &[Symbol], top: u32) -> Option<u32> {
     })
 }
 
-/// The icon for a completion kind. The names are the app's own, shipped in the GResource
-/// (`data/icons/scalable/actions`) because Adwaita has no glyph for a function, an enum member or
-/// a type parameter. Kinds that mean the same thing to a reader share one drawing: a constructor
-/// is a method, a property is a field.
+/// Completion-kind icons shipped as GResources because Adwaita lacks semantic code glyphs.
+/// Kinds with the same meaning share icons, such as constructor/method and property/field.
 pub fn icon_name(kind: Kind) -> &'static str {
     match kind {
         Kind::Text => "lsp-text-symbolic",
@@ -789,8 +733,7 @@ pub fn icon_name(kind: Kind) -> &'static str {
     }
 }
 
-/// The icon for a declaration the index holds: the one a server's completion of the same thing
-/// gets, a trait being an interface and a type alias a type parameter, as rust-analyzer has them.
+/// Map indexed declarations to the corresponding completion icon, matching server trait/type-alias meanings.
 pub fn declaration_icon(kind: SymbolKind) -> &'static str {
     icon_name(match kind {
         SymbolKind::Function | SymbolKind::Macro => Kind::Function,

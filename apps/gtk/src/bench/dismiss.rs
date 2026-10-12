@@ -1,5 +1,4 @@
-//! A primary click outside a dialog (`dialogs::close_on_outside_press`), through real XTEST
-//! clicks.
+//! Probe outside-click dialog dismissal with real XTEST input.
 
 use super::*;
 
@@ -11,16 +10,12 @@ const CLOSING: [(&str, &str); 4] = [
     ("preferences", "win.preferences"),
 ];
 
-/// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` opens the two notes in one pane, `<relA>` in
-/// front with its caret at the start, and presents each dialog in [`CLOSING`] in turn. For each it
-/// prints `bench dismiss_ready <case> <x> <y>`, a point on screen outside the dialog, on `<relA>`'s
-/// text or else on `<relB>`'s tab, for an XTEST click there (`build-aux/xtest.py :N "move x y;
-/// down; up"`), then whether the dialog closed, whether the tab in front and its caret are what
-/// they were, and whether the dialog was let go. Then a click on the palette's own entry, which
-/// leaves it up; one outside Preferences with Restore Defaults' question over it, and one outside
-/// an alert alone, both of which stay; one outside About, which closes; the same two points with
-/// no dialog up, which move the caret and switch the tab, so the points are shown to be live; and
-/// last the same in a small window ([`bench_dismiss_small`]).
+/// `ACCENT_BENCH_SWITCHER=dismiss:<relA>,<relB>` presents each [`CLOSING`] dialog over
+/// two notes. `bench dismiss_ready <case> <x> <y>` requests an outside XTEST click
+/// (`build-aux/xtest.py :N "move x y; down; up"`). Check dismissal and release without
+/// changing the underlying tab or caret. Check that clicks inside the palette and
+/// outside alerts preserve dialogs, About dismisses, and the same points act on notes
+/// without a dialog. Repeat in a small window ([`bench_dismiss_small`]).
 pub(super) fn bench_dismiss(app: &Rc<App>, rels: &str) {
     let Some((a, b)) = rels.split_once(',') else {
         return bench_quit(app);
@@ -244,10 +239,9 @@ pub(super) fn bench_dismiss(app: &Rc<App>, rels: &str) {
     });
 }
 
-/// The window under 450 x 360 px, where libadwaita makes a dialog a bottom sheet: the palette is
-/// one and still closes on a click above it, and an alert stays floating, a click outside it
-/// answering nothing, and closes on Escape (`bench dismiss_key <case> <x> <y> Escape`, for an
-/// XTEST press with the window given the keyboard) with its close response.
+/// Repeat below 450 × 360 px: the palette becomes a bottom sheet and dismisses on
+/// clicks above it; floating alerts ignore outside clicks and close on Escape.
+/// `bench dismiss_key <case> <x> <y> Escape` requests focused XTEST input.
 async fn bench_dismiss_small(app: &Rc<App>) {
     app.window.set_default_size(420, 340);
     glib::timeout_future(Duration::from_millis(800)).await;

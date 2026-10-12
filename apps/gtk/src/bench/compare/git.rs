@@ -3,39 +3,18 @@
 use super::disk::centre;
 use super::*;
 
-/// A file opened the way the Git pane opens one: its Changes row activated, with no tab holding
-/// the file yet. Prints which section the row was in, whether a tab came up comparing, and what
-/// the comparison holds. Point it at a repository whose `<rel>` is modified in the working tree.
+/// Open a modified file from its Changes row and report section, comparison state and content.
+/// Use a scratch repository.
 ///
-/// Three of them are the bug this covers, each a row that is older than what git now says, so
-/// both sides carry the same text. `stale:<rel>` stages the file behind the pane's back and
-/// activates the Changes row that has not caught up; the comparison it used to open had
-/// `hunks=0` — two identical columns, while the editor's own gutter went on marking the change
-/// against HEAD. `staged:<rel>` stages it, waits for the Staged row, unstages behind the pane's
-/// back and activates that row. `commit:<rel>` asks for the file at HEAD against HEAD~1, where
-/// HEAD did not touch it — the shape a commit's file list has once history has moved under it.
-/// All three now say so and ask git again instead of opening a tab of two identical columns.
+/// `stale:<rel>` stages behind the pane, `staged:<rel>` unstages behind it, and `commit:<rel>`
+/// compares HEAD with HEAD~1. Stale identical sides must report the change and refresh rather
+/// than show an empty diff. Binary rows open the current file; deleted binaries report absence.
+/// Changed commit files must open with the first hunk visible.
 ///
-/// Pointed at a binary file — modified, untracked, staged alone, renamed, or in `commit:` — the
-/// row opens the file as it is now, in the pane's preview tab and without a toast, where it used
-/// to toast that the file is binary; a deleted one says it is no longer on disk.
-///
-/// Pointed at a file HEAD did change, `commit:` prints whether the tab opened with its first change
-/// on screen, and the shared scrollbar's value, upper and page size: a long file whose one change
-/// is deep inside used to open scrolled away from it, with everything around it folded.
-///
-/// Every comparison that opens is then scrolled half a page down and read back once it has had
-/// time to lay itself again (`scrolled want=… got=…`, the two equal): a file with one side empty
-/// — untracked, newly staged, deleted, or added by the commit — went back to `got=0`, the empty
-/// column's view pulling the scroll they share into its own few pixels. In the note's own tab the
-/// minimap is switched on first and its band's top printed either side (`map=…->…`), then again
-/// across a page of the editor's own scroll once the comparison is left (`left map=…->…`): it
-/// stood still while the editor was on the companion's scrollbar. Point it at a note whose changes
-/// keep most rows on screen, or the view has nothing to scroll. `stale:` opens the file
-/// first and prints whether its editor has its own scrollbar back once the comparison has been
-/// left (`own_scroll=true`), then scrolls it: the editor used to keep the companion's adjustment,
-/// and with it the freed companion's handler, and that scroll crashed the window — every time
-/// under `MALLOC_PERTURB_=165`.
+/// Scroll every opened comparison half a page: `scrolled want=… got=…` must agree even with an
+/// empty side. Check minimap movement during and after comparison. The stale case also expects
+/// `own_scroll=true` after teardown and must scroll safely, including under
+/// `MALLOC_PERTURB_=165`. Use changes with enough visible rows for scrolling.
 pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
     app.show_pane("git");
     let (mode, rel) = match rel.split_once(':') {
@@ -257,23 +236,15 @@ fn bench_compare_binary(app: &Rc<App>, then: impl FnOnce() + 'static) {
     });
 }
 
-/// Stage, Unstage and Revert Selected Lines, end to end. It makes a repository in the vault root
-/// and commits the note as twelve lines, so point it at a throwaway vault. The tab then rewrites
-/// line 3 and adds a line under line 9, and the working tree is compared with the index; line 3
-/// is selected in the editor and staged, then selected in the Index pane of the staged comparison
-/// and unstaged. It prints the entries each pane's menu offers and what the index holds after
-/// each step. Then the added line is selected in the editor and reverted, which takes it out of
-/// the buffer, the index untouched, and an undo puts it back (`reverted gone=true … undone=true`).
-/// Then it leaves line 3 selected in the working-tree comparison for eight seconds, for
-/// `build-aux/xtest.py` to open the menu on with a secondary click (`hold` says when). Last the
-/// same from the buttons on each hunk's band in the strip between the columns, after the strip as
-/// laid (`strip`: the buttons on screen against the columns, `over=0` and `links_off=0` the claim,
-/// see `Compare::strip`): Revert on the second takes line 9b out of the buffer and an undo puts it
-/// back (`hunk_reverted gone=true`, `hunk_undone=true`), as Revert Hunk from the palette does with
-/// the caret on it (`palette_reverted gone=true`), Stage on the first stages line 3 alone, and the
-/// Stage left on line 9b's hunk stages it (`clicked index=…` holding line 9b). Revert and the last
-/// Stage are pressed through the real pointer: `aim <x> <y>` is the middle of each, for
-/// `build-aux/xtest.py :N "move <x> <y>; focus; down; up"` within ten seconds.
+/// Stage, Unstage and Revert Selected Lines in a throwaway repository with a committed 12-line
+/// note. Rewrite line 3 and insert line 9b; report menus and index content after staging and
+/// unstaging line 3. Revert 9b without changing the index, then undo (`gone=true`,
+/// `undone=true`).
+///
+/// Hold the selection for 8 s for an XTEST context-menu check. Repeat through hunk controls and
+/// the Revert Hunk palette action. Strip geometry expects `over=0 links_off=0`; Revert and final
+/// Stage print `aim <x> <y>` for `build-aux/xtest.py :N "move <x> <y>; focus; down; up"` within
+/// 10 s.
 pub(in crate::bench) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -516,20 +487,10 @@ fn bench_tops(compare: &diff::Compare) -> String {
     tops.join(" ")
 }
 
-/// Typing at the start of a padded line, where the character lands outside a padding tag that
-/// begins at it and the line is laid out bare for a frame, and the one place such a tag does not
-/// begin at the newline before its line: a padded paragraph right under a padded blank line.
-///
-/// A changed line shorter than its partner carries the difference as padding under it. The note
-/// is written as five long paragraphs with unchanged lines around them and staged, then the buffer
-/// makes the first three a short line, an empty one and another short one, each padded by its own
-/// amount, and the last two paragraphs two short lines, the second of them the control, under a
-/// padded line that is not blank. A character is then typed at the start of the empty line, of
-/// the line under it and of the control; `padded_after` is the claim in all three.
-///
-/// It makes a repository in the vault root and stages the note, so point it at a throwaway vault.
-/// The lines, counting from 0: three unchanged lines before the empty one, and the fourteen
-/// unchanged lines and the short line before the control.
+/// Type at padded line starts: an empty line, the paragraph below it, and a control below a
+/// nonblank padded line. The staged fixture uses five long paragraphs shortened in the buffer.
+/// Expected `padded_after` in every case, including the boundary where a padding tag cannot
+/// start at the preceding newline. Creates and stages a repository; use a throwaway vault.
 const BLANK: i32 = 4;
 const CONTROL: i32 = 21;
 
@@ -614,25 +575,14 @@ fn pads_texts() -> (String, String) {
     (index, work)
 }
 
-/// Typing by real keys into a working-tree comparison of 400 lines, the editor being its right
-/// column: changed at every fortieth line from line 20 and staged, so a run hides between each two
-/// changes. The lines wrap to a few rows each, which puts the note above the 16 KB under which the
-/// editor lays the comparison again on each keystroke rather than on its debounce; `short:` makes
-/// them one or two rows, under it. The middle run is opened from its button and XTEST types into it
-/// and around it, each step asked for as `bench compare_typing xtest <steps>`: `inside` three
-/// letters at the end of its middle line, `back` three BackSpaces that make that line unchanged
-/// again, `newline` a Return there and `join` a BackSpace that takes the new line out again,
-/// `above` and `below` three letters on the changed line before and after the run; then three
-/// letters in the middle of the run above it, opened by a jump into it as a search hit or the
-/// outline makes (`jump`), and of the last run, opened from its button with the view at the end of
-/// the file (`end`). For each it prints the hidden runs before and after, whether the run opened is
-/// still open, and over every frame painted until a second and a half after the last key: where the
-/// line typed into starts below the top of the view before and after (`line_y`), in how many frames
-/// it was anywhere else (`jumped`) or its partner in the other column off its row (`skewed`), in
-/// how many some row on screen had its two lines at different heights once the edit was laid over
-/// (`uneven`, the first such row as `row:old_y/new_y`), and in how many either view had to skip
-/// drawing (`blank`, see `fold::aborts_at`). Makes a repository in the vault root and stages the
-/// note, so point it at a throwaway vault.
+/// Real-key typing in a working-tree comparison of 400 wrapping lines, changed every fortieth
+/// from line 20. Default size exceeds the 16 KiB instant-relayout threshold; `short:` stays
+/// below it.
+///
+/// Print `bench compare_typing xtest <steps>` for typing inside and around an opened run,
+/// Backspace, Return/join, a jump-opened run and the final run. Report hidden-run retention and
+/// frame-level `line_y`, `jumped`, `skewed`, `uneven` and `blank` through 1.5 s after input.
+/// Creates and stages a repository; use a throwaway vault.
 pub(in crate::bench) fn bench_compare_typing(app: &Rc<App>, rel: &str) {
     let (short, rel) = match rel.strip_prefix("short:") {
         Some(rel) => (true, rel),
@@ -888,14 +838,10 @@ async fn typed(
     )
 }
 
-/// A Changes row clicked right after another repository is picked (`=pick:<rel>`). Point it at a
-/// vault whose root repository has `<rel>` changed and a second repository beside it: the drill
-/// picks the second one in the chooser and activates `<rel>`'s row at once, before the refresh
-/// the pick asks for has landed, and prints whether that row was still listed and, for whatever
-/// comparison opened, both sides' line counts. The list used to go on showing the root's rows
-/// until then, and the row compared its path in the repository just picked, where git has no
-/// such file: an empty Index side and the whole file drawn as added, deletions and all. Then it
-/// picks the root again, lets the refresh land, and prints the same for a click on the row.
+/// `=pick:<rel>` checks a Changes click immediately after switching repositories, before
+/// refresh. Use two repositories with `<rel>` modified in the root. The old row must not be
+/// interpreted against the new repository. Report row presence and both side lengths
+/// immediately, then after returning to the root and refreshing.
 pub(in crate::bench) fn bench_compare_pick(app: &Rc<App>, rel: &str) {
     app.show_pane("git");
     let (app, rel) = (app.clone(), rel.to_string());
@@ -936,15 +882,10 @@ pub(in crate::bench) fn bench_compare_pick(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Changes, Staged, Deleted and history rows clicked in the orders and at the moments a reader
-/// clicks them (`=clicks`): a file not open yet, the same row again, a file open in a tab, right
-/// after a save, right after the file changed on disk under its open tab, while a refresh is on
-/// its way, two rows a few milliseconds apart, a deletion, a staged change and a commit's file.
-/// After each it prints what the comparison in front holds once it has settled: each column's
-/// line count, whether that is the text git has for it (`ok`), how many of its lines show text on
-/// screen (`seen`) and each column's width, and `bad` names what is off. A comparison showing one
-/// side only has a column empty, wrong, off screen or squeezed. It makes a repository in the
-/// vault root, so point it at a throwaway vault.
+/// `=clicks` exercises Changes, Staged, Deleted and history clicks around opening, saving,
+/// external edits, refreshes and near-simultaneous clicks. Report settled side lengths,
+/// git-content agreement (`ok`), visible text (`seen`), widths and any `bad` result. Creates a
+/// repository; use a throwaway vault.
 pub(in crate::bench) fn bench_compare_clicks(app: &Rc<App>) {
     app.show_pane("git");
     let app = app.clone();
@@ -1239,13 +1180,10 @@ fn seen(view: &gtk::TextView) -> usize {
     n
 }
 
-/// A Changes row clicked while the file's own tab is behind the disk (`=stale:<rel>`): the note
-/// is opened as the window comes up and changed on disk while the first index is still walking,
-/// which takes the change in before the watcher's news of it, so the news reads as no change and
-/// the tab is never told. Its row is clicked as soon as the Git pane lists it, and the drill
-/// prints whether the tab had the disk's text then and what the click opened 1.5 s on, as
-/// `=clicks` does. Point it at a clean repository large enough to take seconds to index: `make
-/// vault` into a scratch folder, committed.
+/// `=stale:<rel>` clicks a Changes row after the initial index walk absorbs an external edit
+/// before its watcher event can notify the open tab. Report whether the buffer was current and
+/// the comparison 1.5 s later. Use a committed generated scratch vault large enough to index for
+/// seconds.
 pub(in crate::bench) fn bench_compare_stale(app: &Rc<App>, rel: &str) {
     app.show_pane("git");
     app.open_path(rel);
@@ -1306,18 +1244,14 @@ pub(in crate::bench) fn bench_compare_stale(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Comparisons with git across a restart, in two launches on one scratch home. `save:<rel>,<other>`
-/// makes a repository in the vault root, commits `<rel>` as twelve lines and again with line 1
-/// changed, stages line 3 changed and writes line 9b under line 9 on top. Then the left pane
-/// holds the note compared with the index (in front) and its staged comparison, the right pane
-/// `<other>` and the last commit's comparison (in front), and the left pane is the active one;
-/// it prints the layout the session writes and the comparisons it keeps, and saves it.
-/// `back:<rel>,<other>` prints what the restore put back: the layout, the active tab, whether the
-/// note is compared again and what its comparison holds, and the tabs of two blobs that came
-/// back, and the toasts standing. Committing the note between the two leaves the note and the
-/// staged change nothing to show: they come back as the plain note and not at all, saying
-/// nothing. Before 2026-10-04 the note came back plain, the two blob tabs did not come back, and
-/// the right pane showed whichever of its tabs landed first.
+/// Two launches on one scratch home check comparison session restore. `save:<rel>,<other>`
+/// creates a repository, commits a 12-line note and a line-1 change, stages line 3 and adds 9b.
+/// Keep note/index and staged tabs in the left pane, other/commit tabs in the right; print and
+/// save layout and comparisons.
+///
+/// `back:<rel>,<other>` reports restored layout, active tab, sides and toasts. If the note is
+/// committed between launches, restore the plain note and omit the empty staged comparison
+/// without a toast.
 pub(in crate::bench) fn bench_compare_session(app: &Rc<App>, arg: &str) {
     let (save, rels) = match arg.split_once(':') {
         Some(("save", rels)) => (true, rels),

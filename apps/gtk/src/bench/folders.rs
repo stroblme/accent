@@ -4,17 +4,10 @@
 use super::files::until;
 use super::*;
 
-/// Open a tree row's context menu and then take the pointer away from the list, which is what the
-/// popover itself does: the highlight has to stay on the row the menu is pointing at. Then mark a
-/// second row as a Ctrl+click does and open the menu again, which is the marked set's whole
-/// mechanism bar the modifier: the rows that carry the mark class, and the items a menu over one
-/// of them offers.
-///
-/// The leave is emitted on the list's own motion controller, found among its controllers, because
-/// under Xvfb nothing moves a pointer. That is the event the popover's grab really sends, so this
-/// drives the mechanism the bug was in; what it does not show is the menu on screen over the lit
-/// row, which wants eyes — nor does anything here press Ctrl, there being no pointer to hold it
-/// with.
+/// Open a row menu, emit pointer leave and verify its anchor highlight stays. Mark another row
+/// and inspect classes and multi-file menu actions. Emitting the motion-controller leave models
+/// the popover grab under Xvfb; visual placement and real Ctrl-modifier handling need pointer
+/// checks.
 pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
     let Some(ops) = app.ops().cloned() else {
         return bench_quit(app);
@@ -391,16 +384,11 @@ pub(super) fn bench_expand(app: &Rc<App>, rel: &str) {
     println!("bench bind_probe {n} rows in {:.1} ms", ms_since(t0));
 }
 
-/// `ACCENT_BENCH_DROP="<rel_folder> <abs_file> <abs_file>"`: the half of a drag from GNOME Files
-/// a headless run can drive. Xvfb carries a drag inside one process and not between two, so this
-/// builds the `GdkFileList` a file manager would offer and takes the two ends the app owns.
-///
-/// First the spring-open: the folder's row is shut, `enter` is emitted on its own drop target the
-/// way a drag resting over it does, and the row has to be open a second later. Then the drop
-/// itself: `tree::dropped_paths` over the list, then `fileops::import` into that folder, which is
-/// the path a paste of GNOME Files' clipboard already takes — a copy first, then a move, which
-/// has to leave nothing behind. What no drill sees is the three lines of `connect_drop` glue
-/// between the two, and the action a real file manager reports with Shift held.
+/// `ACCENT_BENCH_DROP="<rel_folder> <abs_file> <abs_file>"` models GNOME file-list offers
+/// because Xvfb cannot drag between processes. Enter a closed row's drop target and expect
+/// spring-open after 1 s, then import through `tree::dropped_paths` and fileops. Copy then Cut
+/// must leave no original behind. Cross-process glue and Shift action negotiation require
+/// real-session checks.
 pub(super) fn bench_drop(app: &Rc<App>, arg: &str) {
     let Some(ops) = app.ops().cloned() else {
         return bench_quit(app);
@@ -562,16 +550,10 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
     });
 }
 
-/// `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: open each folder in the tree as clicks on the rows above
-/// it would, one level at a time, and print what the tree lists under it once it has.
-///
-/// `=race:<rel_ignored_dir>` is the folder a build fills while the tree opens it: a folder is made
-/// in the open gitignored `<rel_ignored_dir>` with one file, and opened as soon as the tree lists
-/// it, with the vault's worker busy on a walk; a second file is written the moment the first is
-/// listed, before the new folder's watch can be in place, and the folder's rows are printed once
-/// the worker has caught up. The files are written the way anything outside accent writes them,
-/// on the host for a remote vault. `=reload:<rel_dir>` is Reload on a folder's menu
-/// ([`bench_unfold_reload`]).
+/// `ACCENT_BENCH_UNFOLD=<rel>,…` expands paths level by level and reports children.
+/// `race:<rel_ignored_dir>` opens a newly created child while indexing runs, then writes another
+/// file before its watch lands; report both after catching up. External writes occur on the host
+/// remotely. `reload:<rel_dir>` runs [`bench_unfold_reload`].
 pub(super) fn bench_unfold(app: &Rc<App>, arg: &str) {
     if arg.contains(':') {
         scratch_only(app, "ACCENT_BENCH_UNFOLD");

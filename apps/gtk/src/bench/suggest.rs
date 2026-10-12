@@ -1,5 +1,4 @@
-//! Drills over the suggestions a note gets as it is typed: the word popup, ghost text and the
-//! index behind it (`ACCENT_BENCH_SUGGEST`).
+//! Probe word suggestions, ghost text and index lifecycle (`ACCENT_BENCH_SUGGEST`).
 
 use super::*;
 
@@ -11,13 +10,10 @@ enum Under {
     Compare,
 }
 
-/// `=escape:<rel>`: Escape over a word popup and over painted ghost text, through real XTEST
-/// presses, with the find bar open and with the note compared with its disk copy. For each case
-/// it prints `bench suggest_ready <case> <steps>`, steps for `build-aux/xtest.py :N "<steps>"` (a
-/// word typed for the popup, then Escape), and after the Escape whether the popup, the ghost, the
-/// find bar and the comparison are still up; then a second Escape, which has to reach the bar or
-/// the comparison. It first prints `bench suggest focus_window` and waits for the window to have
-/// the X input focus (`xtest.py :N "move 700 400; focus"`), without which no popup shows.
+/// `=escape:<rel>` checks Escape priority for popup/ghost suggestions above Find and
+/// comparisons: first dismiss the suggestion, second reach the underlying surface.
+/// `bench suggest_ready <case> <steps>` requests XTEST input. First focus the window
+/// with `xtest.py :N "move 700 400; focus"`; suggestions need X input focus.
 pub(super) fn bench_suggest_escape(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -127,12 +123,9 @@ async fn bench_escape_case(app: &Rc<App>, tab: &Rc<Tab>, under: Under, popup: bo
     );
 }
 
-/// `=words:<rel>`: Word Suggestions on, off and on again, switched as the Preferences row does.
-/// Each time it prints the words the vault offers at the end of `th` (`bench suggest_words <case>
-/// <count> [<first six>]`), then asks for the word typed by XTEST (`bench suggest_ready <case>
-/// type th`) and prints whether the popup came up. With `RUST_LOG=accent_api=debug` the log says
-/// when the dictionary is read and let go, on the host for a remote vault. Waits for the window's
-/// X input focus first, as [`bench_suggest_escape`] does.
+/// `=words:<rel>` toggles Word Suggestions on/off/on, printing offered words and
+/// popup visibility after XTEST types `th`. Wait for X input focus. With
+/// `RUST_LOG=accent_api=debug`, inspect dictionary load/release, on the host if remote.
 pub(super) fn bench_suggest_words(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -206,16 +199,11 @@ pub(super) fn bench_suggest_words(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// `=ghost:<rel>`: the ghost-text index from a cold start, and Ghost Text switched off and on
-/// under an open note. From the drill's start it prints every line the status bar's busy slot
-/// shows (`bench suggest_bar <ms> "<line>"`) until both the vault and merl have finished
-/// indexing, then the `merl-rt` processes this one started and their resident size. A
-/// suggestion is painted and the preference switched off as the Preferences row does: it prints
-/// whether the suggestion is still painted, how long until no `merl-rt` is left, and the busy
-/// line. Then on again, with the bar's lines and the new process, and a suggestion asked for at
-/// the end of a line another note opens with; off again while merl is indexing (`mid`), and while
-/// a suggestion waits on that index (`mid_asked`), neither of which may leave "Indexing
-/// suggestions…" behind; and last on again with the vault walked at the same time.
+/// `=ghost:<rel>` probes cold indexing and Ghost Text toggles. Print busy lines,
+/// `merl-rt` child processes/RSS, suggestion visibility and shutdown latency.
+/// Reenable and request a suggestion to check restart. Disable during indexing and
+/// while a request waits (`mid`, `mid_asked`): neither may leave "Indexing suggestions…".
+/// Finally reenable while the vault scans to check overlapping busy state.
 pub(super) fn bench_suggest_ghost(app: &Rc<App>, rel: &str) {
     let start = Instant::now();
     app.open_path(rel);

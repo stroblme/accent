@@ -4,14 +4,10 @@ use super::*;
 use accent_core::attachment;
 use std::os::unix::fs::PermissionsExt;
 
-/// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` puts an image on the real
-/// clipboard and pastes it at the end of the note, undoes and redoes that, and pastes it again
-/// over a selected word; then drops a PNG from outside the vault onto the text twice and
-/// `<rel_vault_png>` once, each at the end with the caret at the start. After every step it
-/// prints the note's last line and the files the attachment folder gained, with their modes.
-/// Then it pastes into `<rel_code>`, which must take nothing, and ends in the split view for five
-/// seconds, which is the time to take a screenshot of the preview. It writes into the vault, so
-/// point it at a scratch one.
+/// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` probes image paste,
+/// undo/redo, paste over selection, external drops and an in-vault drop. Print inserted
+/// text and attachment files/modes; code must reject the paste. Hold Split view for
+/// 5 s to review rendering. Writes attachments and notes; use a scratch vault.
 pub(super) fn bench_attach(app: &Rc<App>, arg: &str) {
     let [note, in_vault, code] = arg.splitn(3, ',').collect::<Vec<_>>()[..] else {
         println!("bench attach needs <rel_note>,<rel_vault_png>,<rel_code>");
@@ -124,8 +120,8 @@ async fn opened(app: &Rc<App>, rel: &str) -> Option<Rc<Tab>> {
     None
 }
 
-/// A drop of `file` from another application at the end of the note, through the view's own file
-/// drop target: Xvfb carries a drag inside one process and not between two.
+/// Inject an external file through the view's drop target because Xvfb cannot
+/// carry a drag between processes.
 fn drop_file(tab: &Rc<Tab>, file: &Path) {
     let target = tab
         .view
