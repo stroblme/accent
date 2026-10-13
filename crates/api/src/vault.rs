@@ -13,8 +13,8 @@ use crate::local::Local;
 use crate::{
     Backlink, CodeSymbol, Commit, Etag, Event, FileRow, HeadingHit, KeptLink, Location, Match,
     Mention, Options, OutLink, PageEdit, PdfLink, RenamePlan, RenameReport, RepageReport,
-    ReplaceReport, Repo, Result, SearchHit, Session, Stats, Status, Submodule, UndoReport,
-    VaultConfig, fs, git, remote, rpc, ssh,
+    ReplaceReport, Repo, Result, SearchHit, Session, Stats, Status, Submodule, SymbolName,
+    UndoReport, VaultConfig, fs, git, remote, rpc, ssh,
 };
 
 /// An open vault with the same interface for local and remote files.
@@ -397,6 +397,8 @@ methods! {
     file_symbols(rel: ref str) -> Vec<CodeSymbol>;
     /// The declarations a name or `Container::name` finds, best first.
     find_symbols(query: ref str, limit: val usize) -> Vec<CodeSymbol>;
+    /// Every declaration's name and place, which Go to Symbol holds and ranks in the window.
+    symbol_names() -> Vec<SymbolName>;
     /// The declarations of each of `names`, those in `near` first.
     symbols_named(names: ref [String], near: ref str, per: val usize) -> Vec<CodeSymbol>;
     /// Where a name is written in code, with the declaration around it.

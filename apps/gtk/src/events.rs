@@ -224,6 +224,7 @@ impl App {
                     tree.refresh();
                 }
                 self.refresh_corpus(false);
+                self.refresh_symbols();
                 self.sync_active();
                 // A walk of one folder is news only to the reader who asked for it with Reload,
                 // and answers every such ask for that folder or one inside it.
@@ -370,6 +371,7 @@ impl App {
                     git.schedule_refresh(git::Depth::Discover);
                 }
                 self.refresh_corpus(false);
+                self.refresh_symbols();
                 self.restore_session();
                 self.sync_active();
                 // What was drawn while the link was down reached only the file here, and the

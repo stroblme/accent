@@ -876,9 +876,25 @@ pub fn detach(pane: &Pane) {
     let (Some(sibling), Some(grandparent)) = (sibling, paned.parent()) else {
         return;
     };
+    // A paned that loses the child it had the keyboard in looks for the focused widget among its
+    // own, and warns once per paned up the tree where it is not there (ISSUES.md): gone with a
+    // shell's tab, since GTK hands the keyboard on only at the next frame, or in `sibling` while
+    // it is between its two paneds, whose keyboard GTK would then hand to the paned it lands in.
+    // So the focus is unset while the tree changes, and a widget still in the window gets it back.
+    let root = pane.column.root();
+    let held = root
+        .as_ref()
+        .and_then(|root| root.focus())
+        .filter(|w| w.root().is_none() || w.is_ancestor(&sibling));
+    if let (Some(root), Some(_)) = (&root, &held) {
+        root.set_focus(gtk::Widget::NONE);
+    }
     paned.set_start_child(gtk::Widget::NONE);
     paned.set_end_child(gtk::Widget::NONE);
     replace(&grandparent, paned.upcast_ref(), &sibling);
+    if let Some(widget) = held.filter(|w| w.root().is_some()) {
+        widget.grab_focus();
+    }
 }
 
 /// Show only `only` in-place by hiding sibling branches, or restore all panes with `None`.

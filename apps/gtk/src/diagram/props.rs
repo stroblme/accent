@@ -1,8 +1,9 @@
 //! Properties for selected cells, or the page when nothing is selected.
 //!
-//! Each change uses the tab's undo path; spin rows debounce bursts. `filling` prevents
-//! model-to-widget notifications from becoming edits. Geometry and style groups reveal
-//! Copy/Paste buttons on hover or focus (`widgets::reveal_on_hover`).
+//! Each change uses the tab's undo path; spin rows debounce bursts, and a change still held
+//! lands before any other (`Props::flush`). `filling` prevents model-to-widget notifications
+//! from becoming edits. Geometry and style groups reveal Copy/Paste buttons on hover or focus
+//! (`widgets::reveal_on_hover`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -41,6 +42,8 @@ pub enum Target {
 pub enum Change {
     /// Style keys on every selected cell, as one step.
     Style(Vec<(&'static str, Option<String>)>),
+    /// Style keys on the selected arrows alone, as draw.io's arrow rows set them (`ss.edges`).
+    EdgeStyle(Vec<(&'static str, Option<String>)>),
     /// The whole style string of the one selected cell.
     Raw(String),
     PageAttr(&'static str, Option<String>),
@@ -74,18 +77,92 @@ impl Clip {
     }
 }
 
-/// Arrow heads a menu offers, by style value and label.
-const HEADS: [(&str, &str); 6] = [
-    ("none", "None"),
-    ("classic", "Classic"),
-    ("block", "Block"),
-    ("open", "Open"),
-    ("oval", "Oval"),
-    ("diamond", "Diamond"),
+/// draw.io's arrow heads (`Format.addLineMarkerItems`): the style value, whether the head is
+/// filled (`startFill`/`endFill`), and a label. The circle is filled at the start and open at
+/// the end, as draw.io offers it.
+const HEADS: [(&str, bool, &str); 35] = [
+    ("none", false, "None"),
+    ("classic", true, "Classic"),
+    ("classicThin", true, "Classic Thin"),
+    ("open", false, "Open"),
+    ("openThin", false, "Open Thin"),
+    ("openAsync", false, "Open Async"),
+    ("block", true, "Block"),
+    ("blockThin", true, "Block Thin"),
+    ("async", true, "Async"),
+    ("oval", true, "Oval"),
+    ("diamond", true, "Diamond"),
+    ("diamondThin", true, "Diamond Thin"),
+    ("classic", false, "Classic Outline"),
+    ("classicThin", false, "Classic Thin Outline"),
+    ("block", false, "Block Outline"),
+    ("blockThin", false, "Block Thin Outline"),
+    ("async", false, "Async Outline"),
+    ("oval", false, "Oval Outline"),
+    ("diamond", false, "Diamond Outline"),
+    ("diamondThin", false, "Diamond Thin Outline"),
+    ("box", false, "Box"),
+    ("halfCircle", false, "Half Circle"),
+    ("dash", false, "Dash"),
+    ("cross", false, "Cross"),
+    ("circlePlus", false, "Circle Plus"),
+    ("circle", true, "Circle"),
+    ("baseDash", false, "Base Dash"),
+    ("ERone", false, "ER One"),
+    ("ERmandOne", false, "ER Mandatory One"),
+    ("ERmany", false, "ER Many"),
+    ("ERoneToMany", false, "ER One to Many"),
+    ("ERzeroToOne", false, "ER Zero to One"),
+    ("ERzeroToMany", false, "ER Zero to Many"),
+    ("doubleBlock", false, "Double Block Outline"),
+    ("doubleBlock", true, "Double Block"),
+];
+
+/// Whether head `i` of [`HEADS`] is filled at the start (`start`) or the end.
+fn head_filled(i: usize, start: bool) -> bool {
+    let (kind, filled, _) = HEADS[i];
+    filled && (start || kind != "circle")
+}
+
+/// Where in [`HEADS`] a head of `kind`, filled or not, is: the entry that matches both, else the
+/// first of that kind.
+fn head_at(kind: &str, filled: bool, start: bool) -> Option<usize> {
+    let of_kind = |i: &usize| HEADS[*i].0 == kind;
+    (0..HEADS.len())
+        .filter(of_kind)
+        .find(|&i| head_filled(i, start) == filled)
+        .or_else(|| (0..HEADS.len()).find(of_kind))
+}
+
+/// The keys of an arrow's head at its start or its end: its kind, whether it is filled, its size.
+fn head_keys(start: bool) -> [&'static str; 3] {
+    match start {
+        true => ["startArrow", "startFill", "startSize"],
+        false => ["endArrow", "endFill", "endSize"],
+    }
+}
+
+/// draw.io's line patterns (Format panel), by `dashed`, `dashPattern` and label.
+const PATTERNS: [(Option<&str>, Option<&str>, &str); 8] = [
+    (None, None, "Solid"),
+    (Some("1"), None, "Dashed"),
+    (Some("1"), Some("8 8"), "Dashed (2)"),
+    (Some("1"), Some("12 12"), "Dashed (3)"),
+    (Some("1"), Some("8 4 1 4"), "Dashed (4)"),
+    (Some("1"), Some("1 1"), "Dotted"),
+    (Some("1"), Some("1 2"), "Dotted (2)"),
+    (Some("1"), Some("1 4"), "Dotted (3)"),
 ];
 const ALIGN: [(&str, &str); 3] = [("left", "Left"), ("center", "Centre"), ("right", "Right")];
 const VALIGN: [(&str, &str); 3] = [("top", "Top"), ("middle", "Middle"), ("bottom", "Bottom")];
-const ROUTES: [&str; 3] = ["Straight", "Orthogonal", "Curved"];
+/// The routes an arrow takes, the elbows named by draw.io's titles for them.
+const ROUTES: [&str; 5] = [
+    "Straight",
+    "Orthogonal",
+    "Horizontal Elbow",
+    "Vertical Elbow",
+    "Curved",
+];
 /// draw.io's gradient directions (Format panel), south when a style names none.
 const DIRECTIONS: [(&str, &str); 5] = [
     ("north", "North"),
@@ -96,6 +173,9 @@ const DIRECTIONS: [(&str, &str); 5] = [
 ];
 
 type OnChange = Rc<RefCell<Option<Box<dyn Fn(Change)>>>>;
+/// Spin rows' changes waiting for their burst to settle, one a slot (the four geometry rows
+/// share one), in the order they were made.
+type Held = RefCell<Vec<(&'static str, Box<dyn FnOnce()>)>>;
 
 /// A colour a cell may also have none of: a switch for whether it has one, and the colour.
 struct ColourRow {
@@ -184,7 +264,7 @@ pub struct Props {
     direction: adw::ComboRow,
     stroke: Rc<ColourRow>,
     stroke_width: adw::SpinRow,
-    dashed: adw::SwitchRow,
+    pattern: adw::ComboRow,
     rounded: adw::SwitchRow,
     shadow: adw::SwitchRow,
     opacity: adw::SpinRow,
@@ -199,6 +279,8 @@ pub struct Props {
     route: adw::ComboRow,
     start: adw::ComboRow,
     end: adw::ComboRow,
+    start_size: adw::SpinRow,
+    end_size: adw::SpinRow,
     raw: adw::EntryRow,
     page_name: adw::EntryRow,
     background: Rc<ColourRow>,
@@ -207,6 +289,7 @@ pub struct Props {
     /// The font style bits the cell had when the pane was filled, which a toggle flips one of.
     font_bits: Cell<u32>,
     debounce: Debounce,
+    held: Held,
 }
 
 /// Apply an entry on Return or its button. Hide the idle pencil because clicking
@@ -311,10 +394,10 @@ impl Props {
         position.add(&y);
         size.add(&width);
         size.add(&height);
-        let (shape, text, line, raw_group, page_group) = (
+        let (shape, line, text, raw_group, page_group) = (
             group("Shape"),
-            group("Text"),
             group("Line"),
+            group("Text"),
             group("Style"),
             group("Page"),
         );
@@ -325,7 +408,7 @@ impl Props {
         let stroke = Rc::new(ColourRow::new("Line Colour"));
         let stroke_width = spin("Line Width", (0.0, 20.0, 0.5));
         stroke_width.set_digits(1);
-        let dashed = adw::SwitchRow::builder().title("Dashed").build();
+        let pattern = combo("Pattern", &PATTERNS.map(|(.., l)| l));
         let rounded = adw::SwitchRow::builder().title("Rounded").build();
         let shadow = adw::SwitchRow::builder().title("Shadow").build();
         let opacity = spin("Opacity", (0.0, 100.0, 5.0));
@@ -333,13 +416,13 @@ impl Props {
         shape.add(&fill.row);
         shape.add(&gradient.row);
         shape.add(&direction);
-        shape.add(&stroke.row);
-        shape.add(&stroke_width);
-        shape.add(&dashed);
         shape.add(&rounded);
         shape.add(&shadow);
         shape.add(&opacity);
         shape.add(&rotation);
+        line.add(&stroke.row);
+        line.add(&stroke_width);
+        line.add(&pattern);
 
         let font_size = spin("Font Size", (6.0, 96.0, 1.0));
         let font_colour = Rc::new(ColourRow::new("Font Colour"));
@@ -369,11 +452,15 @@ impl Props {
         text.add(&valign);
 
         let route = combo("Route", &ROUTES);
-        let start = combo("Start", &HEADS.map(|(_, l)| l));
-        let end = combo("End", &HEADS.map(|(_, l)| l));
+        let start = combo("Start", &HEADS.map(|(.., l)| l));
+        let end = combo("End", &HEADS.map(|(.., l)| l));
+        let start_size = spin("Start Size", (0.0, 999.0, 1.0));
+        let end_size = spin("End Size", (0.0, 999.0, 1.0));
         line.add(&route);
         line.add(&start);
+        line.add(&start_size);
         line.add(&end);
+        line.add(&end_size);
 
         let raw = entry_row("Style");
         raw.add_css_class("monospace");
@@ -433,7 +520,7 @@ impl Props {
             direction,
             stroke,
             stroke_width,
-            dashed,
+            pattern,
             rounded,
             shadow,
             opacity,
@@ -448,6 +535,8 @@ impl Props {
             route,
             start,
             end,
+            start_size,
+            end_size,
             raw,
             page_name,
             background,
@@ -455,6 +544,7 @@ impl Props {
             page_height,
             font_bits: Cell::new(0),
             debounce: Debounce::new(Duration::from_millis(300)),
+            held: RefCell::new(Vec::new()),
         });
         props.wire();
         props
@@ -470,10 +560,17 @@ impl Props {
 
     fn wire(self: &Rc<Self>) {
         let send = {
-            let (on, filling) = (self.on_change.clone(), self.filling.clone());
+            let (me, on, filling) = (
+                Rc::downgrade(self),
+                self.on_change.clone(),
+                self.filling.clone(),
+            );
             Rc::new(move |change: Change| {
                 if filling.get() {
                     return;
+                }
+                if let Some(me) = me.upgrade() {
+                    me.flush();
                 }
                 if let Some(f) = on.borrow().as_ref() {
                     f(change);
@@ -515,28 +612,34 @@ impl Props {
                 })
             });
         };
-        switch(&self.dashed, "dashed", None);
         switch(&self.rounded, "rounded", Some("0"));
         switch(&self.shadow, "shadow", None);
 
-        // Spin rows step once per arrow press; a burst of them is one change.
-        let spins: [(&adw::SpinRow, &'static str, Option<f64>); 4] = [
-            (&self.stroke_width, "strokeWidth", None),
-            (&self.opacity, "opacity", Some(100.0)),
-            (&self.rotation, "rotation", Some(0.0)),
-            (&self.font_size, "fontSize", None),
+        // Spin rows step once per arrow press; a burst of them is one change. The last ones
+        // are an arrow's alone; 6 is a head's size when the style gives none
+        // (`mxConstants.DEFAULT_MARKERSIZE`).
+        let spins: [(&adw::SpinRow, &'static str, Option<f64>, bool); 6] = [
+            (&self.stroke_width, "strokeWidth", None, false),
+            (&self.opacity, "opacity", Some(100.0), false),
+            (&self.rotation, "rotation", Some(0.0), false),
+            (&self.font_size, "fontSize", None, false),
+            (&self.start_size, "startSize", Some(6.0), true),
+            (&self.end_size, "endSize", Some(6.0), true),
         ];
-        for (row, key, default) in spins {
-            let (me, set) = (Rc::downgrade(self), style(key));
-            let set = Rc::new(set);
+        for (row, key, default, edges) in spins {
+            let (me, send) = (Rc::downgrade(self), send.clone());
             row.connect_value_notify(move |row| {
                 let Some(me) = me.upgrade() else { return };
                 if me.filling.get() {
                     return;
                 }
-                let (value, set) = (row.value(), set.clone());
-                me.debounce.call(move || {
-                    set((Some(value) != default).then(|| number(value)));
+                let (value, send) = (row.value(), send.clone());
+                me.hold(key, move || {
+                    let pairs = vec![(key, (Some(value) != default).then(|| number(value)))];
+                    send(match edges {
+                        true => Change::EdgeStyle(pairs),
+                        false => Change::Style(pairs),
+                    })
                 });
             });
         }
@@ -551,8 +654,9 @@ impl Props {
                     return;
                 }
                 let (value, send) = (row.value(), send.clone());
-                me.debounce
-                    .call(move || send(Change::PageAttr(key, Some(number(value)))));
+                me.hold(key, move || {
+                    send(Change::PageAttr(key, Some(number(value))))
+                });
             });
         }
 
@@ -566,7 +670,7 @@ impl Props {
                     return;
                 }
                 let (weak, send) = (Rc::downgrade(&me), send.clone());
-                me.debounce.call(move || {
+                me.hold("geometry", move || {
                     if let Some(me) = weak.upgrade() {
                         let (x, y) = (me.x.value(), me.y.value());
                         let (w, h) = (me.width.value(), me.height.value());
@@ -613,20 +717,50 @@ impl Props {
             "gradientDirection",
             DIRECTIONS.map(|(v, _)| v).to_vec(),
         );
-        pick(&self.start, "startArrow", HEADS.map(|(v, _)| v).to_vec());
-        pick(&self.end, "endArrow", HEADS.map(|(v, _)| v).to_vec());
-        let route_send = send.clone();
-        self.route.connect_selected_notify(move |row| {
-            let (edge_style, curved) = match row.selected() {
-                1 => (Some("orthogonalEdgeStyle"), None),
-                2 => (None, Some("1")),
-                _ => (None, None),
-            };
-            route_send(Change::Style(vec![
-                ("edgeStyle", edge_style.map(str::to_string)),
-                ("curved", curved.map(str::to_string)),
-            ]));
-        });
+        // A pick that writes several keys, as one step.
+        let choose = |row: &adw::ComboRow, change: Box<dyn Fn(usize) -> Option<Change>>| {
+            let send = send.clone();
+            row.connect_selected_notify(move |row| {
+                if let Some(change) = change(row.selected() as usize) {
+                    send(change);
+                }
+            });
+        };
+        choose(
+            &self.pattern,
+            Box::new(|i| {
+                let (dashed, pattern, _) = PATTERNS.get(i)?;
+                let pairs = [("dashed", *dashed), ("dashPattern", *pattern)];
+                Some(Change::Style(owned(&pairs)))
+            }),
+        );
+        for (row, start) in [(&self.start, true), (&self.end, false)] {
+            let [arrow, fill, _] = head_keys(start);
+            choose(
+                row,
+                Box::new(move |i| {
+                    let (kind, ..) = HEADS.get(i)?;
+                    let filled = if head_filled(i, start) { "1" } else { "0" };
+                    let pairs = [(arrow, Some(*kind)), (fill, Some(filled))];
+                    Some(Change::EdgeStyle(owned(&pairs)))
+                }),
+            );
+        }
+        choose(
+            &self.route,
+            Box::new(|i| {
+                let (edge, elbow, curved) = match i {
+                    0 => (None, None, None),
+                    1 => (Some("orthogonalEdgeStyle"), None, None),
+                    2 => (Some("elbowEdgeStyle"), Some("vertical"), None),
+                    3 => (Some("elbowEdgeStyle"), None, None),
+                    4 => (None, None, Some("1")),
+                    _ => return None,
+                };
+                let pairs = [("edgeStyle", edge), ("elbow", elbow), ("curved", curved)];
+                Some(Change::EdgeStyle(owned(&pairs)))
+            }),
+        );
 
         let raw_send = send.clone();
         self.raw
@@ -638,11 +772,11 @@ impl Props {
     /// Show `target`, writing nothing back.
     pub fn fill(&self, target: &Target) {
         self.filling.set(true);
-        self.debounce.cancel();
         let cells = matches!(target, Target::Cells { .. });
         self.page_group.set_visible(!cells);
-        self.raw_group.set_visible(cells);
-        self.text.set_visible(cells);
+        for group in [&self.shape, &self.line, &self.text, &self.raw_group] {
+            group.set_visible(cells);
+        }
         match target {
             Target::Cells {
                 style,
@@ -668,26 +802,36 @@ impl Props {
                         _ => paste.set_sensitive(!geometry.is_some_and(|(_, pinned)| pinned)),
                     }
                 }
-                // Every shape takes a fill; flex arrows alone show only the rows it takes.
-                self.shape.set_visible(*fills);
-                let outline: [&gtk::Widget; 7] = [
-                    self.stroke.row.upcast_ref(),
-                    self.stroke_width.upcast_ref(),
-                    self.dashed.upcast_ref(),
-                    self.rounded.upcast_ref(),
-                    self.shadow.upcast_ref(),
-                    self.opacity.upcast_ref(),
-                    self.rotation.upcast_ref(),
+                // An arrow's line is drawn from the same keys as a shape's outline, so every cell
+                // shows the line's colour, width and dash; the fill only where a cell takes one,
+                // the turn for shapes, the route and the heads for arrows.
+                self.fill.row.set_visible(*fills);
+                self.gradient.row.set_visible(*fills);
+                self.rotation.set_visible(*vertices);
+                let arrow: [&gtk::Widget; 5] = [
+                    self.route.upcast_ref(),
+                    self.start.upcast_ref(),
+                    self.start_size.upcast_ref(),
+                    self.end.upcast_ref(),
+                    self.end_size.upcast_ref(),
                 ];
-                for row in outline {
-                    row.set_visible(*vertices);
+                for row in arrow {
+                    row.set_visible(*edges);
                 }
-                self.line.set_visible(*edges);
                 self.fill.fill(style.color("fillColor"));
                 self.gradient.fill(style.color("gradientColor"));
                 self.stroke.fill(style.color("strokeColor"));
                 self.stroke_width.set_value(style.num("strokeWidth", 1.0));
-                self.dashed.set_active(style.flag("dashed", false));
+                // A pattern draw.io's menu has none of shows no row picked, as it shows none.
+                let pattern = match style.flag("dashed", false) {
+                    false => Some(0),
+                    true => {
+                        let p = style.get("dashPattern");
+                        let p = p.map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "));
+                        (1..PATTERNS.len()).find(|&i| PATTERNS[i].1.map(str::to_string) == p)
+                    }
+                };
+                self.pattern.set_selected(listed(pattern));
                 self.rounded.set_active(style.flag("rounded", false));
                 self.shadow.set_active(style.flag("shadow", false));
                 self.opacity.set_value(style.num("opacity", 100.0));
@@ -712,18 +856,25 @@ impl Props {
                 let direction = style.get("gradientDirection").unwrap_or("south");
                 self.direction
                     .set_selected(at(&DIRECTIONS.map(|(v, _)| v), Some(direction)));
-                let heads = HEADS.map(|(v, _)| v);
-                self.start
-                    .set_selected(at(&heads, Some(style.get("startArrow").unwrap_or("none"))));
-                self.end
-                    .set_selected(at(&heads, Some(style.get("endArrow").unwrap_or("none"))));
-                self.route.set_selected(
-                    match (style.get("edgeStyle"), style.flag("curved", false)) {
-                        (Some("orthogonalEdgeStyle"), _) => 1,
-                        (_, true) => 2,
+                let heads = [
+                    (&self.start, &self.start_size, true),
+                    (&self.end, &self.end_size, false),
+                ];
+                for (row, size, start) in heads {
+                    let [arrow, fill, size_key] = head_keys(start);
+                    let kind = style.get(arrow).unwrap_or("none");
+                    row.set_selected(listed(head_at(kind, style.flag(fill, true), start)));
+                    size.set_value(style.num(size_key, 6.0));
+                }
+                let route = (style.get("edgeStyle"), style.get("elbow"));
+                self.route
+                    .set_selected(match (route, style.flag("curved", false)) {
+                        ((Some("orthogonalEdgeStyle"), _), _) => 1,
+                        ((Some("elbowEdgeStyle"), Some("vertical")), _) => 2,
+                        ((Some("elbowEdgeStyle"), _), _) => 3,
+                        (_, true) => 4,
                         _ => 0,
-                    },
-                );
+                    });
                 // A style string is one cell's: with several selected there is none to show.
                 self.raw.set_sensitive(*count == 1);
                 self.raw.set_text(if *count == 1 { raw } else { "" });
@@ -735,8 +886,6 @@ impl Props {
             } => {
                 self.position.set_visible(false);
                 self.size.set_visible(false);
-                self.shape.set_visible(false);
-                self.line.set_visible(false);
                 self.page_name.set_text(name);
                 self.background.fill(*background);
                 self.page_width.set_value(size.0);
@@ -745,6 +894,31 @@ impl Props {
         }
         self.sync_gradient();
         self.filling.set(false);
+    }
+
+    /// Hold `f` as `slot`'s change until the rows have been still for a moment, in place of the
+    /// one held for it: a burst of steps is one change.
+    fn hold(self: &Rc<Self>, slot: &'static str, f: impl FnOnce() + 'static) {
+        let mut held = self.held.borrow_mut();
+        held.retain(|(s, _)| *s != slot);
+        held.push((slot, Box::new(f)));
+        drop(held);
+        let me = Rc::downgrade(self);
+        self.debounce.call(move || {
+            if let Some(me) = me.upgrade() {
+                me.flush();
+            }
+        });
+    }
+
+    /// Make the held changes now, each its own step: before any other change, a refill, or
+    /// the selection or the page changing, so none is lost or lands on other cells.
+    pub fn flush(&self) {
+        self.debounce.cancel();
+        let held = std::mem::take(&mut *self.held.borrow_mut());
+        for (_, f) in held {
+            f();
+        }
     }
 
     /// Show the page's layers, the topmost first, `current` marked.
@@ -763,9 +937,23 @@ impl Props {
     fn sync_gradient(&self) {
         let fill = self.fill.switch.is_active();
         self.gradient.row.set_sensitive(fill);
-        self.direction
-            .set_visible(fill && self.gradient.switch.is_active());
+        self.direction.set_visible(
+            self.gradient.row.is_visible() && fill && self.gradient.switch.is_active(),
+        );
     }
+}
+
+/// Style pairs as a [`Change`] carries them.
+fn owned(pairs: &[(&'static str, Option<&str>)]) -> Vec<(&'static str, Option<String>)> {
+    pairs
+        .iter()
+        .map(|(k, v)| (*k, v.map(str::to_string)))
+        .collect()
+}
+
+/// A combo row's position for entry `i`, none when there is no entry.
+fn listed(i: Option<usize>) -> u32 {
+    i.map_or(gtk::INVALID_LIST_POSITION, |i| i as u32)
 }
 
 /// A picked colour as a style value.
@@ -782,6 +970,8 @@ impl DiagramTab {
 
     /// Put the selection's look, or the page's, into the Properties pane, and the page's layers.
     pub(super) fn fill_props(&self) {
+        // What the rows hold is the selection's still; it lands before they show the model.
+        self.props.flush();
         let (target, layers, current) = {
             let editor = self.editor.borrow();
             let Ok(page) = editor.page(self.page_index.get()) else {
@@ -840,6 +1030,19 @@ impl DiagramTab {
                 let pairs: Vec<(&str, Option<&str>)> =
                     pairs.iter().map(|(k, v)| (*k, v.as_deref())).collect();
                 self.edit(|e, page| e.set_styles(page, &ids, &pairs));
+            }
+            Change::EdgeStyle(pairs) => {
+                let edges: Vec<CellId> = {
+                    let editor = self.editor.borrow();
+                    let page = editor.page(self.page_index.get()).ok();
+                    let edge = |id: &CellId| page.and_then(|p| p.cell(id)).is_some_and(|c| c.edge);
+                    ids.into_iter().filter(edge).collect()
+                };
+                let pairs: Vec<(&str, Option<&str>)> =
+                    pairs.iter().map(|(k, v)| (*k, v.as_deref())).collect();
+                if !edges.is_empty() {
+                    self.edit(|e, page| e.set_styles(page, &edges, &pairs));
+                }
             }
             Change::Raw(style) => {
                 if let [id] = ids.as_slice() {

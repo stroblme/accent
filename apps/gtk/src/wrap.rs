@@ -4,6 +4,8 @@
 //! GtkTextView has no wrap-indent API; negative paragraph indents provide hanging indents.
 //! Column tags (`wrap1`..`wrap32`) use widths measured in the view's font. Marker tags measure
 //! the styled marker itself, so proportional fonts align correctly; deeper columns are capped.
+//! A line indented with a tab takes a marker tag, with or without a marker: GtkSourceView puts its
+//! tab stops a whole number of pixels apart, so a tab's columns are not as wide as as many spaces.
 //!
 //! Paragraph properties come from the first character, so tags cover whole lines and
 //! [`retag`] checks that character. [`follow`] retags only edited lines, keeping keystroke
@@ -30,15 +32,17 @@ fn name(column: usize) -> String {
     format!("wrap{column}")
 }
 
-/// A marker tag's name: `wrap2:- ` hangs a line behind a bullet two columns in.
-fn marker_name(columns: usize, marker: &str) -> String {
-    format!("wrap{columns}:{marker}")
+/// A marker tag's name: `wrap1t2:- ` hangs a line behind a bullet two columns past the first tab
+/// stop, `wrap1t4:` four columns past it behind nothing.
+fn marker_name(stops: usize, columns: usize, marker: &str) -> String {
+    format!("wrap{stops}t{columns}:{marker}")
 }
 
-/// The indent and marker a marker tag was made for, read back out of its name.
-fn marker_of(name: &str) -> Option<(usize, &str)> {
-    let (columns, marker) = name.strip_prefix("wrap")?.split_once(':')?;
-    Some((columns.parse().ok()?, marker))
+/// The tab stops, columns and marker a marker tag was made for, read back out of its name.
+fn marker_of(name: &str) -> Option<(usize, usize, &str)> {
+    let (indent, marker) = name.strip_prefix("wrap")?.split_once(':')?;
+    let (stops, columns) = indent.split_once('t')?;
+    Some((stops.parse().ok()?, columns.parse().ok()?, marker))
 }
 
 /// Whether `tag` is one of this module's, a column's or a marker's.
@@ -62,15 +66,16 @@ pub fn install(buffer: &sourceview5::Buffer) {
 }
 
 /// Measure tags in `view`'s font, using spaces for columns and [`hang`] for marker widths.
-/// Remeasure after font or zoom changes, updating only changed widths to avoid line relayout.
+/// Remeasure after font, zoom or tab width changes, updating only changed widths to avoid line
+/// relayout.
 pub fn measure(view: &sourceview5::View) {
-    let space = space(view);
+    let (space, tab) = (space(view), tab(view));
     let table = view.buffer().tag_table();
     for column in 1..=COLUMNS {
         let Some(tag) = table.lookup(&name(column)) else {
             continue;
         };
-        let indent = -pango::units_to_double(space * column as i32).round() as i32;
+        let indent = indent(0, 0, column, space, 0);
         if tag.indent() != indent {
             tag.set_indent(indent);
         }
@@ -81,8 +86,8 @@ pub fn measure(view: &sourceview5::View) {
         let Some(name) = tag.name() else {
             continue;
         };
-        if let Some((columns, marker)) = marker_of(&name) {
-            let indent = hang(view, space, columns, marker);
+        if let Some((stops, columns, marker)) = marker_of(&name) {
+            let indent = hang(view, (space, tab), stops, columns, marker);
             if tag.indent() != indent {
                 tag.set_indent(indent);
             }
@@ -95,9 +100,37 @@ fn space(view: &sourceview5::View) -> i32 {
     view.create_pango_layout(Some(" ")).size().0
 }
 
-/// Hanging indent behind `marker` at `columns`, measured with the note's styled marker.
-/// Bullets/numbers are bold, quote markers italic and following spaces plain.
-fn hang(view: &sourceview5::View, space: i32, columns: usize, marker: &str) -> i32 {
+/// GtkSourceView's distance between tab stops, in whole pixels: `tab-width` spaces in `view`'s
+/// font, rounded up as `pango_layout_get_pixel_size` rounds (`set_tab_stops_internal`).
+fn tab(view: &sourceview5::View) -> i32 {
+    let spaces = " ".repeat(view.tab_width() as usize);
+    view.create_pango_layout(Some(&spaces)).pixel_size().0
+}
+
+/// The tab stops a line's indent reaches by its last tab, as columns count them.
+fn tab_stops(line: &str, tab_width: usize) -> usize {
+    let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+    indent.rfind('\t').map_or(0, |last| {
+        typing::wrap_head(&indent[..=last], tab_width, false).0 / tab_width
+    })
+}
+
+/// A paragraph indent hanging rows behind `stops` tab stops `tab` pixels apart, then `columns`
+/// spaces `space` wide and a marker `width` wide, both in Pango units: negative, in whole pixels.
+fn indent(stops: usize, tab: i32, columns: usize, space: i32, width: i32) -> i32 {
+    let units = stops as i32 * tab * pango::SCALE + columns as i32 * space + width;
+    -pango::units_to_double(units).round() as i32
+}
+
+/// Hanging indent behind `marker` at `stops` tab stops and `columns` past them, measured with the
+/// note's styled marker. Bullets/numbers are bold, quote markers italic and following spaces plain.
+fn hang(
+    view: &sourceview5::View,
+    (space, tab): (i32, i32),
+    stops: usize,
+    columns: usize,
+    marker: &str,
+) -> i32 {
     let font = view
         .pango_context()
         .font_description()
@@ -121,20 +154,25 @@ fn hang(view: &sourceview5::View, space: i32, columns: usize, marker: &str) -> i
         WIDTHS.with_borrow_mut(|widths| widths.insert(key, width));
         width
     });
-    -pango::units_to_double(space * columns as i32 + width).round() as i32
+    indent(stops, tab, columns, space, width)
 }
 
 /// Create a marker wrap tag lazily, below other tags so heading indentation wins.
-fn marker_tag(view: &sourceview5::View, columns: usize, marker: &str) -> gtk::TextTag {
+fn marker_tag(
+    view: &sourceview5::View,
+    stops: usize,
+    columns: usize,
+    marker: &str,
+) -> gtk::TextTag {
     let table = view.buffer().tag_table();
-    let name = marker_name(columns, marker);
+    let name = marker_name(stops, columns, marker);
     if let Some(tag) = table.lookup(&name) {
         return tag;
     }
     let tag = gtk::TextTag::new(Some(&name));
     table.add(&tag);
     tag.set_priority(0);
-    tag.set_indent(hang(view, space(view), columns, marker));
+    tag.set_indent(hang(view, (space(view), tab(view)), stops, columns, marker));
     tag
 }
 
@@ -165,6 +203,8 @@ pub fn follow(view: &sourceview5::View, markers: bool) {
     for property in ["tab-width", "indent-width"] {
         let all = tags.clone();
         view.connect_notify_local(Some(property), move |view, _| {
+            // The tags behind a tab hang by its stops, which are as wide as the tab width's spaces.
+            measure(view);
             retag(view, &all, markers, 0, view.buffer().line_count() - 1);
         });
     }
@@ -256,11 +296,16 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
         });
         let markers = markers && !fenced;
         let column = typing::wrap_column(text, tab_width, level, markers);
-        match typing::wrap_head(text, tab_width, markers) {
-            (columns, marker) if !marker.is_empty() && column <= COLUMNS => {
-                Some(marker_tag(view, columns, marker))
+        let (_, marker) = typing::wrap_head(text, tab_width, markers);
+        let stops = tab_stops(text, tab_width);
+        match (stops > 0 || !marker.is_empty()) && column <= COLUMNS {
+            // What the row hangs behind past the stops: the indent's own columns, then the marker
+            // or one level.
+            true => {
+                let columns = column - stops * tab_width - marker.len();
+                Some(marker_tag(view, stops, columns, marker))
             }
-            _ => column
+            false => column
                 .min(COLUMNS)
                 .checked_sub(1)
                 .and_then(|index| tags.get(index))
@@ -332,6 +377,23 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tab hangs a row from GtkSourceView's stop, whole pixels after the last, not from as many
+    /// spaces: under Adwaita Sans 11 a space is 4.125 px, four of them 16.5 and the stop 17, so
+    /// `\t- `'s text, behind a 10.75 px marker, starts at 27.75 and its rows at 28, where four
+    /// spaces would hang them at 27.
+    #[test]
+    fn a_tab_hangs_from_its_stop() {
+        let (space, tab, marker) = (4224, 17, 11008);
+        assert_eq!(indent(1, tab, 0, space, marker), -28);
+        assert_eq!(indent(0, tab, 4, space, marker), -27);
+        assert_eq!(indent(2, tab, 4, space, 0), -51, "two stops, then a level");
+        assert_eq!(tab_stops("\t- item", 4), 1);
+        assert_eq!(tab_stops("\t\t  - item", 4), 2, "spaces after are columns");
+        assert_eq!(tab_stops("  \t- item", 4), 1, "after spaces too");
+        assert_eq!(tab_stops("    - item", 4), 0);
+        assert_eq!(tab_stops("text\tafter", 4), 0, "only the indent counts");
+    }
 
     /// Only the fences a pass moved are retagged: what the two lists share at either end is left
     /// alone, and everything between, from both, is not.

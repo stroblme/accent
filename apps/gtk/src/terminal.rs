@@ -66,9 +66,6 @@ pub struct Facts {
     pub running: Option<String>,
     /// When it started, in seconds since the epoch.
     pub started: Option<i64>,
-    /// Whether it outlives its window: a holder keeps it, and the window keeps a session to bring
-    /// it back in.
-    pub survives: bool,
 }
 
 impl Term {
@@ -107,28 +104,20 @@ impl Term {
     }
 
     /// Combine holder facts with tab-known fallbacks for Details.
-    /// `kept` means a saved session restores the shell; other windows end shells on close.
-    pub fn facts(&self, kept: bool) -> Facts {
+    pub fn facts(&self) -> Facts {
         let told = self.holder.borrow().clone();
-        let (host, dir, program, held) = match &self.shell {
-            Shell::Local(_) => (
-                glib::host_name().to_string(),
-                self.at(),
-                Some(user_shell()),
-                cli().is_some(),
-            ),
+        let (host, dir, program) = match &self.shell {
+            Shell::Local(_) => (glib::host_name().to_string(), self.at(), Some(user_shell())),
             Shell::Remote { at, .. } => (
                 at.host.clone(),
                 Some(at.path.to_string_lossy().into_owned()),
                 None,
-                true,
             ),
         };
         Facts {
             program: told.program.or(program),
             host,
             dir: told.dir.or(dir),
-            survives: held && kept,
             ..told
         }
     }

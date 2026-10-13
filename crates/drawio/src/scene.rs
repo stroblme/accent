@@ -1164,6 +1164,39 @@ mod tests {
     }
 
     #[test]
+    fn an_edge_takes_the_line_the_properties_pane_gives_it_its_head_undashed() {
+        let mut p = page(vec![Cell::new_edge(
+            "e",
+            "1",
+            (None, Point::default()),
+            (None, Point::new(100.0, 0.0)),
+            "edgeStyle=none;",
+        )]);
+        let line = [
+            ("strokeColor", Some("#ff0000")),
+            ("strokeWidth", Some("3")),
+            ("dashed", Some("1")),
+        ];
+        crate::edit::set_styles(&mut p, &["e".to_string()], &line).unwrap();
+        let s = scene(&p);
+        let strokes: Vec<&Stroke> = s
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Path {
+                    stroke: Some(s), ..
+                } => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strokes.len(), 2, "the line and its classic head");
+        let red = Color::rgb(255, 0, 0);
+        assert!(strokes.iter().all(|s| s.width == 3.0 && s.color == red));
+        assert_eq!(strokes[0].dash, Some(vec![9.0, 9.0]), "in widths");
+        assert_eq!(strokes[1].dash, None);
+    }
+
+    #[test]
     fn a_gradient_runs_its_direction_across_the_outline_it_fills() {
         let fill = |cell: Cell| match &scene(&page(vec![cell])).prims[0] {
             Prim::Path { fill, .. } => fill.clone().expect("a fill"),

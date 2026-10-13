@@ -359,6 +359,8 @@ impl DiagramTab {
         if i >= self.page_count() {
             return;
         }
+        // A change the Properties pane holds is this page's.
+        self.props.flush();
         self.finish_label();
         self.page_index.set(i);
         self.selection.borrow_mut().clear();
@@ -486,6 +488,8 @@ impl DiagramTab {
     }
 
     pub fn select(self: &Rc<Self>, ids: Vec<CellId>) {
+        // A change the Properties pane holds is the old selection's.
+        self.props.flush();
         self.view.set_selection(&ids);
         *self.selection.borrow_mut() = ids;
         self.fill_props();
@@ -511,6 +515,8 @@ impl DiagramTab {
     }
 
     fn walk(self: &Rc<Self>, back: bool) {
+        // A change the Properties pane holds is a step to walk too.
+        self.props.flush();
         let walked = {
             let mut editor = self.editor.borrow_mut();
             match back {

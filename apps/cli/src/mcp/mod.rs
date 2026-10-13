@@ -159,6 +159,31 @@ impl Shared {
         self.inside(rel).is_ok()
     }
 
+    /// The first `limit` of the rows `fetch(n)` answers, at most `n` of them, that may be
+    /// [`shown`](Self::shown). A symlink can bring in any number of the top rows from outside, so
+    /// the index is asked for twice as many until enough are shown or it has no more.
+    fn first_shown<T>(
+        &self,
+        limit: usize,
+        fetch: impl Fn(usize) -> Result<Vec<T>, String>,
+        rel: impl Fn(&T) -> &str,
+    ) -> Result<Vec<T>, String> {
+        let mut asked = limit;
+        loop {
+            let rows = fetch(asked)?;
+            let all = rows.len() < asked;
+            let shown: Vec<T> = rows
+                .into_iter()
+                .filter(|r| self.shown(rel(r)))
+                .take(limit)
+                .collect();
+            if shown.len() == limit || all {
+                return Ok(shown);
+            }
+            asked *= 2;
+        }
+    }
+
     /// Refuse a template a symlink takes outside the vault: its text is what the note gets.
     /// The first of the places the vault looks for it that holds a file is the one it reads.
     fn template(&self, name: &str) -> Result<(), String> {

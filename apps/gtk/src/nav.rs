@@ -31,10 +31,15 @@ impl App {
 
     /// Select an already-open page and activate its pane.
     /// Move focus across panes when following a link, but retain sidebar focus while navigating its lists.
-    pub fn reveal_page(&self, page: &adw::TabPage) {
+    pub fn reveal_page(self: &Rc<Self>, page: &adw::TabPage) {
         if let Some(pane) = self.pane_of(page) {
             pane.tabs.set_selected_page(page);
-            self.set_active_pane(&pane);
+            // A tab already in front notifies nothing, and with the keyboard in another pane the
+            // `selected-page` handler syncs that one; the focus moved below then finds this pane
+            // active already.
+            if self.set_active_pane(&pane) {
+                self.sync_active();
+            }
             if self.keyboard_pane().is_some_and(|k| !Rc::ptr_eq(&k, &pane)) {
                 self.focus_document(&pane);
             }
@@ -574,7 +579,11 @@ impl App {
         match zone {
             Zone::Split(side) => self.open_beside(pane, side, &rel),
             Zone::Here => {
-                self.set_active_pane(pane);
+                // The note may be in front of this pane already: `open_path` reveals it, and with
+                // the pane active by then nothing would sync.
+                if self.set_active_pane(pane) {
+                    self.sync_active();
+                }
                 self.open_path(&rel);
             }
         }

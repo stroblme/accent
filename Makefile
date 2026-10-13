@@ -303,15 +303,16 @@ $(VAULT): $(GEN_VAULT)
 # The start of a headless launch's command line. A private session bus per run: accent is a
 # single-instance GApplication, so without one a second invocation forwards its arguments to
 # whatever instance is already up and exits 0, which makes a check pass while proving nothing.
-# The XDG dirs point at a scratch directory, set outside the bus so whatever it activates sees
-# them too: a check must neither read the user's config nor write a session and an index.
+# It starts no services, for the reasons build-aux/headless-bus.conf gives.
+# The XDG dirs point at a scratch directory: a check must neither read the user's config nor
+# write a session and an index.
 # TMPDIR as well, where the terminal holder listens and every start sweeps for orphaned shells;
 # under /tmp whatever the caller's is, because a unix socket path is at most 108 bytes.
 HEADLESS = xdg=$$(mktemp -d /tmp/accent-headless-XXXXXX) && trap 'rm -rf "$$xdg"' EXIT && \
 	mkdir "$$xdg/tmp" "$$xdg/vault" && \
 	env XDG_CONFIG_HOME="$$xdg/config" XDG_CACHE_HOME="$$xdg/cache" \
 		XDG_STATE_HOME="$$xdg/state" XDG_DATA_HOME="$$xdg/data" TMPDIR="$$xdg/tmp" \
-	dbus-run-session -- env $(XVFB_ENV)
+	dbus-run-session --config-file=$(CURDIR)/build-aux/headless-bus.conf -- env $(XVFB_ENV)
 
 ## xvfb: start the X server the headless checks draw on, unless it is already up
 xvfb:

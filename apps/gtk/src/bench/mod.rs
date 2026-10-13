@@ -143,7 +143,8 @@ use tags::bench_tags;
 ///   including 10k code lines in the last file), `dragfold:<rel>` (XTEST folded
 ///   selection drag), `seam:<rel>` (hidden-line layout), `listing:<rel>`
 ///   (LaTeX listing colours). Every mode requires a scratch vault under `/tmp`.
-/// - `ACCENT_BENCH_PANES=<relA>,<relB>`: tab moves and divider stepping.
+/// - `ACCENT_BENCH_PANES=<relA>,<relB>`: tab moves, a reveal across panes and divider
+///   stepping; `shells:<rel>`: two shells in split panes ending, one with the keyboard.
 /// - `ACCENT_BENCH_COMPARE=<rel_path>`: disk comparison alignment/focus.
 ///   Modes: `pads:<rel_path>` (paragraph padding), `lines:<rel_path>`
 ///   (line staging), `row:<repo_rel>`, `row:stale:<repo_rel>`,
@@ -260,7 +261,8 @@ use tags::bench_tags;
 ///   changes. Creates a repository; requires a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_DIAGRAM=<rel>`: diagram edits/save, creating a sample if
 ///   absent; `shot:<rel>:<dir>`: render pages; `export:<rel>:<dir>`: dark-theme
-///   PDF/PNG/SVG export and print output.
+///   PDF/PNG/SVG export and print output. `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture
+///   of the window (`diagram::bench_diagram`).
 /// - `ACCENT_BENCH_COLLAPSE=1`: responsive sidebar width and saved state.
 /// - `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>[,shell]`: save split layout and
 ///   active tab; `1`: inspect restored layout without saving; `pick:<rel>`,

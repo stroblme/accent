@@ -73,6 +73,9 @@ const LAYERED: &str = r#"<mxfile host="accent">
 /// - `=present:<rel>,<pdf>`, `=look:<rel>:<dir>`, `=export:<rel>:<dir>`, `=props:<rel>`,
 ///   `=layers:<rel>` and `=web:<rel>:<url>` probe presentation, recolouring, output,
 ///   Properties, Layers and web images through the corresponding helpers.
+///
+/// `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture of the window to the plain round, `props:`,
+/// `layers:` and `hold:`, for looking at.
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     if let Some((rel, url)) = arg.strip_prefix("web:").and_then(|a| a.split_once(':')) {
         return web(app, rel, url);
@@ -485,7 +488,7 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
     tab.select(vec!["a".to_string()]);
     tab.edit_label();
     // A picture of the window as it stands, for looking at rather than asserting on.
-    if let Ok(path) = std::env::var("ACCENT_BENCH_SHOT") {
+    if let Ok(path) = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT") {
         bench_pump();
         println!(
             "bench diagram shot {}",
@@ -542,8 +545,8 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
 }
 
 /// Probe Properties on the sample: position/size after nudging, burst edits as one
-/// undo, hover-revealed buttons, Copy/Paste Position and Style, and wrong-type paste
-/// toasts. Create the sample at `rel` if absent.
+/// undo, hover-revealed buttons, Copy/Paste Position and Style, wrong-type paste toasts, and
+/// the line rows an arrow and a shape share, as saved. Create the sample at `rel` if absent.
 fn props(app: &Rc<App>, rel: &str) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -621,7 +624,7 @@ fn props(app: &Rc<App>, rel: &str) {
             revealed()
         );
         // A picture of the pane with the buttons out, for looking at rather than asserting on.
-        if let Ok(path) = std::env::var("ACCENT_BENCH_SHOT") {
+        if let Ok(path) = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT") {
             glib::timeout_future(Duration::from_millis(400)).await;
             println!(
                 "bench diagram shot {}",
@@ -665,8 +668,120 @@ fn props(app: &Rc<App>, rel: &str) {
             tab.frame_of("b"),
             tab.history()
         );
+
+        // An arrow's line takes the outline's rows, and the file keeps what they write. A spin
+        // row's held change lands before a switch's right after it, and on the cells it was
+        // made on when the selection changes before it settles.
+        let looks = [
+            "Fill",
+            "Rounded",
+            "Shadow",
+            "Opacity",
+            "Rotation",
+            "Line Colour",
+            "Line Width",
+            "Pattern",
+            "Route",
+            "Start",
+            "Start Size",
+            "End",
+            "End Size",
+        ];
+        let showing = || {
+            looks
+                .into_iter()
+                .filter_map(|t| Some(format!("{}:{t}", shown(&pane, t)?)))
+                .collect::<Vec<_>>()
+        };
+        let row = |title: &str| {
+            find_widget(&pane, &|w| {
+                w.downcast_ref::<adw::PreferencesRow>()
+                    .is_some_and(|r| r.title() == title)
+            })
+        };
+        tab.select(vec!["e".to_string()]);
+        println!("bench diagram props edge shown={:?}", showing());
+        if let Some(width) = row("Line Width").and_downcast::<adw::SpinRow>() {
+            width.set_value(3.0);
+        }
+        let choose = |title: &str, label: &str| {
+            let combo = row(title).and_downcast::<adw::ComboRow>();
+            let list = combo
+                .as_ref()
+                .and_then(|c| c.model())
+                .and_downcast::<gtk::StringList>();
+            let at = list
+                .and_then(|l| (0..l.n_items()).find(|&i| l.string(i).as_deref() == Some(label)));
+            match (combo, at) {
+                (Some(combo), Some(i)) => combo.set_selected(i),
+                _ => println!("bench diagram props no_choice {title} {label}"),
+            }
+        };
+        choose("Pattern", "Dashed");
+        tab.select(vec!["a".to_string(), "e".to_string()]);
+        println!("bench diagram props mixed shown={:?}", showing());
+        tab.select(vec!["a".to_string()]);
+        println!("bench diagram props vertex shown={:?}", showing());
+        if let Some(width) = row("Line Width").and_downcast::<adw::SpinRow>() {
+            width.set_value(2.5);
+        }
+        tab.select(vec!["e".to_string()]);
+        // draw.io's pattern, heads and route menus; an arrow's rows leave a shape selected with
+        // it alone.
+        choose("Pattern", "Dotted (2)");
+        choose("Start", "Circle");
+        choose("End", "Diamond Outline");
+        choose("Route", "Vertical Elbow");
+        if let Some(size) = row("End Size").and_downcast::<adw::SpinRow>() {
+            size.set_value(10.0);
+        }
+        tab.select(vec!["a".to_string(), "e".to_string()]);
+        if let Some(size) = row("Start Size").and_downcast::<adw::SpinRow>() {
+            size.set_value(9.0);
+        }
+        tab.select(vec!["e".to_string()]);
+        let picked = ["Pattern", "Start", "End", "Route"].map(|t| {
+            let item = row(t).and_downcast::<adw::ComboRow>()?.selected_item();
+            Some(
+                item.and_downcast::<gtk::StringObject>()?
+                    .string()
+                    .to_string(),
+            )
+        });
+        println!("bench diagram props line picked={picked:?}");
+        // Saved a second after the last edit.
+        glib::timeout_future(Duration::from_millis(1600)).await;
+        let saved = std::fs::read(&path).ok().and_then(|xml| {
+            let file = accent_drawio::File::from_bytes(&xml).ok()?;
+            let style = |id: &str| file.pages[0].cell(id).map(|c| c.style.to_string());
+            Some([style("a"), style("e")])
+        });
+        println!("bench diagram props line saved={saved:?}");
         bench_quit(&app);
     });
+}
+
+/// The group the row titled `title` shows in within `pane`, if it and everything above it is
+/// visible.
+fn shown(pane: &gtk::Widget, title: &str) -> Option<String> {
+    let mut at = find_widget(pane, &|w| {
+        w.downcast_ref::<adw::PreferencesRow>()
+            .is_some_and(|r| r.title() == title)
+    });
+    let mut group = None;
+    while let Some(w) = at {
+        if !w.is_visible() {
+            return None;
+        }
+        if let Some(g) = w.downcast_ref::<adw::PreferencesGroup>() {
+            group.get_or_insert_with(|| g.title().to_string());
+        }
+        if &w == pane {
+            return group;
+        }
+        at = w.parent();
+    }
+    None
 }
 
 /// Count visible AdwEntryRow pencils; expect none because clicking a row already starts editing.
@@ -928,7 +1043,7 @@ fn layers(app: &Rc<App>, rel: &str) {
         tab.undo();
         println!("bench diagram layers left_undo rows={:?}", rows());
         // A picture of the group, for looking at rather than asserting on.
-        if let Ok(path) = std::env::var("ACCENT_BENCH_SHOT") {
+        if let Ok(path) = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT") {
             tab.undo();
             glib::timeout_future(Duration::from_millis(400)).await;
             println!(
@@ -1113,7 +1228,7 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                     tab.selection(),
                     tab.history()
                 );
-                if let Ok(path) = std::env::var("ACCENT_BENCH_SHOT") {
+                if let Ok(path) = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT") {
                     println!(
                         "bench diagram shot {}",
                         shoot(app.window.upcast_ref(), Path::new(&path))

@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::work::or_empty;
-use accent_api::CodeSymbol;
+use accent_api::SymbolName;
 use accent_api::git::Sides;
 
 /// What the palette lists before the user types anything.
@@ -27,6 +27,10 @@ pub struct Corpus {
     /// The index's recently changed notes, up to [`RECENT_FILES`]: one refresh behind at worst,
     /// which a list of what changed lately can afford.
     recent: Rc<Vec<String>>,
+    /// Whether `@` has been typed in this window, so that Go to Symbol's list (`files.symbols`)
+    /// is held and read again where the files are: as the palette opens, a walk ends or the link
+    /// comes back.
+    symbols_wanted: bool,
 }
 
 impl App {
@@ -93,27 +97,58 @@ impl App {
                     real,
                     ignored: Rc::new(ignored),
                     aliases: Rc::new(aliases),
+                    symbols: app.corpus.borrow().files.symbols.clone(),
                 };
-                // Taken out while the dialog ranks: nothing it runs may find the corpus borrowed.
-                let open = {
+                {
                     let mut corpus = app.corpus.borrow_mut();
-                    corpus.files = files.clone();
+                    corpus.files = files;
                     corpus.tags = Rc::new(tags);
                     corpus.recent = Rc::new(recent);
-                    corpus.open.take()
-                };
-                if let Some(refill) = open {
-                    refill(files);
-                    app.corpus.borrow_mut().open.get_or_insert(refill);
                 }
+                app.refill_palette();
             }
         });
+    }
+
+    /// Read Go to Symbol's list off the main loop, on the host for a remote vault, and hand it
+    /// to an open palette as the files are, once `@` has been typed in this window.
+    pub fn refresh_symbols(self: &Rc<Self>) {
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        if !self.corpus.borrow().symbols_wanted {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let read = crate::work::off_thread("symbols", move || vault.symbol_names()).await;
+            let (Some(app), Some(read)) = (weak.upgrade(), read) else {
+                return;
+            };
+            let symbols = Rc::new(or_empty("listing the symbols", read));
+            app.corpus.borrow_mut().files.symbols = Some(symbols);
+            app.refill_palette();
+        });
+    }
+
+    /// Hand an open palette the lists as they are now. Taken out while the dialog ranks:
+    /// nothing it runs may find the corpus borrowed.
+    fn refill_palette(&self) {
+        let (files, open) = {
+            let mut corpus = self.corpus.borrow_mut();
+            (corpus.files.clone(), corpus.open.take())
+        };
+        if let Some(refill) = open {
+            refill(files);
+            self.corpus.borrow_mut().open.get_or_insert(refill);
+        }
     }
 
     pub fn palette(self: &Rc<Self>, initial: palette::Mode) {
         // This one shows what is already here, and takes the fresh files when they land. Only Go
         // to File walks the gitignored folders again for its notes.
         self.refresh_corpus(initial == palette::Mode::Files);
+        self.refresh_symbols();
         // Two answers to "recent": what this window opened, and what changed on disk. The first
         // is what the user means, so it leads and the index's mtime list fills the page below it.
         let mru = self.recent_files.borrow().clone();
@@ -170,23 +205,18 @@ impl App {
                     None => Vec::new(),
                 }
             }),
-            // Go to Symbol's rows: the index's, on the host for a remote vault.
-            symbols: Box::new({
+            // Go to Symbol's list, read the first time `@` is typed and refilled as the files are.
+            on_symbols: Box::new({
                 let app = Rc::downgrade(self);
-                move |query: &str, done: Box<dyn FnOnce(Vec<CodeSymbol>)>| {
-                    let Some(vault) = app.upgrade().and_then(|app| app.vault().cloned()) else {
-                        return done(Vec::new());
+                move || {
+                    let Some(app) = app.upgrade() else {
+                        return;
                     };
-                    let query = query.to_string();
-                    glib::spawn_future_local(async move {
-                        let found = crate::work::off_thread("symbols", move || {
-                            vault.find_symbols(&query, palette::MAX_RESULTS)
-                        })
-                        .await;
-                        done(
-                            found.map_or_else(Vec::new, |found| or_empty("finding symbols", found)),
-                        );
-                    });
+                    let first =
+                        !std::mem::replace(&mut app.corpus.borrow_mut().symbols_wanted, true);
+                    if first {
+                        app.refresh_symbols();
+                    }
                 }
             }),
             // The start screen's own removal, so one list is written one way.
@@ -249,7 +279,7 @@ impl App {
     }
 
     /// Open the file a declaration is in, as Go to File does, with the caret on its name.
-    fn goto_symbol(self: &Rc<Self>, symbol: &CodeSymbol) {
+    fn goto_symbol(self: &Rc<Self>, symbol: &SymbolName) {
         self.mark();
         let name = symbol.name.clone();
         let (first, last) = (
@@ -719,12 +749,12 @@ impl App {
             1 => (
                 "remote-server-symbolic",
                 format!("Waiting for {}", self.host()),
-                "1 tab will open when it answers.".to_string(),
+                "1 tab in this vault.".to_string(),
             ),
             n => (
                 "remote-server-symbolic",
                 format!("Waiting for {}", self.host()),
-                format!("{n} tabs will open when it answers."),
+                format!("{n} tabs in this vault."),
             ),
         };
         page.set_icon_name(Some(icon));

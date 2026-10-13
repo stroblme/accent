@@ -18,7 +18,7 @@ use crate::language::notes;
 use crate::paths::conflict_pairs;
 use crate::{
     Backlink, CodeSymbol, FileRow, HeadingHit, Location, Match, Mention, Options, OutLink, PdfLink,
-    Repo, SearchHit, Stats, fs, locked,
+    Repo, SearchHit, Stats, SymbolName, fs, locked,
 };
 
 impl Local {
@@ -202,6 +202,10 @@ impl Local {
 
     pub fn find_symbols(&self, query: &str, limit: usize) -> Result<Vec<CodeSymbol>> {
         Ok(self.index().find_symbols(query, limit)?)
+    }
+
+    pub fn symbol_names(&self) -> Result<Vec<SymbolName>> {
+        Ok(self.index().symbol_names()?)
     }
 
     pub fn symbols_named(

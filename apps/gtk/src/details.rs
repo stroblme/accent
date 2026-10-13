@@ -18,7 +18,7 @@ impl App {
             return;
         }
         if let Some(Doc::Terminal(term)) = self.active_doc() {
-            return sidebar.set_details(&[shell_group(term.facts(self.keeps_session()))]);
+            return sidebar.set_details(&[shell_group(term.facts())]);
         }
         let Some(doc) = self.active_doc().filter(|doc| !doc.is_transient()) else {
             return sidebar.set_details(&[]);
@@ -213,10 +213,6 @@ fn kind_group(doc: &Doc) -> Option<Group> {
 /// What the shell in front is, each row only where it is known, and Running only while a command
 /// is.
 fn shell_group(facts: terminal::Facts) -> Group {
-    let held = match facts.survives {
-        true => "Yes, survives closing the window",
-        false => "No, ends with the window",
-    };
     let said = [
         ("Shell", facts.program),
         ("PID", facts.pid.map(|pid| pid.to_string())),
@@ -224,7 +220,6 @@ fn shell_group(facts: terminal::Facts) -> Group {
         ("Directory", facts.dir),
         ("Running", facts.running),
         ("Started", facts.started.map(date_label)),
-        ("Held", Some(held.to_string())),
     ];
     Group {
         title: "Terminal",
@@ -285,29 +280,19 @@ mod tests {
             dir: Some("/home/me".into()),
             ..Default::default()
         };
-        assert_eq!(names(tab.clone()), ["Host", "Directory", "Held"]);
+        assert_eq!(names(tab.clone()), ["Host", "Directory"]);
         let told = terminal::Facts {
             program: Some("/bin/zsh".into()),
             pid: Some(42),
             running: Some("cargo build".into()),
             started: Some(1_760_000_000),
-            survives: true,
             ..tab
         };
         assert_eq!(
             names(told.clone()),
-            [
-                "Shell",
-                "PID",
-                "Host",
-                "Directory",
-                "Running",
-                "Started",
-                "Held"
-            ]
+            ["Shell", "PID", "Host", "Directory", "Running", "Started"]
         );
         let facts = shell_group(told).facts;
         assert_eq!(facts[4].value, "cargo build");
-        assert_eq!(facts[6].value, "Yes, survives closing the window");
     }
 }

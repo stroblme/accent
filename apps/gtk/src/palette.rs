@@ -8,7 +8,7 @@
 
 use crate::start;
 use crate::widgets::{Debounce, status_page};
-use accent_api::CodeSymbol;
+use accent_api::SymbolName;
 use accent_core::fuzzy::{self, Corpus};
 use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
@@ -54,7 +54,7 @@ pub enum Item {
     /// A tag to filter by.
     Tag(String),
     /// A declaration the index holds, to open its file at.
-    Symbol(CodeSymbol),
+    Symbol(SymbolName),
     /// A recent vault to switch to, by the key it is stored under: a canonical path, or an
     /// `ssh://` address for one on another machine.
     Vault(String),
@@ -93,8 +93,9 @@ pub struct Sources {
     /// Bind an action to a new set of accelerators, or to its default when given `None`. Returns
     /// what is in force afterwards, so the row can be redrawn without asking again.
     pub on_rebind: Box<Rebind>,
-    /// The declarations a query names, handed to the callback once the index answers.
-    pub symbols: Box<Find>,
+    /// Ask the window for Go to Symbol's list, which a [`Refill`] hands over: called while
+    /// [`Files::symbols`] is `None`.
+    pub on_symbols: Box<dyn Fn()>,
     /// Remove a recent key, then run the callback: immediate for vaults, after confirmed
     /// shell teardown for terminal sessions, never on cancellation (`Shell::remove_recent`).
     pub on_forget: Box<Forget>,
@@ -108,13 +109,13 @@ pub struct Files {
     pub real: usize,
     pub ignored: Rc<HashSet<String>>,
     pub aliases: Rc<Vec<(String, String)>>,
+    /// Every declaration the index holds, for Go to Symbol: `None` until `@` is first typed in
+    /// the window.
+    pub symbols: Option<Rc<Vec<SymbolName>>>,
 }
 
 /// Hand an open dialog the window's files as they are now. See [`present`].
 pub type Refill = Box<dyn Fn(Files)>;
-
-/// Find the declarations `query` names, at most [`MAX_RESULTS`], and hand them to the callback.
-pub type Find = dyn Fn(&str, Box<dyn FnOnce(Vec<CodeSymbol>)>);
 
 /// Remove the recent vault `key`, then run the callback once its row may go.
 pub type Forget = dyn Fn(&str, Box<dyn FnOnce()>);
@@ -191,22 +192,41 @@ fn parse_query(raw: &str, opened_in: Mode) -> (Mode, &str) {
 ///
 /// Core [`fuzzy::rank`] keeps GTK completion and Android file ranking consistent. Window-local
 /// `recent` boosts frequently used commands.
-fn rank(haystacks: &[String], recent: &[Option<usize>], query: &str, corpus: Corpus) -> Vec<usize> {
+fn rank(
+    haystacks: &[impl AsRef<str>],
+    recent: &[Option<usize>],
+    query: &str,
+    corpus: Corpus,
+) -> Vec<usize> {
     let mut hits = fuzzy::rank(haystacks, recent, query, corpus);
     hits.truncate(MAX_RESULTS);
     hits
 }
 
-/// Rank declarations by name, using index order to break ties: exact, prefix,
-/// substring, then tests. `Type::name` and `Type.name` rank by the member name.
-fn rank_symbols(found: Vec<CodeSymbol>, query: &str) -> Vec<Rc<Item>> {
-    let name = query.rsplit([':', '.']).next().unwrap_or(query).trim();
-    let names: Vec<String> = found.iter().map(|s| s.name.clone()).collect();
-    let mut found: Vec<Option<CodeSymbol>> = found.into_iter().map(Some).collect();
+/// Rank declarations by name with Go to File's matcher, the index's order (a test's last, then
+/// the shorter name) breaking ties. `Type::name` and `Type.name` keep to a type's declarations,
+/// case aside, and rank by the member's name.
+fn rank_symbols(symbols: &[SymbolName], query: &str) -> Vec<Rc<Item>> {
+    let query = query.trim();
+    let (container, name) = match query.rsplit_once("::").or_else(|| query.rsplit_once('.')) {
+        Some((c, n)) if !c.is_empty() => (c.rsplit([':', '.']).next(), n),
+        _ => (None, query),
+    };
+    let held: Vec<&SymbolName> = match container {
+        Some(c) => symbols
+            .iter()
+            .filter(|s| {
+                s.container
+                    .as_ref()
+                    .is_some_and(|t| t.eq_ignore_ascii_case(c))
+            })
+            .collect(),
+        None => symbols.iter().collect(),
+    };
+    let names: Vec<&str> = held.iter().map(|s| s.name.as_str()).collect();
     rank(&names, &[], name, Corpus::Words)
         .into_iter()
-        .filter_map(|i| found[i].take())
-        .map(|symbol| Rc::new(Item::Symbol(symbol)))
+        .map(|i| Rc::new(Item::Symbol(held[i].clone())))
         .collect()
 }
 
@@ -592,10 +612,9 @@ pub fn present(
         vaults,
         taken,
         on_rebind,
-        symbols,
+        on_symbols,
         on_forget,
     } = sources;
-    let find: Rc<Find> = Rc::from(symbols);
     let recent = Rc::new(recent);
     let mru = Rc::new(mru);
     // Behind a cell because the trash button on a row rewrites the list without closing the
@@ -693,7 +712,7 @@ pub fn present(
         .build();
 
     // A query's rows into the list, the first highlighted, or the empty page; how many there are.
-    let show = Rc::new({
+    let show = {
         let (model, selection, stack) = (model.clone(), selection.clone(), stack.clone());
         move |hits: Vec<Rc<Item>>| {
             let objects: Vec<glib::BoxedAnyObject> =
@@ -705,10 +724,10 @@ pub fn present(
             stack.set_visible_child_name(if objects.is_empty() { "empty" } else { "list" });
             objects.len()
         }
-    });
+    };
 
     let refresh = Rc::new({
-        let (show, empty, entry) = (show.clone(), empty.clone(), entry.downgrade());
+        let empty = empty.clone();
         let (recent, files, tags) = (recent.clone(), files.clone(), tags.clone());
         let (mru, typed) = (mru.clone(), typed.clone());
         let (vaults, vault_places) = (vaults.clone(), vault_places.clone());
@@ -779,21 +798,22 @@ pub fn present(
                         .into_iter()
                         .map(|i| Rc::new(Item::Tag(tags[i].clone())))
                         .collect(),
-                    Mode::Symbols if empty_query => Vec::new(),
-                    // The index answers off the main loop, on the host for a remote vault, and
-                    // an answer to a query typed past since is dropped.
+                    // Read the first time `@` is typed in the window, off the main loop and on the
+                    // host for a remote vault: the refill that hands it over ranks the query typed
+                    // by then.
                     Mode::Symbols => {
-                        let (show, entry) = (show.clone(), entry.clone());
-                        let (raw, typed) = (raw.to_string(), query.to_string());
-                        find(
-                            query,
-                            Box::new(move |found| {
-                                if entry.upgrade().is_some_and(|e| e.text() == raw) {
-                                    show(rank_symbols(found, &typed));
+                        let held = files.borrow().symbols.clone();
+                        match held {
+                            Some(symbols) if !empty_query => rank_symbols(&symbols, query),
+                            Some(_) => Vec::new(),
+                            None => {
+                                on_symbols();
+                                if !empty_query {
+                                    return;
                                 }
-                            }),
-                        );
-                        return;
+                                Vec::new()
+                            }
+                        }
                     }
                     // The two ways of opening a vault that is *not* in the list end the rows, and are
                     // never filtered out: one surface reaches every way of changing vault, and the
@@ -997,7 +1017,7 @@ pub fn present(
                 return;
             };
             let raw = entry.text();
-            if parse_query(&raw, mode).0 != Mode::Files {
+            if !matches!(parse_query(&raw, mode).0, Mode::Files | Mode::Symbols) {
                 return;
             }
             let kept = text_at(&selection, selection.selected());
@@ -1151,32 +1171,51 @@ mod tests {
         );
     }
 
-    /// The index's order stands where the names score alike, and a type in the query is no
-    /// part of what the names are ranked by.
+    /// Names match as Go to File's paths do, a subsequence included; the index's order stands
+    /// where they score alike; a type in the query keeps to its declarations.
     #[test]
     fn symbols_rank_by_their_names() {
-        let symbol = |name: &str| CodeSymbol {
-            rel_path: "a.rs".to_string(),
-            kind: accent_api::SymbolKind::Function,
+        let symbol = |name: &str, container: Option<&str>| SymbolName {
             name: name.to_string(),
-            container: Some("Index".to_string()),
-            byte_start: 0,
-            byte_end: 0,
+            kind: accent_api::SymbolKind::Function,
+            container: container.map(str::to_string),
+            rel_path: "a.rs".to_string(),
             line: 1,
             end_line: 1,
-            signature: String::new(),
-            test: false,
         };
+        // In the index's order: the shorter name first.
+        let held = [
+            symbol("open", Some("Index")),
+            symbol("open", None),
+            symbol("reopen", Some("Index")),
+            symbol("open_at", Some("Index")),
+            symbol("find_symbols", Some("Index")),
+        ];
         let names = |query| -> Vec<String> {
-            let found = vec![symbol("open"), symbol("open_at"), symbol("reopen")];
-            rank_symbols(found, query)
+            rank_symbols(&held, query)
                 .iter()
-                .map(|item| item.text().to_string())
+                .map(|item| match &**item {
+                    Item::Symbol(SymbolName {
+                        container: Some(c),
+                        name,
+                        ..
+                    }) => format!("{c}::{name}"),
+                    item => item.text().to_string(),
+                })
                 .collect()
         };
-        assert_eq!(names("open"), ["open", "open_at", "reopen"]);
-        assert_eq!(names("Index::open"), ["open", "open_at", "reopen"]);
-        assert_eq!(names("Index.open_"), ["open_at"]);
+        assert_eq!(names("fsym"), ["Index::find_symbols"]);
+        assert_eq!(
+            names("open"),
+            ["Index::open", "open", "Index::open_at", "Index::reopen"]
+        );
+        assert_eq!(
+            names("Index::open"),
+            ["Index::open", "Index::open_at", "Index::reopen"]
+        );
+        assert_eq!(names("index.opat"), ["Index::open_at"]);
+        // A type alone lists its declarations, in the index's order.
+        assert_eq!(names("Index::").len(), 4);
     }
 
     /// A note in an ignored folder joins the files once, behind them, so the indexed one of two

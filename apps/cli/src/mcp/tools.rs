@@ -118,15 +118,17 @@ impl Server {
         self.blocking(move |s| {
             let partial = s.ready.wait();
             let limit = a.limit.unwrap_or(20).min(100);
+            let ignored = a.include_ignored.unwrap_or(false);
             let hits = {
                 let _turn = locked(&s.search);
-                s.vault
-                    .search(&a.query, limit, a.include_ignored.unwrap_or(false))
-                    .map_err(fail)?
+                s.first_shown(
+                    limit,
+                    |n| s.vault.search(&a.query, n, ignored).map_err(fail),
+                    |h| &h.rel_path,
+                )?
             };
             let rows: Vec<Value> = hits
                 .into_iter()
-                .filter(|h| s.shown(&h.rel_path))
                 .map(|h| {
                     json!({"path": h.rel_path, "title": h.title, "line": h.line, "snippet": h.snippet})
                 })
@@ -344,11 +346,12 @@ impl Server {
             let partial = s.ready.wait();
             let limit = a.limit.unwrap_or(20).min(500);
             let rows: Vec<Value> = s
-                .vault
-                .recent_files(limit)
-                .map_err(fail)?
+                .first_shown(
+                    limit,
+                    |n| s.vault.recent_files(n).map_err(fail),
+                    String::as_str,
+                )?
                 .into_iter()
-                .filter(|rel| s.shown(rel))
                 .filter_map(|rel| {
                     let etag = s.vault.stat(&rel).ok()??;
                     Some(json!({"path": rel, "modified": modified(etag.mtime_ns)}))

@@ -194,6 +194,9 @@ fn mcp_answers_after_initialize_and_holds_to_the_vault() {
     assert_eq!(hits.as_array().unwrap().len(), 1, "{hits}");
     assert_eq!(hits[0]["path"], "a.md");
     assert_eq!(hits[0]["line"], 4);
+    // The shorter symlinked note ranks first; the limit counts only what is shown.
+    let (hits, _) = c.call("search_notes", json!({"query": "kumquat", "limit": 1}));
+    assert!(hits[0].contains(r#""path":"a.md""#), "{hits:?}");
 
     let (read, error) = c.call("read_note", json!({"path": "a.md", "heading": "part"}));
     assert!(!error, "{read:?}");
@@ -460,6 +463,13 @@ fn mcp_lists_folders_recent_files_and_missing_notes() {
         "[[Later]]\nand [[Later#Part]]\n",
     )
     .unwrap();
+    // The symlinked note is the newest, which `recent_changes` must skip and still fill its limit.
+    std::fs::File::options()
+        .write(true)
+        .open(scratch.dir.join("outside/secret.md"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(60))
+        .unwrap();
     let mut c = Client::start(&scratch, &[]);
     c.initialize();
 

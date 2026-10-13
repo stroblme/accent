@@ -150,10 +150,43 @@ fn fill(
     }
     page.add(&reset_group(dialog, config, root, &save, on_change));
 
-    if let Some(old) = dialog.visible_page() {
+    // The new page opens where the old one was scrolled to: a hand edit or a reset is not the
+    // reader scrolling back to the top.
+    let top = dialog.visible_page().map(|old| {
+        let top = scroll(&old).map_or(0.0, |adjustment| adjustment.value());
         dialog.remove(&old);
-    }
+        top
+    });
     dialog.add(&page);
+    if let (Some(top), Some(adjustment)) = (top.filter(|top| *top > 0.0), scroll(&page)) {
+        scroll_once_laid_out(&adjustment, top);
+    }
+}
+
+/// A page's vertical scroll: its one child is the scrolled window it holds its groups in, which
+/// AdwPreferencesPage has no getter for.
+fn scroll(page: &adw::PreferencesPage) -> Option<gtk::Adjustment> {
+    let scroller = page.first_child().and_downcast::<gtk::ScrolledWindow>()?;
+    Some(scroller.vadjustment())
+}
+
+/// Scroll to `top` once the page has a height: until it is laid out the adjustment's range is
+/// empty and would clamp the value to 0.
+fn scroll_once_laid_out(adjustment: &gtk::Adjustment, top: f64) {
+    let handler = Rc::new(RefCell::new(None));
+    let id = adjustment.connect_changed({
+        let handler = handler.clone();
+        move |adjustment| {
+            if adjustment.page_size() <= 0.0 {
+                return;
+            }
+            if let Some(id) = handler.take() {
+                adjustment.disconnect(id);
+            }
+            adjustment.set_value(top);
+        }
+    });
+    handler.replace(Some(id));
 }
 
 // ------------------------------------------------------------------------------- appearance
@@ -210,10 +243,6 @@ fn appearance_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::P
 fn recolour_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Recolour to the Theme")
-        .description(
-            "Show these in the colours of a dark or Solarized theme. Invert Colours does the \
-             opposite for a single file.",
-        )
         .build();
     type Switch = fn(&mut RecolourConfig) -> &mut bool;
     let rows: [(&str, Option<&str>, Switch); 3] = [
@@ -572,11 +601,7 @@ fn vault_group(
     root: &Path,
     save: &Rc<dyn Fn()>,
 ) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder()
-        .title("This Vault")
-        // AdwEntryRow has no subtitle, so what is true of every path below is said once here.
-        .description("Paths are relative to the vault root.")
-        .build();
+    let group = adw::PreferencesGroup::builder().title("This Vault").build();
     let vault = config.borrow().vault(root);
 
     group.add(&entry_row(

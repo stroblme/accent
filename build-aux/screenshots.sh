@@ -90,8 +90,8 @@ trap 'exit 1' INT TERM
 for _ in 1 2 3 4 5 6 7 8 9 10; do test -S "$socket" && break; sleep 0.5; done
 
 # One launch per scene, as `make smoke` launches: scratch XDG dirs and TMPDIR outside a private
-# bus. The index is shared and the session is not. No portals: GTK asking for one starts a
-# document portal on the private bus, which unmounts the user's.
+# bus, which starts no services (headless-bus.conf says why). The index is shared and the session
+# is not.
 for n in 1 2 3 4; do
 	tmp=$(mktemp -d /tmp/accent-shot-XXXXXX)
 	rm -rf "$root/xdg/state"
@@ -100,8 +100,9 @@ for n in 1 2 3 4; do
 		XDG_CONFIG_HOME="$root/xdg/config" XDG_CACHE_HOME="$root/xdg/cache" \
 		XDG_STATE_HOME="$root/xdg/state" XDG_DATA_HOME="$root/xdg/data" \
 		GSETTINGS_BACKEND=memory ADW_DISABLE_PORTAL=1 \
-		dbus-run-session -- env DISPLAY="$display" GDK_BACKEND=x11 GSK_RENDERER=cairo \
-		GTK_A11Y=none G_DEBUG=fatal-criticals GDK_DEBUG=no-portals \
+		dbus-run-session --config-file="$repo/build-aux/headless-bus.conf" -- \
+		env DISPLAY="$display" GDK_BACKEND=x11 GSK_RENDERER=cairo \
+		GTK_A11Y=none G_DEBUG=fatal-criticals \
 		ACCENT_BENCH_SHOT="$n:$root/out" timeout 300 "$bin/accent" "$vault" || status=$?
 	# Scene 3 ends its shells, and the holder leaves with the last; one a failed scene left behind
 	# still has its socket. Bounded: fuser stats every mount, and hangs on an unreachable one.

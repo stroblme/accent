@@ -5,6 +5,9 @@ use super::*;
 /// Split the second of two notes right, move it back, then try moving without a neighbour.
 /// Report pane geometry rather than creation-order indices to prove the tab changed position.
 pub(super) fn bench_panes(app: &Rc<App>, rels: &str) {
+    if let Some(rel) = rels.strip_prefix("shells:") {
+        return bench_shells(app, rel);
+    }
     let Some((a, b)) = rels.split_once(',') else {
         return bench_quit(app);
     };
@@ -41,7 +44,7 @@ fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
                 println!("bench accel {accel} {:?}", gtk_app.actions_for_accel(accel));
             }
         }
-        return bench_dividers(app);
+        return bench_reveal(app);
     };
     println!("bench step {action}");
     let _ = WidgetExt::activate_action(&app.window, action, None);
@@ -49,6 +52,67 @@ fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
     glib::timeout_add_local_once(Duration::from_millis(200), move || {
         bench_pane_at(&app, &page);
         bench_pane_step(&app, &page, step + 1);
+    });
+}
+
+/// Reveal the tab in front of the left pane while the right one holds the keyboard: the pane's
+/// selection does not change, and the title has to follow it there all the same.
+fn bench_reveal(app: &Rc<App>) {
+    let front = app
+        .panes
+        .borrow()
+        .first()
+        .and_then(|p| p.tabs.selected_page());
+    let Some(doc) = front.and_then(|page| app.doc_for_page(&page)) else {
+        return bench_dividers(app);
+    };
+    app.reveal_page(doc.page());
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        let subtitle = app.title.subtitle();
+        println!("bench reveal key={:?} subtitle={subtitle:?}", doc.key());
+        bench_dividers(&app);
+    });
+}
+
+/// `ACCENT_BENCH_PANES=shells:<rel>`: `rel` in the first pane and a shell in each of two panes
+/// stacked beside it, the second holding the keyboard, then each shell ended in turn, the one
+/// without the keyboard first: shells ending at once, as `ACCENT_BENCH_SHOT=3` ends its own, end
+/// in either order. GTK says on stderr what it makes of the panes closing.
+fn bench_shells(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    app.open_terminal();
+    app.open_terminal();
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        while app.terminals().len() < 2 || app.docs().len() < 3 {
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+        let terms = app.terminals();
+        app.split_page(&app.pane(), Side::Right, &terms[0].page);
+        if let Some(right) = app.pane_of(&terms[0].page) {
+            app.split_page(&right, Side::Down, &terms[1].page);
+        }
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let keyboard = || {
+            let focus = gtk::prelude::GtkWindowExt::focus(&app.window);
+            focus.map(|w| w.type_().name().to_string())
+        };
+        let panes = || app.panes.borrow().len();
+        println!("bench shells panes={} keyboard={:?}", panes(), keyboard());
+        for (i, term) in terms.iter().enumerate() {
+            term.kill();
+            while app.terminals().len() + i >= terms.len() {
+                glib::timeout_future(Duration::from_millis(50)).await;
+            }
+            glib::timeout_future(Duration::from_millis(500)).await;
+            println!(
+                "bench shells ended {i} panes={} keyboard={:?}",
+                panes(),
+                keyboard()
+            );
+        }
+        bench_quit(&app);
     });
 }
 

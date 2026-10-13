@@ -24,7 +24,7 @@ use search::{folded_find, snippet_window};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::Path;
-pub use symbols::{CodeSymbol, Mention};
+pub use symbols::{CodeSymbol, Mention, SymbolName};
 
 pub struct Index {
     conn: Connection,

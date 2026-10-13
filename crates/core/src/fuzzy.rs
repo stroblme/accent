@@ -93,7 +93,7 @@ impl Query {
 /// `recent` is empty or has one entry per haystack, with 0 most recent. Within each tier,
 /// previously used entries lead in recency order; unused entries follow by score.
 pub fn rank(
-    haystacks: &[String],
+    haystacks: &[impl AsRef<str>],
     recent: &[Option<usize>],
     query: &str,
     corpus: Corpus,
@@ -104,6 +104,7 @@ pub fn rank(
         .iter()
         .enumerate()
         .filter_map(|(i, h)| {
+            let h = h.as_ref();
             let path = q.score(h)?;
             let name = basename(h);
             // Scoring the whole path again when it has no folder in it would give the same number.

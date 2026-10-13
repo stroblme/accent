@@ -25,6 +25,20 @@ pub struct CodeSymbol {
     pub test: bool,
 }
 
+/// A declaration as Go to Symbol holds every one of them: what ranks, shows and opens it, its
+/// signature and offsets left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolName {
+    pub name: String,
+    pub kind: SymbolKind,
+    /// The type a method belongs to.
+    pub container: Option<String>,
+    pub rel_path: String,
+    /// 1-based.
+    pub line: u32,
+    pub end_line: u32,
+}
+
 /// Where [`Index::mentions`] found a name: the line, and the declaration around it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mention {
@@ -90,6 +104,28 @@ impl Index {
              WHERE f.rel_path = ?1 ORDER BY s.byte_start"
         ))?;
         let rows = st.query_map([rel], symbol)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every declaration the index holds, a test's after the rest, then the shorter name and the
+    /// shorter path first: the order a fuzzy ranking of the names keeps where they score alike.
+    pub fn symbol_names(&self) -> Result<Vec<SymbolName>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT s.name, s.kind, s.container, f.rel_path, s.line, s.end_line
+             FROM symbols s JOIN files f ON f.id = s.file_id
+             ORDER BY s.test, length(s.name), s.name, length(f.rel_path), f.rel_path,
+                      s.byte_start",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(SymbolName {
+                name: r.get(0)?,
+                kind: SymbolKind::from_i64(r.get(1)?),
+                container: r.get(2)?,
+                rel_path: r.get(3)?,
+                line: r.get(4)?,
+                end_line: r.get(5)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -363,6 +399,43 @@ mod tests {
         );
         // `_` is a letter of the name, not a `LIKE` wildcard.
         assert!(found("links_x").is_empty());
+    }
+
+    /// Every declaration, a test's after the rest and a shorter name first: the order Go to
+    /// Symbol keeps where its matcher scores names alike.
+    #[test]
+    fn symbol_names_list_every_declaration() {
+        let (vault, db) = fixture();
+        fs::write(vault.path().join("lib.rs"), LIB).unwrap();
+        fs::create_dir(vault.path().join("tests")).unwrap();
+        fs::write(vault.path().join("tests/t.rs"), "fn a() {}\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let listed: Vec<(String, Option<String>, String, u32, u32)> = ix
+            .symbol_names()
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.name, s.container, s.rel_path, s.line, s.end_line))
+            .collect();
+        let row = |name: &str, container: Option<&str>, rel: &str, line, end_line| {
+            (
+                name.into(),
+                container.map(Into::into),
+                rel.into(),
+                line,
+                end_line,
+            )
+        };
+        assert_eq!(
+            listed,
+            [
+                row("Index", None, "lib.rs", 1, 1),
+                row("backlinks", Some("Index"), "lib.rs", 4, 4),
+                row("links_from", Some("Index"), "lib.rs", 5, 7),
+                row("a", None, "tests/t.rs", 1, 1),
+            ]
+        );
     }
 
     /// A question's words find the declarations named by them, the type named by one alone.

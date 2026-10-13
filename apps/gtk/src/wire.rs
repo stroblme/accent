@@ -354,7 +354,10 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
             let Ok(rel) = value.get::<String>() else {
                 return false;
             };
-            app.set_active_pane(&pane);
+            // As a drop on the pane's middle does (`App::dropped`).
+            if app.set_active_pane(&pane) {
+                app.sync_active();
+            }
             app.open_path(&rel);
             true
         }
