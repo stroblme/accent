@@ -1,5 +1,7 @@
 //! Map completion edits to current text after typing beyond the request.
 
+use std::collections::HashSet;
+
 use accent_api::language::byte_of;
 use accent_api::{Completion, Pos, Range, TextEdit};
 use gtk::prelude::*;
@@ -81,6 +83,52 @@ fn with_final_stop(snippet: &str) -> String {
     }
 }
 
+/// Turn each number's first bare `$N` into `${N}` unless it has a `${N…}` already: LSP's `$N` is
+/// a stop, GtkSourceView 5.20's a mirror of stop N's text, so a `foo($1)` walked nothing. Repeats
+/// stay mirrors, as LSP has them; escapes, variables and what is inside `${…}` are left alone.
+fn with_stops(snippet: &str) -> String {
+    let b = snippet.as_bytes();
+    let digits = |at: usize| at + b[at..].iter().take_while(|c| c.is_ascii_digit()).count();
+    // The top level's `$N` and `${N`, as their digits' span and whether braced.
+    let mut found = Vec::new();
+    let (mut i, mut depth) = (0, 0);
+    while i < b.len() {
+        match (b[i], b.get(i + 1)) {
+            (b'\\', _) => i += 1,
+            (b'$', Some(b'{')) => {
+                if depth == 0 {
+                    found.push((i + 2, digits(i + 2), true));
+                }
+                depth += 1;
+                i += 1;
+            }
+            (b'$', _) if depth == 0 => found.push((i + 1, digits(i + 1), false)),
+            (b'}', _) if depth > 0 => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    let stop = |(at, end): (usize, usize)| snippet[at..end].parse::<u32>().ok().filter(|&n| n > 0);
+    let mut seen: HashSet<u32> = found
+        .iter()
+        .filter(|f| f.2)
+        .filter_map(|&(at, end, _)| stop((at, end)))
+        .collect();
+    let mut out = String::with_capacity(snippet.len() + 2);
+    let mut from = 0;
+    for (at, end, braced) in found {
+        if !braced && stop((at, end)).is_some_and(|n| seen.insert(n)) {
+            out.push_str(&snippet[from..at]);
+            out.push('{');
+            out.push_str(&snippet[at..end]);
+            out.push('}');
+            from = end;
+        }
+    }
+    out.push_str(&snippet[from..]);
+    out
+}
+
 /// Apply `item`, `range` and `extras` in current coordinates as one undoable action.
 ///
 /// Apply extra edits first, then the item over marks adjusted through those edits. Snippets
@@ -110,7 +158,7 @@ pub(super) fn apply(
     // losing the acceptance altogether.
     let snippet = item
         .is_snippet
-        .then(|| sourceview5::Snippet::new_parsed(&with_final_stop(&item.insert)));
+        .then(|| sourceview5::Snippet::new_parsed(&with_final_stop(&with_stops(&item.insert))));
     match snippet {
         Some(Ok(snippet)) => push_snippet(&snippet, &mut from),
         Some(Err(e)) => {
@@ -268,5 +316,19 @@ mod tests {
         assert_eq!(with_final_stop("add($1)$0"), "add($1)$0");
         assert_eq!(with_final_stop("${0:x} + $1"), "${0:x} + $1");
         assert_eq!(with_final_stop("cost: \\$0"), "cost: \\$0$0");
+    }
+
+    #[test]
+    fn a_bare_stop_becomes_one_gtksourceview_walks() {
+        assert_eq!(with_stops("foo($1)"), "foo(${1})");
+        assert_eq!(with_stops("foo($1, $2)$0"), "foo(${1}, ${2})$0");
+        assert_eq!(with_stops("$1 $1"), "${1} $1", "a repeat mirrors");
+        assert_eq!(with_stops("$1 ${1:a}"), "$1 ${1:a}", "the stop is braced");
+        assert_eq!(with_stops("\\$1 \\\\$1"), "\\$1 \\\\${1}");
+        assert_eq!(with_stops("${1:a$2} $2"), "${1:a$2} ${2}");
+        assert_eq!(
+            with_stops("$TM_FILENAME ${TM_LINE:x$1}"),
+            "$TM_FILENAME ${TM_LINE:x$1}"
+        );
     }
 }

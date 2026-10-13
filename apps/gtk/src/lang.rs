@@ -132,6 +132,12 @@ impl State {
     pub fn claim_toast(&self) -> bool {
         !self.toasted.replace(true)
     }
+
+    /// Whether the document is a dependency outside the vault, answered by the server that
+    /// named it: see [`Support::dependency`].
+    pub fn is_dependency(&self) -> bool {
+        self.support().is_some_and(|s| s.dependency)
+    }
 }
 
 /// Request position as zero-based line and character column, matching TextIter coordinates.
@@ -174,11 +180,21 @@ pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
     let Some(vault) = vault else {
         return restart(tab, Duration::ZERO);
     };
-    *tab.lang.vault.borrow_mut() = Some(vault.clone());
     crate::completion::install(tab);
     crate::hover::install(tab);
     crate::signature::install(tab);
     crate::ghost::install(tab);
+    join(tab, vault);
+}
+
+/// Open the tab's document on `vault`, unless it is open there already or opening. A file from
+/// outside the vault opens only as a dependency a running server named ([`Support::dependency`]);
+/// any other keeps no vault, as a tab outside every vault has none, until it is joined again.
+pub fn join(tab: &Rc<Tab>, vault: Arc<Vault>) {
+    if tab.lang.vault().is_some() {
+        return;
+    }
+    *tab.lang.vault.borrow_mut() = Some(vault.clone());
     index_outline(tab);
 
     let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
@@ -187,6 +203,9 @@ pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
         let support = open(&weak, &vault, &rel, &id, text).await;
         let Some(tab) = weak.upgrade() else { return };
         match support {
+            Ok(support) if crate::doc::is_loose_key(&rel) && !support.dependency => {
+                tab.lang.vault.take();
+            }
             Ok(support) => {
                 tracing::debug!("opened {rel} as {id}: {support:?}");
                 supported(&tab, support);
@@ -235,6 +254,7 @@ pub fn index_outline(tab: &Rc<Tab>) {
     if tab.flavour() != Flavour::Code
         || tab.lang.served.get()
         || accent_core::code::lang_of(&rel).is_none()
+        || crate::doc::is_loose_key(&rel)
     {
         return;
     }

@@ -1,6 +1,6 @@
 id: io.github.stroblme.Accent
 runtime: org.gnome.Platform
-runtime-version: '50'
+runtime-version: '51'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -29,7 +29,7 @@ build-options:
     CARGO_HOME: /run/build/accent/cargo
 
 modules:
-  # The GNOME 50 runtime ships enchant and hunspell but not libspelling, so the app has to build it.
+  # The GNOME 51 runtime ships enchant and hunspell but not libspelling, so the app has to build it.
   - name: libspelling
     buildsystem: meson
     config-opts:
@@ -95,26 +95,44 @@ modules:
         sha256: d7247b33ae5545615a5e877235dd97afc879e3a8805689684f528cae3339d352
         strip-components: 0
 
-  # The servers a remote vault uploads, one per machine a host may be, built by `make server`
-  # (which `make flatpak` runs first) outside the sandbox: the Rust extension has no musl targets,
-  # and bundled SQLite wants a C compiler for each, which cargo zigbuild brings there.
-  - name: accent-server
+  # The tool the server below is built with, left out of the app.
+  - name: cargo-zigbuild
     buildsystem: simple
+    cleanup: ['*']
+    build-options:
+      env:
+        CARGO_HOME: /run/build/cargo-zigbuild/cargo
     build-commands:
-      - install -Dm755 accent-cli-x86_64 accent-cli-aarch64 -t /app/lib/accent
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/cargo-zigbuild -t /app/bin
     sources:
-      - type: file
-        path: ../target/x86_64-unknown-linux-musl/release/accent-cli
-        dest-filename: accent-cli-x86_64
-      - type: file
-        path: ../target/aarch64-unknown-linux-musl/release/accent-cli
-        dest-filename: accent-cli-aarch64
+      - type: archive
+        archive-type: tar-gzip
+        url: https://static.crates.io/crates/cargo-zigbuild/cargo-zigbuild-0.23.4.crate
+        sha256: 0b0c2fe7d5f1a782047272e3fc1cd44214c450776bbde564bf92b9776dc2d781
+      # Generated from the crate's Cargo.lock as cargo-sources.json is from ours.
+      - cargo-zigbuild-sources.json
 
   - name: accent
     buildsystem: simple
+    build-options:
+      env:
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: --sysroot=/run/build/accent/sysroot
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: --sysroot=/run/build/accent/sysroot
+        CARGO_ZIGBUILD_ZIG_PATH: /run/build/accent/zig/zig
     build-commands:
       - cargo --offline fetch --manifest-path Cargo.toml
       - cargo --offline build --release -p accent
+      # The server a remote vault uploads, static so it starts on any distribution, for this
+      # machine's architecture only: Flathub refuses a build holding another's binaries, so a
+      # host of the other one is refused (`link::Server::for_host`). The extension's sysroot is
+      # read-only and has no musl std, so ours (the RUSTFLAGS above) adds it beside the host's,
+      # and bundled SQLite wants a musl C compiler, which zig is.
+      - mkdir -p sysroot/lib/rustlib
+      - ln -s /usr/lib/sdk/rust-stable/lib/rustlib/*-linux-gnu "$PWD"/rust-std/*/lib/rustlib/*-musl sysroot/lib/rustlib
+      # Without the SDK's CFLAGS, which the C compiler for musl does not take (-fcf-protection).
+      - env -u CFLAGS cargo --offline zigbuild --release -p accent-cli --target $FLATPAK_ARCH-unknown-linux-musl
+      - install -Dm755 target/$FLATPAK_ARCH-unknown-linux-musl/release/accent-cli /app/lib/accent/accent-cli-$FLATPAK_ARCH
       # Five install lines beat adding a meson build system that nothing else in the tree needs.
       - install -Dm755 target/release/accent -t /app/bin
       - install -Dm644 data/io.github.stroblme.Accent.desktop -t /app/share/applications
@@ -137,3 +155,26 @@ modules:
           - vendor/pdfium
       # Regenerate whenever Cargo.lock changes, see the command in the repo README/report.
       - cargo-sources.json
+      # The server's std, from the release the rust-stable extension is (`rustc --version` in
+      # the SDK): a std any other rustc built is refused, so these move with it.
+      - type: archive
+        only-arches: [x86_64]
+        url: https://static.rust-lang.org/dist/2026-08-20/rust-std-1.98.0-x86_64-unknown-linux-musl.tar.xz
+        sha256: 1a76f782db2d540e1cd16ea47829b323f4a8f4dda64bca4b23be189109c510f8
+        dest: rust-std
+      - type: archive
+        only-arches: [aarch64]
+        url: https://static.rust-lang.org/dist/2026-08-20/rust-std-1.98.0-aarch64-unknown-linux-musl.tar.xz
+        sha256: 36f82e96e86ec8a02d0a0a66574f4b7be086771cec41bb8e9d40ba5cbd64c93a
+        dest: rust-std
+      # zig, for the machine building.
+      - type: archive
+        only-arches: [x86_64]
+        url: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+        sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+        dest: zig
+      - type: archive
+        only-arches: [aarch64]
+        url: https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz
+        sha256: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+        dest: zig

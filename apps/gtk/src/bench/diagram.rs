@@ -545,8 +545,10 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
 }
 
 /// Probe Properties on the sample: position/size after nudging, burst edits as one
-/// undo, hover-revealed buttons, Copy/Paste Position and Style, wrong-type paste toasts, and
-/// the line rows an arrow and a shape share, as saved. Create the sample at `rel` if absent.
+/// undo, hover-revealed buttons, Copy/Paste Position and Style, wrong-type paste toasts, the
+/// line rows an arrow and a shape share, the rows of a flex arrow and a swimlane, Flip of an
+/// arrow and of a box placed by fractions, and Custom picked and typed by XTEST, as saved.
+/// Create the sample at `rel` if absent.
 fn props(app: &Rc<App>, rel: &str) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -580,6 +582,8 @@ fn props(app: &Rc<App>, rel: &str) {
             .and_downcast::<adw::SpinRow>()
         };
         let rows = || ["X", "Y", "Width", "Height"].map(|t| spin(t).map(|r| r.text().to_string()));
+        // The groups' box, whole however far the pane is scrolled, for the pictures below.
+        let content = group("Shape").and_then(|g| g.parent());
         let click = |tooltip: &str| {
             let button = find_widget(&pane, &|w| {
                 w.is::<gtk::Button>() && w.tooltip_text().as_deref() == Some(tooltip)
@@ -694,6 +698,18 @@ fn props(app: &Rc<App>, rel: &str) {
             "Word Wrap",
             "Label Background",
             "Label Border",
+            "Dash Pattern",
+            "Perimeter",
+            "Arc Size",
+            "Divider",
+            "Vertical Text",
+            "Text Opacity",
+            "Spacing",
+            "Start Spacing",
+            "End Spacing",
+            "Arrow Width",
+            "Start Width",
+            "End Width",
         ];
         let showing = || {
             looks
@@ -820,12 +836,181 @@ fn props(app: &Rc<App>, rel: &str) {
             showing(),
             id.and_then(|id| style(&id))
         );
+
+        // What is drawn and draw.io offers: a pattern and a font its menus do not list, a
+        // shape's perimeter and corners, a label's turn, opacity and spacing, an arrow's
+        // spacing, a flex arrow's widths and heads, a swimlane's divider, and Flip of an arrow
+        // on its own and of a box placed by fractions.
+        let shot = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT").ok();
+        let pane_shot = |name: &str| {
+            let (Some(path), Some(content)) = (&shot, &content) else {
+                return;
+            };
+            let path = Path::new(path).with_extension(format!("{name}.png"));
+            println!("bench diagram props shot {name} {}", shoot(content, &path));
+        };
+        let set = |title: &str, value: f64| match row(title).and_downcast::<adw::SpinRow>() {
+            Some(row) => row.set_value(value),
+            None => println!("bench diagram props no_spin {title}"),
+        };
+        let picked = |title: &str| {
+            let item = row(title).and_downcast::<adw::ComboRow>()?.selected_item();
+            Some(
+                item.and_downcast::<gtk::StringObject>()?
+                    .string()
+                    .to_string(),
+            )
+        };
+        tab.select(vec!["a".to_string()]);
+        choose("Pattern", "Custom");
+        let dash = row("Dash Pattern").and_downcast::<adw::EntryRow>();
+        println!(
+            "bench diagram props custom shown={:?} text={:?}",
+            shown(&pane, "Dash Pattern"),
+            dash.as_ref().map(|d| d.text().to_string())
+        );
+        if let Some(dash) = &dash {
+            dash.set_text("6 2 1 2");
+            dash.emit_by_name::<()>("apply", &[]);
+        }
+        set("Perimeter", 4.0);
+        set("Arc Size", 30.0);
+        set("Text Opacity", 60.0);
+        set("Top", 5.0);
+        if let Some(vertical) = row("Vertical Text").and_downcast::<adw::SwitchRow>() {
+            vertical.set_active(true);
+        }
+        let ids = vec!["a".to_string()];
+        tab.edit(|e, page| e.set_styles(page, &ids, &[("fontFamily", Some("Inter"))]));
+        if let Some(spacing) = row("Spacing").and_downcast::<adw::ExpanderRow>() {
+            spacing.set_expanded(true);
+        }
+        println!(
+            "bench diagram props drawn a={:?} picked={:?}",
+            style("a"),
+            [picked("Pattern"), picked("Font")]
+        );
+        glib::timeout_future(Duration::from_millis(400)).await;
+        pane_shot("shape");
+        tab.select(vec!["e".to_string()]);
+        set("Start Spacing", 3.0);
+        set("End Spacing", -2.0);
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!(
+            "bench diagram props drawn e={:?} shown={:?}",
+            style("e"),
+            showing()
+        );
+        pane_shot("arrow");
+
+        let model = r#"<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="s" value="Lane" style="swimlane;startSize=23;" parent="1" vertex="1">
+              <mxGeometry x="600" y="380" width="160" height="100" as="geometry"/></mxCell>
+            <mxCell id="p" style="ellipse;" parent="s" vertex="1">
+              <mxGeometry x="1" y="0.5" width="20" height="20" relative="1" as="geometry">
+                <mxPoint x="-10" y="-10" as="offset"/></mxGeometry></mxCell>
+            <mxCell id="f" style="shape=flexArrow;endArrow=classic;html=1;" parent="1" edge="1">
+              <mxGeometry relative="1" as="geometry"><mxPoint x="600" y="100" as="sourcePoint"/>
+                <mxPoint x="700" y="150" as="targetPoint"/></mxGeometry></mxCell>
+            </root></mxGraphModel>"#;
+        tab.paste_text(model);
+        let pasted = tab.file().pages[0].clone();
+        let find = |kind: &str| {
+            let cell = pasted
+                .cells
+                .iter()
+                .rev()
+                .find(|c| c.style.to_string().contains(kind));
+            cell.map(|c| c.id.clone()).unwrap_or_default()
+        };
+        let (lane, flex) = (find("swimlane"), find("flexArrow"));
+        let port = pasted.children(&lane).next().map(|c| c.id.clone());
+        let geometry = |id: &str| tab.file().pages[0].cell(id)?.geometry.clone();
+        let ends = |id: &str| geometry(id).map(|g| (g.source_point, g.target_point));
+        tab.select(vec![flex.clone()]);
+        let heads = |title: &str| {
+            let combo = row(title).and_downcast::<adw::ComboRow>()?;
+            let list = combo.model().and_downcast::<gtk::StringList>()?;
+            Some((0..list.n_items()).filter_map(|i| list.string(i)).count())
+        };
+        println!(
+            "bench diagram props flex shown={:?} heads={:?} picked={:?}",
+            showing(),
+            [heads("Start"), heads("End")],
+            [picked("Start"), picked("End")]
+        );
+        set("Arrow Width", 14.0);
+        set("Start Width", 30.0);
+        set("End Width", 26.0);
+        choose("Start", "Block");
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!("bench diagram props flex style={:?}", style(&flex));
+        pane_shot("flex");
+        let before = ends(&flex);
+        click("Flip Horizontally");
+        println!(
+            "bench diagram props flip arrow before={before:?} after={:?}",
+            ends(&flex)
+        );
+        tab.select(vec![lane.clone()]);
+        println!("bench diagram props lane shown={:?}", showing());
+        if let Some(divider) = row("Divider").and_downcast::<adw::SwitchRow>() {
+            divider.set_active(false);
+        }
+        glib::timeout_future(Duration::from_millis(400)).await;
+        pane_shot("swimlane");
+        let port_at = || {
+            let g = geometry(port.as_deref()?)?;
+            Some((g.x, g.relative, g.offset))
+        };
+        let before = port_at();
+        click("Flip Horizontally");
+        println!(
+            "bench diagram props flip lane={:?} port before={before:?} after={:?}",
+            style(&lane),
+            port_at()
+        );
+        // The pointer and the keys: Pattern's menu to its last entry, Custom, and numbers typed
+        // into the row it opens.
+        tab.select(vec!["b".to_string()]);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let (dx, dy) = app.window.surface_transform();
+        let on_row = |title: &str| {
+            let row = row(title)?;
+            let scroller = row.ancestor(gtk::ScrolledWindow::static_type())?;
+            let scroller = scroller.downcast_ref::<gtk::ScrolledWindow>()?;
+            // From where the scroller shows it to 100 px below its top.
+            let top = row.compute_point(&scroller.child()?, &graphene::Point::zero())?;
+            let scroll = scroller.vadjustment();
+            scroll.set_value(scroll.value() + f64::from(top.y()) - 100.0);
+            let at = row.compute_point(&app.window, &graphene::Point::new(40.0, 20.0))?;
+            Some(format!(
+                "{} {}",
+                f64::from(at.x()) + dx,
+                f64::from(at.y()) + dy
+            ))
+        };
+        if let Some(at) = on_row("Pattern") {
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let at = on_row("Pattern").unwrap_or(at);
+            super::git::xtest(&format!("move {at}; focus; sleep 0.2; down; up; sleep 0.4")).await;
+            super::git::xtest("key End; key Return; sleep 0.3").await;
+            println!(
+                "bench diagram props typed picked={:?} focus={:?}",
+                picked("Pattern"),
+                dash.as_ref()
+                    .map(|d| d.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN))
+            );
+            super::git::xtest("key ctrl+a; type 3 3; key Return").await;
+        }
+        println!("bench diagram props typed b={:?}", style("b"));
+
         // Saved a second after the last edit.
         glib::timeout_future(Duration::from_millis(1600)).await;
         let saved = std::fs::read(&path).ok().and_then(|xml| {
             let file = accent_drawio::File::from_bytes(&xml).ok()?;
             let style = |id: &str| file.pages[0].cell(id).map(|c| c.style.to_string());
-            Some([style("a"), style("e")])
+            Some([style("a"), style("e"), style(&flex), style(&lane)])
         });
         println!("bench diagram props line saved={saved:?}");
         bench_quit(&app);

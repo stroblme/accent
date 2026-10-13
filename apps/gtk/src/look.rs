@@ -14,8 +14,8 @@ use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-use accent_core::orientation;
 use accent_core::recolour::{self, Verdict};
+use accent_core::{animation, orientation};
 use gtk::prelude::*;
 use gtk::subclass::prelude::ObjectSubclassIsExt;
 use gtk::{gdk, gdk_pixbuf, gio, glib};
@@ -95,6 +95,8 @@ pub struct Shown {
     pub texture: gdk::Texture,
     /// SVG logical size, distinct from texture pixels rendered for display scale and zoom. `None` for rasters.
     pub size: Option<(i32, i32)>,
+    /// Whether the file is an animation, which Invert Image Colours leaves alone ([`animated`]).
+    pub animated: bool,
 }
 
 impl Shown {
@@ -140,6 +142,7 @@ pub fn show(
         original: Some(original),
         texture,
         size: None,
+        animated: animated(path),
     })
 }
 
@@ -167,6 +170,7 @@ fn show_svg(
         original: None,
         texture,
         size: Some(size),
+        animated: false,
     })
 }
 
@@ -320,7 +324,7 @@ impl Pixels {
     }
 }
 
-/// Recolour a raster for `look`, or return `None` to preserve it.
+/// Recolour a raster for `look`, or return `None` to preserve it: an animation always.
 /// Decode at most once and only when classification or recolouring needs pixels.
 fn recoloured(
     path: &Path,
@@ -328,11 +332,14 @@ fn recoloured(
     inverted: bool,
     decode: impl Fn() -> Option<gdk::Texture>,
 ) -> Option<gdk::MemoryTexture> {
+    if look.palette(true, inverted).is_none() || animated(path) {
+        return None;
+    }
     let texture = OnceCell::new();
     let decoded = || texture.get_or_init(&decode).clone();
-    let document = match gif(path) || !look.asks(inverted) {
-        true => false,
-        false => classified(path, || decoded().map(|t| measure(&t))).is_some_and(|v| v.document),
+    let document = match look.asks(inverted) {
+        true => classified(path, || decoded().map(|t| measure(&t))).is_some_and(|v| v.document),
+        false => false,
     };
     let (paper, ink) = look.palette(document, inverted)?;
     let mut pixels = pixels(&decoded()?)?;
@@ -430,10 +437,17 @@ fn svg(path: &Path) -> bool {
     extension(path) == "svg"
 }
 
-/// Never recoloured unasked: likely an animation, which is its own content.
-fn gif(path: &Path) -> bool {
-    extension(path) == "gif"
+/// Never recoloured, nor inverted: an animated GIF, WebP or PNG, which a recolouring would hand
+/// the preview as one still. Reads the file, so off the main thread.
+pub(crate) fn animated(path: &Path) -> bool {
+    std::fs::File::open(path).is_ok_and(animation::animated)
 }
+
+/// Why Invert Image Colours is greyed out over an animation, in the palette ([`animated`]).
+pub(crate) const ANIMATED: &str = "An animation is shown as its file is, never recoloured";
+
+/// The same, after the command's name in the preview's menu.
+pub(crate) const ANIMATED_LABEL: &str = "(animated)";
 
 fn extension(path: &Path) -> String {
     path.extension()

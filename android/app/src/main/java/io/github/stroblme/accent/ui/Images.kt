@@ -6,6 +6,7 @@ import android.util.LruCache
 import android.util.Size
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import io.github.stroblme.accent.OpenImage
 import io.github.stroblme.accent.ffi.Theme
 import io.github.stroblme.accent.ffi.looksLikeDocument
 import io.github.stroblme.accent.ffi.recolourImage
@@ -28,15 +29,20 @@ enum class ImageKind {
     /** Always a drawing, and recoloured as a filter, so it stays vector. */
     Svg,
 
-    /** Never recoloured: the decoder takes its first frame only, and an animation would stop. */
-    Gif,
+    /**
+     * An animated GIF, WebP or PNG, never recoloured: the decoder takes one still of it, and the
+     * animation would stop. Told from a still by reading the file ([OpenImage.animated]).
+     */
+    Animation,
 }
 
-/** What an image file is to the recolouring rule, by its extension; null for anything else. */
+/**
+ * What an image file is to the recolouring rule, by its extension; null for anything else. A GIF,
+ * a WebP or a PNG is a raster here, and an [ImageKind.Animation] once its file says it moves.
+ */
 fun imageKind(name: String): ImageKind? = when (name.substringAfterLast('.', "").lowercase()) {
-    "png", "jpg", "jpeg", "webp", "bmp", "avif" -> ImageKind.Raster
+    "png", "jpg", "jpeg", "webp", "gif", "bmp", "avif" -> ImageKind.Raster
     "svg" -> ImageKind.Svg
-    "gif" -> ImageKind.Gif
     else -> null
 }
 
@@ -49,14 +55,14 @@ fun imageKind(name: String): ImageKind? = when (name.substringAfterLast('.', "")
  */
 internal fun imageTheme(kind: ImageKind, dark: Boolean, inverted: Boolean, document: () -> Boolean): Theme =
     when (kind) {
-        ImageKind.Gif -> Theme.Plain
+        ImageKind.Animation -> Theme.Plain
         ImageKind.Svg -> pageTheme(dark, inverted)
         ImageKind.Raster ->
             if (inverted) pageTheme(dark, inverted = true) else pageTheme(dark && document())
     }
 
 /**
- * [file] as a rendered page is to show it in a [dark] theme or a light one: as it is on disk, or
+ * [image] as a rendered page is to show it in a [dark] theme or a light one: as it is on disk, or
  * recoloured, and turned round if it is among the [inverted] — the reader's, or none on paper. A
  * file that cannot be read is refused rather than thrown out of the WebView's thread.
  *
@@ -73,11 +79,13 @@ internal fun imageTheme(kind: ImageKind, dark: Boolean, inverted: Boolean, docum
  * recolour always is.
  */
 fun served(
-    file: File,
+    image: OpenImage,
     dark: Boolean,
     inverted: Set<String> = Inverted.files,
 ): WebResourceResponse = runCatching {
-    val kind = imageKind(file.name) ?: return@runCatching asItIs(file, null)
+    val file = File(image.path)
+    val byName = imageKind(file.name) ?: return@runCatching asItIs(file, null)
+    val kind = if (image.animated) ImageKind.Animation else byName
     when (val theme = imageTheme(kind, dark, file.path in inverted) { document(file) }) {
         Theme.Plain -> asItIs(file, kind)
         is Theme.Recolour -> when (kind) {

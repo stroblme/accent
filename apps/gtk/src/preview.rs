@@ -443,6 +443,8 @@ struct Assets {
     requests: Cell<u32>,
     /// Served keys and request paths since the memory cache was cleared, used to invalidate stale WebKit responses.
     served: RefCell<HashMap<String, HashSet<String>>>,
+    /// The request paths last served an animation, over which the menu's Invert is greyed out.
+    animations: RefCell<HashSet<String>>,
     /// How many times the file a path names changed under the page, which asks for it with `v=`
     /// that many ([`versioned`]).
     versions: RefCell<HashMap<String, u32>>,
@@ -516,6 +518,7 @@ impl Preview {
             #[cfg(feature = "bench")]
             requests: Cell::new(0),
             served: RefCell::default(),
+            animations: RefCell::default(),
             versions: RefCell::default(),
             paper,
             note: RefCell::default(),
@@ -1107,9 +1110,13 @@ fn same_page(uri: &str, current: &str) -> bool {
 // ----------------------------------------------------------------------------------- image menu
 
 /// Offer Invert Image Colours in the page's menu over an image of the vault's, handing
-/// `on_invert` the image's key once the vault has named the file.
+/// `on_invert` the image's key once the vault has named the file; over an animation, greyed out
+/// and saying why, as Go to Source is without SyncTeX data.
 fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
     let action = gio::SimpleAction::new("invert-image", Some(glib::VariantTy::STRING));
+    let animation = gio::SimpleAction::new("invert-animation", None);
+    animation.set_enabled(false);
+    let animations = inner.assets.clone();
     let (assets, on_invert) = (inner.assets.clone(), Rc::new(on_invert));
     action.connect_activate(move |_, rel| {
         let Some(rel) = rel.and_then(|v| v.str()).map(str::to_string) else {
@@ -1129,11 +1136,18 @@ fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
         let uri = hit.context_is_image().then(|| hit.image_uri()).flatten();
         if let Some(("file", rel)) = uri.as_deref().and_then(accent_uri) {
             menu.append(&webkit6::ContextMenuItem::new_separator());
-            menu.append(&webkit6::ContextMenuItem::from_gaction(
-                &action,
-                "Invert Image Colours",
-                Some(&rel.to_variant()),
-            ));
+            menu.append(&match animations.animations.borrow().contains(&rel) {
+                true => webkit6::ContextMenuItem::from_gaction(
+                    &animation,
+                    &format!("Invert Image Colours {}", look::ANIMATED_LABEL),
+                    None,
+                ),
+                false => webkit6::ContextMenuItem::from_gaction(
+                    &action,
+                    "Invert Image Colours",
+                    Some(&rel.to_variant()),
+                ),
+            });
         }
         false
     });
@@ -1170,16 +1184,22 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
             let inverted = inverted.contains(&key);
             let served =
                 (!accent_core::path::is_diagram(&key)).then(|| look::serve(&path, look, inverted));
-            Some((key, path, served, inverted))
+            let animated = served.is_some() && look::animated(&path);
+            Some((key, path, served, inverted, animated))
         });
         let answer = answer.await;
-        if let Some(Some((key, ..))) = &answer {
+        if let Some(Some((key, .., animated))) = &answer {
+            let mut animations = assets.animations.borrow_mut();
+            match animated {
+                true => animations.insert(asked.clone()),
+                false => animations.remove(&asked),
+            };
             let mut served = assets.served.borrow_mut();
             served.entry(key.clone()).or_default().insert(asked);
         }
         let (path, served) = match answer {
-            Some(Some((_, path, Some(served), _))) => (path, served),
-            Some(Some((key, path, None, inverted))) => {
+            Some(Some((_, path, Some(served), ..))) => (path, served),
+            Some(Some((key, path, None, inverted, _))) => {
                 let web = assets.web.borrow().contains(&key);
                 match crate::diagram::embed::svg(&path, page.as_deref(), web).await {
                     Some(svg) => (path, look::serve_svg(&svg, look, inverted)),
@@ -1462,6 +1482,9 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) 
             two paragraphs, and two in one paragraph would touch. 1.2em is what a heading takes\n\
             above itself, and it is in `em` so it follows the document font. */\n\
          math[display=\"block\"] {{ margin: 1.2em 0; }}\n\
+         /* Radicals and delimiters stretch only in a font with an OpenType MATH table, and the\n\
+            runtime's `math` alias names none it ships: DejaVu is the GNOME runtime's. */\n\
+         math {{ font-family: 'Latin Modern Math', 'STIX Two Math', 'DejaVu Math TeX Gyre', math; }}\n\
          code, pre, .math {{ font-family: monospace; font-size: 0.92em; }}\n\
          code {{ background: {surface}; border-radius: 4px; padding: 0.1em 0.3em; }}\n\
          pre {{ background: {surface}; border-radius: 6px; padding: 12px; overflow-x: auto; }}\n\

@@ -350,7 +350,7 @@ drills: gtk-bench xvfb
 		"$$xdg/vault" >"$$xdg/complete" && \
 	grep '^bench ' "$$xdg/complete" | diff -u apps/gtk/src/bench/complete.expected -
 
-## screenshots: regenerate docs/screenshot-1..4.png (light and dark of each; needs magick, htop, Xvfb)
+## screenshots: regenerate docs/screenshot-1..4.png and data/screenshots (needs magick, htop, Xvfb)
 #
 # On a vault and repository of their own, made afresh each run; build-aux/screenshots.sh says how.
 screenshots: core gtk-bench pdfium
@@ -434,10 +434,8 @@ cargo-sources:
 		https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py \
 		Cargo.lock -o build-aux/cargo-sources.json
 
-## flatpak: build and install the Flatpak (needs org.flatpak.Builder and the GNOME 50 SDK)
-#
-# After `server`, whose binaries the manifest takes from target/ as they are.
-flatpak: server
+## flatpak: build and install the Flatpak (needs org.flatpak.Builder and the GNOME 51 SDK)
+flatpak:
 	flatpak run org.flatpak.Builder --user --install --force-clean \
 		build-aux/build build-aux/$(APP_ID).yml
 

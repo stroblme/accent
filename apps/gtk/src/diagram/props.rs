@@ -27,6 +27,8 @@ pub enum Target {
         edges: bool,
         /// Some cell takes a fill: a shape, or a flex arrow ([`accent_drawio::Cell::takes_fill`]).
         fills: bool,
+        /// Some cell is a swimlane, whose divider draw.io offers (`ss.swimlane`).
+        swimlane: bool,
         /// The one shape selected: its place and size in its parent, as the file has them, and
         /// whether it is pinned where it is (locked, or on a locked layer).
         geometry: Option<(Rect, bool)>,
@@ -144,7 +146,13 @@ fn head_keys(start: bool) -> [&'static str; 3] {
     }
 }
 
-/// draw.io's line patterns (Format panel), by `dashed`, `dashPattern` and label.
+/// The heads draw.io offers a flex arrow, which draws any head as its block: none, as
+/// [`HEADS`]' first writes it, and Block, writing the head alone.
+const FLEX_HEADS: [&str; 2] = ["None", "Block"];
+
+/// draw.io's line patterns (Format panel), by `dashed`, `dashPattern` and label; its Custom
+/// prompt follows them in the Pattern row, starting from [`CUSTOM_PATTERN`] when the cell has
+/// no pattern of its own.
 const PATTERNS: [(Option<&str>, Option<&str>, &str); 8] = [
     (None, None, "Solid"),
     (Some("1"), None, "Dashed"),
@@ -155,6 +163,7 @@ const PATTERNS: [(Option<&str>, Option<&str>, &str); 8] = [
     (Some("1"), Some("1 2"), "Dotted (2)"),
     (Some("1"), Some("1 4"), "Dotted (3)"),
 ];
+const CUSTOM_PATTERN: &str = "8 4 1 4";
 /// draw.io's fonts (`Menus.defaultFonts`).
 const FONTS: [&str; 9] = [
     "Helvetica",
@@ -326,12 +335,18 @@ pub struct Props {
     stroke: Rc<ColourRow>,
     stroke_width: adw::SpinRow,
     pattern: adw::ComboRow,
+    /// The numbers of a pattern draw.io's menu does not list, its Custom prompt.
+    dash_pattern: adw::EntryRow,
+    /// A shape's `perimeterSpacing`, how far off its outline arrows stop.
+    perimeter: adw::SpinRow,
     rounded: adw::SwitchRow,
+    arc_size: adw::SpinRow,
+    /// A swimlane's divider under its title (`swimlaneLine`).
+    divider: adw::SwitchRow,
     shadow: adw::SwitchRow,
     opacity: adw::SpinRow,
     rotation: adw::SpinRow,
     flip: [gtk::Button; 2],
-    flip_row: adw::ActionRow,
     /// Constrain Proportions (`aspect=fixed`).
     aspect: adw::SwitchRow,
     /// The size the Width and Height rows had, which Constrain Proportions scales from.
@@ -342,18 +357,32 @@ pub struct Props {
     bold: gtk::ToggleButton,
     italic: gtk::ToggleButton,
     underline: gtk::ToggleButton,
+    /// draw.io's Vertical: the label across the height (`horizontal=0`).
+    vertical: adw::SwitchRow,
     align: adw::ComboRow,
     valign: adw::ComboRow,
     label_position: adw::ComboRow,
     wrap: adw::SwitchRow,
     label_background: Rc<ColourRow>,
     label_border: Rc<ColourRow>,
+    text_opacity: adw::SpinRow,
+    /// `spacing` and its four sides, draw.io's Text Spacing.
+    spacing: [adw::SpinRow; 5],
     waypoints: adw::ComboRow,
     line_style: adw::ComboRow,
     start: adw::ComboRow,
     end: adw::ComboRow,
     start_size: adw::SpinRow,
     end_size: adw::SpinRow,
+    /// `sourcePerimeterSpacing` and `targetPerimeterSpacing`.
+    start_spacing: adw::SpinRow,
+    end_spacing: adw::SpinRow,
+    /// A flex arrow's band and its heads' widths (`width`, `startWidth`, `endWidth`).
+    arrow_width: adw::SpinRow,
+    start_width: adw::SpinRow,
+    end_width: adw::SpinRow,
+    /// Whether Start and End offer a flex arrow's heads ([`FLEX_HEADS`]) rather than [`HEADS`].
+    flex: Cell<bool>,
     raw: adw::EntryRow,
     page_name: adw::EntryRow,
     background: Rc<ColourRow>,
@@ -485,8 +514,15 @@ impl Props {
         let stroke = Rc::new(ColourRow::new("Line Colour", Color::BLACK));
         let stroke_width = spin("Line Width", (0.0, 20.0, 0.5));
         stroke_width.set_digits(1);
-        let pattern = combo("Pattern", &PATTERNS.map(|(.., l)| l));
+        let pattern = combo(
+            "Pattern",
+            &[&PATTERNS.map(|(.., l)| l)[..], &["Custom"]].concat(),
+        );
+        let dash_pattern = entry_row("Dash Pattern");
+        let perimeter = spin("Perimeter", (0.0, 999.0, 1.0));
         let rounded = adw::SwitchRow::builder().title("Rounded").build();
+        let arc_size = spin("Arc Size", (0.0, 999.0, 1.0));
+        let divider = adw::SwitchRow::builder().title("Divider").build();
         let shadow = adw::SwitchRow::builder().title("Shadow").build();
         let opacity = spin("Opacity", (0.0, 100.0, 5.0));
         let rotation = spin("Rotation", (-180.0, 180.0, 1.0));
@@ -494,6 +530,8 @@ impl Props {
         shape.add(&gradient.row);
         shape.add(&direction);
         shape.add(&rounded);
+        shape.add(&arc_size);
+        shape.add(&divider);
         shape.add(&shadow);
         shape.add(&opacity);
         shape.add(&rotation);
@@ -509,6 +547,8 @@ impl Props {
         line.add(&stroke.row);
         line.add(&stroke_width);
         line.add(&pattern);
+        line.add(&dash_pattern);
+        line.add(&perimeter);
 
         let font = combo("Font", &FONTS);
         let font_size = spin("Font Size", (6.0, 96.0, 1.0));
@@ -530,22 +570,33 @@ impl Props {
         }
         let style_row = adw::ActionRow::builder().title("Style").build();
         style_row.add_suffix(&styles);
+        let vertical = adw::SwitchRow::builder().title("Vertical Text").build();
         let align = combo("Alignment", &ALIGN.map(|(_, l)| l));
         let valign = combo("Vertical Alignment", &VALIGN.map(|(_, l)| l));
         let label_position = combo("Position", &POSITIONS.map(|(l, _)| l));
         let wrap = adw::SwitchRow::builder().title("Word Wrap").build();
         let label_background = Rc::new(ColourRow::new("Label Background", Color::WHITE));
         let label_border = Rc::new(ColourRow::new("Label Border", Color::BLACK));
+        let text_opacity = spin("Text Opacity", (0.0, 100.0, 5.0));
+        let spacing = ["Global", "Top", "Left", "Bottom", "Right"]
+            .map(|side| spin(side, (-999.0, 999.0, 1.0)));
+        let spacing_row = adw::ExpanderRow::builder().title("Spacing").build();
+        for row in &spacing {
+            spacing_row.add_row(row);
+        }
         text.add(&font);
         text.add(&font_size);
         text.add(&font_colour.row);
         text.add(&style_row);
+        text.add(&vertical);
         text.add(&align);
         text.add(&valign);
         text.add(&label_position);
         text.add(&wrap);
         text.add(&label_background.row);
         text.add(&label_border.row);
+        text.add(&text_opacity);
+        text.add(&spacing_row);
 
         let waypoints = combo("Waypoints", &WAYPOINTS.map(|(l, _)| l));
         let line_style = combo("Line Style", &LINE_STYLES.map(|(.., l)| l));
@@ -553,12 +604,22 @@ impl Props {
         let end = combo("End", &HEADS.map(|(.., l)| l));
         let start_size = spin("Start Size", (0.0, 999.0, 1.0));
         let end_size = spin("End Size", (0.0, 999.0, 1.0));
+        let start_spacing = spin("Start Spacing", (-999.0, 999.0, 1.0));
+        let end_spacing = spin("End Spacing", (-999.0, 999.0, 1.0));
+        let arrow_width = spin("Arrow Width", (1.0, 999.0, 1.0));
+        let start_width = spin("Start Width", (0.0, 999.0, 1.0));
+        let end_width = spin("End Width", (0.0, 999.0, 1.0));
         line.add(&waypoints);
         line.add(&line_style);
+        line.add(&arrow_width);
         line.add(&start);
         line.add(&start_size);
+        line.add(&start_width);
+        line.add(&start_spacing);
         line.add(&end);
         line.add(&end_size);
+        line.add(&end_width);
+        line.add(&end_spacing);
 
         let raw = entry_row("Style");
         raw.add_css_class("monospace");
@@ -619,12 +680,15 @@ impl Props {
             stroke,
             stroke_width,
             pattern,
+            dash_pattern,
+            perimeter,
             rounded,
+            arc_size,
+            divider,
             shadow,
             opacity,
             rotation,
             flip,
-            flip_row,
             aspect,
             size_was: Cell::new((0.0, 0.0)),
             font,
@@ -633,18 +697,27 @@ impl Props {
             bold,
             italic,
             underline,
+            vertical,
             align,
             valign,
             label_position,
             wrap,
             label_background,
             label_border,
+            text_opacity,
+            spacing,
             waypoints,
             line_style,
             start,
             end,
             start_size,
             end_size,
+            start_spacing,
+            end_spacing,
+            arrow_width,
+            start_width,
+            end_width,
+            flex: Cell::new(false),
             raw,
             page_name,
             background,
@@ -696,11 +769,16 @@ impl Props {
         colour(&self.fill, "fillColor");
         colour(&self.gradient, "gradientColor");
         colour(&self.stroke, "strokeColor");
-        for switch in [&self.fill.switch, &self.gradient.switch] {
+        let toggles: [&glib::Object; 3] = [
+            self.fill.switch.upcast_ref(),
+            self.gradient.switch.upcast_ref(),
+            self.rounded.upcast_ref(),
+        ];
+        for toggle in toggles {
             let me = Rc::downgrade(self);
-            switch.connect_active_notify(move |_| {
+            toggle.connect_notify_local(Some("active"), move |_, _| {
                 if let Some(me) = me.upgrade() {
-                    me.sync_gradient();
+                    me.sync_rows();
                 }
             });
         }
@@ -723,21 +801,48 @@ impl Props {
             });
         };
         switch(&self.rounded, "rounded", Some("0"));
+        switch(&self.divider, "swimlaneLine", Some("0"));
         switch(&self.shadow, "shadow", None);
         let set = style("whiteSpace");
         self.wrap
             .connect_active_notify(move |row| set(row.is_active().then(|| "wrap".to_string())));
+        // draw.io's Vertical toggles `horizontal`, writing 1 when it goes off.
+        let set = style("horizontal");
+        self.vertical.connect_active_notify(move |row| {
+            set(Some(if row.is_active() { "0" } else { "1" }.into()))
+        });
 
-        // Spin rows step once per arrow press; a burst of them is one change. The last ones
-        // are an arrow's alone; 6 is a head's size when the style gives none
-        // (`mxConstants.DEFAULT_MARKERSIZE`).
-        let spins: [(&adw::SpinRow, &'static str, Option<f64>, bool); 6] = [
+        // Spin rows step once per arrow press; a burst of them is one change. A default is
+        // where the key is left out, as draw.io leaves out an opacity of 100; a key a named style
+        // can give (`spacingLeft`) or whose default depends on another (`arcSize`) is always
+        // written. The last ones are an arrow's alone, at mxGraph's defaults: 6 a head's size
+        // (`mxConstants.DEFAULT_MARKERSIZE`), 10 a flex arrow's band and 20 its heads' width.
+        let [global, top, left, bottom, right] = &self.spacing;
+        let spins: [(&adw::SpinRow, &'static str, Option<f64>, bool); 19] = [
             (&self.stroke_width, "strokeWidth", None, false),
+            (&self.perimeter, "perimeterSpacing", Some(0.0), false),
+            (&self.arc_size, "arcSize", None, false),
             (&self.opacity, "opacity", Some(100.0), false),
             (&self.rotation, "rotation", Some(0.0), false),
             (&self.font_size, "fontSize", None, false),
+            (&self.text_opacity, "textOpacity", Some(100.0), false),
+            (global, "spacing", None, false),
+            (top, "spacingTop", None, false),
+            (left, "spacingLeft", None, false),
+            (bottom, "spacingBottom", None, false),
+            (right, "spacingRight", None, false),
             (&self.start_size, "startSize", Some(6.0), true),
             (&self.end_size, "endSize", Some(6.0), true),
+            (
+                &self.start_spacing,
+                "sourcePerimeterSpacing",
+                Some(0.0),
+                true,
+            ),
+            (&self.end_spacing, "targetPerimeterSpacing", Some(0.0), true),
+            (&self.arrow_width, "width", Some(10.0), true),
+            (&self.start_width, "startWidth", Some(20.0), true),
+            (&self.end_width, "endWidth", Some(20.0), true),
         ];
         for (row, key, default, edges) in spins {
             let (me, send) = (Rc::downgrade(self), send.clone());
@@ -858,15 +963,41 @@ impl Props {
                 Some(Change::Style(owned(&pairs)))
             }),
         );
+        // Custom writes nothing until its numbers are applied, as draw.io's prompt.
+        let me = Rc::downgrade(self);
+        self.pattern.connect_selected_notify(move |row| {
+            let Some(me) = me.upgrade() else { return };
+            let custom = row.selected() as usize == PATTERNS.len();
+            me.dash_pattern.set_visible(custom);
+            if custom && !me.filling.get() {
+                me.dash_pattern.grab_focus();
+            }
+        });
+        let dash_send = send.clone();
+        self.dash_pattern.connect_apply(move |row| {
+            let numbers = row.text().split_whitespace().collect::<Vec<_>>().join(" ");
+            let pattern = (!numbers.is_empty()).then_some(numbers);
+            dash_send(Change::Style(vec![
+                ("dashed", Some("1".to_string())),
+                ("dashPattern", pattern),
+            ]))
+        });
         for (row, start) in [(&self.start, true), (&self.end, false)] {
             let [arrow, fill, _] = head_keys(start);
+            let me = Rc::downgrade(self);
             choose(
                 row,
                 Box::new(move |i| {
-                    let (kind, ..) = HEADS.get(i)?;
-                    let filled = if head_filled(i, start) { "1" } else { "0" };
-                    let pairs = [(arrow, Some(*kind)), (fill, Some(filled))];
-                    Some(Change::EdgeStyle(owned(&pairs)))
+                    let pairs = match (me.upgrade()?.flex.get(), i) {
+                        (true, 1) => owned(&[(arrow, Some("block"))]),
+                        (true, 2..) => return None,
+                        _ => {
+                            let (kind, ..) = HEADS.get(i)?;
+                            let filled = if head_filled(i, start) { "1" } else { "0" };
+                            owned(&[(arrow, Some(*kind)), (fill, Some(filled))])
+                        }
+                    };
+                    Some(Change::EdgeStyle(pairs))
                 }),
             );
         }
@@ -924,6 +1055,7 @@ impl Props {
                 vertices,
                 edges,
                 fills,
+                swimlane,
                 geometry,
             } => {
                 self.position.set_visible(geometry.is_some());
@@ -953,42 +1085,82 @@ impl Props {
                 };
                 // An arrow's line is drawn from the same keys as a shape's outline, so every cell
                 // shows the line's colour, width and dash; the fill only where a cell takes one,
-                // the corners, the turn and the flip for shapes (an arrow's corners are its line
-                // style), the route and the heads for arrows.
+                // the corners and the turn for shapes (an arrow's corners are its line style),
+                // the route and the heads for arrows. draw.io offers a shape's perimeter only
+                // with shapes alone selected, and a swimlane's divider with one among them.
                 self.fill.row.set_visible(*fills);
                 self.gradient.row.set_visible(*fills && !picture);
                 self.rounded.set_visible(*vertices);
+                self.divider.set_visible(*swimlane);
+                self.perimeter.set_visible(*vertices && !edges);
                 self.rotation.set_visible(*vertices);
-                self.flip_row.set_visible(*vertices);
-                // An arrow's label sits on its line, at no size to wrap to.
+                // An arrow's label sits on its line, at no size to wrap to or turn across.
                 self.label_position.set_visible(*vertices);
                 self.wrap.set_visible(*vertices);
-                let arrow: [&gtk::Widget; 6] = [
+                self.vertical.set_visible(*vertices);
+                let arrow: [&gtk::Widget; 8] = [
                     self.waypoints.upcast_ref(),
                     self.line_style.upcast_ref(),
                     self.start.upcast_ref(),
                     self.start_size.upcast_ref(),
+                    self.start_spacing.upcast_ref(),
                     self.end.upcast_ref(),
                     self.end_size.upcast_ref(),
+                    self.end_spacing.upcast_ref(),
                 ];
                 for row in arrow {
                     row.set_visible(*edges);
                 }
+                // The first cell decides, as draw.io's `ss.style` does.
+                let flex = *edges && style.shape() == "flexArrow";
+                for row in [&self.arrow_width, &self.start_width, &self.end_width] {
+                    row.set_visible(flex);
+                }
+                if self.flex.replace(flex) != flex {
+                    let heads = match flex {
+                        true => gtk::StringList::new(&FLEX_HEADS),
+                        false => gtk::StringList::new(&HEADS.map(|(.., l)| l)),
+                    };
+                    for row in [&self.start, &self.end] {
+                        row.set_model(Some(&heads));
+                    }
+                }
+                self.arrow_width.set_value(style.num("width", 10.0));
+                self.start_width.set_value(style.num("startWidth", 20.0));
+                self.end_width.set_value(style.num("endWidth", 20.0));
+                self.perimeter.set_value(style.num("perimeterSpacing", 0.0));
+                self.start_spacing
+                    .set_value(style.num("sourcePerimeterSpacing", 0.0));
+                self.end_spacing
+                    .set_value(style.num("targetPerimeterSpacing", 0.0));
                 self.fill.fill(style.color(fill_key));
                 self.gradient.fill(style.color("gradientColor"));
                 self.stroke.fill(style.color(stroke_key));
                 self.stroke_width.set_value(style.num("strokeWidth", 1.0));
-                // A pattern draw.io's menu has none of shows no row picked, as it shows none.
+                // A pattern draw.io's menu does not list is Custom, its numbers in the row below.
+                let numbers = style
+                    .get("dashPattern")
+                    .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "));
                 let pattern = match style.flag("dashed", false) {
-                    false => Some(0),
-                    true => {
-                        let p = style.get("dashPattern");
-                        let p = p.map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "));
-                        (1..PATTERNS.len()).find(|&i| PATTERNS[i].1.map(str::to_string) == p)
-                    }
+                    false => 0,
+                    true => (1..PATTERNS.len())
+                        .find(|&i| PATTERNS[i].1.map(str::to_string) == numbers)
+                        .unwrap_or(PATTERNS.len()),
                 };
-                self.pattern.set_selected(listed(pattern));
+                self.dash_pattern
+                    .set_text(numbers.as_deref().unwrap_or(CUSTOM_PATTERN));
+                self.pattern.set_selected(pattern as u32);
+                self.dash_pattern.set_visible(pattern == PATTERNS.len());
                 self.rounded.set_active(style.flag("rounded", false));
+                // mxGraph's corner when the style gives none: `LINE_ARCSIZE` units with
+                // `absoluteArcSize`, else `RECTANGLE_ROUNDING_FACTOR` of the shorter side.
+                let arc = if style.flag("absoluteArcSize", false) {
+                    20.0
+                } else {
+                    15.0
+                };
+                self.arc_size.set_value(style.num("arcSize", arc));
+                self.divider.set_active(style.flag("swimlaneLine", true));
                 self.shadow.set_active(style.flag("shadow", false));
                 self.opacity.set_value(style.num("opacity", 100.0));
                 // draw.io keeps any turn it was given; the row shows it within a half turn.
@@ -999,6 +1171,18 @@ impl Props {
                 self.label_background
                     .fill(style.color("labelBackgroundColor"));
                 self.label_border.fill(style.color("labelBorderColor"));
+                self.text_opacity.set_value(style.num("textOpacity", 100.0));
+                let sides = [
+                    "spacing",
+                    "spacingTop",
+                    "spacingLeft",
+                    "spacingBottom",
+                    "spacingRight",
+                ];
+                for (row, key) in self.spacing.iter().zip(sides) {
+                    row.set_value(style.num(key, if key == "spacing" { 2.0 } else { 0.0 }));
+                }
+                self.vertical.set_active(!style.flag("horizontal", true));
                 self.wrap
                     .set_active(style.get("whiteSpace") == Some("wrap"));
                 let bits = style.num("fontStyle", 0.0) as u32;
@@ -1010,7 +1194,20 @@ impl Props {
                     v.and_then(|v| values.iter().position(|x| *x == v))
                         .map_or(gtk::INVALID_LIST_POSITION, |i| i as u32)
                 };
-                self.font.set_selected(at(&FONTS, style.get("fontFamily")));
+                // A font draw.io's list does not have is an entry of its own, as draw.io's menu
+                // names whatever font the cell has.
+                let family = style.get("fontFamily").unwrap_or(FONTS[0]);
+                let own: &[&str] = if FONTS.contains(&family) {
+                    &[]
+                } else {
+                    &[family]
+                };
+                if let Some(fonts) = self.font.model().and_downcast::<gtk::StringList>() {
+                    let n = FONTS.len() as u32;
+                    fonts.splice(n, fonts.n_items() - n, own);
+                }
+                let font = FONTS.iter().position(|f| *f == family);
+                self.font.set_selected(font.unwrap_or(FONTS.len()) as u32);
                 self.align
                     .set_selected(at(&ALIGN.map(|(v, _)| v), style.get("align")));
                 // As draw.io reads it: a side named with no corner is its middle.
@@ -1035,7 +1232,10 @@ impl Props {
                 for (row, size, start) in heads {
                     let [arrow, fill, size_key] = head_keys(start);
                     let kind = style.get(arrow).unwrap_or("none");
-                    row.set_selected(listed(head_at(kind, style.flag(fill, true), start)));
+                    row.set_selected(match flex {
+                        true => u32::from(kind != "none"),
+                        false => listed(head_at(kind, style.flag(fill, true), start)),
+                    });
                     size.set_value(style.num(size_key, 6.0));
                 }
                 // An edge style draw.io's menu does not offer shows no row picked.
@@ -1071,7 +1271,7 @@ impl Props {
                 self.page_height.set_value(size.1);
             }
         }
-        self.sync_gradient();
+        self.sync_rows();
         self.filling.set(false);
     }
 
@@ -1130,13 +1330,15 @@ impl Props {
     }
 
     /// A gradient runs from the fill, so it is greyed without one, and its direction shows only
-    /// while there is a gradient.
-    fn sync_gradient(&self) {
+    /// while there is a gradient; the corners' size shows only while they are rounded.
+    fn sync_rows(&self) {
         let fill = self.fill.switch.is_active();
         self.gradient.row.set_sensitive(fill);
         self.direction.set_visible(
             self.gradient.row.is_visible() && fill && self.gradient.switch.is_active(),
         );
+        self.arc_size
+            .set_visible(self.rounded.is_visible() && self.rounded.is_active());
     }
 }
 
@@ -1205,6 +1407,9 @@ impl DiagramTab {
                     vertices: cells.iter().any(|c| c.vertex),
                     edges: cells.iter().any(|c| c.edge),
                     fills: cells.iter().any(|c| c.takes_fill()),
+                    swimlane: cells
+                        .iter()
+                        .any(|c| c.vertex && c.style.resolve(false).shape() == "swimlane"),
                     geometry,
                 },
                 None => Target::Page {
@@ -1258,7 +1463,8 @@ impl DiagramTab {
                 }
             }
             Change::Flip(across) if !ids.is_empty() => {
-                self.edit(|e, page| e.flip(page, &ids, across))
+                let shown = self.view.sheet().unwrap_or_default();
+                self.edit(|e, page| e.flip(page, &ids, across, &shown.scene))
             }
             Change::Copy(clip) => self.copy_property(clip),
             Change::Paste(clip) => self.paste_property(clip),

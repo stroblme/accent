@@ -405,7 +405,9 @@ impl App {
                     zoom::set_image_zoom(&picture, image.zoom.get());
                     let own = (shown.texture.width(), shown.texture.height());
                     image.size.set(Some(shown.size.unwrap_or(own)));
+                    image.animated.set(shown.animated);
                     app.sync_details();
+                    app.sync_image_invert();
                     *image.image.borrow_mut() = Some((path, shown.original));
                     app.show_image(&image, None);
                 }
@@ -420,6 +422,20 @@ impl App {
                 None => app.cannot("reload", "the image worker stopped"),
             }
         });
+    }
+
+    /// Grey out Invert Image Colours over an animation, which is never recoloured, once the image
+    /// in front has been read.
+    pub(crate) fn sync_image_invert(&self) {
+        let action = self.window.lookup_action("image-invert");
+        if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+            action.set_enabled(!self.active_animation());
+        }
+    }
+
+    /// Whether the tab in front shows an animation.
+    pub(crate) fn active_animation(&self) -> bool {
+        matches!(self.active_doc(), Some(Doc::Image(image)) if image.animated.get())
     }
 
     /// Toggle key's image appearance in tabs and preview for this process, reversing theme recolouring.
@@ -846,6 +862,15 @@ impl App {
         )
     }
 
+    /// The vault `tab`'s language document opens on: this window's for its own files, and for
+    /// code from outside it, a dependency its server may have named (`lang::join`). Not a remote
+    /// vault's: its dependencies are on the host, and a loose tab reads this machine's disk.
+    pub(crate) fn language_vault(&self, tab: &Tab) -> Option<Arc<Vault>> {
+        let vault = self.vault()?;
+        let loose_code = tab.flavour() == Flavour::Code && !vault.is_remote();
+        (!doc::is_loose_key(&tab.rel()) || loose_code).then(|| vault.clone())
+    }
+
     pub(crate) fn mark_loose(&self, page: &adw::TabPage, key: &str) {
         if self.vault.is_some() && doc::is_loose_key(key) {
             page.set_indicator_icon(Some(&gio::ThemedIcon::new("document-open-symbolic")));
@@ -953,13 +978,11 @@ impl App {
             move |_| app.on_edit(&tab)
         ));
 
-        // A file inside the vault gets a document on the language layer; a loose file has no
-        // vault to open it on, and a loose note outlines itself.
+        // A file inside the vault gets a document on the language layer; a loose note outlines
+        // itself, and loose code joins the server that named it, if one did.
         lang::attach(
             &tab,
-            self.vault()
-                .filter(|_| !doc::is_loose_key(&tab.rel()))
-                .cloned(),
+            self.language_vault(&tab),
             lang::Hooks {
                 on_symbols: Rc::new(glib::clone!(
                     #[weak(rename_to = app)]
@@ -979,6 +1002,7 @@ impl App {
                     move |tab: &Rc<Tab>| {
                         if app.is_active(tab) {
                             app.sync_code_pane();
+                            app.follow_references();
                         }
                     }
                 )),
@@ -1010,6 +1034,12 @@ impl App {
             ));
         }
         self.mark_loose(&tab.page, &tab.rel());
+        // A package manager's or a toolchain's file is theirs, not the user's to edit, however it
+        // was opened and before any server answers; a sibling crate a path dependency names is not.
+        if doc::is_loose_key(&tab.rel()) && accent_core::path::managed(Path::new(&tab.rel())) {
+            tab.view.set_editable(false);
+            tab.show_alert(Alert::Installed);
+        }
         let page = tab.page.clone();
         self.fetch_head(&tab);
         self.watch_folder_of(&tab.rel());

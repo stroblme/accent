@@ -24,9 +24,10 @@ impl App {
         let code = matches!(&doc, Some(Doc::Text(tab)) if !tab.flavour().is_note());
         // Whatever code asks, the answer is backlinks; a code tab's says which once it lands.
         let title = (!code).then_some("Backlinks");
-        // A diff, a shell and a file from outside the vault are nothing the index links to.
+        // A diff, a shell and a file from outside the vault are nothing the index links to, and
+        // only a dependency's server has references in one.
         let (Some(doc), Some(vault)) = (
-            doc.filter(|doc| !doc.is_transient() && !doc.is_loose()),
+            doc.filter(|doc| !doc.is_transient() && (!doc.is_loose() || is_dependency(doc))),
             self.vault().cloned(),
         ) else {
             return sidebar.set_references(title, Some(&[]), empty);
@@ -50,8 +51,8 @@ impl App {
                     vault.references(&key, pos).await,
                 );
             }
-            // A note's answer is its backlinks already.
-            let backlinks = found.is_empty() && !note;
+            // A note's answer is its backlinks already, and nothing links to a dependency.
+            let backlinks = found.is_empty() && !note && !doc::is_loose_key(&key);
             if backlinks {
                 let asked = key.clone();
                 found =
@@ -178,7 +179,7 @@ impl App {
         }
         let (key, at) = (loc.path.clone(), loc.range.start);
         // Outside the vault: the same door a file dropped on the window comes through, and the
-        // tab it opens gets no language server of its own.
+        // tab it opens starts no language server of its own, joining the one that named it.
         let how = match doc::is_loose_key(&key) {
             true => Opened::Kept,
             false => Opened::Preview,
@@ -191,9 +192,17 @@ impl App {
         }
         // Any other anchor is a heading the note does not have.
         let missed = loc.anchor.clone();
-        self.with_tab(&key, how, "go to", move |app, tab| match missed {
-            Some(anchor) => app.no_heading(tab, &anchor),
-            None => tab.goto_pos(at),
+        self.with_tab(&key, how, "go to", move |app, tab| {
+            // A loose tab opened before a server named its file, a restored one say, joins it now.
+            if doc::is_loose_key(&tab.rel())
+                && let Some(vault) = app.language_vault(tab)
+            {
+                lang::join(tab, vault);
+            }
+            match missed {
+                Some(anchor) => app.no_heading(tab, &anchor),
+                None => tab.goto_pos(at),
+            }
         });
     }
 }
@@ -242,6 +251,7 @@ pub fn reference_icon(row: &str) -> &'static str {
 /// Empty-state text distinguishing file backlinks from text-symbol references.
 fn references_empty(doc: Option<&Doc>) -> &'static str {
     match doc {
+        Some(doc) if is_dependency(doc) => "Nothing refers to the symbol under the caret.",
         Some(doc) if doc.is_transient() || doc.is_loose() => {
             "Open a file from this vault to see what links to it."
         }
@@ -252,6 +262,11 @@ fn references_empty(doc: Option<&Doc>) -> &'static str {
         // Nothing open at all.
         None => "Open a file from this vault to see what links to it.",
     }
+}
+
+/// A dependency outside the vault, answered by the server that named it.
+fn is_dependency(doc: &Doc) -> bool {
+    doc.tab().is_some_and(|tab| tab.lang.is_dependency())
 }
 
 /// A place in a PDF a link names: the page, and the selection on it if it names one.

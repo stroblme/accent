@@ -59,12 +59,12 @@ struct Shot {
     dir: String,
 }
 
-/// The window as the originals show it: 1920×1168, a maximised window under GNOME Shell's top
-/// bar, focused, the vault indexed and the text zoomed.
+/// The window at the 1000×700 Flathub's screenshot guidelines ask for, focused, the vault indexed
+/// and the text zoomed. `build-aux/screenshots.sh` runs it at scale 2.
 async fn prepare(app: &Rc<App>) {
-    // Without a compositor GTK draws the window's frame itself (`.solid-csd`), 5 px a side. And a
-    // reader's pointer at rest has GTK's overlay scrollbars hidden, where a scroll the drill makes
-    // shows them for a second.
+    // Without a compositor GTK draws the window's frame itself (`.solid-csd`), 5 px a side, where
+    // the script adds GNOME's rounded corners and shadow. And a reader's pointer at rest has GTK's
+    // overlay scrollbars hidden, where a scroll the drill makes shows them for a second.
     let look = gtk::CssProvider::new();
     look.load_from_string(
         "window.solid-csd { padding: 0; box-shadow: none; } \
@@ -75,14 +75,16 @@ async fn prepare(app: &Rc<App>) {
         &look,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
     );
-    app.window.set_default_size(1920, 1168);
-    // No window manager gives the window the keyboard, and the pointer is parked below it, where
-    // it raises no hover and no tooltip.
-    super::git::xtest("move 400 300; focus; move 960 1190").await;
+    app.window.set_default_size(1000, 700);
+    // Narrower than a session's default, leaving the documents the room a 1000 px window has.
+    app.restore_sidebar(true, 250);
+    // No window manager gives the window the keyboard, and the pointer is parked past its corner,
+    // where it raises no hover and no tooltip.
+    super::git::xtest("move 400 300; focus; move 2150 1550").await;
     until("focus", 10_000, || app.window.is_active()).await;
     until("index", 120_000, || app.reconciled.get()).await;
-    // 120 % in the originals, of an 11 pt document font where GNOME's own is 12 pt.
-    app.set_zoom(1.1);
+    // The document font as it is: a 1000 px window has room for little more.
+    app.set_zoom(1.0);
     println!(
         "bench shot window {}x{} {:?}",
         app.window.width(),
@@ -91,7 +93,7 @@ async fn prepare(app: &Rc<App>) {
     );
 }
 
-/// Scene 1: the Files tree, two code files above each other and a note with ghost text.
+/// Scene 1: the Files tree and a note with ghost text.
 async fn scene_files(app: &Rc<App>, shot: &Shot) {
     let Some(tree) = app.tree.get() else {
         return println!("bench shot no_tree");
@@ -106,36 +108,41 @@ async fn scene_files(app: &Rc<App>, shot: &Shot) {
             row.set_expanded(true);
         }
     }
-    let (build, project) = ("Code/build.sh", "Code/pyproject.toml");
     let note = "Submissions/grant-2026/Benchmark Backend.md";
-    open_all(app, &[build, project, note]).await;
-    app.split_page(&app.pane(), Side::Right, &page(app, note));
-    app.split_page(&pane_of(app, build), Side::Down, &page(app, project));
-    glib::timeout_future(Duration::from_millis(300)).await;
-    divide(&pane_of(app, note), 0.5);
-    divide(&pane_of(app, build), 0.5);
-
+    open_all(app, &[note]).await;
     let tab = tab(app, note);
     focus(app, &pane_of(app, note)).await;
     until("ghost_text", 30_000, || {
         tab.lang.support().is_some_and(|s| s.inline)
     })
     .await;
-    // At the end of the first paragraph under the table: a suggestion is only asked for at the
-    // end of a line.
+    // At the end of a paragraph under the table whose last line has room for the suggestion: one
+    // is only asked for at the end of a line, and it does not wrap. The note's lines take their
+    // final wrap a moment after it opens, with nothing to wait on.
+    glib::timeout_future(Duration::from_millis(1000)).await;
+    style::bench_painted(&tab.view, String::new).await;
     let buffer = &tab.buffer;
     let lines: Vec<String> = tab.text().lines().map(str::to_string).collect();
     let table = lines
         .iter()
         .position(|line| line.starts_with('|'))
         .unwrap_or(0);
-    let prose =
-        (table..lines.len()).find(|&i| !lines[i].starts_with('|') && !lines[i].trim().is_empty());
-    let Some(mut end) = prose.and_then(|line| buffer.iter_at_line(line as i32)) else {
+    let roomy = |line: usize| {
+        let mut end = buffer.iter_at_line(line as i32)?;
+        end.forward_to_line_end();
+        let mut start = end;
+        tab.view.backward_display_line_start(&mut start);
+        (end.offset() - start.offset() < 20).then_some(end)
+    };
+    let Some(end) = (table..lines.len())
+        .filter(|&i| !lines[i].starts_with('|') && !lines[i].trim().is_empty())
+        .find_map(roomy)
+    else {
         return println!("bench shot no_paragraph");
     };
-    end.forward_to_line_end();
     buffer.place_cursor(&end);
+    tab.view
+        .scroll_to_mark(&buffer.get_insert(), 0.0, true, 0.0, 0.7);
     for dark in [false, true] {
         set_dark(app, dark).await;
         if tab.ghost_view().and_then(|v| v.ghost()).is_none() {
@@ -154,6 +161,8 @@ async fn scene_files(app: &Rc<App>, shot: &Shot) {
 /// Scene 2: the Git pane, and the working tree against the index of a file with changes both
 /// staged and not.
 async fn scene_git(app: &Rc<App>, shot: &Shot) {
+    // Two columns of code beside the pane, in a 1000 px window.
+    app.set_zoom(0.8);
     app.show_pane("git");
     let Some(git) = app.git.get().cloned() else {
         return println!("bench shot no_git");
@@ -175,14 +184,9 @@ async fn scene_git(app: &Rc<App>, shot: &Shot) {
     }
 }
 
-/// Scene 3: the tree's far end, two shells and a figure in the middle column, and a CSV over an
-/// annotated PDF with its tool ring out.
+/// Scene 3: two shells beside an annotated PDF with its tool ring out, the sidebar hidden.
 async fn scene_terminals(app: &Rc<App>, shot: &Shot) {
-    let (csv, pdf, figure) = (
-        "Attachments/2025-08/file-15055.csv",
-        "Attachments/2019-03/file-17474.pdf",
-        "Attachments/figure.png",
-    );
+    let pdf = "Attachments/2019-03/file-17474.pdf";
     // Drawn before the PDF opens, and the file put back as it was once both halves are taken.
     let path = app.root().join(pdf);
     let original = std::fs::read(&path).map_err(anyhow::Error::from);
@@ -190,40 +194,24 @@ async fn scene_terminals(app: &Rc<App>, shot: &Shot) {
         println!("bench shot no_ink {path:?}");
         std::process::exit(1);
     };
-    if let Some(tree) = app.tree.get() {
-        until("Attachments", 10_000, || {
-            tree::find_row(tree.model(), "Attachments").is_some()
-        })
-        .await;
-        if let Some(row) = tree::find_row(tree.model(), "Attachments") {
-            row.set_expanded(true);
-        }
-        glib::timeout_future(Duration::from_millis(300)).await;
-        let last = tree.model().n_items().saturating_sub(1);
-        tree.view()
-            .scroll_to(last, gtk::ListScrollFlags::NONE, None);
-    }
-    open_all(app, &[csv, pdf, figure]).await;
+    app.restore_sidebar(false, 250);
+    open_all(app, &[pdf]).await;
     app.open_terminal();
     app.open_terminal();
     until("terminals", 10_000, || app.terminals().len() == 2).await;
     let terms = app.terminals();
     let (top, shell) = (&terms[0], &terms[1]);
     for term in [top, shell] {
-        term.set_zoom(1.1);
+        term.set_zoom(1.0);
     }
 
-    // Pane A keeps the first shell; B (right), C (below B), D (below A) and E (between A and D)
-    // take the rest.
+    // Pane A keeps the first shell, the second goes below it and the PDF to their right.
     let a = app.pane();
-    app.split_page(&a, Side::Right, &page(app, csv));
-    app.split_page(&pane_of(app, csv), Side::Down, &page(app, pdf));
-    app.split_page(&a, Side::Down, &page(app, figure));
+    app.split_page(&a, Side::Right, &page(app, pdf));
     app.split_page(&a, Side::Down, &shell.page);
     glib::timeout_future(Duration::from_millis(300)).await;
-    divide(&pane_of(app, figure), 0.64);
-    divide(&a, 0.39);
-    divide(&pane_of(app, csv), 0.46);
+    divide(&a, 0.5);
+    divide(&pane_of(app, pdf), 0.4);
 
     let text = |term: &terminal::Term| term.view.text_format(vte4::Format::Text);
     let prompts =
@@ -237,11 +225,6 @@ async fn scene_terminals(app: &Rc<App>, shot: &Shot) {
     .await;
     until("cat", 10_000, || prompts(shell) > 1).await;
 
-    let image = app.images().into_iter().next();
-    until("figure", 10_000, || {
-        image.as_ref().is_some_and(|i| i.image.borrow().is_some())
-    })
-    .await;
     focus(app, &pane_of(app, pdf)).await;
     app.set_drawing(true);
     let pdf_tab = app.active_pdf();
@@ -255,8 +238,6 @@ async fn scene_terminals(app: &Rc<App>, shot: &Shot) {
     }
     for dark in [false, true] {
         set_dark(app, dark).await;
-        // The figure is recoloured on a worker, and its answer has no signal to wait on.
-        glib::timeout_future(Duration::from_millis(800)).await;
         until("tiles", 10_000, || {
             pdf_tab
                 .as_ref()
@@ -278,6 +259,8 @@ async fn scene_terminals(app: &Rc<App>, shot: &Shot) {
 
 /// Scene 4: Solarized, Focus Mode High with the chrome faded, and the link popup over a note.
 async fn scene_focus(app: &Rc<App>, shot: &Shot) {
+    // The faded sidebar would keep its column, and the note sit off the window's middle.
+    app.restore_sidebar(false, 250);
     crate::theme::apply(Theme::Solarized);
     app.restyle_all();
     app.config.borrow_mut().focus_mode = FocusMode::High;
@@ -380,7 +363,7 @@ async fn set_dark(app: &Rc<App>, dark: bool) {
     glib::timeout_future(Duration::from_millis(300)).await;
 }
 
-/// Take the screen once the window has painted, at the window's own size.
+/// Take the screen once the window has painted, at the window's own size in pixels.
 async fn capture(app: &Rc<App>, shot: &Shot, dark: bool) {
     // One that came after `prepare`, such as the first index's: said here, kept off the picture.
     let toasts = app.toasts.shown();
@@ -399,7 +382,12 @@ async fn capture(app: &Rc<App>, shot: &Shot, dark: bool) {
     let half = if dark { "dark" } else { "light" };
     let path = format!("{}/shot-{}-{half}.png", shot.dir, shot.n);
     let display = std::env::var("DISPLAY").unwrap_or_default();
-    let size = format!("{}x{}+0+0", app.window.width(), app.window.height());
+    let scale = app.window.scale_factor();
+    let size = format!(
+        "{}x{}+0+0",
+        app.window.width() * scale,
+        app.window.height() * scale
+    );
     let argv = [
         "magick", "import", "-display", &display, "-window", "root", "-crop", &size, "+repage",
         &path,

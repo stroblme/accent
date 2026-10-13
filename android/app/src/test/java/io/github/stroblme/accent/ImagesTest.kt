@@ -25,7 +25,7 @@ class ImagesTest {
         assertEquals(ImageKind.Raster, imageKind("Attachments/Scan 1.JPG"))
         assertEquals(ImageKind.Raster, imageKind("plot.avif"))
         assertEquals(ImageKind.Svg, imageKind("diagram.svg"))
-        assertEquals(ImageKind.Gif, imageKind("loop.gif"))
+        assertEquals(ImageKind.Raster, imageKind("loop.gif"))
         assertNull(imageKind("Note.md"))
         assertNull(imageKind("paper.pdf"))
         assertNull("a dot in a folder is not an extension", imageKind("v1.2/README"))
@@ -51,13 +51,13 @@ class ImagesTest {
     }
 
     @Test
-    fun `an svg is always a drawing and a gif never recoloured`() {
-        val never = { error("classified an svg or a gif") }
+    fun `an svg is always a drawing and an animation never recoloured`() {
+        val never = { error("classified an svg or an animation") }
         assertEquals(recoloured, imageTheme(ImageKind.Svg, dark = true, inverted = false, never))
         assertEquals(plain, imageTheme(ImageKind.Svg, dark = true, inverted = true, never))
         assertEquals(recoloured, imageTheme(ImageKind.Svg, dark = false, inverted = true, never))
         for (dark in listOf(false, true)) for (inverted in listOf(false, true)) {
-            assertEquals(plain, imageTheme(ImageKind.Gif, dark, inverted, never))
+            assertEquals(plain, imageTheme(ImageKind.Animation, dark, inverted, never))
         }
     }
 

@@ -558,19 +558,68 @@ fn failed_edits_leave_no_undo_step() {
 fn a_flip_mirrors_what_a_shape_holds_and_turns_its_flip_on_and_off() {
     let group = Cell::new_vertex("g", "1", Rect::new(0.0, 0.0, 100.0, 50.0), "", "");
     let inner = Cell::new_vertex("c", "g", Rect::new(10.0, 5.0, 20.0, 10.0), "", "");
-    let mut e = open([group, inner]);
+    let mut port = Cell::new_vertex("p", "g", Rect::new(1.0, 0.5, 20.0, 20.0), "", "");
+    let g = port.geometry.as_mut().unwrap();
+    (g.relative, g.offset) = (true, Some(Point::new(-10.0, -10.0)));
+    let mut e = open([group, inner, port]);
     let style = |e: &Editor, id| e.file.pages[0].cell(id).unwrap().style.to_string();
-    e.flip(0, &list(&["g", "c"]), true).unwrap();
+    let drawn = Scene::default();
+    e.flip(0, &list(&["g", "c"]), true, &drawn).unwrap();
     assert_eq!(geometry(&e, "c").x, 70.0, "mirrored within g");
+    let p = geometry(&e, "p");
+    assert_eq!(
+        (p.x, p.offset),
+        (0.0, Some(Point::new(-10.0, -10.0))),
+        "a port on the right edge goes to the left one, still placed by fractions"
+    );
     assert_eq!(style(&e, "g"), "flipH=1;legacyAnchorPoints=0;");
     assert_eq!(
         style(&e, "c"),
         "",
         "inside the shape flipped, not flipped itself"
     );
-    e.flip(0, &list(&["g"]), true).unwrap();
+    e.flip(0, &list(&["g"]), true, &drawn).unwrap();
     assert_eq!(geometry(&e, "c").x, 10.0);
+    assert_eq!(geometry(&e, "p").x, 1.0);
     assert_eq!(style(&e, "g"), "legacyAnchorPoints=0;");
+    e.flip(0, &list(&["g"]), false, &drawn).unwrap();
+    let p = geometry(&e, "p");
+    assert_eq!((p.y, p.offset), (0.5, Some(Point::new(-10.0, -10.0))));
+    assert_eq!(geometry(&e, "c").y, 35.0);
+}
+
+#[test]
+fn a_flipped_arrow_is_mirrored_across_the_middle_of_its_route() {
+    let mut e = Cell::new_edge(
+        "e",
+        "1",
+        (None, Point::new(10.0, 0.0)),
+        (None, Point::new(50.0, 20.0)),
+        "",
+    );
+    e.geometry.as_mut().unwrap().points = Some(vec![Point::new(20.0, 40.0)]);
+    let shape = Cell::new_vertex("s", "1", Rect::new(200.0, 0.0, 40.0, 40.0), "", "");
+    let mut e = open([e, shape]);
+    let ends = |e: &Editor| {
+        let g = geometry(e, "e");
+        [
+            g.source_point,
+            g.points.as_ref().unwrap().first().copied(),
+            g.target_point,
+        ]
+        .map(|p| p.map(|p| (p.x, p.y)).unwrap())
+    };
+    let drawn = scene(e.page(0).unwrap());
+    e.flip(0, &list(&["e"]), true, &drawn).unwrap();
+    assert_eq!(ends(&e), [(50.0, 0.0), (40.0, 40.0), (10.0, 20.0)]);
+    assert_eq!(e.file.pages[0].cell("e").unwrap().style.to_string(), "");
+    // With a shape: each mirrored across its own middle.
+    let drawn = scene(e.page(0).unwrap());
+    e.flip(0, &list(&["s", "e"]), false, &drawn).unwrap();
+    assert_eq!(ends(&e), [(50.0, 40.0), (40.0, 0.0), (10.0, 20.0)]);
+    assert_eq!(geometry(&e, "s").rect(), Rect::new(200.0, 0.0, 40.0, 40.0));
+    let style = e.file.pages[0].cell("s").unwrap().style.to_string();
+    assert_eq!(style, "flipV=1;legacyAnchorPoints=0;");
 }
 
 #[test]

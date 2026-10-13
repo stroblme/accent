@@ -48,42 +48,15 @@ jobs:
           path: accent-*.apk
           if-no-files-found: error
 
-  # The servers a remote vault uploads, which the Flatpak ships but cannot build: the Rust
-  # extension has no musl targets (see the manifest's accent-server module).
-  server:
-    needs: tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-      - run: pipx install cargo-zigbuild
-      - run: make server
-      - uses: actions/upload-artifact@v7
-        with:
-          name: server
-          path: target/*-unknown-linux-musl/release/accent-cli
-          if-no-files-found: error
-
   flatpak:
     name: desktop app
-    needs: server
+    needs: tests
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
     steps:
       - uses: actions/checkout@v7
-      # Back where `make server` left them, which is where the manifest looks.
-      - uses: actions/download-artifact@v8
-        with:
-          name: server
-          path: target
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           manifest-path: build-aux/io.github.stroblme.Accent.yml
@@ -96,7 +69,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      # `accent-*` leaves the server artifact out; the Flatpak action names its own after the bundle.
+      # The Flatpak action names its artifact after the bundle.
       - uses: actions/download-artifact@v8
         with:
           pattern: accent-*

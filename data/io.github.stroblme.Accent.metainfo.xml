@@ -30,8 +30,20 @@
 
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/stroblme/accent/main/data/screenshots/editor.png</image>
-      <caption>Editing a note next to the vault tree</caption>
+      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/files.png</image>
+      <caption>A note with an inline suggestion beside the vault's files</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/git.png</image>
+      <caption>The Git pane beside a file's changes since it was staged</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/terminals.png</image>
+      <caption>Two terminals beside a PDF annotated by hand</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/focus.png</image>
+      <caption>Focus mode in the Solarized theme while another note is linked</caption>
     </screenshot>
   </screenshots>
 

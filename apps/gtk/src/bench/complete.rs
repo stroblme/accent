@@ -206,10 +206,58 @@ async fn bench_complete_code(app: &Rc<App>, rel: &str, typed: &str) {
         bench_line(&tab, 0),
         bench_line(&tab, line)
     );
+
+    // A snippet row accepted before its resolve, rust-analyzer's `foo(${1:a})` and its `use`:
+    // the import waits while the stops are walked, the placeholder staying selected to be typed
+    // over, and lands once the walk ends. A second is past the resolve's 0.3 s.
+    tab.set_text(&text);
+    body();
+    bench_keys(&tab, "s.a").await;
+    bench_settle(&session).await;
+    editor::press(&tab, gdk::Key::Down, gdk::ModifierType::empty());
+    editor::press(&tab, gdk::Key::Return, gdk::ModifierType::empty());
+    bench_snippet(&tab, "accepted");
+    glib::timeout_future(Duration::from_secs(1)).await;
+    bench_snippet(&tab, "walked");
+    tab.end_snippet();
+    bench_settle(&session).await;
+    bench_snippet(&tab, "resolved");
+
+    // typescript-language-server's plain stop, `beta($1)`: the walk lands between the parens.
+    tab.set_text(&text);
+    body();
+    bench_keys(&tab, "s.b").await;
+    bench_settle(&session).await;
+    editor::press(&tab, gdk::Key::Down, gdk::ModifierType::empty());
+    editor::press(&tab, gdk::Key::Return, gdk::ModifierType::empty());
+    bench_snippet(&tab, "plain");
+    tab.end_snippet();
+    bench_settle(&session).await;
     tab.set_text(&text);
     if let Err(e) = app.write_tab(&tab, None) {
         println!("bench complete write_failed {e}");
     }
+}
+
+/// The first line and the caret's, the caret marked `|`, what is selected, and whether a snippet
+/// is being walked.
+fn bench_snippet(tab: &Rc<Tab>, step: &str) {
+    let caret = editor::caret(&tab.buffer);
+    let line = bench_line(tab, caret.line());
+    let (before, after) = line.split_at(
+        line.char_indices()
+            .nth(caret.line_offset() as usize)
+            .map_or(line.len(), |(i, _)| i),
+    );
+    let selected = tab
+        .buffer
+        .selection_bounds()
+        .map(|(a, b)| a.slice(&b).to_string());
+    println!(
+        "bench complete_snippet_{step} {:?} \"{before}|{after}\" selected={selected:?} walking={}",
+        bench_line(tab, 0),
+        tab.snippet_active()
+    );
 }
 
 /// The tab at `rel` once it is open on the language layer, with the keyboard, and its session.

@@ -184,10 +184,11 @@ exist as a visible control.
 | Pinch on an image | Zooms it, the WebView's own | — |
 
 - A tap or a long press on an image is taken only where the WebView's hit test says one is under the
-  finger; anywhere else a tap is the chrome's and a long press the WebView's selection. An image
-  inside a link is the link's to a tap, as on any page — the author made it one — and a long press
-  inverts it all the same. The long press's twin is the tap: the image on its own screen, where
-  Invert in the bar flips the same switch.
+  finger; anywhere else a tap is the chrome's and a long press the WebView's selection, as a long
+  press is on an animation, which has nothing to invert. An image inside a link is the link's to a
+  tap, as on any page — the author made it one — and a long press inverts it all the same. The long
+  press's twin is the tap: the image on its own screen, where Invert in the bar flips the same
+  switch.
 - A panel is closed by pulling it down, the one gesture here that reads as itself: the handle says
   it moves, and down is where a panel goes. What is inside scrolls first, so only a drag the list
   cannot use pulls the panel, and letting go short of the threshold springs it back. Back does the
@@ -230,7 +231,7 @@ exist as a visible control.
 - The bar's button is a note's Edit and Done. A PDF's are Find and Contents, the document's
   bookmarks; on a file with none, Contents is there and disabled: a gap where a control belongs is
   worse than a control that says it has nothing to offer. A PDF's third, and an image's one, is
-  Invert, disabled on a GIF, which is never recoloured.
+  Invert, disabled on an animation, which is never recoloured.
 - Invert is a toggle, and the only one: its label says what it does, so while it is on the button is
   filled with the accent (`BarToggle`), the one place the bar spends a fill.
 - Only one screen keeps window insets. A PDF inside a vault is inside a screen already clear of the
@@ -288,13 +289,13 @@ exist as a visible control.
   surface and its ink on the app's text, each pixel keeping its chroma, so a coloured figure stays
   coloured. Invert in its bar turns that round for the file, as an image's does below.
 - So is an image that reads as a document — a scan, a plot, a diagram, a screenshot of text — in a
-  note and on the image screen alike; a photo is left alone, an SVG is always a drawing, a GIF is
-  never touched (the decoder takes its first frame, and an animation would stop), and past 64 MP an
-  image is not looked at. Inverting one sends it to the other theme's page whatever it shows, as it
-  does a PDF: in a light theme onto the dark page, with that page under its transparent parts as a
-  PDF page's paper is, and in a dark one as it is. Per file, until the app's process ends, never
-  written anywhere — the desktop's Invert, for a figure the classifier got wrong or a PDF that reads
-  better the other way.
+  note and on the image screen alike; a photo is left alone, an SVG is always a drawing, an animated
+  GIF, WebP or PNG is never touched (the decoder takes one still of it, and the animation would
+  stop), and past 64 MP an image is not looked at. Inverting one sends it to the other theme's page
+  whatever it shows, as it does a PDF: in a light theme onto the dark page, with that page under its
+  transparent parts as a PDF page's paper is, and in a dark one as it is. Per file, until the app's
+  process ends, never written anywhere — the desktop's Invert, for a figure the classifier got wrong
+  or a PDF that reads better the other way.
 
 ## Architecture
 
@@ -344,16 +345,17 @@ The decisions under the Android app, each with its reason; the shared ones are i
   reach the network. Mermaid runs at its default strict level, which sanitises a diagram's labels
   and drops its click handlers.
 - **Images are recoloured on their way into a WebView** (`ui/Images.kt`): the note's page and the
-  image screen both take them from `served`, which classifies a raster from a copy decoded to a
-  512 px long side (`looksLikeDocument` samples 65 k pixels whatever it is given; the verdict is
-  cached by path, size and date), recolours it at a 2048 px long side and serves a PNG, turned
-  first the way its EXIF says (the core's `orientation` through the ffi, as on the desktop:
-  `BitmapFactory` ignores the tag, where the WebView honours it in a JPEG left alone), and hands
-  an SVG over with the core's filter in it — straight alpha throughout, `BitmapFactory` decoding
-  without premultiplying. The rules are the core's (DESIGN.md, Recolouring); the image screen is a
-  WebView too, because nothing else here draws an SVG, and a recoloured SVG is a filter only a
-  browser applies. The WebViews share one memory cache, cleared before a load whenever the palette
-  or the inverted files differ from what it was filled under.
+  image screen both take them from `served`, which leaves an animation as its file is (the core's
+  `animation` through the ffi, read where the image is resolved, off the main thread) and classifies
+  any other raster from a copy decoded to a 512 px long side (`looksLikeDocument` samples 65 k
+  pixels whatever it is given; the verdict is cached by path, size and date), recolours it at a
+  2048 px long side and serves a PNG, turned first the way its EXIF says (the core's `orientation`
+  through the ffi, as on the desktop: `BitmapFactory` ignores the tag, where the WebView honours it
+  in a JPEG left alone), and hands an SVG over with the core's filter in it — straight alpha
+  throughout, `BitmapFactory` decoding without premultiplying. The rules are the core's (DESIGN.md,
+  Recolouring); the image screen is a WebView too, because nothing else here draws an SVG, and a
+  recoloured SVG is a filter only a browser applies. The WebViews share one memory cache, cleared
+  before a load whenever the palette or the inverted files differ from what it was filled under.
 - **An embed resolves as on the desktop**: the path the note spells if a file is there, otherwise
   where the index places the name (`Vault::asset`), inside the vault or not at all.
 - **The editor is `BasicTextField(TextFieldState)`** with a styled `OutputTransformation` — the only

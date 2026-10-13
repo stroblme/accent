@@ -274,6 +274,9 @@ pub struct Support {
     pub inline: bool,
     /// The provider answers [`Vault::goals`]: a proof assistant's server.
     pub goals: bool,
+    /// The document is outside the vault, answered by the running server whose answer named
+    /// it: a dependency of the code.
+    pub dependency: bool,
 }
 
 // -------------------------------------------------------------------- tasks
@@ -414,6 +417,11 @@ pub(crate) trait Language: Send + Sync {
     }
     /// The provider stopped answering (the server exited); the registry starts a fresh one.
     fn is_dead(&self) -> bool {
+        false
+    }
+    /// Whether an answer of this provider named `path`, a file outside the vault: a dependency
+    /// of its project, which it then answers for ([`Languages::naming`]).
+    fn named(&self, _path: &str) -> bool {
         false
     }
     fn shutdown(&self) -> Fut<'_, ()> {
@@ -812,6 +820,23 @@ impl Languages {
         let me = self.clone();
         let which = server(cfg, &language);
         Task::spawn(async move {
+            // Outside the vault: a dependency a running server's answer led to is that server's
+            // to answer for, and nothing is started for any other file there.
+            if Path::new(&rel).is_absolute() {
+                let Some((key, session)) = me.naming(&rel) else {
+                    return Ok(Support::default());
+                };
+                let language_id = match which {
+                    Some(Server::External { language_id, .. }) => language_id,
+                    _ => language,
+                };
+                let support = Support {
+                    dependency: true,
+                    ..session.open(&rel, &language_id, text)?
+                };
+                locked(&me.docs).insert(rel, (Some(key), session, false));
+                return Ok(support);
+            }
             // What speaks the file's structure, if anything does: the index for a note, a
             // language server for code, nothing for a `.txt`.
             let (primary, language_id, missing, key): Opened = match which {
@@ -886,6 +911,14 @@ impl Languages {
             support.missing = support.missing.or(missing);
             locked(&me.docs).insert(rel, (key, provider, prose));
             Ok(support)
+        })
+    }
+
+    /// The running session whose answers named `path`, a file outside the vault, under its key.
+    fn naming(&self, path: &str) -> Option<(Key, Arc<dyn Language>)> {
+        locked(&self.sessions).iter().find_map(|(key, cell)| {
+            let session = cell.get().filter(|s| !s.is_dead() && s.named(path))?;
+            Some((key.clone(), session.clone()))
         })
     }
 
@@ -993,6 +1026,10 @@ const SERVERS: &[(&str, &str, &[&[&str]])] = &[
     ("rust", "rust", &[&["rust-analyzer"]]),
     ("c", "c", &[&["clangd"]]),
     ("cpp", "cpp", &[&["clangd"]]),
+    // A header is its language's, as GtkSourceView tells a `.h` from a `.hpp`; clangd reads the
+    // dialect off the compile command whatever the `languageId` says.
+    ("chdr", "c", &[&["clangd"]]),
+    ("cpphdr", "cpp", &[&["clangd"]]),
     ("python", "python", PYTHON),
     ("python3", "python", PYTHON),
     ("js", "javascript", TYPESCRIPT),
@@ -1513,6 +1550,15 @@ mod tests {
         };
         assert_eq!(language_id, "nim");
 
+        for (header, id) in [("chdr", "c"), ("cpphdr", "cpp")] {
+            let Some(Server::External { language_id, .. }) =
+                server(&configured(header, &[me]), header)
+            else {
+                panic!("{header} has a server")
+            };
+            assert_eq!(language_id, id, "a header is its language's");
+        }
+
         assert!(
             matches!(server(&configured("rust", &["/no/such/server"]), "rust"),
                 Some(Server::Missing(name)) if name == "/no/such/server"),
@@ -1622,6 +1668,77 @@ mod tests {
             assert!(
                 locked(&vault.lang.sessions).is_empty(),
                 "nothing is open, so nothing is kept"
+            );
+        });
+    }
+
+    /// A server whose definition answer named `/dep/lib.rs`, as rust-analyzer's names a crate
+    /// in `~/.cargo/registry`, and answers nothing else.
+    struct Naming;
+
+    impl Language for Naming {
+        fn open(&self, _: &str, _: &str, _: String) -> Result<Support> {
+            Ok(Support::default())
+        }
+        fn change(&self, _: &str, _: String) -> Result<()> {
+            Ok(())
+        }
+        fn close(&self, _: &str) {}
+        fn completion(&self, _: &str, _: Pos, _: Option<char>) -> Fut<'_, Completions> {
+            Box::pin(async { Ok(Completions::default()) })
+        }
+        fn resolve(&self, _: &str, item: Completion) -> Fut<'_, Completion> {
+            Box::pin(async { Ok(item) })
+        }
+        fn signature_help(&self, _: &str, _: Pos) -> Fut<'_, Option<Signature>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn hover(&self, _: &str, _: Pos) -> Fut<'_, Option<Hover>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn definition(&self, _: &str, _: Pos) -> Fut<'_, Vec<Location>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn symbols(&self, _: &str) -> Fut<'_, Vec<Symbol>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn references(&self, _: &str, _: Pos) -> Fut<'_, Vec<Location>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn folds(&self, _: &str) -> Fut<'_, Vec<Fold>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn named(&self, path: &str) -> bool {
+            path == "/dep/lib.rs"
+        }
+    }
+
+    /// A file outside the vault joins the session that named it, holds it while open and starts
+    /// nothing; one no session named gets no provider.
+    #[test]
+    fn a_dependency_joins_the_session_that_named_it() {
+        let (events, _said) = std::sync::mpsc::channel();
+        let langs = Languages::new("/vault".into(), "/index.db".into(), events);
+        let key = ("rust-analyzer".to_string(), PathBuf::from("/vault"));
+        let running = tokio::sync::OnceCell::new_with(Some(Arc::new(Naming) as Arc<dyn Language>));
+        locked(&langs.sessions).insert(key.clone(), Arc::new(running));
+        let open = |rel: &str| {
+            let cfg = LspConfig::default();
+            langs.open_document(rel.into(), "rust".into(), String::new(), &cfg)
+        };
+        accent_lsp::runtime().block_on(async {
+            assert!(open("/dep/lib.rs").await.unwrap().dependency);
+            assert!(langs.provider("/dep/lib.rs").is_ok());
+            assert_eq!(locked(&langs.docs)["/dep/lib.rs"].0, Some(key));
+
+            assert!(!open("/elsewhere/main.rs").await.unwrap().dependency);
+            assert!(langs.provider("/elsewhere/main.rs").is_err());
+            assert_eq!(locked(&langs.sessions).len(), 1, "nothing was started");
+
+            langs.close_document("/dep/lib.rs".into()).await.unwrap();
+            assert!(
+                locked(&langs.sessions).is_empty(),
+                "the dependency was the last document holding the session"
             );
         });
     }

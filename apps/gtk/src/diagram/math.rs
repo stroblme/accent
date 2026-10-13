@@ -230,7 +230,7 @@ impl Typesetter {
              html, body {{ margin: 0; padding: 0; background: transparent; }}\
              .w {{ display: block; margin: 0 0 24px 0; }}\
              .l {{ display: inline-block; line-height: 1.2; }}\
-             math {{ font-family: 'Latin Modern Math', 'STIX Two Math', math; }}\
+             math {{ font-family: 'Latin Modern Math', 'STIX Two Math', 'DejaVu Math TeX Gyre', math; }}\
              ul {{ margin: 0; padding-left: 1.2em; }}\
              </style></head><body>{body}</body></html>"
         );

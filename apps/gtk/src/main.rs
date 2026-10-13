@@ -610,9 +610,10 @@ impl App {
             self.lay_out();
         }
         // The tools belong to the window, so they follow the tab in front, and so do SyncTeX's
-        // two commands.
+        // two commands and Invert Image Colours.
         self.sync_drawing();
         self.sync_synctex(self.active_doc());
+        self.sync_image_invert();
         // The tree's selection follows the tab in front, so the sidebar says which file is open
         // rather than which row the pointer last crossed. A diff, a terminal and a file from
         // outside the vault have no row to point at, and clear it.

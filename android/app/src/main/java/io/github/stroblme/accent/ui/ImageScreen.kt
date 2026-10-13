@@ -26,7 +26,7 @@ import java.io.File
  * long press on the image in a note flips. A pinch zooms it, which is the WebView's own.
  *
  * A WebView rather than an `Image` because an SVG is drawn by nothing else on the platform, and its
- * recolouring is a filter only a browser applies; an animated GIF moves in one too.
+ * recolouring is a filter only a browser applies; an animated GIF, WebP or PNG moves in one too.
  */
 @Composable
 fun ImageScreen(image: OpenImage, chrome: Chrome) {
@@ -36,18 +36,18 @@ fun ImageScreen(image: OpenImage, chrome: Chrome) {
     val inverted = Inverted.files
     // Read by the loading thread, whose client is built once with the view.
     val serving by rememberUpdatedState(dark)
-    val path by rememberUpdatedState(image.path)
+    val shown by rememberUpdatedState(image)
     DocumentFrame(
         barShown = chrome.shown,
         bar = {
             DocumentBar(name) {
-                // A GIF is never recoloured, so there is nothing to invert: disabled rather than
-                // gone, as Contents is on a PDF with no bookmarks.
+                // An animation is never recoloured, so there is nothing to invert: disabled rather
+                // than gone, as Contents is on a PDF with no bookmarks.
                 BarToggle(
                     "Invert",
                     on = image.path in inverted,
                     onClick = { Inverted.toggle(image.path) },
-                    enabled = imageKind(name) != ImageKind.Gif,
+                    enabled = !image.animated,
                 )
             }
         },
@@ -74,7 +74,7 @@ fun ImageScreen(image: OpenImage, chrome: Chrome) {
                             view: WebView,
                             request: WebResourceRequest,
                         ): WebResourceResponse? =
-                            if (request.isForMainFrame) null else served(File(path), serving)
+                            if (request.isForMainFrame) null else served(shown, serving)
                     }
                 }
             },

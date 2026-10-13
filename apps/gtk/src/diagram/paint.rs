@@ -153,20 +153,20 @@ fn hash(s: &str) -> u64 {
 
 /// A picture's bytes, of type `mime`, decoded.
 fn decode(bytes: Vec<u8>, mime: &str) -> Option<Rc<Picture>> {
-    let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()?;
-    // As the image tab takes them: an SVG is line art, a GIF likely an animation.
+    // As the image tab takes them: an SVG is line art, an animation its own content.
     let document = match mime {
         "image/svg+xml" => OnceCell::from(true),
-        "image/gif" => OnceCell::from(false),
+        _ if accent_core::animation::animated(&bytes[..]) => OnceCell::from(false),
         _ => OnceCell::new(),
     };
+    let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()?;
     Some(Rc::new(Picture { texture, document }))
 }
 
 /// A cell's picture, decoded, and whether it reads as a document.
 pub struct Picture {
     texture: gdk::Texture,
-    /// Set from the type for an SVG and a GIF; a raster's is measured the first time a theme
+    /// Set for an SVG and an animation; a still raster's is measured the first time a theme
     /// that remaps documents asks (`look::measure`, on the main thread).
     document: OnceCell<bool>,
 }

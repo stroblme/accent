@@ -7,8 +7,10 @@ With `--inline TEXT` it suggests TEXT as ghost text wherever it is asked, standi
 in `make screenshots`.
 
 `.` triggers it, `;` commits a row (its `allCommitCharacters`), and it can resolve: `alpha` is a
-snippet with a stop, `beta` a plain word, and `gamma` resolves to its documentation and an
-`#include` at the top of the file, which is what a server keeps back until a row is accepted.
+snippet with a stop (`${1:x}`, as rust-analyzer fills arguments), `beta` one with a plain stop
+(`$1`, as typescript-language-server has it), and `gamma` resolves to its documentation; `alpha`
+and `gamma` resolve to an `#include` at the top of the file, which is what a server keeps back
+until a row is accepted.
 A completion is answered after `DELAY` seconds and a resolve after `RESOLVE`, later than a row
 can be committed, the messages that arrive meanwhile still read, so a request the editor has
 typed past can be cancelled; each cancel is said on stderr, which accent logs under
@@ -20,14 +22,15 @@ from urllib.parse import unquote
 DELAY = 0.15
 RESOLVE = 0.3
 ITEMS = [
-    {"label": "alpha", "kind": 3, "detail": "int alpha(int)", "insertText": "alpha($1)",
+    {"label": "alpha", "kind": 3, "detail": "int alpha(int)", "insertText": "alpha(${1:x})",
      "insertTextFormat": 2, "data": "alpha"},
-    {"label": "beta", "kind": 6, "detail": "int", "data": "beta"},
+    {"label": "beta", "kind": 3, "detail": "int beta(int)", "insertText": "beta($1)",
+     "insertTextFormat": 2, "data": "beta"},
     {"label": "gamma", "kind": 3, "detail": "void gamma(void)", "insertText": "gamma()",
      "data": "gamma"},
 ]
-IMPORT = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
-          "newText": '#include "gamma.h"\n'}
+TOP = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}
+IMPORT = {"range": TOP, "newText": '#include "gamma.h"\n'}
 
 inbox, pending = b"", []
 
@@ -108,6 +111,8 @@ def answer(message):
         item = dict(message["params"])
         if item.get("data") == "gamma":
             item.update(documentation="Gamma does things.", additionalTextEdits=[IMPORT])
+        elif item.get("data") == "alpha":
+            item.update(additionalTextEdits=[{"range": TOP, "newText": '#include "alpha.h"\n'}])
         pending.append((time.monotonic() + RESOLVE, id, item))
     elif method == "$/cancelRequest":
         cancelled = message["params"]["id"]

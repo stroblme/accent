@@ -39,6 +39,9 @@ const MOST: usize = 200;
 /// for every row crossed by arrow keys.
 const LOOK: Duration = Duration::from_millis(50);
 
+/// How often a late import waiting for a snippet's walk to end looks again.
+const WALK: Duration = Duration::from_millis(100);
+
 /// A pinned future, which is what every reply here is.
 pub(crate) type Reply<T> = Pin<Box<dyn Future<Output = T>>>;
 
@@ -51,6 +54,10 @@ pub(crate) trait Source {
     fn resolve(&self, item: Completion) -> Reply<Completion>;
     /// The popup came up, or went.
     fn shown(&self, _up: bool) {}
+    /// A snippet's stops are being walked.
+    fn walking(&self) -> bool {
+        false
+    }
     /// Park `snippet` in `view` at `at`, its stops to be walked with Tab.
     fn push_snippet(
         &self,
@@ -587,8 +594,8 @@ impl Session {
 
     /// Insert the item at `row` now, as it stands, and end the session: accepting waits on no
     /// server. A row whose resolve has not answered yet is resolved after, and what that adds,
-    /// an import, goes in once it lands, as its own undo step, unless the text before it has
-    /// changed meanwhile ([`apply::still_fits`]): VS Code's rule.
+    /// an import, goes in once it lands and any snippet walk is over, as its own undo step,
+    /// unless the text before it has changed meanwhile ([`apply::still_fits`]): VS Code's rule.
     fn accept(self: &Rc<Self>, row: u32) {
         let Some((item, range, extras)) = self.take(row) else {
             return;
@@ -602,6 +609,12 @@ impl Session {
         let me = Rc::downgrade(self);
         let handle = glib::spawn_future_local(async move {
             let full = asked.await;
+            // GtkSourceView takes any insert during a snippet's walk for typing at the caret and
+            // collapses the stop's placeholder there, so it would no longer be typed over: what
+            // landed waits for the walk to end.
+            while me.upgrade().is_some_and(|me| me.source.walking()) {
+                glib::timeout_future(WALK).await;
+            }
             let Some(me) = me.upgrade() else {
                 return;
             };
@@ -860,6 +873,10 @@ impl Source for TabSource {
                 });
             }
         }
+    }
+
+    fn walking(&self) -> bool {
+        self.0.upgrade().is_some_and(|tab| tab.snippet_active())
     }
 
     fn push_snippet(

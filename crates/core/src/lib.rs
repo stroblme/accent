@@ -1,6 +1,7 @@
 //! accent-core: vault index, safe file ops, markdown analysis, PDF.
 //! Rule: no UI toolkit types in this crate. Everything here must work on Linux and Android.
 
+pub mod animation;
 pub mod attachment;
 pub mod code;
 pub mod config;

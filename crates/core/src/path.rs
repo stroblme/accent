@@ -1,6 +1,9 @@
 //! Shared operations on vault-relative, `/`-separated paths, avoiding repeated path splitting
 //! across layers.
 
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+
 use crate::markdown;
 
 /// `"a/b/c.md"` -> `("a/b", "c.md")`; a name at the root gives `("", name)`.
@@ -186,9 +189,65 @@ pub fn subtree_range(rel: &str) -> (String, String) {
     (format!("{rel}/"), format!("{rel}0"))
 }
 
+/// Whether `abs`, a file outside the vault, is where a package manager or a toolchain installs
+/// what code depends on, and so not its user's to edit: cargo's registry and git checkouts,
+/// rustup's toolchains, a Python `site-packages` or `dist-packages` (a virtualenv's too), a
+/// `node_modules`, and anything under `/usr`. Read where the language server runs.
+pub fn managed(abs: &Path) -> bool {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home_of = |var: &str, dot: &str| {
+        std::env::var_os(var)
+            .map(PathBuf::from)
+            .or_else(|| Some(home.as_ref()?.join(dot)))
+    };
+    managed_by(
+        abs,
+        home_of("CARGO_HOME", ".cargo").as_deref(),
+        home_of("RUSTUP_HOME", ".rustup").as_deref(),
+    )
+}
+
+/// [`managed`] with cargo's and rustup's homes given.
+fn managed_by(abs: &Path, cargo: Option<&Path>, rustup: Option<&Path>) -> bool {
+    let installs = [
+        cargo.map(|home| home.join("registry")),
+        cargo.map(|home| home.join("git")),
+        rustup.map(|home| home.join("toolchains")),
+    ];
+    let folders = ["site-packages", "dist-packages", "node_modules"].map(OsStr::new);
+    abs.starts_with("/usr")
+        || installs.iter().flatten().any(|dir| abs.starts_with(dir))
+        || abs.components().any(|c| folders.contains(&c.as_os_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_package_managers_files_are_told_from_the_users() {
+        let (cargo, rustup) = (Path::new("/h/.cargo"), Path::new("/opt/rustup"));
+        let managed = |abs: &str| managed_by(Path::new(abs), Some(cargo), Some(rustup));
+        for abs in [
+            "/h/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/hex-0.4.3/src/lib.rs",
+            "/h/.cargo/git/checkouts/gtk-rs-core-7be42ca38bd6361c/a1b2c3d/glib/src/lib.rs",
+            "/opt/rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/string.rs",
+            "/h/proj/.venv/lib/python3.13/site-packages/requests/api.py",
+            "/usr/lib/python3/dist-packages/apt/cache.py",
+            "/h/web/node_modules/react/index.js",
+            "/usr/include/stdio.h",
+        ] {
+            assert!(managed(abs), "{abs}");
+        }
+        for abs in [
+            "/h/proj/sibling/src/lib.rs",
+            "/h/.cargo/config.toml",
+            "/h/site-packages-notes/a.py",
+            "/usrx/a.h",
+        ] {
+            assert!(!managed(abs), "{abs} is the user's");
+        }
+    }
 
     #[test]
     fn splits_a_vault_relative_path() {

@@ -24,6 +24,10 @@ impl App {
     /// Tab and window closes use their own write-then-ask path: a refused closing write must
     /// keep the buffer available rather than lose unsaved text.
     pub fn save_tab(self: &Rc<Self>, tab: &Rc<Tab>, explicit: bool) {
+        // A read-only tab, a lossy reading or an installed file, has nothing to write.
+        if !tab.view.is_editable() {
+            return;
+        }
         if !editor::may_save(tab.save.modified.get(), tab.save.disk_changed.get()) {
             if explicit {
                 // A note deleted underneath us is asking to be written back, and its banner's
@@ -612,7 +616,7 @@ impl App {
     pub fn answer_banner(self: &Rc<Self>, tab: &Rc<Tab>) {
         match tab.alert() {
             // Reports rather than asks, so it has no button and this cannot be reached from one.
-            Some(Alert::ReadOnly) => {}
+            Some(Alert::ReadOnly | Alert::Installed) => {}
             // Both sides hold work, so neither is thrown away on one click: the diff shows what
             // differs and the user picks (DESIGN.md: a choice that can lose data is a dialog).
             Some(Alert::Compare) => self.compare_with_disk(tab),

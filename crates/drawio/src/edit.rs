@@ -239,8 +239,14 @@ impl Editor {
     }
 
     /// [`flip`] on page `page`, as one step.
-    pub fn flip(&mut self, page: usize, ids: &[CellId], horizontal: bool) -> Result<(), Error> {
-        self.edit(page, |p, _| flip(p, ids, horizontal))
+    pub fn flip(
+        &mut self,
+        page: usize,
+        ids: &[CellId],
+        horizontal: bool,
+        drawn: &Scene,
+    ) -> Result<(), Error> {
+        self.edit(page, |p, _| flip(p, ids, horizontal, drawn))
     }
 
     /// [`paste_style`] on page `page`, as one step.
@@ -1130,17 +1136,31 @@ pub fn set_styles(
     Ok(())
 }
 
-/// Mirror the topmost shapes of `ids` across their middles, as draw.io's Flip does: each takes
+/// Mirror the topmost cells of `ids` across their middles, as draw.io's Flip does. A shape takes
 /// `flipH` (or `flipV`) as the first of them did not have it, and `legacyAnchorPoints=0` so its
 /// connection points follow; what is directly inside one is mirrored within it, a shape by its
-/// box and an arrow by its waypoints and loose ends. An arrow selected on its own stays, draw.io
-/// mirroring it across the middle of its route, which the model does not hold.
-// Graph.flipCells, flipChildren, flipEdgePoints: Graph.js 28686-28775, 29237-29283
-pub fn flip(page: &mut Page, ids: &[CellId], horizontal: bool) -> Result<(), Error> {
-    let shapes: Vec<CellId> = topmost(page, ids)
-        .into_iter()
-        .filter(|id| page.cell(id).is_some_and(|c| c.vertex))
-        .collect();
+/// box and an arrow by its waypoints and loose ends. An arrow's waypoints and loose ends are
+/// mirrored across the middle of its route as `drawn` has it, at least a unit across
+/// (`mxGraphView.updateEdgeBounds`); an arrow not drawn stays.
+// Graph.flipCells, flipChildren, flipEdgePoints: Graph.js 22700-22790, 22960-23005
+pub fn flip(page: &mut Page, ids: &[CellId], horizontal: bool, drawn: &Scene) -> Result<(), Error> {
+    let top = topmost(page, ids);
+    let of = |kind: fn(&Cell) -> bool| -> Vec<CellId> {
+        let cells = top.iter().filter(|id| page.cell(id).is_some_and(kind));
+        cells.cloned().collect()
+    };
+    let (edges, shapes) = (of(|c| c.edge), of(|c| c.vertex));
+    for id in &edges {
+        let along = |p: &Point| if horizontal { p.x } else { p.y };
+        let route = drawn.route(id).unwrap_or_default().iter().map(along);
+        let (low, high) = route.fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| {
+            (l.min(v), h.max(v))
+        });
+        if low.is_finite() {
+            let middle = low + (high - low).max(1.0) / 2.0 - along(&page.origin_of(id));
+            mirror(cell_mut(page, id)?, horizontal, middle);
+        }
+    }
     let key = if horizontal { "flipH" } else { "flipV" };
     let Some(first) = shapes.first().and_then(|id| page.cell(id)) else {
         return Ok(());
@@ -1162,7 +1182,9 @@ pub fn flip(page: &mut Page, ids: &[CellId], horizontal: bool) -> Result<(), Err
 }
 
 /// Mirror `cell`'s place in its parent across `middle`: a shape's box, an arrow's waypoints and
-/// loose ends. A box placed by fractions of its parent (`relative`) is left where it is.
+/// loose ends. A box placed by fractions of its parent (`relative`), `middle` being the parent's,
+/// keeps to fractions: the one from the other side, its offset taking its size. draw.io's own
+/// `flipChildren` mirrors such a fraction as if it were units, throwing the box far off.
 fn mirror(cell: &mut Cell, horizontal: bool, middle: f64) {
     let edge = cell.edge;
     let Some(g) = cell.geometry.as_mut() else {
@@ -1177,7 +1199,13 @@ fn mirror(cell: &mut Cell, horizontal: bool, middle: f64) {
         {
             across(if horizontal { &mut p.x } else { &mut p.y }, 0.0);
         }
-    } else if !g.relative {
+    } else if g.relative {
+        let o = g.offset.get_or_insert_default();
+        match horizontal {
+            true => (g.x, o.x) = (1.0 - g.x, 0.0 - o.x - g.width),
+            false => (g.y, o.y) = (1.0 - g.y, 0.0 - o.y - g.height),
+        }
+    } else {
         match horizontal {
             true => across(&mut g.x, g.width),
             false => across(&mut g.y, g.height),

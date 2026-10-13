@@ -50,8 +50,17 @@ impl Server {
             )));
         };
         self.builds.iter().find(|b| b.arch == *arch).ok_or_else(|| {
+            let carried: Vec<&str> = self.builds.iter().map(|b| b.arch).collect();
+            // The Flatpak carries its own machine's server only: Flathub refuses a build holding
+            // binaries of another architecture.
+            let fix = if Path::new("/.flatpak-info").exists() {
+                ""
+            } else {
+                ": run `make server`"
+            };
             Error::Refused(format!(
-                "{host} runs {system}, and this build has no server for it: run `make server`"
+                "{host} runs {system}, and this build carries the server for {} hosts only{fix}",
+                carried.join(" and ")
             ))
         })
     }
@@ -441,7 +450,8 @@ mod tests {
         assert_eq!(
             one.for_host("box", "Linux aarch64").map(|b| b.arch),
             Err(Error::Refused(
-                "box runs Linux aarch64, and this build has no server for it: run `make server`"
+                "box runs Linux aarch64, and this build carries the server for x86_64 hosts \
+                 only: run `make server`"
                     .to_string()
             ))
         );

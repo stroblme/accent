@@ -1,10 +1,12 @@
 //! Expose core recolouring and EXIF orientation for Android-decoded
-//! straight-alpha RGBA8 pixels. Use the PDF [`Theme`] so figures and pages
-//! share paper and ink ([`accent_core::recolour`], [`accent_core::orientation`]).
+//! straight-alpha RGBA8 pixels, and the check that leaves an animation alone.
+//! Use the PDF [`Theme`] so figures and pages share paper and ink
+//! ([`accent_core::recolour`], [`accent_core::orientation`],
+//! [`accent_core::animation`]).
 
-use accent_core::orientation;
 use accent_core::pdf;
 use accent_core::recolour;
+use accent_core::{animation, orientation};
 
 use crate::ffi::convert::{Theme, Tile};
 
@@ -47,6 +49,13 @@ pub fn upright_image(rgba: Vec<u8>, width: u32, height: u32, path: String) -> Ti
         height,
         rgba,
     }
+}
+
+/// Whether `path` is an animated GIF, WebP or PNG, which `BitmapFactory`
+/// decodes as one still. False for a still, any other file, or none.
+#[uniffi::export]
+pub fn is_animated(path: String) -> bool {
+    std::fs::File::open(path).is_ok_and(animation::animated)
 }
 
 /// Add a recolouring filter to SVG text, preserving vectors. `fill` adds

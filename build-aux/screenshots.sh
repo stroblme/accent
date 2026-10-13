@@ -1,8 +1,10 @@
 #!/bin/sh
-# Regenerate the README's screenshots, docs/screenshot-1..4.png, from the vault `make screenshots`
-# generates in target/screenshots/testvault. Each scene is one launch of the bench build on a
-# private Xvfb, whose ACCENT_BENCH_SHOT drill (apps/gtk/src/bench/shots.rs) sets it up and takes
-# it light and dark; split-screenshot.sh joins the two.
+# Regenerate the screenshots, the README's docs/screenshot-1..4.png and the metainfo's
+# data/screenshots/*.png, from the vault `make screenshots` generates in
+# target/screenshots/testvault. Each scene is one launch of the bench build on a private Xvfb,
+# whose ACCENT_BENCH_SHOT drill (apps/gtk/src/bench/shots.rs) sets it up and takes it light and
+# dark at scale 2. The README's joins the two (split-screenshot.sh), the metainfo's is the light
+# one alone, as Flathub asks, and frame-screenshot.sh gives both GNOME's corners and shadow.
 #
 # What the app sees is made here, under target/screenshots: a home with a plain bash prompt, a
 # stand-in merl-rt for the ghost text, a short history with one staged and one unstaged edit, and
@@ -79,11 +81,11 @@ git -C "$vault" apply "$here/analyze.patch"
 test "$(git -C "$vault" status --porcelain)" = "MM Code/analyze.py" ||
 	{ git -C "$vault" status --short | head >&2; echo "not the changes scene 2 needs" >&2; exit 1; }
 
-# The screen the originals were taken on; the window is 1920x1168, which GNOME's top bar leaves.
+# Room for the 1000x700 window at scale 2, and for the pointer parked past its corner.
 display=:${SHOT_DISPLAY:-98}
 socket=/tmp/.X11-unix/X${display#:}
 test ! -e "$socket" || { echo "display $display is taken: set SHOT_DISPLAY" >&2; exit 1; }
-Xvfb "$display" -screen 0 1920x1200x24 -nolisten tcp >/dev/null 2>&1 &
+Xvfb "$display" -screen 0 2160x1560x24 -nolisten tcp >/dev/null 2>&1 &
 xvfb=$!
 trap 'kill $xvfb' EXIT
 trap 'exit 1' INT TERM
@@ -92,7 +94,10 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do test -S "$socket" && break; sleep 0.5; done
 # One launch per scene, as `make smoke` launches: scratch XDG dirs and TMPDIR outside a private
 # bus, which starts no services (headless-bus.conf says why). The index is shared and the session
 # is not.
-for n in 1 2 3 4; do
+mkdir -p "$repo/data/screenshots"
+n=0
+for name in files git terminals focus; do
+	n=$((n + 1))
 	tmp=$(mktemp -d /tmp/accent-shot-XXXXXX)
 	rm -rf "$root/xdg/state"
 	status=0
@@ -101,7 +106,7 @@ for n in 1 2 3 4; do
 		XDG_STATE_HOME="$root/xdg/state" XDG_DATA_HOME="$root/xdg/data" \
 		GSETTINGS_BACKEND=memory ADW_DISABLE_PORTAL=1 \
 		dbus-run-session --config-file="$repo/build-aux/headless-bus.conf" -- \
-		env DISPLAY="$display" GDK_BACKEND=x11 GSK_RENDERER=cairo \
+		env DISPLAY="$display" GDK_BACKEND=x11 GDK_SCALE=2 GSK_RENDERER=cairo \
 		GTK_A11Y=none G_DEBUG=fatal-criticals \
 		ACCENT_BENCH_SHOT="$n:$root/out" timeout 300 "$bin/accent" "$vault" || status=$?
 	# Scene 3 ends its shells, and the holder leaves with the last; one a failed scene left behind
@@ -111,5 +116,9 @@ for n in 1 2 3 4; do
 	rm -rf "$tmp"
 	test "$status" = 0 || { echo "scene $n failed with $status" >&2; exit 1; }
 	"$repo/build-aux/split-screenshot.sh" "$root/out/shot-$n-light.png" \
-		"$root/out/shot-$n-dark.png" "$repo/docs/screenshot-$n.png"
+		"$root/out/shot-$n-dark.png" "$root/out/shot-$n-split.png"
+	"$repo/build-aux/frame-screenshot.sh" 2 "$root/out/shot-$n-split.png" \
+		"$repo/docs/screenshot-$n.png"
+	"$repo/build-aux/frame-screenshot.sh" 2 "$root/out/shot-$n-light.png" \
+		"$repo/data/screenshots/$name.png"
 done

@@ -18,6 +18,9 @@ pub enum Alert {
     /// Invalid UTF-8 displayed lossily. Keep the tab read-only with no action
     /// button to preserve the original bytes.
     ReadOnly,
+    /// A file a package manager or a toolchain installed, outside the vault, read-only with no
+    /// action button: it is theirs, not the vault's to edit.
+    Installed,
 }
 
 impl Alert {
@@ -27,6 +30,7 @@ impl Alert {
             Alert::Restore => "This file was deleted on disk",
             Alert::Conflict => "A sync conflict copy of this file exists",
             Alert::ReadOnly => "This file is not valid UTF-8 and is shown read-only",
+            Alert::Installed => "This file belongs to an installed package and is shown read-only",
         }
     }
 
@@ -40,7 +44,7 @@ impl Alert {
             Alert::Compare => Some("Compare"),
             Alert::Restore => Some("Save"),
             Alert::Conflict => Some("Resolve"),
-            Alert::ReadOnly => None,
+            Alert::ReadOnly | Alert::Installed => None,
         }
     }
 }
@@ -56,6 +60,7 @@ fn banner_alert(standing: &[Alert]) -> Option<Alert> {
         Alert::Compare,
         Alert::Conflict,
         Alert::ReadOnly,
+        Alert::Installed,
     ]
     .into_iter()
     .find(|a| standing.contains(a))

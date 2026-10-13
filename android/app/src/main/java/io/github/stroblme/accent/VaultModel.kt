@@ -19,6 +19,7 @@ import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.TagCount
 import io.github.stroblme.accent.ffi.Vault
+import io.github.stroblme.accent.ffi.isAnimated
 import io.github.stroblme.accent.ffi.pdfAnchor
 import io.github.stroblme.accent.ui.imageKind
 import kotlinx.coroutines.Dispatchers
@@ -127,8 +128,13 @@ data class OpenPdf(
 /**
  * The image in front of the reader: where it is in the vault, and where on disk. It opens on the
  * image screen rather than as a note, which is what every file that was not a PDF used to do.
+ * [animated] is read off the file where the image is resolved, never on the main thread: an
+ * animated GIF, WebP or PNG is never recoloured, so it has no Invert.
  */
-data class OpenImage(val rel: String, val path: String)
+data class OpenImage(val rel: String, val path: String, val animated: Boolean)
+
+/** [rel] at [path], read for whether it moves. Blocking. */
+private fun imageAt(rel: String, path: String) = OpenImage(rel, path, isAnimated(path))
 
 /** The document a note was reached from, which Back from the note returns to. */
 sealed interface Back {
@@ -587,11 +593,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             return
         }
         if (imageKind(rel) != null) {
-            val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
-            path.onSuccess { p ->
-                _state.update {
-                    it.copy(image = OpenImage(rel, p), open = null, pdf = null, back = null)
-                }
+            val image = withContext(Dispatchers.IO) { runCatching { imageAt(rel, v.pathOf(rel)) } }
+            image.onSuccess { i ->
+                _state.update { it.copy(image = i, open = null, pdf = null, back = null) }
             }
                 .onFailure { fail("Cannot open this file", it) }
             return
@@ -672,7 +676,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun image(rel: String): OpenImage? {
         val v = vault ?: return null
-        return runCatching { v.asset(rel)?.let { OpenImage(it, v.pathOf(it)) } }.getOrNull()
+        return runCatching { v.asset(rel)?.let { imageAt(it, v.pathOf(it)) } }.getOrNull()
     }
 
     /** The notes that link to the document at [rel], once each ([linkingNotes]). */

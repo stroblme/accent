@@ -336,11 +336,12 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
                                 images[url] = image
                             }
                     }
-                    // Taken only on an image, a linked one too, where it inverts; anywhere else it
-                    // is left to the view, whose long press is the selection.
+                    // Taken only on an image, a linked one too, where it inverts; anywhere else,
+                    // and on an animation, which is never recoloured, it is left to the view,
+                    // whose long press is the selection.
                     setOnLongClickListener {
                         val hit = imageHit(HitTestResult.IMAGE_TYPE, HitTestResult.SRC_IMAGE_ANCHOR_TYPE)
-                        val image = hit?.let { images[it] }
+                        val image = hit?.let { images[it] }?.takeUnless { it.animated }
                         image?.let { Inverted.toggle(it.path) } != null
                     }
                     setOnScrollChangeListener { _, _, y, _, was ->
@@ -437,7 +438,7 @@ internal fun pageRequest(
     if (!url.startsWith("accent://file/")) return blocked()
     val image = model.image(decode(url.removePrefix("accent://file/"))) ?: return blocked()
     onImage(url, image)
-    return served(File(image.path), dark, inverted)
+    return served(image, dark, inverted)
 }
 
 /** What a relative link inside the note resolves against: the directory the note is in. */

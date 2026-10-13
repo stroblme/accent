@@ -22,3 +22,7 @@ bench complete_commit_accepted "#include \"gamma.h\"" "    s.gamma();"
 bench complete_code_burst ["gamma"] shown=true
 bench complete_late_committed "int main(void)" "    s.gamma(); "
 bench complete_late_resolved "#include \"gamma.h\"" "    s.gamma(); "
+bench complete_snippet_accepted "int main(void)" "    s.alpha(|x)" selected=Some("x") walking=true
+bench complete_snippet_walked "int main(void)" "    s.alpha(|x)" selected=Some("x") walking=true
+bench complete_snippet_resolved "#include \"alpha.h\"" "    s.alpha(|x)" selected=Some("x") walking=false
+bench complete_snippet_plain "int main(void)" "    s.beta(|)" selected=None walking=true

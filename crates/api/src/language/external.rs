@@ -68,6 +68,8 @@ pub(crate) struct External {
     /// Whether call hierarchy has found a declaration. Before the first
     /// success, an empty result may mean the project is still loading.
     found_one: AtomicBool,
+    /// The files outside the vault its answers have named: the dependencies it answers for.
+    named: Mutex<HashSet<String>>,
 }
 
 /// Start `argv` as a provider rooted at `root`; paths remain relative to
@@ -115,6 +117,7 @@ pub(crate) async fn start(
             .is_some_and(|file| file == "lake" || file == "lean"),
         tocs: Default::default(),
         found_one: AtomicBool::new(false),
+        named: Default::default(),
     }))
 }
 
@@ -420,6 +423,10 @@ impl External {
     fn location(&self, uri: &str, range: types::Range) -> Option<Location> {
         let path = from_uri(uri)?;
         let rel = rel_of(uri, &self.root)?;
+        // Outside the vault: a dependency, which a tab opened on it then asks this server about.
+        if Path::new(&rel).is_absolute() {
+            locked(&self.named).insert(rel.clone());
+        }
         let text = self
             .text_of(&rel)
             .ok()
@@ -469,6 +476,7 @@ impl External {
             missing: None,
             inline: on(&self.caps.inline_completion_provider),
             goals: self.lean,
+            dependency: false,
         }
     }
 
@@ -890,6 +898,10 @@ impl Language for External {
 
     fn is_dead(&self) -> bool {
         self.client.is_dead()
+    }
+
+    fn named(&self, path: &str) -> bool {
+        locked(&self.named).contains(path)
     }
 
     fn shutdown(&self) -> Fut<'_, ()> {
