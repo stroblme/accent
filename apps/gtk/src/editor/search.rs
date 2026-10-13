@@ -175,13 +175,12 @@ impl Tab {
     /// Notify the last bar targeting this tab after rematching. The flag
     /// means query changes, not buffer edits or viewport changes.
     pub fn connect_found(&self, f: impl Fn(bool) + 'static) {
-        *self.on_found.borrow_mut() = Some(Rc::new(f));
+        self.on_found.set(Rc::new(f));
     }
 
-    /// Cloned out of its cell before it runs, as [`Tab::emit`]'s hooks are.
+    /// Taken out of its cell before it runs, so the bar may reach the tab again.
     fn emit_found(&self, query: bool) {
-        let f = self.on_found.borrow().clone();
-        if let Some(f) = f {
+        if let Some(f) = self.on_found.get() {
             f(query);
         }
     }

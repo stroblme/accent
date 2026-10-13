@@ -28,14 +28,37 @@ const SECTIONS: [&str; 16] = [
     "Tabs and panes",
 ];
 
-/// The keys a PDF tab answers itself (`PdfTab::wire_keys`) with these commands, which carry none
-/// in the table: a bare `space` there would be taken from every entry (DESIGN.md, PDF).
-const PDF_KEYS: [(&str, &[&str]); 5] = [
+/// The keys a PDF tab or a diagram's canvas answers itself (`PdfTab::wire_keys`,
+/// `DiagramTab::wire_keys`) with these commands, which carry none in the table: a bare `space` or
+/// `Delete` there would be taken from every entry (DESIGN.md, PDF and Diagram). A presented
+/// diagram's paging keys are left out, being its only keys then.
+const TAB_KEYS: [(&str, &[&str]); 16] = [
     ("win.pdf-next-page", &["space", "n", "Right"]),
     ("win.pdf-previous-page", &["<Shift>space", "p", "Left"]),
     ("win.pdf-copy", &["<Control>c"]),
     ("win.pdf-undo", &["<Control>z"]),
     ("win.pdf-redo", &["<Control><Shift>z", "<Control>y"]),
+    ("win.diagram-undo", &["<Control>z"]),
+    ("win.diagram-redo", &["<Control><Shift>z", "<Control>y"]),
+    ("win.diagram-delete", &["Delete", "BackSpace"]),
+    (
+        "win.diagram-delete-all",
+        &["<Control>Delete", "<Control>BackSpace"],
+    ),
+    ("win.diagram-select-all", &["<Control>a"]),
+    ("win.diagram-cut", &["<Control>x"]),
+    ("win.diagram-copy", &["<Control>c"]),
+    ("win.diagram-paste", &["<Control>v"]),
+    ("win.diagram-edit-label", &["Return"]),
+    ("win.diagram-next-page", &["Page_Down"]),
+    ("win.diagram-previous-page", &["Page_Up"]),
+];
+
+/// Commands a diagram in front runs on another command's chord (`App::run_action`), so they
+/// show whatever that one is bound to.
+const BORROWED: [(&str, &str); 2] = [
+    ("win.diagram-duplicate", "win.duplicate-line"),
+    ("win.diagram-group", "win.goto-line"),
 ];
 
 /// The heading `action` is listed under in DESIGN.md Keyboard, `None` for one not placed yet.
@@ -91,12 +114,15 @@ fn rows(config: &Config) -> Vec<Section> {
                 .iter()
                 .filter(|(action, _, _)| section(action) == Some(title))
                 .map(|(action, label, _)| {
-                    let own = PDF_KEYS.iter().find(|(a, _)| a == action);
+                    let own = TAB_KEYS.iter().find(|(a, _)| a == action);
                     let mut accels: Vec<String> = own
                         .into_iter()
                         .flat_map(|(_, keys)| keys.iter().map(|k| k.to_string()))
                         .collect();
                     accels.extend(accels_for(config, action));
+                    if let Some((_, lender)) = BORROWED.iter().find(|(a, _)| a == action) {
+                        accels.extend(accels_for(config, lender));
+                    }
                     (*label, accels)
                 })
                 .filter(|(_, accels)| !accels.is_empty())
@@ -141,13 +167,21 @@ mod tests {
             .map(|(_, accels)| accels.clone())
     }
 
-    /// Every command has a heading, so none can be missing from the dialog once bound.
+    /// Every command has a heading, so none can be missing from the dialog once bound, and a
+    /// misspelt name in the tabs' own keys would leave them out.
     #[test]
     fn every_action_has_a_section() {
         for (action, _, _) in ACTIONS {
             assert!(
                 section(action).is_some(),
                 "{action} has no Keyboard section"
+            );
+        }
+        let named = TAB_KEYS.iter().map(|(a, _)| *a);
+        for action in named.chain(BORROWED.iter().flat_map(|(a, b)| [*a, *b])) {
+            assert!(
+                ACTIONS.iter().any(|(name, _, _)| *name == action),
+                "{action} is not in ACTIONS"
             );
         }
     }
@@ -169,14 +203,22 @@ mod tests {
             accels_of(&shown, "Next Page"),
             Some(vec!["space".into(), "n".into(), "Right".into()])
         );
+        assert_eq!(
+            accels_of(&shown, "Duplicate Selection"),
+            Some(vec!["<Control>d".into()])
+        );
 
-        // A rebind shows, under its heading; an unbind hides.
+        // A rebind shows, under its heading; an unbind hides; a borrowed chord follows its lender.
         config
             .shortcuts
             .insert("win.copy-name".into(), vec!["<Control><Shift>m".into()]);
         config.shortcuts.insert("win.save".into(), Vec::new());
+        config
+            .shortcuts
+            .insert("win.duplicate-line".into(), Vec::new());
         let shown = rows(&config);
         assert_eq!(accels_of(&shown, "Save"), None);
+        assert_eq!(accels_of(&shown, "Duplicate Selection"), None);
         let (_, tab_menu) = shown
             .iter()
             .find(|(title, _)| *title == "Tab menu")

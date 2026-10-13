@@ -66,11 +66,9 @@ const INSTANT: i32 = 16 * 1024;
 pub(crate) const AUTOSAVE: Duration = Duration::from_secs(1);
 /// The cursor callback drives the preview's scroll sync; 100 ms is below what the eye follows.
 const CURSOR: Duration = Duration::from_millis(100);
-/// Store callbacks in `Rc` so callers can release the cell borrow before
-/// invocation, allowing callbacks to reenter the tab.
-type Hook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>)>>>;
+type TabHook = crate::widgets::Hook<dyn Fn(&Rc<Tab>)>;
 /// The find bar's hook, told whether the query itself changed ([`Tab::connect_found`]).
-type FoundHook = RefCell<Option<Rc<dyn Fn(bool)>>>;
+type FoundHook = crate::widgets::Hook<dyn Fn(bool)>;
 
 /// Whether a tab may attempt saving its current file.
 ///
@@ -360,11 +358,11 @@ pub struct Tab {
     moved: Cell<bool>,
     /// The end-of-line messages laid again for a new column width, once a drag has settled.
     refit: crate::widgets::Debounce,
-    on_autosave: Hook,
-    on_edited: Hook,
-    on_banner: Hook,
-    on_cursor: Hook,
-    on_follow: Hook,
+    on_autosave: TabHook,
+    on_edited: TabHook,
+    on_banner: TabHook,
+    on_cursor: TabHook,
+    on_follow: TabHook,
     /// This tab's document on the vault's language layer: what it can answer, what it last
     /// answered, and the refresh that is still in flight. Empty for a tab outside every vault.
     pub lang: lang::State,
@@ -1106,36 +1104,27 @@ impl Tab {
     /// Called 1 s after the last edit and when focus leaves the view. Never fires while
     /// `disk_changed` is set.
     pub fn connect_autosave(self: &Rc<Self>, f: impl Fn(&Rc<Tab>) + 'static) {
-        *self.on_autosave.borrow_mut() = Some(Rc::new(f));
+        self.on_autosave.set(Rc::new(f));
     }
 
     /// Called after the re-highlight debounce, for the preview.
     pub fn connect_edited(self: &Rc<Self>, f: impl Fn(&Rc<Tab>) + 'static) {
-        *self.on_edited.borrow_mut() = Some(Rc::new(f));
+        self.on_edited.set(Rc::new(f));
     }
 
     /// Called when the banner's button is pressed.
     pub fn connect_banner(self: &Rc<Self>, f: impl Fn(&Rc<Tab>) + 'static) {
-        *self.on_banner.borrow_mut() = Some(Rc::new(f));
+        self.on_banner.set(Rc::new(f));
     }
 
     /// Called for a Ctrl+click in the view or the Go to Definition chord.
     pub fn connect_follow(self: &Rc<Self>, f: impl Fn(&Rc<Tab>) + 'static) {
-        *self.on_follow.borrow_mut() = Some(Rc::new(f));
+        self.on_follow.set(Rc::new(f));
     }
 
     /// Called at most every 100 ms while the caret moves.
     pub fn connect_cursor(self: &Rc<Self>, f: impl Fn(&Rc<Tab>) + 'static) {
-        *self.on_cursor.borrow_mut() = Some(Rc::new(f));
-    }
-
-    /// Clone the callback before invoking it so reentrant tab access cannot
-    /// conflict with a live cell borrow.
-    fn emit(self: &Rc<Self>, hook: &Hook) {
-        let f = hook.borrow().clone();
-        if let Some(f) = f {
-            f(self);
-        }
+        self.on_cursor.set(Rc::new(f));
     }
 
     // --- edits ---------------------------------------------------------------------------
@@ -1200,7 +1189,7 @@ impl Tab {
     /// the preview, whose own debounce defers rerendering across keystrokes.
     fn reanalyse(self: &Rc<Self>) {
         self.analyse_text();
-        self.emit(&self.on_edited);
+        self.on_edited.emit(self);
     }
 
     /// Refresh all text-derived state, including change bars, after whole
@@ -1272,7 +1261,7 @@ impl Tab {
         self.autosave.cancel();
         let modified = self.save.modified.get();
         if modified && may_save(modified, self.save.disk_changed.get()) {
-            self.emit(&self.on_autosave);
+            self.on_autosave.emit(self);
         }
     }
 
@@ -1281,7 +1270,7 @@ impl Tab {
         self.cursor.call_once(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move || tab.emit(&tab.on_cursor)
+            move || tab.on_cursor.emit(&tab)
         ));
     }
 

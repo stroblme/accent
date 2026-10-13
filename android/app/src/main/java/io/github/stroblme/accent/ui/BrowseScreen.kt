@@ -20,7 +20,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import io.github.stroblme.accent.Back
 import io.github.stroblme.accent.Corpus
 import io.github.stroblme.accent.Recents
 import io.github.stroblme.accent.VaultModel
@@ -217,7 +216,7 @@ fun BrowseScreen(
                     to == null -> Quiet("Open a file from this vault to see what links to it.")
                     linked?.isEmpty() == true -> Quiet("No notes link to ${title(to)} yet.")
                     else -> Notes("Links to ${title(to)}", linked, placesIn(linked)) {
-                        model.openFile(it, back = Back.File(to))
+                        model.openBacklink(it, from = to)
                         onClose()
                     }
                 }

@@ -77,7 +77,14 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) ->
             barShown = editing || chrome.shown,
             bar = {
                 DocumentBar(title = File(open.rel).name.removeSuffix(".md")) {
-                    TextButton(onClick = { editing = !editing }) {
+                    TextButton(
+                        onClick = {
+                            // Now rather than on Done: the view built again then would load before
+                            // the place reached it.
+                            if (!editing) model.keepPlace()
+                            editing = !editing
+                        },
+                    ) {
                         Text(if (editing) "Done" else "Edit")
                     }
                 }
@@ -251,6 +258,12 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
         model.found()
     }
 
+    // Back from a backlink put the reader where they were ([Open.scroll]), and that is spent once
+    // the page is up: the load has already taken it.
+    LaunchedEffect(loaded, open.scroll) {
+        if (open.scroll != 0 && loaded == html) model.placed()
+    }
+
     // Back puts the bar away, which is how the panel closes too.
     BackHandler(enabled = open.finding) { model.finding(false) }
 
@@ -293,7 +306,12 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
                             // further than the content it has, and until then it has none.
                             if (load.scroll > 0) {
                                 view.postVisualStateCallback(0, object : WebView.VisualStateCallback() {
-                                    override fun onComplete(requestId: Long) = view.scrollTo(0, load.scroll)
+                                    override fun onComplete(requestId: Long) {
+                                        view.scrollTo(0, load.scroll)
+                                        // The reader did not scroll there: a note they are brought
+                                        // back to arrives with its bar up, as any document does.
+                                        if (load.back) chrome.show()
+                                    }
                                 })
                             }
                         }
@@ -325,7 +343,10 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
                         val image = hit?.let { images[it] }
                         image?.let { Inverted.toggle(it.path) } != null
                     }
-                    setOnScrollChangeListener { _, _, y, _, was -> chrome.scrolled((y - was).toFloat()) }
+                    setOnScrollChangeListener { _, _, y, _, was ->
+                        chrome.scrolled((y - was).toFloat())
+                        (tag as? Load)?.let { model.reading(it.rel, scroll = y) }
+                    }
                     setFindListener { active, total, _ -> matches = active to total }
                     view = this
                 }
@@ -334,11 +355,17 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
                 // The view's own tag is what it last loaded: `update` runs on every recomposition and
                 // only a different page, or the same one with its images served otherwise, is worth
                 // a load. The note in front loaded again keeps the reader's place; another opens at
-                // its top.
+                // its top, or where Back brings the reader to ([Open.scroll]).
                 val load = Load(open.rel, html, dark, inverted)
                 val last = web.tag as? Load
                 if (load != last) {
-                    if (last?.rel == open.rel) load.scroll = web.scrollY
+                    if (last?.rel == open.rel) {
+                        load.scroll = web.scrollY
+                    } else {
+                        load.scroll = open.scroll
+                        load.back = open.scroll > 0
+                    }
+                    model.reading(open.rel, scroll = load.scroll)
                     web.tag = load
                     web.freshen(dark)
                     // Scripts only for a page with diagrams to draw, and there only the app's own.
@@ -370,10 +397,12 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
 
 /**
  * A page the rendered view was told to load: the note, its HTML, and what its images were served
- * under. [scroll] is where the reader is put once it is up, and no part of which page it is.
+ * under. [scroll] is where the reader is put once it is up, and [back] whether that is a place
+ * they are brought back to rather than kept at; neither is part of which page it is.
  */
 private data class Load(val rel: String, val html: String, val dark: Boolean, val inverted: Set<String>) {
     var scroll = 0
+    var back = false
 }
 
 /**

@@ -371,6 +371,22 @@ pub fn default_font() -> String {
     desc.to_str().to_string()
 }
 
+/// Text attributes painting `colour` behind the glyphs, as a text tag's `background` does.
+fn background(colour: &gdk::RGBA) -> pango::AttrList {
+    let channel = |v: f32| (f64::from(v) * 65535.0).round() as u16;
+    let (r, g, b) = (colour.red(), colour.green(), colour.blue());
+    let attributes = pango::AttrList::new();
+    attributes.insert(pango::AttrColor::new_background(
+        channel(r),
+        channel(g),
+        channel(b),
+    ));
+    attributes.insert(pango::AttrInt::new_background_alpha(channel(
+        colour.alpha(),
+    )));
+    attributes
+}
+
 /// Choose the innermost sticky-block opener, omitting one on the top
 /// visible line because its text is already shown.
 fn sticky_opener(top: i32, heading: Option<i32>, fence: Option<i32>) -> Option<i32> {
@@ -470,6 +486,8 @@ impl Tab {
     /// Toggle line numbers for all text tabs, outside the 48 px heading-marker gutter.
     pub fn set_line_numbers(&self, on: bool) {
         self.numbers.set_visible(on);
+        // The pinned title starts where the text does, after the gutter the numbers widen.
+        self.update_sticky();
     }
 
     /// Whether the line numbers are on, and the width the gutter gave them. Only
@@ -589,15 +607,27 @@ impl Tab {
         let end = line_end(&self.buffer, line);
         self.sticky
             .set_text(self.buffer.text(&start, &end, false).trim_end());
-        // The clamp centres the view in the scroller, so where the text column starts is not
-        // something the bar can be told once. The page gutter goes on top of it.
-        let origin = graphene::Point::zero();
+        // A fence's opening line is code, washed behind its text as the code under it is.
+        let wash = self
+            .buffer
+            .tag_table()
+            .lookup(highlight::CODEBLOCK)
+            .filter(|tag| start.has_tag(tag))
+            .and_then(|tag| tag.background_rgba());
+        self.sticky
+            .set_attributes(wash.as_ref().map(background).as_ref());
+        // The text starts after the left gutter (fold chevrons, change bars, line numbers), at
+        // the minimum width GtkTextView gives it, and the page's margin. Measured rather than read
+        // off the allocation, so a gutter changing width takes the title along on the same frame.
+        // The clamp centres the view in the scroller, so where that is is asked every time.
+        let gutter = gtk::prelude::TextViewExt::gutter(&self.view, gtk::TextWindowType::Left);
+        let border = gutter.map_or(0, |g| g.measure(gtk::Orientation::Horizontal, -1).0);
+        let start = graphene::Point::new((border + self.view.left_margin()) as f32, 0.0);
         let left = self
             .view
-            .compute_point(&self.sticky_bar, &origin)
+            .compute_point(&self.sticky_bar, &start)
             .map_or(0, |point| point.x() as i32);
-        self.sticky
-            .set_margin_start((left + self.view.left_margin()).max(0));
+        self.sticky.set_margin_start(left.max(0));
         self.sticky_bar.set_visible(true);
     }
 }

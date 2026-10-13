@@ -19,3 +19,6 @@ bench complete_code_superseded ["alpha", "beta", "gamma"] shown=true
 bench complete_commit_down Stop "    s.g" selected=Some(0) shown=true
 bench complete_commit_; [] shown=false
 bench complete_commit_accepted "#include \"gamma.h\"" "    s.gamma();"
+bench complete_code_burst ["gamma"] shown=true
+bench complete_late_committed "int main(void)" "    s.gamma(); "
+bench complete_late_resolved "#include \"gamma.h\"" "    s.gamma(); "

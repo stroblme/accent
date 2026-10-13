@@ -77,16 +77,22 @@ modules:
 
   # Cargo feature `pdf`. pdfium-render dlopen()s libpdfium.so at runtime and accent-core looks
   # next to the binary first (crates/core/src/pdf.rs), so /app/bin/accent finds /app/lib/accent
-  # with no environment variable. Build 8076 matches what `make pdfium` puts in vendor/pdfium.
+  # with no environment variable. Build 8076 and its checksums match the Makefile's `make pdfium`.
+  # The archives have no top-level directory: lib/ and LICENSE sit at their root.
   - name: pdfium
     buildsystem: simple
     build-commands:
       - install -Dm755 lib/libpdfium.so -t /app/lib/accent
     sources:
       - type: archive
+        only-arches: [x86_64]
         url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8076/pdfium-linux-x64.tgz
         sha256: d9d67bc40af03aef4fe28a60b19b1086f28ace019c8c9caf19cb7fe3d14ceca3
-        # The archive has no top-level directory: lib/ and LICENSE sit at its root.
+        strip-components: 0
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8076/pdfium-linux-arm64.tgz
+        sha256: d7247b33ae5545615a5e877235dd97afc879e3a8805689684f528cae3339d352
         strip-components: 0
 
   # The servers a remote vault uploads, one per machine a host may be, built by `make server`

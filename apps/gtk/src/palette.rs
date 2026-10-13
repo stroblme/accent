@@ -338,11 +338,16 @@ fn accel_button(
     conflicts: &HashSet<String>,
     rebind: &Rc<dyn Fn(&str)>,
 ) -> gtk::Button {
-    let shown = accels.first().and_then(|a| accel_label(a));
+    // A chord GTK cannot read shows as none, so the button still offers to set one.
+    let shown = accels
+        .first()
+        .filter(|a| gtk::accelerator_parse(a.as_str()).is_some());
     let clashes = accels.iter().any(|a| conflicts.contains(a));
+    let keys = adw::ShortcutLabel::new(shown.map_or("", String::as_str));
+    // An unbound command still lists; the button is what says it can be given a shortcut.
+    keys.set_disabled_text("Set…");
     let button = gtk::Button::builder()
-        // An unbound command still lists; the button is what says it can be given a shortcut.
-        .label(shown.as_deref().unwrap_or("Set…"))
+        .child(&keys)
         .tooltip_text(match clashes {
             true => "Change Shortcut (bound twice)",
             false => "Change Shortcut",

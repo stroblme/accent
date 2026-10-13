@@ -863,6 +863,12 @@ impl DiagramTab {
         self.view.scale()
     }
 
+    /// Whether the page is laid out at the canvas's size, fitted or at its zoom.
+    #[cfg(feature = "bench")]
+    pub fn laid_out(&self) -> bool {
+        self.view.laid_out()
+    }
+
     /// Whether the web banner is out, for a drill.
     #[cfg(feature = "bench")]
     pub fn web_banner_shown(&self) -> bool {

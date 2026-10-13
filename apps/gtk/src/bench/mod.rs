@@ -85,9 +85,9 @@ use panes::{
 };
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_closed,
-    bench_pdf_comments, bench_pdf_deep, bench_pdf_dropped, bench_pdf_failed, bench_pdf_insert,
-    bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale, bench_pdf_strip,
-    bench_sketch,
+    bench_pdf_comments, bench_pdf_deep, bench_pdf_deleted, bench_pdf_dropped, bench_pdf_failed,
+    bench_pdf_insert, bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale,
+    bench_pdf_strip, bench_sketch,
 };
 use preview::bench_preview_type;
 use replace::bench_replace;
@@ -183,7 +183,8 @@ use tags::bench_tags;
 ///   host/retry), `dropped:<rel_path>` (disconnect/reconnect and note relinking),
 ///   `renaming:<rel_path>` (rename during upload; remote PDF of several MB),
 ///   `closed:<rel_path>` (close during save; remote: while refused, then while
-///   the link is down), `pages:<rel_path>` (page edits,
+///   the link is down), `deleted:<rel_path>,<replacement>` (remote: deleted on
+///   the host with a refused page, then replaced), `pages:<rel_path>` (page edits,
 ///   undo/redo and note links; generated `Attachments/pages.pdf`),
 ///   `insert:<rel_path>,<source>` (drop insertion; put scratch copies of
 ///   generated `Attachments/pages.pdf` and `Attachments/comments.pdf` at root),
@@ -524,6 +525,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("closed:") {
                 return bench_pdf_closed(&app, rel);
+            }
+            if let Some(arg) = rel.strip_prefix("deleted:") {
+                return bench_pdf_deleted(&app, arg);
             }
             if let Some(rel) = rel.strip_prefix("comments:") {
                 return bench_pdf_comments(&app, rel);

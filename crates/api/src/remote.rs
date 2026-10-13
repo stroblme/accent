@@ -109,6 +109,37 @@ fn carry(from: &Path, to: &Path) {
     }
 }
 
+/// Take away the cached copy at `dest`, a file or a folder of them, with the stamps at `stamp`
+/// and a copy kept beside it ([`kept_path`]): `true` when one held edits the host never had.
+/// Not under the stamp's lock, which an upload holds for as long as it takes.
+fn uncache(dest: &Path, stamp: &Path) -> bool {
+    let unsent = match std::fs::read_dir(dest) {
+        // Every entry, past the first that held edits.
+        Ok(entries) => {
+            let mut any = false;
+            for entry in entries.flatten() {
+                any |= uncache(&entry.path(), &stamp.join(entry.file_name()));
+            }
+            any
+        }
+        Err(_) => {
+            let stamped = std::fs::File::open(stamp)
+                .ok()
+                .and_then(|file| serde_json::from_reader(file).ok());
+            unsent(dest, stamped)
+        }
+    };
+    for path in [dest, stamp, &kept_path(dest)] {
+        remove_any(path);
+    }
+    unsent
+}
+
+/// Remove the file or folder at `path`, if there is one.
+fn remove_any(path: &Path) {
+    let _ = std::fs::remove_dir_all(path).or_else(|_| std::fs::remove_file(path));
+}
+
 /// Host and local etags at the last fetch or push. A changed local etag
 /// identifies unsent pen or page edits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -558,6 +589,22 @@ impl Remote {
             if let (Some(from), Some(to)) = (place(&self.url, from), place(&self.url, to)) {
                 carry(&from, &to);
             }
+        }
+    }
+
+    /// Drop the cached copy of `rel`, a file or a folder, with its stamp, its pending page edits
+    /// and a copy kept beside it, once it is deleted, so a new file given the name is fetched as
+    /// itself. `true` when the copy held edits that never reached the host: the delete wins.
+    pub fn removed(&self, rel: &str) -> bool {
+        if let Some(edits) = ssh::relink_path(&self.url, rel) {
+            remove_any(&edits);
+        }
+        match (
+            ssh::cache_path(&self.url, rel),
+            ssh::stamp_path(&self.url, rel),
+        ) {
+            (Some(dest), Some(stamp)) => uncache(&dest, &stamp),
+            _ => false,
         }
     }
 
@@ -1045,9 +1092,46 @@ fn drain(stream: impl Read + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Stamp, Stamped, carry, edited_name, kept_path, unsent};
+    use super::{Stamp, Stamped, carry, edited_name, kept_path, uncache, unsent};
     use std::path::Path;
     use std::time::Duration;
+
+    /// A deleted file's cached copy goes with its stamp and the copy kept beside it, a deleted
+    /// folder's with all of theirs, and the answer says whether one held edits the host never had.
+    #[test]
+    fn a_deleted_files_cached_copy_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cache, stamps) = (dir.path().join("cache"), dir.path().join("stamps"));
+        let cached = |rel: &str, drawn_on: bool| {
+            let (dest, stamp) = (cache.join(rel), stamps.join(rel));
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(&dest, "fetched").unwrap();
+            let fetched = crate::Etag::of(&dest).unwrap();
+            (Stamp::hold(&stamp).unwrap())
+                .set(&Stamped {
+                    host: fetched,
+                    copy: fetched,
+                })
+                .unwrap();
+            if drawn_on {
+                std::fs::write(&dest, "drawn on").unwrap();
+            }
+        };
+        cached("a.pdf", false);
+        std::fs::write(kept_path(&cache.join("a.pdf")), "kept").unwrap();
+        cached("sub/b.pdf", false);
+        cached("sub/c.pdf", true);
+
+        assert!(!uncache(&cache.join("a.pdf"), &stamps.join("a.pdf")));
+        assert!(!cache.join("a.pdf").exists() && !stamps.join("a.pdf").exists());
+        assert!(!kept_path(&cache.join("a.pdf")).exists());
+        assert!(uncache(&cache.join("sub"), &stamps.join("sub")));
+        assert!(!cache.join("sub").exists() && !stamps.join("sub").exists());
+        assert!(!uncache(
+            &cache.join("never.pdf"),
+            &stamps.join("never.pdf")
+        ));
+    }
 
     /// A method the host's server lacks fails as itself at every call, and the window is told
     /// once that the server is older than it: the readers that do without an answer say nothing.

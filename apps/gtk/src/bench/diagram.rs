@@ -1206,7 +1206,10 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
     let (app, rel, tool) = (app.clone(), rel.to_string(), tool.to_string());
     glib::timeout_add_local_once(Duration::from_millis(1500), move || {
         app.open_path(&rel);
-        glib::timeout_add_local_once(Duration::from_millis(800), move || {
+        glib::spawn_future_local(async move {
+            // Once the page is laid out at the canvas's size: before, the shapes are not where
+            // the pointer will find them (`scale=1.000`).
+            files::until(|| app.active_diagram().is_some_and(|tab| tab.laid_out())).await;
             let Some(tab) = app.active_diagram() else {
                 println!("bench diagram no_tab");
                 return bench_quit(&app);

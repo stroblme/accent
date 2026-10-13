@@ -288,6 +288,17 @@ impl App {
             Event::FileRemoved(rel) => {
                 self.reshow_preview_image(&rel);
                 self.relinks_removed(&rel);
+                // A remote file's cached copy goes with it, so a new file given the name opens as
+                // itself; changes it held that had not reached the host go too, and are said.
+                if let Some(remote) = self.vault().and_then(|v| v.remote())
+                    && remote.removed(&rel)
+                {
+                    self.toast(&format!(
+                        "{} was deleted on {} before your changes reached it",
+                        doc::file_name(&rel),
+                        self.host()
+                    ));
+                }
                 // A conflict copy is never a tab of its own; what its removal changes is the
                 // banner on the file it was a copy of.
                 if let Some(original) = accent_api::conflict_original_rel(&rel) {

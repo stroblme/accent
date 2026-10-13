@@ -73,6 +73,13 @@ data class Open(
      */
     val find: String? = null,
     /**
+     * How far down the rendered page it opens, in pixels: where the reader was when they followed
+     * a backlink out of it, which Back returns them to ([Back.File]), or when they opened the
+     * editor, which Done returns them to ([VaultModel.keepPlace]). Consumed once the page is up,
+     * as [find] is ([VaultModel.placed]).
+     */
+    val scroll: Int = 0,
+    /**
      * Whether the reader has the note's own find open ([VaultModel.finding]).
      *
      * Not [find]: that is one word the app was handed and marks once, this is a bar the reader
@@ -129,10 +136,11 @@ sealed interface Back {
     data class Pdf(val pdf: OpenPdf) : Back
 
     /**
-     * Any document, by one of Browse's backlinks, opened again: at its top, since the place a
-     * reader was in a page or a PDF is the screen's rather than the model's.
+     * Any document, by one of Browse's backlinks, opened again where its screen last said the
+     * reader was ([VaultModel.reading]): [at] in a PDF, [scroll] pixels down a note. An image
+     * opens fitted, as it always does.
      */
-    data class File(val rel: String) : Back
+    data class File(val rel: String, val at: PdfPlace? = null, val scroll: Int = 0) : Back
 }
 
 /**
@@ -257,6 +265,13 @@ class Corpus(
  * to it three times is one backlink, as it is on the desktop.
  */
 fun linkingNotes(links: List<Backlink>): List<String> = links.map { it.srcRelPath }.distinct()
+
+/**
+ * Back to [rel] at [here], if that is where its screen last said the reader was, and otherwise at
+ * its top: a place said of another document is no place in this one.
+ */
+fun backTo(rel: String, here: Back.File?): Back.File =
+    here?.takeIf { it.rel == rel } ?: Back.File(rel)
 
 /**
  * [save] against [expected], and when the etag gate refuses, the file as it is now if it still
@@ -557,6 +572,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         find: String? = null,
         at: PdfPlace? = null,
         back: Back? = null,
+        scroll: Int = 0,
     ) {
         val v = vault ?: return
         recents.touch(Recents.Kind.Notes, rel)
@@ -591,7 +607,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     pdf = null,
                     image = null,
-                    open = Open(rel, note.text, note.etag, conflicts = conflicts, find = find),
+                    open = Open(
+                        rel, note.text, note.etag,
+                        conflicts = conflicts, find = find, scroll = scroll,
+                    ),
                     back = back,
                 )
             }
@@ -606,7 +625,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         when (val to = _state.value.back) {
             // [show], not [openFile]: the buffer has been dealt with, and going through [leave]
             // again would ask again about edits the reader has just chosen to drop.
-            is Back.File -> show(to.rel)
+            is Back.File -> show(to.rel, at = to.at, scroll = to.scroll)
             else -> _state.update {
                 it.copy(open = null, pdf = (to as? Back.Pdf)?.pdf, image = null, back = null)
             }
@@ -623,6 +642,27 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val back = Back.Pdf(from.copy(at = place, finding = false))
         openFile(link.srcRelPath, find = link.alias, back = back)
     }
+
+    /**
+     * Where the reader is in the document in front, as its screen last said ([reading]): what a
+     * backlink followed out of it keeps for Back. Not state, since nothing draws from it and it
+     * changes with every frame of a scroll.
+     */
+    private var here: Back.File? = null
+
+    /**
+     * The screen in front saying where the reader is in [rel]: [at] in a PDF, [scroll] pixels
+     * down a note.
+     */
+    fun reading(rel: String, at: PdfPlace? = null, scroll: Int = 0) {
+        here = Back.File(rel, at, scroll)
+    }
+
+    /**
+     * Open [note], one of the notes linking to [from], for Back to open [from] again where the
+     * reader left it.
+     */
+    fun openBacklink(note: String, from: String) = openFile(note, back = backTo(from, here))
 
     /**
      * The image an embed names, in the vault and on this device: the path as the note spells it
@@ -949,6 +989,17 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     /** The query has been marked on the page. One-shot, the same way [said] is. */
     fun found() = _state.update { it.copy(open = it.open?.copy(find = null)) }
+
+    /** The rendered note has been put back where the reader was ([Open.scroll]). */
+    fun placed() = _state.update { it.copy(open = it.open?.copy(scroll = 0)) }
+
+    /**
+     * Keep where the reader is in the rendered note for when it is drawn again: the editor takes
+     * its place, and Done builds the view anew.
+     */
+    fun keepPlace() = _state.update { s ->
+        s.copy(open = s.open?.let { it.copy(scroll = backTo(it.rel, here).scroll) })
+    }
 
     /**
      * Open or put away the find of whatever is in front, a note or a PDF.

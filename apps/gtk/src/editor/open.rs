@@ -172,7 +172,7 @@ pub fn open(
         alerts: RefCell::new(Vec::new()),
         find: RefCell::default(),
         find_tag,
-        on_found: RefCell::new(None),
+        on_found: Default::default(),
         occurrence_tag,
         occurrence_query: RefCell::new(None),
         reveal_tag,
@@ -202,11 +202,11 @@ pub fn open(
         turn: Cell::new((false, false)),
         moved: Cell::new(false),
         refit: crate::widgets::Debounce::new(DEBOUNCE),
-        on_autosave: RefCell::new(None),
-        on_edited: RefCell::new(None),
-        on_banner: RefCell::new(None),
-        on_cursor: RefCell::new(None),
-        on_follow: RefCell::new(None),
+        on_autosave: Default::default(),
+        on_edited: Default::default(),
+        on_banner: Default::default(),
+        on_cursor: Default::default(),
+        on_follow: Default::default(),
         lang: lang::State::default(),
     });
     // One controller for the keys the popup, the signature, the ghost text, the extra carets and
@@ -246,7 +246,7 @@ pub fn open(
     banner.connect_button_clicked(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_| tab.emit(&tab.on_banner)
+        move |_| tab.on_banner.emit(&tab)
     ));
     connect_view(&tab);
 
@@ -597,7 +597,7 @@ fn connect_view(tab: &Rc<Tab>) {
             }
             gesture.set_state(gtk::EventSequenceState::Claimed);
             tab.clear_follow();
-            tab.emit(&tab.on_follow);
+            tab.on_follow.emit(&tab);
         }
     ));
     tab.view.add_controller(click);

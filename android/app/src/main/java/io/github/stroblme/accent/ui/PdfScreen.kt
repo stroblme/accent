@@ -136,6 +136,7 @@ fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome
         at = pdf.at,
         notes = notes,
         onNote = model::openFromPdf,
+        onPlace = { model.reading(pdf.rel, at = it) },
         finding = pdf.finding,
         onFinding = model::finding,
     ) { it.save() }
@@ -219,6 +220,8 @@ private fun Reader(
     /** The note links into it, which paint as highlights; none for a document from outside. */
     notes: List<PdfLink> = emptyList(),
     onNote: (PdfLink, PdfPlace) -> Unit = { _, _ -> },
+    /** Where the reader is, said as it changes, for Back from a backlink to return to. */
+    onPlace: (PdfPlace) -> Unit = {},
     /** Whether its find bar is open. */
     finding: Boolean,
     onFinding: (Boolean) -> Unit,
@@ -302,6 +305,7 @@ private fun Reader(
                     finding,
                     onFinding,
                     onSay = { scope.launch { snackbar.showSnackbar(it) } },
+                    onPlace = onPlace,
                 ) { wanted = null }
                 if (ANNOTATIONS) {
                     PdfToolbar(
@@ -411,6 +415,8 @@ private fun Pages(
     onFinding: (Boolean) -> Unit,
     /** A line for the snackbar. */
     onSay: (String) -> Unit,
+    /** Where the reader is: the page and the points down it at the top, the zoom and the pan. */
+    onPlace: (PdfPlace) -> Unit,
     onWent: () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -496,6 +502,18 @@ private fun Pages(
         }
     }
 
+    // Where the reader is, said as it changes: a backlink followed out of the document keeps it,
+    // and Back opens the document there again, as it does from a highlight's note.
+    val tell by rememberUpdatedState(onPlace)
+    LaunchedEffect(pages, viewport) {
+        val width = viewport.width
+        if (width == 0) return@LaunchedEffect
+        snapshotFlow {
+            val (page, top) = pages.place(pages.above(list, width, zoom), width, zoom)
+            PdfPlace(page, top, zoom, panX)
+        }.collect { tell(it) }
+    }
+
     /**
      * Put [top] points down page [index] at the top of the screen.
      *
@@ -543,7 +561,7 @@ private fun Pages(
     fun follow(target: LinkTarget) {
         when (target) {
             is LinkTarget.Page -> jump(target.page.toInt(), target.top ?: 0f)
-            is LinkTarget.Uri -> leave(context, target.uri)
+            is LinkTarget.Uri -> leave(context, target.uri, onSay)
         }
     }
 
@@ -1502,14 +1520,16 @@ private const val TAP_SLOP = 12f
  * Hand a document's URL to the platform.
  *
  * The one place this reader reaches the network, so the system's chooser answers it rather than a
- * view of ours: nothing is fetched, nothing is opened inside the app, and nothing happens at all
- * for a scheme a reader would not expect a document to carry — a PDF can say `file:` or
- * `javascript:` as easily as `https:`, and neither is a link anybody meant to follow.
+ * view of ours: nothing is fetched, nothing is opened inside the app, and a scheme a reader would
+ * not expect a document to carry is refused, with a line to [onSay] that it was — a PDF can say
+ * `file:` or `javascript:` as easily as `https:`, and neither is a link anybody meant to follow.
+ * A link no app on the device takes says so too.
  */
-private fun leave(context: Context, uri: String) {
+private fun leave(context: Context, uri: String, onSay: (String) -> Unit) {
     val target = Uri.parse(uri)
-    if (target.scheme?.lowercase() !in OUTWARD) return
+    if (target.scheme?.lowercase() !in OUTWARD) return onSay("Links of this kind are not opened")
     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, target)) }
+        .onFailure { onSay("No app can open this link") }
 }
 
 /** The schemes a document may send the reader out to. */

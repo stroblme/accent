@@ -220,8 +220,9 @@ impl App {
         }
     }
 
-    /// Drop the pending edits of a deleted document, or of every one in a deleted folder, with
-    /// what was kept of them, so a new file given the name does not move its notes for them.
+    /// Drop the pending edits of a deleted document, or of every one in a deleted folder, so a
+    /// new file given the name does not move its notes for them. What a remote vault kept of them
+    /// goes with the cached copy ([`Remote::removed`](accent_api::remote::Remote::removed)).
     pub(crate) fn relinks_removed(&self, rel: &str) {
         self.relinks.borrow_mut().retain(|key, relinks| {
             let gone = at_or_under(key, rel);
@@ -231,9 +232,6 @@ impl App {
             }
             !gone
         });
-        if let Some(kept) = self.relink_path(rel) {
-            let _ = std::fs::remove_dir_all(&kept).or_else(|_| std::fs::remove_file(&kept));
-        }
     }
 
     /// The page edits of the document at `key` still to follow, read back from beside its

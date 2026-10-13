@@ -46,6 +46,9 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   switcher — the recent files, then names ranked against the query — and Command the palette; both
   lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the
   keyboard up when their page lands.
+- A search hit opens its note marked by the page's own find; where that find cannot see what the
+  index matched — an accent folded, markup the page does not show, a title — the note opens
+  unmarked at its top rather than marked at the wrong words.
 - New from Template… and Today's Note are the commands that ask first: the Command page lists the
   templates they offer under the command's name in the accent, as a tag lists its notes, and the
   field narrows them. A pick makes the note there, or opens the one it made — a dated target asked
@@ -60,9 +63,10 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   page, its notes listed, as if it had been opened here.
 - Backlinks is the notes linking to the document in front — a note, a PDF or an image — once each,
   by name and folder under "Links to …", the desktop's References for a note. One opened from
-  here is one step from where the reader was: Back from it opens that document again, at its top,
-  since where a reader was in a page is the screen's to know. With nothing in front, or nothing
-  linking, the page says so in a line where the rows would be.
+  here is one step from where the reader was: Back from it opens that document again where they
+  left it — a note scrolled as it was, a PDF at its page, zoom and pan, an image fitted as it always
+  opens. With nothing in front, or nothing linking, the page says so in a line where the rows
+  would be.
 - Tags and Backlinks keep the keyboard down when they land: each is a list to read, as the tree
   is, and the field is there to narrow it.
 - A handle at the top, and a pull down anywhere in it closes it. No Close button: Back already does
@@ -74,7 +78,7 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   while a find is open, the find bar below. The page is loaded when the note, the palette or an
   image inverted in it changes, and at no other time: a WebView told to load again sends the reader
   back to the top, so a load of the note already in front puts them back where they were once it
-  has been drawn.
+  has been drawn, and so does Done, which builds the view again.
 - Editing: the same text with the same styling spans, markup visible and dimmed.
 
 ### PDF
@@ -298,9 +302,10 @@ The decisions under the Android app, each with its reason; the shared ones are i
 
 - **Scope**: reading the vault, small edits, reading and marking up PDFs, and serving as the
   system's PDF viewer (`ACTION_VIEW`, no vault needed); the Pixel 8 is the reference device.
-- **Storage**: all-files access (`MANAGE_EXTERNAL_STORAGE`) and real paths, distributed as an APK
-  or through F-Droid, Play optional — the Storage Access Framework is 25–50× slower and cannot see a
-  Syncthing folder that already exists, and Play allows the permission only behind a declaration.
+- **Storage**: all-files access (`MANAGE_EXTERNAL_STORAGE`) and real paths, distributed as the
+  per-ABI APKs a tagged release carries (`release.yml`), Play optional — the Storage Access
+  Framework is 25–50× slower and cannot see a Syncthing folder that already exists, and Play allows
+  the permission only behind a declaration.
 - **The ffi** lives in `crates/api/src/ffi/` behind the `android` feature, core types declared with
   `#[uniffi::remote]` — one façade, and no mirrored definitions to keep in step.
 - **`android/ffi` is a cdylib of its own** — `accent-api` as one would make every desktop build link a
@@ -311,6 +316,9 @@ The decisions under the Android app, each with its reason; the shared ones are i
   spells a colour.
 - **No watcher**: `Vault::open_unwatched`, and a rescan on every return to the app — inotify over
   emulated storage drops events; the app's own writes still reach the index.
+- **The index lives in `noBackupFilesDir`**, not `cacheDir` — Android empties a cache under storage
+  pressure, and re-indexing a large vault is the one slow thing the app does; the cost is an index
+  counted against the app's own storage, which nothing reclaims.
 - **A first index lets the reader in while it runs**: the walk commits in batches and the tree lists
   what it has as it goes — a large vault's first walk is tens of seconds. The scan before the
   first batch writes nothing, so it counts the files it has found instead. Stopping it is the

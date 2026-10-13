@@ -1035,11 +1035,12 @@ fn chmod_on_host(
         accent_api::ssh::quote(&path.to_string_lossy()),
         accent_api::ssh::quote(&path.parent().unwrap_or(&path).to_string_lossy()),
     );
-    let argv = accent_api::ssh::run(
-        remote.url(),
-        remote.control_path(),
-        &format!("chmod {mode} {file} {dir}"),
-    );
+    on_host(remote, &format!("chmod {mode} {file} {dir}"))
+}
+
+/// Run `command` on the host over the window's master: `true` when it succeeded.
+fn on_host(remote: &accent_api::remote::Remote, command: &str) -> bool {
+    let argv = accent_api::ssh::run(remote.url(), remote.control_path(), command);
     std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .status()
@@ -1258,6 +1259,74 @@ pub(super) fn bench_pdf_closed(app: &Rc<App>, rel: &str) {
             kept.exists(),
             app.toasted.get(),
             bench_said(&app)
+        );
+        bench_quit(&app);
+    });
+}
+
+/// A remote PDF deleted on the host while its cached copy holds a page the host refused (its
+/// folder read-only, the tab closed): the copy goes with the file, and a toast says the page went
+/// too. A PDF the host is then given under the name (a copy of `with`) opens as itself, not as
+/// the drawn-on copy, and nothing goes up beside it as `(edited)`.
+pub(super) fn bench_pdf_deleted(app: &Rc<App>, arg: &str) {
+    let (app, arg) = (app.clone(), arg.to_string());
+    glib::spawn_future_local(async move {
+        let Some((rel, with)) = arg.split_once(',') else {
+            println!("bench pdf deleted usage=deleted:<rel_path>,<replacement>");
+            return bench_quit(&app);
+        };
+        let Some(pdf) = opened(&app, rel).await else {
+            println!("bench pdf deleted no_tab");
+            return bench_quit(&app);
+        };
+        let (Some(vault), Some(remote)) = (
+            app.vault().cloned(),
+            app.vault().and_then(|v| v.remote()).cloned(),
+        ) else {
+            println!("bench pdf deleted not_remote");
+            return bench_quit(&app);
+        };
+        let (key, page) = (pdf.key(), pdf.page.clone());
+        let read_only = chmod_on_host(&vault, &remote, &key, "a-w");
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        drop(pdf);
+        app.close_page(&page);
+        written(&app).await;
+        let cache = accent_api::ssh::cache_path(remote.url(), &key).unwrap_or_default();
+        println!(
+            "bench pdf deleted refused read_only={read_only} cached={} {:?}",
+            cache.exists(),
+            bench_said(&app)
+        );
+        let on_disk = |rel: &str| {
+            let path = vault.resolve(rel).unwrap_or_default();
+            accent_api::ssh::quote(&path.to_string_lossy())
+        };
+        let deleted = chmod_on_host(&vault, &remote, &key, "u+w")
+            && on_host(&remote, &format!("rm {}", on_disk(&key)));
+        for _ in 0..100 {
+            if !cache.exists() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        let said = find_widget(app.window.upcast_ref(), &|w| {
+            (w.downcast_ref::<gtk::Label>())
+                .is_some_and(|l| l.label().contains("before your changes reached it"))
+        });
+        println!(
+            "bench pdf deleted removed deleted={deleted} cached={} said={:?}",
+            cache.exists(),
+            said.and_then(|w| Some(w.downcast::<gtk::Label>().ok()?.label().to_string()))
+        );
+        let replaced = on_host(&remote, &format!("cp {} {}", on_disk(with), on_disk(&key)));
+        let pdf = opened(&app, &key).await;
+        written(&app).await;
+        println!(
+            "bench pdf deleted reopened replaced={replaced} pages={:?} in_vault {} edited={}",
+            pdf.map(|pdf| pdf.page_count()),
+            vault_pages(&app, &key),
+            vault.exists(&accent_api::remote::edited_name(&key, 1))
         );
         bench_quit(&app);
     });

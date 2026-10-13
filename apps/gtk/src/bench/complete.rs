@@ -151,7 +151,7 @@ async fn bench_complete_code(app: &Rc<App>, rel: &str, typed: &str) {
     // A request typed past: the second ask drops the first while the server still has it.
     tab.set_text(&text);
     body();
-    bench_char(&tab, 'x');
+    bench_keys(&tab, "x").await;
     glib::timeout_future(Duration::from_millis(50)).await;
     bench_type(&tab, &session, "complete_code_superseded", ".").await;
 
@@ -159,16 +159,50 @@ async fn bench_complete_code(app: &Rc<App>, rel: &str, typed: &str) {
     // character after it.
     tab.set_text(&text);
     body();
-    for c in typed.chars() {
-        bench_char(&tab, c);
-        glib::timeout_future(Duration::from_millis(1)).await;
-    }
+    bench_keys(&tab, typed).await;
     bench_settle(&session).await;
     bench_key(&tab, &session, "complete_commit_down", gdk::Key::Down).await;
     bench_type(&tab, &session, "complete_commit_;", ";").await;
     let line = editor::caret(&tab.buffer).line();
     println!(
         "bench complete_commit_accepted {:?} {:?}",
+        bench_line(&tab, 0),
+        bench_line(&tab, line)
+    );
+
+    // `.g` in one burst while `s` is being answered, both landing before the look at the `.`:
+    // the trigger still asks, or the `s` answer closes the popup.
+    tab.set_text(&text);
+    body();
+    bench_keys(&tab, "s").await;
+    bench_char(&tab, '.');
+    bench_char(&tab, 'g');
+    bench_settle(&session).await;
+    println!(
+        "bench complete_code_burst {:?} shown={}",
+        bench_rows(&session).0,
+        session.is_shown()
+    );
+
+    // A row committed before its look has resolved it, the typing going on: the `#include`
+    // the resolve keeps back follows the row in once it lands.
+    tab.set_text(&text);
+    body();
+    bench_keys(&tab, typed).await;
+    bench_settle(&session).await;
+    editor::press(&tab, gdk::Key::Down, gdk::ModifierType::empty());
+    bench_char(&tab, ';');
+    bench_keys(&tab, " ").await;
+    let line = editor::caret(&tab.buffer).line();
+    println!(
+        "bench complete_late_committed {:?} {:?}",
+        bench_line(&tab, 0),
+        bench_line(&tab, line)
+    );
+    bench_settle(&session).await;
+    let line = editor::caret(&tab.buffer).line();
+    println!(
+        "bench complete_late_resolved {:?} {:?}",
         bench_line(&tab, 0),
         bench_line(&tab, line)
     );
@@ -201,10 +235,7 @@ pub(super) async fn bench_complete_open(
 /// have settled.
 async fn bench_type(tab: &Rc<Tab>, session: &Rc<Session>, step: &str, text: &str) {
     let t0 = Instant::now();
-    for c in text.chars() {
-        bench_char(tab, c);
-        glib::timeout_future(Duration::from_millis(1)).await;
-    }
+    bench_keys(tab, text).await;
     bench_settle(session).await;
     println!("time {step} ms={:.0}", ms_since(t0));
     println!(
@@ -220,6 +251,27 @@ fn bench_rows(session: &Rc<Session>) -> (Vec<String>, Option<u32>) {
         true => session.rows(),
         false => (Vec::new(), None),
     }
+}
+
+/// Type `text` through the key chain a keystroke at a time, each looked at before the next, as
+/// a main loop that keeps up with the typist has it. Keystrokes landing before the look at the
+/// first, as a busy loop has them, are what `complete_code_burst` types on purpose.
+async fn bench_keys(tab: &Rc<Tab>, text: &str) {
+    for c in text.chars() {
+        bench_char(tab, c);
+        bench_idle().await;
+    }
+}
+
+/// Until the idles queued before this one have run. `completion::install` looks at a keystroke
+/// from an idle queued as it lands, and GLib runs idles of one priority in the order they were
+/// queued, so whatever that look asked is in flight once this returns.
+async fn bench_idle() {
+    let (done, idle) = futures_channel::oneshot::channel();
+    glib::idle_add_local_once(move || {
+        let _ = done.send(());
+    });
+    let _ = idle.await;
 }
 
 /// Run a character through editor key handlers before inserting it if unhandled.
@@ -253,9 +305,10 @@ async fn bench_key(tab: &Rc<Tab>, session: &Rc<Session>, step: &str, key: gdk::K
     );
 }
 
-/// Wait for pending requests and one further frame before probing settled output.
+/// Wait for what was typed to be looked at, the requests that made, and one further frame
+/// before probing settled output. A fixed wait for the look lost its ask under load.
 pub(super) async fn bench_settle(session: &Rc<Session>) {
-    glib::timeout_future(Duration::from_millis(30)).await;
+    bench_idle().await;
     for _ in 0..500 {
         if session.settled() {
             break;

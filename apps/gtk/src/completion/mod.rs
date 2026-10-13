@@ -136,9 +136,7 @@ pub(crate) struct Session {
     detail: RefCell<Option<glib::JoinHandle<()>>>,
     /// The session is editing the buffer itself, which opens nothing.
     muted: Cell<bool>,
-    /// Buffer generation, cancelling deferred acceptance when typing changes text.
-    edits: Cell<u64>,
-    /// An accepted row waiting for what the provider kept back.
+    /// An accepted row's resolve, bringing what the provider kept back.
     accepting: RefCell<Option<glib::JoinHandle<()>>>,
     /// The input method holds text not committed yet: the keys are its own.
     preedit: Cell<bool>,
@@ -178,7 +176,6 @@ impl Session {
                 asked_at: Cell::new(None),
                 detail: RefCell::default(),
                 muted: Cell::new(false),
-                edits: Cell::new(0),
                 accepting: RefCell::default(),
                 preedit: Cell::new(false),
                 queued: Cell::new(false),
@@ -195,11 +192,6 @@ impl Session {
             #[weak(rename_to = me)]
             self,
             move |_| me.queue()
-        ));
-        view.buffer().connect_changed(glib::clone!(
-            #[weak(rename_to = me)]
-            self,
-            move |_| me.edits.set(me.edits.get().wrapping_add(1))
         ));
         // Ahead of GtkSourceView's own handler, which runs last and would bring up its own popup.
         view.connect_show_completion(glib::clone!(
@@ -549,7 +541,7 @@ impl Session {
                 Some(glib::Propagation::Stop)
             }
             rank::Step::Commit(row) => {
-                self.commit(row);
+                self.accept(row);
                 past
             }
             rank::Step::Dismiss => {
@@ -593,40 +585,40 @@ impl Session {
         accepted
     }
 
-    /// Insert the item at `row` now, for the commit character about to be typed after it:
-    /// typing waits on no server, so a row is taken as its look left it ([`Self::resolved`]).
-    fn commit(&self, row: u32) {
-        if let Some((item, range, extras)) = self.take(row) {
-            self.write(&item, range, extras);
-        }
-    }
-
-    /// Resolve and insert the item at `row`, then end the session.
-    ///
-    /// Resolution can supply deferred imports, which join the insertion's undo step. Leave the
-    /// buffer unchanged while waiting; further typing cancels acceptance.
+    /// Insert the item at `row` now, as it stands, and end the session: accepting waits on no
+    /// server. A row whose resolve has not answered yet is resolved after, and what that adds,
+    /// an import, goes in once it lands, as its own undo step, unless the text before it has
+    /// changed meanwhile ([`apply::still_fits`]): VS Code's rule.
     fn accept(self: &Rc<Self>, row: u32) {
         let Some((item, range, extras)) = self.take(row) else {
             return;
         };
+        self.write(&item, range, extras);
         if item.resolve.is_none() {
-            return self.write(&item, range, extras);
+            return;
         }
-        let (me, edits) = (Rc::downgrade(self), self.edits.get());
+        let then = buffer_text(&self.view.buffer());
         let asked = self.source.resolve(item.clone());
+        let me = Rc::downgrade(self);
         let handle = glib::spawn_future_local(async move {
             let full = asked.await;
-            let Some(me) = me.upgrade().filter(|me| me.edits.get() == edits) else {
+            let Some(me) = me.upgrade() else {
                 return;
             };
             drop(me.accepting.take());
-            // Edits the answer itself had are about the text it was asked about, and were
-            // moved on above; the provider's own resolve answers about the text as it is.
-            let extras = match full.extra_edits == item.extra_edits {
-                true => extras,
-                false => full.extra_edits,
-            };
-            me.write(&item, range, extras);
+            // The answer's own went in with the row.
+            let late: Vec<TextEdit> = full
+                .extra_edits
+                .into_iter()
+                .filter(|e| !item.extra_edits.contains(e))
+                .collect();
+            let buffer = me.view.buffer();
+            if late.is_empty() || !apply::still_fits(&then, &buffer_text(&buffer), &late) {
+                return;
+            }
+            me.muted.set(true);
+            apply::edits(&buffer, late);
+            me.muted.set(false);
         });
         if let Some(old) = self.accepting.replace(Some(handle)) {
             old.abort();
@@ -689,8 +681,8 @@ impl Session {
         }
     }
 
-    /// A row's resolve arrived: kept with the row, imports included for a commit character, and
-    /// its documentation shown while it is still selected.
+    /// A row's resolve arrived: kept with the row, imports included for its acceptance, and its
+    /// documentation shown while it is still selected.
     fn resolved(&self, generation: u64, i: usize, full: Completion) {
         if generation != self.generation.get() {
             return;
@@ -705,6 +697,8 @@ impl Session {
             item.completion.doc = full.doc;
             item.completion.detail = full.detail.or(item.completion.detail.take());
             item.completion.extra_edits = full.extra_edits;
+            // Answered: an acceptance has nothing left to ask.
+            item.completion.resolve = None;
             let still = self
                 .popup
                 .selected()
@@ -767,6 +761,13 @@ fn typed_since(buffer: &gtk::TextBuffer, line: &[char], start: Pos, here: Pos) -
         true => buffer.text(&from, &to, true).to_string(),
         false => String::new(),
     }
+}
+
+/// The whole of `buffer`'s text, folded lines included.
+fn buffer_text(buffer: &gtk::TextBuffer) -> String {
+    buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), true)
+        .to_string()
 }
 
 /// A row's detail in monospace over its documentation, or `None` with neither.
@@ -894,8 +895,8 @@ fn abbreviations(tab: &Tab, at: Pos) -> Option<Completions> {
 pub fn install(tab: &Rc<Tab>) {
     let made = Session::new(&tab.view, Box::new(TabSource(Rc::downgrade(tab))));
     // What was typed is looked at once it has landed, one idle on: a single character, or the
-    // pair `typing` writes for a bracket, at the caret. A paste, a template, the text of a reload
-    // and the session's own insert open nothing.
+    // pair `typing` writes for a bracket, at the caret, its first character being the one typed.
+    // A paste, a template, the text of a reload and the session's own insert open nothing.
     tab.buffer.connect_insert_text(glib::clone!(
         #[weak]
         tab,
@@ -905,7 +906,8 @@ pub fn install(tab: &Rc<Tab>) {
                 || at.offset() != caret(buffer).offset()
                 || session(&tab).is_none_or(|s| s.muted.get());
             if !quiet {
-                glib::idle_add_local_once(move || typed(&tab));
+                let first = text.chars().next();
+                glib::idle_add_local_once(move || typed(&tab, first));
             }
         }
     ));
@@ -918,8 +920,9 @@ pub(crate) fn session(tab: &Tab) -> Option<Rc<Session>> {
 }
 
 /// Handle typed completion triggers ([`rank::opens`]) only while focused
-/// and without a caret column, matching ghost-text eligibility.
-fn typed(tab: &Rc<Tab>) {
+/// and without a caret column, matching ghost-text eligibility. `typed` is
+/// the character the keystroke typed.
+fn typed(tab: &Rc<Tab>, typed: Option<char>) {
     let Some(session) = session(tab) else {
         return;
     };
@@ -941,8 +944,12 @@ fn typed(tab: &Rc<Tab>) {
         false => 1,
     };
     let before = line_prefix(&tab.buffer, &caret(&tab.buffer));
-    if let Some(trigger) = rank::opens(&before, &triggers, min_word) {
-        session.open(trigger);
+    match rank::opens(&before, &triggers, min_word) {
+        // This keystroke typed a trigger that more typing follows by now, the main loop having
+        // been busy: an answer up was asked before it, so ask afresh where the caret is.
+        Some(None) if typed.is_some_and(|c| triggers.contains(&c)) => session.ask(None),
+        Some(trigger) => session.open(trigger),
+        None => {}
     }
 }
 

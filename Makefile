@@ -26,7 +26,7 @@ PDFIUM_RELEASE := https://github.com/bblanchon/pdfium-binaries/releases/download
 PDFIUM_ARCH   := $(if $(filter aarch64,$(shell uname -m)),arm64,x64)
 PDFIUM_URL    := $(PDFIUM_RELEASE)/pdfium-linux-$(PDFIUM_ARCH).tgz
 PDFIUM_SHA256_x64   := d9d67bc40af03aef4fe28a60b19b1086f28ace019c8c9caf19cb7fe3d14ceca3
-PDFIUM_SHA256_arm64 :=
+PDFIUM_SHA256_arm64 := d7247b33ae5545615a5e877235dd97afc879e3a8805689684f528cae3339d352
 PDFIUM_SHA256 := $(PDFIUM_SHA256_$(PDFIUM_ARCH))
 PDFIUM_LIB    := vendor/pdfium/libpdfium.so
 
@@ -73,8 +73,9 @@ VAULT_FILES ?= 40000
 GEN_VAULT := crates/core/examples/gen-vault.rs
 
 # Headless runs need an X server; :99 is what CI uses. GDK_BACKEND=x11 because
-# DISPLAY alone leaves GTK on a Wayland session; cairo because there is no GL under Xvfb; no a11y
-# because the private bus has no registry; fatal-criticals so a GTK critical fails the check.
+# DISPLAY alone leaves GTK on a Wayland session; cairo because llvmpipe, Xvfb's GL, costs more CPU
+# and memory; no a11y because the private bus has no registry; fatal-criticals so a GTK critical
+# fails the check.
 DISPLAY_NUM ?= 99
 XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals
 

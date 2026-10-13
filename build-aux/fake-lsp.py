@@ -8,14 +8,17 @@ in `make screenshots`.
 
 `.` triggers it, `;` commits a row (its `allCommitCharacters`), and it can resolve: `alpha` is a
 snippet with a stop, `beta` a plain word, and `gamma` resolves to its documentation and an
-`#include` at the top of the file, which is what a server keeps back until a row is accepted. A completion is answered after `DELAY` seconds, the
-messages that arrive meanwhile still read, so a request the editor has typed past can be
-cancelled; each cancel is said on stderr, which accent logs under `accent_lsp::stderr`.
+`#include` at the top of the file, which is what a server keeps back until a row is accepted.
+A completion is answered after `DELAY` seconds and a resolve after `RESOLVE`, later than a row
+can be committed, the messages that arrive meanwhile still read, so a request the editor has
+typed past can be cancelled; each cancel is said on stderr, which accent logs under
+`accent_lsp::stderr`.
 """
 import json, os, re, select, sys, time
 from urllib.parse import unquote
 
 DELAY = 0.15
+RESOLVE = 0.3
 ITEMS = [
     {"label": "alpha", "kind": 3, "detail": "int alpha(int)", "insertText": "alpha($1)",
      "insertTextFormat": 2, "data": "alpha"},
@@ -98,17 +101,17 @@ def answer(message):
     elif method in ("callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"):
         send({"id": id, "result": calls(method.split("/")[1][:8], message["params"]["item"]["data"])})
     elif method == "textDocument/completion":
-        pending.append((time.monotonic() + DELAY, id))
+        pending.append((time.monotonic() + DELAY, id, {"isIncomplete": False, "items": ITEMS}))
     elif method == "textDocument/inlineCompletion":
         send({"id": id, "result": {"items": [{"insertText": INLINE}]}})
     elif method == "completionItem/resolve":
         item = dict(message["params"])
         if item.get("data") == "gamma":
             item.update(documentation="Gamma does things.", additionalTextEdits=[IMPORT])
-        send({"id": id, "result": item})
+        pending.append((time.monotonic() + RESOLVE, id, item))
     elif method == "$/cancelRequest":
         cancelled = message["params"]["id"]
-        if any(waiting == cancelled for _, waiting in pending):
+        if any(waiting == cancelled for _, waiting, _ in pending):
             pending[:] = [p for p in pending if p[1] != cancelled]
             print(f"fake-lsp cancelled {cancelled}", file=sys.stderr, flush=True)
             send({"id": cancelled, "error": {"code": -32800, "message": "cancelled"}})
@@ -119,7 +122,7 @@ def answer(message):
 
 
 while True:
-    due = min((at for at, _ in pending), default=None)
+    due = min((at for at, _, _ in pending), default=None)
     wait = None if due is None else max(0.0, due - time.monotonic())
     if select.select([sys.stdin], [], [], wait)[0]:
         chunk = os.read(sys.stdin.fileno(), 65536)
@@ -129,6 +132,6 @@ while True:
         for message in messages():
             answer(message)
     now = time.monotonic()
-    for at, id in [p for p in pending if p[0] <= now]:
-        pending.remove((at, id))
-        send({"id": id, "result": {"isIncomplete": False, "items": ITEMS}})
+    for p in [p for p in pending if p[0] <= now]:
+        pending.remove(p)
+        send({"id": p[1], "result": p[2]})

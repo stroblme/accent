@@ -1,5 +1,6 @@
 //! Map completion edits to current text after typing beyond the request.
 
+use accent_api::language::byte_of;
 use accent_api::{Completion, Pos, Range, TextEdit};
 use gtk::prelude::*;
 
@@ -95,12 +96,7 @@ pub(super) fn apply(
     buffer.begin_user_action();
     let start = buffer.create_mark(None, &lang::iter_at(buffer, range.start), false);
     let end = buffer.create_mark(None, &lang::iter_at(buffer, range.end), true);
-    for edit in ordered(extras) {
-        let mut from = lang::iter_at(buffer, edit.range.start);
-        let mut to = lang::iter_at(buffer, edit.range.end);
-        buffer.delete(&mut from, &mut to);
-        buffer.insert(&mut from, &edit.text);
-    }
+    replace(buffer, extras);
     let mut from = buffer.iter_at_mark(&start);
     let mut to = buffer.iter_at_mark(&end);
     buffer.delete_mark(&start);
@@ -124,6 +120,32 @@ pub(super) fn apply(
         None => buffer.insert(&mut from, &item.insert),
     }
     buffer.end_user_action();
+}
+
+/// Apply what a resolve that landed after the acceptance added, as one undoable action.
+pub(super) fn edits(buffer: &gtk::TextBuffer, edits: Vec<TextEdit>) {
+    buffer.begin_user_action();
+    replace(buffer, edits);
+    buffer.end_user_action();
+}
+
+fn replace(buffer: &gtk::TextBuffer, edits: Vec<TextEdit>) {
+    for edit in ordered(edits) {
+        let mut from = lang::iter_at(buffer, edit.range.start);
+        let mut to = lang::iter_at(buffer, edit.range.end);
+        buffer.delete(&mut from, &mut to);
+        buffer.insert(&mut from, &edit.text);
+    }
+}
+
+/// Whether `edits`, a late resolve's, still go where they say in `now`, the text as it was when
+/// the row went in being `then`: nothing up to the last of them has changed since, so none of
+/// their positions moved. Text changed only after them moves none, which is VS Code's rule.
+pub(super) fn still_fits(then: &str, now: &str, edits: &[TextEdit]) -> bool {
+    let Some(end) = edits.iter().map(|e| e.range.end).max() else {
+        return true;
+    };
+    byte_of(then, end).is_some_and(|at| now.get(..at) == Some(&then[..at]))
 }
 
 #[cfg(test)]
@@ -217,6 +239,27 @@ mod tests {
             text: "x".into(),
         };
         assert_eq!(moved.edit(&before).range, range(0, 1));
+    }
+
+    /// A late import goes in while the typing since is all after it, and not once the text before
+    /// it has changed.
+    #[test]
+    fn a_late_edit_fits_while_the_text_before_it_is_unchanged() {
+        let then = "use a;\nfn main() {\n    s.gamma();\n}\n";
+        let import = [edit(1, "use g;\n")];
+        let below = then.replace("gamma();", "gamma(); x");
+        assert!(still_fits(then, &below, &import));
+        assert!(!still_fits(then, &format!("// x\n{then}"), &import));
+        assert!(!still_fits(
+            then,
+            &then.replacen("use a;\n", "", 1),
+            &import
+        ));
+        assert!(
+            !still_fits(then, "use", &import),
+            "the text it lands after is cut short"
+        );
+        assert!(still_fits(then, "", &[]));
     }
 
     #[test]

@@ -311,6 +311,12 @@ impl DiagramView {
         self.imp().typesetter.borrow().clone()
     }
 
+    /// Whether the page has been laid out at the canvas's size: a drill aiming at it waits.
+    #[cfg(feature = "bench")]
+    pub fn laid_out(&self) -> bool {
+        self.imp().laid_out.get()
+    }
+
     /// Whether formulas are still being typeset: the drill waits for them.
     #[cfg(feature = "bench")]
     pub fn typesetting(&self) -> bool {
