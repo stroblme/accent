@@ -8,7 +8,8 @@ use crate::completion::{self, Session};
 /// `note:` creates completion fixtures, narrows `[[` and `#c` suggestions, accepts
 /// with Down/Tab and undoes. Bracket completion must consume the existing `]]` once.
 /// `code:` types `typed` (default `s.g`) into a blank line, creating a C fixture if
-/// absent. Print rows, selected documentation, accepted imports and undo results.
+/// absent. Print rows, selected documentation, accepted imports and undo results, then type it
+/// again and commit the first row with `;`.
 /// Requests from `x` and `.` 50 ms apart test cancellation (`fake-lsp cancelled` with
 /// `RUST_LOG=accent_lsp::stderr=debug`). `build-aux/fake-lsp.py` gives fixed output for
 /// `make drills`; real servers can exercise imports for unimported symbols.
@@ -153,6 +154,24 @@ async fn bench_complete_code(app: &Rc<App>, rel: &str, typed: &str) {
     bench_char(&tab, 'x');
     glib::timeout_future(Duration::from_millis(50)).await;
     bench_type(&tab, &session, "complete_code_superseded", ".").await;
+
+    // A commit character: the row the arrows picked goes in as its look resolved it, and the
+    // character after it.
+    tab.set_text(&text);
+    body();
+    for c in typed.chars() {
+        bench_char(&tab, c);
+        glib::timeout_future(Duration::from_millis(1)).await;
+    }
+    bench_settle(&session).await;
+    bench_key(&tab, &session, "complete_commit_down", gdk::Key::Down).await;
+    bench_type(&tab, &session, "complete_commit_;", ";").await;
+    let line = editor::caret(&tab.buffer).line();
+    println!(
+        "bench complete_commit_accepted {:?} {:?}",
+        bench_line(&tab, 0),
+        bench_line(&tab, line)
+    );
     tab.set_text(&text);
     if let Err(e) = app.write_tab(&tab, None) {
         println!("bench complete write_failed {e}");
@@ -210,6 +229,7 @@ pub(super) fn bench_char(tab: &Rc<Tab>, c: char) {
         '#' => "numbersign".to_string(),
         '.' => "period".to_string(),
         '-' => "minus".to_string(),
+        ';' => "semicolon".to_string(),
         c => c.to_string(),
     };
     let none = gdk::ModifierType::empty();

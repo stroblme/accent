@@ -213,6 +213,7 @@ pub(super) fn bench_chrome_keys(app: &Rc<App>, rels: &str) {
                 extra_edits: Vec::new(),
                 resolve: None,
                 preselect: false,
+                commit: Vec::new(),
             }]);
         }
         println!("bench chrome_keys popup_up={}", tab.popup_shown());

@@ -16,3 +16,6 @@ bench complete_code_return Stop "    s.gamma()" selected=None shown=false
 bench complete_code_accepted "#include \"gamma.h\"" "    s.gamma()"
 bench complete_code_undo "int main(void)" "    s.g"
 bench complete_code_superseded ["alpha", "beta", "gamma"] shown=true
+bench complete_commit_down Stop "    s.g" selected=Some(0) shown=true
+bench complete_commit_; [] shown=false
+bench complete_commit_accepted "#include \"gamma.h\"" "    s.gamma();"

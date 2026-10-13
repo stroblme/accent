@@ -1,7 +1,8 @@
 //! One palette for commands, files, symbols, tags and vaults.
 //!
 //! Callers choose the initial mode; `>`, `#` and `@` switch modes while typing. Command rows
-//! show accelerators because this is also the shortcuts reference below libadwaita 1.8.
+//! list every command, bound or not, its accelerator a button that rebinds it; Keyboard
+//! Shortcuts (`shortcuts.rs`) lists the bound ones.
 //!
 //! File mode opens immediately with recently opened and modified files, matching the full
 //! list only after typing. Debouncing prevents a full match being queued for every character.

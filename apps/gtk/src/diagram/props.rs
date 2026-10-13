@@ -50,6 +50,8 @@ pub enum Change {
     PageName(String),
     /// The one selected shape's place and size in its parent.
     Geometry(Rect),
+    /// draw.io's Flip of the selected shapes, across (else up and down).
+    Flip(bool),
     /// A group's Copy button: what it shows, onto the clipboard.
     Copy(Clip),
     /// A group's Paste button: what the clipboard holds, onto the selection.
@@ -153,15 +155,70 @@ const PATTERNS: [(Option<&str>, Option<&str>, &str); 8] = [
     (Some("1"), Some("1 2"), "Dotted (2)"),
     (Some("1"), Some("1 4"), "Dotted (3)"),
 ];
+/// draw.io's fonts (`Menus.defaultFonts`).
+const FONTS: [&str; 9] = [
+    "Helvetica",
+    "Verdana",
+    "Times New Roman",
+    "Garamond",
+    "Comic Sans MS",
+    "Courier New",
+    "Georgia",
+    "Lucida Console",
+    "Tahoma",
+];
+/// draw.io's label positions (`Format.js`): `labelPosition`, `verticalLabelPosition`, `align`
+/// and `verticalAlign`, by label; a label beside its shape is aligned towards it.
+const POSITIONS: [(&str, [&str; 4]); 9] = [
+    ("Top Left", ["left", "top", "right", "bottom"]),
+    ("Top", ["center", "top", "center", "bottom"]),
+    ("Top Right", ["right", "top", "left", "bottom"]),
+    ("Left", ["left", "middle", "right", "middle"]),
+    ("Centre", ["center", "middle", "center", "middle"]),
+    ("Right", ["right", "middle", "left", "middle"]),
+    ("Bottom Left", ["left", "bottom", "right", "top"]),
+    ("Bottom", ["center", "bottom", "center", "top"]),
+    ("Bottom Right", ["right", "bottom", "left", "top"]),
+];
 const ALIGN: [(&str, &str); 3] = [("left", "Left"), ("center", "Centre"), ("right", "Right")];
 const VALIGN: [(&str, &str); 3] = [("top", "Top"), ("middle", "Middle"), ("bottom", "Bottom")];
-/// The routes an arrow takes, the elbows named by draw.io's titles for them.
-const ROUTES: [&str; 5] = [
-    "Straight",
-    "Orthogonal",
-    "Horizontal Elbow",
-    "Vertical Elbow",
-    "Curved",
+/// draw.io's Waypoints menu (`Format.js`), the elbows named by its titles for them: what each
+/// writes, every entry clearing `noEdgeStyle` and `libavoidRouting` and Straight keeping `curved`.
+const WAYPOINTS: [(&str, Pairs); 5] = [
+    ("Straight", &[("edgeStyle", None)]),
+    (
+        "Orthogonal",
+        &[("edgeStyle", Some("orthogonalEdgeStyle")), ("curved", None)],
+    ),
+    (
+        "Horizontal Elbow",
+        &[
+            ("edgeStyle", Some("elbowEdgeStyle")),
+            ("elbow", Some("vertical")),
+            ("curved", None),
+        ],
+    ),
+    (
+        "Vertical Elbow",
+        &[
+            ("edgeStyle", Some("elbowEdgeStyle")),
+            ("elbow", None),
+            ("curved", None),
+        ],
+    ),
+    (
+        "Curved",
+        &[
+            ("edgeStyle", Some("orthogonalEdgeStyle")),
+            ("curved", Some("1")),
+        ],
+    ),
+];
+/// draw.io's line style menu: `rounded` and `curved`, by label.
+const LINE_STYLES: [(&str, &str, &str); 3] = [
+    ("0", "0", "Sharp"),
+    ("1", "0", "Rounded"),
+    ("0", "1", "Curved"),
 ];
 /// draw.io's gradient directions (Format panel), south when a style names none.
 const DIRECTIONS: [(&str, &str); 5] = [
@@ -173,6 +230,8 @@ const DIRECTIONS: [(&str, &str); 5] = [
 ];
 
 type OnChange = Rc<RefCell<Option<Box<dyn Fn(Change)>>>>;
+/// Style keys and the values a menu entry gives them.
+type Pairs = &'static [(&'static str, Option<&'static str>)];
 /// Spin rows' changes waiting for their burst to settle, one a slot (the four geometry rows
 /// share one), in the order they were made.
 type Held = RefCell<Vec<(&'static str, Box<dyn FnOnce()>)>>;
@@ -182,10 +241,12 @@ struct ColourRow {
     row: adw::ActionRow,
     switch: gtk::Switch,
     button: gtk::ColorDialogButton,
+    /// What the switch turns on while there is no colour: draw.io's `default`, ink or paper.
+    blank: Color,
 }
 
 impl ColourRow {
-    fn new(title: &str) -> ColourRow {
+    fn new(title: &str, blank: Color) -> ColourRow {
         let button = gtk::ColorDialogButton::new(Some(
             gtk::ColorDialog::builder().with_alpha(false).build(),
         ));
@@ -198,15 +259,15 @@ impl ColourRow {
             row,
             switch,
             button,
+            blank,
         }
     }
 
     fn fill(&self, colour: Option<Color>) {
         self.switch.set_active(colour.is_some());
         self.button.set_sensitive(colour.is_some());
-        if let Some(c) = colour {
-            self.button.set_rgba(&super::paint::rgba(c));
-        }
+        self.button
+            .set_rgba(&super::paint::rgba(colour.unwrap_or(self.blank)));
     }
 
     /// What the row says now, as a style value: the colour, or `none`.
@@ -269,6 +330,13 @@ pub struct Props {
     shadow: adw::SwitchRow,
     opacity: adw::SpinRow,
     rotation: adw::SpinRow,
+    flip: [gtk::Button; 2],
+    flip_row: adw::ActionRow,
+    /// Constrain Proportions (`aspect=fixed`).
+    aspect: adw::SwitchRow,
+    /// The size the Width and Height rows had, which Constrain Proportions scales from.
+    size_was: Cell<(f64, f64)>,
+    font: adw::ComboRow,
     font_size: adw::SpinRow,
     font_colour: Rc<ColourRow>,
     bold: gtk::ToggleButton,
@@ -276,7 +344,12 @@ pub struct Props {
     underline: gtk::ToggleButton,
     align: adw::ComboRow,
     valign: adw::ComboRow,
-    route: adw::ComboRow,
+    label_position: adw::ComboRow,
+    wrap: adw::SwitchRow,
+    label_background: Rc<ColourRow>,
+    label_border: Rc<ColourRow>,
+    waypoints: adw::ComboRow,
+    line_style: adw::ComboRow,
     start: adw::ComboRow,
     end: adw::ComboRow,
     start_size: adw::SpinRow,
@@ -394,6 +467,10 @@ impl Props {
         position.add(&y);
         size.add(&width);
         size.add(&height);
+        let aspect = adw::SwitchRow::builder()
+            .title("Constrain Proportions")
+            .build();
+        size.add(&aspect);
         let (shape, line, text, raw_group, page_group) = (
             group("Shape"),
             group("Line"),
@@ -402,10 +479,10 @@ impl Props {
             group("Page"),
         );
 
-        let fill = Rc::new(ColourRow::new("Fill"));
-        let gradient = Rc::new(ColourRow::new("Gradient"));
+        let fill = Rc::new(ColourRow::new("Fill", Color::WHITE));
+        let gradient = Rc::new(ColourRow::new("Gradient", Color::WHITE));
         let direction = combo("Gradient Direction", &DIRECTIONS.map(|(_, l)| l));
-        let stroke = Rc::new(ColourRow::new("Line Colour"));
+        let stroke = Rc::new(ColourRow::new("Line Colour", Color::BLACK));
         let stroke_width = spin("Line Width", (0.0, 20.0, 0.5));
         stroke_width.set_digits(1);
         let pattern = combo("Pattern", &PATTERNS.map(|(.., l)| l));
@@ -420,12 +497,22 @@ impl Props {
         shape.add(&shadow);
         shape.add(&opacity);
         shape.add(&rotation);
+        let flip = [
+            icon_button("object-flip-horizontal-symbolic", "Flip Horizontally"),
+            icon_button("object-flip-vertical-symbolic", "Flip Vertically"),
+        ];
+        let flip_row = adw::ActionRow::builder().title("Flip").build();
+        for button in &flip {
+            flip_row.add_suffix(button);
+        }
+        shape.add(&flip_row);
         line.add(&stroke.row);
         line.add(&stroke_width);
         line.add(&pattern);
 
+        let font = combo("Font", &FONTS);
         let font_size = spin("Font Size", (6.0, 96.0, 1.0));
-        let font_colour = Rc::new(ColourRow::new("Font Colour"));
+        let font_colour = Rc::new(ColourRow::new("Font Colour", Color::BLACK));
         let toggle = |icon: &str, tooltip: &str| {
             gtk::ToggleButton::builder()
                 .icon_name(icon)
@@ -445,18 +532,29 @@ impl Props {
         style_row.add_suffix(&styles);
         let align = combo("Alignment", &ALIGN.map(|(_, l)| l));
         let valign = combo("Vertical Alignment", &VALIGN.map(|(_, l)| l));
+        let label_position = combo("Position", &POSITIONS.map(|(l, _)| l));
+        let wrap = adw::SwitchRow::builder().title("Word Wrap").build();
+        let label_background = Rc::new(ColourRow::new("Label Background", Color::WHITE));
+        let label_border = Rc::new(ColourRow::new("Label Border", Color::BLACK));
+        text.add(&font);
         text.add(&font_size);
         text.add(&font_colour.row);
         text.add(&style_row);
         text.add(&align);
         text.add(&valign);
+        text.add(&label_position);
+        text.add(&wrap);
+        text.add(&label_background.row);
+        text.add(&label_border.row);
 
-        let route = combo("Route", &ROUTES);
+        let waypoints = combo("Waypoints", &WAYPOINTS.map(|(l, _)| l));
+        let line_style = combo("Line Style", &LINE_STYLES.map(|(.., l)| l));
         let start = combo("Start", &HEADS.map(|(.., l)| l));
         let end = combo("End", &HEADS.map(|(.., l)| l));
         let start_size = spin("Start Size", (0.0, 999.0, 1.0));
         let end_size = spin("End Size", (0.0, 999.0, 1.0));
-        line.add(&route);
+        line.add(&waypoints);
+        line.add(&line_style);
         line.add(&start);
         line.add(&start_size);
         line.add(&end);
@@ -477,7 +575,7 @@ impl Props {
         .to_vec();
 
         let page_name = entry_row("Name");
-        let background = Rc::new(ColourRow::new("Background"));
+        let background = Rc::new(ColourRow::new("Background", Color::WHITE));
         let page_width = spin("Width", (100.0, 10000.0, 10.0));
         let page_height = spin("Height", (100.0, 10000.0, 10.0));
         page_group.add(&page_name);
@@ -525,6 +623,11 @@ impl Props {
             shadow,
             opacity,
             rotation,
+            flip,
+            flip_row,
+            aspect,
+            size_was: Cell::new((0.0, 0.0)),
+            font,
             font_size,
             font_colour,
             bold,
@@ -532,7 +635,12 @@ impl Props {
             underline,
             align,
             valign,
-            route,
+            label_position,
+            wrap,
+            label_background,
+            label_border,
+            waypoints,
+            line_style,
             start,
             end,
             start_size,
@@ -597,6 +705,8 @@ impl Props {
             });
         }
         colour(&self.font_colour, "fontColor");
+        colour(&self.label_background, "labelBackgroundColor");
+        colour(&self.label_border, "labelBorderColor");
         let page_send = send.clone();
         self.background.connect(&self.filling, move |value| {
             let value = (value != "none").then_some(value);
@@ -614,6 +724,9 @@ impl Props {
         };
         switch(&self.rounded, "rounded", Some("0"));
         switch(&self.shadow, "shadow", None);
+        let set = style("whiteSpace");
+        self.wrap
+            .connect_active_notify(move |row| set(row.is_active().then(|| "wrap".to_string())));
 
         // Spin rows step once per arrow press; a burst of them is one change. The last ones
         // are an arrow's alone; 6 is a head's size when the style gives none
@@ -669,6 +782,9 @@ impl Props {
                 if me.filling.get() {
                     return;
                 }
+                if me.aspect.is_active() {
+                    me.keep_proportions();
+                }
                 let (weak, send) = (Rc::downgrade(&me), send.clone());
                 me.hold("geometry", move || {
                     if let Some(me) = weak.upgrade() {
@@ -678,6 +794,13 @@ impl Props {
                     }
                 });
             });
+        }
+        let set = style("aspect");
+        self.aspect
+            .connect_active_notify(move |row| set(row.is_active().then(|| "fixed".to_string())));
+        for (button, across) in self.flip.iter().zip([true, false]) {
+            let send = send.clone();
+            button.connect_clicked(move |_| send(Change::Flip(across)));
         }
         for (clip, copy, paste) in &self.clips {
             let (clip, send_copy, send_paste) = (*clip, send.clone(), send.clone());
@@ -706,6 +829,7 @@ impl Props {
                 }
             });
         };
+        pick(&self.font, "fontFamily", FONTS.to_vec());
         pick(&self.align, "align", ALIGN.map(|(v, _)| v).to_vec());
         pick(
             &self.valign,
@@ -747,17 +871,32 @@ impl Props {
             );
         }
         choose(
-            &self.route,
+            &self.waypoints,
             Box::new(|i| {
-                let (edge, elbow, curved) = match i {
-                    0 => (None, None, None),
-                    1 => (Some("orthogonalEdgeStyle"), None, None),
-                    2 => (Some("elbowEdgeStyle"), Some("vertical"), None),
-                    3 => (Some("elbowEdgeStyle"), None, None),
-                    4 => (None, None, Some("1")),
-                    _ => return None,
-                };
-                let pairs = [("edgeStyle", edge), ("elbow", elbow), ("curved", curved)];
+                let (_, pairs) = WAYPOINTS.get(i)?;
+                let clear = [("noEdgeStyle", None), ("libavoidRouting", None)];
+                Some(Change::EdgeStyle(owned(&[*pairs, &clear].concat())))
+            }),
+        );
+        choose(
+            &self.label_position,
+            Box::new(|i| {
+                let (_, values) = POSITIONS.get(i)?;
+                let keys = [
+                    "labelPosition",
+                    "verticalLabelPosition",
+                    "align",
+                    "verticalAlign",
+                ];
+                let pairs: Vec<_> = keys.into_iter().zip(values.map(Some)).collect();
+                Some(Change::Style(owned(&pairs)))
+            }),
+        );
+        choose(
+            &self.line_style,
+            Box::new(|i| {
+                let (rounded, curved, _) = LINE_STYLES.get(i)?;
+                let pairs = [("rounded", Some(*rounded)), ("curved", Some(*curved))];
                 Some(Change::EdgeStyle(owned(&pairs)))
             }),
         );
@@ -795,6 +934,9 @@ impl Props {
                         row.set_value(v);
                         row.set_sensitive(!pinned);
                     }
+                    self.size_was.set((r.w, r.h));
+                    self.aspect.set_active(style.get("aspect") == Some("fixed"));
+                    self.aspect.set_sensitive(!pinned);
                 }
                 for (clip, copy, paste) in &self.clips {
                     match clip {
@@ -802,14 +944,28 @@ impl Props {
                         _ => paste.set_sensitive(!geometry.is_some_and(|(_, pinned)| pinned)),
                     }
                 }
+                // A picture's fill and line are its background and border, as draw.io's panel
+                // has them (`edit::set_styles` writes them so), with no gradient.
+                let picture = style.shape() == "image";
+                let (fill_key, stroke_key) = match picture {
+                    true => ("imageBackground", "imageBorder"),
+                    false => ("fillColor", "strokeColor"),
+                };
                 // An arrow's line is drawn from the same keys as a shape's outline, so every cell
                 // shows the line's colour, width and dash; the fill only where a cell takes one,
-                // the turn for shapes, the route and the heads for arrows.
+                // the corners, the turn and the flip for shapes (an arrow's corners are its line
+                // style), the route and the heads for arrows.
                 self.fill.row.set_visible(*fills);
-                self.gradient.row.set_visible(*fills);
+                self.gradient.row.set_visible(*fills && !picture);
+                self.rounded.set_visible(*vertices);
                 self.rotation.set_visible(*vertices);
-                let arrow: [&gtk::Widget; 5] = [
-                    self.route.upcast_ref(),
+                self.flip_row.set_visible(*vertices);
+                // An arrow's label sits on its line, at no size to wrap to.
+                self.label_position.set_visible(*vertices);
+                self.wrap.set_visible(*vertices);
+                let arrow: [&gtk::Widget; 6] = [
+                    self.waypoints.upcast_ref(),
+                    self.line_style.upcast_ref(),
                     self.start.upcast_ref(),
                     self.start_size.upcast_ref(),
                     self.end.upcast_ref(),
@@ -818,9 +974,9 @@ impl Props {
                 for row in arrow {
                     row.set_visible(*edges);
                 }
-                self.fill.fill(style.color("fillColor"));
+                self.fill.fill(style.color(fill_key));
                 self.gradient.fill(style.color("gradientColor"));
-                self.stroke.fill(style.color("strokeColor"));
+                self.stroke.fill(style.color(stroke_key));
                 self.stroke_width.set_value(style.num("strokeWidth", 1.0));
                 // A pattern draw.io's menu has none of shows no row picked, as it shows none.
                 let pattern = match style.flag("dashed", false) {
@@ -840,6 +996,11 @@ impl Props {
                 self.rotation.set_value(turn);
                 self.font_size.set_value(style.num("fontSize", 12.0));
                 self.font_colour.fill(style.color("fontColor"));
+                self.label_background
+                    .fill(style.color("labelBackgroundColor"));
+                self.label_border.fill(style.color("labelBorderColor"));
+                self.wrap
+                    .set_active(style.get("whiteSpace") == Some("wrap"));
                 let bits = style.num("fontStyle", 0.0) as u32;
                 self.font_bits.set(bits);
                 self.bold.set_active(bits & 1 != 0);
@@ -849,8 +1010,19 @@ impl Props {
                     v.and_then(|v| values.iter().position(|x| *x == v))
                         .map_or(gtk::INVALID_LIST_POSITION, |i| i as u32)
                 };
+                self.font.set_selected(at(&FONTS, style.get("fontFamily")));
                 self.align
                     .set_selected(at(&ALIGN.map(|(v, _)| v), style.get("align")));
+                // As draw.io reads it: a side named with no corner is its middle.
+                let side = style.get("labelPosition").unwrap_or("center");
+                let height = style.get("verticalLabelPosition").unwrap_or("middle");
+                let placed = |height: &str| {
+                    POSITIONS
+                        .iter()
+                        .position(|(_, [s, h, ..])| *s == side && *h == height)
+                };
+                let position = placed(height).or_else(|| placed("middle")).unwrap_or(4);
+                self.label_position.set_selected(position as u32);
                 self.valign
                     .set_selected(at(&VALIGN.map(|(v, _)| v), style.get("verticalAlign")));
                 let direction = style.get("gradientDirection").unwrap_or("south");
@@ -866,15 +1038,22 @@ impl Props {
                     row.set_selected(listed(head_at(kind, style.flag(fill, true), start)));
                     size.set_value(style.num(size_key, 6.0));
                 }
-                let route = (style.get("edgeStyle"), style.get("elbow"));
-                self.route
-                    .set_selected(match (route, style.flag("curved", false)) {
-                        ((Some("orthogonalEdgeStyle"), _), _) => 1,
-                        ((Some("elbowEdgeStyle"), Some("vertical")), _) => 2,
-                        ((Some("elbowEdgeStyle"), _), _) => 3,
-                        (_, true) => 4,
-                        _ => 0,
-                    });
+                // An edge style draw.io's menu does not offer shows no row picked.
+                let curved = style.flag("curved", false);
+                let route = (style.get("edgeStyle"), style.get("elbow"), curved);
+                self.waypoints.set_selected(listed(match route {
+                    (None, ..) => Some(0),
+                    (Some("orthogonalEdgeStyle"), _, false) => Some(1),
+                    (Some("elbowEdgeStyle"), Some("vertical"), _) => Some(2),
+                    (Some("elbowEdgeStyle"), ..) => Some(3),
+                    (Some("orthogonalEdgeStyle"), _, true) => Some(4),
+                    _ => None,
+                }));
+                let corners = match (curved, style.flag("rounded", false)) {
+                    (true, _) => 2,
+                    (false, rounded) => u32::from(rounded),
+                };
+                self.line_style.set_selected(corners);
                 // A style string is one cell's: with several selected there is none to show.
                 self.raw.set_sensitive(*count == 1);
                 self.raw.set_text(if *count == 1 { raw } else { "" });
@@ -919,6 +1098,24 @@ impl Props {
         for (_, f) in held {
             f();
         }
+    }
+
+    /// Width or Height changed under Constrain Proportions: the other follows, scaled to a
+    /// hundredth as draw.io's Arrange panel scales it (Format.js 3183-3230).
+    fn keep_proportions(&self) {
+        let (w0, h0) = self.size_was.get();
+        let (w, h) = (self.width.value(), self.height.value());
+        let hundredth = |v: f64| (v * 100.0).round() / 100.0;
+        let (w, h) = match (w != w0, h != h0) {
+            (true, false) if w0 > 0.0 => (w, hundredth(h0 * w / w0)),
+            (false, true) if h0 > 0.0 => (hundredth(w0 * h / h0), h),
+            _ => (w, h),
+        };
+        self.size_was.set((w, h));
+        self.filling.set(true);
+        self.width.set_value(w);
+        self.height.set_value(h);
+        self.filling.set(false);
     }
 
     /// Show the page's layers, the topmost first, `current` marked.
@@ -1059,6 +1256,9 @@ impl DiagramTab {
                 if let [id] = ids.as_slice() {
                     self.set_geometry(id, rect);
                 }
+            }
+            Change::Flip(across) if !ids.is_empty() => {
+                self.edit(|e, page| e.flip(page, &ids, across))
             }
             Change::Copy(clip) => self.copy_property(clip),
             Change::Paste(clip) => self.paste_property(clip),

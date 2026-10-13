@@ -190,6 +190,7 @@ impl LabelEditor {
             label_zoom(px, doc_pt),
             &self.view.widget_name(),
         );
+        editor::refont(&self.view);
     }
 
     /// The Markdown typed, or `None` when it is what the editor opened with.

@@ -620,7 +620,7 @@ impl Language for External {
                 &text,
                 pos,
                 self.encoding,
-                completion.resolve_provider,
+                completion,
             ))
         })
     }

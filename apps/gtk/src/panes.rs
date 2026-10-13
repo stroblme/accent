@@ -863,6 +863,27 @@ pub fn split(pane: &Pane, new: &Pane, side: Side) {
     paned.set_end_child(Some(second));
 }
 
+/// The column that takes `pane`'s place when it is detached: its sibling, or where the sibling is
+/// split itself, the sibling's column that borders `pane`.
+pub fn heir(pane: &Pane) -> Option<gtk::Widget> {
+    let paned = pane.column.parent().and_downcast::<gtk::Paned>()?;
+    let after = paned.end_child().as_ref() == Some(pane.widget());
+    let mut heir = match after {
+        true => paned.start_child(),
+        false => paned.end_child(),
+    }?;
+    // Where `pane` comes after the sibling, the columns facing it end the sibling's splits that
+    // run the same way.
+    while let Ok(split) = heir.clone().downcast::<gtk::Paned>() {
+        let facing = after && split.orientation() == paned.orientation();
+        heir = match facing {
+            true => split.end_child(),
+            false => split.start_child(),
+        }?;
+    }
+    Some(heir)
+}
+
 /// Take `pane` out of the window, leaving its neighbour where the two of them were.
 pub fn detach(pane: &Pane) {
     let Some(paned) = pane.column.parent().and_downcast::<gtk::Paned>() else {
@@ -878,14 +899,16 @@ pub fn detach(pane: &Pane) {
     };
     // A paned that loses the child it had the keyboard in looks for the focused widget among its
     // own, and warns once per paned up the tree where it is not there (ISSUES.md): gone with a
-    // shell's tab, since GTK hands the keyboard on only at the next frame, or in `sibling` while
-    // it is between its two paneds, whose keyboard GTK would then hand to the paned it lands in.
-    // So the focus is unset while the tree changes, and a widget still in the window gets it back.
+    // shell's tab, since GTK hands the keyboard on only at the next frame, on `pane` itself, or in
+    // `sibling` while it is between its two paneds, whose keyboard GTK would then hand to the
+    // paned it lands in. So the focus is unset while the tree changes, and a widget still in the
+    // window gets it back; one that was `pane`'s went on as its last tab closed
+    // (`App::hand_on_keyboard`).
     let root = pane.column.root();
     let held = root
         .as_ref()
         .and_then(|root| root.focus())
-        .filter(|w| w.root().is_none() || w.is_ancestor(&sibling));
+        .filter(|w| w.root().is_none() || w.is_ancestor(&paned));
     if let (Some(root), Some(_)) = (&root, &held) {
         root.set_focus(gtk::Widget::NONE);
     }

@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
-use accent_api::PdfLink;
 use accent_core::pdf::{self, Ink, PdfDoc};
 use anyhow::{Result, anyhow};
 use gtk::glib;
@@ -474,7 +473,10 @@ fn render_loop(
                     let quads: Highlights = pdf::highlight_quads(&doc, &mut glyphs, &links);
                     send(view, Reply::Highlights(quads));
                 }
-                Request::Export { links, color } => {
+                Request::Export {
+                    links,
+                    color: [r, g, b],
+                } => {
                     let quads = pdf::highlight_quads(&doc, &mut glyphs, &links);
                     // What each page gains, so only those tiles are rendered again.
                     let pages: Vec<(usize, pdf::Rect)> = quads
@@ -488,7 +490,7 @@ fn render_loop(
                             Some((*page, area))
                         })
                         .collect();
-                    let highlights = as_highlights(quads, &links, color);
+                    let highlights = pdf::link_annotations(quads, &links, [r, g, b, 255]);
                     let written = doc
                         .add_highlights(&highlights)
                         .map_err(anyhow::Error::from)
@@ -512,12 +514,12 @@ fn render_loop(
                 }
                 Request::Copy {
                     links,
-                    color,
+                    color: [r, g, b],
                     dest,
                     done,
                 } => {
                     let quads = pdf::highlight_quads(&doc, &mut glyphs, &links);
-                    let highlights = as_highlights(quads, &links, color);
+                    let highlights = pdf::link_annotations(quads, &links, [r, g, b, 255]);
                     let copied = copy(&doc, &highlights, &path, &dest);
                     let _ = done.send(copied.map_err(|e| format!("{e:#}")));
                 }
@@ -569,21 +571,6 @@ fn render_loop(
         }
     }
     None
-}
-
-/// Where the note links land, as `/Highlight` annotations in `color`, each carrying the text its
-/// link quotes.
-fn as_highlights(quads: Highlights, links: &[PdfLink], color: [u8; 3]) -> Vec<pdf::Highlight> {
-    quads
-        .into_iter()
-        .flat_map(|(page, found)| found.into_iter().map(move |(quads, at)| (page, quads, at)))
-        .map(|(page, quads, at)| pdf::Highlight {
-            page,
-            quads,
-            color: [color[0], color[1], color[2], 255],
-            contents: links.get(at).and_then(|l| l.alias.clone()),
-        })
-        .collect()
 }
 
 /// The document with `highlights` in it, written to `dest`. Never onto `path`, the file this

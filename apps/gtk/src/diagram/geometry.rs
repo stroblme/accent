@@ -381,6 +381,27 @@ pub fn resize_by(r: &Rect, handle: Handle, delta: Point, grid: Option<f64>) -> R
     Rect::new(l, t, rr - l, b - t)
 }
 
+/// `out`, resized from `r` by `handle`, kept to `r`'s proportions as draw.io keeps a shape with
+/// `aspect=fixed`: a top or bottom handle, and the right-hand corners, set the height and the
+/// width follows it, any other handle the width; only the top-left corner grows up and left.
+// mxVertexHandler.union, mxVertexHandler.js 1772-1795
+pub fn keep_proportions(out: Rect, r: &Rect, handle: Handle) -> Rect {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return out;
+    }
+    let aspect = r.w / r.h;
+    let (w, h) = match handle {
+        Handle::North | Handle::NorthEast | Handle::South | Handle::SouthEast => {
+            (out.h * aspect, out.h)
+        }
+        _ => (out.w, out.w / aspect),
+    };
+    match handle {
+        Handle::NorthWest => Rect::new(out.right() - w, out.bottom() - h, w, h),
+        _ => Rect::new(out.x, out.y, w, h),
+    }
+}
+
 /// One end of a connector being drawn: the shape it attaches to, if any, where it is, and the
 /// connection point that pins it when it was dropped on one.
 pub type End = (Option<CellId>, Point, Option<Constraint>);
@@ -1146,6 +1167,23 @@ mod tests {
             |_, _| {},
         );
         assert!((free.w - 114.0).abs() < 1e-9, "{free:?}");
+    }
+
+    #[test]
+    fn a_shape_with_fixed_proportions_keeps_them_from_any_handle() {
+        let r = Rect::new(0.0, 0.0, 40.0, 20.0);
+        let resize =
+            |h, dx, dy| keep_proportions(resize_by(&r, h, Point::new(dx, dy), None), &r, h);
+        assert_eq!(
+            resize(Handle::East, 40.0, 0.0),
+            Rect::new(0.0, 0.0, 80.0, 40.0)
+        );
+        assert_eq!(
+            resize(Handle::South, 0.0, 10.0),
+            Rect::new(0.0, 0.0, 60.0, 30.0)
+        );
+        let nw = resize(Handle::NorthWest, -40.0, 0.0);
+        assert_eq!(nw, Rect::new(-40.0, -20.0, 80.0, 40.0));
     }
 
     #[test]

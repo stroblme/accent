@@ -125,6 +125,11 @@ fn renamed(key: &str, from: &str, to: &str) -> Option<String> {
     }
 }
 
+/// Whether `key` is `rel` or under it.
+fn at_or_under(key: &str, rel: &str) -> bool {
+    (key.strip_prefix(rel)).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
 impl App {
     /// Update reading locations immediately; queue note-link rewrites after remote upload ([`pages_landed`](Self::pages_landed)).
     pub(crate) fn repaged(self: &Rc<Self>, pdf: &Rc<PdfTab>, edit: PageEdit, step: u32) {
@@ -212,6 +217,22 @@ impl App {
             if !relinks.queue.is_empty() {
                 self.keep_relinks(key, &relinks);
             }
+        }
+    }
+
+    /// Drop the pending edits of a deleted document, or of every one in a deleted folder, with
+    /// what was kept of them, so a new file given the name does not move its notes for them.
+    pub(crate) fn relinks_removed(&self, rel: &str) {
+        self.relinks.borrow_mut().retain(|key, relinks| {
+            let gone = at_or_under(key, rel);
+            // A rewrite still out holds on to these: emptied, it keeps nothing more under the name.
+            if gone {
+                relinks.borrow_mut().queue.clear();
+            }
+            !gone
+        });
+        if let Some(kept) = self.relink_path(rel) {
+            let _ = std::fs::remove_dir_all(&kept).or_else(|_| std::fs::remove_file(&kept));
         }
     }
 
@@ -361,8 +382,17 @@ fn relink_message(report: &RepageReport, unsaved: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Relinks, relink_message};
+    use super::{Relinks, at_or_under, relink_message};
     use accent_api::{KeptLink, PageEdit, RepageReport};
+
+    /// A deleted file takes its own queue, and a deleted folder those of the files in it.
+    #[test]
+    fn a_removal_takes_the_queues_at_or_under_it() {
+        assert!(at_or_under("papers/a.pdf", "papers/a.pdf"));
+        assert!(at_or_under("papers/a.pdf", "papers"));
+        assert!(!at_or_under("papers/a.pdf.bak", "papers/a.pdf"));
+        assert!(!at_or_under("papers-old/a.pdf", "papers"));
+    }
 
     /// On a remote vault the notes follow an edit once an upload that started after the edit was
     /// written out has landed; one that went beside the file as `(edited)` drops what it carried,

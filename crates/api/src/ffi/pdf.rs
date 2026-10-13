@@ -220,18 +220,8 @@ impl PdfSession {
                 .into_iter()
                 .filter_map(|l| l.try_into().ok())
                 .collect();
-            let color = rgba.to_be_bytes();
-            let highlights: Vec<pdf::Highlight> =
-                pdf::highlight_quads(&s.doc, &mut s.glyphs, &links)
-                    .into_iter()
-                    .flat_map(|(page, found)| found.into_iter().map(move |q| (page, q)))
-                    .map(|(page, (quads, at))| pdf::Highlight {
-                        page,
-                        quads,
-                        color,
-                        contents: links[at].alias.clone(),
-                    })
-                    .collect();
+            let found = pdf::highlight_quads(&s.doc, &mut s.glyphs, &links);
+            let highlights = pdf::link_annotations(found, &links, rgba.to_be_bytes());
             Ok(s.doc.copy_with_highlights(&highlights)?)
         })
     }

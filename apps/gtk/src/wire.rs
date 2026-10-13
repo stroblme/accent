@@ -58,6 +58,8 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
     pane.tabs.connect_close_page(glib::clone!(
         #[weak]
         app,
+        #[weak]
+        pane,
         #[upgrade_or]
         glib::Propagation::Proceed,
         move |tabs, page| {
@@ -103,6 +105,10 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             }
             app.select_survivor(page);
             app.forget_page(page);
+            // The pane goes with its last tab.
+            if tabs.n_pages() == 1 {
+                app.hand_on_keyboard(&pane);
+            }
             glib::Propagation::Proceed
         }
     ));

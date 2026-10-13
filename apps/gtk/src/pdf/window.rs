@@ -367,6 +367,69 @@ impl App {
         });
     }
 
+    /// Upload the cached copy of every remote PDF this window has sent, or tried to, and has no
+    /// tab of now: one closed before its upload landed (the link down, the host refusing) has its
+    /// changes only here, and its notes' page links wait on them. A copy with nothing new costs
+    /// no round trip ([`Remote::push`](accent_api::remote::Remote::push)).
+    pub(crate) fn push_closed_pdfs(self: &Rc<Self>) {
+        let closed: Vec<String> = (self.relinks.borrow().keys())
+            .filter(|key| self.doc_for(key).is_none())
+            .cloned()
+            .collect();
+        for key in closed {
+            self.push_closed_pdf(key);
+        }
+    }
+
+    /// [`push_pdf`](Self::push_pdf) for a document with no tab: an `(edited)` copy has no tab to
+    /// move onto, so the toast only names it.
+    fn push_closed_pdf(self: &Rc<Self>, key: String) {
+        let Some(remote) = self.vault().and_then(|v| v.remote()).cloned() else {
+            return;
+        };
+        let carried = self.pages_carried(&key);
+        let weak_app = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let asked = key.clone();
+            let sent = crate::work::off_thread("upload", move || remote.push(&asked)).await;
+            let Some(app) = weak_app.upgrade() else {
+                return;
+            };
+            // Renamed or deleted while it was out: a renamed copy goes under its new name with
+            // the next reconnect or opening.
+            if !app.relinks.borrow().contains_key(&key) {
+                return;
+            }
+            let (what, host) = (format!("save {}", doc::file_name(&key)), app.host());
+            let why = match sent {
+                Some(Ok(accent_api::remote::Pushed::Sent)) => {
+                    return app.pages_landed(&key, carried);
+                }
+                Some(Ok(accent_api::remote::Pushed::Conflict(copy))) => {
+                    app.pages_refused(&key);
+                    let copy = doc::file_name(&copy);
+                    let why = format!("it changed on {host}; your changes are saved as {copy}");
+                    return app.cannot(&what, why);
+                }
+                Some(Ok(accent_api::remote::Pushed::Kept(at, why))) => format!(
+                    "it changed on {host} and the copy beside it would not go either ({why}); \
+                     your changes are kept at {}",
+                    at.display()
+                ),
+                // The link went again: the next reconnect sends it.
+                Some(Err(e)) if e.is_offline() => return,
+                Some(Err(e)) => e.to_string(),
+                None => "the upload stopped".to_string(),
+            };
+            let retry = Rc::downgrade(&app);
+            app.toast_with(&format!("Cannot {what}: {why}"), "Retry", move || {
+                if let Some(app) = retry.upgrade() {
+                    app.push_closed_pdf(key.clone());
+                }
+            });
+        });
+    }
+
     /// Point the tab of `pdf` at `copy`, where its changes went up and its cached copy has gone
     /// (`Pushed::Conflict`): as a rename moves a tab, and this tab alone, the original staying
     /// in the vault, the recent files and any other window as it was.

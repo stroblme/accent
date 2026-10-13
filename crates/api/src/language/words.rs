@@ -225,6 +225,7 @@ impl Words {
                     extra_edits: Vec::new(),
                     resolve: None,
                     preselect: false,
+                    commit: Vec::new(),
                 })
                 .collect(),
             incomplete,
@@ -627,6 +628,7 @@ mod tests {
             extra_edits: Vec::new(),
             resolve: None,
             preselect: false,
+            commit: Vec::new(),
         });
         let doc = Layered::new(
             Some(primary),

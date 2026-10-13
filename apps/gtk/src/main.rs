@@ -59,6 +59,7 @@ mod scrollable;
 mod session;
 mod settings;
 mod shell;
+mod shortcuts;
 mod sidebar;
 mod signature;
 mod start;
@@ -180,7 +181,7 @@ fn main() -> glib::ExitCode {
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
-        shell_keys: Cell::new(false),
+        keys: Cell::new(actions::Keys::Tab),
     });
     shell.watch_config();
     // A `[shortcuts]` key naming no action binds nothing, silently — an action that was renamed
@@ -1496,7 +1497,10 @@ impl App {
             // Here, on the main loop, in the order they were changed: a remote vault records
             // them at once and sends them on from a thread of its own, in that order
             // (`Remote::send_hello`).
-            vault.set_config(config.vault(&self.root()));
+            vault.set_config(match vault.is_remote() {
+                true => config.vault(&self.root()),
+                false => config.local_vault(&self.root()),
+            });
             vault.set_ghost(config.ghost_text);
             vault.set_words(config.word_suggestions);
         }

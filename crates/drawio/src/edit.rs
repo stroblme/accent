@@ -238,6 +238,11 @@ impl Editor {
         self.edit(page, |p, _| set_styles(p, ids, pairs))
     }
 
+    /// [`flip`] on page `page`, as one step.
+    pub fn flip(&mut self, page: usize, ids: &[CellId], horizontal: bool) -> Result<(), Error> {
+        self.edit(page, |p, _| flip(p, ids, horizontal))
+    }
+
     /// [`paste_style`] on page `page`, as one step.
     pub fn paste_style(&mut self, page: usize, ids: &[CellId], from: &Style) -> Result<(), Error> {
         self.edit(page, |p, _| paste_style(p, ids, from))
@@ -1102,19 +1107,82 @@ pub fn set_points(page: &mut Page, id: &str, points: &[Point]) -> Result<(), Err
 }
 
 /// Set or remove style keys on every cell in `ids`, including keys controlling
-/// connector routing.
+/// connector routing. A picture's fill and line colours are its `imageBackground` and
+/// `imageBorder`, the keys draw.io's Format panel writes for one.
+// Format.js 6907, 7264
 pub fn set_styles(
     page: &mut Page,
     ids: &[CellId],
     pairs: &[(&str, Option<&str>)],
 ) -> Result<(), Error> {
     for id in ids {
-        let style = &mut cell_mut(page, id)?.style;
+        let cell = cell_mut(page, id)?;
+        let picture = cell.vertex && cell.style.resolve(false).shape() == "image";
         for (key, value) in pairs {
-            style.set(key, *value);
+            let key = match (picture, *key) {
+                (true, "fillColor") => "imageBackground",
+                (true, "strokeColor") => "imageBorder",
+                (_, key) => key,
+            };
+            cell.style.set(key, *value);
         }
     }
     Ok(())
+}
+
+/// Mirror the topmost shapes of `ids` across their middles, as draw.io's Flip does: each takes
+/// `flipH` (or `flipV`) as the first of them did not have it, and `legacyAnchorPoints=0` so its
+/// connection points follow; what is directly inside one is mirrored within it, a shape by its
+/// box and an arrow by its waypoints and loose ends. An arrow selected on its own stays, draw.io
+/// mirroring it across the middle of its route, which the model does not hold.
+// Graph.flipCells, flipChildren, flipEdgePoints: Graph.js 28686-28775, 29237-29283
+pub fn flip(page: &mut Page, ids: &[CellId], horizontal: bool) -> Result<(), Error> {
+    let shapes: Vec<CellId> = topmost(page, ids)
+        .into_iter()
+        .filter(|id| page.cell(id).is_some_and(|c| c.vertex))
+        .collect();
+    let key = if horizontal { "flipH" } else { "flipV" };
+    let Some(first) = shapes.first().and_then(|id| page.cell(id)) else {
+        return Ok(());
+    };
+    let on = !first.style.resolve(false).flag(key, false);
+    for id in &shapes {
+        let geometry = page.cell(id).and_then(|c| c.geometry.as_ref());
+        if let Some(middle) = geometry.map(|g| if horizontal { g.width } else { g.height } / 2.0) {
+            let inside: Vec<CellId> = page.children(id).map(|c| c.id.clone()).collect();
+            for child in &inside {
+                mirror(cell_mut(page, child)?, horizontal, middle);
+            }
+        }
+        let style = &mut cell_mut(page, id)?.style;
+        style.set(key, on.then_some("1"));
+        style.set("legacyAnchorPoints", Some("0"));
+    }
+    Ok(())
+}
+
+/// Mirror `cell`'s place in its parent across `middle`: a shape's box, an arrow's waypoints and
+/// loose ends. A box placed by fractions of its parent (`relative`) is left where it is.
+fn mirror(cell: &mut Cell, horizontal: bool, middle: f64) {
+    let edge = cell.edge;
+    let Some(g) = cell.geometry.as_mut() else {
+        return;
+    };
+    let across = |v: &mut f64, size: f64| *v = 2.0 * middle - *v - size;
+    if edge {
+        let points = g.points.iter_mut().flatten();
+        for p in points
+            .chain(g.source_point.as_mut())
+            .chain(g.target_point.as_mut())
+        {
+            across(if horizontal { &mut p.x } else { &mut p.y }, 0.0);
+        }
+    } else if !g.relative {
+        match horizontal {
+            true => across(&mut g.x, g.width),
+            false => across(&mut g.y, g.height),
+        }
+    }
 }
 
 /// Apply draw.io's Paste Style while preserving shapes (`Graph.pasteCellStyles`,

@@ -73,6 +73,9 @@ impl DiffTab {
             editor::set_margins(view, zoom);
         }
         editor::install_font(&self.font, self.flavour, font, zoom, &self.name);
+        for view in &self.views {
+            editor::refont(view);
+        }
         // Heading markers hang in the left margin and are measured in the font, so they are
         // measured again once the font has reached the views, as `Tab::rehang` does.
         let compare = Rc::downgrade(&self.compare);

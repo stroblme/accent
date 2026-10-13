@@ -144,7 +144,9 @@ use tags::bench_tags;
 ///   selection drag), `seam:<rel>` (hidden-line layout), `listing:<rel>`
 ///   (LaTeX listing colours). Every mode requires a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_PANES=<relA>,<relB>`: tab moves, a reveal across panes and divider
-///   stepping; `shells:<rel>`: two shells in split panes ending, one with the keyboard.
+///   stepping; `shells:<rel>`: two shells in split panes ending, one with the keyboard;
+///   `bar:<a>,<b>,<c>`: a closed pane's keyboard, on its find bar or in its last tab;
+///   `chords:<rel>`: the editing chords in the note, the tree and the find bar (XTEST).
 /// - `ACCENT_BENCH_COMPARE=<rel_path>`: disk comparison alignment/focus.
 ///   Modes: `pads:<rel_path>` (paragraph padding), `lines:<rel_path>`
 ///   (line staging), `row:<repo_rel>`, `row:stale:<repo_rel>`,
@@ -180,7 +182,8 @@ use tags::bench_tags;
 ///   `stale:<rel_path>` (remote conflicts), `failed:<rel_path>` (read-only
 ///   host/retry), `dropped:<rel_path>` (disconnect/reconnect and note relinking),
 ///   `renaming:<rel_path>` (rename during upload; remote PDF of several MB),
-///   `closed:<rel_path>` (close during save), `pages:<rel_path>` (page edits,
+///   `closed:<rel_path>` (close during save; remote: while refused, then while
+///   the link is down), `pages:<rel_path>` (page edits,
 ///   undo/redo and note links; generated `Attachments/pages.pdf`),
 ///   `insert:<rel_path>,<source>` (drop insertion; put scratch copies of
 ///   generated `Attachments/pages.pdf` and `Attachments/comments.pdf` at root),

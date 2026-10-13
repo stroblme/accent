@@ -1046,6 +1046,7 @@ fn empty_item() -> Completion {
         extra_edits: Vec::new(),
         resolve: None,
         preselect: false,
+        commit: Vec::new(),
     }
 }
 

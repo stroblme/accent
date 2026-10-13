@@ -485,6 +485,24 @@ impl App {
         self.sync_active();
     }
 
+    /// `pane`'s last tab is closing: a keyboard on the pane's own bar or in that tab goes to the
+    /// tab in front of the pane that takes its place, which its focus makes the active one (user
+    /// decision 2026-10-13). Before the tab goes, while all of it is in the window: taken out with
+    /// the keyboard in it, GTK would hand the keyboard to whatever comes first at the next frame,
+    /// which can come before [`Self::close_pane`].
+    pub(crate) fn hand_on_keyboard(&self, pane: &Pane) {
+        if !self.focused().is_some_and(|w| w.is_ancestor(pane.widget())) {
+            return;
+        }
+        let heir = panes::heir(pane).and_then(|column| {
+            let panes = self.panes.borrow();
+            panes.iter().find(|p| p.widget() == &column).cloned()
+        });
+        if let Some(widget) = heir.and_then(|heir| self.key_target(&heir)) {
+            widget.grab_focus();
+        }
+    }
+
     /// Activate `pane` for future opens and return whether it changed.
     /// Callers sync title, references and preview even if only its selected page changed.
     pub fn set_active_pane(&self, pane: &Rc<Pane>) -> bool {
@@ -508,17 +526,9 @@ impl App {
     /// Focus the document shown in `pane` after moving a tab into it.
     ///
     /// Otherwise libadwaita can leave focus on the source pane's survivor or drop it entirely.
-    /// Focus the document widget directly: container focus may select a banner or non-input
-    /// scroller. Images and status pages use their page; blob comparisons use the right column.
     pub(crate) fn focus_document(&self, pane: &Pane) {
-        let widget: gtk::Widget = match self.doc_of(pane) {
-            Some(Doc::Text(tab)) => tab.view.clone().upcast(),
-            Some(Doc::Terminal(term)) => term.view.clone().upcast(),
-            Some(Doc::Pdf(pdf)) => pdf.key_target(),
-            Some(Doc::Diagram(d)) => d.key_target(),
-            Some(Doc::Diff(d)) => d.key_target(),
-            Some(doc @ (Doc::Image(_) | Doc::Status(_))) => doc.page().child(),
-            None => return,
+        let Some(widget) = self.key_target(pane) else {
+            return;
         };
         // From an idle, as a new terminal's own focus is (see [`Self::open_terminal_at`]): the
         // page has only just been attached, and a widget still mid-reparenting is not one GTK
@@ -528,6 +538,20 @@ impl App {
         glib::idle_add_local_once(move || {
             widget.grab_focus();
         });
+    }
+
+    /// The widget of the document in front of `pane` that takes the keyboard: the document itself,
+    /// as container focus may select a banner or a scroller that takes no input. Images and status
+    /// pages use their page; blob comparisons use the right column.
+    fn key_target(&self, pane: &Pane) -> Option<gtk::Widget> {
+        Some(match self.doc_of(pane)? {
+            Doc::Text(tab) => tab.view.clone().upcast(),
+            Doc::Terminal(term) => term.view.clone().upcast(),
+            Doc::Pdf(pdf) => pdf.key_target(),
+            Doc::Diagram(d) => d.key_target(),
+            Doc::Diff(d) => d.key_target(),
+            doc @ (Doc::Image(_) | Doc::Status(_)) => doc.page().child(),
+        })
     }
 
     /// What changes when a pane appears or goes: whether the tab bars may hide themselves, which

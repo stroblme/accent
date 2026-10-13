@@ -14,7 +14,7 @@ mod tests;
 mod text;
 
 pub use crate::page_edit::PageEdit;
-pub use annot::{LinkHighlights, highlight_quads};
+pub use annot::{LinkHighlights, highlight_quads, link_annotations};
 pub use doc::{A4, PdfDoc, blank_pdf};
 pub use ink::{Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, swept, thin};
 pub use ledger::{Ink, NamedInk, Walked, fresh_id};

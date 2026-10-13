@@ -6,9 +6,9 @@ hierarchy from that file, which `apps/cli/tests/mcp.rs` holds `explore`'s `preci
 With `--inline TEXT` it suggests TEXT as ghost text wherever it is asked, standing in for merl-rt
 in `make screenshots`.
 
-`.` triggers it and it can resolve: `alpha` is a snippet with a stop, `beta` a plain word, and
-`gamma` resolves to its documentation and an `#include` at the top of the file, which is what a
-server keeps back until a row is accepted. A completion is answered after `DELAY` seconds, the
+`.` triggers it, `;` commits a row (its `allCommitCharacters`), and it can resolve: `alpha` is a
+snippet with a stop, `beta` a plain word, and `gamma` resolves to its documentation and an
+`#include` at the top of the file, which is what a server keeps back until a row is accepted. A completion is answered after `DELAY` seconds, the
 messages that arrive meanwhile still read, so a request the editor has typed past can be
 cancelled; each cancel is said on stderr, which accent logs under `accent_lsp::stderr`.
 """
@@ -80,7 +80,8 @@ def answer(message):
         ROOT[0] = unquote(message["params"]["rootUri"][len("file://"):])
         send({"id": id, "result": {"capabilities": {
             "textDocumentSync": 1,
-            "completionProvider": {"triggerCharacters": ["."], "resolveProvider": True},
+            "completionProvider": {"triggerCharacters": ["."], "resolveProvider": True,
+                                   "allCommitCharacters": [";"]},
             "callHierarchyProvider": CALLS is not None,
             "inlineCompletionProvider": INLINE is not None}}})
     elif method == "textDocument/prepareCallHierarchy" and LOADING[0] > 0:

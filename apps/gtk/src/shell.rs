@@ -22,8 +22,9 @@ pub struct Shell {
     /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
     /// somewhere to put it. See [`Landing`].
     pub landing: RefCell<Option<Landing>>,
-    /// Application-wide shell-focus shortcut state; one flag because all windows share the accelerator table.
-    pub shell_keys: Cell<bool>,
+    /// Where the keyboard was when the shared accelerator table was last built
+    /// (`Shell::apply_accels`); one for all windows, as the table is.
+    pub keys: Cell<crate::actions::Keys>,
 }
 
 /// Window identity: vault key, named `terminal://<name>` session or unkeyed [`Loose`] kind.
@@ -134,6 +135,7 @@ impl Changed {
             font: old.editor_font != new.editor_font,
             // Every vault's entries, not this window's: a `hello` too many is harmless.
             vault: old.vaults != new.vaults
+                || old.lsp != new.lsp
                 || old.ghost_text != new.ghost_text
                 || old.word_suggestions != new.word_suggestions,
             // What a focused shell is left is part of the table.

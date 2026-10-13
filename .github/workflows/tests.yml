@@ -40,7 +40,7 @@ jobs:
   gtk:
     name: desktop app
     runs-on: ubuntu-latest
-    # Ubuntu 24.04 ships libadwaita 1.5, older than the v1_7 feature the app is built against.
+    # Ubuntu 24.04 ships libadwaita 1.5, older than the v1_8 feature the app is built against.
     # Fedora 44 packages the whole current GNOME stack, so it is the cheapest runner that links.
     container: fedora:44
     steps:

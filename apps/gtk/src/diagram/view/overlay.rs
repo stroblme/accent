@@ -248,10 +248,12 @@ impl DiagramView {
                 rect,
                 rotation,
                 guides,
+                fixed,
                 ..
             } => {
                 let delta = Point::new(pointer.x - from.x, pointer.y - from.y);
-                let (_, lines) = self.resize_to(rect, *rotation, *handle, delta, guides, free);
+                let (_, lines) =
+                    self.resize_to(rect, *rotation, *handle, delta, guides, free, *fixed);
                 guide_lines(snapshot, frame, &lines, &accent);
             }
             Drag::Rotate { .. }

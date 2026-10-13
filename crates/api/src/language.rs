@@ -154,6 +154,10 @@ pub struct Completion {
     /// `preselect` is ignored to preserve Return as a newline in code.
     #[serde(default)]
     pub preselect: bool,
+    /// Characters that, typed with this row selected, accept it and are then typed after it: a
+    /// server's `commitCharacters`, or its `allCommitCharacters`. No other source has any.
+    #[serde(default)]
+    pub commit: Vec<char>,
 }
 
 /// Completion results. When `incomplete` is true, query again as the prefix grows;

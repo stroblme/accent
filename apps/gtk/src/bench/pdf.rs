@@ -1046,6 +1046,25 @@ fn chmod_on_host(
         .is_ok_and(|s| s.success())
 }
 
+/// End the window's SSH master and hold the link down, with no automatic reconnect: `true` when
+/// the master ended.
+async fn link_down(app: &Rc<App>, remote: &accent_api::remote::Remote) -> bool {
+    let argv = accent_api::ssh::exit(remote.url(), remote.control_path());
+    let ended = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+        .is_ok_and(|s| s.success());
+    // The banner is up once the window has heard; that is when its countdown can go.
+    for _ in 0..50 {
+        if app.connection.is_revealed() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    app.connection_refused("the drill holds the link down");
+    ended
+}
+
 /// Drop the SSH master immediately after adding a page and suppress automatic reconnect. Saves
 /// and link rewrites land offline without extra errors beyond the link banner. Reconnect Now
 /// must upload and rewrite without another stroke. Use at least three pages; links `1,2,3,2,1`
@@ -1077,19 +1096,7 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
             links_read(&app, &note, &said)
         );
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
-        let argv = accent_api::ssh::exit(remote.url(), remote.control_path());
-        let ended = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .status()
-            .is_ok_and(|s| s.success());
-        // The banner is up once the window has heard; that is when its countdown can go.
-        for _ in 0..50 {
-            if app.connection.is_revealed() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
-        app.connection_refused("the drill holds the link down");
+        let ended = link_down(&app, &remote).await;
         written(&app).await;
         println!(
             "bench pdf dropped down ended={ended} offline={} pages={} unsent={} said={} {:?}",
@@ -1119,18 +1126,7 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
         );
 
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
-        let argv = accent_api::ssh::exit(remote.url(), remote.control_path());
-        let ended = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .status()
-            .is_ok_and(|s| s.success());
-        for _ in 0..50 {
-            if app.connection.is_revealed() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
-        app.connection_refused("the drill holds the link down");
+        let ended = link_down(&app, &remote).await;
         written(&app).await;
         let page = pdf.page.clone();
         drop(pdf);
@@ -1172,7 +1168,9 @@ pub(super) fn bench_pdf_dropped(app: &Rc<App>, rel: &str) {
 /// write the close flushes lands after the tab has gone. It must still reach the vault, which on a
 /// remote vault is an upload nobody is left to ask for. On a remote vault the same again with
 /// the host's folder read-only, so the page cannot go: it must go up when the document is next
-/// opened, the host taking writes again by then.
+/// opened, the host taking writes again by then. Then once more with the link down: the page
+/// and the link rewrite waiting on it (`kept`) must go once the link is back, the tab still
+/// closed.
 pub(super) fn bench_pdf_closed(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -1229,9 +1227,37 @@ pub(super) fn bench_pdf_closed(app: &Rc<App>, rel: &str) {
         written(&app).await;
         println!(
             "bench pdf closed reopened pages={:?} in_vault {} said={}",
-            pdf.map(|pdf| pdf.page_count()),
+            pdf.as_ref().map(|pdf| pdf.page_count()),
             vault_pages(&app, &key),
             app.toasted.get()
+        );
+        let Some(pdf) = pdf else {
+            return bench_quit(&app);
+        };
+        let page = pdf.page.clone();
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-after", None);
+        let ended = link_down(&app, &remote).await;
+        drop(pdf);
+        app.close_page(&page);
+        written(&app).await;
+        let kept = accent_api::ssh::relink_path(remote.url(), &key).unwrap_or_default();
+        println!(
+            "bench pdf closed closed_down ended={ended} offline={} open={} kept={}",
+            app.offline(),
+            app.doc_for(&key).is_some(),
+            kept.exists()
+        );
+        app.reconnect_now();
+        online(&app).await;
+        written(&app).await;
+        println!(
+            "bench pdf closed closed_back offline={} open={} in_vault {} kept={} said={} {:?}",
+            app.offline(),
+            app.doc_for(&key).is_some(),
+            vault_pages(&app, &key),
+            kept.exists(),
+            app.toasted.get(),
+            bench_said(&app)
         );
         bench_quit(&app);
     });

@@ -1,6 +1,6 @@
 //! Tab-hosted comparisons and merges, with read-only companion columns.
 
-use super::{Alert, Flavour, Tab, build, line_numbers, sync_scheme};
+use super::{Alert, Flavour, Tab, build, line_numbers, refont, sync_scheme};
 use crate::{diff, fold, highlight, wrap};
 use adw::prelude::*;
 use gtk::glib;
@@ -94,6 +94,7 @@ pub fn companion(
     view.set_editable(false);
     view.set_cursor_visible(false);
     view.set_widget_name(name);
+    refont(&view);
     // A comparison is about lines, so the numbers are always on here.
     line_numbers(&view, &buffer).set_visible(true);
     style_companion(flavour, &buffer, &view);

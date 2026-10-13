@@ -624,16 +624,13 @@ fn declaration(decls: &[CodeSymbol], at: &mut usize, lines: &[&str]) -> Symbol {
     }
 }
 
-/// Find `name` as a word in `first..last` lines, falling back to the start of `first`.
-/// Declaration jumps should target names rather than attributes.
+/// Find `name` as a word in `first..last` lines (`accent_core::code::name_at`, a line at a time),
+/// falling back to the start of `first`. Declaration jumps should target names rather than
+/// attributes.
 pub fn name_at(lines: &[&str], first: u32, last: u32, name: &str) -> Pos {
-    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
     let span = lines.iter().enumerate().skip(first as usize);
     for (line, text) in span.take(last.saturating_sub(first) as usize + 1) {
-        let found = text.match_indices(name).find(|(i, _)| {
-            !word(text[..*i].chars().next_back()) && !word(text[i + name.len()..].chars().next())
-        });
-        if let Some((i, _)) = found {
+        if let Some(i) = accent_core::code::name_at(text, 0..text.len(), name) {
             return Pos {
                 line: line as u32,
                 character: text[..i].chars().count() as u32,

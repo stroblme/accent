@@ -466,13 +466,7 @@ impl<'a> Builder<'a> {
                 locked,
                 path: outline,
                 fill: None,
-                stroke: Some(Stroke {
-                    color: border,
-                    width: style.num("strokeWidth", 1.0),
-                    dash: None,
-                    cap: Cap::Butt,
-                    join: Join::default(),
-                }),
+                stroke: Some(stroke_in(style, border, style.flag("dashed", false))),
                 opacity,
                 shadow: false,
             });

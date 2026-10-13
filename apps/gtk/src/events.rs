@@ -287,6 +287,7 @@ impl App {
             Event::FileChanged(rel) => self.changed_on_disk(&rel),
             Event::FileRemoved(rel) => {
                 self.reshow_preview_image(&rel);
+                self.relinks_removed(&rel);
                 // A conflict copy is never a tab of its own; what its removal changes is the
                 // banner on the file it was a copy of.
                 if let Some(original) = accent_api::conflict_original_rel(&rel) {
@@ -375,12 +376,13 @@ impl App {
                 self.restore_session();
                 self.sync_active();
                 // What was drawn while the link was down reached only the file here, and the
-                // notes' page links into it were not rewritten.
+                // notes' page links into it were not rewritten: in a tab, or in one closed since.
                 for pdf in self.docs().iter().filter_map(Doc::pdf) {
                     if pdf.unsent() {
                         self.push_pdf(pdf);
                     }
                 }
+                self.push_closed_pdfs();
                 self.relink_all();
                 // A remote shell the drop ended kept its tab, and starts again in it; one whose tab
                 // was closed meanwhile is ended now.

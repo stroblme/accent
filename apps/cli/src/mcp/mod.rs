@@ -42,7 +42,7 @@ const INSTRUCTIONS: &str = "The notes of one accent vault: markdown files linked
 /// Serve the vault at `root`, its index at `db`, until stdin closes; `read_only` leaves out the
 /// tools that write.
 pub fn run(root: &Path, db: &Path, read_only: bool) -> Result<()> {
-    let cfg = Config::load().vault(root);
+    let cfg = Config::load().local_vault(root);
     let (vault, events) = Vault::open_at(root, db, cfg)?;
     let ready = Arc::new(Ready::default());
     let drain = ready.clone();

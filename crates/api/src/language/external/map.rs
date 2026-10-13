@@ -7,9 +7,9 @@ use serde_json::Value;
 
 use accent_lsp::from_uri;
 use accent_lsp::types::{
-    self, CompletionItem, CompletionResponse, CompletionTextEdit, DocumentSymbolResponse,
-    Documentation, GotoDefinitionResponse, HoverContents, InlineCompletionResponse, MarkedString,
-    ParameterLabel, ServerCapabilities, SignatureHelp,
+    self, CompletionItem, CompletionOptions, CompletionResponse, CompletionTextEdit,
+    DocumentSymbolResponse, Documentation, GotoDefinitionResponse, HoverContents,
+    InlineCompletionResponse, MarkedString, ParameterLabel, ServerCapabilities, SignatureHelp,
 };
 
 use crate::language::{
@@ -153,13 +153,19 @@ pub(super) fn edits_of(
         .collect()
 }
 
-/// One item, keeping the server's own object when it can still be resolved for more.
+/// The characters of a list the protocol gives as strings of one.
+fn chars_of(list: &[String]) -> Vec<char> {
+    list.iter().filter_map(|c| c.chars().next()).collect()
+}
+
+/// One item, keeping the server's own object when it can still be resolved for more. `options`
+/// is what the server said it does for completion.
 fn completion_of(
     raw: &Value,
     text: &str,
     pos: Pos,
     enc: Encoding,
-    resolvable: bool,
+    options: &CompletionOptions,
 ) -> Option<Completion> {
     let item: CompletionItem = serde_json::from_value(raw.clone()).ok()?;
     let (insert, replace) = match item.text_edit {
@@ -187,8 +193,14 @@ fn completion_of(
         is_snippet: item.insert_text_format == Some(2),
         replace,
         extra_edits: edits_of(item.additional_text_edits, text, enc),
-        resolve: resolvable.then(|| raw.clone()),
+        resolve: options.resolve_provider.then(|| raw.clone()),
         preselect: false,
+        // An item's own list wins over the server's default.
+        commit: chars_of(
+            item.commit_characters
+                .as_deref()
+                .unwrap_or(&options.all_commit_characters),
+        ),
     })
 }
 
@@ -197,7 +209,7 @@ pub(super) fn completions_of(
     text: &str,
     pos: Pos,
     enc: Encoding,
-    resolvable: bool,
+    options: &CompletionOptions,
 ) -> Completions {
     let (mut items, incomplete) = match answer {
         Some(CompletionResponse::List(list)) => (list.items, list.is_incomplete),
@@ -208,7 +220,7 @@ pub(super) fn completions_of(
     Completions {
         items: items
             .iter()
-            .filter_map(|raw| completion_of(raw, text, pos, enc, resolvable))
+            .filter_map(|raw| completion_of(raw, text, pos, enc, options))
             .collect(),
         incomplete,
         pages: None,
@@ -512,7 +524,11 @@ mod tests {
              "textEdit": {"newText": "foo", "insert": range(0, 8, 0, 10), "replace": range(0, 8, 0, 12)}},
             {"label": "fourth", "sortText": "c"},
         ]);
-        let list = completions_of(parse(items), text, pos, Encoding::Utf16, true);
+        let resolvable = CompletionOptions {
+            resolve_provider: true,
+            ..CompletionOptions::default()
+        };
+        let list = completions_of(parse(items), text, pos, Encoding::Utf16, &resolvable);
         assert!(!list.incomplete, "an array is the whole answer");
         let out = list.items;
 
@@ -532,6 +548,29 @@ mod tests {
         assert_eq!(out[2].replace.start.character, 8);
         assert_eq!(out[2].replace.end, pos);
         assert!(out[2].resolve.is_some(), "kept for completionItem/resolve");
+    }
+
+    /// An item's own list wins, an empty one included, and the server's default covers the rest.
+    #[test]
+    fn commit_characters_are_the_items_own_or_the_servers_default() {
+        let items = json!([
+            {"label": "a", "commitCharacters": [";"]},
+            {"label": "b", "commitCharacters": []},
+            {"label": "c"},
+        ]);
+        let pos = Pos {
+            line: 0,
+            character: 0,
+        };
+        let options = CompletionOptions {
+            all_commit_characters: vec![".".to_string(), "(".to_string()],
+            ..CompletionOptions::default()
+        };
+        let out = completions_of(parse(items.clone()), "", pos, Encoding::Utf8, &options).items;
+        let commit: Vec<&[char]> = out.iter().map(|c| c.commit.as_slice()).collect();
+        assert_eq!(commit, [&[';'][..], &[], &['.', '(']]);
+        let none = completions_of(parse(items), "", pos, Encoding::Utf8, &Default::default());
+        assert!(none.items[2].commit.is_empty());
     }
 
     #[test]
@@ -593,7 +632,7 @@ mod tests {
                 character: 3,
             },
             Encoding::Utf8,
-            false,
+            &CompletionOptions::default(),
         );
         assert!(out.incomplete);
         assert_eq!(out.items[0].label, "cite");
@@ -613,7 +652,7 @@ mod tests {
                 character: 10,
             },
             Encoding::Utf16,
-            false,
+            &CompletionOptions::default(),
         ).items;
         assert_eq!(out[0].replace.start.character, 8);
         assert!(out[0].resolve.is_none(), "the server cannot resolve");

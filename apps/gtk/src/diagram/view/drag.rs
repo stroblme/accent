@@ -46,6 +46,8 @@ pub(super) enum Drag {
         rotation: f64,
         /// The shapes its size and sides snap to.
         guides: Vec<Neighbour>,
+        /// It keeps its proportions (`aspect=fixed`).
+        fixed: bool,
     },
     /// Dragging the source end (else the target end) of edge `id`, whose other end is at
     /// `other`.
@@ -145,6 +147,9 @@ impl DiagramView {
                                 true => sheet.size_guides(&id, &self.guide_area()),
                                 false => Vec::new(),
                             },
+                            fixed: sheet.page.cell(&id).is_some_and(|c| {
+                                c.style.resolve(false).get("aspect") == Some("fixed")
+                            }),
                             id,
                         },
                     });
@@ -302,7 +307,9 @@ impl DiagramView {
 
     /// `rect`, turned `rotation`, resized by dragging `handle` by `delta`, and the lines that
     /// show the guides it snapped to: on the grid and the size guides unless `free` (Alt, as in
-    /// draw.io, Graph.js 27881) or the page has its guides off.
+    /// draw.io, Graph.js 27881) or the page has its guides off. A shape `fixed` to its
+    /// proportions keeps them, and so snaps to no size guide.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn resize_to(
         &self,
         rect: &Rect,
@@ -311,9 +318,11 @@ impl DiagramView {
         delta: Point,
         guides: &[Neighbour],
         free: bool,
+        fixed: bool,
     ) -> (Rect, Vec<guide::Line>) {
         let grid = self.grid(free);
-        let guided = !free && !guides.is_empty() && self.sheet().is_some_and(|s| s.guides);
+        let guided =
+            !free && !fixed && !guides.is_empty() && self.sheet().is_some_and(|s| s.guides);
         let px = 1.0 / self.scale();
         let mut snapped = None;
         let resized = geometry::resize_rotated(rect, rotation, handle, delta, grid, |r, bounds| {
@@ -322,6 +331,9 @@ impl DiagramView {
                 snapped = Some(guide::snap_resize(
                     r, bounds, sides, rotation, guides, grid, px,
                 ));
+            }
+            if fixed {
+                *r = geometry::keep_proportions(*r, bounds, handle);
             }
         });
         let lines = snapped.map_or(Vec::new(), |s| s.lines(&resized, rotation));
@@ -365,13 +377,14 @@ impl DiagramView {
                 rect,
                 rotation,
                 guides,
+                fixed,
             } => {
                 let delta = Point::new(p.x - from.x, p.y - from.y);
+                let (rect, _) =
+                    self.resize_to(rect, *rotation, *handle, delta, guides, free, *fixed);
                 Some(Edit::Resize {
                     id: id.clone(),
-                    rect: self
-                        .resize_to(rect, *rotation, *handle, delta, guides, free)
-                        .0,
+                    rect,
                 })
             }
             Drag::Rotate { id, rect } => Some(Edit::Rotate {

@@ -674,18 +674,26 @@ fn props(app: &Rc<App>, rel: &str) {
         // made on when the selection changes before it settles.
         let looks = [
             "Fill",
+            "Gradient",
             "Rounded",
             "Shadow",
             "Opacity",
             "Rotation",
+            "Flip",
             "Line Colour",
             "Line Width",
             "Pattern",
-            "Route",
+            "Waypoints",
+            "Line Style",
             "Start",
             "Start Size",
             "End",
             "End Size",
+            "Font",
+            "Position",
+            "Word Wrap",
+            "Label Background",
+            "Label Border",
         ];
         let showing = || {
             looks
@@ -731,7 +739,13 @@ fn props(app: &Rc<App>, rel: &str) {
         choose("Pattern", "Dotted (2)");
         choose("Start", "Circle");
         choose("End", "Diamond Outline");
-        choose("Route", "Vertical Elbow");
+        choose("Waypoints", "Vertical Elbow");
+        println!("bench diagram props line elbow={:?}", style("e"));
+        // draw.io's Curved waypoints are orthogonal and curved; its line style then takes the
+        // curve back for rounded corners.
+        choose("Waypoints", "Curved");
+        println!("bench diagram props line curved={:?}", style("e"));
+        choose("Line Style", "Rounded");
         if let Some(size) = row("End Size").and_downcast::<adw::SpinRow>() {
             size.set_value(10.0);
         }
@@ -740,7 +754,7 @@ fn props(app: &Rc<App>, rel: &str) {
             size.set_value(9.0);
         }
         tab.select(vec!["e".to_string()]);
-        let picked = ["Pattern", "Start", "End", "Route"].map(|t| {
+        let picked = ["Pattern", "Start", "End", "Waypoints", "Line Style"].map(|t| {
             let item = row(t).and_downcast::<adw::ComboRow>()?.selected_item();
             Some(
                 item.and_downcast::<gtk::StringObject>()?
@@ -749,6 +763,63 @@ fn props(app: &Rc<App>, rel: &str) {
             )
         });
         println!("bench diagram props line picked={picked:?}");
+        // draw.io's fonts, label positions and word wrap on a shape; a label's colours.
+        let switch_of = |title: &str| {
+            find_widget(&row(title)?, &|w| w.is::<gtk::Switch>()).and_downcast::<gtk::Switch>()
+        };
+        tab.select(vec!["a".to_string()]);
+        choose("Font", "Georgia");
+        choose("Position", "Top");
+        if let Some(wrap) = row("Word Wrap").and_downcast::<adw::SwitchRow>() {
+            wrap.set_active(false);
+        }
+        if let Some(border) = switch_of("Label Border") {
+            border.set_active(true);
+        }
+        tab.select(vec!["e".to_string()]);
+        if let Some(background) = switch_of("Label Background") {
+            background.set_active(false);
+        }
+        println!(
+            "bench diagram props text a={:?} e={:?}",
+            style("a"),
+            style("e")
+        );
+
+        // draw.io's Flip, and Constrain Proportions scaling the height with the width.
+        tab.select(vec!["a".to_string()]);
+        click("Flip Horizontally");
+        if let Some(aspect) = row("Constrain Proportions").and_downcast::<adw::SwitchRow>() {
+            aspect.set_active(true);
+        }
+        if let Some(width) = spin("Width") {
+            width.set_value(300.0);
+        }
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!(
+            "bench diagram props arrange frame={:?} rows={:?} a={:?}",
+            tab.frame_of("a"),
+            rows(),
+            style("a")
+        );
+        // A picture's fill and line are its background and border.
+        let picture = "shape=image;image=data:image/png,x;";
+        tab.edit(|e, page| {
+            let rect = accent_drawio::Rect::new(600.0, 300.0, 40.0, 40.0);
+            e.add_vertex(page, None, rect, picture, "").map(drop)
+        });
+        let id = tab.file().pages[0].cells.last().map(|c| c.id.clone());
+        tab.select(id.iter().cloned().collect());
+        for title in ["Fill", "Line Colour"] {
+            if let Some(on) = switch_of(title) {
+                on.set_active(true);
+            }
+        }
+        println!(
+            "bench diagram props image shown={:?} style={:?}",
+            showing(),
+            id.and_then(|id| style(&id))
+        );
         // Saved a second after the last edit.
         glib::timeout_future(Duration::from_millis(1600)).await;
         let saved = std::fs::read(&path).ok().and_then(|xml| {

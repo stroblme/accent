@@ -553,3 +553,41 @@ fn failed_edits_leave_no_undo_step() {
     assert!(matches!(r, Err(Error::Refused(_))), "no layer to go in");
     assert!(!e.can_undo() && !e.dirty());
 }
+
+#[test]
+fn a_flip_mirrors_what_a_shape_holds_and_turns_its_flip_on_and_off() {
+    let group = Cell::new_vertex("g", "1", Rect::new(0.0, 0.0, 100.0, 50.0), "", "");
+    let inner = Cell::new_vertex("c", "g", Rect::new(10.0, 5.0, 20.0, 10.0), "", "");
+    let mut e = open([group, inner]);
+    let style = |e: &Editor, id| e.file.pages[0].cell(id).unwrap().style.to_string();
+    e.flip(0, &list(&["g", "c"]), true).unwrap();
+    assert_eq!(geometry(&e, "c").x, 70.0, "mirrored within g");
+    assert_eq!(style(&e, "g"), "flipH=1;legacyAnchorPoints=0;");
+    assert_eq!(
+        style(&e, "c"),
+        "",
+        "inside the shape flipped, not flipped itself"
+    );
+    e.flip(0, &list(&["g"]), true).unwrap();
+    assert_eq!(geometry(&e, "c").x, 10.0);
+    assert_eq!(style(&e, "g"), "legacyAnchorPoints=0;");
+}
+
+#[test]
+fn a_pictures_fill_and_line_are_its_background_and_border() {
+    let picture = "shape=image;image=x.png;";
+    let p = Cell::new_vertex("p", "1", Rect::new(0.0, 0.0, 10.0, 10.0), picture, "");
+    let r = Cell::new_vertex("r", "1", Rect::new(20.0, 0.0, 10.0, 10.0), "", "");
+    let mut e = open([p, r]);
+    let look = [
+        ("fillColor", Some("#ff0000")),
+        ("strokeColor", Some("#00ff00")),
+    ];
+    e.set_styles(0, &list(&["p", "r"]), &look).unwrap();
+    let style = |id| e.file.pages[0].cell(id).unwrap().style.to_string();
+    assert_eq!(
+        style("p"),
+        format!("{picture}imageBackground=#ff0000;imageBorder=#00ff00;")
+    );
+    assert_eq!(style("r"), "fillColor=#ff0000;strokeColor=#00ff00;");
+}

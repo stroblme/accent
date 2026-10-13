@@ -50,7 +50,7 @@ use open::build;
 pub use open::open;
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
-pub(crate) use page::{font_css, install_font, next_view_name, set_margins};
+pub(crate) use page::{font_css, install_font, next_view_name, refont, set_margins};
 use search::{match_style, matched, mute};
 pub(crate) use text::{caret, line_end, line_prefix};
 

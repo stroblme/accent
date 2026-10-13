@@ -73,6 +73,25 @@ pub fn highlight_quads(
     out
 }
 
+/// Where the note links land ([`highlight_quads`]) as `/Highlight` annotations in `color`, each
+/// carrying the text its link quotes: what Export Highlights and a print copy write.
+pub fn link_annotations(
+    found: LinkHighlights,
+    links: &[PdfLink],
+    color: [u8; 4],
+) -> Vec<Highlight> {
+    found
+        .into_iter()
+        .flat_map(|(page, quads)| quads.into_iter().map(move |(quads, at)| (page, quads, at)))
+        .map(|(page, quads, at)| Highlight {
+            page,
+            quads,
+            color,
+            contents: links.get(at).and_then(|l| l.alias.clone()),
+        })
+        .collect()
+}
+
 impl PdfDoc {
     /// Existing `/Highlight` annotations on one page.
     pub fn highlights_on(&self, page: usize) -> Result<Vec<Highlight>> {

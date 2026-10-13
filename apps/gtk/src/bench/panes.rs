@@ -8,6 +8,12 @@ pub(super) fn bench_panes(app: &Rc<App>, rels: &str) {
     if let Some(rel) = rels.strip_prefix("shells:") {
         return bench_shells(app, rel);
     }
+    if let Some(rels) = rels.strip_prefix("bar:") {
+        return bench_bar(app, rels);
+    }
+    if let Some(rel) = rels.strip_prefix("chords:") {
+        return bench_chords(app, rel);
+    }
     let Some((a, b)) = rels.split_once(',') else {
         return bench_quit(app);
     };
@@ -112,6 +118,103 @@ fn bench_shells(app: &Rc<App>, rel: &str) {
                 keyboard()
             );
         }
+        bench_quit(&app);
+    });
+}
+
+/// `ACCENT_BENCH_PANES=bar:<a>,<b>,<c>`: `a` on the left, `b` and `c` stacked on the right, and
+/// `c`'s pane closed with its last tab twice: first with the keyboard in its find bar, then, `c`
+/// split off below `b` again, in the tab itself. Both times the keyboard and the active pane go to
+/// `b`'s, which takes its place.
+fn bench_bar(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    let [a, b, c] = &rels[..] else {
+        return bench_quit(app);
+    };
+    for rel in [a, b, c] {
+        app.open_path(rel);
+    }
+    let (app, b, c) = (app.clone(), b.clone(), c.clone());
+    glib::spawn_future_local(async move {
+        let page = |rel: &str| app.doc_for(rel).map(|doc| doc.page().clone());
+        let keyboard = || {
+            let focus = gtk::prelude::GtkWindowExt::focus(&app.window);
+            focus.map(|w| w.type_().name().to_string())
+        };
+        while app.docs().len() < 3 {
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+        let Some(pb) = page(&b) else {
+            return bench_quit(&app);
+        };
+        app.split_page(&app.pane(), Side::Right, &pb);
+        for how in ["bar", "tab"] {
+            let Some(right) = app.pane_of(&pb) else {
+                return bench_quit(&app);
+            };
+            if page(&c).is_none() {
+                app.set_active_pane(&right);
+                app.open_path(&c);
+            }
+            while page(&c).is_none() {
+                glib::timeout_future(Duration::from_millis(50)).await;
+            }
+            let Some(pc) = page(&c) else {
+                return bench_quit(&app);
+            };
+            app.split_page(&right, Side::Down, &pc);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            if how == "bar" {
+                let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+            }
+            println!("bench bar {how} keyboard={:?}", keyboard());
+            app.close_page(&pc);
+            glib::timeout_future(Duration::from_millis(500)).await;
+            println!("bench bar {how} closed keyboard={:?}", keyboard());
+            bench_pane_at(&app, &pb);
+        }
+        bench_quit(&app);
+    });
+}
+
+/// `ACCENT_BENCH_PANES=chords:<rel>`: which action `Ctrl+D` and `Ctrl+Down` name with the
+/// keyboard in the note, in the Files tree and in the find bar, and what `Ctrl+Down` and `Ctrl+D`
+/// pressed in the tree do: move the tree's focus, and leave the note alone. Under Xvfb with the
+/// pointer over the window, which the drill moves there.
+fn bench_chords(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        while app.tab_for(&rel).is_none() {
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+        let (Some(tab), Some(tree), Some(gtk_app)) =
+            (app.tab_for(&rel), app.tree.get(), app.window.application())
+        else {
+            return bench_quit(&app);
+        };
+        super::git::xtest("move 700 400; focus").await;
+        let say = |where_: &str| {
+            let [d, down] = ["<Control>d", "<Control>Down"].map(|a| gtk_app.actions_for_accel(a));
+            println!("bench chords {where_} ctrl_d={d:?} ctrl_down={down:?}");
+        };
+        tab.view.grab_focus();
+        glib::timeout_future(Duration::from_millis(200)).await;
+        say("note");
+        tree.view().grab_focus();
+        glib::timeout_future(Duration::from_millis(200)).await;
+        say("tree");
+        let focus = || gtk::prelude::GtkWindowExt::focus(&app.window);
+        let (text, row) = (tab.text(), focus());
+        super::git::xtest("key ctrl+Down; key ctrl+d").await;
+        println!(
+            "bench chords tree_keys focus_moved={} note_changed={}",
+            focus() != row,
+            tab.text() != text
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+        glib::timeout_future(Duration::from_millis(200)).await;
+        say("find");
         bench_quit(&app);
     });
 }

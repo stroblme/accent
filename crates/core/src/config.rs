@@ -52,6 +52,10 @@ rounded = true
 route = "curved"
 arrow = false
 
+[lsp.servers]
+python3 = ["pyright-langserver", "--stdio"]
+rust = ["rust-analyzer"]
+
 [vaults."/home/me/Notes"]
 templates_dir = "Templates"
 new_file_dir = "Inbox"
@@ -141,6 +145,9 @@ pub struct Config {
     pub search: SearchConfig,
     pub drawing: DrawingConfig,
     pub diagram: DiagramConfig,
+    /// This machine's servers, under every local vault's own (`Config::local_vault`).
+    #[serde(skip_serializing_if = "LspConfig::is_empty")]
+    pub lsp: LspConfig,
     /// Keyed by canonical vault path.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub vaults: BTreeMap<String, VaultConfig>,
@@ -275,6 +282,7 @@ impl Default for Config {
             search: SearchConfig::default(),
             drawing: DrawingConfig::default(),
             diagram: DiagramConfig::default(),
+            lsp: LspConfig::default(),
             vaults: BTreeMap::new(),
         }
     }
@@ -655,6 +663,20 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// What a vault on this machine opens with: its entry, its own servers over the global
+    /// `[lsp.servers]` key by key. A remote vault takes [`Self::vault`] alone, its host's
+    /// servers being the host's own.
+    pub fn local_vault(&self, root: &Path) -> VaultConfig {
+        let mut cfg = self.vault(root);
+        for (language, argv) in &self.lsp.servers {
+            cfg.lsp
+                .servers
+                .entry(language.clone())
+                .or_insert_with(|| argv.clone());
+        }
+        cfg
+    }
+
     pub fn set_vault(&mut self, root: &Path, cfg: VaultConfig) {
         self.vaults.insert(vault_key(root), cfg);
     }
@@ -759,6 +781,7 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
     let top = names(Config {
         editor_font: Some(String::new()),
         shortcuts: one(),
+        lsp: LspConfig { servers: one() },
         vaults: BTreeMap::from([(String::new(), vault.clone())]),
         ..Config::default()
     });
@@ -1339,6 +1362,20 @@ daily_dir = "Daily"
         assert_eq!(c.vaults.len(), 1);
         assert_eq!(c.vault(&real).new_file_dir, "Inbox");
         assert_eq!(c.vault(&tmp.path().join("Other")).new_file_dir, "");
+    }
+
+    /// The global table sits under a vault's own, key by key, and only where it is asked for.
+    #[test]
+    fn a_local_vault_takes_the_global_servers_under_its_own() {
+        let c: Config = toml::from_str(EXAMPLE).unwrap();
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let notes = Path::new("/home/me/Notes");
+        let local = c.local_vault(notes).lsp.servers;
+        assert_eq!(local["python3"], argv(&["pylsp"]));
+        assert_eq!(local["rust"], argv(&["rust-analyzer"]));
+        assert_eq!(c.vault(notes).lsp.servers.len(), 1);
+        let other = c.local_vault(Path::new("/elsewhere")).lsp;
+        assert_eq!(other, c.lsp);
     }
 
     #[test]

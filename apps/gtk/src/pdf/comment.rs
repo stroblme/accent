@@ -176,11 +176,15 @@ impl PdfTab {
         ));
         popover.popup();
         // The text takes the focus as the popover opens, and a label taking it selects all of
-        // itself: the reader selects what they want.
+        // itself: the reader selects what they want. Unselected and focused, it would draw a
+        // caret at its start, as if it could be edited, so the popover holds the keyboard (for
+        // `Escape`) until a click into the text gives it to the label.
         let focus = popover.root().and_then(|root| root.focus());
         if let Some(label) = focus.and_downcast::<gtk::Label>() {
             label.select_region(0, 0);
         }
+        popover.set_focusable(true);
+        popover.grab_focus();
         *self.pinned.borrow_mut() = Some(popover);
     }
 

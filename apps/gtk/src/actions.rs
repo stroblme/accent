@@ -61,8 +61,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // Move the tab into the pane that way, splitting one off only when there is none. Left and
     // right alone carry chords: `Shift+Alt+Up` / `Shift+Alt+Down` are the multi-caret pair, and
     // every plainer arrow chord is spoken for — `Alt+Left` / `Alt+Right` are Back and Forward,
-    // `Alt+Up` / `Alt+Down` are on DESIGN.md's never-bind list, and `Ctrl+Alt`+arrow moves the
-    // dividers.
+    // and `Alt+Up` / `Alt+Down` and `Ctrl+Alt`+arrow are on DESIGN.md's never-bind list.
     ("win.move-tab-left", "Move Tab Left", &["<Shift><Alt>Left"]),
     (
         "win.move-tab-right",
@@ -79,24 +78,13 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pin-tab", "Pin Tab", &[]),
     ("win.unpin-tab", "Unpin Tab", &[]),
     // The divider of the nearest split around the active pane that runs that way, one step of a
-    // grid anchored at the centre (`panes::divider_step`). A stock GNOME takes all four chords
-    // for switching workspaces before the window sees them, which is what a rebind is for.
-    (
-        "win.divider-left",
-        "Move Divider Left",
-        &["<Control><Alt>Left"],
-    ),
-    (
-        "win.divider-right",
-        "Move Divider Right",
-        &["<Control><Alt>Right"],
-    ),
-    ("win.divider-up", "Move Divider Up", &["<Control><Alt>Up"]),
-    (
-        "win.divider-down",
-        "Move Divider Down",
-        &["<Control><Alt>Down"],
-    ),
+    // grid anchored at the centre (`panes::divider_step`). No chord (user decision 2026-10-13):
+    // the obvious four, `Ctrl+Alt`+arrows, are GNOME's workspace switching, which a stock desktop
+    // takes before the window sees them; the palette runs them, and `[shortcuts]` binds them.
+    ("win.divider-left", "Move Divider Left", &[]),
+    ("win.divider-right", "Move Divider Right", &[]),
+    ("win.divider-up", "Move Divider Up", &[]),
+    ("win.divider-down", "Move Divider Down", &[]),
     ("app.new-window", "New Window", &[]),
     ("app.open-local", "Open Local…", &["<Control><Shift>o"]),
     ("app.open-remote", "Open Remote…", &[]),
@@ -327,6 +315,12 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.present", "Presentation Mode", &["F5"]),
     ("win.fullscreen", "Fullscreen", &["F11"]),
     ("win.preferences", "Preferences", &["<Control>comma"]),
+    // GNOME's chord for it (`Ctrl+?`); `F1`, help, is on the never-bind list.
+    (
+        "win.shortcuts",
+        "Keyboard Shortcuts",
+        &["<Control>question"],
+    ),
     ("win.menu", "Primary Menu", &["F10"]),
     ("win.about", "About accent", &[]),
 ];
@@ -459,11 +453,8 @@ impl App {
             "toggle-wrap" => self.with_active(Tab::toggle_wrap),
             "delete-line" => self.with_active(Tab::delete_line),
             "newline-below" => {
-                // `Ctrl+Return` belongs to the git commit box while the keyboard is in it
-                // (DESIGN.md, Git pane). A window accelerator is dispatched ahead of any
-                // controller on the focused widget, so the box cannot claim the chord itself.
-                let committed = self.git.get().is_some_and(|git| git.commit_if_focused())
-                    || self.active_diagram().is_some_and(|d| d.commit_label());
+                // A diagram's label being edited takes `Ctrl+Return` as finishing it.
+                let committed = self.active_diagram().is_some_and(|d| d.commit_label());
                 if !committed && let Some(tab) = self.active() {
                     tab.newline_below();
                 }
@@ -734,6 +725,7 @@ impl App {
             "present" => self.set_presenting(self.presenting.get().is_none()),
             "fullscreen" => self.window.set_fullscreened(!self.window.is_fullscreen()),
             "preferences" => self.preferences(),
+            "shortcuts" => shortcuts::present(&self.window, &self.config.borrow()),
             "menu" => self.menu.popup(),
             "about" => self.about(),
             _ => tracing::warn!("no handler for action {name}"),
@@ -872,6 +864,55 @@ const CAPTURED: &[&str] = &[
     // reaches for in an editor that has Ctrl+L for the whole line.
     "win.toggle-comment",
 ];
+
+/// The chords that edit the tab in front or move about in it. They are bound only while the
+/// keyboard is in a tab (user decision 2026-10-13), so pressed in the sidebar, a find bar or a
+/// dialog the key is that widget's, and nothing edits the note behind it; the palette still runs
+/// them. The find family goes by the active pane instead.
+const EDITING: &[&str] = &[
+    "win.duplicate-line",
+    "win.delete-line",
+    "win.newline-below",
+    "win.toggle-comment",
+    "win.toggle-wrap",
+    "win.scroll-up",
+    "win.scroll-down",
+    "win.caret-above",
+    "win.caret-below",
+    "win.next-occurrence",
+    "win.all-occurrences",
+    "win.paste-plain",
+    // Paste as Plain Text over a text tab.
+    "win.terminal-paste",
+    "win.fold",
+    "win.unfold",
+];
+
+/// Where the active window's keyboard is, which decides what the shared accelerator table holds.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Keys {
+    /// In a shell, which keeps every chord but [`kept`] ones.
+    Shell,
+    /// In a tab: the whole table.
+    Tab,
+    /// Anywhere else, which leaves the [`EDITING`] chords to the focused widget.
+    Elsewhere,
+}
+
+impl Keys {
+    fn of(gtk_app: &gtk::Application) -> Keys {
+        if terminal::has_focus(gtk_app) {
+            return Keys::Shell;
+        }
+        let focus = gtk_app
+            .active_window()
+            .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
+        match focus.is_some_and(|w| w.ancestor(adw::TabView::static_type()).is_some()) {
+            true => Keys::Tab,
+            false => Keys::Elsewhere,
+        }
+    }
+}
 
 /// Select application shortcuts retained while a terminal owns focus.
 ///
@@ -1052,7 +1093,7 @@ fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
         files,
         vaults,
         shows,
-        vec!["win.preferences", "win.about", "app.quit"],
+        vec!["win.preferences", "win.shortcuts", "win.about", "app.quit"],
     ]
 }
 
@@ -1190,26 +1231,32 @@ impl Shell {
     /// Replace application accelerators with the current config's full table.
     ///
     /// Filter through [`kept`] while the active window focuses a shell, allowing other keys to
-    /// reach VTE. Filter effective bindings so rebindings obey the same rule; the table belongs
-    /// to the application even when another window rebuilds it.
+    /// reach VTE, and leave out the [`EDITING`] chords while its keyboard is in no tab. Filter
+    /// effective bindings so rebindings obey the same rule; the table belongs to the application
+    /// even when another window rebuilds it.
     pub fn apply_accels(&self, gtk_app: &gtk::Application) {
         let config = self.config.borrow();
-        let shell = terminal::has_focus(gtk_app);
-        self.shell_keys.set(shell);
+        let keys = Keys::of(gtk_app);
+        self.keys.set(keys);
         for (action, _, _) in ACTIONS {
             let accels = accels_for(&config, action);
             let accels: Vec<&str> = accels
                 .iter()
                 .map(String::as_str)
-                .filter(|accel| !shell || kept(action, accel, config.forward_keys_to_terminal))
+                .filter(|accel| match keys {
+                    Keys::Shell => kept(action, accel, config.forward_keys_to_terminal),
+                    Keys::Tab => true,
+                    Keys::Elsewhere => !EDITING.contains(action),
+                })
                 .collect();
             gtk_app.set_accels_for_action(action, &accels);
         }
     }
 
-    /// Rebuild shortcuts only on transitions into or out of shell focus, avoiding work on every click.
+    /// Rebuild shortcuts only when the keyboard crosses into or out of a shell or a tab, avoiding
+    /// work on every click.
     pub fn sync_accels(&self, gtk_app: &gtk::Application) {
-        if terminal::has_focus(gtk_app) != self.shell_keys.get() {
+        if Keys::of(gtk_app) != self.keys.get() {
             self.apply_accels(gtk_app);
         }
     }
@@ -1235,6 +1282,31 @@ mod tests {
         // An empty override is "unbound", not "fall back to the default".
         config.shortcuts.insert("win.find".to_string(), Vec::new());
         assert!(accels_for(&config, "win.find").is_empty());
+    }
+
+    /// `Ctrl+Alt` with anything is GNOME's (workspace switching, the never-bind list), which a stock
+    /// desktop takes before the window sees it: no default may need it rebound to arrive.
+    #[test]
+    fn no_default_chord_is_the_desktops() {
+        for (action, _, accels) in ACTIONS {
+            for accel in *accels {
+                assert!(
+                    !(accel.contains("<Control>") && accel.contains("<Alt>")),
+                    "{action} defaults to {accel}"
+                );
+            }
+        }
+    }
+
+    /// A misspelt name in [`EDITING`] would leave that chord bound everywhere.
+    #[test]
+    fn editing_actions_are_in_the_action_table() {
+        for action in EDITING {
+            assert!(
+                ACTIONS.iter().any(|(name, _, _)| name == action),
+                "{action} is an editing chord but not in ACTIONS"
+            );
+        }
     }
 
     /// Every action the capture controller claims has to be in the table it reads its chords from,

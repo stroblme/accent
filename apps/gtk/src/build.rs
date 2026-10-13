@@ -23,10 +23,10 @@ pub fn build_window(
     // the events like the indexing does.
     let (vault, events) = match &root {
         Some(root) => {
-            let vault_config = shell.config.borrow().vault(root);
+            let config = || shell.config.borrow();
             let opened = match ssh::is_remote_path(root) {
-                true => Vault::open_remote(&root.to_string_lossy(), vault_config),
-                false => Vault::open(root, vault_config),
+                true => Vault::open_remote(&root.to_string_lossy(), config().vault(root)),
+                false => Vault::open(root, config().local_vault(root)),
             };
             match opened {
                 Ok((vault, events)) => {

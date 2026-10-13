@@ -58,6 +58,7 @@ fn row(key: &str, symbol: &str, replace: Range) -> Completion {
         extra_edits: Vec::new(),
         resolve: None,
         preselect: true,
+        commit: Vec::new(),
     }
 }
 

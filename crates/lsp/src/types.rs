@@ -166,6 +166,8 @@ pub fn on(v: &Option<Value>) -> bool {
 pub struct CompletionOptions {
     pub trigger_characters: Vec<String>,
     pub resolve_provider: bool,
+    /// What commits an item that names no `commit_characters` of its own.
+    pub all_commit_characters: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -207,6 +209,8 @@ pub struct CompletionItem {
     pub insert_text_format: Option<u32>,
     pub text_edit: Option<CompletionTextEdit>,
     pub additional_text_edits: Option<Vec<TextEdit>>,
+    /// Characters that, typed with the item selected, accept it before they are typed.
+    pub commit_characters: Option<Vec<String>>,
     /// The server's own bookkeeping, handed back untouched on resolve.
     pub data: Option<Value>,
 }

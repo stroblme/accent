@@ -6,7 +6,8 @@
 //! Each item uses its own start and range, moved with edits through [`apply::Moved`].
 //!
 //! The view retains focus. `editor::keys` offers presses to [`press`] first for arrows,
-//! Escape, and Return or Tab with a selected row; other keys keep normal typing behaviour.
+//! Escape, and Return or Tab with a selected row; other keys keep normal typing behaviour, a
+//! commit character after accepting the selected row.
 
 mod abbrev;
 mod apply;
@@ -535,7 +536,9 @@ impl Session {
             .downcast_ref::<multicaret::View>()
             .is_some_and(|view| view.has_carets());
         let past = column.then_some(glib::Propagation::Proceed);
-        match rank::step(key, state, self.popup.selected(), self.popup.len()) {
+        let selected = self.popup.selected();
+        let commit = selected.map(|row| self.commit_of(row)).unwrap_or_default();
+        match rank::step(key, state, selected, self.popup.len(), &commit) {
             rank::Step::Select(row) => {
                 self.preselected.set(false);
                 self.popup.select(row);
@@ -544,6 +547,10 @@ impl Session {
             rank::Step::Accept(row) => {
                 self.accept(row);
                 Some(glib::Propagation::Stop)
+            }
+            rank::Step::Commit(row) => {
+                self.commit(row);
+                past
             }
             rank::Step::Dismiss => {
                 self.close();
@@ -557,11 +564,19 @@ impl Session {
         }
     }
 
-    /// Resolve and insert the item at `row`, then end the session.
-    ///
-    /// Resolution can supply deferred imports, which join the insertion's undo step. Leave the
-    /// buffer unchanged while waiting; further typing cancels acceptance.
-    fn accept(self: &Rc<Self>, row: u32) {
+    /// The commit characters of the item at `row`.
+    fn commit_of(&self, row: u32) -> Vec<char> {
+        let shown = self.shown.borrow();
+        let item = shown.as_ref().and_then(|shown| {
+            let i = *shown.rows.get(row as usize)?;
+            Some(&shown.items[i].completion)
+        });
+        item.map_or_else(Vec::new, |item| item.commit.clone())
+    }
+
+    /// The item at `row` with the range it replaces and its extra edits, moved on by what was
+    /// typed since it was asked for; the session ends.
+    fn take(&self, row: u32) -> Option<(Completion, Range, Vec<TextEdit>)> {
         let buffer = self.view.buffer();
         let caret = caret(&buffer);
         let accepted = {
@@ -575,7 +590,23 @@ impl Session {
             })
         };
         self.close();
-        let Some((item, range, extras)) = accepted else {
+        accepted
+    }
+
+    /// Insert the item at `row` now, for the commit character about to be typed after it:
+    /// typing waits on no server, so a row is taken as its look left it ([`Self::resolved`]).
+    fn commit(&self, row: u32) {
+        if let Some((item, range, extras)) = self.take(row) {
+            self.write(&item, range, extras);
+        }
+    }
+
+    /// Resolve and insert the item at `row`, then end the session.
+    ///
+    /// Resolution can supply deferred imports, which join the insertion's undo step. Leave the
+    /// buffer unchanged while waiting; further typing cancels acceptance.
+    fn accept(self: &Rc<Self>, row: u32) {
+        let Some((item, range, extras)) = self.take(row) else {
             return;
         };
         if item.resolve.is_none() {
@@ -658,7 +689,8 @@ impl Session {
         }
     }
 
-    /// A row's documentation arrived: kept with the row, and shown while it is still selected.
+    /// A row's resolve arrived: kept with the row, imports included for a commit character, and
+    /// its documentation shown while it is still selected.
     fn resolved(&self, generation: u64, i: usize, full: Completion) {
         if generation != self.generation.get() {
             return;
@@ -672,6 +704,7 @@ impl Session {
             };
             item.completion.doc = full.doc;
             item.completion.detail = full.detail.or(item.completion.detail.take());
+            item.completion.extra_edits = full.extra_edits;
             let still = self
                 .popup
                 .selected()

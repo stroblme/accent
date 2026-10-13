@@ -98,6 +98,9 @@ pub(super) enum Step {
     Select(Option<u32>),
     /// Apply this row.
     Accept(u32),
+    /// Apply this row and let the key go on to be typed after it: one of the row's commit
+    /// characters.
+    Commit(u32),
     /// Put the popup away, and the key with it: Escape.
     Dismiss,
     /// Put the popup away and let the key go on to the editor: Return or Tab with no row
@@ -109,18 +112,27 @@ pub(super) enum Step {
 
 /// Map popup keys to [`Step`]. Start unselected except exact Lean
 /// abbreviations ([`accent_api::Completion::preselect`]); Up from first
-/// returns to none. Return/Tab accept only a selected row.
+/// returns to none. Return/Tab accept only a selected row, as does one of
+/// its `commit` characters, Shift being how `(` is typed.
 pub(super) fn step(
     key: gdk::Key,
     state: gdk::ModifierType,
     selected: Option<u32>,
     rows: u32,
+    commit: &[char],
 ) -> Step {
-    let held = gdk::ModifierType::CONTROL_MASK
+    let chord = gdk::ModifierType::CONTROL_MASK
         | gdk::ModifierType::ALT_MASK
-        | gdk::ModifierType::SUPER_MASK
-        | gdk::ModifierType::SHIFT_MASK;
-    if rows == 0 || state.intersects(held) {
+        | gdk::ModifierType::SUPER_MASK;
+    if rows == 0 || state.intersects(chord) {
+        return Step::Pass;
+    }
+    // A character typed, so never Tab or Return, whatever a server lists.
+    let typed = key.to_unicode().filter(|c| !c.is_control());
+    if let Some(row) = selected.filter(|_| typed.is_some_and(|c| commit.contains(&c))) {
+        return Step::Commit(row);
+    }
+    if state.contains(gdk::ModifierType::SHIFT_MASK) {
         return Step::Pass;
     }
     let last = rows - 1;
@@ -215,7 +227,7 @@ mod tests {
     #[test]
     fn keys_walk_the_rows_and_accept_only_a_selected_one() {
         let none = gdk::ModifierType::empty();
-        let key = |k, sel| step(k, none, sel, 10);
+        let key = |k, sel| step(k, none, sel, 10, &[]);
         assert_eq!(key(gdk::Key::Down, None), Step::Select(Some(0)));
         assert_eq!(key(gdk::Key::Down, Some(9)), Step::Select(Some(9)));
         assert_eq!(key(gdk::Key::Up, Some(0)), Step::Select(None));
@@ -234,9 +246,46 @@ mod tests {
         assert_eq!(key(gdk::Key::BackSpace, Some(1)), Step::Pass);
         // A chord, Shift+Tab included, is somebody else's.
         let ctrl = gdk::ModifierType::CONTROL_MASK;
-        assert_eq!(step(gdk::Key::Down, ctrl, None, 10), Step::Pass);
+        assert_eq!(step(gdk::Key::Down, ctrl, None, 10, &[]), Step::Pass);
         let shift = gdk::ModifierType::SHIFT_MASK;
-        assert_eq!(step(gdk::Key::ISO_Left_Tab, shift, Some(1), 10), Step::Pass);
-        assert_eq!(step(gdk::Key::Down, none, None, 0), Step::Pass);
+        assert_eq!(
+            step(gdk::Key::ISO_Left_Tab, shift, Some(1), 10, &[]),
+            Step::Pass
+        );
+        assert_eq!(step(gdk::Key::Down, none, None, 0, &[]), Step::Pass);
+    }
+
+    /// A commit character accepts the selected row and is typed after it; with no row selected,
+    /// under a chord, or for a row without it, it is only typed.
+    #[test]
+    fn a_commit_character_accepts_the_selected_row() {
+        let (none, shift) = (gdk::ModifierType::empty(), gdk::ModifierType::SHIFT_MASK);
+        let commit = ['(', '.'];
+        assert_eq!(
+            step(gdk::Key::parenleft, shift, Some(2), 10, &commit),
+            Step::Commit(2)
+        );
+        assert_eq!(
+            step(gdk::Key::period, none, Some(0), 10, &commit),
+            Step::Commit(0)
+        );
+        assert_eq!(step(gdk::Key::period, none, None, 10, &commit), Step::Pass);
+        let ctrl = gdk::ModifierType::CONTROL_MASK;
+        assert_eq!(
+            step(gdk::Key::period, ctrl, Some(0), 10, &commit),
+            Step::Pass
+        );
+        assert_eq!(step(gdk::Key::period, none, Some(0), 10, &[]), Step::Pass);
+        assert_eq!(step(gdk::Key::a, none, Some(0), 10, &commit), Step::Pass);
+        // Tab and Return accept, as they do any selected row, even listed.
+        let tab = ['\t', '\r'];
+        assert_eq!(
+            step(gdk::Key::Tab, none, Some(0), 10, &tab),
+            Step::Accept(0)
+        );
+        assert_eq!(
+            step(gdk::Key::Return, none, Some(0), 10, &tab),
+            Step::Accept(0)
+        );
     }
 }

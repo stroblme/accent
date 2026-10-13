@@ -373,6 +373,7 @@ pub(super) fn inputs(rows: Vec<FileRow>, replace: Range) -> Vec<Completion> {
                 extra_edits: Vec::new(),
                 resolve: None,
                 preselect: false,
+                commit: Vec::new(),
             })
         })
         .collect()

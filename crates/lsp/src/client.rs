@@ -221,6 +221,7 @@ impl Client {
                     "completion": {
                         "completionItem": {
                             "snippetSupport": true,
+                            "commitCharactersSupport": true,
                             "insertReplaceSupport": true,
                             "documentationFormat": ["markdown", "plaintext"],
                             "resolveSupport": {
