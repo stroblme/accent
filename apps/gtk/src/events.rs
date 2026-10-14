@@ -414,6 +414,12 @@ impl App {
                 self.connect.hide();
                 self.connection_refused(&why);
             }
+            // No pause: the worker walks again when next asked, and the index stays partial,
+            // `reconciled` with it. Its error, if any is new, is an `Error` of its own.
+            Event::WalkFailed => {
+                self.statusbar.set_progress(None);
+                self.statusbar.set_indexing(statusbar::Indexing::Idle);
+            }
             Event::Error(message) => self.toast(&message),
             // Every tab of the file holds the check, so a switch to one shows it.
             Event::Checking { rel, lines } => {

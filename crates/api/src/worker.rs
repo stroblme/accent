@@ -526,7 +526,11 @@ impl Worker {
                 self.emit(Event::Reconciled(stats));
                 self.emit_conflicts();
             }
-            Err(e) => self.fail("reconciling the vault", e),
+            Err(e) => {
+                self.fail("reconciling the vault", e);
+                // Every time, unlike the error: it is what ends the walk on screen.
+                self.emit(Event::WalkFailed);
+            }
         }
     }
 

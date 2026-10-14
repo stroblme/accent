@@ -228,6 +228,13 @@ data class VaultState(
      * picked another, while the core was opening it.
      */
     fun waitsFor(picked: String): Boolean = opening && root == picked
+
+    /**
+     * No walk running any more, whatever ended it short of finishing: a failure, or the events
+     * no longer being read. What the status line and the service a walk holds go by, and what
+     * lets the next return to the app walk again. What the index holds is left as it is.
+     */
+    fun walkOver(): VaultState = copy(indexing = false, paused = false, scanned = 0, phase = null)
 }
 
 /**
@@ -416,11 +423,17 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** Drain the vault's events for as long as the vault is open. */
     private fun listen() = viewModelScope.launch(Dispatchers.IO) {
         val v = vault ?: return@launch
-        while (isActive && vault === v) {
-            // Half a second is short enough that closing the vault is not felt and long enough
-            // that a quiet app is not waking up for nothing.
-            val batch = runCatching { v.nextEvents(500u) }.getOrElse { return@launch }
-            if (batch.isNotEmpty()) apply(batch)
+        try {
+            while (isActive && vault === v) {
+                // Half a second is short enough that closing the vault is not felt and long
+                // enough that a quiet app is not waking up for nothing.
+                val batch = runCatching { v.nextEvents(500u) }.getOrElse { return@launch }
+                if (batch.isNotEmpty()) apply(batch)
+            }
+        } finally {
+            // However the loop ends, nothing will say a walk is over any more. A vault closed or
+            // replaced meanwhile has a state of its own.
+            if (vault === v) _state.update { it.walkOver() }
         }
     }
 
@@ -441,6 +454,12 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 touched += parentOf(event.to)
             }
             is Event.Conflict -> onConflict(event.original)
+            // Over, the progress it had made with it, and not paused. Its error, if this vault has
+            // not said it already, is an [Event.Error] of its own.
+            Event.WalkFailed -> {
+                seen = null
+                _state.update { it.walkOver() }
+            }
             is Event.Error -> _state.update { it.copy(message = event.message) }
             is Event.Progress -> seen = event.progress
         }

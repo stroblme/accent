@@ -1,5 +1,6 @@
 package io.github.stroblme.accent
 
+import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ui.nothingFound
 import io.github.stroblme.accent.ui.readingLine
 import org.junit.Assert.assertEquals
@@ -28,6 +29,21 @@ class ReadingTest {
             readingLine(indexing = false, paused = true, scanned = 0),
         )
         assertNull(readingLine(indexing = false, paused = false, scanned = 0))
+    }
+
+    /**
+     * A walk that fails, or whose events stop being read, puts down what drives the status line
+     * and the service a walk holds, and leaves what the index already lets the reader do.
+     */
+    @Test
+    fun `a walk that ends short is over`() {
+        val walking = VaultState(root = "/v", indexing = true, scanned = 40, phase = Phase.INDEX)
+        val over = walking.copy(ready = true).walkOver()
+        assertEquals(false, over.indexing)
+        assertEquals(false, over.paused)
+        assertEquals(0L, over.scanned)
+        assertNull(over.phase)
+        assertEquals(true, over.ready)
     }
 
     /** The notification a walk holds, before it has a count and once it has one. */

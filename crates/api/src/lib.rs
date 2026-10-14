@@ -62,6 +62,10 @@ pub use language::{
 pub enum Event {
     Progress(Progress),
     Reconciled(ReconcileStats),
+    /// A walk ended without finishing. What it had indexed stays, nothing is paused, and the
+    /// error is an [`Error`](Self::Error), said once per vault; this is sent on every failed walk,
+    /// since it is what ends the walk on screen.
+    WalkFailed,
     /// The direct children of these directories changed ("" is the vault root). The tree refills
     /// exactly these levels instead of dropping its whole cache.
     DirsChanged(Vec<String>),

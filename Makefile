@@ -249,11 +249,12 @@ android-check:
 	$(CARGO) test -p accent-api --features android --locked
 	$(MAKE) android
 	@# Android 15 runs some devices with 16 KB pages, and a library laid out for 4 KB will not
-	@# load there at all. Every LOAD segment must be aligned to 0x4000.
+	@# load there at all. Every LOAD segment must be aligned to 0x4000. No segment at all fails
+	@# too: sh has no pipefail, so a missing readelf would otherwise pass every library.
 	@for abi in $(ANDROID_ABIS); do \
 		for so in $(JNI_LIBS)/$$abi/*.so; do \
 			test -f "$$so" || continue; \
-			$(READELF) -lW "$$so" | awk -v f="$$so" '/LOAD/ { if ($$NF != "0x4000") { print f " is not 16 KB aligned: " $$NF; bad=1 } } END { exit bad }' \
+			$(READELF) -lW "$$so" | awk -v f="$$so" -v r="$(READELF)" '/LOAD/ { n++; if ($$NF != "0x4000") { print f " is not 16 KB aligned: " $$NF; bad=1 } } END { if (!n) print f ": no LOAD segment from " r; exit bad || !n }' \
 				|| exit 1; \
 			echo "$$so: 16 KB aligned"; \
 		done; \

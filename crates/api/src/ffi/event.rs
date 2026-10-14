@@ -9,6 +9,9 @@ pub enum Event {
     Progress {
         progress: Progress,
     },
+    /// A walk ended without finishing ([`crate::Event::WalkFailed`]): nothing is paused, and the
+    /// error, if this vault has not said it already, is an [`Event::Error`].
+    WalkFailed,
     /// Index reconciliation completed, possibly with a partial index if
     /// `stopped`. Only [`Vault::resume_indexing`] resumes a paused vault.
     ///
@@ -64,6 +67,7 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         crate::Event::FileRenamed { from, to } => Event::FileRenamed { from, to },
         crate::Event::Conflict { original, conflict } => Event::Conflict { original, conflict },
         crate::Event::Error(message) => Event::Error { message },
+        crate::Event::WalkFailed => Event::WalkFailed,
         // Git, the remote connection, language servers and their background jobs, and the watch
         // on unindexed folders: none of them run on a phone, so nothing here ever has to match
         // them.
