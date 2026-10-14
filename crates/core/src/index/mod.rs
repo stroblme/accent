@@ -23,11 +23,26 @@ pub use search::MIN_INFIX;
 use search::{folded_find, snippet_window};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 pub use symbols::{CodeSymbol, Mention, SymbolName};
 
 pub struct Index {
     conn: Connection,
+    /// The lock on [`unsynced_marker`] a first index holds while its writes are not synced.
+    unsynced: Option<std::fs::File>,
+}
+
+/// `db_path` with `suffix` on its file name, as SQLite names an index's `-wal` and `-shm`.
+fn beside(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = db_path.as_os_str().to_owned();
+    path.push(suffix);
+    path.into()
+}
+
+/// The file beside an index that a first index holds locked while it writes without syncing
+/// (`Index::sync_writes`). Found unlocked, it is a first index a crash ended.
+fn unsynced_marker(db_path: &Path) -> PathBuf {
+    beside(db_path, "-unsynced")
 }
 
 /// `$XDG_CACHE_HOME/accent/<blake3 of the canonical vault path>.db`.
@@ -222,6 +237,35 @@ impl Index {
         Self::from_conn(conn)
     }
 
+    /// [`open`](Self::open), unless the file is not a database SQLite can read — a power cut in
+    /// the middle of a first index, which does not sync its writes, or a disk's damage. Its files
+    /// are then deleted and a new index started in their place, the index being only what the
+    /// vault's files say, and the second value says what was wrong with it.
+    pub fn open_or_rebuild(db_path: &Path) -> Result<(Self, Option<String>)> {
+        // A first index a crash ended can have left any page damaged, so every one is checked
+        // then (about a second for 300 MB), and only then: a first index still running elsewhere
+        // holds the marker's lock.
+        let marker = unsynced_marker(db_path);
+        let unfinished = std::fs::File::open(&marker).is_ok_and(|f| f.try_lock().is_ok());
+        let damage = damage(db_path, unfinished);
+        if let Some(why) = &damage {
+            tracing::warn!("{}: {why}, building a new index", db_path.display());
+            for suffix in ["", "-wal", "-shm"] {
+                let path = beside(db_path, suffix);
+                match std::fs::remove_file(&path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(Error::io(path.display(), e));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if unfinished {
+            let _ = std::fs::remove_file(&marker);
+        }
+        Ok((Self::open(db_path)?, damage))
+    }
+
     /// What stops the statement this connection is running, from any thread: that statement fails
     /// as interrupted, and the next one runs as usual.
     pub fn interrupt_handle(&self) -> InterruptHandle {
@@ -294,7 +338,10 @@ impl Index {
             }
         }
         conn.execute_batch(BODIES)?;
-        Ok(Index { conn })
+        Ok(Index {
+            conn,
+            unsynced: None,
+        })
     }
 
     /// SQLite's `data_version`: a number that moves whenever another connection has committed to
@@ -324,6 +371,35 @@ impl Index {
             )));
         }
         Ok(tx)
+    }
+}
+
+/// What makes the index at `db_path` one SQLite cannot read, if anything: its header and schema,
+/// which is where garbage shows, and with `every_page` the rest of it too. `None` as well for a
+/// file that cannot be opened at all, which [`Index::open`] reports as itself.
+fn damage(db_path: &Path, every_page: bool) -> Option<String> {
+    let conn = Connection::open(db_path).ok()?;
+    let damaged = |e: rusqlite::Error| {
+        matches!(
+            e.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        )
+        .then(|| e.to_string())
+    };
+    if let Err(e) = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(())) {
+        return damaged(e);
+    }
+    if !every_page {
+        return None;
+    }
+    match conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)) {
+        Ok(ok) if ok == "ok" => None,
+        // The check's own words, page by page, are for the log.
+        Ok(why) => {
+            tracing::warn!("{}: {why}", db_path.display());
+            Some("a first index a crash ended left it damaged".into())
+        }
+        Err(e) => damaged(e),
     }
 }
 
@@ -470,6 +546,34 @@ mod tests {
             ix.note_aliases().is_ok(),
             "the rebuilt index has the aliases table"
         );
+    }
+
+    /// A first index a crash ended wrote without syncing, so any page of it can be damaged, not
+    /// only the header and schema every open reads: the marker it leaves has every page checked.
+    #[test]
+    fn a_first_index_a_crash_ended_is_checked_whole() {
+        let (vault, db) = fixture();
+        for i in 0..50 {
+            fs::write(vault.path().join(format!("n{i}.md")), "word ".repeat(400)).unwrap();
+        }
+        let path = db.path().join("i.db");
+        Index::open(&path)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        let end = bytes.len();
+        bytes[end - 4096..].fill(0x5a);
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(damage(&path, false), None, "a page past the schema's");
+
+        fs::write(unsynced_marker(&path), "").unwrap();
+        let (mut ix, why) = Index::open_or_rebuild(&path).unwrap();
+        assert!(why.is_some());
+        assert_eq!(ix.stats().unwrap().files, 0, "a new index");
+        assert!(!unsynced_marker(&path).exists());
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert!(ix.stats().unwrap().notes > 50);
     }
 
     /// Two builds can share one index, the app and an `accent-cli mcp` from another build, so an

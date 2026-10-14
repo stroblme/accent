@@ -16,6 +16,7 @@ import io.github.stroblme.accent.ffi.NoteAlias
 import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ffi.Progress
+import io.github.stroblme.accent.ffi.Ranker
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.TagCount
 import io.github.stroblme.accent.ffi.Vault
@@ -259,6 +260,12 @@ class Corpus(
     /** What the ranking reads. */
     val names = files + unindexed + missing + aliases.map { it.name }
 
+    /**
+     * [names] held on the core's side, ranked there: a keystroke sends the query, not the names.
+     * Built on first use, which [VaultModel.loadNames] makes off the main thread.
+     */
+    val ranker: Ranker by lazy { Ranker(names) }
+
     private val indexed = files.size
     private val written = indexed + unindexed.size
     private val paths = written + missing.size
@@ -287,6 +294,35 @@ class Corpus(
         val unwritten: Boolean = false,
         val ignored: Boolean = false,
     )
+}
+
+/**
+ * When the switcher's names are read again: never two loads at once, and an asking that comes
+ * while one runs is kept for one more load after it rather than restarting it. A load cut short
+ * is a load thrown away, and one that took longer than the typing between two keystrokes, or than
+ * the walk between two batches, never landed at all.
+ */
+class Reload {
+    private var running = false
+
+    /** Asked for again while running, and whether with the ignored folders walked. */
+    private var again: Boolean? = null
+
+    /** A load is asked for, [walk] saying whether it walks the ignored folders: start it now? */
+    fun ask(walk: Boolean): Boolean {
+        if (!running) {
+            running = true
+            return true
+        }
+        again = again == true || walk
+        return false
+    }
+
+    /** A load has ended: another to run after it, and whether it walks; null for none. */
+    fun next(): Boolean? = again.also {
+        again = null
+        running = it != null
+    }
 }
 
 /**
@@ -348,9 +384,20 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** One [write] at a time, so each goes out with the etag the one before it recorded. */
     private val writing = Mutex()
 
-    /** The switcher's files, and the [VaultState.revision] they were read at. See [corpus]. */
-    private var corpus: Corpus? = null
-    private var corpusAt = 0
+    /**
+     * The switcher's names ([loadNames]): null until first read, then the index's as soon as they
+     * are, the ignored notes joining when their walk lands.
+     */
+    private val _names = MutableStateFlow<Corpus?>(null)
+    val names: StateFlow<Corpus?> = _names.asStateFlow()
+
+    /** The notes in the folders git ignores, as last walked, kept while the index's are reread. */
+    @Volatile private var ignored: List<String> = emptyList()
+    private val reload = Reload()
+
+    /** Those folders are being walked: the switcher's list may still grow. */
+    private val _listing = MutableStateFlow(false)
+    val listing: StateFlow<Boolean> = _listing.asStateFlow()
 
     /** How far the batch being applied said the walk had got, and when the tree last caught up. */
     private var seen: Progress? = null
@@ -397,6 +444,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun open(root: String) {
         _state.value = VaultState(root = root, opening = true)
+        _names.value = null
+        ignored = emptyList()
         viewModelScope.launch {
             val opened = withContext(Dispatchers.IO) { runCatching { Vault.open(root) } }
             if (!_state.value.waitsFor(root)) {
@@ -476,7 +525,6 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     revision = it.revision + 1,
                 )
             }
-            corpus = null
             relist(_state.value.expanded)
             // Stopped while it was still finding the files, a walk writes nothing, so whether
             // there is anything to browse is whatever an earlier walk left behind.
@@ -523,31 +571,52 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * The switcher's corpus, fetched the first time it is asked for, and again once the index has
-     * moved on under a running walk ([VaultState.revision]).
+     * Read the switcher's names again, in the model's own time: what asks for them never waits
+     * on, or cancels, a load ([Reload]), and the names it already has stay up meanwhile.
+     *
+     * The index's lists are queries and come first. With [walkIgnored], the folders git ignores
+     * are walked after them, as the desktop's Go to File walks them as it opens: over shared
+     * storage that is a walk of the whole vault, the slow half, so their notes join the list when
+     * it lands rather than holding the list back.
      */
-    suspend fun corpus(): Corpus {
-        val at = _state.value.revision
-        corpus?.takeIf { it.names.isNotEmpty() && corpusAt == at }?.let { return it }
-        val v = vault ?: return Corpus()
-        // Only a corpus dropped outright walks the ignored folders again: one read again because
-        // the walk has read more files has nothing new to find there.
-        val fresh = corpus == null
-        // Tens of thousands of strings in one call: worth doing when the switcher opens, which is
-        // the only thing that wants them, rather than after every reconcile.
-        val read = withContext(Dispatchers.IO) {
-            Corpus(
+    fun loadNames(walkIgnored: Boolean) {
+        if (!reload.ask(walkIgnored)) return
+        viewModelScope.launch {
+            var walk: Boolean? = walkIgnored
+            while (walk != null) {
+                load(walk)
+                walk = reload.next()
+            }
+        }
+    }
+
+    private suspend fun load(walk: Boolean) {
+        val v = vault ?: return
+        // The ranker's copy is made here too, off the main thread, rather than at the first key.
+        fun publish(files: List<String>, missing: List<String>, aliases: List<NoteAlias>) {
+            val read = Corpus(files, ignored, missing, aliases).also { it.ranker }
+            if (vault === v) _names.value = read
+        }
+        val (files, missing, aliases) = withContext(Dispatchers.IO) {
+            val read = Triple(
                 runCatching { v.filePaths(false) }.getOrDefault(emptyList()),
-                // Walked again here, as the desktop's Go to File walks them as it opens: nothing
-                // else on a phone asks for a fresh walk of the folders the index leaves out.
-                runCatching { v.ignoredNotes(fresh) }.getOrDefault(emptyList()),
                 runCatching { v.missingNotes() }.getOrDefault(emptyList()),
                 runCatching { v.noteAliases() }.getOrDefault(emptyList()),
             )
+            read.also { (f, m, a) -> publish(f, m, a) }
         }
-        corpus = read
-        corpusAt = at
-        return read
+        if (!walk) return
+        _listing.value = true
+        try {
+            withContext(Dispatchers.IO) {
+                val walked = runCatching { v.ignoredNotes(true) }.getOrNull() ?: return@withContext
+                if (vault !== v) return@withContext
+                ignored = walked
+                publish(files, missing, aliases)
+            }
+        } finally {
+            _listing.value = false
+        }
     }
 
     /** List every directory the tree has open again. */
@@ -801,7 +870,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         // handle: the buffer is the only copy of whatever was typed in the last second.
         release(vault)
         vault = null
-        corpus = null
+        _names.value = null
+        ignored = emptyList()
         _state.value = VaultState()
     }
 
@@ -968,8 +1038,6 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val v = vault ?: return@launch
         val made = withContext(Dispatchers.IO) { runCatching { v.createNote(rel, null) } }
         made.onSuccess {
-            // The switcher reads its files again next time, so the note is one of them there.
-            corpus = null
             openFile(rel)
         }.onFailure { fail("Cannot create this note", it) }
     }
@@ -984,7 +1052,6 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         made.onSuccess { rel ->
             // The file changed since the list was read; nothing was made.
             if (rel == null) return@onSuccess said("This template no longer has a destination")
-            corpus = null
             openFile(rel)
         }.onFailure { fail("Cannot create this note", it) }
     }

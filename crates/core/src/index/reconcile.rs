@@ -9,6 +9,7 @@ use crate::{markdown, path};
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -205,53 +206,74 @@ impl Index {
             tx.commit()?;
         }
 
+        // The files are read and parsed on a pool, and written here as the walk found them: the
+        // one connection writing is the one writer SQLite takes, and the walk's order is what
+        // writes a folder's row before its children's.
         let mut done = 0usize;
-        for chunk in jobs.chunks(BATCH) {
-            let tx = self.write_tx()?;
-            // The files whose content really changed: a touched one kept its links and its keys.
-            let mut changed = Vec::new();
-            for &job in chunk {
-                // Per file rather than per batch: a batch is 500 files, and one of 500 large ones
-                // measured 2.5 s on the bench vault — a Stop that waits that long is not a Stop.
-                // The transaction still commits: every file in it is a whole row either way.
-                if stop() {
-                    stats.stopped = true;
-                    break;
-                }
-                let touched = stats.touched;
-                let f = &scan.files[job];
-                upsert(&tx, f, &mut stats)?;
-                if stats.touched == touched {
-                    changed.push(&f.rel_path);
-                }
-                if f.kind != FileKind::Dir {
-                    stats.changed.push(f.rel_path.clone());
-                }
-                done += 1;
-            }
-            write_bodies(&tx)?;
-            // What these files can have changed is resolved in the transaction that wrote them, so
-            // no reader between two batches sees a changed note link to nothing. A note a later
-            // batch adds takes the links waiting for it then: they are the ones its keys name.
-            // The cold build has no earlier answer to keep and resolves once, at the end.
-            if !cold {
-                for rel in changed {
-                    resolve_links_of(&tx, rel)?;
-                }
-            }
-            tx.commit()?;
-            on_progress(
-                self,
-                Progress {
-                    phase: Phase::Index,
-                    done,
-                    total,
-                },
-            );
-            if stats.stopped {
-                break;
-            }
+        if cold {
+            self.sync_writes(false)?;
         }
+        let written = in_order(
+            &jobs,
+            |&job| read_content(&scan.files[job]),
+            |contents| -> Result<()> {
+                for chunk in jobs.chunks(BATCH) {
+                    let tx = self.write_tx()?;
+                    // The files whose content really changed: a touched one kept its links and
+                    // its keys.
+                    let mut changed = Vec::new();
+                    for (&job, content) in chunk.iter().zip(&mut *contents) {
+                        // Per file rather than per batch: a batch is 500 files, and one of 500
+                        // large ones measured 2.5 s on the bench vault — a Stop that waits that
+                        // long is not a Stop. The transaction still commits: every file in it is
+                        // a whole row either way.
+                        if stop() {
+                            stats.stopped = true;
+                            break;
+                        }
+                        let touched = stats.touched;
+                        let f = &scan.files[job];
+                        upsert(&tx, f, content, &mut stats)?;
+                        if stats.touched == touched {
+                            changed.push(&f.rel_path);
+                        }
+                        if f.kind != FileKind::Dir {
+                            stats.changed.push(f.rel_path.clone());
+                        }
+                        done += 1;
+                    }
+                    write_bodies(&tx)?;
+                    // What these files can have changed is resolved in the transaction that
+                    // wrote them, so no reader between two batches sees a changed note link to
+                    // nothing. A note a later batch adds takes the links waiting for it then:
+                    // they are the ones its keys name. The cold build has no earlier answer to
+                    // keep and resolves once, at the end.
+                    if !cold {
+                        for rel in changed {
+                            resolve_links_of(&tx, rel)?;
+                        }
+                    }
+                    tx.commit()?;
+                    on_progress(
+                        self,
+                        Progress {
+                            phase: Phase::Index,
+                            done,
+                            total,
+                        },
+                    );
+                    if stats.stopped {
+                        break;
+                    }
+                }
+                Ok(())
+            },
+        );
+        // Synced again however the walk ended, stopped, failed or done.
+        if cold {
+            self.sync_writes(true)?;
+        }
+        written?;
 
         if dirty {
             // Aliases are a handful of rows; rewriting them beats diffing them.
@@ -284,6 +306,43 @@ impl Index {
         }
 
         Ok(stats)
+    }
+
+    /// Whether this connection's commits wait for the disk. A first index's do not: synced, a
+    /// vault's 0.3 GB index wrote 1.1 GB through 66 syncs, unsynced 0.4 GB through 10. What that
+    /// risks is an index that held nothing before — a power cut or a system crash mid-way (not
+    /// one of accent's own) can leave any page of it damaged. So the walk holds
+    /// [`unsynced_marker`](super::unsynced_marker) locked meanwhile, its name on the disk before
+    /// anything unsynced is, and an open that finds it unlocked checks every page and builds
+    /// anew what is damaged ([`Index::open_or_rebuild`]). Syncing again puts what was written
+    /// unsynced on the disk before the marker goes.
+    fn sync_writes(&mut self, sync: bool) -> Result<()> {
+        let db = PathBuf::from(self.conn.path().unwrap_or_default());
+        let marker = super::unsynced_marker(&db);
+        let io = |path: &Path, e| Error::io(path.display(), e);
+        if sync {
+            self.conn.pragma_update(None, "synchronous", "NORMAL")?;
+            for path in [db.clone(), super::beside(&db, "-wal")] {
+                if let Ok(file) = std::fs::File::open(&path) {
+                    file.sync_all().map_err(|e| io(&path, e))?;
+                }
+            }
+            if self.unsynced.take().is_some() {
+                std::fs::remove_file(&marker).map_err(|e| io(&marker, e))?;
+            }
+        } else {
+            let file = std::fs::File::create(&marker).map_err(|e| io(&marker, e))?;
+            file.lock().map_err(|e| io(&marker, e))?;
+            // The marker's name in its folder is on the disk too, or it may not be found.
+            if let Some(dir) = marker.parent() {
+                std::fs::File::open(dir)
+                    .and_then(|d| d.sync_all())
+                    .map_err(|e| io(dir, e))?;
+            }
+            self.unsynced = Some(file);
+            self.conn.pragma_update(None, "synchronous", "OFF")?;
+        }
+        Ok(())
     }
 
     /// The canonical folders the index reaches through a link outside the folder `dir`, which a
@@ -382,8 +441,9 @@ impl Index {
         }
 
         let existing_id = existing.map(|(id, ..)| id);
+        let content = read_content(&meta);
         let tx = self.write_tx()?;
-        upsert(&tx, &meta, &mut ReconcileStats::default())?;
+        upsert(&tx, &meta, content, &mut ReconcileStats::default())?;
         write_bodies(&tx)?;
         // The file's own links were just written unresolved, and a new note can be what a link
         // written long before it existed was waiting for — or a shorter path for one that
@@ -430,40 +490,83 @@ impl Index {
     }
 }
 
-/// Index one scanned entry: read and hash markdown, then replace its file row and everything
-/// derived from it. Returns the file id.
+/// Run `work` over `items` on a pool of threads, one per core, and hand `consume` the results in
+/// the order of `items` as they come in. At most two a thread wait to be consumed, so a slow
+/// consumer holds the pool back rather than piling its results up in memory; once `consume`
+/// returns, the pool stops after the items it is working on.
+fn in_order<T: Sync, R: Send, O>(
+    items: &[T],
+    work: impl Fn(&T) -> R + Sync,
+    consume: impl FnOnce(&mut dyn Iterator<Item = R>) -> O,
+) -> O {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len());
+    // A receiver per item, queued in the order of `items` as each is taken, which its result is
+    // sent to once it is worked out: the queue is the order, and its bound is the memory bound.
+    let (order, results) = mpsc::sync_channel::<mpsc::Receiver<R>>(2 * threads);
+    let next = Mutex::new((items.iter(), order));
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                loop {
+                    let (item, result) = {
+                        let mut next = next.lock().unwrap();
+                        let (items, order) = &mut *next;
+                        let Some(item) = items.next() else { break };
+                        let (result, receiver) = mpsc::sync_channel(1);
+                        // Hung up: `consume` is done.
+                        if order.send(receiver).is_err() {
+                            break;
+                        }
+                        (item, result)
+                    };
+                    let _ = result.send(work(item));
+                }
+            });
+        }
+        // Moved in, so that it hangs up on the pool as `consume` returns, before the scope waits
+        // for the threads. Its sender lives in `next`, so the queue never ends of itself: `take`
+        // ends it. A result that never comes is a thread's panic, raised here rather than waited
+        // for.
+        let results = results;
+        consume(
+            &mut results
+                .iter()
+                .take(items.len())
+                .map(|r| r.recv().expect("a thread of the pool panicked")),
+        )
+    })
+}
+
+/// What a file's content gives its rows, worked out before the transaction that writes them: the
+/// part of indexing a file that needs no database, which a walk spreads over a pool of threads.
+struct Content {
+    /// Of the normalised text, never of the raw file. Safe, because a hash is only ever compared
+    /// against an earlier hash of the same file taken the same way.
+    hash: Option<blake3::Hash>,
+    text: Option<String>,
+    analysis: Option<markdown::Analysis>,
+    symbols: Vec<crate::code::Decl>,
+}
+
+/// Read, hash and parse one scanned entry for [`upsert`].
 ///
-/// The one place a file becomes index rows, shared by the full reconcile and the watcher's
-/// [`Index::update_file`] so the two can never drift apart.
-fn upsert(
-    tx: &rusqlite::Transaction<'_>,
-    f: &walk::FileMeta,
-    stats: &mut ReconcileStats,
-) -> Result<i64> {
-    // The row it replaces, as this transaction sees it rather than as the caller's diff did:
-    // another process sharing the index (`accent-cli mcp` beside the app) may have written it
-    // since, and a row taken for new would keep the links and tags it already had twice over.
-    let existing_id: Option<i64> = tx
-        .prepare_cached("SELECT id FROM files WHERE rel_path = ?1")?
-        .query_row([&f.rel_path], |r| r.get(0))
-        .optional()?;
-    // Everything is read through `fs::read_text`, the same call the editor opens a tab with, so
-    // that every byte offset the index hands out — a search hit, a backlink, a heading — lands on
-    // the buffer it is applied to. That is what makes a CRLF note work: the buffer holds `\n`,
-    // and so must the text the offsets were counted in. `read_text` also brings the NUL sniff
-    // and the `lossy` flag; a lossy note is still indexed because its buffer holds the same
-    // replacement characters, while a lossy source file is dropped rather than indexed as text
-    // it is not. Only a note is read past [`MAX_INDEXED_BODY`], and the size test uses the stat
-    // the walk already took rather than pulling a 15 MiB file into memory for the cap to throw
-    // away. PDFs and binaries stay cheap `(mtime, size, ino)` rows; the `pdf` feature will add
-    // text extraction and can reuse the same hash column when it does.
-    //
-    // The hash is of the normalised text, never of the raw file. Safe, because a hash is only
-    // ever compared against an earlier hash of the same file taken the same way.
-    //
-    // A file that cannot be read keeps its stat row and loses its body, which is a note that is
-    // in the tree and in no search. Said at `debug!`, the level the walk says its own skips at,
-    // because it is the only trace such a note leaves.
+/// Everything is read through `fs::read_text`, the same call the editor opens a tab with, so that
+/// every byte offset the index hands out — a search hit, a backlink, a heading — lands on the
+/// buffer it is applied to. That is what makes a CRLF note work: the buffer holds `\n`, and so
+/// must the text the offsets were counted in. `read_text` also brings the NUL sniff and the
+/// `lossy` flag; a lossy note is still indexed because its buffer holds the same replacement
+/// characters, while a lossy source file is dropped rather than indexed as text it is not. Only a
+/// note is read past [`MAX_INDEXED_BODY`], and the size test uses the stat the walk already took
+/// rather than pulling a 15 MiB file into memory for the cap to throw away. PDFs and binaries stay
+/// cheap `(mtime, size, ino)` rows, a file named as a binary format unopened; the `pdf` feature
+/// will add text extraction and can reuse the same hash column when it does.
+///
+/// A file that cannot be read keeps its stat row and loses its body, which is a note that is in
+/// the tree and in no search. Said at `debug!`, the level the walk says its own skips at, because
+/// it is the only trace such a note leaves.
+fn read_content(f: &walk::FileMeta) -> Content {
     let body = || match crate::fs::read_text(&f.canonical) {
         Ok(read) => Some(read),
         Err(e) => {
@@ -478,23 +581,67 @@ fn upsert(
         // its pictures, so the cap does not apply.
         FileKind::Other if crate::path::is_diagram(&f.rel_path) => body().and_then(diagram_labels),
         // An `.xml` draw.io wrote is known by its first element once its text is in.
-        FileKind::Other if f.size <= MAX_INDEXED_BODY => body().and_then(|read| match read {
-            crate::fs::Read::Text(t) if crate::path::holds_diagram(&f.rel_path, &t.text) => {
-                diagram_labels(crate::fs::Read::Text(t))
-            }
-            read => Some(read),
-        }),
+        FileKind::Other if f.size <= MAX_INDEXED_BODY && !path::is_binary(&f.rel_path) => body()
+            .and_then(|read| match read {
+                crate::fs::Read::Text(t) if crate::path::holds_diagram(&f.rel_path, &t.text) => {
+                    diagram_labels(crate::fs::Read::Text(t))
+                }
+                read => Some(read),
+            }),
         _ => None,
     };
-    let (hash, text) = match read {
-        Some(crate::fs::Read::Text(t)) if f.kind == FileKind::Markdown || !t.lossy => {
-            stats.bytes_read += t.text.len() as u64;
-            (Some(blake3::hash(t.text.as_bytes())), Some(t.text))
-        }
+    let text = match read {
+        Some(crate::fs::Read::Text(t)) if f.kind == FileKind::Markdown || !t.lossy => Some(t.text),
         // Vanished or unreadable mid-walk, binary, or over the cap: keep the stat row, drop the
         // content.
-        _ => (None, None),
+        _ => None,
     };
+    // Only a note is markdown. A `.py`'s `#` comments are not tags and its `#!` line is not a
+    // heading, so nothing but a note reaches the analyser.
+    let analysis = match f.kind {
+        FileKind::Markdown => text.as_deref().map(markdown::analyze),
+        _ => None,
+    };
+    // A code file's declarations, read from the text its body is.
+    let symbols = match (f.kind, text.as_deref()) {
+        (FileKind::Other, Some(text)) => crate::code::lang_of(&f.rel_path)
+            .map(|lang| crate::code::symbols(lang, text))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    Content {
+        hash: text.as_deref().map(|t| blake3::hash(t.as_bytes())),
+        text,
+        analysis,
+        symbols,
+    }
+}
+
+/// Replace one scanned entry's file row and everything derived from it with what its
+/// [`Content`] says. Returns the file id.
+///
+/// The one place a file becomes index rows, shared by the full reconcile and the watcher's
+/// [`Index::update_file`] so the two can never drift apart.
+fn upsert(
+    tx: &rusqlite::Transaction<'_>,
+    f: &walk::FileMeta,
+    content: Content,
+    stats: &mut ReconcileStats,
+) -> Result<i64> {
+    let Content {
+        hash,
+        text,
+        analysis,
+        symbols,
+    } = content;
+    // The row it replaces, as this transaction sees it rather than as the caller's diff did:
+    // another process sharing the index (`accent-cli mcp` beside the app) may have written it
+    // since, and a row taken for new would keep the links and tags it already had twice over.
+    let existing_id: Option<i64> = tx
+        .prepare_cached("SELECT id FROM files WHERE rel_path = ?1")?
+        .query_row([&f.rel_path], |r| r.get(0))
+        .optional()?;
+    stats.bytes_read += text.as_ref().map_or(0, |t| t.len() as u64);
 
     // Syncthing preserves origin mtimes, so mtime alone lies both ways; the hash is
     // the arbiter for "did the content really change".
@@ -526,13 +673,7 @@ fn upsert(
         return Ok(id);
     }
 
-    // Only a note is markdown. A `.py`'s `#` comments are not tags and its `#!` line is not a
-    // heading, so nothing but a note reaches the analyser; the `path::stem` fallback below is what
-    // gives every other file a title.
-    let analysis = match f.kind {
-        FileKind::Markdown => text.as_deref().map(markdown::analyze),
-        _ => None,
-    };
+    // The `path::stem` fallback is what gives a file the analyser never saw a title.
     let title = analysis
         .as_ref()
         .and_then(|a| a.title.clone())
@@ -632,13 +773,9 @@ fn upsert(
                 .execute(params![id, name])?;
         }
     }
-    // A code file's declarations, read from the text its body is.
-    let lang = (f.kind == FileKind::Other)
-        .then(|| crate::code::lang_of(&f.rel_path))
-        .flatten();
-    if let (Some(lang), Some(text)) = (lang, text.as_deref()) {
+    if !symbols.is_empty() {
         let test_file = crate::code::is_test_path(&f.rel_path);
-        for d in crate::code::symbols(lang, text) {
+        for d in symbols {
             tx.prepare_cached(
                 "INSERT INTO symbols(file_id, kind, name, container, byte_start, byte_end, line,
                                      end_line, signature, test)
@@ -807,6 +944,109 @@ mod tests {
             "what was written is not written again"
         );
         assert_eq!(ix.file_paths(false).unwrap().len(), notes);
+    }
+
+    /// A first index writes without syncing, on its own connection alone, and that connection
+    /// syncs as before once the walk ends, a stopped one too.
+    #[test]
+    fn a_first_index_syncs_as_usual_again_once_it_ends() {
+        let vault = tempfile::tempdir().unwrap();
+        for i in 0..BATCH + 10 {
+            fs::write(vault.path().join(format!("n{i}.md")), "# Note\n").unwrap();
+        }
+        let db = tempfile::tempdir().unwrap();
+        let (mut ix, other) = (open(&db), open(&db));
+        let sync = |ix: &Index| -> i64 {
+            ix.conn
+                .pragma_query_value(None, "synchronous", |r| r.get(0))
+                .unwrap()
+        };
+        let marker = || crate::index::unsynced_marker(&db.path().join("i.db")).exists();
+        let (off, normal) = (0, 1);
+        let mut during = Vec::new();
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        ix.reconcile_with(
+            vault.path(),
+            "",
+            &ScanOptions::default(),
+            &|| stopped.load(std::sync::atomic::Ordering::Relaxed),
+            |ix, p| {
+                if p.phase == Phase::Index {
+                    during.push((sync(ix), sync(&other), marker()));
+                    stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            },
+        )
+        .unwrap();
+        during.dedup();
+        assert_eq!(during, [(off, normal, true)]);
+        assert_eq!(sync(&ix), normal, "after a stopped first index");
+        assert!(!marker());
+
+        stopped.store(false, std::sync::atomic::Ordering::Relaxed);
+        during.clear();
+        ix.reconcile_with(
+            vault.path(),
+            "",
+            &ScanOptions::default(),
+            &|| false,
+            |ix, p| {
+                if p.phase == Phase::Index {
+                    during.push((sync(ix), sync(&other), marker()));
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            during,
+            [(normal, normal, false)],
+            "the resume is no first index"
+        );
+        assert_eq!(sync(&ix), normal);
+    }
+
+    /// Files are read on a pool, in whatever order its threads finish them, and written as the
+    /// walk found them: each row holds its own file's content, and the ids follow the scan, so a
+    /// folder's row is there before its children's.
+    #[test]
+    fn files_read_on_the_pool_are_written_in_scan_order() {
+        let vault = tempfile::tempdir().unwrap();
+        for i in 0..BATCH + 100 {
+            let dir = vault.path().join(format!("d{}", i % 7));
+            fs::create_dir_all(&dir).unwrap();
+            // Sizes apart by orders of magnitude, so the reads finish out of order.
+            let pad = "x ".repeat(if i % 50 == 0 { 20_000 } else { i % 10 });
+            fs::write(dir.join(format!("n{i}.md")), format!("# Note {i}\n{pad}\n")).unwrap();
+        }
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let scanned: Vec<String> = walk::scan(vault.path(), &ScanOptions::default())
+            .files
+            .into_iter()
+            .map(|f| f.rel_path)
+            .collect();
+        let rows: Vec<(String, Option<String>, Option<String>)> = ix
+            .conn
+            .prepare(
+                "SELECT f.rel_path, f.title, n.body FROM files f
+                 LEFT JOIN notes n ON n.file_id = f.id ORDER BY f.id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            scanned
+        );
+        for (rel, title, body) in rows.iter().filter(|r| r.0.ends_with(".md")) {
+            let i = &rel[rel.find("/n").unwrap() + 2..rel.len() - 3];
+            assert_eq!(title.as_deref(), Some(format!("Note {i}").as_str()));
+            assert!(body.as_ref().unwrap().starts_with(&format!("# Note {i}\n")));
+        }
     }
 
     /// Two processes share one index (the app and `accent-cli mcp`), so a row this walk found
@@ -1375,6 +1615,8 @@ mod tests {
         .unwrap();
         fs::write(vault.path().join("big.txt"), "zorblat\n".repeat(300_000)).unwrap();
         fs::write(vault.path().join("bin.dat"), b"\0zorblat\n").unwrap();
+        // Named as a binary format, so never opened: text or not, it is not read.
+        fs::write(vault.path().join("pic.png"), "zorblat\n").unwrap();
         fs::write(
             vault.path().join("flow.drawio"),
             r#"<mxfile><diagram><mxGraphModel><root><mxCell id="0" value="zorblat"/></root></mxGraphModel></diagram></mxfile>"#,
@@ -1412,6 +1654,7 @@ mod tests {
         assert_eq!(body_count("tool.py"), 1);
         assert_eq!(body_count("big.txt"), 0, "over MAX_INDEXED_BODY");
         assert_eq!(body_count("bin.dat"), 0, "a NUL byte is not text");
+        assert_eq!(body_count("pic.png"), 0, "a picture is not read");
         assert_eq!(
             body_count("flow.drawio"),
             0,

@@ -137,7 +137,22 @@ fun BrowseScreen(
     // up without the query being typed again.
     LaunchedEffect(query, mode, revision) { if (mode == Mode.Search) model.search(query) }
 
-    LaunchedEffect(query, mode, tags, tag, tagged, linked, picking, revision) {
+    // The switcher's names, read by the model as the page opens and again as the walk moves on.
+    // Never waited for here: a keystroke or a batch restarting this page's effects cannot cut a
+    // load short, and the rows already ranked stay up until the next ranking replaces them. The
+    // folders git ignores are walked once a session, the first time the page is reached.
+    val corpus by model.names.collectAsState()
+    // Files is still growing while those folders are walked: said as a walk of the index says it.
+    val growing by model.listing.collectAsState()
+    val reading = indexing || (growing && mode == Mode.Files)
+    var walked by remember { mutableStateOf(false) }
+    LaunchedEffect(mode, revision) {
+        if (mode != Mode.Files) return@LaunchedEffect
+        model.loadNames(walkIgnored = !walked)
+        walked = true
+    }
+
+    LaunchedEffect(query, mode, tags, tag, tagged, linked, picking, corpus) {
         if (mode == Mode.Search) return@LaunchedEffect
         val choosing = mode == Mode.Command && picking != null
         if (mode == Mode.Tags || mode == Mode.Backlinks || choosing) {
@@ -151,18 +166,18 @@ fun BrowseScreen(
             listing = list to withContext(Dispatchers.Default) { listed(query, names, ::fuzzy) }
             return@LaunchedEffect
         }
-        val commands = mode == Mode.Command
-        val kind = if (commands) Recents.Kind.Commands else Recents.Kind.Notes
-        // The note corpus is fetched on demand rather than kept in step with the index, so the
-        // first query in a session waits for it once.
-        val read = if (commands) null else model.corpus()
-        val corpus = read?.names ?: palette.map { it.label }
+        val read = if (mode == Mode.Command) null else corpus ?: return@LaunchedEffect
         ranked = Ranked(mode, query, withContext(Dispatchers.Default) {
-            if (read != null && query.isBlank()) {
-                model.recents.list(Recents.Kind.Notes).mapNotNull { read.find(it) }.take(50)
-            } else {
-                val ranks = model.recents.ranks(kind, corpus)
-                fuzzyRank(query, corpus, ranks).map { it.toInt() }
+            val recent = model.recents.list(Recents.Kind.Notes)
+            when {
+                read == null -> {
+                    val labels = palette.map { it.label }
+                    val ranks = model.recents.ranks(Recents.Kind.Commands, labels)
+                    fuzzyRank(query, labels, ranks).map { it.toInt() }
+                }
+                query.isBlank() -> recent.mapNotNull { read.find(it) }.take(50)
+                // On the core's side, where the names already are: the query crosses, not them.
+                else -> read.ranker.rank(query, recent).map { it.toInt() }
             }
         })
         // With the places it holds, in the same frame.
@@ -212,7 +227,7 @@ fun BrowseScreen(
         // Over every page, since every list here is drawn from the index: what is not read yet is
         // in none of them. The start screen's words and its bar.
         line?.let { Status(it) }
-        if (indexing || slow) {
+        if (reading || slow) {
             LinearProgressIndicator(
                 Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, bottom = 8.dp),
             )
@@ -268,7 +283,7 @@ fun BrowseScreen(
             }
             LazyColumn(Modifier.fillMaxSize(), reverseLayout = tab != Mode.Search) {
                 when {
-                    none -> item { Quiet(nothingFound(indexing, paused)) }
+                    none -> item { Quiet(nothingFound(indexing || growing, paused)) }
                     tab == Mode.Command -> items(rows, key = { it }) { i ->
                         val command = palette[i]
                         ListItem(

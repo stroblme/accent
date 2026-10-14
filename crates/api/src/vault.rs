@@ -1184,6 +1184,32 @@ mod tests {
         });
     }
 
+    /// An index SQLite cannot read is a cache to build again rather than a vault that will not
+    /// open — on the desktop, on Android and on a host alike, all of which open it here — and the
+    /// vault's own files are never touched by it.
+    #[test]
+    fn an_unreadable_index_is_built_anew() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# A\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("index.db");
+        std::fs::write(&db, vec![0x5a; 8192]).unwrap();
+
+        let (vault, events) =
+            Vault::open_unwatched_at(root.path(), &db, VaultConfig::default()).unwrap();
+        let said = wait_for(&events, |e| matches!(e, Event::Error(_)), BUDGET);
+        assert!(
+            matches!(&said, Some(Event::Error(m)) if m.contains("index")),
+            "{said:?}"
+        );
+        assert!(wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+        assert_eq!(vault.file_paths(false).unwrap(), ["a.md"]);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("a.md")).unwrap(),
+            "# A\n"
+        );
+    }
+
     /// The façade is the boundary MCP and Android call directly, so it decides what is inside
     /// the vault; an `accent-target:` of `../Outside/x.md` reaches it too.
     #[test]

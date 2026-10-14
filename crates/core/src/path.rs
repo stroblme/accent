@@ -66,6 +66,20 @@ const CONFIG_EXT: &[&str] = &[
     "json", "jsonc", "toml", "yaml", "yml", "ini", "cfg", "conf", "env", "xml", "lock",
 ];
 const TEXT_EXT: &[&str] = &["txt", "log", "rst", "org", "adoc"];
+/// Formats that are never text, which the index leaves unread: finding the NUL byte that says
+/// so meant reading a 200 KB picture whole, 0.9 GB over a vault's worth of them.
+const BINARY_EXT: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "tif", "tiff", "ico", "heic", "zip", "gz",
+    "xz", "7z", "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "xopp", "mp3", "mp4", "m4a",
+    "ogg", "wav", "flac", "webm", "mkv", "mov",
+];
+
+/// Whether `rel` is named as a binary format ([`BINARY_EXT`]).
+pub fn is_binary(rel: &str) -> bool {
+    basename(rel).rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && BINARY_EXT.contains(&ext.to_ascii_lowercase().as_str())
+    })
+}
 
 /// What `rel` is by its name alone. The extension is the file name's, lowercased, with a leading
 /// dot counted as part of the name, as [`markdown::strip_ext`] has it: `LICENSE` and `.gitignore`

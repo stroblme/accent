@@ -88,13 +88,20 @@ impl Local {
                 accent_core::Error::Invalid(format!("{} is not a folder", root.display()))
             })?;
         // The reader opens first because it is the connection that may drop and recreate the
-        // schema; the worker's must never see the database half-built.
-        let index = Index::open(db)?;
+        // schema, or build anew an index it cannot read; the worker's must never see the
+        // database half-built.
+        let (index, damage) = Index::open_or_rebuild(db)?;
         let search = Index::open(db)?;
         let writer = Index::open(db)?;
 
         let (tx, rx) = channel::<Msg>();
         let (events, event_rx) = channel::<Event>();
+        // Said once, as the worker says its own failures: the walk that follows is a first index.
+        if let Some(damage) = damage {
+            let _ = events.send(Event::Error(format!(
+                "the index could not be read and is built anew: {damage}"
+            )));
+        }
         // The providers send their diagnostics down the same channel the worker's events use.
         let lang = language::Languages::new(root.clone(), db.to_path_buf(), events.clone());
         let stop = Arc::new(AtomicU8::new(worker::RUN));

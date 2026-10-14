@@ -17,7 +17,7 @@ mod vault;
 pub use convert::*;
 pub use error::AccentError;
 pub use event::Event;
-pub use fuzzy::fuzzy_rank;
+pub use fuzzy::{Ranker, fuzzy_rank};
 pub use markdown::{analyze_utf16, pdf_anchor, to_html};
 pub use pdf::{PdfSession, link_with_alias};
 pub use recolour::{is_animated, looks_like_document, recolour_image, recolour_svg, upright_image};

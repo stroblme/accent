@@ -45,6 +45,25 @@ class CorpusTest {
         assertEquals(Corpus.Row("Nickname", "Nick notes.md"), corpus.row(5))
     }
 
+    /**
+     * A load of the names is never restarted: what asks while one runs gets one more after it,
+     * walking the ignored folders if any of the askings wanted that, and then nothing. Restarting
+     * it at every keystroke is what kept a slow load from ever landing.
+     */
+    @Test
+    fun `a load asked for again while it runs runs once more after it`() {
+        val reload = Reload()
+        assertEquals(true, reload.ask(walk = true))
+        assertEquals(false, reload.ask(walk = false))
+        assertEquals(false, reload.ask(walk = true))
+        assertEquals(false, reload.ask(walk = false))
+        assertEquals(true, reload.next())
+        assertNull(reload.next())
+        // Idle again: the next asking starts at once, and alone it is followed by nothing.
+        assertEquals(true, reload.ask(walk = false))
+        assertNull(reload.next())
+    }
+
     @Test
     fun `a recent note is found among the paths and never among the aliases`() {
         assertEquals(1, corpus.find("Nick notes.md"))

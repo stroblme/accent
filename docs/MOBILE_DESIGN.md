@@ -45,7 +45,9 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
 - Search is the default: the tree until there is a query, then what the notes say. Files is the
   switcher — the recent files, then names ranked against the query — and Command the palette; both
   lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the
-  keyboard up when their page lands.
+  keyboard up when their page lands. Files lists the index's names at once, and the notes in the
+  folders git ignores join when their walk lands, which over shared storage is a walk of the
+  whole vault; the names are ranked on the core's side, so a key sends the query and not them.
 - Every list here is the index's, so while the vault is still being read a muted line under the
   title says what is not listed yet, over the start screen's bar; a stopped walk keeps the line
   and drops the bar. Search and Files ask again as the walk reads more files, so a file it reaches
