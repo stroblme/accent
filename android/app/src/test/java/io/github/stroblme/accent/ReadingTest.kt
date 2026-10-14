@@ -30,6 +30,13 @@ class ReadingTest {
         assertNull(readingLine(indexing = false, paused = false, scanned = 0))
     }
 
+    /** The notification a walk holds, before it has a count and once it has one. */
+    @Test
+    fun `the notification names the vault and counts its files`() {
+        assertEquals("Indexing Notes…", indexingText("Notes", 0))
+        assertEquals("Indexing Notes… 120 files", indexingText("Notes", 120))
+    }
+
     @Test
     fun `nothing found while reading is not nothing found`() {
         val done = nothingFound(indexing = false, paused = false)

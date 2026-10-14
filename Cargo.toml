@@ -46,12 +46,13 @@ opt-level = "s"
 [profile.release.package.rmcp]
 opt-level = "s"
 
-# The Android core, built for size rather than speed: the `.so` is the download, and the desktop
-# app shares `release` above and wants the other trade. `make android` and the cross build Gradle
-# runs itself both name this profile; nothing else does. Measured on the arm64 library, 8.7 MB
-# before: 6.9 MB stripped, 5.2 MB stripped and built for size. The symbol table it drops is where
-# uniffi keeps its metadata, which is why `make bindings` reads a host build instead.
+# The Android core, built for speed as the desktop's is: a vault's first index is the one slow
+# thing the app does, and it is CPU-bound on one core. `opt-level = "z"` cost it ~15 % on the host
+# (2026-10-14, the generated vault: 9.7 against 8.4 s of CPU), for a smaller download: the
+# stripped arm64 library is 7.4 MB here, 5.7 MB at "z". `make android` and the cross build
+# Gradle runs itself both name this profile; nothing else does. The symbol table it strips is
+# where uniffi keeps its metadata, which is why `make bindings` reads a host build instead.
 [profile.android]
 inherits = "release"
-opt-level = "z"
+opt-level = 3
 strip = "symbols"

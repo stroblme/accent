@@ -29,12 +29,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.getAndUpdate
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -359,6 +363,21 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 tell(write(text))
             }
         }
+        // The foreground service a walk holds ([IndexingService]): started as one starts, its
+        // count kept, and stopped as it ends.
+        viewModelScope.launch {
+            var walking = false
+            state.map { s ->
+                s.root?.takeIf { s.indexing }?.let { indexingText(File(it).name, s.scanned) }
+            }.distinctUntilChanged().collect { text ->
+                when {
+                    text == null -> IndexingService.stop(app)
+                    walking -> IndexingService.update(app, text)
+                    else -> IndexingService.start(app, text)
+                }
+                walking = text != null
+            }
+        }
     }
 
     /**
@@ -534,11 +553,14 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** Walk the files again: what the app does instead of watching them. */
     fun rescan() = viewModelScope.launch(Dispatchers.IO) {
         val v = vault ?: return@launch
-        // A paused vault ignores the rescan, so no walk would come to say it was over.
-        if (!_state.value.paused) {
-            _state.update { it.copy(indexing = true) }
-            runCatching { v.rescan() }
+        // A paused vault ignores the rescan, so no walk would come to say it was over. A running
+        // walk is reading the vault already, and asked again the core would walk the whole of it
+        // once more the moment this one ended. Asked and marked in one step, so two returns in a
+        // row ask once.
+        val was = _state.getAndUpdate {
+            if (it.paused || it.indexing) it else it.copy(indexing = true)
         }
+        if (!was.paused && !was.indexing) runCatching { v.rescan() }
         // An open note may have been changed by Syncthing while the app was away.
         _state.value.open?.let { onChanged(it.rel) }
     }
@@ -1107,6 +1129,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        IndexingService.stop(getApplication())
         release(vault)
         vault = null
     }

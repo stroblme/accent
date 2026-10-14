@@ -41,8 +41,9 @@ PDFIUM_SHA256_android_x86_64    := 9d043689096c7cdd4ca98fff95599be115b2a38feba0c
 PDFIUM_ASSET_arm64-v8a := arm64
 PDFIUM_ASSET_x86_64    := x64
 ANDROID_TARGETS := aarch64-linux-android x86_64-linux-android
-# A release cross build takes `[profile.android]` from Cargo.toml — release plus `opt-level = "z"`
-# and `strip` — because the `.so` ships in the APK and the desktop must keep release's speed.
+# A release cross build takes `[profile.android]` from Cargo.toml — release plus `strip`, because
+# the `.so` ships in the APK, and at release's speed, which a phone's first index needs more than
+# the 1.7 MB a size build saved (Cargo.toml says what was measured).
 ANDROID_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--profile android,)
 # uniffi keeps its metadata in the symbol table, which that profile strips, so the bindings are
 # read out of a host build of the same crate — the flow uniffi documents. Dev profile, because

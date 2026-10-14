@@ -1527,8 +1527,16 @@ fn theme_css(
          color: {quote}; font-style: italic; }}\n\
          hr {{ border: 0; border-top: 1px solid {rule}; margin: 24px 0; }}\n\
          table {{ border-collapse: collapse; }}\n\
-         th, td {{ border: 1px solid {rule}; padding: 6px 12px; }}\n\
+         /* WebKit pads every cell with the table's cellpadding, 1px unless it says otherwise, as\n\
+            a hint of the page's own: that outranks this user sheet's rule, `!important` aside. */\n\
+         th, td {{ border: 1px solid {rule}; padding: 6px 12px !important; }}\n\
          th {{ font-weight: 700; }}\n\
+         /* A table wider than the page scrolls sideways on its own, never the page: a block\n\
+            hugging the table, which wraps its cells first, so one that fits is laid out as\n\
+            before. On paper it stays a table and wraps as it can. */\n\
+         @media screen {{\n\
+         table {{ display: block; width: max-content; max-width: 100%; overflow-x: auto; }}\n\
+         }}\n\
          /* A conflict block: its sides stacked in one rounded box, each under a caption naming\n\
             it. A side is a flow root, so its paragraphs' margins stay inside its tint. */\n\
          .conflict {{ margin: 1em 0; border-radius: 6px; overflow: auto; }}\n\
@@ -1537,12 +1545,15 @@ fn theme_css(
          font-weight: 700; }}\n\
          {tints}\
          /* On paper the page's margins are the print settings', a line of code has no sideways\n\
-            scroll to hide in, and a heading or a figure is not cut from what it belongs to. */\n\
+            scroll to hide in, and a heading or a figure is not cut from what it belongs to. A\n\
+            cell's padding is tighter, so a table that has wrapped as far as it can still fits\n\
+            the paper: 6px either side cut a 12-column one off A4, 4px did not. */\n\
          @media print {{\n\
          body {{ max-width: none; padding: 0; }}\n\
          pre {{ white-space: pre-wrap; overflow-wrap: anywhere; }}\n\
          h1, h2, h3, h4, h5, h6 {{ break-after: avoid; }}\n\
          pre, table, img, svg, .conflict, math[display=\"block\"] {{ break-inside: avoid; }}\n\
+         th, td {{ padding: 2px 4px !important; }}\n\
          }}\n"
     )
 }
@@ -1657,6 +1668,34 @@ mod tests {
         );
     }
 
+    /// A cell's padding outranks the 1 px WebKit gives every cell from the table's cellpadding.
+    #[test]
+    fn theme_css_pads_cells_over_webkits_cellpadding() {
+        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0, None);
+        assert!(css.contains("padding: 6px 12px !important; }"), "{css}");
+    }
+
+    /// A wide table scrolls on its own on screen, while on paper it is a table as any other.
+    #[test]
+    fn theme_css_scrolls_a_wide_table_on_its_own() {
+        let css = theme_css(
+            FG,
+            theme::view_bg(false),
+            ACCENT,
+            "Cantarell",
+            11.0,
+            Some(50.0),
+        );
+        let rule =
+            "table { display: block; width: max-content; max-width: 100%; overflow-x: auto; }";
+        assert!(
+            css.contains(&format!("@media screen {{\n{rule}\n}}")),
+            "{css}"
+        );
+        let print = css.split_once("@media print").unwrap().1;
+        assert!(!print.contains("display: block"), "{print}");
+    }
+
     /// On paper the page is the paper's width, a long code line wraps rather than running off it,
     /// and no heading is left at the foot of a page away from what it heads.
     #[test]
@@ -1675,6 +1714,7 @@ mod tests {
             "pre { white-space: pre-wrap; overflow-wrap: anywhere; }",
             "h1, h2, h3, h4, h5, h6 { break-after: avoid; }",
             "pre, table, img, svg, .conflict, math[display=\"block\"] { break-inside: avoid; }",
+            "th, td { padding: 2px 4px !important; }",
         ] {
             assert!(print.contains(rule), "{rule} in {print}");
         }

@@ -322,8 +322,10 @@ The decisions under the Android app, each with its reason; the shared ones are i
   the wrong unit lands beside the word.
 - **A colour crosses as one `u32`** (`0xRRGGBBAA`) — uniffi carries no arrays, and it is how Android
   spells a colour.
-- **No watcher**: `Vault::open_unwatched`, and a rescan on every return to the app — inotify over
-  emulated storage drops events; the app's own writes still reach the index.
+- **No watcher**: `Vault::open_unwatched`, and a rescan on every return to the app that finds no
+  walk running — inotify over emulated storage drops events; the app's own writes still reach the
+  index. A walk already running is reading the vault, and a rescan asked during it would only walk
+  the whole of it again once it ended.
 - **The index lives in `noBackupFilesDir`**, not `cacheDir` — Android empties a cache under storage
   pressure, and re-indexing a large vault is the one slow thing the app does; the cost is an index
   counted against the app's own storage, which nothing reclaims.
@@ -331,6 +333,12 @@ The decisions under the Android app, each with its reason; the shared ones are i
   what it has as it goes — a large vault's first walk is tens of seconds. The scan before the
   first batch writes nothing, so it counts the files it has found instead. Stopping it is the
   desktop's pause, and the rescan on a return is one of the walks a pause refuses.
+- **A walk holds a foreground service** (`IndexingService`, type `dataSync`) — an app left with
+  none is frozen soon after, and its walk with it. Started as a walk starts, stopped as it ends or
+  is stopped; its notification is ongoing and quiet, "Indexing <vault>… N files" over the
+  indeterminate bar, a tap back into the app and no actions. No notification permission is asked
+  for it: without one the service runs all the same, its notification missing from the drawer.
+  Android 15's daily limit on a data sync lets it go, and the walk finishes once the app is back.
 - **The PDF rules are the core's**, called by both apps (`pdf::highlight_quads`,
   `pdf::link_with_alias`, the ink ledger in `accent_core::pdf::ledger`) — the reader behaves as the
   desktop's does, and only the gestures, the drawing and their arithmetic are Kotlin.
