@@ -1,5 +1,8 @@
 package io.github.stroblme.accent
 
+import androidx.compose.ui.geometry.Offset
+import io.github.stroblme.accent.ffi.PageSize
+import io.github.stroblme.accent.ui.Pagination
 import io.github.stroblme.accent.ui.anchor
 import io.github.stroblme.accent.ui.liveShift
 import org.junit.Assert.assertEquals
@@ -75,9 +78,9 @@ class AnchorTest {
      * The two halves have to agree, or the page jumps at the moment the fingers come up: what the
      * layer showed during the pinch is what the laid-out column must show after it.
      *
-     * Down the page, a point [into] pixels into the document with [above] of it past the top edge
-     * is drawn at `into - above`. Afterwards the document is [live] times as long and the reader
-     * is wherever `anchor` put them.
+     * Along an axis with nothing between the pages — across them — a point [into] pixels in with
+     * [above] of it past the edge is drawn at `into - above`. Afterwards the column is [live] times
+     * as wide and the reader is wherever `anchor` put them.
      */
     @Test
     fun `the release changes nothing that was on the screen`() {
@@ -90,5 +93,89 @@ class AnchorTest {
                 )
             }
         }
+    }
+
+    /**
+     * Forty pages, every seventh one landscape, with the 21 px gap 8 dp makes under each on a
+     * Pixel 8, at its 1080 px fit width.
+     */
+    private val pages = Pagination(
+        List(40) { if (it % 7 == 3) PageSize(842f, 595f) else PageSize(595f, 842f) },
+        gap = 21f,
+    )
+    private val width = 1080
+
+    /**
+     * Down the column the two halves have to agree as well, and there the column is not one thing
+     * that scales: the pages grow with the zoom and the gaps between them do not. So what the layer
+     * showed under the fingers — the point under [pivot] when they landed, carried to
+     * `pivot + shift` — has to be under them once the column is laid out at the new zoom, on any
+     * page, at any zoom, however far the hand moved.
+     */
+    @Test
+    fun `a release leaves the word under the fingers under them`() {
+        val pivot = Offset(400f, 900f)
+        val lives = listOf(0.6f, 1.7f, 3f)
+        val shifts = listOf(Offset(-90f, 130f), Offset.Zero, Offset(60f, -200f))
+        for (page in listOf(0, 1, 17, 38)) for (zoom in listOf(1f, 2.5f)) for (live in lives) {
+            // The gesture holds the layer between the zoom's two ends.
+            if (zoom * live < 1f) continue
+            for (shift in shifts) {
+                // Centred sideways, and scrolled so the fingers land 500 pt down [page].
+                val panX = -width * (zoom - 1f) / 2
+                val scale = width * zoom / (if (page % 7 == 3) 842f else 595f)
+                val above = pages.top(page, width, zoom) + 500f * scale - pivot.y
+                val to = pages.released(above, panX, pivot, shift, live, width, zoom, maxZoom = 8f)
+                // The word under the fingers, and one a line above it.
+                for (at in listOf(pivot, pivot + Offset(120f, -60f))) {
+                    val land = pages.on(at.x - panX, at.y + above, width, zoom)!!
+                    val layer = Offset(
+                        (at.x - panX) * live + liveShift(pivot.x, live, panX, shift.x),
+                        at.y * live + liveShift(pivot.y, live, 0f, shift.y),
+                    )
+                    val (x, y) = land.point.x to land.point.y
+                    near1(layer, pages.screen(land.page, x, y, to.above, to.panX, width, to.zoom))
+                }
+            }
+        }
+    }
+
+    private fun near1(expected: Offset, actual: Offset) {
+        assertEquals(expected.x, actual.x, 1f)
+        assertEquals(expected.y, actual.y, 1f)
+    }
+
+    /** Shrunk with the fingers low on the first page, there is nothing above it to bring down. */
+    @Test
+    fun `a release past the top of the document stops at its top`() {
+        val to = pages.released(0f, -540f, Offset(540f, 1800f), Offset.Zero, 0.5f, width, 2f, 8f)
+        assertEquals(1f, to.zoom, 0f)
+        assertEquals(0 to 0, pages.at(to.above, width, to.zoom))
+        assertEquals(0f, to.panX, 0f)
+    }
+
+    /**
+     * Past the end the column is asked for more than it has and stops at its end by itself, which
+     * it can only do if what it is asked for is still past the end, not the top of the last page.
+     */
+    @Test
+    fun `a release past the end of the document stays past it`() {
+        val end = pages.top(40, width, 3f)
+        val (row, into) = pages.at(end + 500f, width, 3f)
+        assertEquals(39, row)
+        assertEquals(end + 500f, pages.top(row, width, 3f) + into, 1f)
+    }
+
+    /**
+     * At the ceiling the layer stops growing and still follows the hand, so the release is a drag:
+     * the zoom stays and the column moves as far as the fingers did.
+     */
+    @Test
+    fun `a release at the ceiling keeps the zoom and moves with the hand`() {
+        val hand = Offset(40f, -70f)
+        val to = pages.released(50_000f, -3000f, Offset(500f, 1000f), hand, 1f, width, 8f, 8f)
+        assertEquals(8f, to.zoom, 0f)
+        assertEquals(-2960f, to.panX, 0.01f)
+        assertEquals(50_070f, to.above, 0.5f)
     }
 }

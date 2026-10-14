@@ -22,6 +22,7 @@ git_tree = true
 show_hidden = false
 git_tint = false
 column_width = 50
+full_width_preview = true
 indent_width = 4
 forward_keys_to_terminal = false
 theme = "solarized"
@@ -126,6 +127,9 @@ pub struct Config {
     /// Document-column width as a percentage of editor width. The editor enforces a readable
     /// minimum on narrow windows; 50 approximates the former 800 px cap on a maximised window.
     pub column_width: u32,
+    /// Let the preview's page fill its pane instead of taking [`Config::column_width`]'s share
+    /// of it, for a note whose tables are wider than a column of prose. Off by default.
+    pub full_width_preview: bool,
     /// How many columns one indent is worth in a code tab: the width of a tab character and of
     /// the run of spaces Tab writes in its place. Prose is not measured in columns and keeps
     /// GtkSourceView's own.
@@ -273,6 +277,7 @@ impl Default for Config {
             show_hidden: true,
             git_tint: true,
             column_width: 50,
+            full_width_preview: false,
             indent_width: 4,
             forward_keys_to_terminal: false,
             theme: Theme::System,
@@ -1055,6 +1060,7 @@ daily_template = "DailyNote.md"
         assert!(!c.show_hidden);
         assert!(!c.git_tint);
         assert_eq!(c.column_width, 50);
+        assert!(c.full_width_preview);
         assert_eq!(c.indent_width, 4);
         assert!(!c.forward_keys_to_terminal);
         assert_eq!(c.theme, Theme::Solarized);
@@ -1159,6 +1165,7 @@ daily_template = "DailyNote.md"
         assert!(c.spellcheck);
         assert!(c.show_hidden);
         assert!(c.git_tint);
+        assert!(!c.full_width_preview);
         assert_eq!(c.focus_mode, FocusMode::Medium);
         assert!(c.recent_vaults.is_empty());
         assert!(!config_path_exists(tmp.path()));

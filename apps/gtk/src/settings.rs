@@ -388,6 +388,20 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     });
     group.add(&width);
 
+    let full = adw::SwitchRow::builder()
+        .title("Full-Width Preview")
+        .subtitle("Let the preview use its whole width instead of the column width")
+        .active(config.borrow().full_width_preview)
+        .build();
+    full.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().full_width_preview = r.is_active();
+            save();
+        }
+    });
+    group.add(&full);
+
     // Columns rather than a choice of 2/4/8: the number is what a tab character is worth on
     // screen, and a language whose house style is three of them is not ours to rule out.
     let indent = adw::SpinRow::with_range(1.0, 16.0, 1.0);

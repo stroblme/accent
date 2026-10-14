@@ -521,12 +521,14 @@ fun FindBar(
  *
  * [onEnd] is called when the fingers come up, with the velocity they left behind: a drag ends in a
  * throw and a pinch in the one layout the gesture is worth, and only the caller knows which it
- * was.
+ * was. [onDown] is called as the first finger lands, before anything moves: where a throw is
+ * stopped.
  *
  * A gesture whose events something nearer the finger has already taken — the pen drawing on the
  * page — is dropped rather than fought over.
  */
 suspend fun PointerInputScope.panZoom(
+    onDown: () -> Unit,
     onGesture: (centroid: Offset, pan: Offset, zoom: Float) -> Unit,
     onEnd: (Velocity) -> Unit,
 ) {
@@ -534,6 +536,7 @@ suspend fun PointerInputScope.panZoom(
         val speed = VelocityTracker()
         var moving = false
         awaitFirstDown(requireUnconsumed = false)
+        onDown()
         do {
             val event = awaitPointerEvent()
             if (event.changes.any { it.isConsumed }) return@awaitEachGesture

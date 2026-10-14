@@ -193,7 +193,10 @@ impl App {
                     .map_err(|e| e.to_string())?
                     .to_str()
                     .to_string();
-                let (resolve, css) = (app.asset_resolver(), preview::paper_css());
+                let (resolve, css) = (
+                    app.asset_resolver(),
+                    preview::paper_css(&app.config.borrow()),
+                );
                 let note = tab.rel();
                 let web = app.web_images.borrow().clone();
                 let drawn = drawn_diagrams(&html, &resolve, &note, &web).await;

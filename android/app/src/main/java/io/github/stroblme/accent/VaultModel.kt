@@ -35,6 +35,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Put a note's text in the buffer as its own, with nothing to undo back into.
@@ -196,10 +197,21 @@ data class VaultState(
      * before its first batch sets it only if an earlier walk left files in the index.
      */
     val ready: Boolean = false,
+    /**
+     * How often what the index holds has moved on: each time the tree catches up with a running
+     * walk, and when one ends. What a list drawn from the index is keyed on, so a file the walk
+     * reads while the list is open turns up in it without the query being typed again.
+     */
+    val revision: Int = 0,
     /** The directories whose children have been listed, so the tree redraws in place. */
     val children: Map<String, List<FileRow>> = emptyMap(),
     val expanded: Set<String> = setOf(""),
     val results: List<SearchHit> = emptyList(),
+    /**
+     * The query [results] answer. Behind the field while a search is under way, which is the one
+     * thing that tells "nothing found" from "not answered yet".
+     */
+    val searched: String = "",
     val open: Open? = null,
     val pdf: OpenPdf? = null,
     val image: OpenImage? = null,
@@ -325,8 +337,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** One [write] at a time, so each goes out with the etag the one before it recorded. */
     private val writing = Mutex()
 
-    /** The switcher's files. See [corpus]. */
+    /** The switcher's files, and the [VaultState.revision] they were read at. See [corpus]. */
     private var corpus: Corpus? = null
+    private var corpusAt = 0
 
     /** How far the batch being applied said the walk had got, and when the tree last caught up. */
     private var seen: Progress? = null
@@ -422,6 +435,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     scanned = 0,
                     phase = null,
                     ready = it.ready || !stopped,
+                    revision = it.revision + 1,
                 )
             }
             corpus = null
@@ -467,12 +481,20 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         if (now - lastRelist < RELIST_EVERY_MS) return
         lastRelist = now
         relist(_state.value.expanded)
+        _state.update { it.copy(revision = it.revision + 1) }
     }
 
-    /** The switcher's corpus, fetched the first time it is asked for. */
+    /**
+     * The switcher's corpus, fetched the first time it is asked for, and again once the index has
+     * moved on under a running walk ([VaultState.revision]).
+     */
     suspend fun corpus(): Corpus {
-        corpus?.takeIf { it.names.isNotEmpty() }?.let { return it }
+        val at = _state.value.revision
+        corpus?.takeIf { it.names.isNotEmpty() && corpusAt == at }?.let { return it }
         val v = vault ?: return Corpus()
+        // Only a corpus dropped outright walks the ignored folders again: one read again because
+        // the walk has read more files has nothing new to find there.
+        val fresh = corpus == null
         // Tens of thousands of strings in one call: worth doing when the switcher opens, which is
         // the only thing that wants them, rather than after every reconcile.
         val read = withContext(Dispatchers.IO) {
@@ -480,12 +502,13 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 runCatching { v.filePaths(false) }.getOrDefault(emptyList()),
                 // Walked again here, as the desktop's Go to File walks them as it opens: nothing
                 // else on a phone asks for a fresh walk of the folders the index leaves out.
-                runCatching { v.ignoredNotes(true) }.getOrDefault(emptyList()),
+                runCatching { v.ignoredNotes(fresh) }.getOrDefault(emptyList()),
                 runCatching { v.missingNotes() }.getOrDefault(emptyList()),
                 runCatching { v.noteAliases() }.getOrDefault(emptyList()),
             )
         }
         corpus = read
+        corpusAt = at
         return read
     }
 
@@ -973,21 +996,22 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------------------- search
 
     /**
-     * What the box asked last. An answer to anything else is dropped: the core interrupts a search
-     * a newer one supersedes, and its answer, an error, would otherwise empty the list.
+     * How many searches have been asked for. An answer to any but the last is dropped: the core
+     * interrupts a search a newer one supersedes, and its answer, an error, would otherwise empty
+     * the list — a count rather than the query, because the same query is asked again as the
+     * walk reads more files, and the second asking supersedes the first.
      */
-    @Volatile private var asking = ""
+    private val asked = AtomicInteger()
 
     fun search(query: String) {
-        asking = query
+        val mine = asked.incrementAndGet()
         viewModelScope.launch(Dispatchers.IO) {
             val v = vault ?: return@launch
-            if (query.isBlank()) {
-                _state.update { it.copy(results = emptyList()) }
-                return@launch
+            val hits = if (query.isBlank()) emptyList()
+            else runCatching { v.search(query, 100u, false) }.getOrDefault(emptyList())
+            _state.update {
+                if (asked.get() != mine) it else it.copy(results = hits, searched = query)
             }
-            val hits = runCatching { v.search(query, 100u, false) }.getOrDefault(emptyList())
-            if (asking == query) _state.update { it.copy(results = hits) }
         }
     }
 

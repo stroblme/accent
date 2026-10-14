@@ -8,6 +8,7 @@
 
 use crate::look::{self, Look, Served};
 use crate::theme;
+use accent_core::config::Config;
 use accent_core::markdown::{self, percent_decode};
 use accent_core::path::parent_dir;
 use accent_core::search::Options;
@@ -19,10 +20,6 @@ use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use webkit6::prelude::*;
-
-/// Preview column width in ch for DESIGN.md's 60–72-character measure.
-/// 56ch measures roughly 71 Adwaita Sans or 62 Cantarell characters.
-const COLUMN_CH: u32 = 56;
 
 /// WebKit find options: wrap, optional case matching and word starts for whole-word mode.
 /// WebKit has no regex search; queries remain literal, and foo can match food at word starts.
@@ -205,6 +202,8 @@ struct Inner {
     look: Cell<Look>,
     /// The sheet currently injected, so `restyle` can replace instead of stack.
     sheet: RefCell<Option<webkit6::UserStyleSheet>>,
+    /// The page's share of the view in percent, `None` for all of it ([`Preview::set_column`]).
+    column: Cell<Option<u32>>,
     /// [`MERMAID`] while a note with a diagram is shown, `None` otherwise.
     mermaid: RefCell<Option<webkit6::UserScript>>,
     /// Whether a page may load yet; see [`Gate`].
@@ -577,6 +576,7 @@ impl Preview {
             assets,
             look: Cell::new(Look::now()),
             sheet: RefCell::new(None),
+            column: Cell::new(None),
             mermaid: RefCell::new(None),
             gate: RefCell::new(Gate::Waiting(None)),
             renders: Cell::new(0),
@@ -792,7 +792,13 @@ impl Preview {
                 inner.view.color(),
             ),
         };
-        let css = stylesheet(fg, bg);
+        // WebKit's zoom scales the floor's pixels but not a percentage of the view, so the share
+        // carries the zoom itself, as the editor's column does.
+        let share = inner
+            .column
+            .get()
+            .map(|c| f64::from(c) * inner.view.zoom_level());
+        let css = stylesheet(fg, bg, share);
 
         if let Some(old) = inner.sheet.borrow_mut().take() {
             inner.content.remove_style_sheet(&old);
@@ -813,9 +819,18 @@ impl Preview {
     }
 
     /// The document zoom, shared with the editor. WebKit keeps it across loads and `apply_style`
-    /// never touches it, so a stylesheet rebuild cannot undo it.
+    /// never touches it, so a stylesheet rebuild cannot undo it; the page's cap is scaled by it.
     pub fn set_zoom(&self, zoom: f64) {
         self.inner.view.set_zoom_level(zoom);
+        Self::apply_style(&self.inner);
+    }
+
+    /// The page's width as Preferences set it: the editor's Column Width, or the whole view.
+    pub fn set_column(&self, config: &Config) {
+        let column = column(config);
+        if self.inner.column.replace(column) != column {
+            Self::apply_style(&self.inner);
+        }
     }
 
     // --- find ----------------------------------------------------------------------------
@@ -1404,8 +1419,14 @@ fn css_rgba(c: gdk::RGBA) -> String {
     )
 }
 
+/// The page's share of its view in percent, as the editor's column takes of the editor, or
+/// `None` under Full-Width Preview.
+fn column(config: &Config) -> Option<u32> {
+    (!config.full_width_preview).then_some(config.column_width)
+}
+
 /// [`theme_css`] for `fg` on `bg`, in the editor's font and the system accent.
-fn stylesheet(fg: gdk::RGBA, bg: &str) -> String {
+fn stylesheet(fg: gdk::RGBA, bg: &str, share: Option<f64>) -> String {
     // The editor's own font, not the GNOME document font: DESIGN.md's Typography section gives
     // prose Adwaita Mono at the *size* of the document font, and the two panes are meant to agree
     // by construction. Asked of `editor::default_font`, which is where that decision is made, so a
@@ -1420,14 +1441,14 @@ fn stylesheet(fg: gdk::RGBA, bg: &str) -> String {
         _ => 11.0,
     };
     let accent = adw::StyleManager::default().accent_color_rgba();
-    theme_css(fg, bg, accent, &family, size)
+    theme_css(fg, bg, accent, &family, size, share)
 }
 
 /// The sheet a paper preview is given, for an export that carries it in the file: WebKit applies
 /// it as a user stylesheet, which the page's own DOM does not hold.
-pub(crate) fn paper_css() -> String {
+pub(crate) fn paper_css(config: &Config) -> String {
     let (bg, fg) = theme::paper();
-    stylesheet(fg, bg)
+    stylesheet(fg, bg, column(config).map(f64::from))
 }
 
 /// The foreground at `alpha`, as CSS: the same colour the editor dims with.
@@ -1437,8 +1458,16 @@ fn dim(c: gdk::RGBA, alpha: f32) -> String {
 
 /// Generate preview styling from foreground, background, accent and document font.
 /// Editor alpha and conflict tint rules are shared. Composite caption tints to opaque colours
-/// so underlying side backgrounds cannot darken them.
-fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) -> String {
+/// so underlying side backgrounds cannot darken them. `share` is the page's cap in percent of the
+/// view, `None` for no cap.
+fn theme_css(
+    fg: gdk::RGBA,
+    bg: &str,
+    accent: gdk::RGBA,
+    family: &str,
+    pt: f64,
+    share: Option<f64>,
+) -> String {
     let (text, accent) = (css_rgba(fg), css_rgba(accent));
     let (surface, quote, rule) = (dim(fg, 0.07), dim(fg, 0.6), dim(fg, 0.15));
     let page = gdk::RGBA::parse(bg).unwrap_or(gdk::RGBA::WHITE);
@@ -1454,11 +1483,16 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) 
             )
         })
         .collect();
+    let column = share.map_or_else(
+        || "none".to_string(),
+        |share| format!("max({}px, {share:.1}%)", crate::editor::COLUMN_FLOOR),
+    );
     format!(
         "html {{ background: {bg}; color: {text}; font-family: \"{family}\", sans-serif; \
          font-size: {pt}pt; }}\n\
-         body {{ max-width: {COLUMN_CH}ch; margin: 0 auto; padding: 24px 48px 96px; \
-         line-height: 1.6; }}\n\
+         /* The editor's column, its gutters inside the cap as they are inside the clamp. */\n\
+         body {{ box-sizing: border-box; max-width: {column}; margin: 0 auto; \
+         padding: 24px 48px 96px; line-height: 1.6; }}\n\
          /* Scroll-sync markers: the script scrolls the block around them, never the marker. */\n\
          span[data-line] {{ display: none; }}\n\
          h1, h2, h3, h4, h5, h6 {{ font-weight: 700; line-height: 1.25; margin: 1.2em 0 0.4em; }}\n\
@@ -1544,7 +1578,14 @@ mod tests {
 
     #[test]
     fn theme_css_paints_links_with_the_accent() {
-        let css = theme_css(FG, theme::view_bg(true), ACCENT, "Cantarell", 11.0);
+        let css = theme_css(
+            FG,
+            theme::view_bg(true),
+            ACCENT,
+            "Cantarell",
+            11.0,
+            Some(50.0),
+        );
         assert!(
             css.contains("a { color: rgba(255, 0, 0, 1.00); text-decoration: underline; }"),
             "{css}"
@@ -1557,7 +1598,14 @@ mod tests {
     /// the marker lines over the page, so the two panes show one block.
     #[test]
     fn theme_css_tints_a_conflict_as_the_editor_does() {
-        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0);
+        let css = theme_css(
+            FG,
+            theme::view_bg(false),
+            ACCENT,
+            "Cantarell",
+            11.0,
+            Some(50.0),
+        );
         let page = gdk::RGBA::parse(theme::view_bg(false)).unwrap();
         for (side, (body, head)) in ["current", "base", "incoming"]
             .into_iter()
@@ -1576,21 +1624,51 @@ mod tests {
     #[test]
     fn theme_css_writes_no_hex_but_the_background() {
         for bg in [theme::view_bg(false), theme::view_bg(true)] {
-            let css = theme_css(FG, bg, ACCENT, "Cantarell", 11.0);
+            let css = theme_css(FG, bg, ACCENT, "Cantarell", 11.0, Some(50.0));
             assert_eq!(hex_literals(&css), vec![bg], "stray hex with {bg}");
         }
         // Paper is white whatever the theme on screen.
         let (bg, ink) = theme::paper();
         assert_eq!(bg, theme::view_bg(false));
-        let css = theme_css(ink, bg, ACCENT, "Cantarell", 11.0);
+        let css = theme_css(ink, bg, ACCENT, "Cantarell", 11.0, Some(50.0));
         assert_eq!(hex_literals(&css), vec![bg]);
+    }
+
+    /// On screen the page takes the editor's column (`editor::column_max`), gutters included, or
+    /// the whole view.
+    #[test]
+    fn theme_css_caps_the_page_as_the_editor_caps_its_column() {
+        let css = theme_css(
+            FG,
+            theme::view_bg(false),
+            ACCENT,
+            "Cantarell",
+            11.0,
+            Some(55.0),
+        );
+        assert!(
+            css.contains("body { box-sizing: border-box; max-width: max(480px, 55.0%);"),
+            "{css}"
+        );
+        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0, None);
+        assert!(
+            css.contains("body { box-sizing: border-box; max-width: none;"),
+            "{css}"
+        );
     }
 
     /// On paper the page is the paper's width, a long code line wraps rather than running off it,
     /// and no heading is left at the foot of a page away from what it heads.
     #[test]
     fn theme_css_lays_the_note_out_for_print() {
-        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0);
+        let css = theme_css(
+            FG,
+            theme::view_bg(false),
+            ACCENT,
+            "Cantarell",
+            11.0,
+            Some(50.0),
+        );
         let print = css.split_once("@media print").expect("a print block").1;
         for rule in [
             "body { max-width: none; padding: 0; }",
@@ -1605,13 +1683,25 @@ mod tests {
     #[test]
     fn theme_css_follows_its_inputs() {
         let (light, dark) = (theme::view_bg(false), theme::view_bg(true));
-        let base = theme_css(FG, light, ACCENT, "Cantarell", 11.0);
+        let base = theme_css(FG, light, ACCENT, "Cantarell", 11.0, Some(50.0));
         let teal = gdk::RGBA::new(0.0, 0.5, 0.5, 1.0);
-        assert_ne!(base, theme_css(FG, dark, ACCENT, "Cantarell", 11.0));
-        assert_ne!(base, theme_css(FG, light, teal, "Cantarell", 11.0));
-        assert_ne!(base, theme_css(FG, light, ACCENT, "Inter", 11.0));
-        assert_ne!(base, theme_css(FG, light, ACCENT, "Cantarell", 13.0));
-        assert!(theme_css(FG, light, ACCENT, "Inter", 13.0).contains("\"Inter\""));
+        assert_ne!(
+            base,
+            theme_css(FG, dark, ACCENT, "Cantarell", 11.0, Some(50.0))
+        );
+        assert_ne!(
+            base,
+            theme_css(FG, light, teal, "Cantarell", 11.0, Some(50.0))
+        );
+        assert_ne!(
+            base,
+            theme_css(FG, light, ACCENT, "Inter", 11.0, Some(50.0))
+        );
+        assert_ne!(
+            base,
+            theme_css(FG, light, ACCENT, "Cantarell", 13.0, Some(50.0))
+        );
+        assert!(theme_css(FG, light, ACCENT, "Inter", 13.0, Some(50.0)).contains("\"Inter\""));
     }
 
     /// A resolver of the shape a caller that owns the root passes in: a join that canonicalises,

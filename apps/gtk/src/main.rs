@@ -1519,6 +1519,9 @@ impl App {
             tab.set_column_width(config.column_width);
             tab.set_indent_width(config.indent_width);
         }
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.set_column(config);
+        }
         if changed.font {
             for diff in self.diffs() {
                 diff.set_font(config.editor_font.as_deref(), self.zoom.get());

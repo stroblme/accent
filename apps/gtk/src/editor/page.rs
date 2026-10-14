@@ -20,7 +20,7 @@ const BOTTOM: i32 = 96;
 /// Minimum capped column width at 100% zoom: 384 text pixels, about 52
 /// GNOME-font characters. Prevent unreadably narrow percentage columns;
 /// the 30% preference minimum makes it apply only below 1600 editor pixels.
-const COLUMN_FLOOR: i32 = 480;
+pub(crate) const COLUMN_FLOOR: i32 = 480;
 /// Opacity of unhovered line numbers over the background, muting the
 /// scheme's gutter colour further. Match quote alpha in `highlight::restyle`.
 const DIM: f64 = 0.6;

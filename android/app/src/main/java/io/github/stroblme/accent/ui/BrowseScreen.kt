@@ -29,6 +29,7 @@ import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.TagCount
 import io.github.stroblme.accent.ffi.fuzzyRank
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -76,6 +77,14 @@ fun BrowseScreen(
     children: Map<String, List<FileRow>>,
     expanded: Set<String>,
     results: List<SearchHit>,
+    /** The query [results] answer ([VaultState.searched]). */
+    searched: String,
+    /** Bumped as the index takes in more files ([VaultState.revision]). */
+    revision: Int,
+    /** The walk is running, or was stopped, and how far it has read: what [readingLine] says. */
+    indexing: Boolean,
+    paused: Boolean,
+    scanned: Long,
     front: String?,
     openTag: String?,
     /** Whether a note or a PDF is in front, which is what Print… acts on. */
@@ -90,10 +99,10 @@ fun BrowseScreen(
     // follow the surface across, rather than waiting for it to land.
     val mode = Mode.entries[pager.currentPage]
     var query by remember { mutableStateOf("") }
-    // The ranking and the page it was ranked for, as places in [palette] or in [files]. Two pages
-    // are composed at once while one is being dragged in, and a file row drawn from a command's
-    // place is a row that says the wrong thing.
-    var ranked by remember { mutableStateOf(Mode.Search to emptyList<Int>()) }
+    // The ranking and the page and query it was ranked for, as places in [palette] or in [files].
+    // Two pages are composed at once while one is being dragged in, and a file row drawn from a
+    // command's place is a row that says the wrong thing.
+    var ranked by remember { mutableStateOf(Ranked(Mode.Search, "", emptyList())) }
     // What the Files page's places are places in.
     var files by remember { mutableStateOf(Corpus()) }
     // What the Tags and Backlinks pages list, asked for as the panel opens and as a tag is opened:
@@ -124,7 +133,11 @@ fun BrowseScreen(
         tagged = tag?.let { model.filesWithTag(it.name) }
     }
 
-    LaunchedEffect(query, mode, tags, tag, tagged, linked, picking) {
+    // Asked again as the walk reads more files, so a note it reaches while the query is up turns
+    // up without the query being typed again.
+    LaunchedEffect(query, mode, revision) { if (mode == Mode.Search) model.search(query) }
+
+    LaunchedEffect(query, mode, tags, tag, tagged, linked, picking, revision) {
         if (mode == Mode.Search) return@LaunchedEffect
         val choosing = mode == Mode.Command && picking != null
         if (mode == Mode.Tags || mode == Mode.Backlinks || choosing) {
@@ -144,14 +157,14 @@ fun BrowseScreen(
         // first query in a session waits for it once.
         val read = if (commands) null else model.corpus()
         val corpus = read?.names ?: palette.map { it.label }
-        ranked = mode to withContext(Dispatchers.Default) {
+        ranked = Ranked(mode, query, withContext(Dispatchers.Default) {
             if (read != null && query.isBlank()) {
                 model.recents.list(Recents.Kind.Notes).mapNotNull { read.find(it) }.take(50)
             } else {
                 val ranks = model.recents.ranks(kind, corpus)
                 fuzzyRank(query, corpus, ranks).map { it.toInt() }
             }
-        }
+        })
         // With the places it holds, in the same frame.
         if (read != null) files = read
     }
@@ -178,11 +191,42 @@ fun BrowseScreen(
     val chips = remember { Mode.entries.map { BringIntoViewRequester() } }
     LaunchedEffect(mode) { chips[mode.ordinal].bringIntoView() }
 
+    // A query the page has no answer to yet. The bar for it waits a moment, since most answers
+    // are in before it would have been seen, and one flashing at every keystroke says nothing.
+    val asking = query.isNotBlank() && when (mode) {
+        Mode.Search -> searched != query
+        Mode.Files -> ranked.mode != mode || ranked.query != query
+        else -> false
+    }
+    var slow by remember { mutableStateOf(false) }
+    LaunchedEffect(asking) {
+        slow = false
+        if (!asking) return@LaunchedEffect
+        delay(SLOW_MS)
+        slow = true
+    }
+    val line = readingLine(indexing, paused, scanned)
+
     PullDownPanel(onClose) {
         ScreenBar("Browse")
+        // Over every page, since every list here is drawn from the index: what is not read yet is
+        // in none of them. The start screen's words and its bar.
+        line?.let { Status(it) }
+        if (indexing || slow) {
+            LinearProgressIndicator(
+                Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, bottom = 8.dp),
+            )
+        }
         HorizontalPager(state = pager, modifier = Modifier.weight(1f).fillMaxWidth()) { page ->
             val tab = Mode.entries[page]
-            val rows = if (ranked.first == tab) ranked.second else emptyList()
+            val rows = if (ranked.mode == tab) ranked.rows else emptyList()
+            // Answered, and with nothing in it. Search's answer is the core's, the rest are ranked
+            // here.
+            val none = query.isNotBlank() && when (tab) {
+                Mode.Search -> searched == query && results.isEmpty()
+                Mode.Files -> ranked.mode == tab && ranked.query == query && rows.isEmpty()
+                else -> false
+            }
             if (tab == Mode.Tags) {
                 val open = tag
                 val all = tags
@@ -224,6 +268,7 @@ fun BrowseScreen(
             }
             LazyColumn(Modifier.fillMaxSize(), reverseLayout = tab != Mode.Search) {
                 when {
+                    none -> item { Quiet(nothingFound(indexing, paused)) }
                     tab == Mode.Command -> items(rows, key = { it }) { i ->
                         val command = palette[i]
                         ListItem(
@@ -318,7 +363,7 @@ fun BrowseScreen(
         }
         Field(
             value = query,
-            onValue = { query = it; if (mode == Mode.Search) model.search(it) },
+            onValue = { query = it },
             placeholder = when (mode) {
                 Mode.Search -> "Search"
                 Mode.Files -> "Go to a file"
@@ -404,6 +449,42 @@ private fun Notes(
             )
         }
     }
+}
+
+/** A ranking, and the page and the query it was ranked for. */
+private data class Ranked(val mode: Mode, val query: String, val rows: List<Int>)
+
+/** How long a query goes unanswered before the bar says it is still being looked for. */
+private const val SLOW_MS = 200L
+
+/**
+ * What Browse says over its lists while they may not hold every file — the walk is still reading
+ * the vault, or was stopped before the end — and nothing once they do. The start screen's words.
+ */
+internal fun readingLine(indexing: Boolean, paused: Boolean, scanned: Long): String? = when {
+    indexing && scanned > 0 ->
+        "Reading your vault… %,d files so far. Some may not be listed yet.".format(scanned)
+    indexing -> "Reading your vault… Some files may not be listed yet."
+    paused -> "Reading paused. Files not read yet are not listed."
+    else -> null
+}
+
+/** What a query that matched nothing says: nothing yet, while [readingLine] has a line. */
+internal fun nothingFound(indexing: Boolean, paused: Boolean): String = when {
+    indexing -> "Nothing found yet. Your vault is still being read."
+    paused -> "Nothing found in the files read so far."
+    else -> "Nothing found."
+}
+
+/** A line over the lists about all of them, in the muted colour. */
+@Composable
+private fun Status(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = Gutter, end = Gutter, bottom = 8.dp),
+    )
 }
 
 /** What a page says in place of rows it does not have. */

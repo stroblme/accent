@@ -463,6 +463,7 @@ impl App {
         );
         self.paned.set_end_child(Some(preview.widget()));
         preview.set_zoom(self.zoom.get());
+        preview.set_column(&self.config.borrow());
         // The preview follows the document zoom, so the wheel over it has to reach the same
         // setting the wheel over the editor does. Capture phase: WebKit answers a Ctrl+scroll
         // itself, with a zoom of its own that nothing else in the window knows about.

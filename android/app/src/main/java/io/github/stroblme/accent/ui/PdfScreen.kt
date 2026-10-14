@@ -30,6 +30,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -807,11 +808,10 @@ private fun Pages(
     /** Take what the fingers did to the layer and lay the column out that way. */
     fun commit() {
         val above = pages.above(list, viewport.width, zoom)
-        val down = anchor(above, pivot.y, live, shift.y)
-        val across = anchor(-panX, pivot.x, live, shift.x)
-        zoom = (zoom * live).coerceIn(MIN_ZOOM, maxZoom)
-        panX = holdXAt(-across, viewport.width, zoom)
-        val (page, into) = pages.at(down, viewport.width, zoom)
+        val to = pages.released(above, panX, pivot, shift, live, viewport.width, zoom, maxZoom)
+        zoom = to.zoom
+        panX = to.panX
+        val (page, into) = pages.at(to.above, viewport.width, zoom)
         list.requestScrollToItem(page, into)
         live = 1f
         shift = Offset.Zero
@@ -828,40 +828,53 @@ private fun Pages(
                 .onTap(chrome, claimed = ::claimed)
                 .pointerInput(doc, viewport) {
                     val decay = exponentialDecay<Float>()
+                    // Not `live != 1f`: at either end of the zoom the layer is held at 1 while the
+                    // fingers still move it.
+                    var pinching = false
+                    // The throw the last drag left. The next finger down stops it, as on any
+                    // scroller, before that gesture reads where the column is: a column still
+                    // moving under a pinch is one the release would lay out from elsewhere.
+                    var thrown: Job? = null
                     panZoom(
+                        onDown = { thrown?.cancel() },
                         onGesture = { centroid, pan, step ->
-                            if (live == 1f && step == 1f) {
+                            if (!pinching && step == 1f) {
                                 // One finger: the column scrolls and the pages slide, both at once.
                                 list.dispatchRawDelta(-pan.y)
                                 panX = holdXAt(panX + pan.x, viewport.width, zoom)
                                 chrome.scrolled(-pan.y)
                             } else {
-                                // Two: the layer below carries all of it until they are lifted.
-                                if (live == 1f) pivot = centroid
+                                // Two: the layer below carries all of it until they are lifted,
+                                // from where they were before this event, as [shift] counts.
+                                if (!pinching) pivot = centroid - pan
+                                pinching = true
                                 live = (live * step).coerceIn(MIN_ZOOM / zoom, maxZoom / zoom)
                                 shift += pan
                             }
                         },
                         onEnd = { velocity ->
-                            if (live != 1f) {
+                            if (pinching) {
+                                pinching = false
                                 // The one place the column is laid out again, on a list that has
                                 // not moved since the pinch began: where the reader was, plus what
                                 // the fingers did to it, is where they have to be put back.
                                 commit()
                                 return@panZoom
                             }
-                            scope.launch {
-                                var last = 0f
-                                AnimationState(0f, -velocity.y).animateDecay(decay) {
-                                    list.dispatchRawDelta(value - last)
-                                    last = value
+                            thrown = scope.launch {
+                                launch {
+                                    var last = 0f
+                                    AnimationState(0f, -velocity.y).animateDecay(decay) {
+                                        list.dispatchRawDelta(value - last)
+                                        last = value
+                                    }
                                 }
-                            }
-                            scope.launch {
-                                var last = 0f
-                                AnimationState(0f, velocity.x).animateDecay(decay) {
-                                    panX = holdXAt(panX + (value - last), viewport.width, zoom)
-                                    last = value
+                                launch {
+                                    var last = 0f
+                                    AnimationState(0f, velocity.x).animateDecay(decay) {
+                                        panX = holdXAt(panX + (value - last), viewport.width, zoom)
+                                        last = value
+                                    }
                                 }
                             }
                         },
@@ -1046,14 +1059,32 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
         top(list.firstVisibleItemIndex, width, zoom) + list.firstVisibleItemScrollOffset
 
     /** The page, and the offset into it, that [y] pixels from the start lands on at [zoom]. */
-    fun at(y: Float, width: Int, zoom: Float): Pair<Int, Int> {
+    fun at(y: Float, width: Int, zoom: Float): Pair<Int, Int> =
+        row(y, width, zoom).let { (index, into) -> index to into.roundToInt() }
+
+    /**
+     * [at] before the rounding. Past the end it stays on the last row, overrun and all, for the
+     * column to stop at its end: the top of the last page would be a jump back up it.
+     */
+    private fun row(y: Float, width: Int, zoom: Float): Pair<Int, Float> {
         var left = y.coerceAtLeast(0f)
         for (i in sizes.indices) {
             val h = height(i, width, zoom)
-            if (left < h) return i to left.roundToInt()
+            if (left < h) return i to left
             left -= h
         }
-        return maxOf(sizes.size - 1, 0) to 0
+        val last = sizes.lastIndex
+        return if (last < 0) 0 to 0f else last to left + height(last, width, zoom)
+    }
+
+    /**
+     * Where [y] pixels from the start at zoom [from] is at zoom [to]: the same place on the same
+     * page. Not `y * to / from`, which grows the gaps between the pages as well — they do not grow
+     * — and so lands further out the further down the document the point is.
+     */
+    private fun rescale(y: Float, width: Int, from: Float, to: Float): Float {
+        val (index, into) = row(y, width, from)
+        return top(index, width, to) + into * to / from
     }
 
     /**
@@ -1151,7 +1182,34 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
         val (row, into) = at(y, viewport.width, zoom)
         return Reveal(row, into, holdXAt(x, viewport.width, zoom))
     }
+
+    /**
+     * Where the column has to be once a pinch is let go, for what the layer showed under the
+     * fingers to stay there: the zoom, the pan, and how much of the document is above the screen.
+     *
+     * [above] and [panX] are where the column was when the pinch began — it does not move during
+     * one — [pivot] where the fingers began between them, [live] how much further apart they got
+     * and [shift] how far they moved: the layer drew what was under [pivot] at `pivot + shift`.
+     */
+    fun released(
+        above: Float,
+        panX: Float,
+        pivot: Offset,
+        shift: Offset,
+        live: Float,
+        width: Int,
+        zoom: Float,
+        maxZoom: Float,
+    ): Release {
+        val next = (zoom * live).coerceIn(MIN_ZOOM, maxZoom)
+        val across = anchor(-panX, pivot.x, live, shift.x)
+        val down = rescale(above + pivot.y, width, zoom, next) - pivot.y - shift.y
+        return Release(next, holdXAt(-across, width, next), down)
+    }
 }
+
+/** Where a pinch leaves the column: the zoom, the pan, and how far down the document it is. */
+internal data class Release(val zoom: Float, val panX: Float, val above: Float)
 
 /** Where the column has to be for something to be in view: the row, the offset into it, the pan. */
 internal data class Reveal(val row: Int, val into: Int, val panX: Float)

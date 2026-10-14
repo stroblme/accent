@@ -46,6 +46,11 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   switcher — the recent files, then names ranked against the query — and Command the palette; both
   lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the
   keyboard up when their page lands.
+- Every list here is the index's, so while the vault is still being read a muted line under the
+  title says what is not listed yet, over the start screen's bar; a stopped walk keeps the line
+  and drops the bar. Search and Files ask again as the walk reads more files, so a file it reaches
+  turns up without the query being typed again, and a query that matched nothing says "Nothing
+  found yet" until it ends. A query unanswered after 200 ms puts the bar up as well.
 - A search hit opens its note marked by the page's own find; where that find cannot see what the
   index matched — an accent folded, markup the page does not show, a title — the note opens
   unmarked at its top rather than marked at the wrong words.
@@ -209,7 +214,9 @@ exist as a visible control.
   on release. That layer's column is placed by its top-left corner, not by a `required*` modifier,
   which centres what overflows and would shift the page sideways on every pinch; its position is
   never read back in the frame that sets it, which walks the page out from under the hand; and it
-  grows in both directions, a column held to the screen's width squeezing the page sideways.
+  grows in both directions, a column held to the screen's width squeezing the page sideways. The
+  commit puts back the place on the page that was under the fingers, not a distance down the
+  column: the pages grow with the zoom and the gaps between them do not.
 
 ## The document
 
