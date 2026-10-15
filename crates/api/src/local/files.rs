@@ -160,25 +160,38 @@ impl Local {
         Ok(())
     }
 
-    /// Copy a file or directory between vault-relative paths without overwriting.
-    /// Remote copies run beside the files, avoiding transfers; the caller chooses
-    /// an unused destination such as a "(copy)" name. A folder is never copied into itself.
+    /// Copy a file or a folder between vault-relative paths, beside the files on a remote vault.
+    /// Nothing is replaced: a `to` taken by the time the copy gets there fails with
+    /// `AlreadyExists(to)`, and the caller takes its next free name. A folder is copied as Paste
+    /// carries one in ([`copy_tree`]), and never into itself.
     pub fn copy(&self, from: &str, to: &str) -> Result<()> {
         let (src, dest) = (self.resolve(from)?, self.resolve(to)?);
-        match src.is_dir() {
+        let named = |e: io::Error| match e.kind() {
+            io::ErrorKind::AlreadyExists => accent_core::Error::AlreadyExists(to.to_string()),
+            _ => accent_core::Error::io(from, e),
+        };
+        let landed = match src.is_dir() {
             // Before anything is made: a folder copied into itself would copy its copy again.
             true if lands_inside(&src, &dest) => {
                 return Err(accent_core::Error::Invalid(format!("{to} is inside {from}")).into());
             }
-            true => copy_tree(&src, &dest),
-            false => std::fs::copy(&src, &dest).map(|_| ()),
-        }
-        .map_err(|e| accent_core::Error::io(from, e))?;
+            // `create_dir`, not `create_dir_all`: a folder already there is taken, not merged into.
+            true => {
+                let root = src.canonicalize().map_err(named)?;
+                std::fs::create_dir(&dest).map_err(named)?;
+                copy_tree(&src, &dest, &root)
+            }
+            false => {
+                copy_file(&src, &dest).map_err(named)?;
+                Ok(())
+            }
+        };
+        // Made either way: what landed before a later file failed stays, as in a file manager.
         self.post(Msg::Update {
             rel: to.to_string(),
             own: true,
         });
-        Ok(())
+        Ok(landed.map_err(named)?)
     }
 
     /// Plan link and import rewrites before moving files, for UI confirmation.
@@ -734,21 +747,48 @@ fn lands_inside(src: &std::path::Path, dest: &std::path::Path) -> bool {
             .is_some_and(|(src, dest)| dest.starts_with(src))
 }
 
-/// `cp -r`: `std::fs` copies one file, and a pasted folder is the one caller that needs the rest.
-/// Follows a symlink rather than recreating it, which is what copying its contents means.
-fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
-    std::fs::create_dir_all(to)?;
+/// Fill `to`, a folder just made, with what the folder `from` holds, as Paste carries a folder in
+/// from this machine: its folders and files, and a link as the file it names when that is inside
+/// `root`, the real path of the folder being copied ([`fs::links_inside`]). Other links, FIFOs and
+/// sockets stay behind, never opened.
+fn copy_tree(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    root: &std::path::Path,
+) -> io::Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let (src, dest) = (entry.path(), to.join(entry.file_name()));
-        match entry.file_type()?.is_dir() {
-            true => copy_tree(&src, &dest)?,
-            false => {
-                std::fs::copy(&src, &dest)?;
-            }
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            std::fs::create_dir(&dest)?;
+            copy_tree(&src, &dest, root)?;
+        } else if kind.is_file() || (kind.is_symlink() && fs::links_inside(&src, root)) {
+            copy_file(&src, &dest)?;
         }
     }
     Ok(())
+}
+
+/// Copy the file `from` to `to`, a name nothing holds: `create_new` claims it and opens it in one
+/// step, so a file that appeared there meanwhile stays as it was. The mode goes along, under the
+/// umask. A copy cut short is removed rather than left torn.
+fn copy_file(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    // Asked before opening: opening a FIFO would wait for a writer that never comes.
+    let meta = std::fs::metadata(from)?;
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a file"));
+    }
+    let mut src = std::fs::File::open(from)?;
+    let mut dest = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(meta.permissions().mode() & 0o777)
+        .open(to)?;
+    io::copy(&mut src, &mut dest).map(drop).inspect_err(|_| {
+        let _ = std::fs::remove_file(to);
+    })
 }
 
 #[cfg(test)]

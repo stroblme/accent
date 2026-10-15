@@ -326,7 +326,8 @@ methods! {
     /// [`write_file`](Vault::write_file) calls this after uploading bytes.
     wrote(rel: ref str) -> ();
     /// Copy a file or directory within the vault, without transferring remote bytes.
-    /// The caller must choose an unused destination; existing files are not overwritten.
+    /// Nothing is replaced: a taken `to` fails with `AlreadyExists`, and the caller tries its
+    /// next free name.
     copy(from: ref str, to: ref str) -> ();
     plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
     rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
@@ -763,6 +764,67 @@ mod tests {
         assert_eq!(f.read("Note.md"), "body\n");
 
         assert!(f.vault.copy("nowhere.md", "x.md").is_err());
+    }
+
+    /// A name taken between choosing it and copying, by another paste or a sync, is refused and
+    /// left as it was, a folder's included: the caller takes the next free name.
+    #[test]
+    fn a_copy_never_replaces_what_is_there() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Note.md", "mine\n");
+        f.write("Note (copy).md", "theirs\n");
+        f.write("Folder/inner/deep.md", "mine\n");
+        f.write("Folder/top.md", "mine\n");
+        f.write("Folder (copy)/inner/deep.md", "theirs\n");
+        let taken = |rel: &str| {
+            Err(crate::Error::Core(accent_core::Error::AlreadyExists(
+                rel.into(),
+            )))
+        };
+
+        assert_eq!(
+            f.vault.copy("Note.md", "Note (copy).md"),
+            taken("Note (copy).md")
+        );
+        assert_eq!(f.read("Note (copy).md"), "theirs\n");
+        assert_eq!(
+            f.vault.copy("Folder", "Folder (copy)"),
+            taken("Folder (copy)")
+        );
+        assert_eq!(f.read("Folder (copy)/inner/deep.md"), "theirs\n");
+        let listed = std::fs::read_dir(f.vault.root().join("Folder (copy)")).unwrap();
+        assert_eq!(listed.count(), 1, "nothing joins the folder that was there");
+    }
+
+    /// A copied folder is what Paste carries in from this machine: a link to a file inside it
+    /// becomes that file, and a link out of it, one to a folder, a dangling one and a socket stay
+    /// behind.
+    #[test]
+    fn a_copied_folder_keeps_links_inside_it_and_drops_the_rest() {
+        use std::os::unix::fs::symlink;
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("o.md"), "outside\n").unwrap();
+        let f = Fixture::open(VaultConfig::default());
+        f.write("F/a.md", "inside\n");
+        f.write("F/sub/b.md", "b\n");
+        let src = f.vault.root().join("F");
+        symlink("a.md", src.join("link.md")).unwrap();
+        symlink(outside.path().join("o.md"), src.join("out.md")).unwrap();
+        symlink("sub", src.join("dir")).unwrap();
+        symlink("gone.md", src.join("dangling.md")).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(src.join("sock")).unwrap();
+
+        f.vault.copy("F", "G").unwrap();
+        let copy = f.vault.root().join("G");
+        let mut names: Vec<String> = std::fs::read_dir(&copy)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a.md", "link.md", "sub"]);
+        assert!(!copy.join("link.md").is_symlink());
+        assert_eq!(f.read("G/link.md"), "inside\n");
+        assert_eq!(f.read("G/sub/b.md"), "b\n");
     }
 
     /// A folder copied into itself would copy its own copy again, so nothing is made: not by its

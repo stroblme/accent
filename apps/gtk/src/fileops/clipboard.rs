@@ -7,7 +7,7 @@
 //! Paste copies or moves paths inside the vault. Other paths name local files to import
 //! through [`transfer::import`].
 
-use super::paths::{free_path, move_dest};
+use super::paths::{at_free_name, free_path, move_dest};
 use super::{Ops, batch_to, move_all, several, transfer};
 use accent_core::path::{basename, is_under};
 use gtk::prelude::*;
@@ -284,8 +284,8 @@ fn copy_here(ops: &Rc<Ops>, inside: Vec<(String, bool)>, dir: &str) {
                 .map(|(rel, is_dir)| {
                     // Naming and copying on the same worker: each candidate name costs a `stat`,
                     // which on a remote vault is a round trip the window must not wait on.
-                    let to = free_path(&dir, basename(&rel), is_dir, |rel| vault.exists(rel));
-                    (vault.copy(&rel, &to).map(|()| to), rel)
+                    let free = || free_path(&dir, basename(&rel), is_dir, |rel| vault.exists(rel));
+                    (at_free_name(free(), free, |to| vault.copy(&rel, to)), rel)
                 })
                 .collect::<Vec<_>>()
         })

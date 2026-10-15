@@ -274,6 +274,24 @@ fun reread(asked: Open, now: Open?, read: Note, typed: CharSequence): Open? {
     }
 }
 
+/** What came of keeping the other copy of a note ([takeTheirs]). */
+sealed interface Theirs {
+    /** The note holds the copy's text, and the copy is gone. */
+    data object Taken : Theirs
+
+    /** The note holds the copy's text, but the copy is still there, for [why]. */
+    data class CopyKept(val why: Throwable) : Theirs
+
+    /** Nothing was taken, and nothing removed, for [why]. */
+    data class Failed(val why: Throwable) : Theirs
+}
+
+/** Take a conflict copy as its note ([adopt]), and only once that is done [remove] the copy. */
+fun takeTheirs(adopt: () -> Unit, remove: () -> Unit): Theirs {
+    runCatching(adopt).onFailure { return Theirs.Failed(it) }
+    return runCatching(remove).fold({ Theirs.Taken }, { Theirs.CopyKept(it) })
+}
+
 /** Deduplicate [links] by source note in indexed path order. */
 fun linkingNotes(links: List<Backlink>): List<String> = links.map { it.srcRelPath }.distinct()
 
@@ -865,7 +883,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun reload() {
         val open = _state.value.note ?: return
         val ticket = shown.next()
-        viewModelScope.launch { show(open.rel, ticket) }
+        viewModelScope.launch { show(open.rel, ticket, back = open.back) }
     }
 
     fun newNote(rel: String) = viewModelScope.launch {
@@ -895,14 +913,30 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     // ----------------------------------------------------------------------- sync conflicts
 
-    /** Use the conflict copy as note text and delete it, preserving pending edits. */
-    fun keepTheirs(conflict: String) = viewModelScope.launch {
-        val v = vault ?: return@launch
-        val open = _state.value.note ?: return@launch
+    /**
+     * Take the conflict copy as the note and delete it, once [leave] has written what was typed:
+     * the text it replaces is what the core keeps as a conflict copy of its own, to be taken back.
+     */
+    fun keepTheirs(conflict: String) {
+        val open = _state.value.note ?: return
         val ticket = shown.next()
-        val done = withContext(Dispatchers.IO) { runCatching { v.adoptConflict(open.rel, conflict) } }
-        done.onSuccess { show(open.rel, ticket) }
-            .onFailure { fail("Cannot take the other copy", it) }
+        leave {
+            val v = vault ?: return@leave
+            val taken = withContext(Dispatchers.IO) {
+                takeTheirs({ v.adoptConflict(open.rel, conflict) }, { v.delete(conflict) })
+            }
+            when (taken) {
+                is Theirs.Failed -> return@leave fail("Cannot take the other copy", taken.why)
+                is Theirs.CopyKept -> fail("Took the other copy, but cannot remove it", taken.why)
+                Theirs.Taken -> {}
+            }
+            show(open.rel, ticket, back = open.back)
+            // The index has yet to hear that the copy went, so the banner is told, as on the
+            // desktop.
+            if (taken == Theirs.Taken) _state.update { s ->
+                s.withNote(open.rel) { it.copy(conflicts = it.conflicts - conflict) }
+            }
+        }
     }
 
     /** Keep this note as it stands and delete the conflict copy. */

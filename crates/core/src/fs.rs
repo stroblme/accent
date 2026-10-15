@@ -301,6 +301,14 @@ pub fn rename(from: &Path, to: &Path) -> Result<()> {
     std::fs::rename(from, to).map_err(|e| Error::io(from.display(), e))
 }
 
+/// Whether the symlink `link`, inside a folder being copied whole whose real path is `root`, is
+/// copied as the file it names: only a file inside that folder is. One leading out would copy what
+/// nobody chose, and one to a folder may be a loop; those stay behind, as a dangling one does.
+pub fn links_inside(link: &Path, root: &Path) -> bool {
+    link.canonicalize()
+        .is_ok_and(|target| target.starts_with(root) && target.is_file())
+}
+
 /// `canonicalize()`, but tolerating a file that does not exist yet by resolving its parent.
 fn canonical_target(path: &Path) -> io::Result<PathBuf> {
     match path.canonicalize() {

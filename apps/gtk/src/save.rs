@@ -992,13 +992,18 @@ impl App {
                         Contents::Text(text, note) => {
                             write_text(&vault, &from, &to, text, note, free).map(Some)
                         }
-                        Contents::File(local) => copy_pdf(&vault, &from, &local, &to)
+                        Contents::File(local) => copy_pdf(&vault, &from, &local, &to, free)
                             .map(|()| None)
                             .map_err(|e| e.to_string()),
-                        Contents::Copy => vault
-                            .copy(&from, &to)
-                            .map(|()| None)
-                            .map_err(|e| e.to_string()),
+                        // A copy never replaces, so the Replace confirmed writes over instead.
+                        Contents::Copy => match free {
+                            true => vault.copy(&from, &to),
+                            false => vault
+                                .fetch(&from)
+                                .and_then(|local| vault.upload(&local, &to)),
+                        }
+                        .map(|()| None)
+                        .map_err(|e| e.to_string()),
                     };
                     written.map_err(|why| format!("Cannot save as {name}: {why}"))
                 }
@@ -1107,13 +1112,21 @@ fn write_text(
     Ok((etag, accent_core::fs::digest(written), relinked.is_some()))
 }
 
-/// Save PDF bytes to `to`, using the local edited cache for remote vaults.
+/// Save PDF bytes to `to`, using the local edited cache for remote vaults: copied to a `free`
+/// name, written over one whose Replace was confirmed, since a copy never replaces.
 /// Upload and fetch the destination with its cache stamp so later strokes do not mistake the
 /// new file for an external change.
-fn copy_pdf(vault: &Vault, from: &str, local: &Path, to: &str) -> accent_api::Result<()> {
-    match vault.is_remote() {
-        false => vault.copy(from, to),
-        true => vault
+fn copy_pdf(
+    vault: &Vault,
+    from: &str,
+    local: &Path,
+    to: &str,
+    free: bool,
+) -> accent_api::Result<()> {
+    match (vault.is_remote(), free) {
+        (false, true) => vault.copy(from, to),
+        (false, false) => vault.upload(local, to),
+        (true, _) => vault
             .upload(local, to)
             .and_then(|()| vault.fetch(to))
             .map(drop),

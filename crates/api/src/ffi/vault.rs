@@ -218,7 +218,9 @@ impl Vault {
         Ok(self.inner.conflicts_of(&rel)?)
     }
 
-    /// Take the conflict copy as the note: its text replaces the original's and the copy goes.
+    /// Take the conflict copy as the note: its text replaces the original's, whose own text is
+    /// kept beside it as a `*.sync-conflict-…-accent.md` copy. The incoming copy stays: removing
+    /// it is the caller's job, through `delete`.
     pub fn adopt_conflict(&self, original: String, conflict: String) -> Answer<Etag> {
         Ok(self.inner.adopt_conflict(&original, &conflict)?)
     }

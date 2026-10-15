@@ -5,6 +5,7 @@ use super::paths::{child_path, free_path};
 use super::{Ops, batch_to};
 use crate::dialogs::confirm;
 use crate::statusbar::Bytes;
+use accent_core::fs::links_inside;
 use accent_core::path::basename;
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -349,13 +350,9 @@ impl Carry {
                 continue;
             };
             let rel = child_path(to, &name);
-            let linked_inside = || {
-                path.canonicalize()
-                    .is_ok_and(|target| target.starts_with(root) && target.is_file())
-            };
             if meta.is_dir() {
                 self.walk(root, &path, &rel);
-            } else if meta.is_file() || (meta.is_symlink() && linked_inside()) {
+            } else if meta.is_file() || (meta.is_symlink() && links_inside(&path, root)) {
                 self.files.push((path, rel));
             }
         }

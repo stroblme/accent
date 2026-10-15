@@ -1,5 +1,7 @@
 //! Pure path calculations for file dialogs, tree drops and move results.
 
+use accent_api::Error;
+use accent_core::Error as Core;
 use accent_core::path::{basename, is_under, parent_dir};
 use accent_core::walk::out_of_reach;
 
@@ -69,6 +71,29 @@ pub(super) fn free_path(
 /// `rel` moved into `dest_dir`, keeping its name.
 pub(super) fn moved_path(rel: &str, dest_dir: &str) -> String {
     child_path(dest_dir, basename(rel))
+}
+
+/// How many more names [`at_free_name`] tries before it gives up on a folder that keeps filling.
+const RETRIES: usize = 3;
+
+/// Write through `put` at `rel`, and at the name `next` picks while the one tried was taken by the
+/// time `put` got there: the vault never replaces, so another paste or a sync landing first costs
+/// this write its name, not that file. Answers where it landed, or the last refusal.
+pub(crate) fn at_free_name(
+    mut rel: String,
+    next: impl Fn() -> String,
+    put: impl Fn(&str) -> accent_api::Result<()>,
+) -> accent_api::Result<String> {
+    let mut tries = 0;
+    loop {
+        match put(&rel) {
+            Err(Error::Core(Core::AlreadyExists(_))) if tries < RETRIES => {
+                tries += 1;
+                rel = next();
+            }
+            done => return done.map(|()| rel),
+        }
+    }
 }
 
 /// Where dropping `from` on a row of `dir` would put it, or `None` where there is no such move.
@@ -184,6 +209,31 @@ pub(super) fn verb(from: &str, to: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_taken_meanwhile_moves_on_to_the_next_free_one() {
+        // `a (copy).md` was free when chosen and is taken by the time the write gets there.
+        let held = std::cell::RefCell::new(vec!["a.md".to_string(), "a (copy).md".to_string()]);
+        let next = || {
+            free_path("", "a.md", false, |rel| {
+                held.borrow().iter().any(|h| h == rel)
+            })
+        };
+        let put = |rel: &str| match held.borrow().iter().any(|h| h == rel) {
+            true => Err(Error::Core(Core::AlreadyExists(rel.into()))),
+            false => Ok(()),
+        };
+        assert_eq!(
+            at_free_name("a (copy).md".into(), next, put).unwrap(),
+            "a (copy 2).md"
+        );
+
+        // A folder that keeps filling is given up on, and another refusal is answered at once.
+        let full = |rel: &str| Err(Error::Core(Core::AlreadyExists(rel.into())));
+        assert!(at_free_name("x".into(), || "x".into(), full).is_err());
+        let denied = |_: &str| Err(Error::Core(Core::Invalid("no".into())));
+        assert!(at_free_name("x".into(), || unreachable!(), denied).is_err());
+    }
 
     #[test]
     fn levels_lists_what_a_mkdir_p_would_have_made() {
