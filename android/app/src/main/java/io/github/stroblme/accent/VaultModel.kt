@@ -1,6 +1,7 @@
 package io.github.stroblme.accent
 
 import android.app.Application
+import android.util.Log
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
 import androidx.compose.runtime.snapshotFlow
@@ -141,6 +142,8 @@ data class VaultState(
     val results: List<SearchHit> = emptyList(),
     /** Query for [results], retained while the next search runs. */
     val searched: String = "",
+    /** Why [searched] could not be searched, said where [results] would say nothing matched. */
+    val searchFailed: String? = null,
     val doc: Doc? = null,
     val message: String? = null,
 ) {
@@ -173,6 +176,13 @@ data class VaultState(
 
     /** The document in front closed: back to the PDF the note was reached from, else nothing. */
     fun closed(): VaultState = copy(doc = (note?.back as? Back.Pdf)?.pdf)
+
+    /** [query] searched: [hits], or why there are none to show. */
+    fun answered(query: String, hits: Result<List<SearchHit>>): VaultState = copy(
+        results = hits.getOrDefault(emptyList()),
+        searched = query,
+        searchFailed = hits.exceptionOrNull()?.let { failure("Cannot search", it) },
+    )
 
     /** Whether the still-opening vault for [picked] is still wanted. */
     fun waitsFor(picked: String): Boolean = opening && root == picked
@@ -290,6 +300,12 @@ sealed interface Theirs {
 fun takeTheirs(adopt: () -> Unit, remove: () -> Unit): Theirs {
     runCatching(adopt).onFailure { return Theirs.Failed(it) }
     return runCatching(remove).fold({ Theirs.Taken }, { Theirs.CopyKept(it) })
+}
+
+/** [what] could not be done, with the core's reason when it gave one. */
+fun failure(what: String, e: Throwable): String {
+    val why = (e as? AccentException.Failed)?.reason ?: e.message
+    return if (why.isNullOrBlank()) what else "$what: $why"
 }
 
 /** Deduplicate [links] by source note in indexed path order. */
@@ -523,19 +539,20 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             val read = Corpus(files, ignored, missing, aliases).also { it.ranker }
             if (vault === v) _names.value = read
         }
+        // Not read, the names already listed stay: an empty switcher would say the vault is.
         val (files, missing, aliases) = withContext(Dispatchers.IO) {
-            val read = Triple(
-                runCatching { v.filePaths(false) }.getOrDefault(emptyList()),
-                runCatching { v.missingNotes() }.getOrDefault(emptyList()),
-                runCatching { v.noteAliases() }.getOrDefault(emptyList()),
-            )
-            read.also { (f, m, a) -> publish(f, m, a) }
-        }
+            runCatching { Triple(v.filePaths(false), v.missingNotes(), v.noteAliases()) }
+                .onSuccess { (f, m, a) -> publish(f, m, a) }
+                .onFailure { logged("Cannot list the notes", it) }
+                .getOrNull()
+        } ?: return
         if (!walk) return
         _listing.value = true
         try {
             withContext(Dispatchers.IO) {
-                val walked = runCatching { v.ignoredNotes(true) }.getOrNull() ?: return@withContext
+                val walked = runCatching { v.ignoredNotes(true) }
+                    .onFailure { logged("Cannot list the ignored notes", it) }
+                    .getOrNull() ?: return@withContext
                 if (vault !== v) return@withContext
                 ignored = walked
                 publish(files, missing, aliases)
@@ -550,7 +567,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun relist(dirs: Set<String>) = withContext(Dispatchers.IO) {
         val v = vault ?: return@withContext
-        val listed = dirs.mapNotNull { dir -> runCatching { dir to v.listDir(dir) }.getOrNull() }
+        val listed = dirs.mapNotNull { dir ->
+            runCatching { dir to v.listDir(dir) }
+                .onFailure { logged("Cannot list \"$dir\"", it) }
+                .getOrNull()
+        }
         _state.update { it.copy(children = it.children + listed) }
     }
 
@@ -574,7 +595,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val was = _state.getAndUpdate {
             if (it.paused || it.indexing) it else it.copy(indexing = true)
         }
-        if (!was.paused && !was.indexing) runCatching { v.rescan() }
+        // Not asked, no walk will say it is over either.
+        if (!was.paused && !was.indexing) runCatching { v.rescan() }.onFailure {
+            if (vault === v) _state.update { s -> s.walkOver() }
+            fail("Cannot read the vault again", it)
+        }
         // An open note may have been changed by Syncthing while the app was away.
         _state.value.note?.let { onChanged(it.rel) }
     }
@@ -598,7 +623,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun resumeIndexing() = viewModelScope.launch(Dispatchers.IO) {
         val v = vault ?: return@launch
         _state.update { it.copy(indexing = true, paused = false) }
-        runCatching { v.resumeIndexing() }
+        runCatching { v.resumeIndexing() }.onFailure {
+            if (vault === v) _state.update { s -> s.walkOver() }
+            fail("Cannot resume reading the vault", it)
+        }
     }
 
     // ------------------------------------------------------------------------------ one file
@@ -636,10 +664,13 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     pdf -> OpenPdf(rel, v.pathOf(rel), at)
                     image -> imageAt(rel, v.pathOf(rel))
                     else -> v.read(rel).let {
+                        // Without them the note still opens; the banner waits for the next look.
+                        val conflicts = runCatching { v.conflictsOf(rel) }
+                            .onFailure { e -> logged("Cannot look for conflict copies", e) }
+                            .getOrDefault(emptyList())
                         Open(
                             rel, it.text, it.etag,
-                            conflicts = v.conflictsOf(rel), find = find, scroll = scroll,
-                            back = back,
+                            conflicts = conflicts, find = find, scroll = scroll, back = back,
                         )
                     }
                 }
@@ -710,40 +741,58 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The notes that link to the document at [rel], once each ([linkingNotes]). */
-    suspend fun linkedFrom(rel: String): List<String> = withContext(Dispatchers.IO) {
-        linkingNotes(runCatching { vault?.backlinks(rel) }.getOrNull().orEmpty())
-    }
+    suspend fun linkedFrom(rel: String): Result<List<String>> =
+        listing("Cannot list the links") { linkingNotes(vault?.backlinks(rel).orEmpty()) }
 
     /** Every tag in the vault with how many notes carry it, most used first. */
-    suspend fun tags(): List<TagCount> = withContext(Dispatchers.IO) {
-        runCatching { vault?.tags() }.getOrNull().orEmpty()
-    }
+    suspend fun tags(): Result<List<TagCount>> =
+        listing("Cannot list the tags") { vault?.tags().orEmpty() }
 
     /** The notes carrying [tag], by path. */
-    suspend fun filesWithTag(tag: String): List<String> = withContext(Dispatchers.IO) {
-        runCatching { vault?.filesWithTag(tag) }.getOrNull().orEmpty().map { it.relPath }
-    }
+    suspend fun filesWithTag(tag: String): Result<List<String>> =
+        listing("Cannot list the tag's notes") {
+            vault?.filesWithTag(tag).orEmpty().map { it.relPath }
+        }
 
-    /** Templates with `accent-target:` offered by New from Template…; `null` without a vault. */
+    /**
+     * A list Browse shows, read off the main thread. A failure is logged as [what], and handed on
+     * for the page to say where its rows would be.
+     */
+    private suspend fun <T> listing(what: String, read: () -> List<T>): Result<List<T>> =
+        withContext(Dispatchers.IO) { runCatching(read).onFailure { logged(what, it) } }
+
+    /**
+     * Templates with `accent-target:` offered by New from Template…; `null` without a vault, or
+     * when they cannot be listed, which is said.
+     */
     suspend fun templateTargets(): List<String>? = withContext(Dispatchers.IO) {
-        vault?.let { v -> runCatching { v.templateTargets() }.getOrDefault(emptyList()) }
+        val v = vault ?: return@withContext null
+        runCatching { v.templateTargets() }
+            .onFailure { fail("Cannot list the templates", it) }
+            .getOrNull()
     }
 
-    /** Templates with a dated `accent-target:` for Today's Note; `null` without a vault. */
+    /**
+     * Templates with a dated `accent-target:` for Today's Note, as [templateTargets] lists them.
+     * One whose destination cannot be read is left out, not the rest with it.
+     */
     suspend fun dailyTemplates(): List<String>? = withContext(Dispatchers.IO) {
-        vault?.let { v ->
-            runCatching {
-                v.templateTargets().filter { v.templateRawTarget(it)?.contains("{{date") == true }
-            }.getOrDefault(emptyList())
+        val v = vault ?: return@withContext null
+        templateTargets()?.filter { template ->
+            runCatching { v.templateRawTarget(template) }
+                .onFailure { logged("Cannot read where $template puts its notes", it) }
+                .getOrNull()?.contains("{{date") == true
         }
     }
 
     /** Where the templates are read from, for the reader told there are none to offer. */
     fun templatesDir(): String? = vault?.templatesDir()
 
-    /** The note links into this PDF, which paint as its highlights. */
-    suspend fun pdfLinks(rel: String): List<PdfLink> = withContext(Dispatchers.IO) {
-        runCatching { vault?.pdfLinks(rel) }.getOrNull().orEmpty()
+    /** The note links into this PDF, which paint as its highlights; `null` if not read. */
+    suspend fun pdfLinks(rel: String): List<PdfLink>? = withContext(Dispatchers.IO) {
+        runCatching { vault?.pdfLinks(rel).orEmpty() }
+            .onFailure { logged("Cannot read the links into this PDF", it) }
+            .getOrNull()
     }
 
     /** Close the vault, retain it in recents, and release its state and handle. */
@@ -760,20 +809,19 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * Resolve note links through the index or disk, creating missing notes and opening PDF anchors.
-     */
+    /** Follow a note link through the index or disk, opening a PDF link at its passage. */
     fun openLink(target: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val ticket = shown.next()
         val name = target.substringBefore('#')
-        val found = withContext(Dispatchers.IO) { runCatching { v.follow(name) }.getOrNull() }
+        val found = withContext(Dispatchers.IO) { runCatching { v.follow(name) } }
         // Another file asked for while the link was looked up goes in front instead.
         if (!shown.holds(ticket) || vault !== v) return@launch
+        found.onFailure { return@launch fail("Cannot follow this link", it) }
         val at = pdfAnchor(target.substringAfter('#', ""))?.let {
             PdfPlace(it.page.toInt(), selection = it.selection)
         }
-        when (val rel = found) {
+        when (val rel = found.getOrNull()) {
             null -> _state.update { it.copy(message = "No note called \"$name\"") }
             else -> openFile(rel, at = at)
         }
@@ -824,7 +872,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                             }
                             Saved.Paused
                         }
-                        else -> Saved.Failed(failure("Cannot save this note", e))
+                        else -> Saved.Failed(logged("Cannot save this note", e))
                     }
                 },
             )
@@ -954,7 +1002,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     private fun refreshConflicts(rel: String) = viewModelScope.launch(Dispatchers.IO) {
         val v = vault ?: return@launch
-        val found = runCatching { v.conflictsOf(rel) }.getOrDefault(emptyList())
+        // Not read, the banner keeps what it shows.
+        val found = runCatching { v.conflictsOf(rel) }
+            .onFailure { logged("Cannot look for conflict copies", it) }
+            .getOrNull() ?: return@launch
         _state.update { s -> s.withNote(rel) { it.copy(conflicts = found) } }
     }
 
@@ -967,11 +1018,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val mine = asked.next()
         viewModelScope.launch(Dispatchers.IO) {
             val v = vault ?: return@launch
-            val hits = if (query.isBlank()) emptyList()
-            else runCatching { v.search(query, 100u, false) }.getOrDefault(emptyList())
-            _state.update {
-                if (!asked.holds(mine)) it else it.copy(results = hits, searched = query)
-            }
+            val hits = if (query.isBlank()) Result.success(emptyList())
+            else runCatching { v.search(query, 100u, false) }
+                .onFailure { logged("Cannot search", it) }
+            _state.update { if (!asked.holds(mine)) it else it.answered(query, hits) }
         }
     }
 
@@ -1002,7 +1052,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val asked = _state.value.note?.takeIf { it.rel == rel } ?: return
         refreshConflicts(rel)
         viewModelScope.launch {
-            val read = withContext(Dispatchers.IO) { runCatching { v.read(rel) } }
+            val read = withContext(Dispatchers.IO) {
+                runCatching { v.read(rel) }.onFailure { logged("Cannot read the note again", it) }
+            }
             val note = read.getOrNull() ?: return@launch
             if (vault !== v) return@launch
             val now = _state.value.note
@@ -1022,13 +1074,12 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         Thread({ going.close() }, "vault-close").start()
     }
 
-    private fun fail(what: String, e: Throwable) = said(failure(what, e))
+    /** Say why [what] could not be done, and log it. */
+    private fun fail(what: String, e: Throwable) = said(logged(what, e))
 
-    /** [what] could not be done, with the core's reason when it gave one. */
-    private fun failure(what: String, e: Throwable): String {
-        val why = (e as? AccentException.Failed)?.reason ?: e.message
-        return if (why.isNullOrBlank()) what else "$what: $why"
-    }
+    /** Log why [what] could not be done; the words [failure] gives it, for whoever says them. */
+    private fun logged(what: String, e: Throwable): String =
+        failure(what, e).also { Log.w(Native.TAG, it, e) }
 
     override fun onCleared() {
         IndexingService.stop(getApplication())

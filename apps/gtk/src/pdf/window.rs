@@ -478,26 +478,28 @@ impl App {
             // A round trip per name tried on a remote vault, and pdfium work behind the
             // process-wide lock a render thread may be holding: a worker's, as New Drawing's is.
             let made = crate::work::off_thread("sketch", move || {
+                let bytes = accent_core::pdf::blank_pdf(accent_core::pdf::A4)
+                    .map_err(|e| ("make a sketch".to_string(), format!("{e:#}")))?;
                 let mut n = 1;
-                let key = loop {
+                loop {
                     let key = match dir.is_empty() {
                         true => format!("{stem}-sketch-{n}.pdf"),
                         false => format!("{dir}/{stem}-sketch-{n}.pdf"),
                     };
-                    // A name the vault cannot answer for is not taken as free: the write would
-                    // replace whatever is there.
+                    n += 1;
+                    // A name the vault cannot answer for is not taken as free, and one taken
+                    // between the asking and the write is passed over as one taken before.
                     match vault.stat(&key) {
-                        Ok(None) => break key,
-                        Ok(Some(_)) => n += 1,
+                        Ok(None) => {}
+                        Ok(Some(_)) => continue,
                         Err(e) => return Err(("make a sketch".to_string(), e.to_string())),
                     }
-                };
-                let bytes = accent_core::pdf::blank_pdf(accent_core::pdf::A4)
-                    .map_err(|e| ("make a sketch".to_string(), format!("{e:#}")))?;
-                vault
-                    .write_file(&key, &bytes)
-                    .map_err(|e| (format!("write {key}"), e.to_string()))?;
-                Ok(key)
+                    match vault.write_file(&key, &bytes) {
+                        Ok(()) => return Ok(key),
+                        Err(accent_api::Error::Core(accent_core::Error::AlreadyExists(_))) => {}
+                        Err(e) => return Err((format!("write {key}"), e.to_string())),
+                    }
+                }
             })
             .await
             .unwrap_or_else(|| Err(("make a sketch".to_string(), "it stopped".to_string())));

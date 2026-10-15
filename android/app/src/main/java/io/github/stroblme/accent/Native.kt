@@ -10,7 +10,8 @@ import java.io.File
  * Set Android paths for the core's XDG config, state, and cache directories before its first call.
  */
 object Native {
-    private const val TAG = "accent"
+    /** What the app logs under. */
+    const val TAG = "accent"
 
     fun setUp(context: Context) {
         val files = context.filesDir

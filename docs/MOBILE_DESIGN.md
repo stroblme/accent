@@ -86,6 +86,10 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   image inverted in it changes, and at no other time: a WebView told to load again sends the reader
   back to the top, so a load of the note already in front puts them back where they were once it
   has been drawn, and so does Done, which builds the view again.
+- A tapped link goes where the desktop preview sends it (`markdown::click`): a wikilink or a link
+  to a vault file opens it, an anchor into the note scrolls there, a tag opens Browse on its notes,
+  and an address the desktop hands to the system goes to whichever app opens it, on a tap only. A
+  PDF's own links keep their shorter list (http, https, mailto, tel).
 - Editing: the same text with the same styling spans, markup visible and dimmed.
 
 ### PDF
@@ -153,6 +157,11 @@ DESIGN.md's Material 3 table pairs Compose widgets with their desktop counterpar
   except on the way out, where the row would go with the content: leaving a note over edits whose
   saving was paused asks the row's question in an `AlertDialog`, and over edits that could not be
   written (a disk error) asks whether to stay or leave without them.
+- A failure says what could not be done and why, never an empty answer in its place: a list that
+  says "nothing" when it could not be read tells the reader something false about their vault.
+  Where it is said follows who asked: a list in Browse says it where its rows would be, an action
+  the reader took says it in the `Snackbar`, and a refresh nobody asked for keeps what it had and
+  logs why.
 
 ## Spacing and type
 

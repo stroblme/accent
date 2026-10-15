@@ -127,6 +127,7 @@ fun HomeScreen(model: VaultModel) {
                     expanded = state.expanded,
                     results = state.results,
                     searched = state.searched,
+                    searchFailed = state.searchFailed,
                     revision = state.revision,
                     indexing = state.indexing,
                     paused = state.paused,

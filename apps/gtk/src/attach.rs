@@ -204,14 +204,14 @@ fn store(vault: &Vault, note: &str, incoming: Incoming) -> (Vec<String>, Option<
     (embeds, None)
 }
 
-/// Write `bytes` as `name` in `dir`, numbered where the name is taken, and say where it went.
+/// Write `bytes` as `name` in `dir`, numbered where the name is taken, also when it is taken by
+/// the time the bytes get there, and say where it went.
 fn write(vault: &Vault, dir: &str, name: &str, bytes: &[u8]) -> Result<String, String> {
-    let rel = attachment::free_path(dir, name, |rel| vault.exists(rel));
+    let free = || attachment::free_path(dir, name, |rel| vault.exists(rel));
+    let rel = free();
     crate::fileops::make_parents(vault, &rel)?;
-    vault
-        .write_file(&rel, bytes)
-        .map_err(|e| format!("Cannot add {name}: {e}"))?;
-    Ok(rel)
+    crate::fileops::at_free_name(rel, free, |rel| vault.write_file(rel, bytes))
+        .map_err(|e| format!("Cannot add {name}: {e}"))
 }
 
 /// Where `file` is in the vault, when the vault is on this machine and holds it.

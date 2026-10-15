@@ -321,7 +321,10 @@ methods! {
     /// Permanently delete a remote file or directory after UI confirmation.
     /// Local deletion uses the desktop system trash.
     delete(rel: ref str) -> ();
-    create_dir(rel: ref str) -> ();
+    /// Make the folder `rel` and any parents it lacks. With `merge`, a folder already there is
+    /// fine, as `mkdir -p` has it; without, a taken `rel` fails with `AlreadyExists`, so the folder
+    /// is the caller's own.
+    create_dir(rel: ref str, merge: val bool) -> ();
     /// Index an external write immediately, without watcher debounce.
     /// [`write_file`](Vault::write_file) calls this after uploading bytes.
     wrote(rel: ref str) -> ();
@@ -506,25 +509,31 @@ impl Vault {
         }
     }
 
-    /// Copy a file from this machine into the vault.
-    pub fn upload(&self, local: &Path, rel: &str) -> Result<()> {
-        self.upload_with(local, rel, &|_, _| ())
+    /// Copy a file from this machine into the vault: over the file at `rel` when `replace`, which
+    /// a caller passes once Replace was confirmed; otherwise only to a name nothing holds, a taken
+    /// one failing with `AlreadyExists`.
+    pub fn upload(&self, local: &Path, rel: &str, replace: bool) -> Result<()> {
+        self.upload_with(local, rel, replace, &|_, _| ())
     }
 
     /// [`upload`](Self::upload) with sent and total byte counts for remote uploads.
     /// Local copies do not report progress.
-    pub fn upload_with(&self, local: &Path, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<()> {
+    pub fn upload_with(
+        &self,
+        local: &Path,
+        rel: &str,
+        replace: bool,
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<()> {
         match &self.backend {
-            Backend::Local(v) => match std::fs::copy(local, v.resolve(rel)?) {
-                Ok(_) => Ok(()),
-                Err(e) => Err(accent_core::Error::io(local.display(), e).into()),
-            },
-            Backend::Remote(r) => r.upload_with(local, rel, progress),
+            Backend::Local(v) => v.upload(local, rel, replace),
+            Backend::Remote(r) => r.upload_with(local, rel, replace, progress),
         }
     }
 
-    /// Create a new file from `bytes`, for pasted or dropped images. Remote bytes
-    /// travel over SSH rather than through the RPC protocol.
+    /// Create a new file from `bytes`, for pasted or dropped images: a name taken by the time
+    /// the bytes get there fails with `AlreadyExists`. Remote bytes travel over SSH rather than
+    /// through the RPC protocol.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
         match &self.backend {
             Backend::Local(v) => v.write_file(rel, bytes),
@@ -794,6 +803,39 @@ mod tests {
         assert_eq!(f.read("Folder (copy)/inner/deep.md"), "theirs\n");
         let listed = std::fs::read_dir(f.vault.root().join("Folder (copy)")).unwrap();
         assert_eq!(listed.count(), 1, "nothing joins the folder that was there");
+    }
+
+    /// Bytes from this machine land only where nothing is, unless the caller asked to replace: a
+    /// pasted image, an upload and a folder pasted in leave a name taken meanwhile as it was.
+    #[test]
+    fn an_upload_or_a_written_file_never_replaces_what_is_there() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("x.png", "theirs\n");
+        f.write("D/in.md", "theirs\n");
+        let local = tempfile::tempdir().unwrap();
+        let mine = local.path().join("x.png");
+        std::fs::write(&mine, "mine\n").unwrap();
+        let taken = |rel: &str| {
+            Err(crate::Error::Core(accent_core::Error::AlreadyExists(
+                rel.into(),
+            )))
+        };
+
+        assert_eq!(f.vault.write_file("x.png", b"mine\n"), taken("x.png"));
+        assert_eq!(f.vault.upload(&mine, "x.png", false), taken("x.png"));
+        assert_eq!(f.read("x.png"), "theirs\n");
+        assert_eq!(f.vault.create_dir("D", false), taken("D"));
+        f.vault.create_dir("D", true).unwrap();
+        assert_eq!(f.read("D/in.md"), "theirs\n");
+
+        f.vault.upload(&mine, "x.png", true).unwrap();
+        assert_eq!(f.read("x.png"), "mine\n", "a confirmed Replace writes over");
+        f.vault.write_file("y.png", b"new\n").unwrap();
+        f.vault.upload(&mine, "z.png", false).unwrap();
+        assert_eq!(
+            (f.read("y.png"), f.read("z.png")),
+            ("new\n".into(), "mine\n".into())
+        );
     }
 
     /// A copied folder is what Paste carries in from this machine: a link to a file inside it
@@ -1325,7 +1367,7 @@ mod tests {
             assert!(vault.save(rel, "CLOBBERED\n", None).is_err(), "{rel}");
             assert!(vault.create_note(rel, None).is_err(), "{rel}");
             assert!(vault.read(rel).is_err(), "{rel}");
-            assert!(vault.create_dir(rel).is_err(), "{rel}");
+            assert!(vault.create_dir(rel, true).is_err(), "{rel}");
         }
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep me\n");
 

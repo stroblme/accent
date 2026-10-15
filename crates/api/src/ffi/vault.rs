@@ -110,7 +110,7 @@ impl Vault {
     }
 
     pub fn create_dir(&self, rel: String) -> Answer<()> {
-        Ok(self.inner.create_dir(&rel)?)
+        Ok(self.inner.create_dir(&rel, true)?)
     }
 
     /// The vault-relative path an embed names, resolved through the index when it is written as

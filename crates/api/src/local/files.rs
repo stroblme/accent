@@ -6,7 +6,7 @@ use std::io;
 
 use crate::{Error, Result};
 
-use accent_core::path::{basename, is_under, stem};
+use accent_core::path::{basename, is_under, parent_dir, stem};
 use accent_core::{markdown, search, template};
 
 use super::{Local, Msg};
@@ -47,8 +47,15 @@ impl Local {
 
     /// Write `bytes` to a file nothing holds yet, an image pasted into a note, and tell the worker
     /// as [`save`](Self::save) does: an embed of it resolves at once, not a watcher debounce later.
+    /// A name taken meanwhile fails with `AlreadyExists(rel)` and keeps what it holds.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
-        fs::write_bytes(&self.resolve(rel)?, bytes, None)?;
+        let path = self.resolve(rel)?;
+        // Claimed empty, then filled by the atomic write, as `fs::create_note` makes a note.
+        std::fs::File::create_new(&path).map_err(|e| accent_core::Error::io(rel, e))?;
+        if let Err(e) = fs::write_bytes(&path, bytes, None) {
+            let _ = std::fs::remove_file(&path);
+            return Err(e.into());
+        }
         self.post(Msg::Update {
             rel: rel.to_string(),
             own: true,
@@ -148,8 +155,16 @@ impl Local {
         Ok((rel, cursor))
     }
 
-    pub fn create_dir(&self, rel: &str) -> Result<()> {
-        std::fs::create_dir_all(self.resolve(rel)?).map_err(|e| accent_core::Error::io(rel, e))?;
+    pub fn create_dir(&self, rel: &str, merge: bool) -> Result<()> {
+        let path = self.resolve(rel)?;
+        let made = match (merge, path.parent()) {
+            // The parents as `mkdir -p` makes them, then the folder itself, which must be new.
+            (false, Some(parent)) => {
+                std::fs::create_dir_all(parent).and_then(|()| std::fs::create_dir(&path))
+            }
+            _ => std::fs::create_dir_all(&path),
+        };
+        made.map_err(|e| accent_core::Error::io(rel, e))?;
         // ponytail: only the deepest component is indexed straight away; intermediate levels of a
         // nested path wait for the watcher or the next reconcile. Post one update per component
         // if the tree ever looks wrong right after "New folder".
@@ -166,10 +181,7 @@ impl Local {
     /// carries one in ([`copy_tree`]), and never into itself.
     pub fn copy(&self, from: &str, to: &str) -> Result<()> {
         let (src, dest) = (self.resolve(from)?, self.resolve(to)?);
-        let named = |e: io::Error| match e.kind() {
-            io::ErrorKind::AlreadyExists => accent_core::Error::AlreadyExists(to.to_string()),
-            _ => accent_core::Error::io(from, e),
-        };
+        let named = |e| copy_error(from, to, e);
         let landed = match src.is_dir() {
             // Before anything is made: a folder copied into itself would copy its copy again.
             true if lands_inside(&src, &dest) => {
@@ -192,6 +204,18 @@ impl Local {
             own: true,
         });
         Ok(landed.map_err(named)?)
+    }
+
+    /// [`Vault::upload`](crate::Vault::upload) here: over the file at `rel` when `replace`, else
+    /// only to a name nothing holds, as [`copy`](Self::copy) does.
+    pub fn upload(&self, local: &std::path::Path, rel: &str, replace: bool) -> Result<()> {
+        let dest = self.resolve(rel)?;
+        match replace {
+            true => std::fs::copy(local, &dest).map(drop),
+            false => copy_file(local, &dest),
+        }
+        .map_err(|e| copy_error(local.display(), rel, e))?;
+        Ok(())
     }
 
     /// Plan link and import rewrites before moving files, for UI confirmation.
@@ -644,19 +668,22 @@ impl Local {
     pub fn adopt_conflict(&self, original: &str, conflict: &str) -> Result<Etag> {
         let (text, _) = fs::read_note(&self.resolve(conflict)?).map_err(named(conflict))?;
         let target = self.resolve(original)?;
-        let keep = target.with_file_name(accent_conflict_name(
-            basename(original),
-            chrono::Local::now().naive_local(),
-        ));
+        let name = accent_conflict_name(basename(original), chrono::Local::now().naive_local());
+        let keep = target.with_file_name(&name);
         // ponytail: a second adopt within the same second overwrites the first copy, because the
         // name only carries whole seconds. Add a counter suffix if that ever costs anyone a note.
         std::fs::copy(&target, &keep).map_err(|e| accent_core::Error::io(original, e))?;
         let etag = Etag::of(&target).map_err(named(original))?;
         let written = fs::write_note(&target, &text, Some(etag))?;
-        self.post(Msg::Update {
-            rel: original.to_string(),
-            own: true,
-        });
+        // The kept version too, so the banner offering it back is up at once, not a watcher
+        // debounce later.
+        let kept = match parent_dir(original) {
+            "" => name,
+            dir => format!("{dir}/{name}"),
+        };
+        for rel in [original.to_string(), kept] {
+            self.post(Msg::Update { rel, own: true });
+        }
         Ok(written)
     }
 
@@ -745,6 +772,14 @@ fn lands_inside(src: &std::path::Path, dest: &std::path::Path) -> bool {
         || real(src)
             .zip(real(dest))
             .is_some_and(|(src, dest)| dest.starts_with(src))
+}
+
+/// A failed copy to `to` by what went wrong: `to` when it was taken, else `from`, what was read.
+fn copy_error(from: impl std::fmt::Display, to: &str, e: io::Error) -> accent_core::Error {
+    match e.kind() {
+        io::ErrorKind::AlreadyExists => accent_core::Error::AlreadyExists(to.to_string()),
+        _ => accent_core::Error::io(from, e),
+    }
 }
 
 /// Fill `to`, a folder just made, with what the folder `from` holds, as Paste carries a folder in
@@ -1494,5 +1529,17 @@ mod tests {
             Some("Note.md")
         );
         assert_eq!(f.read(&backups[0]), "mine\n");
+        // Indexed with the adopt rather than a watcher debounce later, so the banner offering it
+        // back is up at once.
+        let crate::vault::Backend::Local(local) = &f.vault.backend else {
+            panic!("the fixture opens a local vault");
+        };
+        local.settle_index();
+        assert!(
+            f.vault
+                .conflicts_of("Note.md")
+                .unwrap()
+                .contains(&backups[0])
+        );
     }
 }

@@ -1000,7 +1000,7 @@ impl App {
                             true => vault.copy(&from, &to),
                             false => vault
                                 .fetch(&from)
-                                .and_then(|local| vault.upload(&local, &to)),
+                                .and_then(|local| vault.upload(&local, &to, true)),
                         }
                         .map(|()| None)
                         .map_err(|e| e.to_string()),
@@ -1125,9 +1125,9 @@ fn copy_pdf(
 ) -> accent_api::Result<()> {
     match (vault.is_remote(), free) {
         (false, true) => vault.copy(from, to),
-        (false, false) => vault.upload(local, to),
+        (false, false) => vault.upload(local, to, true),
         (true, _) => vault
-            .upload(local, to)
+            .upload(local, to, !free)
             .and_then(|()| vault.fetch(to))
             .map(drop),
     }

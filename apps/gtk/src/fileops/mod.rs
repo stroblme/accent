@@ -15,6 +15,7 @@ pub use clipboard::Clip;
 #[cfg(feature = "bench")]
 pub use menu::labels;
 pub use menu::{context_menu, row_dir};
+pub(crate) use paths::at_free_name;
 pub use paths::{move_dest, topmost};
 #[cfg(feature = "bench")]
 pub use transfer::download_to;
@@ -259,7 +260,7 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
                         return Err(format!("Cannot create {name}: it already exists"));
                     }
                     vault
-                        .create_dir(&rel)
+                        .create_dir(&rel, true)
                         .map_err(|e| made_what_it_could(&vault, &rel, &e.to_string()))
                 }
             })
@@ -1132,7 +1133,7 @@ pub(crate) fn make_parents(vault: &Vault, rel: &str) -> Result<(), String> {
     if dir.is_empty() || vault.exists(dir) {
         return Ok(());
     }
-    match vault.create_dir(dir) {
+    match vault.create_dir(dir, true) {
         Ok(()) => Ok(()),
         Err(e) => Err(made_what_it_could(vault, dir, &e.to_string())),
     }

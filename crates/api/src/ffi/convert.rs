@@ -6,7 +6,7 @@
 // already stands: the name has to resolve to the real one.
 use accent_core::fs::Etag;
 use accent_core::index::{self, Backlink, FileRow, Phase};
-use accent_core::markdown::{LinkKind, Style};
+use accent_core::markdown::{Click, LinkKind, Style};
 use accent_core::pdf::{self, Comment, Rect, SelectionLink};
 use accent_core::walk::FileKind;
 
@@ -102,6 +102,15 @@ pub enum LinkKind {
     Embed,
     Markdown,
     External,
+}
+
+#[uniffi::remote(Enum)]
+pub enum Click {
+    Open(String),
+    Tag(String),
+    Scroll,
+    Leave,
+    Nowhere,
 }
 
 // ------------------------------------------------------------------------------- text offsets

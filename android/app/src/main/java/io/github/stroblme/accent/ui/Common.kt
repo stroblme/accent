@@ -1,5 +1,8 @@
 package io.github.stroblme.accent.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -426,4 +429,10 @@ suspend fun PointerInputScope.panZoom(
         } while (event.changes.any { it.pressed })
         if (moving) onEnd(speed.calculateVelocity())
     }
+}
+
+/** Hand [uri] to whichever app opens it, saying through [onSay] when none does. */
+internal fun launchUri(context: Context, uri: String, onSay: (String) -> Unit) {
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(uri))) }
+        .onFailure { onSay("No app can open this link") }
 }

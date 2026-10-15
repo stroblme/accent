@@ -2,7 +2,8 @@
 //! All ranges are source byte offsets for GTK and Compose consumers.
 //!
 //! Helpers separate delimiter validation, link handling, frontmatter and HTML. `table` handles
-//! pipe-table layout and cell navigation for Tab and Enter.
+//! pipe-table layout and cell navigation for Tab and Enter; `uri` reads the preview's own
+//! addresses back for a click.
 
 mod blocks;
 mod frontmatter;
@@ -10,6 +11,7 @@ mod html;
 mod links;
 mod spans;
 mod table;
+mod uri;
 
 pub use blocks::{BlockId, block_ids};
 pub use html::{math_errors, mathml, to_html};
@@ -19,6 +21,7 @@ pub use links::{
     slugs, strip_ext,
 };
 pub use table::{TableEdit, TableKey, table_key};
+pub use uri::{Click, accent_file, base_uri, click};
 
 use frontmatter::{frontmatter, scan_tags};
 use links::pending;

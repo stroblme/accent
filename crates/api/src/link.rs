@@ -278,7 +278,8 @@ fn upload(
 
 /// Run `argv` and stream `input` in chunks, reporting bytes written of `total`.
 /// On write failure, use SSH stderr rather than the resulting broken-pipe error.
-/// SSH exit 255 maps to [`Error::Offline`]; other failures belong to the command.
+/// SSH exit 255 maps to [`Error::Offline`] and [`ssh::TAKEN`] to `AlreadyExists`, the command
+/// naming what was taken; other failures belong to the command.
 pub(crate) fn send(
     argv: &[String],
     mut input: impl Read,
@@ -313,6 +314,9 @@ pub(crate) fn send(
     match (written, out.status.success()) {
         (Ok(()), true) => Ok(()),
         _ if out.status.code() == Some(255) => Err(Error::Offline(said)),
+        _ if out.status.code() == Some(ssh::TAKEN) => {
+            Err(accent_core::Error::AlreadyExists(said).into())
+        }
         (Err(e), _) if said.is_empty() => Err(Error::Remote(e.to_string())),
         _ => Err(Error::Remote(said)),
     }

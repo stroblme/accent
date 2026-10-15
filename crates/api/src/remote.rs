@@ -657,19 +657,27 @@ impl Remote {
         Err(accent_core::Error::AlreadyExists(edited_name(rel, EDITED_COPIES)).into())
     }
 
-    /// Copy a local file into the vault. The remote watcher indexes it as it lands.
-    pub fn upload(&self, local: &Path, rel: &str) -> Result<()> {
-        self.upload_with(local, rel, &|_, _| ())
+    /// Copy a local file into the vault, over the file at `rel` when `replace` and otherwise to a
+    /// name nothing holds. The remote watcher indexes it as it lands.
+    pub fn upload(&self, local: &Path, rel: &str, replace: bool) -> Result<()> {
+        self.upload_with(local, rel, replace, &|_, _| ())
     }
 
     /// [`upload`](Self::upload), read and sent a chunk at a time, telling `progress` the bytes
     /// sent so far and how many there are.
-    pub fn upload_with(&self, local: &Path, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<()> {
-        self.send(local, rel, false, progress).map(|_| ())
+    pub fn upload_with(
+        &self,
+        local: &Path,
+        rel: &str,
+        replace: bool,
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<()> {
+        self.send(local, rel, replace, progress).map(|_| ())
     }
 
     /// Send a local file to host `rel`. With `replace`, require the destination
-    /// to remain present ([`ssh::put_cmd`]). Return the etag of the bytes sent,
+    /// to remain present; without, require the name to be free, a taken one failing with
+    /// `AlreadyExists` ([`ssh::put_cmd`]). Return the etag of the bytes sent,
     /// unaffected by a concurrent save replacing `local`.
     fn send(
         &self,
@@ -690,7 +698,8 @@ impl Remote {
         Ok(sent)
     }
 
-    /// Create `rel` from `bytes` over the master using the host umask. Notify the
+    /// Create `rel` from `bytes` over the master using the host umask, failing with
+    /// `AlreadyExists` when the name is taken by the time they land. Notify the
     /// host index immediately so pasted embeds resolve before watcher debounce.
     /// Notification failure does not fail the write; the watcher still indexes it.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {

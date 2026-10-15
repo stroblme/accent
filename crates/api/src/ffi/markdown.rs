@@ -1,7 +1,7 @@
 //! Core Markdown analysis and rendering for Android. Convert output byte
 //! ranges to Kotlin UTF-16 units.
 
-use accent_core::markdown;
+use accent_core::markdown::{self, Click};
 
 use crate::ffi::convert::{Analysis, Heading, Link, PdfAnchor, Span, Tag, Utf16};
 
@@ -22,6 +22,25 @@ pub fn pdf_anchor(anchor: String) -> Option<PdfAnchor> {
 #[uniffi::export]
 pub fn to_html(text: String) -> String {
     markdown::to_html(&text)
+}
+
+/// Where a click on a link in a rendered note goes, from the page loaded at `page`
+/// ([`base_uri`]): the desktop preview's rules, so a link goes the same way on either.
+#[uniffi::export]
+pub fn click(uri: String, page: String) -> Click {
+    markdown::click(&uri, &page)
+}
+
+/// The vault path an `accent://file/` request names, decoded; `None` for any other address.
+#[uniffi::export]
+pub fn accent_file(uri: String) -> Option<String> {
+    markdown::accent_file(&uri)
+}
+
+/// Where relative links in `rel`'s markdown resolve from: the note's own folder, encoded.
+#[uniffi::export]
+pub fn base_uri(rel: String) -> String {
+    markdown::base_uri(&rel)
 }
 
 /// The note's styling spans, links, tags and headings, with every range in UTF-16 code units.

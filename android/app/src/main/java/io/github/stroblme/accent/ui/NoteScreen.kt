@@ -32,12 +32,15 @@ import androidx.compose.ui.viewinterop.AndroidView
 import io.github.stroblme.accent.Open
 import io.github.stroblme.accent.OpenImage
 import io.github.stroblme.accent.VaultModel
+import io.github.stroblme.accent.ffi.Click
 import io.github.stroblme.accent.ffi.Span
 import io.github.stroblme.accent.ffi.Style
+import io.github.stroblme.accent.ffi.accentFile
 import io.github.stroblme.accent.ffi.analyzeUtf16
+import io.github.stroblme.accent.ffi.baseUri
+import io.github.stroblme.accent.ffi.click
 import io.github.stroblme.accent.ffi.toHtml
 import java.io.File
-import java.net.URLDecoder
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -273,14 +276,23 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
                             }
                         }
 
+                        /** Route a tapped link as the desktop preview does ([click]). */
                         override fun shouldOverrideUrlLoading(
                             view: WebView,
                             request: WebResourceRequest,
                         ): Boolean {
                             val url = request.url.toString()
-                            when {
-                                url.startsWith(OPEN) -> model.openLink(decode(url.removePrefix(OPEN)))
-                                url.startsWith(TAG) -> tagged(decode(url.removePrefix(TAG)))
+                            val load = view.tag as? Load ?: return true
+                            when (val to = click(url, baseUri(load.rel))) {
+                                // An anchor into this note, which the view scrolls to itself.
+                                Click.Scroll -> return false
+                                is Click.Open -> model.openLink(to.v1)
+                                is Click.Tag -> tagged(to.v1)
+                                // Only for a tap: a refresh or a redirect launches nothing.
+                                Click.Leave -> if (request.hasGesture()) {
+                                    launchUri(view.context, url) { model.said(it) }
+                                }
+                                Click.Nowhere -> {}
                             }
                             return true
                         }
@@ -380,19 +392,10 @@ internal fun pageRequest(
             view.context.assets.open(url.substringAfterLast('/')),
         )
     }
-    if (!url.startsWith("accent://file/")) return blocked()
-    val image = model.image(decode(url.removePrefix("accent://file/"))) ?: return blocked()
+    val image = accentFile(url)?.let { model.image(it) } ?: return blocked()
     onImage(url, image)
     return served(image, dark, inverted)
 }
-
-/** What a relative link inside the note resolves against: the directory the note is in. */
-internal fun baseUri(rel: String): String {
-    val dir = rel.substringBeforeLast('/', "")
-    return if (dir.isEmpty()) "accent://file/" else "accent://file/$dir/"
-}
-
-internal fun decode(s: String): String = runCatching { URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)
 
 /** Wrap `to_html` in the current app palette and optional Mermaid scripts. */
 internal fun page(body: String, fg: Color, bg: Color, accent: Color): String = """
@@ -441,10 +444,6 @@ internal fun Color.rgba(): String = String.format(
 
 /** Whether rendered HTML holds a mermaid fence: pulldown-cmark's class on a fence's code. */
 internal fun diagrams(html: String): Boolean = "<code class=\"language-mermaid\">" in html
-
-/** A link to another note, and one to a tag's notes, as `to_html` writes them. */
-private const val OPEN = "accent://open/"
-private const val TAG = "accent://tag/"
 
 /** Where a page asks for mermaid and its bootstrap, answered from the APK's assets. */
 private const val MERMAID = "accent://app/mermaid.min.js"

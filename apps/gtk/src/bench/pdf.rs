@@ -839,7 +839,7 @@ fn rebuild(vault: &accent_api::Vault, key: &str) -> anyhow::Result<()> {
     let rebuilt = accent_core::pdf::blank_pdf((595.0, 842.0))
         .map_err(anyhow::Error::from)
         .and_then(|bytes| Ok(std::fs::write(&blank, bytes)?))
-        .and_then(|()| Ok(vault.upload(&blank, key)?));
+        .and_then(|()| Ok(vault.upload(&blank, key, true)?));
     let _ = std::fs::remove_file(&blank);
     rebuilt
 }

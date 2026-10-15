@@ -3,7 +3,6 @@ package io.github.stroblme.accent.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
 import android.graphics.Rect as AndroidRect
 import android.net.Uri
 import android.os.Build
@@ -102,8 +101,9 @@ fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome
     }
     DisposableEffect(path) { onDispose { doc?.close() } }
     // Asked again whenever a walk ends, which is when a link written elsewhere reaches the index.
+    // An answer that could not be read leaves the highlights already painted.
     var notes by remember(pdf.rel) { mutableStateOf(emptyList<PdfLink>()) }
-    LaunchedEffect(pdf.rel, indexing) { if (!indexing) notes = model.pdfLinks(pdf.rel) }
+    LaunchedEffect(pdf.rel, indexing) { if (!indexing) model.pdfLinks(pdf.rel)?.let { notes = it } }
     // Print… from the palette, once the document is open: a copy with those links' highlights.
     // The request is taken back once the print system has it, as a note's is.
     val context = LocalContext.current
@@ -1356,15 +1356,11 @@ private fun Rect.near(at: Point, slop: Float): Boolean =
 /** How far off a link a tap may land and still count, in view pixels. */
 private const val TAP_SLOP = 12f
 
-/**
- * Open allowed document URLs through the system chooser and report rejected schemes or
- * missing handlers through [onSay].
- */
+/** Open an allowed document URL through [launchUri]; say why a rejected scheme goes nowhere. */
 private fun leave(context: Context, uri: String, onSay: (String) -> Unit) {
     val target = Uri.parse(uri)
     if (target.scheme?.lowercase() !in OUTWARD) return onSay("This type of link can't be opened")
-    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, target)) }
-        .onFailure { onSay("No app can open this link") }
+    launchUri(context, uri, onSay)
 }
 
 /** The schemes a document may send the reader out to. */

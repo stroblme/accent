@@ -9,8 +9,7 @@
 use crate::look::{self, Look, Served};
 use crate::theme;
 use accent_core::config::Config;
-use accent_core::markdown::{self, percent_decode};
-use accent_core::path::parent_dir;
+use accent_core::markdown::{self, Click, accent_file, base_uri, percent_decode};
 use accent_core::search::Options;
 use gtk::{gdk, gio, glib, pango};
 use std::borrow::Cow;
@@ -1076,26 +1075,21 @@ fn decide(
         .unwrap_or_default()
         .to_string();
 
-    match accent_uri(&uri) {
-        // Our own `load_html`, which arrives as the base URI and never as a click.
-        Some(("file", _)) if action.navigation_type() != webkit6::NavigationType::LinkClicked => {
-            return false;
-        }
+    // Our own `load_html`, which arrives as the base URI and never as a click.
+    if accent_file(&uri).is_some()
+        && action.navigation_type() != webkit6::NavigationType::LinkClicked
+    {
+        return false;
+    }
+    match markdown::click(&uri, &view.uri().unwrap_or_default()) {
         // A `#tag`, which `to_html` makes a link to the tag's notes.
-        Some(("tag", tag)) => on_tag(&tag),
+        Click::Tag(tag) => on_tag(&tag),
         // An in-note `[text](#slug)`: WebKit scrolls to the heading `to_html` gave that `id`.
-        _ if view.uri().is_some_and(|page| same_page(&uri, &page)) => return false,
-        // A wikilink, or a markdown link the base URI has already made a vault path. The anchor
-        // rides along for a PDF, which needs the page as well as the file, and for a note, whose
-        // heading it names. Rejoined here rather than kept by `accent_uri`, whose asset requests
-        // must go on dropping it: an asset is fetched by path and a `#` in one is not a place.
-        Some(("open" | "file", target)) => match uri.split_once('#') {
-            Some((_, anchor)) if !anchor.is_empty() => {
-                on_open(&format!("{target}#{}", percent_decode(anchor)))
-            }
-            _ => on_open(&target),
-        },
-        _ if launches(&uri, action.is_user_gesture()) => {
+        Click::Scroll => return false,
+        // A wikilink, or a markdown link the base URI has already made a vault path.
+        Click::Open(target) => on_open(&target),
+        // Only for a click: a meta refresh or a redirect must not launch an application.
+        Click::Leave if action.is_user_gesture() => {
             let parent = view.root().and_downcast::<gtk::Window>();
             gtk::UriLauncher::new(&uri).launch(parent.as_ref(), gio::Cancellable::NONE, |result| {
                 if let Err(e) = result {
@@ -1103,23 +1097,10 @@ fn decide(
                 }
             });
         }
-        _ => tracing::debug!("preview: refused navigation to {uri}"),
+        Click::Leave | Click::Nowhere => tracing::debug!("preview: refused navigation to {uri}"),
     }
     decision.ignore();
     true
-}
-
-/// Allow system navigation only for explicit clicks and markdown::is_url schemes.
-/// Meta refreshes, redirects and JavaScript/data/file addresses must not launch applications.
-fn launches(uri: &str, clicked: bool) -> bool {
-    clicked && markdown::is_url(uri)
-}
-
-/// Whether `uri` is a place on the page `current` shows: the same document with a `#fragment`.
-/// `current` may carry a fragment of its own, from the last anchor followed.
-fn same_page(uri: &str, current: &str) -> bool {
-    let page = current.split_once('#').map_or(current, |(doc, _)| doc);
-    uri.split_once('#').is_some_and(|(doc, _)| doc == page)
 }
 
 // ----------------------------------------------------------------------------------- image menu
@@ -1149,7 +1130,7 @@ fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
     });
     inner.view.connect_context_menu(move |_, menu, hit| {
         let uri = hit.context_is_image().then(|| hit.image_uri()).flatten();
-        if let Some(("file", rel)) = uri.as_deref().and_then(accent_uri) {
+        if let Some(rel) = uri.as_deref().and_then(accent_file) {
             menu.append(&webkit6::ContextMenuItem::new_separator());
             menu.append(&match animations.animations.borrow().contains(&rel) {
                 true => webkit6::ContextMenuItem::from_gaction(
@@ -1179,7 +1160,7 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     #[cfg(feature = "bench")]
     assets.requests.set(assets.requests.get() + 1);
     let uri = request.uri().unwrap_or_default();
-    let Some(("file", rel)) = accent_uri(&uri) else {
+    let Some(rel) = accent_file(&uri) else {
         return deny(request, "not a vault file");
     };
     let asked = rel.clone();
@@ -1301,9 +1282,7 @@ pub(crate) fn asset(resolve: &Resolve, note: &str, uri: &str) -> Option<PathBuf>
 
 /// [`asset`] with its key.
 pub(crate) fn asset_of(resolve: &Resolve, note: &str, uri: &str) -> Option<(String, PathBuf)> {
-    let Some(("file", rel)) = accent_uri(uri) else {
-        return None;
-    };
+    let rel = accent_file(uri)?;
     resolve_asset(resolve, note, &rel)
 }
 
@@ -1321,30 +1300,10 @@ pub(crate) fn diagram_page(uri: &str) -> Option<String> {
 /// Whether an `accent://file/` address names a diagram, which an export draws rather than
 /// copies.
 pub(crate) fn is_diagram(uri: &str) -> bool {
-    matches!(accent_uri(uri), Some(("file", rel)) if accent_core::path::is_diagram(&rel))
-}
-
-/// Split `accent://<host>/<path>` into host and percent-decoded path, dropping `?query` and
-/// `#fragment`. `None` for anything that is not an `accent:` URI.
-fn accent_uri(uri: &str) -> Option<(&str, String)> {
-    let rest = uri.strip_prefix("accent://")?;
-    let head = rest.split_once(['?', '#']).map_or(rest, |(h, _)| h);
-    let (host, path) = head.split_once('/').unwrap_or((head, ""));
-    Some((host, percent_decode(path)))
+    accent_file(uri).is_some_and(|rel| accent_core::path::is_diagram(&rel))
 }
 
 // -------------------------------------------------------------------------------------- document
-
-/// Where relative links in `rel`'s markdown resolve from: the note's own directory.
-fn base_uri(rel: &str) -> String {
-    match parent_dir(rel) {
-        "" => "accent://file/".to_string(),
-        dir => format!(
-            "accent://file/{}/",
-            glib::Uri::escape_string(dir, Some("/"), false)
-        ),
-    }
-}
 
 /// Add v= versions to changed image addresses in `body` so WebKit fetches only invalidated files.
 /// Match paths relative to `base`; unquoted addresses remain unchanged.
@@ -1394,10 +1353,7 @@ fn versioned<'a>(body: &'a str, base: &str, versions: &HashMap<String, u32>) -> 
 fn version(src: &str, base: &str, versions: &HashMap<String, u32>) -> Option<u32> {
     let src = src.replace("&amp;", "&");
     let uri = glib::Uri::resolve_relative(Some(base), &src, glib::UriFlags::NONE).ok()?;
-    match accent_uri(&uri)? {
-        ("file", path) => versions.get(&path).copied(),
-        _ => None,
-    }
+    versions.get(&accent_file(&uri)?).copied()
 }
 
 /// The smallest document that will hold the fragment. All styling arrives as a user stylesheet, so
@@ -1835,66 +1791,12 @@ mod tests {
     }
 
     #[test]
-    fn accent_uri_decodes_the_target_and_drops_the_anchor() {
-        assert_eq!(
-            accent_uri("accent://open/Deep%20Work#Section%20One"),
-            Some(("open", "Deep Work".to_string()))
-        );
-        assert_eq!(
-            accent_uri("accent://open/Notes-PHD/Deep%20Work.md"),
-            Some(("open", "Notes-PHD/Deep Work.md".to_string()))
-        );
-        assert_eq!(
-            accent_uri("accent://file/img%20a.png?v=1"),
-            Some(("file", "img a.png".to_string()))
-        );
-        // A malformed escape stays as written rather than eating the next character.
-        assert_eq!(
-            accent_uri("accent://open/100%25%zz"),
-            Some(("open", "100%%zz".to_string()))
-        );
-        assert_eq!(accent_uri("https://example.com/x"), None);
-    }
-
-    /// A click hands the system what Go to Definition would, and nothing the page could run or
-    /// read the disk with; without a click nothing leaves at all.
-    #[test]
     fn an_embedded_diagram_names_its_page() {
         let uri = "accent://file/Figures/flow.drawio?page=Page%202";
         assert!(is_diagram(uri));
         assert_eq!(diagram_page(uri).as_deref(), Some("Page 2"));
         assert_eq!(diagram_page("accent://file/flow.drawio"), None);
         assert!(!is_diagram("accent://file/flow.png"));
-    }
-
-    #[test]
-    fn a_click_launches_what_the_editor_would_and_nothing_else() {
-        for url in ["https://e.org", "mailto:a@b.c", "tel:+123", "sms:+123"] {
-            assert!(launches(url, true), "{url}");
-            assert!(!launches(url, false), "{url} without a click");
-        }
-        for not in [
-            "javascript:alert(1)",
-            "javascript://%0aalert(1)",
-            "file:///etc/passwd",
-            "data:text/html,x",
-        ] {
-            assert!(!launches(not, true), "{not}");
-        }
-    }
-
-    #[test]
-    fn an_anchor_into_the_page_on_screen_stays_on_it() {
-        let page = "accent://file/Notes/";
-        assert!(same_page("accent://file/Notes/#intro", page));
-        // After the first jump the view's own URI carries the fragment it scrolled to.
-        assert!(same_page(
-            "accent://file/Notes/#outro",
-            "accent://file/Notes/#intro"
-        ));
-        assert!(!same_page("accent://file/Notes/Other.md#intro", page));
-        // No fragment is a load of the directory, not a place on the page.
-        assert!(!same_page(page, page));
     }
 
     #[test]
@@ -1965,12 +1867,5 @@ mod tests {
             versioned(body, base, &HashMap::new()),
             std::borrow::Cow::Borrowed(_)
         ));
-    }
-
-    #[test]
-    fn base_uri_is_the_notes_own_directory() {
-        assert_eq!(base_uri("Index.md"), "accent://file/");
-        assert_eq!(base_uri("Notes/Deep Work.md"), "accent://file/Notes/");
-        assert_eq!(base_uri("a b/c d/Note.md"), "accent://file/a%20b/c%20d/");
     }
 }

@@ -1136,9 +1136,10 @@ pub(super) fn bench_apart(app: &Rc<App>, rels: &str) {
     let (Some(vault), Some(ops)) = (app.vault().cloned(), app.ops().cloned()) else {
         return;
     };
-    // Typed into and moved, so it is made here rather than taken from the vault.
+    // Typed into and moved, so it is made here rather than taken from the vault, over the one an
+    // earlier run in the same scratch vault left.
     let typed = "apart-drill.md".to_string();
-    if let Err(e) = vault.write_file(&typed, b"# Apart\n") {
+    if let Err(e) = vault.save(&typed, "# Apart\n", None) {
         println!("bench apart cannot make {typed}: {e}");
         return bench_quit(app);
     }

@@ -130,7 +130,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     std::fs::create_dir_all(&scratch).unwrap();
     let (sent, got) = (scratch.join("sent.bin"), scratch.join("got.bin"));
     std::fs::write(&sent, &bytes).unwrap();
-    vault.upload(&sent, "blob.bin").unwrap();
+    vault.upload(&sent, "blob.bin", false).unwrap();
     vault.download("blob.bin", &got).unwrap();
     assert!(
         std::fs::read(&got).unwrap() == bytes,
@@ -160,7 +160,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let small = scratch.join("small.txt");
     std::fs::write(&small, "up\n").unwrap();
     let uploaded = changes_dir(&events, "sub", || {
-        vault.upload(&small, "sub/uploaded.txt").unwrap();
+        vault.upload(&small, "sub/uploaded.txt", false).unwrap();
     });
     let outside = changes_dir(&events, "sub", || {
         on_host(&url, &format!("printf 'there\\n' > {p}/sub/outside.md"));

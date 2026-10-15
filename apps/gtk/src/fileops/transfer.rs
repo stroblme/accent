@@ -1,7 +1,7 @@
 //! Transfer files to or from a remote vault over SSH. Workers keep transfers off the UI thread;
 //! the status bar shows progress and reports the result once.
 
-use super::paths::{child_path, free_path};
+use super::paths::{at_free_name, child_path, free_path};
 use super::{Ops, batch_to};
 use crate::dialogs::confirm;
 use crate::statusbar::Bytes;
@@ -9,6 +9,7 @@ use accent_core::fs::links_inside;
 use accent_core::path::basename;
 use adw::prelude::*;
 use gtk::{gio, glib};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -92,8 +93,8 @@ pub fn upload(ops: &Rc<Ops>, dir: &str) {
                 return (ops.toast)("Cannot upload");
             };
             match existing.is_empty() {
-                true => send(&ops, &dir, chosen),
-                false => confirm_replace(&ops, &dir, chosen, &existing),
+                true => send(&ops, &dir, chosen, Vec::new()),
+                false => confirm_replace(&ops, &dir, chosen, existing),
             }
         });
     });
@@ -118,7 +119,7 @@ fn local_name(path: &Path) -> Option<String> {
 /// Overwriting is the one thing an upload does that can lose data, so it is asked about
 /// (DESIGN.md, States). Once for the batch rather than once per file: a chooser can return a
 /// dozen paths, and a dozen dialogs is an obstacle rather than a question.
-fn confirm_replace(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>, existing: &[String]) {
+fn confirm_replace(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>, existing: Vec<String>) {
     let heading = match existing.len() {
         1 => "Replace File?",
         _ => "Replace Files?",
@@ -127,10 +128,10 @@ fn confirm_replace(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>, existing: &[S
     confirm(
         &window,
         heading,
-        &replace_body(existing),
+        &replace_body(&existing),
         "Replace",
         true,
-        move || send(&ops, &dir, chosen),
+        move || send(&ops, &dir, chosen, existing),
     );
 }
 
@@ -147,8 +148,9 @@ fn replace_body(existing: &[String]) -> String {
     }
 }
 
-/// Send the chosen files, off the main thread, and report once.
-fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
+/// Send the chosen files, off the main thread, and report once. Only the names in `replace`,
+/// confirmed by the reader, are written over; a file that took any other name since is left be.
+fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>, replace: Vec<String>) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
     let count = Arc::new(Count::default());
     count.total.store(chosen.len(), Ordering::Relaxed);
@@ -163,8 +165,8 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
                         continue;
                     };
                     let to = child_path(&dir, &name);
-                    match vault.upload_with(file, &to, &|done, total| count.bytes.set(done, total))
-                    {
+                    let progress = |done, total| count.bytes.set(done, total);
+                    match vault.upload_with(file, &to, replace.contains(&name), &progress) {
                         Ok(()) => uploaded += 1,
                         Err(_) => failed.push(name),
                     }
@@ -186,8 +188,9 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
 /// Copy external files or folders into `dir` under free names, removing originals after
 /// successful Cut transfers. Used by paste and external drag-and-drop on local or remote vaults.
 ///
-/// Never overwrite: occupied names gain `(copy)` suffixes. Recreate folders file by file through
-/// [`Carry`].
+/// Never overwrite: occupied names gain `(copy)` suffixes, and a name taken between choosing and
+/// writing moves on to the next ([`at_free_name`]). Recreate folders file by file through
+/// [`Carry`], each in a folder made for it.
 pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
     let count = Arc::new(Count::default());
@@ -199,36 +202,65 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
                 // Every name and every walk first, so the count has its total before the first
                 // file goes. A name is taken once chosen, or two pasted files of one name would
                 // both be given it.
+                let free = |claimed: &[String], name: &str, is_dir: bool| {
+                    free_path(&dir, name, is_dir, |rel| {
+                        claimed.iter().any(|c| c == rel) || vault.exists(rel)
+                    })
+                };
                 let mut claimed = Vec::new();
                 let mut carries = Vec::new();
+                let mut report = Imported::default();
                 for file in &files {
                     let Some(name) = local_name(file) else {
                         continue;
                     };
                     let is_dir = file.is_dir();
-                    let to = free_path(&dir, &name, is_dir, |rel| {
-                        claimed.iter().any(|c| c == rel) || vault.exists(rel)
-                    });
+                    let next = || free(&claimed, &name, is_dir);
+                    let mut to = next();
+                    let mut carry = Carry::of(file, &to);
+                    // A folder that could be read is claimed now, made empty, so what was walked
+                    // into it never joins a folder that took the name meanwhile; one taken since
+                    // is walked again under the name it got.
+                    if is_dir && !carry.unread.contains(&to) {
+                        match at_free_name(to.clone(), next, |rel| vault.create_dir(rel, false)) {
+                            Ok(made) if made == to => {}
+                            Ok(made) => (carry, to) = (Carry::of(file, &made), made),
+                            Err(_) => {
+                                report.failed.push(name);
+                                continue;
+                            }
+                        }
+                    }
                     claimed.push(to.clone());
-                    carries.push((Carry::of(file, &to), to, is_dir));
+                    carries.push((carry, to, name, is_dir));
                 }
                 let total = carries.iter().map(|(carry, ..)| carry.files.len()).sum();
                 count.total.store(total, Ordering::Relaxed);
-                let mut report = Imported::default();
-                for (carry, to, is_dir) in carries {
+                for (carry, to, name, is_dir) in carries {
+                    // Where a file pasted alone landed: its name, or the next free one when that
+                    // was taken since. What a folder holds goes into the folder made for it.
+                    let landed = RefCell::new(to.clone());
                     let (sent, failed) = carry.send(
                         cut,
-                        |rel| vault.create_dir(rel),
+                        |rel| vault.create_dir(rel, true),
                         |from, rel| {
-                            let sent = vault.upload_with(from, rel, &|done, total| {
-                                count.bytes.set(done, total)
-                            });
+                            let progress = |done, total| count.bytes.set(done, total);
+                            let upload = |rel: &str| vault.upload_with(from, rel, false, &progress);
+                            let sent = match is_dir {
+                                true => upload(rel),
+                                false => at_free_name(
+                                    rel.to_string(),
+                                    || free(&claimed, &name, false),
+                                    upload,
+                                )
+                                .map(|at| *landed.borrow_mut() = at),
+                            };
                             count.done.fetch_add(1, Ordering::Relaxed);
                             sent
                         },
                     );
                     if !failed.contains(&to) {
-                        report.landed.push(to);
+                        report.landed.push(landed.into_inner());
                         report.folders |= is_dir;
                     }
                     report.files += sent;

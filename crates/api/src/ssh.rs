@@ -448,27 +448,44 @@ pub fn install_server_cmd(hash: &str, size: usize) -> String {
     )
 }
 
+/// The exit status [`put_cmd`] answers a taken name with, its stderr naming the file.
+pub const TAKEN: i32 = 17;
+
 /// Write exactly `size` stdin bytes atomically to `path`. Use an unwatched
 /// `.accent-` temporary beside it, check length, then rename so interrupted
-/// uploads preserve the original. Follow symlinks, keep existing modes and
-/// use umask for new files. Errors name the destination folder.
-/// With `replace`, leave a file moved or deleted during upload absent
-/// instead of recreating it under its old name.
+/// uploads preserve the original. Errors name the destination folder.
+///
+/// With `replace`, follow symlinks, keep the existing mode, and leave a file moved or deleted
+/// during upload absent instead of recreating it under its old name. Without, the name must be
+/// free, a final symlink included: once every byte is there it is claimed empty with `set -C`,
+/// which every POSIX shell (dash, bash, zsh, BusyBox and BSD `sh`) opens with `O_EXCL` on any
+/// filesystem, and the rename then lands on that claim; a taken one exits [`TAKEN`]. The test
+/// before the claim keeps it off a FIFO, which `set -C` would open and wait on.
 pub fn put_cmd(path: &str, size: u64, replace: bool) -> String {
     let path = quote(path);
-    let gone = match replace {
-        true => "[ -e \"$p\" ] || { echo \"${p##*/} was moved or deleted\" >&2; exit 1; }; ",
-        false => "",
+    let (resolve, land) = match replace {
+        true => (
+            format!("p=$(readlink -f -- {path}) || p={path}"),
+            "m=$(stat -c %a \"$p\" 2>/dev/null) && chmod \"$m\" \"$t\"; \
+             [ -e \"$p\" ] || { echo \"${p##*/} was moved or deleted\" >&2; exit 1; }; "
+                .to_string(),
+        ),
+        false => (
+            format!("p={path}"),
+            format!(
+                "{{ [ ! -e \"$p\" ] && [ ! -L \"$p\" ] && (set -C; : > \"$p\") 2>/dev/null; }} \
+                 || {{ echo \"${{p##*/}}\" >&2; exit {TAKEN}; }}; "
+            ),
+        ),
     };
     format!(
-        "p=$(readlink -f -- {path}) || p={path}; t=\"${{p%/*}}/.accent-$$\"; \
+        "{resolve}; t=\"${{p%/*}}/.accent-$$\"; \
          trap 'rm -f \"$t\"' EXIT; trap 'exit 1' HUP INT TERM; \
          true 2>/dev/null > \"$t\" || {{ echo \"cannot write in ${{p%/*}}\" >&2; exit 1; }}; \
          cat > \"$t\" || exit 1; \
          if [ \"$(wc -c < \"$t\")\" -ne {size} ]; then \
          echo 'the upload was cut short' >&2; exit 1; fi; \
-         m=$(stat -c %a \"$p\" 2>/dev/null) && chmod \"$m\" \"$t\"; \
-         {gone}mv -f \"$t\" \"$p\""
+         {land}mv -f \"$t\" \"$p\""
     )
 }
 
@@ -1018,7 +1035,8 @@ mod tests {
     }
 
     /// The command run by the shell here, as the host's runs it: a file replaced only once every
-    /// byte is there, keeping its mode and its symlink, and one cut short left as it was.
+    /// byte is there, keeping its mode and its symlink, one cut short left as it was, and a name
+    /// that is taken, by a file or a dangling link, never written over unless asked to.
     #[test]
     fn an_upload_lands_whole_or_not_at_all() {
         use std::io::Write;
@@ -1034,26 +1052,38 @@ mod tests {
                 .spawn()
                 .unwrap();
             sh.stdin.take().unwrap().write_all(bytes).unwrap();
-            sh.wait_with_output().unwrap().status.success()
+            sh.wait_with_output().unwrap().status.code()
         };
         let put = |path: &Path, bytes: &[u8], size: u64| put_as(path, bytes, size, false);
+        let (done, failed, taken) = (Some(0), Some(1), Some(TAKEN));
         let (file, link) = (dir.path().join("a b.pdf"), dir.path().join("link.pdf"));
         std::fs::write(&file, "old").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
         std::os::unix::fs::symlink(&file, &link).unwrap();
 
-        assert!(!put(&file, b"ne", 3));
+        assert_eq!(put(&file, b"ne", 3), failed);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "old");
-        assert!(put_as(&link, b"new", 3, true));
+        assert_eq!(put(&file, b"new", 3), taken);
+        assert_eq!(put(&link, b"new", 3), taken);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "old");
+        assert_eq!(put_as(&link, b"new", 3, true), done);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
         assert!(link.is_symlink());
         let mode = std::fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o640);
         // A file nothing held yet, unless it is one to replace, which has gone meanwhile; and no
         // temporary left beside any of them.
-        assert!(put(&dir.path().join("new.png"), b"png", 3));
-        assert!(!put_as(&dir.path().join("moved.pdf"), b"pdf", 3, true));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+        assert_eq!(put(&dir.path().join("new.png"), b"png", 3), done);
+        assert_eq!(std::fs::read(dir.path().join("new.png")).unwrap(), b"png");
+        assert_eq!(
+            put_as(&dir.path().join("moved.pdf"), b"pdf", 3, true),
+            failed
+        );
+        let dangling = dir.path().join("dangling.png");
+        std::os::unix::fs::symlink("nowhere.png", &dangling).unwrap();
+        assert_eq!(put(&dangling, b"png", 3), taken);
+        assert!(!dir.path().join("nowhere.png").exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 4);
     }
 
     #[test]

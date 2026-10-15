@@ -16,6 +16,7 @@ import android.webkit.WebViewClient
 import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.Color
 import io.github.stroblme.accent.VaultModel
+import io.github.stroblme.accent.ffi.baseUri
 import io.github.stroblme.accent.ffi.toHtml
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay

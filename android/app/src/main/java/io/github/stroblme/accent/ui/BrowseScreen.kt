@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.Corpus
 import io.github.stroblme.accent.Recents
 import io.github.stroblme.accent.VaultModel
+import io.github.stroblme.accent.failure
 import io.github.stroblme.accent.ffi.FileKind
 import io.github.stroblme.accent.ffi.FileRow
 import io.github.stroblme.accent.ffi.SearchHit
@@ -49,6 +50,8 @@ fun BrowseScreen(
     results: List<SearchHit>,
     /** The query [results] answer ([VaultState.searched]). */
     searched: String,
+    /** Why [searched] could not be searched ([VaultState.searchFailed]). */
+    searchFailed: String?,
     /** Bumped as the index takes in more files ([VaultState.revision]). */
     revision: Int,
     /** The walk is running, or was stopped, and how far it has read: what [readingLine] says. */
@@ -76,11 +79,12 @@ fun BrowseScreen(
     // What the Files page's places are places in.
     var files by remember { mutableStateOf(Corpus()) }
     // What the Tags and Backlinks pages list, asked for as the panel opens and as a tag is opened:
-    // null until it has arrived, so a page still asking does not say there is nothing.
-    var tags by remember { mutableStateOf<List<TagCount>?>(null) }
+    // null until it has arrived, so a page still asking does not say there is nothing, and one
+    // that could not be read says why instead.
+    var tags by remember { mutableStateOf<Result<List<TagCount>>?>(null) }
     var tag by remember { mutableStateOf<TagCount?>(null) }
-    var tagged by remember { mutableStateOf<List<String>?>(null) }
-    var linked by remember { mutableStateOf<List<String>?>(null) }
+    var tagged by remember { mutableStateOf<Result<List<String>>?>(null) }
+    var linked by remember { mutableStateOf<Result<List<String>>?>(null) }
     // The template command asking which template, and the ones it offers, listed in the
     // commands' place until one is picked.
     var picking by remember { mutableStateOf<Pair<Command, List<String>>?>(null) }
@@ -95,7 +99,9 @@ fun BrowseScreen(
         tags = all
         // By its count from the same list, so its heading reads as one opened here would; a tag
         // the index does not have yet, typed and not saved, has no notes to list.
-        if (openTag != null) tag = all.find { it.name == openTag } ?: TagCount(openTag, 0)
+        if (openTag != null) {
+            tag = all.getOrNull()?.find { it.name == openTag } ?: TagCount(openTag, 0)
+        }
     }
     LaunchedEffect(front) { linked = front?.let { model.linkedFrom(it) } }
     LaunchedEffect(tag) {
@@ -127,10 +133,10 @@ fun BrowseScreen(
         val choosing = mode == Mode.Command && picking != null
         if (mode == Mode.Tags || mode == Mode.Backlinks || choosing) {
             val list = when {
-                mode == Mode.Backlinks -> linked
+                mode == Mode.Backlinks -> linked?.getOrNull()
                 choosing -> picking?.second
-                tag != null -> tagged
-                else -> tags
+                tag != null -> tagged?.getOrNull()
+                else -> tags?.getOrNull()
             } ?: return@LaunchedEffect
             val names = list.map { if (it is TagCount) it.name else it as String }
             listing = list to withContext(Dispatchers.Default) { listed(query, names, ::fuzzy) }
@@ -214,14 +220,17 @@ fun BrowseScreen(
             }
             if (tab == Mode.Tags) {
                 val open = tag
-                val all = tags
+                val all = tags?.getOrNull()
+                val failed = tags.failed("Cannot list the tags")
                 when {
                     open != null -> Notes(
                         heading = tagHeading(open),
-                        notes = tagged,
-                        rows = placesIn(tagged),
+                        notes = tagged?.getOrNull(),
+                        rows = placesIn(tagged?.getOrNull()),
+                        failed = tagged.failed("Cannot list the tag's notes"),
                         onBack = { tag = null },
                     ) { onOpen(it, null) }
+                    failed != null -> Quiet(failed)
                     all?.isEmpty() == true -> Quiet("No tags yet. Add a #tag to a note to see it here.")
                     all != null -> Tags(all, placesIn(all)) {
                         tag = it
@@ -241,10 +250,13 @@ fun BrowseScreen(
             }
             if (tab == Mode.Backlinks) {
                 val to = front
+                val links = linked?.getOrNull()
+                val failed = linked.failed("Cannot list the links")
                 when {
                     to == null -> Quiet("Open a file from this vault to see what links to it.")
-                    linked?.isEmpty() == true -> Quiet("No notes link to ${title(to)} yet.")
-                    else -> Notes("Links to ${title(to)}", linked, placesIn(linked)) {
+                    failed != null -> Quiet(failed)
+                    links?.isEmpty() == true -> Quiet("No notes link to ${title(to)} yet.")
+                    else -> Notes("Links to ${title(to)}", links, placesIn(links)) {
                         model.openBacklink(it, from = to)
                         onClose()
                     }
@@ -253,7 +265,10 @@ fun BrowseScreen(
             }
             LazyColumn(Modifier.fillMaxSize(), reverseLayout = tab != Mode.Search) {
                 when {
-                    none -> item { Quiet(nothingFound(indexing || growing, paused)) }
+                    none -> item {
+                        val failed = searchFailed?.takeIf { tab == Mode.Search }
+                        Quiet(failed ?: nothingFound(indexing || growing, paused))
+                    }
                     tab == Mode.Command -> items(rows, key = { it }) { i ->
                         val command = palette[i]
                         ListItem(
@@ -385,12 +400,16 @@ private fun Tags(tags: List<TagCount>, rows: List<Int>, onOpen: (TagCount) -> Un
     }
 }
 
-/** Show notes under [heading], with [notes] null while loading and [onBack] for navigation. */
+/**
+ * Show notes under [heading], with [notes] null while loading, [failed] saying why they could
+ * not be listed, and [onBack] for navigation.
+ */
 @Composable
 private fun Notes(
     heading: String,
     notes: List<String>?,
     rows: List<Int>,
+    failed: String? = null,
     onBack: (() -> Unit)? = null,
     onOpen: (String) -> Unit,
 ) {
@@ -412,6 +431,7 @@ private fun Notes(
                 modifier = onBack?.let { Modifier.row(it) } ?: Modifier,
             )
         }
+        if (failed != null) item { Quiet(failed) }
         if (notes != null) items(rows, key = { notes[it] }) { i ->
             val rel = notes[i]
             val folder = VaultModel.parentOf(rel)
@@ -461,6 +481,10 @@ private fun Status(text: String) {
         modifier = Modifier.padding(start = Gutter, end = Gutter, bottom = 8.dp),
     )
 }
+
+/** Why a list could not be read, as [what] could not be done; `null` while it is read or coming. */
+private fun Result<*>?.failed(what: String): String? =
+    this?.exceptionOrNull()?.let { failure(what, it) }
 
 /** What a page says in place of rows it does not have. */
 @Composable
