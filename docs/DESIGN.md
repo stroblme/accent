@@ -571,7 +571,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - **Cut, Copy and Paste are a section of their own**, over a **hybrid clipboard**, because a vault's files are not always on this machine. A local vault writes the real clipboard in GNOME Files' own formats, so a file crosses between accent and Files either way. A remote vault's Copy remembers vault-relative paths in the window and its Paste copies or moves them on the host, so duplicating a folder sends no bytes over the link.
 - A Cut pasted **is a move**, with its one Update Links? (Imports?) question for everything the Cut took, so notes cut together that link each other are rewritten together. The rows waiting on it are dimmed until the paste.
 - A clipboard file this vault does not hold is carried in, and so is a folder, walked on this disk and made again file by file — everything in it, as Files copies a folder, except a symbolic link leading out of it or to a folder. What lands stays when a later file fails, as in a file manager, and one toast says what went where and names what did not ("Copied Photos (120 files) to Media/Photos, but not Photos/raw.cr2"); a Cut takes away only what went.
-- **Paste never replaces** — a paste has nowhere to ask — so a taken name gets GNOME's own mark: `notes (copy).md`, then `notes (copy 2).md`, a folder taking it at the end. A Copy of several files is one toast once they have all landed ("Copied 3 files to Notes"), a copy that fails being named on its own, as Move to Trash does. Paste is drawn only while the clipboard holds something.
+- **Paste never replaces** — a paste has nowhere to ask — so a taken name gets GNOME's own mark: `notes (copy).md`, then `notes (copy 2).md`, a folder taking it at the end; nor does it put a folder inside itself, where a copy would copy itself again. A Copy of several files is one toast once they have all landed ("Copied 3 files to Notes"), a copy that fails being named on its own, as Move to Trash does. Paste is drawn only while the clipboard holds something.
 - **Show Hidden Files is on no tree menu**: it is about the listing, not the row, so it is a preference and a palette command (Sidebar).
 - **Show in Files is a local vault's**: on a remote one Download… takes its place, and the tab menu's or palette's Show in Files says why in a toast.
 - **Splitting is the tab menu's alone**: a split opens the active tab beside itself, which is not done to a file in the tree. So is pinning: Pin Tab or Unpin Tab ends the Move Tab section, as in GNOME Web.
@@ -586,7 +586,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 ### Empty states
 
-- `AdwStatusPage` (States): no vault; no note open (in a remote window, the stored tabs waiting for the host); no search results ("Nothing in this vault matches this search", a hit being possibly a source file); no file in front of the Info pane; no language server for the open file; nothing to outline.
+- `AdwStatusPage` (States): no vault; no note open (in a remote window, the stored tabs waiting for the host); no search results ("Nothing in this vault matches this search", a hit being possibly a source file); no file in front of the Info pane; no language server for the open file; nothing to outline. A hint that names a shortcut names the one in force, and a way that needs none once it is unbound.
 - `.compact` in the sidebar, where the full size dwarfs a 200–420 px column.
 - An empty section of the Info pane is one dim line under its header: a status page each would stack them in a column.
 

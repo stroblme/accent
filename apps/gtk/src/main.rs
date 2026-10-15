@@ -1507,6 +1507,7 @@ impl App {
         }
         if changed.shortcuts {
             self.refresh_accels();
+            self.sync_placeholder();
         }
         for tab in self.open_tabs() {
             if changed.font {

@@ -4,19 +4,15 @@
 use crate::Result;
 
 use accent_core::index::Index;
-use accent_core::path::{basename, parent_dir};
+use accent_core::path::{basename, is_note, parent_dir};
 
 use crate::fs;
 
 /// A template's target is markdown whatever its date pattern spells.
 pub(crate) fn with_md(rel: &str) -> String {
-    match rel.rsplit_once('.') {
-        Some((_, ext))
-            if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown") =>
-        {
-            rel.to_string()
-        }
-        _ => format!("{rel}.md"),
+    match is_note(rel) {
+        true => rel.to_string(),
+        false => format!("{rel}.md"),
     }
 }
 

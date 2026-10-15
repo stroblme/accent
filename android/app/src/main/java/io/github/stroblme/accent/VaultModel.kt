@@ -246,6 +246,34 @@ class Reload {
     }
 }
 
+/** Tickets for requests of which only the latest counts: an answer to an earlier one is dropped. */
+class Latest {
+    private val asked = AtomicInteger()
+
+    /** A request, superseding every one before it. */
+    fun next(): Int = asked.incrementAndGet()
+
+    /** Whether [ticket]'s request is still the latest. */
+    fun holds(ticket: Int): Boolean = asked.get() == ticket
+}
+
+/**
+ * What the note [asked] about becomes once its file is [read] again, [now] being the note in front
+ * by then and [typed] what the buffer holds; `null` when another note or a save has landed
+ * meanwhile. Dropping is safe: a write it overtook is caught by the next save's etag check.
+ */
+fun reread(asked: Open, now: Open?, read: Note, typed: CharSequence): Open? {
+    if (now == null || now.rel != asked.rel || now.etag != asked.etag) return null
+    return when {
+        // Only touched: the text is the one already here.
+        now.etag != null && now.text == read.text -> now.copy(etag = read.etag)
+        // Nothing was typed here, so taking the new text loses nothing.
+        now.text != read.text && !now.dirty(typed) ->
+            now.copy(text = read.text, etag = read.etag, changedOnDisk = false)
+        else -> now.copy(changedOnDisk = true)
+    }
+}
+
 /** Deduplicate [links] by source note in indexed path order. */
 fun linkingNotes(links: List<Backlink>): List<String> = links.map { it.srcRelPath }.distinct()
 
@@ -281,6 +309,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     /** One [write] at a time, so each goes out with the etag the one before it recorded. */
     private val writing = Mutex()
+
+    /** The file asked for last: a read for an earlier one that lands later is dropped ([show]). */
+    private val shown = Latest()
 
     /** Switcher names, `null` until first load; ignored notes join when scanned. */
     private val _names = MutableStateFlow<Corpus?>(null)
@@ -333,6 +364,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * Open [root] asynchronously, leaving the picker immediately and discarding superseded results.
      */
     fun open(root: String) {
+        shown.next()
         _state.value = VaultState(root = root, opening = true)
         _names.value = null
         ignored = emptyList()
@@ -555,59 +587,77 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     /** Open a file and pass a search query for one-time highlighting. PDFs ignore the query. */
     fun openFile(rel: String, find: String? = null, at: PdfPlace? = null, back: Back? = null) {
+        // Asked for now, not once the buffer is written: a file asked for after this one wins,
+        // whichever read ends first.
+        val ticket = shown.next()
         // What is in the buffer belongs to the note it was typed into, and the buffer is about to
         // hold another note's text: a write left pending across the swap would put these words in
         // that file.
-        leave { show(rel, find, at, back) }
+        leave { show(rel, ticket, find, at, back) }
     }
 
-    /** Put the file in front, whatever the buffer holds: [openFile] once [leave] has written it. */
+    /**
+     * Put the file in front, whatever the buffer holds: [openFile] once [leave] has written it.
+     * Nothing changes unless [ticket] is still the latest request ([shown]) when the file is read.
+     */
     private suspend fun show(
         rel: String,
+        ticket: Int,
         find: String? = null,
         at: PdfPlace? = null,
         back: Back? = null,
         scroll: Int = 0,
     ) {
         val v = vault ?: return
-        recents.touch(Recents.Kind.Notes, rel)
-        if (rel.endsWith(".pdf", ignoreCase = true)) {
-            val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
-            path.onSuccess { p -> _state.update { it.copy(doc = OpenPdf(rel, p, at)) } }
-                .onFailure { fail("Cannot open this file", it) }
-            return
-        }
-        if (imageKind(rel) != null) {
-            val image = withContext(Dispatchers.IO) { runCatching { imageAt(rel, v.pathOf(rel)) } }
-            image.onSuccess { i -> _state.update { it.copy(doc = i) } }
-                .onFailure { fail("Cannot open this file", it) }
-            return
-        }
+        val pdf = rel.endsWith(".pdf", ignoreCase = true)
+        val image = imageKind(rel) != null
+        val typed = buffer.text.toString()
         val read = withContext(Dispatchers.IO) {
-            runCatching { v.read(rel) to v.conflictsOf(rel) }
-        }
-        read.onSuccess { (note, conflicts) ->
-            // The buffer and the state in one step, so nothing composes a note's name over
-            // another note's text.
-            buffer.load(note.text)
-            _state.update {
-                it.copy(
-                    doc = Open(
-                        rel, note.text, note.etag,
-                        conflicts = conflicts, find = find, scroll = scroll, back = back,
-                    ),
-                )
+            runCatching {
+                when {
+                    pdf -> OpenPdf(rel, v.pathOf(rel), at)
+                    image -> imageAt(rel, v.pathOf(rel))
+                    else -> v.read(rel).let {
+                        Open(
+                            rel, it.text, it.etag,
+                            conflicts = v.conflictsOf(rel), find = find, scroll = scroll,
+                            back = back,
+                        )
+                    }
+                }
             }
-        }.onFailure { fail("Cannot read this note", it) }
+        }
+        // Asked for something else since, or closed the vault: the read is not wanted, nor is
+        // its failure.
+        fun current() = shown.holds(ticket) && vault === v
+        if (!current()) return
+        val doc = read.getOrElse {
+            return fail(if (pdf || image) "Cannot open this file" else "Cannot read this note", it)
+        }
+        val swap: suspend () -> Unit = {
+            if (current()) {
+                recents.touch(Recents.Kind.Notes, rel)
+                // The buffer and the state in one step, so nothing composes a note's name over
+                // another note's text.
+                if (doc is Open) buffer.load(doc.text)
+                _state.update { it.copy(doc = doc) }
+            }
+        }
+        // Words typed while the file was read are still waiting out their autosave, which the
+        // swap would cancel: written first, as [leave] writes the rest.
+        if (buffer.text.toString() != typed) exit(flush(), swap) else swap()
     }
 
     /** Close the note after saving pending edits, then return to its backlink source if any. */
-    fun close() = leave {
-        when (val to = _state.value.note?.back) {
-            // [show], not [openFile]: the buffer has been dealt with, and going through [leave]
-            // again would ask again about edits the reader has just chosen to drop.
-            is Back.File -> show(to.rel, at = to.at, scroll = to.scroll)
-            else -> _state.update { it.closed() }
+    fun close() {
+        val ticket = shown.next()
+        leave {
+            when (val to = _state.value.note?.back) {
+                // [show], not [openFile]: the buffer has been dealt with, and going through
+                // [leave] again would ask again about edits the reader has just chosen to drop.
+                is Back.File -> show(to.rel, ticket, at = to.at, scroll = to.scroll)
+                else -> if (shown.holds(ticket)) _state.update { it.closed() }
+            }
         }
     }
 
@@ -679,14 +729,17 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Close the vault, retain it in recents, and release its state and handle. */
-    fun closeVault() = leave {
-        // After the buffer is written rather than before, because the write goes through the
-        // handle: the buffer is the only copy of whatever was typed in the last second.
-        release(vault)
-        vault = null
-        _names.value = null
-        ignored = emptyList()
-        _state.value = VaultState()
+    fun closeVault() {
+        shown.next()
+        leave {
+            // After the buffer is written rather than before, because the write goes through the
+            // handle: the buffer is the only copy of whatever was typed in the last second.
+            release(vault)
+            vault = null
+            _names.value = null
+            ignored = emptyList()
+            _state.value = VaultState()
+        }
     }
 
     /**
@@ -694,8 +747,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun openLink(target: String) = viewModelScope.launch {
         val v = vault ?: return@launch
+        val ticket = shown.next()
         val name = target.substringBefore('#')
         val found = withContext(Dispatchers.IO) { runCatching { v.follow(name) }.getOrNull() }
+        // Another file asked for while the link was looked up goes in front instead.
+        if (!shown.holds(ticket) || vault !== v) return@launch
         val at = pdfAnchor(target.substringAfter('#', ""))?.let {
             PdfPlace(it.page.toInt(), selection = it.selection)
         }
@@ -735,7 +791,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 onSuccess = { etag ->
                     // What was just written is what is on disk, so there is nothing left to
                     // choose between.
-                    _state.update { s ->
+                    if (vault === v) _state.update { s ->
                         s.withNote(open.rel) {
                             it.copy(text = text, etag = etag, changedOnDisk = false)
                         }
@@ -745,7 +801,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 onFailure = { e ->
                     when (e) {
                         is AccentException.ChangedOnDisk -> {
-                            _state.update { s -> s.withNote { it.copy(changedOnDisk = true) } }
+                            if (vault === v) _state.update { s ->
+                                s.withNote(open.rel) { it.copy(changedOnDisk = true) }
+                            }
                             Saved.Paused
                         }
                         else -> Saved.Failed(failure("Cannot save this note", e))
@@ -806,7 +864,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** Replace the buffer with disk text, discarding local edits without another save attempt. */
     fun reload() {
         val open = _state.value.note ?: return
-        viewModelScope.launch { show(open.rel) }
+        val ticket = shown.next()
+        viewModelScope.launch { show(open.rel, ticket) }
     }
 
     fun newNote(rel: String) = viewModelScope.launch {
@@ -840,8 +899,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun keepTheirs(conflict: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val open = _state.value.note ?: return@launch
+        val ticket = shown.next()
         val done = withContext(Dispatchers.IO) { runCatching { v.adoptConflict(open.rel, conflict) } }
-        done.onSuccess { show(open.rel) }.onFailure { fail("Cannot take the other copy", it) }
+        done.onSuccess { show(open.rel, ticket) }
+            .onFailure { fail("Cannot take the other copy", it) }
     }
 
     /** Keep this note as it stands and delete the conflict copy. */
@@ -866,16 +927,16 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------------------- search
 
     /** Search generation; ignore superseded responses, including errors. */
-    private val asked = AtomicInteger()
+    private val asked = Latest()
 
     fun search(query: String) {
-        val mine = asked.incrementAndGet()
+        val mine = asked.next()
         viewModelScope.launch(Dispatchers.IO) {
             val v = vault ?: return@launch
             val hits = if (query.isBlank()) emptyList()
             else runCatching { v.search(query, 100u, false) }.getOrDefault(emptyList())
             _state.update {
-                if (asked.get() != mine) it else it.copy(results = hits, searched = query)
+                if (!asked.holds(mine)) it else it.copy(results = hits, searched = query)
             }
         }
     }
@@ -903,28 +964,19 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     /** Reload a clean open note after external changes; show a conflict for local edits. */
     private fun onChanged(rel: String) {
-        val open = _state.value.note ?: return
-        if (open.rel != rel) return
+        val v = vault ?: return
+        val asked = _state.value.note?.takeIf { it.rel == rel } ?: return
         refreshConflicts(rel)
         viewModelScope.launch {
-            val v = vault ?: return@launch
             val read = withContext(Dispatchers.IO) { runCatching { v.read(rel) } }
             val note = read.getOrNull() ?: return@launch
-            val cur = _state.value.note?.takeIf { it.rel == rel } ?: return@launch
-            // Nothing was typed here, so taking the new text loses nothing. The buffer and the
-            // state in one step, as a note is opened.
-            val take = cur.text != note.text && !cur.dirty(buffer.text)
-            if (take) buffer.load(note.text)
-            _state.update { s ->
-                s.withNote(rel) { now ->
-                    when {
-                        // Only touched: the text is the one already here.
-                        now.etag != null && now.text == note.text -> now.copy(etag = note.etag)
-                        take -> now.copy(text = note.text, etag = note.etag, changedOnDisk = false)
-                        else -> now.copy(changedOnDisk = true)
-                    }
-                }
-            }
+            if (vault !== v) return@launch
+            val now = _state.value.note
+            val next = reread(asked, now, note, buffer.text) ?: return@launch
+            // The buffer and the state in one step, as a note is opened. The conflicts are
+            // refreshed off this thread meanwhile, so they are kept as they now stand.
+            if (next.text != now?.text) buffer.load(next.text)
+            _state.update { s -> s.withNote(rel) { next.copy(conflicts = it.conflicts) } }
         }
     }
 

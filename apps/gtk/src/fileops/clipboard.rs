@@ -9,7 +9,7 @@
 
 use super::paths::{free_path, move_dest};
 use super::{Ops, batch_to, move_all, several, transfer};
-use accent_core::path::basename;
+use accent_core::path::{basename, is_under};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::path::PathBuf;
@@ -259,6 +259,14 @@ fn move_here(ops: &Rc<Ops>, inside: &[(String, bool)], dir: &str) {
 /// copies them in turn, so two of one name take two names, and one toast says what landed once
 /// every copy has; a copy that fails is named on its own, as Move to Trash names one.
 fn copy_here(ops: &Rc<Ops>, inside: Vec<(String, bool)>, dir: &str) {
+    // A folder pasted into itself, or under itself, would copy its own copy. The vault refuses
+    // it too; this says so in Move's words before the worker starts.
+    let (refused, inside): (Vec<_>, Vec<_>) =
+        inside.into_iter().partition(|(rel, _)| is_under(dir, rel));
+    if !refused.is_empty() {
+        let refused: Vec<String> = refused.into_iter().map(|(rel, _)| rel).collect();
+        (ops.toast)(&format!("Cannot paste {} here", several(&refused)));
+    }
     if inside.is_empty() {
         return;
     }

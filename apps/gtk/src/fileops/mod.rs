@@ -21,8 +21,8 @@ pub use transfer::download_to;
 pub use transfer::{download, import, upload};
 
 use self::paths::{
-    is_markdown, levels, moved_path, moves_to, renamed_part, renamed_path, split_typed, typed_dir,
-    typed_path, verb,
+    levels, moved_path, moves_to, renamed_part, renamed_path, split_typed, typed_dir, typed_path,
+    verb,
 };
 use crate::dialogs::{
     CONFIRM, alert, choose, confirm, focus_entry, form, labelled, name_dialog, name_entry,
@@ -30,7 +30,7 @@ use crate::dialogs::{
 use crate::pathfield::{completions, look_again, path_field};
 use accent_api::{Error, FileKind, FileRow, RenamePlan, Vault};
 use accent_core::Error as Core;
-use accent_core::path::{basename, linked_path, parent_dir};
+use accent_core::path::{FileType, basename, file_type, is_note, linked_path, parent_dir};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
@@ -159,10 +159,10 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
     if let Some(picker) = &picker {
         let row = labelled("Template", picker);
         // A prefilled name may already say the file will be markdown, and nothing has changed yet.
-        row.set_visible(is_markdown(name.trim()));
+        row.set_visible(is_note(name.trim()));
         entry.connect_changed({
             let row = row.clone();
-            move |e| row.set_visible(is_markdown(e.text().trim()))
+            move |e| row.set_visible(is_note(e.text().trim()))
         });
         form.append(&row);
     }
@@ -183,7 +183,7 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
         // template was picked does not carry the leftover selection into a non-note file.
         let template = picker
             .as_ref()
-            .filter(|_| is_markdown(&name))
+            .filter(|_| is_note(&name))
             .and_then(|p| (p.selected() as usize).checked_sub(1))
             .and_then(|i| templates.get(i))
             .cloned();
@@ -387,10 +387,7 @@ fn drawing_size(at: usize, window: (i32, i32)) -> (f32, f32) {
 /// A drawing is a PDF whatever it is called: the extension is what opens it in a PDF tab here
 /// and in a reader everywhere else, so a typed name that leaves it out gains it.
 fn drawing_path(rel: String) -> String {
-    match Path::new(&rel)
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-    {
+    match file_type(&rel) == FileType::Pdf {
         true => rel,
         false => format!("{rel}.pdf"),
     }
@@ -544,13 +541,13 @@ fn template_picker(templates: &[String]) -> Option<gtk::DropDown> {
 ///
 /// Select a file's stem while retaining its extension; select a folder's whole name.
 pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
-    let note = is_markdown(basename(rel));
+    let note = is_note(rel);
     let from = rel.to_string();
     path_dialog(ops, rel, is_dir, ("Rename", "Rename"), move |ops, to| {
         if to == from {
             return;
         }
-        match note && !is_markdown(basename(&to)) {
+        match note && !is_note(&to) {
             true => confirm_demote(ops, &from, &to),
             false => plan(ops, vec![(from.clone(), to.clone())], verb(&from, &to)),
         }

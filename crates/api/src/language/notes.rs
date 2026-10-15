@@ -653,7 +653,7 @@ impl Notes {
                         let target =
                             path::resolve(parent_dir(rel), &markdown::percent_decode(dest));
                         match self.find(&locked(&self.index), &target)? {
-                            Some(note) if note.ends_with(".md") => Some(self.text_of(&note)?),
+                            Some(note) if path::is_note(&note) => Some(self.text_of(&note)?),
                             _ => return Ok(Completions::default()),
                         }
                     }
@@ -766,7 +766,7 @@ impl Notes {
                 None => return Ok(Completions::default()),
             },
         };
-        if target.ends_with(".pdf") {
+        if path::file_type(&target) == FileType::Pdf {
             let outline = pdf_outline(&Local::join(&self.root, &target)?)?;
             let pages = PdfPages {
                 rel: target,
@@ -775,7 +775,7 @@ impl Notes {
             };
             return Ok(pages.answer(outline));
         }
-        if !target.ends_with(".md") {
+        if !path::is_note(&target) {
             return Ok(Completions::default());
         }
         let text = self.text_of(&target)?;
@@ -821,7 +821,7 @@ impl Notes {
                 return Ok(None);
             };
             // A link to something that is not a note has nothing to preview but its place.
-            if !target.ends_with(".md") {
+            if !path::is_note(&target) {
                 return Ok(Some(Hover {
                     text: target,
                     range,
@@ -1312,6 +1312,39 @@ mod tests {
         let row = |insert: &str| ("^blk".into(), Some("First.".into()), insert.into());
         assert_eq!(rows(at(1, 9)), [row("[[Other#^blk]]")]);
         assert_eq!(rows(at(2, 14)), [row("Other.md#^blk")]);
+    }
+
+    /// A note is a note by [`path::file_type`], so `.MD` and `.markdown` offer their headings and
+    /// preview on hover as `.md` does.
+    #[test]
+    fn a_note_answers_whatever_its_extension_case_or_spelling() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("Upper.MD"), "# Alpha\nUpper body.\n").unwrap();
+        std::fs::write(vault.path().join("long.markdown"), "# Beta\nLong body.\n").unwrap();
+        let a = "[[Upper#\n[x](long.markdown#\n[[long]]\n";
+        std::fs::write(vault.path().join("a.md"), a).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
+        )
+        .unwrap();
+        let at = |line, character| Pos { line, character };
+        let labels = |pos| -> Vec<String> {
+            let items = notes.completion("a.md", pos).unwrap().items;
+            items.into_iter().map(|i| i.label).collect()
+        };
+        assert_eq!(labels(at(0, 8)), ["Alpha"]);
+        assert_eq!(labels(at(1, 18)), ["Beta"]);
+        let hover = notes.hover("a.md", at(2, 3)).unwrap().unwrap();
+        assert!(hover.text.contains("Long body."), "{}", hover.text);
     }
 
     /// The paths a completion ranks are kept between keystrokes, and read again once the index

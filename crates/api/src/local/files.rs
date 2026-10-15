@@ -6,7 +6,7 @@ use std::io;
 
 use crate::{Error, Result};
 
-use accent_core::path::{basename, stem};
+use accent_core::path::{basename, is_under, stem};
 use accent_core::{markdown, search, template};
 
 use super::{Local, Msg};
@@ -162,10 +162,14 @@ impl Local {
 
     /// Copy a file or directory between vault-relative paths without overwriting.
     /// Remote copies run beside the files, avoiding transfers; the caller chooses
-    /// an unused destination such as a "(copy)" name.
+    /// an unused destination such as a "(copy)" name. A folder is never copied into itself.
     pub fn copy(&self, from: &str, to: &str) -> Result<()> {
         let (src, dest) = (self.resolve(from)?, self.resolve(to)?);
         match src.is_dir() {
+            // Before anything is made: a folder copied into itself would copy its copy again.
+            true if lands_inside(&src, &dest) => {
+                return Err(accent_core::Error::Invalid(format!("{to} is inside {from}")).into());
+            }
             true => copy_tree(&src, &dest),
             false => std::fs::copy(&src, &dest).map(|_| ()),
         }
@@ -702,12 +706,6 @@ fn imports_by_path(rel: &str) -> bool {
         .is_some_and(|ext| IMPORTING.contains(&ext))
 }
 
-/// Whether `rel` is `dir` or inside it.
-fn is_under(rel: &str, dir: &str) -> bool {
-    rel.strip_prefix(dir)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-}
-
 /// Rewrite a core file error's absolute path as vault-relative `rel`.
 fn named(rel: &str) -> impl FnOnce(accent_core::Error) -> Error + '_ {
     move |e| {
@@ -720,6 +718,20 @@ fn named(rel: &str) -> impl FnOnce(accent_core::Error) -> Error + '_ {
         }
         .into()
     }
+}
+
+/// Whether `dest` is the folder `src` or inside it, as spelled or as the filesystem resolves it:
+/// through a link to `src` or to a folder above it. A `dest` not there yet goes by its nearest
+/// folder that is.
+fn lands_inside(src: &std::path::Path, dest: &std::path::Path) -> bool {
+    let real = |path: &std::path::Path| {
+        path.ancestors()
+            .find_map(|at| Some(at.canonicalize().ok()?.join(path.strip_prefix(at).ok()?)))
+    };
+    dest.starts_with(src)
+        || real(src)
+            .zip(real(dest))
+            .is_some_and(|(src, dest)| dest.starts_with(src))
 }
 
 /// `cp -r`: `std::fs` copies one file, and a pasted folder is the one caller that needs the rest.

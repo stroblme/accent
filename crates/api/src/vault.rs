@@ -765,6 +765,36 @@ mod tests {
         assert!(f.vault.copy("nowhere.md", "x.md").is_err());
     }
 
+    /// A folder copied into itself would copy its own copy again, so nothing is made: not by its
+    /// path as spelled, `..` included, and not through a link to it.
+    #[test]
+    fn a_folder_is_never_copied_into_itself() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("A/x.md", "x\n");
+        let root = f.vault.root().to_path_buf();
+        std::os::unix::fs::symlink(root.join("A"), root.join("L")).unwrap();
+        let listed = || {
+            let mut names: Vec<String> = std::fs::read_dir(root.join("A"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        for to in ["A", "A/A", "A/sub/A", "B/../A/A", "L/A"] {
+            let copied = f.vault.copy("A", to);
+            assert!(
+                matches!(
+                    copied,
+                    Err(crate::Error::Core(accent_core::Error::Invalid(_)))
+                ),
+                "{to}: {copied:?}"
+            );
+            assert_eq!(listed(), ["x.md"], "{to}");
+        }
+    }
+
     /// A reader learns that a file is missing from the fetch itself, the way a remote vault
     /// already said it, rather than from a path to nothing.
     #[test]

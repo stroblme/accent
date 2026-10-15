@@ -741,12 +741,12 @@ impl App {
             0 if self.key.borrow().is_terminal() => (
                 "utilities-terminal-symbolic",
                 "No Shell Open".to_string(),
-                "Press Ctrl+J to open one.".to_string(),
+                empty_hint(&self.config.borrow(), true, palette::accel_label),
             ),
             0 => (
                 "text-x-generic-symbolic",
                 "No Note Open".to_string(),
-                "Pick one in the sidebar, or press Ctrl+E to go to a file.".to_string(),
+                empty_hint(&self.config.borrow(), false, palette::accel_label),
             ),
             1 => (
                 "remote-server-symbolic",
@@ -1139,9 +1139,60 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
     stored
 }
 
+/// What an empty window's page tells the reader to do: press the chord in force for New Terminal
+/// or Go to File…, spelled by `label`, or take a way that needs none once the action is unbound.
+fn empty_hint(config: &Config, terminal: bool, label: impl Fn(&str) -> Option<String>) -> String {
+    let action = match terminal {
+        true => "win.terminal",
+        false => "win.palette-files",
+    };
+    let chord = accels_for(config, action)
+        .iter()
+        .find_map(|accel| label(accel));
+    match (terminal, chord) {
+        (true, Some(chord)) => format!("Press {chord} to open one."),
+        (true, None) => "Open one from the main menu.".to_string(),
+        (false, Some(chord)) => {
+            format!("Pick one in the sidebar, or press {chord} to go to a file.")
+        }
+        (false, None) => "Pick one in the sidebar.".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The empty page names the chord that opens a file or a shell as the bindings stand, and a
+    /// way that needs none once the action is unbound.
+    #[test]
+    fn the_empty_state_names_the_chord_in_force() {
+        let label = |accel: &str| Some(accel.to_string());
+        let mut config = Config::default();
+        assert!(empty_hint(&config, false, label).contains("<Control>e"));
+        assert!(empty_hint(&config, true, label).contains("<Control>j"));
+
+        let files = "win.palette-files".to_string();
+        config
+            .shortcuts
+            .insert(files.clone(), vec!["<Control>o".into()]);
+        let hint = empty_hint(&config, false, label);
+        assert!(
+            hint.contains("<Control>o") && !hint.contains("<Control>e"),
+            "{hint}"
+        );
+
+        config.shortcuts.insert(files, vec![]);
+        assert_eq!(
+            empty_hint(&config, false, label),
+            "Pick one in the sidebar."
+        );
+        config.shortcuts.insert("win.terminal".into(), vec![]);
+        assert_eq!(
+            empty_hint(&config, true, label),
+            "Open one from the main menu."
+        );
+    }
 
     /// A window that never restored keeps what was stored, and adds what it opened itself.
     #[test]

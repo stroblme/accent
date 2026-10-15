@@ -107,6 +107,11 @@ pub fn file_type(rel: &str) -> FileType {
     }
 }
 
+/// Whether `rel` is a note by its name ([`FileType::Note`]): `.md` or `.markdown`, in any case.
+pub fn is_note(rel: &str) -> bool {
+    file_type(rel) == FileType::Note
+}
+
 /// Whether `rel` is a draw.io diagram by its name: `.drawio`, `.dio`, or `.drawio.xml`, the three
 /// names draw.io saves under. A plain `.xml` holding a diagram is only known by its bytes.
 pub fn is_diagram(rel: &str) -> bool {
@@ -194,6 +199,13 @@ pub fn linked_path(target: &str) -> String {
     }
 }
 
+/// Whether `rel` is the folder `dir` or inside it, by whole names: `ab` is not inside `a`. The
+/// vault root `""` is nobody's folder here.
+pub fn is_under(rel: &str, dir: &str) -> bool {
+    rel.strip_prefix(dir)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
 /// The half-open `rel_path` range that is exactly the descendants of `rel`: `[rel/, rel0)`,
 /// because `'0'` is the byte after `'/'`. Keeps a subtree query on the `rel_path` index where a
 /// `LIKE` would fall back to a scan.
@@ -235,6 +247,15 @@ fn managed_by(abs: &Path, cargo: Option<&Path>, rustup: Option<&Path>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_under_is_the_folder_itself_or_inside_it() {
+        assert!(is_under("a/b", "a"));
+        assert!(is_under("a", "a"));
+        assert!(!is_under("ab", "a"));
+        assert!(!is_under("a", "a/b"));
+        assert!(!is_under("a", ""));
+    }
 
     #[test]
     fn a_package_managers_files_are_told_from_the_users() {

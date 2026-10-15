@@ -14,6 +14,7 @@
 //! ecosystem-specific name list. Unix metadata is required; supported targets are Linux and
 //! Android.
 
+use crate::path::{FileType, file_type};
 use ignore::{IncrementalIgnore, WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -241,9 +242,9 @@ fn classify(name: &str) -> FileKind {
     if crate::fs::is_sync_conflict(name) {
         return FileKind::Conflict;
     }
-    match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()) {
-        Some(e) if e == "md" || e == "markdown" => FileKind::Markdown,
-        Some(e) if e == "pdf" => FileKind::Pdf,
+    match file_type(name) {
+        FileType::Note => FileKind::Markdown,
+        FileType::Pdf => FileKind::Pdf,
         _ => FileKind::Other,
     }
 }

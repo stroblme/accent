@@ -309,7 +309,7 @@ fn text_at(selection: &gtk::SingleSelection, at: u32) -> Option<String> {
 
 /// Format `<Control>p` as `Ctrl+P` using this GTK build's spelling.
 /// `gtk::ShortcutLabel` is deprecated since GTK 4.18.
-fn accel_label(accel: &str) -> Option<String> {
+pub(crate) fn accel_label(accel: &str) -> Option<String> {
     let (key, mods) = gtk::accelerator_parse(accel)?;
     Some(gtk::accelerator_get_label(key, mods).into())
 }

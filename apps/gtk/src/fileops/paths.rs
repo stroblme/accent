@@ -1,6 +1,6 @@
 //! Pure path calculations for file dialogs, tree drops and move results.
 
-use accent_core::path::{basename, parent_dir};
+use accent_core::path::{basename, is_under, parent_dir};
 use accent_core::walk::out_of_reach;
 
 /// Every level of `dir`, outermost first: `a/b/c` yields `a`, `a/b`, `a/b/c`. What a `mkdir -p`
@@ -9,13 +9,6 @@ pub(super) fn levels(dir: &str) -> impl Iterator<Item = &str> {
     dir.match_indices('/')
         .map(|(at, _)| &dir[..at])
         .chain(std::iter::once(dir))
-}
-
-/// Whether the name already carries a markdown extension.
-pub(super) fn is_markdown(name: &str) -> bool {
-    name.rsplit_once('.').is_some_and(|(_, ext)| {
-        ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
-    })
 }
 
 /// Split a file name into stem and extension, dot included. A leading dot belongs to the name.
@@ -85,8 +78,7 @@ pub(super) fn moved_path(rel: &str, dest_dir: &str) -> String {
 /// into the folder it is already in, which is a no-op and not worth a confirmation dialog. `dir`
 /// is "" for the vault root.
 pub fn move_dest(from: &str, dir: &str) -> Option<String> {
-    let inside_itself = dir == from || dir.starts_with(&format!("{from}/"));
-    if inside_itself || parent_dir(from) == dir {
+    if is_under(dir, from) || parent_dir(from) == dir {
         return None;
     }
     Some(moved_path(from, dir))
@@ -98,7 +90,7 @@ pub fn move_dest(from: &str, dir: &str) -> Option<String> {
 pub(super) fn moves_to(rels: &[String], dir: &str) -> Result<Vec<(String, String)>, String> {
     let mut moves = Vec::new();
     for rel in rels {
-        if dir == rel || dir.starts_with(&format!("{rel}/")) {
+        if is_under(dir, rel) {
             return Err(rel.clone());
         }
         if let Some(to) = move_dest(rel, dir) {
@@ -197,16 +189,6 @@ mod tests {
     fn levels_lists_what_a_mkdir_p_would_have_made() {
         assert_eq!(levels("a/b/c").collect::<Vec<_>>(), ["a", "a/b", "a/b/c"]);
         assert_eq!(levels("a").collect::<Vec<_>>(), ["a"]);
-    }
-
-    #[test]
-    fn is_markdown_only_matches_a_markdown_extension() {
-        assert!(is_markdown("note.md"));
-        assert!(is_markdown("NOTE.MD"));
-        assert!(is_markdown("note.markdown"));
-        assert!(!is_markdown("note"));
-        assert!(!is_markdown("chart.pdf"));
-        assert!(!is_markdown("Notes"));
     }
 
     #[test]
