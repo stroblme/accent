@@ -1,13 +1,12 @@
-//! Completion for every text flavour through one [`Source`] interface.
+//! Text completion through one [`Source`] interface.
 //!
-//! A [`Session`] holds an answer and its popup. [`Anchor`] marks track the request position;
-//! [`rank`] narrows complete answers locally as typing continues. Incomplete answers request
-//! updates per keystroke while the current list narrows, avoiding flicker over slow links.
-//! Each item uses its own start and range, moved with edits through [`apply::Moved`].
+//! A [`Session`] holds an answer and its popup. [`Anchor`] marks track the request position.
+//! [`rank`] narrows complete answers locally; incomplete answers request updates per keystroke
+//! while the current list narrows. [`apply::Moved`] tracks each item's range through edits.
 //!
-//! The view retains focus. `editor::keys` offers presses to [`press`] first for arrows,
-//! Escape, and Return or Tab with a selected row; other keys keep normal typing behaviour, a
-//! commit character after accepting the selected row.
+//! The view retains focus. `editor::keys` offers arrows, Escape, and Return or Tab with a
+//! selected row to [`press`] first. Other keys continue normal typing or accept a selected
+//! row through its commit character.
 
 mod abbrev;
 mod apply;
@@ -42,7 +41,7 @@ const LOOK: Duration = Duration::from_millis(50);
 /// How often a late import waiting for a snippet's walk to end looks again.
 const WALK: Duration = Duration::from_millis(100);
 
-/// A pinned future, which is what every reply here is.
+/// A pinned future for completion replies.
 pub(crate) type Reply<T> = Pin<Box<dyn Future<Output = T>>>;
 
 /// Where a session's answers come from, and what it asks of the document it completes in.

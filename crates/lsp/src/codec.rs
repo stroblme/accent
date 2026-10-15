@@ -1,6 +1,5 @@
 //! LSP `Content-Length` framing for JSON bodies. Accept extra `Content-Type` headers, LF line
-//! endings and case-insensitive header names here so callers share server-compatibility
-//! handling.
+//! endings, and case-insensitive header names.
 
 use std::io;
 
@@ -11,10 +10,8 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
-/// Read one message body, or `None` when the stream ends between messages.
-///
-/// An end *inside* the headers or the body is an error: the message was cut in half and the
-/// caller must not mistake that for an orderly goodbye.
+/// Read one message body, or `None` for EOF between messages. EOF inside headers or a body is an
+/// error because the message is incomplete.
 pub async fn read(r: &mut (impl AsyncBufRead + Unpin)) -> io::Result<Option<Vec<u8>>> {
     let mut len: Option<usize> = None;
     let mut started = false;

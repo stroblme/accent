@@ -3,10 +3,10 @@
 use super::*;
 use crate::completion::{self, Session};
 
-/// `=note:<rel>` and `=code:<rel>[,<typed>]` type into files; use a scratch vault under `/tmp`.
+/// `=note:<rel>` and `=code:<rel>[,<typed>]` type into files in a scratch vault under `/tmp`.
 ///
 /// `note:` creates completion fixtures, narrows `[[` and `#c` suggestions, accepts
-/// with Down/Tab and undoes. Bracket completion must consume the existing `]]` once.
+/// with Down/Tab and undoes. Bracket completion must consume the existing `]]` exactly once.
 /// `code:` types `typed` (default `s.g`) into a blank line, creating a C fixture if
 /// absent. Print rows, selected documentation, accepted imports and undo results, then type it
 /// again and commit the first row with `;`.

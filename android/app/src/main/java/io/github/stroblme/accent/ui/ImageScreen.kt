@@ -18,15 +18,8 @@ import io.github.stroblme.accent.OpenImage
 import java.io.File
 
 /**
- * An image on its own: opened from the files, the switcher, a link, or a tap on it in a note.
- *
- * The note's surface — the same bar lying over it, the same tap for the bar — with the image fitted
- * to the screen, and recoloured by the rule a note's images follow ([served]). The bar's one
- * action is Invert: this file against that rule, for as long as the app runs, the same switch a
- * long press on the image in a note flips. A pinch zooms it, which is the WebView's own.
- *
- * A WebView rather than an `Image` because an SVG is drawn by nothing else on the platform, and its
- * recolouring is a filter only a browser applies; an animated GIF, WebP or PNG moves in one too.
+ * Show an image with the document bar and pinch zoom. [served] applies note image theming;
+ * Invert overrides it for this session.
  */
 @Composable
 fun ImageScreen(image: OpenImage, chrome: Chrome) {
@@ -93,10 +86,7 @@ fun ImageScreen(image: OpenImage, chrome: Chrome) {
     }
 }
 
-/**
- * The image on the app's page, as large as the screen holds it whole: a small one is scaled up
- * rather than left a postage stamp in the middle, and an SVG with no size of its own gets one.
- */
+/** Fit the image to the screen, enlarging small images and sizing dimensionless SVGs. */
 private fun imagePage(src: String, bg: Color): String = """
 <!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

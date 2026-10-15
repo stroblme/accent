@@ -1,5 +1,4 @@
-//! Arithmetic on the paths the dialogs type and the tree drags: what a typed name resolves to,
-//! where a drop may land, and what to call the move afterwards. Pure, and tested as such.
+//! Pure path calculations for file dialogs, tree drops and move results.
 
 use accent_core::path::{basename, parent_dir};
 use accent_core::walk::out_of_reach;
@@ -130,12 +129,12 @@ pub fn topmost(paths: &[(String, bool)]) -> Vec<(String, bool)> {
         .collect()
 }
 
-/// The folder a half-typed path points into and the last segment, which is the file's own name.
+/// Resolve a partial path to its parent folder and final name.
 ///
-/// `base` is the folder the path is typed in: the file's own for Rename, the clicked row's for
-/// New File. `..` walks back up out of it and stops at the vault root. A dot-named folder is taken
-/// like any other, and one the vault never lists (`.git`, `.trash`) is refused. The name comes back
-/// as typed, empty included, so that completion can read a path that is still being written.
+/// `base` is the starting folder: the file's parent for Rename or the clicked folder for
+/// New File. `..` stops at the vault root. Dot-named folders are valid unless hidden from
+/// vault listings (`.git`, `.trash`). Return the final name unchanged, even when empty, for
+/// completion of paths still being typed.
 pub(super) fn split_typed(base: &str, typed: &str) -> Result<(String, String), &'static str> {
     let typed = typed.trim();
     let (dirs, name) = typed.rsplit_once('/').unwrap_or(("", typed));

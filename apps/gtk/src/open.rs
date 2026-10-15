@@ -213,7 +213,7 @@ impl App {
                     // GNOME shows in Files. The cap does not: it is `16 * 1024 * 1024`, and
                     // decimal units render that as "16.8 MB", which is not the number anyone set.
                     &format!(
-                        "{} is over the {} MiB accent will read into an editor.",
+                        "{} exceeds the {} MiB editor limit.",
                         human(size),
                         accent_core::fs::MAX_TEXT / (1024 * 1024)
                     ),

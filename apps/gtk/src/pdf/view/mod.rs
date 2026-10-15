@@ -83,7 +83,7 @@ impl PdfView {
         view
     }
 
-    /// The page sizes in points, which is everything the layout needs to know about the document.
+    /// Page sizes in points, sufficient to lay out the document.
     pub fn set_sizes(&self, sizes: Vec<(f32, f32)>) {
         *self.imp().sizes.borrow_mut() = sizes;
         self.relayout();

@@ -764,10 +764,8 @@ pub fn rename_in(list: &mut [String], from: &str, to: &str) {
     }
 }
 
-/// Keys in `config.toml` that nothing reads: a typo, or a setting that was retired. Serde drops
-/// an unknown field before anything can see it, so the file is compared against the known names
-/// as a plain table first. Checked at the top level and inside each vault table, where the
-/// `daily_*` keys are left to [`daily_keys`], which explains them properly.
+/// Unknown or retired `config.toml` keys. Compare the raw top-level and vault tables with known
+/// fields before Serde discards extras. Leave `daily_*` keys to [`daily_keys`] for migration advice.
 fn unknown_keys(table: &toml::Table) -> Vec<String> {
     // The struct's own field names, read off a serialised value rather than kept as a second
     // list. `editor_font` is skipped when `None` and the maps when empty, so each is filled in

@@ -83,14 +83,10 @@ fn pdf_of(objs: &[String]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// One 200 x 100 pt page carrying an `/Ink` the way another editor may write one: two strokes,
-/// with a note, an author, a date, an intent and a popup, whose appearance stream draws them as
-/// two paths, red and then blue (both red without `two_colours`) — a line from (10, 10) to
-/// (40, 40), and one from (15, 40) to (45, 10) — in a space of its own: its `/BBox` is
-/// `[0 0 50 50]` and its `/Matrix` turns it a quarter round, and the viewer fits that onto the
-/// annotation's `/Rect` at (100, 20). Read back, the lines are in that space and nowhere near
-/// where they show; the `/InkList` has them where they do, bottom-left page origin: the red one
-/// from (140, 30) to (110, 60), the blue one from (110, 35) to (140, 65).
+/// A 200 × 100 pt page with another editor's `/Ink`: two strokes, metadata, and a popup.
+/// Its appearance stream uses `/BBox [0 0 50 50]` and a quarter-turn `/Matrix`, then fits into
+/// `/Rect` at (100, 20). The `/InkList` instead uses page coordinates: red (140, 30)–(110, 60),
+/// blue (110, 35)–(140, 65). Without `two_colours`, both strokes are red.
 fn foreign_ink_pdf(two_colours: bool) -> Vec<u8> {
     let blue = if two_colours { "0 0 1 RG " } else { "" };
     let stream = format!("1 0 0 RG 2 w 10 10 m 40 40 l S {blue}15 40 m 45 10 l S");

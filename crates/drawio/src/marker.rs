@@ -16,15 +16,12 @@ pub struct Marker {
     pub fill: Option<Color>,
 }
 
-/// The head `kind` (`classic`, `block`, `open`, `oval`, `diamond`, `ERmany`, …) at `end`,
-/// pointing along `unit` (the unit vector from the previous point towards `end`), at the
-/// `source` end or the target's: its outlines in paint order. `end` is moved back to where the
-/// line should stop so it does not poke through the head; heads drawn across the line leave it
-/// where it is. `None`, and `end` left alone, for `none` and any kind not registered.
+/// Build marker outlines in paint order at `end`, pointing along `unit`. Move `end` back where
+/// the edge should stop, except for heads drawn across it. Return `None` without moving `end` for
+/// unknown kinds and `none`.
 ///
-/// `mxMarker.createMarker` with the heads mxMarker.js, Shapes.js and mxER.js register. `fill`
-/// is the head's fill colour when it is filled (`endFill`): heads made of lines alone take
-/// none, and the `ERzero…` heads fill their circle white.
+/// `source` selects the edge end. `fill` colours filled heads; line-only heads stay unfilled and
+/// `ERzero…` circles use white. Follows draw.io's `mxMarker.createMarker`.
 pub fn marker(
     kind: &str,
     end: &mut Point,

@@ -4,16 +4,16 @@ use super::*;
 use webkit6::prelude::WebViewExt;
 
 /// `ACCENT_BENCH_CHROME=present:<note>,<pdf>,<image>,<side>` presents four tab kinds
-/// from the left of two panes. Print content bounds, hidden panes/tab bars/sidebar,
-/// PDF zoom and focus; `<kind>_after same=` checks exact layout restoration.
+/// from the left pane. Print content bounds, hidden chrome, PDF zoom and focus;
+/// `<kind>_after same=` checks layout restoration.
 ///
 /// While presenting, probe Find (`<kind>_find`), held Ctrl+Tab card bounds/content,
 /// Escape restoring the initial tab, and toast clearance above the status bar during
 /// animation (`<kind>_toast*`). Repeat for a split note with an off-centre divider.
 ///
-/// Real XTEST input checks tab cycling, Page Down in notes/PDFs and status-bar menus:
-/// open, leave, select Fit Width, open page menu, Escape, and clicks by a resting
-/// pointer. `bar_menu_page_menu` must be false when the status-bar menu handles input.
+/// XTEST checks tab cycling, Page Down in notes/PDFs and status-bar menus: open, leave,
+/// select Fit Width, open the page menu, Escape and clicks by a resting pointer.
+/// `bar_menu_page_menu` must be false while the status-bar menu handles input.
 /// F5/Escape in a shell must leave `presenting=false`.
 /// `bench present xtest <steps>` requests `build-aux/xtest.py :N "<steps>"`, starting
 /// with input focus. `bench present shot <case>` pauses 1.5 s for screenshots.

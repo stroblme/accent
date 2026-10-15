@@ -723,13 +723,11 @@ fn decorations(refs: &[git::Ref]) -> String {
         .join(", ")
 }
 
-/// Whether a freshly-read first page says the history has not moved: the same commits, whole and
-/// in the same order, at the head of what the pane already holds. Whole commits and not their ids
-/// alone, so that a branch moving onto a commit — a decoration, and nothing else — still redraws.
+/// Whether the first page matches the pane's current history prefix, including decorations.
+/// Comparing whole commits detects a branch moving onto an existing commit.
 ///
-/// A page that is longer than what is held is a first refresh or a shorter history; either way it
-/// has to be drawn. A page that is shorter is what a Load More leaves behind, and its own rows
-/// stay where they are.
+/// A longer page may be the first refresh or a shortened history and must be drawn. A shorter
+/// page can be the prefix of a history extended by Load More; keep those extra rows.
 pub(super) fn same_head(held: &[Commit], page: &[Commit]) -> bool {
     held.len() >= page.len() && held[..page.len()] == *page
 }

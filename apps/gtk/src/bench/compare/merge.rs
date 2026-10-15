@@ -1,11 +1,10 @@
-//! A merge view over a conflict a real `git merge` left, opened from its Merge Conflicts row.
+//! Open a real Git merge conflict from its Merge Conflicts row.
 
 use super::*;
 use crate::diff::merge::BASE;
 
-/// `=merge:<rel>` exercises a real conflict view. Use a throwaway vault: creates a repository
-/// and merges a 60-line file conflicting at lines 10, 30 and 50, with an incoming-only line 58
-/// and a diff3 base in the middle block.
+/// `=merge:<rel>` creates a throwaway repository and merges a 60-line file with conflicts
+/// at lines 10, 30 and 50, an incoming-only line 58 and a diff3 base in the middle block.
 ///
 /// Report titles, rows, blocks, hidden runs, controls, tints, widths and connectors. Expected
 /// alignment: `misaligned=0`, strip `over=0 stale=0`, connectors `off=0`. Hold 3 s for a

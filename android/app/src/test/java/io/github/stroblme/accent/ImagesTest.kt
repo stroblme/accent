@@ -12,10 +12,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import java.io.File
 
-/**
- * Which image is recoloured, onto what, and what an image costs to find out. The classifier and
- * the remap are the core's and tested there; the decoding and the serving need a device.
- */
+/** Image theme mapping and classification costs; decoding and serving need a device. */
 class ImagesTest {
     private val plain = pageTheme(dark = false)
     private val recoloured = pageTheme(dark = true)
@@ -31,17 +28,14 @@ class ImagesTest {
         assertNull("a dot in a folder is not an extension", imageKind("v1.2/README"))
     }
 
-    /** A document goes onto the dark page in a dark theme; a photo does not. */
+    /** Dark theme remaps documents, but leaves photos unchanged. */
     @Test
     fun `a raster is recoloured when it reads as a document in a dark theme`() {
         assertEquals(recoloured, imageTheme(ImageKind.Raster, dark = true, inverted = false) { true })
         assertEquals(plain, imageTheme(ImageKind.Raster, dark = true, inverted = false) { false })
     }
 
-    /**
-     * Inverted, any image goes to the other theme's page, as a PDF does: shown as it is in a dark
-     * theme, onto the dark page in a light one. Neither depends on the verdict, so neither decodes.
-     */
+    /** Inversion swaps page themes without image classification or decoding. */
     @Test
     fun `an inverted raster goes to the other page, and neither it nor a light one is classified`() {
         val never = { error("classified") }
@@ -61,7 +55,7 @@ class ImagesTest {
         }
     }
 
-    /** `inSampleSize` halves: the long side ends at most at the limit, and above half of it. */
+    /** Power-of-two sampling keeps the long side at most the limit and above half of it. */
     @Test
     fun `an image is decoded by the power of two that fits it`() {
         assertEquals(1, sampleSize(512, 512))

@@ -1271,7 +1271,7 @@ fn body_stack(
         &status_page(
             "folder-symbolic",
             "No Files Yet",
-            "A blank slate—create a note to get started.",
+            "Create a note to get started.",
         ),
         Some("empty"),
     );
@@ -1281,7 +1281,7 @@ fn body_stack(
             &status_page(
                 "remote-server-symbolic",
                 &format!("Waiting for {host}"),
-                "Files will appear here when the host responds.",
+                "Files will appear when the host responds.",
             ),
             Some("waiting"),
         );

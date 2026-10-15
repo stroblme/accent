@@ -1,10 +1,8 @@
-//! Block ids: the `^id` a `[[Note#^id]]` links to, as Obsidian writes a block reference.
+//! Parse Obsidian block IDs (`^id`) used by links such as `[[Note#^id]]`.
 //!
-//! An id is `^` and Latin letters, digits and dashes at the very end of a block's text, after a
-//! space or on a line of its own. At the end of a paragraph, a list item or a heading it marks
-//! that block. On a line of its own it marks what the line follows: after a blank line the block
-//! before it, and straight under a list, a quote or a table — which the line continues, as far as
-//! markdown is concerned — the whole of that list, quote or table.
+//! IDs contain Latin letters, digits and dashes and end a block's text, after a space or on their
+//! own line. A standalone ID marks the preceding block; directly under a list, quote or table, it
+//! marks that whole structure.
 
 use super::options;
 use pulldown_cmark::{Event, Parser, TagEnd};

@@ -1,5 +1,4 @@
-//! RFC 4648 base64 (`+/`, `=` padding) for embedded images and compressed pages,
-//! implemented locally to avoid a dependency for encoding and decoding.
+//! Local RFC 4648 base64 (`+/`, `=` padding) for embedded images and compressed pages.
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -21,8 +20,7 @@ pub fn encode(bytes: &[u8]) -> String {
     out
 }
 
-/// `None` for a character outside the alphabet. Whitespace is skipped and padding is optional,
-/// because both turn up in files people have edited by hand.
+/// Return `None` for invalid characters. Accept whitespace and optional padding from edited files.
 pub fn decode(s: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(s.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0u32);

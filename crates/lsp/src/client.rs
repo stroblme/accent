@@ -23,19 +23,18 @@ use crate::{codec, from_uri, to_uri};
 /// Request timeout, long enough for normal replies while bounding a stalled server.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
-/// Longer handshake timeout for cold servers such as `lake serve`, which may load or elaborate a
-/// package before answering `initialize`. Bounds hangs without rejecting normal startup.
+/// Startup timeout for cold servers such as `lake serve`, which may load a package before
+/// answering `initialize`.
 pub const STARTING: Duration = Duration::from_secs(120);
 
-/// A message the server sent to nobody in particular and this client does not handle itself —
-/// `textDocument/publishDiagnostics`, above all.
+/// A server notification passed to the caller, such as `textDocument/publishDiagnostics`.
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub method: String,
     pub params: Value,
 }
 
-/// Where those arrive. Unbounded: the reader task must never block on a slow consumer.
+/// Unbounded notification channel so a slow consumer cannot block the reader.
 pub type Notifications = mpsc::UnboundedReceiver<Notification>;
 
 #[derive(Debug, thiserror::Error)]
@@ -55,11 +54,11 @@ pub enum Error {
 /// A running language server.
 pub struct Client {
     inner: Arc<Inner>,
-    /// `None` when the transport is not a process, which is how the tests here are wired.
+    /// `None` for test transports without a child process.
     child: Mutex<Option<tokio::process::Child>>,
 }
 
-/// Everything the reader task and the request futures share.
+/// State shared by the reader and pending requests.
 struct Inner {
     out: mpsc::UnboundedSender<Vec<u8>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, Error>>>>,

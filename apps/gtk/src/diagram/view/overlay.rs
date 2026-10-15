@@ -1,5 +1,4 @@
-//! What the canvas draws over the page: the selection, its handles, the connection points in
-//! reach and whatever a drag is doing.
+//! Draw canvas overlays for selection, handles, connection points and active drags.
 
 use accent_drawio::geom::{self, rotate};
 use accent_drawio::guide;

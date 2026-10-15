@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-/// A vault with a symlink out of it, an index and config and cache directories of our own, so
-/// the test never touches the caches of whoever runs it.
+/// Create an isolated vault with an external symlink and private index, config, and cache directories.
 struct Scratch {
     dir: PathBuf,
 }
@@ -51,7 +50,7 @@ impl Drop for Scratch {
     }
 }
 
-/// The server, and the two ends of its pipe.
+/// The server process and its pipe ends.
 struct Client {
     child: Child,
     input: Option<ChildStdin>,
@@ -100,7 +99,7 @@ impl Client {
         input.flush().unwrap();
     }
 
-    /// Ask, and read past anything else the server says until it answers.
+    /// Send a request and read until its response arrives.
     fn ask(&mut self, method: &str, params: Value) -> Value {
         self.id += 1;
         let id = self.id;
@@ -119,7 +118,7 @@ impl Client {
         }
     }
 
-    /// A tool's answer: its text blocks, and whether it is an error.
+    /// Extract a tool response's text blocks and error flag.
     fn call(&mut self, tool: &str, args: Value) -> (Vec<String>, bool) {
         let msg = self.ask("tools/call", json!({"name": tool, "arguments": args}));
         let result = &msg["result"];
@@ -132,7 +131,7 @@ impl Client {
         (texts, result["isError"] == true)
     }
 
-    /// Close stdin, which is all a client does to end it, and wait for the process to go.
+    /// Close stdin and wait for the server to exit.
     fn close(mut self) {
         drop(self.input.take());
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -238,9 +237,7 @@ fn mcp_answers_a_client_that_never_initializes() {
     c.close();
 }
 
-/// Every write is checked against the read before it: a patch with an etag the note has moved
-/// past changes nothing, and a file that exists is overwritten only with one. Nothing is written
-/// where a symlink leads out of the vault.
+/// Writes reject stale etags and external symlink targets; overwrites require an etag.
 #[test]
 fn mcp_writes_only_over_what_it_read() {
     let scratch = Scratch::new("write");
@@ -288,9 +285,7 @@ fn mcp_writes_only_over_what_it_read() {
     c.close();
 }
 
-/// The cards of `explore`: a note linked from two of the files a word finds outranks one found
-/// the same way that nothing links, a path alone is answered with its whole card, and the
-/// answer keeps to its budget.
+/// Explore ranks linked notes, returns whole cards for explicit paths, and respects its budget.
 #[test]
 fn explore_ranks_by_links_and_answers_a_path_with_its_card() {
     let scratch = Scratch::new("explore");
@@ -332,9 +327,7 @@ fn explore_ranks_by_links_and_answers_a_path_with_its_card() {
     c.close();
 }
 
-/// `explore` on code: a declaration named is shown with its callers, what it calls, whether a
-/// test reaches it and the calls from it to another named, and a code file's card is its
-/// outline.
+/// Explore shows named declarations, callers, callees, test reachability, paths, and file outlines.
 #[test]
 fn explore_follows_code_by_name() {
     let scratch = Scratch::new("code");
@@ -379,10 +372,8 @@ fn explore_follows_code_by_name() {
     c.close();
 }
 
-/// `explore`'s `precise` callers come from the language server configured for the file's
-/// language — here `build-aux/fake-lsp.py`, refusing twice as a server loading its project does —
-/// where by name they would be every `backlinks`'s; a language whose server is not installed goes
-/// by name and says why.
+/// Use `build-aux/fake-lsp.py` to test precise language-server callers and fallback
+/// when a server is unavailable or still loading.
 #[test]
 fn explore_asks_the_language_server_when_precise() {
     let scratch = Scratch::new("precise");
@@ -454,7 +445,7 @@ fn explore_asks_the_language_server_when_precise() {
     c.close();
 }
 
-/// The listings beside `explore`: a folder, the files changed last, and the notes links wait for.
+/// List folders, recently changed files, and unresolved links.
 #[test]
 fn mcp_lists_folders_recent_files_and_missing_notes() {
     let scratch = Scratch::new("lists");

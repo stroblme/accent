@@ -10,20 +10,20 @@ import io.github.stroblme.accent.ffi.Rect
  * core's glyphs, so it is tested without a device.
  */
 
-/** One end of a selection: glyph [glyph] of page [page]. */
+/** Selection endpoint at [glyph] on [page]. */
 internal data class Caret(val page: Int, val glyph: Int) : Comparable<Caret> {
     override fun compareTo(other: Caret) = compareValuesBy(this, other, Caret::page, Caret::glyph)
 }
 
-/** A run of glyphs from [from] to [to], both included, in document order. */
+/** Glyph run from [from] through [to], in document order. */
 internal data class Selection(val from: Caret, val to: Caret) {
     companion object {
-        /** The run between two ends, whichever way round they were made. */
+        /** Order two selection endpoints into a glyph run. */
         fun between(a: Caret, b: Caret) = if (a <= b) Selection(a, b) else Selection(b, a)
     }
 }
 
-/** What a selection covers of one page: glyphs [start] until [end], the boxes and the text. */
+/** Selected glyphs, boxes, and text on one page, from [start] up to [end]. */
 internal data class Piece(
     val page: Int,
     val start: Int,
@@ -32,11 +32,7 @@ internal data class Piece(
     val text: String,
 )
 
-/**
- * What a selection covers, page by page, or `null` while a page it crosses has not had its glyphs
- * read. Each page between the ends gives all of its glyphs, and the two at the ends give from or
- * up to the caret — the desktop's rule, which is what lets a selection run over a page break.
- */
+/** Return selected glyphs per page, or `null` while a spanned page has no glyph data. */
 internal fun Selection.pieces(glyphs: Map<Int, List<Glyph>>): List<Piece>? {
     val out = mutableListOf<Piece>()
     for (page in from.page..to.page) {
@@ -57,7 +53,7 @@ internal fun Selection.pieces(glyphs: Map<Int, List<Glyph>>): List<Piece>? {
     return out
 }
 
-/** The smallest box holding both. */
+/** Smallest box containing both rectangles. */
 internal fun Rect.union(other: Rect) = Rect(
     minOf(left, other.left),
     minOf(top, other.top),
@@ -65,18 +61,12 @@ internal fun Rect.union(other: Rect) = Rect(
     maxOf(bottom, other.bottom),
 )
 
-/** One match of a find: the page it is on, and the box it covers there. */
+/** Find match and its page-local box. */
 internal data class Hit(val page: Int, val box: Rect)
 
-/**
- * What a find has found so far, in page order, and which of it the reader is on: [at], `null`
- * until the first has been gone to.
- */
+/** Find matches in page order and current index [at], if selected. */
 internal data class Found(val hits: List<Hit> = emptyList(), val at: Int? = null) {
-    /**
-     * With one page's matches added in page order, [at] kept on the match it was on. A find walks
-     * round from the page being read, so the pages before it arrive last and go in front.
-     */
+    /** Add page matches in order while preserving the current match as earlier pages arrive. */
     fun plus(page: Int, boxes: List<Rect>): Found {
         if (boxes.isEmpty()) return this
         val i = hits.indexOfFirst { it.page > page }.let { if (it < 0) hits.size else it }
@@ -85,10 +75,10 @@ internal data class Found(val hits: List<Hit> = emptyList(), val at: Int? = null
         return Found(hits.subList(0, i) + added + hits.subList(i, hits.size), kept)
     }
 
-    /** The first match at or after [page]: the one a find lands on first. */
+    /** First match on or after [page]. */
     fun from(page: Int): Int? = hits.indexOfFirst { it.page >= page }.takeIf { it >= 0 }
 
-    /** The next match, or the one before, round the ends of the document. */
+    /** Step forward or backward through matches, wrapping at document ends. */
     fun step(forward: Boolean): Found {
         if (hits.isEmpty()) return this
         val n = hits.size
@@ -100,8 +90,8 @@ internal data class Found(val hits: List<Hit> = emptyList(), val at: Int? = null
     }
 
     /**
-     * "3/12", as a note's find says it — or nothing while the pages are still being searched with
-     * nothing found yet, and "None" once they all have been ([done]).
+     * Format match progress, leaving it blank during an unfinished empty search and showing "None"
+     * when [done].
      */
     fun count(done: Boolean): String = when {
         hits.isEmpty() -> if (done) "None" else ""
@@ -111,9 +101,7 @@ internal data class Found(val hits: List<Hit> = emptyList(), val at: Int? = null
 }
 
 /**
- * The glyph nearest a point on the page, which is the one a finger means: one whose box holds the
- * point outright, or else the closest box, so a finger in the margin still takes the line it is
- * level with. The desktop's `nearest`; `null` for a page with no text.
+ * Find the glyph containing a point, or the nearest glyph on its line; return `null` for no text.
  */
 internal fun nearest(glyphs: List<Glyph>, at: Point): Int? {
     var best: Int? = null
@@ -133,10 +121,7 @@ internal fun nearest(glyphs: List<Glyph>, at: Point): Int? {
     return best
 }
 
-/**
- * The word glyph [at] is in, which is what a long press selects: the run of letters and digits
- * around it, or the glyph alone when it is neither.
- */
+/** Select the alphanumeric word around glyph [at], or that glyph alone. */
 internal fun wordAt(glyphs: List<Glyph>, at: Int): IntRange {
     fun letter(i: Int) = glyphs[i].ch.firstOrNull()?.isLetterOrDigit() == true
     if (!letter(at)) return at..at
@@ -147,15 +132,12 @@ internal fun wordAt(glyphs: List<Glyph>, at: Int): IntRange {
     return lo..hi
 }
 
-/**
- * A long press's word grown towards [caret] as the finger that made it moves on, keeping the word:
- * dragged back past its start, it runs from the finger to the word's end.
- */
+/** Extend the pressed word toward [caret] without dropping the original word. */
 internal fun Selection.grownTo(caret: Caret): Selection = when {
     caret < from -> Selection(caret, to)
     caret > to -> Selection(from, caret)
     else -> this
 }
 
-/** The text a selection spells: a page break reads as a line break, as a pasted passage should. */
+/** Join selected text with a line break at each page boundary. */
 internal fun List<Piece>.text(): String = joinToString("\n") { it.text }

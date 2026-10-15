@@ -25,11 +25,8 @@ import java.io.FileOutputStream
 import kotlin.coroutines.resume
 
 /**
- * Print… for a note, as the desktop prints one: the note as the reader has it, edits and all, on
- * the light page whatever the theme — links in the accent, images as their files are, diagrams in
- * mermaid's light theme — handed to the system's print UI, which paginates it for the paper picked
- * there and offers Save as PDF. A WebView of its own that is never shown, so the reader's page
- * keeps its scroll, its marks and the images it was served.
+ * Print the current note, including edits, on a light page through the system print UI.
+ * Use a hidden WebView so the reader's scroll position and marks remain intact.
  */
 suspend fun printNote(context: Context, model: VaultModel, rel: String, text: String, accent: Color) {
     val html = page(toHtml(text), InkLight, PageLight, accent)
@@ -59,39 +56,31 @@ suspend fun printNote(context: Context, model: VaultModel, rel: String, text: St
     }
     if (ready == null) {
         view.destroy()
-        return model.said("This note took too long to lay out for printing")
+        return model.said("The note took too long to prepare for printing")
     }
     val name = title(rel)
     context.getSystemService(PrintManager::class.java)
         .print(name, view.createPrintDocumentAdapter(name), null)
 }
 
-/**
- * Print… for a PDF: [bytes], the copy of the document with the notes' highlights in it
- * ([io.github.stroblme.accent.PdfModel.printCopy]), handed to the system's print UI as it is —
- * vector pages, the print system doing ranges and copies itself, as the desktop's does.
- */
+/** Send [bytes], including note highlights, to the system print UI as vector pages. */
 fun printPdf(context: Context, name: String, bytes: ByteArray, pages: Int) {
     context.getSystemService(PrintManager::class.java).print(name, PdfCopy(name, bytes, pages), null)
 }
 
-/** The accent on paper: the light theme's, whichever theme is showing. */
+/** Use the light theme accent on paper. */
 internal fun paperAccent(colors: ColorScheme): Color =
     if (colors.surface.dark()) colors.inversePrimary else colors.primary
 
-/** How long a page may take to be ready to print before the print is given up. */
+/** Maximum time to wait for a printable page. */
 private const val PATIENCE_MS = 30_000L
 
-/** What a script on the page answers, as the WebView spells it back. */
+/** Decode a WebView script response. */
 private suspend fun WebView.evaluate(script: String): String = suspendCancellableCoroutine { done ->
     evaluateJavascript(script) { done.resume(it) }
 }
 
-/**
- * A finished PDF, laid out once: its pages do not depend on the paper picked, so the system scales
- * them onto it, and every page is written whatever range is asked for, which the system then picks
- * from.
- */
+/** Print the laid-out PDF; the system scales pages and applies the selected page range. */
 private class PdfCopy(
     private val name: String,
     private val bytes: ByteArray,

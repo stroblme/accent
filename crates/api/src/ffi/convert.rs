@@ -1,7 +1,6 @@
-//! Convert façade types for UniFFI. Replace unsupported `usize`, `Range`,
-//! `PathBuf`, tuples and `char` with records, pack colours as `u32` and
-//! convert text byte ranges to Kotlin UTF-16 units ([`Utf16`]). Other types
-//! use `#[uniffi::remote]` to avoid duplicate definitions.
+//! UniFFI conversions for façade types. Replace unsupported Rust types with records, pack
+//! colours as `u32`, and convert byte ranges to Kotlin UTF-16 units ([`Utf16`]). Reuse supported
+//! types through `#[uniffi::remote]`.
 
 // Every name here is imported bare because `#[uniffi::remote]` restates the type where it
 // already stands: the name has to resolve to the real one.

@@ -1,5 +1,4 @@
-//! Drills over the Files tree: a row's context menu and the marked set, expanding and unfolding
-//! folders, the folders the index does not walk, a drop from a file manager and Move to….
+//! Files-tree drills for menus, marked rows, folders, external drops and Move to….
 
 use super::files::until;
 use super::*;

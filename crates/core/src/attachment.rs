@@ -3,10 +3,8 @@
 
 use crate::path::{basename, parent_dir, resolve};
 
-/// The folder a new attachment of the note `note` goes in, by the vault's `attachment_folder`
-/// (Obsidian's "Default location for new attachments"): empty is the note's own folder, `./sub`
-/// a folder inside it, and anything else a folder from the vault root, `/` being the root itself.
-/// A `..` past the root is dropped, as it is from a link, so the answer is always in the vault.
+/// Resolve the `attachment_folder` setting for `note`: empty means beside the note, `./sub`
+/// means within its folder, and other paths start at the vault root. Paths cannot escape the vault.
 pub fn folder(setting: &str, note: &str) -> String {
     let here = parent_dir(note);
     match setting.trim() {
@@ -22,9 +20,8 @@ pub fn pasted_name(now: chrono::NaiveDateTime) -> String {
     format!("Pasted image {}.png", now.format("%Y%m%d%H%M%S"))
 }
 
-/// Where `name` lands in `dir` without replacing anything: the name itself while it is free, then
-/// `photo 1.png`, `photo 2.png`, … as Obsidian numbers them. Takes the lookup rather than the
-/// vault, so every `stat` it costs stays on the caller's worker.
+/// Find a free path in `dir`, appending Obsidian-style numbers (`photo 1.png`) when needed.
+/// The caller supplies `taken` so lookups stay on its worker.
 pub fn free_path(dir: &str, name: &str, taken: impl Fn(&str) -> bool) -> String {
     let (stem, ext) = match name.rfind('.') {
         Some(i) if i > 0 => name.split_at(i),
@@ -40,10 +37,7 @@ pub fn free_path(dir: &str, name: &str, taken: impl Fn(&str) -> bool) -> String 
         .expect("a folder cannot hold every name")
 }
 
-/// The embed a note gets for the vault file `rel`: its name, `![[photo.png]]`, which the index
-/// and Obsidian resolve by name — unless the name already finds another file (`by_name`, what
-/// the index resolves it to), when it is the whole path, as Obsidian's "shortest path when
-/// possible" writes it.
+/// Embed `rel` by filename unless `by_name` resolves to another file; then use its full path.
 pub fn embed(rel: &str, by_name: Option<&str>) -> String {
     match by_name {
         Some(other) if other != rel => format!("![[{rel}]]"),

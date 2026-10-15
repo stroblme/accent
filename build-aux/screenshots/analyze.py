@@ -1,4 +1,4 @@
-"""analyze: summarise the readout sweeps the noise-atlas notes plot.
+"""Summarise the readout sweeps plotted in the noise-atlas notes.
 
 Reads the CSV files build.sh writes, one per shot count, groups their rows
 by backend and prints the mean fidelity of each with a bootstrap interval.
@@ -19,14 +19,14 @@ SEED = 7
 
 
 def read_sweep(path):
-    """The rows of one sweep file, as (backend, fidelity) pairs."""
+    """Yield (backend, fidelity) pairs from one sweep file."""
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
             yield row["backend"], float(row["fidelity"])
 
 
 def by_backend(paths):
-    """Every fidelity measured, grouped by the backend it was measured on."""
+    """Group fidelity measurements by backend."""
     groups = defaultdict(list)
     for path in paths:
         for backend, fidelity in read_sweep(path):
@@ -35,7 +35,7 @@ def by_backend(paths):
 
 
 def bootstrap(values, resamples=RESAMPLES, level=LEVEL, seed=SEED):
-    """A percentile bootstrap interval for the mean of `values`."""
+    """Return a percentile bootstrap interval for the mean of `values`."""
     rng = random.Random(seed)
     means = sorted(
         statistics.fmean(rng.choices(values, k=len(values)))
@@ -46,7 +46,7 @@ def bootstrap(values, resamples=RESAMPLES, level=LEVEL, seed=SEED):
 
 
 def summarise(groups):
-    """One row per backend: how many runs, their mean and its interval."""
+    """Return each backend's run count, mean, interval, and standard deviation."""
     rows = []
     for backend, values in sorted(groups.items()):
         low, high = bootstrap(values)
@@ -64,7 +64,7 @@ def summarise(groups):
 
 
 def print_table(rows, out=sys.stdout):
-    """The summary as a Markdown table, which the notes paste as it is."""
+    """Print the summary as a Markdown table."""
     out.write("| backend | runs | mean | 95 % interval | stdev |\n")
     out.write("| ------- | ---- | ---- | ------------- | ----- |\n")
     for r in rows:
@@ -75,7 +75,7 @@ def print_table(rows, out=sys.stdout):
 
 
 def sweep_files(folder, shots):
-    """The sweep files build.sh wrote into `folder` for these shot counts."""
+    """Return sweep files in `folder` for the given shot counts."""
     paths = [Path(folder) / f"sweep-{n}.csv" for n in shots]
     missing = [p for p in paths if not p.exists()]
     if missing:

@@ -1,7 +1,6 @@
-//! Prepare an SSH master and server binary for vault `serve` or held-shell `attach`.
-//! Both belong to the host: the socket derives from its address, and ControlPersist
-//! keeps the master alive without a Rust owner. Serialize attempts per host and
-//! reuse their outcomes so restored tabs share a handshake and upload.
+//! Prepare an SSH master and server binary for vault `serve` or shell `attach`. The socket is
+//! keyed by host, and ControlPersist keeps the master alive. Per-host attempts are serialized so
+//! restored tabs share the handshake and upload.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

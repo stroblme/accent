@@ -277,7 +277,7 @@ fn recolour_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Pre
     group
 }
 
-/// Where `theme` sits in [`THEMES`], which is the row's selected index.
+/// Return `theme`'s index in [`THEMES`] for the selected row.
 fn index_of(theme: Theme) -> u32 {
     THEMES.iter().position(|(t, _)| *t == theme).unwrap_or(0) as u32
 }

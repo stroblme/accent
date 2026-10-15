@@ -8,16 +8,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The two sums that let a PDF be pinched past 6×: which part of a page is worth drawing, and how
- * far in a given screen may go at all. Neither can be looked at from here — a bitmap is a stub in a
- * unit test and a layout needs a device — so the arithmetic under both is what is checked.
- */
+/** PDF tiling and Compose layout bounds at high zoom; bitmap and layout need device coverage. */
 class TileTest {
     /** A4 on a 1080 px phone at fit width. */
     private val a4 = IntRect(0, 0, 1080, 1528)
 
-    /** A0 on the same phone at 8×, which is 105 M pixels and cannot be drawn in one go. */
+    /** A0 at 8× on a 1080 px phone needs tiles instead of one 105 Mpx bitmap. */
     private val poster = IntRect(0, 0, 8640, 12213)
 
     private val screen = IntSize(1080, 2400)

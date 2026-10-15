@@ -391,15 +391,11 @@ fn beside(lines: &[DiffLine]) -> Vec<(Vec<usize>, Option<usize>)> {
     out
 }
 
-/// `old` with the changes `new` makes on `side`'s lines `picked` (1-based, inclusive), and no
-/// others: Stage Selected Lines, `old` being the index and `new` the working tree. Both texts
-/// have `\n` line endings, as a buffer holds them.
+/// Apply changes from `new` to `old` only on `side`'s `picked` lines (1-based, inclusive).
+/// Stage Selected Lines uses the index as `old` and the working tree as `new`. Both use `\n`.
 ///
-/// A selection is read the way the side-by-side view shows it ([`align`]): it covers the rows
-/// its first and last lines are on and every row between, so a changed line goes together with
-/// the line beside it. A row with no line on `side` — lines deleted, seen from the new side —
-/// cannot be selected there, so it goes with the line above it: a rewrite selected whole takes
-/// the lines it lost as well, and a deletion is taken with the line before the gap it left.
+/// Selection follows aligned rows ([`align`]), including the opposite side of changed lines.
+/// Deleted lines without a row on `side` belong to the preceding line.
 pub fn apply_lines(old: &str, new: &str, side: Side, picked: RangeInclusive<usize>) -> String {
     mix(old, new, side, &picked, true)
 }

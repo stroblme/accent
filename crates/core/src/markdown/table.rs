@@ -1,12 +1,8 @@
-//! GFM pipe tables as the editor keeps them: Tab and Enter in one lay it out again with its
-//! columns lined up, and walk its cells.
+//! Edit GFM pipe tables with Tab and Enter, realigning columns after each change.
 //!
-//! A table is a header row and a delimiter row of dashes holding as many cells, then the body
-//! rows, every one a line holding a pipe. A row splits at each pipe not escaped with a backslash,
-//! inside code too, as GFM and the preview split it. A column is as wide as its widest cell, three
-//! at least, so the delimiter row has room for its colons. Widths are display columns, a wide
-//! character (CJK, most emoji) taking two, so the table lines up in a monospace font; the caret's
-//! columns are characters, as the buffer counts them.
+//! A table has a header, a delimiter row and optional body rows. Unescaped pipes split cells,
+//! including inside code. Columns use display widths (minimum three), while caret positions use
+//! character offsets.
 
 use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
@@ -56,10 +52,9 @@ enum Target {
     Left,
 }
 
-/// Tab, Shift+Tab or Enter at `column` of line `at` of `lines`: the table laid out again with its
-/// columns lined up, and where the caret goes. Tab and Shift+Tab go to the next or previous cell,
-/// Tab in the last cell adding a row; Enter in the last row adds one, ends the table in an empty
-/// one, and elsewhere leaves the caret where it is. `None` where line `at` is in no table.
+/// Apply Tab, Shift+Tab or Enter at `column` of line `at`, returning the realigned table and caret.
+/// Tab moves between cells and adds a row after the last. Enter adds a row after the last filled
+/// row or exits from an empty final row. Returns `None` outside a table.
 pub fn table_key(lines: &[&str], at: usize, column: usize, key: TableKey) -> Option<TableEdit> {
     let rows: Vec<Option<Vec<Cell>>> = lines.iter().map(|line| split(line)).collect();
     rows.get(at)?.as_ref()?;

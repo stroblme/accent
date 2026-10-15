@@ -9,7 +9,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::path::basename;
 
-/// What the haystacks are, which is what the matcher hands its bonuses out for.
+/// Haystack kind used to choose match bonuses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Corpus {
     /// `/`-separated paths: the start of a segment scores like the start of a word.
@@ -27,10 +27,9 @@ impl Corpus {
     }
 }
 
-/// One parsed query, asked about one haystack at a time.
+/// A parsed query matched against one haystack at a time.
 ///
-/// Holding both the pattern and the matcher is what makes asking cheap: the matcher owns a
-/// scratch matrix that is allocated once and reused for every haystack.
+/// The matcher reuses one scratch matrix across haystacks.
 pub struct Query {
     matcher: Matcher,
     pattern: Pattern,
@@ -48,9 +47,8 @@ impl Query {
         }
     }
 
-    /// The whole query as one needle, in the order typed, spaces and punctuation included, and
-    /// `cafe` still finding `café`: what completion narrows by, where the query is the start of a
-    /// word or a link being written, so its order is the point and fzf's syntax is not.
+    /// Match the whole query in typed order, including spaces and punctuation, without fzf
+    /// operators. Smart normalization still lets `cafe` match `café`.
     pub fn as_typed(query: &str, corpus: Corpus) -> Query {
         // No atom at all for an empty query, which then matches everything as `new`'s does.
         let mut pattern = Pattern::default();

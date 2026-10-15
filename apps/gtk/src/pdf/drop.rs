@@ -1,8 +1,7 @@
-//! Another PDF dropped onto a document's pages: its pages go in between the two under the
-//! pointer, a line in that gap showing where while the drag is over them.
+//! Insert pages from a dropped PDF at the gap under the pointer, marked by a drop line.
 //!
-//! A file from another application is taken here. A row of the Files tree is the pane's drop
-//! (`App::pdf_drop`): its sheet lies over the pages while a drag from the tree is in flight.
+//! Handle external files here. Files-tree rows use the pane drop (`App::pdf_drop`), whose
+//! target covers the pages during a tree drag.
 
 use std::path::PathBuf;
 use std::rc::Rc;

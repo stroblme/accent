@@ -1,5 +1,4 @@
-//! Diagram data with unknown attributes, style keys and child elements preserved
-//! so saving retains data accent does not interpret.
+//! Diagram data that preserves unknown attributes, style keys, and child elements on save.
 
 use crate::Error;
 use crate::geom::{Point, Rect};

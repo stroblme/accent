@@ -108,17 +108,12 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Every openable file's rel_path, notes first and then the rest by path.
+    /// List openable vault paths, notes first and then other files by path.
     ///
-    /// The switcher opens more than markdown, and an `![[embed]]` or a markdown link's destination
-    /// can name any file at all, so they need this rather than
-    /// [`note_and_pdf_paths`](Self::note_and_pdf_paths), which offers only what a wikilink may
-    /// name. Directories are not files to open and conflict copies are reached through the
-    /// resolve UI, so neither is listed.
+    /// Include files opened by the switcher or links; exclude directories and conflict copies.
     ///
-    /// Git-ignored files are left out unless `include_ignored`, but **a note is never left out**:
-    /// a vault that gitignores its own markdown is the ordinary case, not the exception. The file
-    /// tree is the escape hatch either way — it lists an ignored file, dimmed.
+    /// Exclude git-ignored non-note files unless `include_ignored`. Notes remain listed even when
+    /// ignored.
     pub fn file_paths(&self, include_ignored: bool) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached(
             "SELECT rel_path FROM files

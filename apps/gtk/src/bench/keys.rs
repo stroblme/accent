@@ -1,5 +1,4 @@
-//! Drills over the keyboard: the editor's key semantics, and a shell's accelerators, title and
-//! life beyond its window.
+//! Keyboard drills for editor keys and shell accelerators, titles and lifetime.
 
 use super::*;
 use crate::completion;

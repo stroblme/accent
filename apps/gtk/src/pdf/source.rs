@@ -1,5 +1,4 @@
-//! The page's half of SyncTeX (`crate::synctex`): the point Go to Source starts from, and the
-//! line of text Show in PDF brings into view and marks a moment.
+//! PDF-side SyncTeX (`crate::synctex`): Go to Source points and temporary Show in PDF marks.
 
 use std::rc::Rc;
 use std::time::Duration;

@@ -880,14 +880,10 @@ fn dir_label() -> gtk::Label {
     dir
 }
 
-/// Put one changed file on a [`file_line`]: its icon, its status letter, its name, and the
-/// directory it sits in. Both lists that show a file — the changes list and an expanded commit —
-/// bind their row through here, so the two read the same way.
+/// Bind a changed file's icon, status, name and directory to a [`file_line`] in either list.
 ///
-/// `dir` is what the directory label shows rather than where the file is: a row under a folder
-/// leaves it empty, the path being on screen above it already. Without one the name takes the
-/// directory's place: its width, which keeps what follows at the row's end, and the row's spacing
-/// before it, so a long name is cut short at the same width either way.
+/// `dir` is the visible label, empty beneath a folder row. Without it, the name takes the
+/// directory label's width and spacing so truncation stays consistent.
 fn bind_file_line(row: &gtk::Box, icon: &str, letter: char, path: &str, dir: &str) {
     let Some(image) = row.first_child().and_downcast::<gtk::Image>() else {
         return;

@@ -1,12 +1,10 @@
-//! Whether an image file moves. GDK and `BitmapFactory` decode one still of an animated GIF, WebP
-//! or PNG, so both apps leave an animation as its file is rather than recolour that still.
+//! Detect animated images. GDK and `BitmapFactory` decode only one frame, so both apps display
+//! animations as files instead of recolouring a still frame.
 
 use std::io::{self, BufRead, BufReader, Read};
 
-/// Whether the GIF, WebP or PNG in `file` holds more than one frame: a WebP flags it in its VP8X
-/// chunk, a GIF has a second image after the first one's data, and a PNG an `acTL` chunk before
-/// its image data. False for any other file, and for one that ends first. Read from the start, as
-/// far as what says so at most.
+/// Whether `file` is an animated GIF, WebP, or PNG. Checks for a second GIF image, the WebP VP8X
+/// flag, or a PNG `acTL` before image data. Returns false for other or truncated files.
 pub fn animated(file: impl Read) -> bool {
     let mut file = BufReader::new(file);
     match bytes::<8>(&mut file) {

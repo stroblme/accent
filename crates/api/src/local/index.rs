@@ -1,5 +1,4 @@
-//! What [`Local`] answers from the index: the tree, the searches, the links and
-//! the tags, plus the repository discovery that reads the same directory listing.
+//! Index-backed [`Local`] tree, search, link, tag, and repository queries.
 
 use std::collections::HashSet;
 use std::path::Path;

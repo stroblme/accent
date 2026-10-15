@@ -1,16 +1,13 @@
-//! A compact document map replacing the vertical scrollbar (`Tab::set_minimap`).
+//! A document map replacing the vertical scrollbar (`Tab::set_minimap`).
 //!
 //! Clicks centre a line; dragging the visible band or scrolling moves the view without
-//! moving the caret. Foreground tones and accent match editor emphasis; headings remain
-//! readable labels and comparison row tints are preserved.
+//! moving the caret. Colours match editor emphasis and preserve comparison tints.
 //!
-//! GtkSourceMap duplicates layout, has band and adjustment issues (ISSUES.md), and exposes
-//! hidden-text layout failures. [`model`] instead estimates rows from line text and places
-//! the band using visible lines.
+//! GtkSourceMap duplicates layout and has band, adjustment and hidden-text issues (ISSUES.md).
+//! [`model`] estimates rows from line text and places the band using visible lines.
 //!
-//! [`CHUNK`]-line textures avoid painting thousands of rectangles per frame. Edits, styling,
-//! width, colours and scale invalidate chunks. The buffer is followed only while visible;
-//! showing a map after hidden edits rebuilds it.
+//! [`CHUNK`]-line textures limit painting per frame. Edits, styling, width, colours and scale
+//! invalidate chunks. Showing the map after hidden edits rebuilds it.
 
 mod model;
 

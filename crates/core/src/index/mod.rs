@@ -1,10 +1,9 @@
-//! SQLite (FTS5) index of the vault: files, aliases, links, tags, headings.
+//! SQLite FTS5 index of vault files, aliases, links, tags, and headings.
 //!
-//! The index is a **disposable cache**: the markdown files are the source of truth. On a schema
-//! mismatch we drop everything and rebuild rather than migrate.
+//! The index is a disposable cache; vault files are the source of truth. A schema mismatch
+//! triggers a rebuild.
 //!
-//! One `Index` type, its methods spread by concern: `reconcile` turns the disk into rows,
-//! `links` resolves and reads them, `files` lists them, `search` queries the text.
+//! `Index` methods are grouped by reconciliation, links, file listing, and search.
 
 mod files;
 mod links;

@@ -11,7 +11,7 @@ use crate::fs::Etag;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum Error {
-    /// The file, or whatever was looked for, is not there.
+    /// The requested file or resource does not exist.
     #[error("{0} does not exist")]
     NotFound(String),
     #[error("{0} already exists")]
@@ -24,7 +24,7 @@ pub enum Error {
     /// worth offering to force.
     #[error("{0} is not fully merged")]
     NotMerged(String),
-    /// Nobody waits for the answer any more: a search a newer one superseded, a query interrupted.
+    /// The caller abandoned the request, such as a superseded search.
     #[error("cancelled")]
     Cancelled,
     #[error("{0}")]
@@ -46,8 +46,8 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
-    /// An io error met on `what`, a path or the thing being done. A missing file and a taken name
-    /// keep their kind, which callers branch on; anything else reads as `what` and the reason.
+    /// Convert an I/O error for `what`, retaining missing and existing-file variants that callers
+    /// can match. Other errors include `what` in their message.
     pub fn io(what: impl Display, e: std::io::Error) -> Error {
         use std::io::ErrorKind::*;
         match e.kind() {

@@ -8,11 +8,7 @@ import io.github.stroblme.accent.ui.liveShift
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/**
- * The arithmetic behind a pinch. It cannot be driven on an emulator — the Play Store image
- * refuses root, so there is no way to put a second finger on the screen — and it is exactly the
- * sort of thing that is wrong by a sign and looks almost right.
- */
+/** Pinch anchoring arithmetic, checked without a device. */
 class AnchorTest {
     private fun near(expected: Float, actual: Float) = assertEquals(expected, actual, 0.001f)
 
@@ -42,11 +38,7 @@ class AnchorTest {
         near(460f, anchor(scrolled = 0f, centroid = 500f, by = 2f, pan = 40f))
     }
 
-    /**
-     * The other half of the same sum: while the fingers are still down nothing is laid out again,
-     * so a scaled layer has to be moved to where the arithmetic above says the reader will land.
-     * What is drawn at [screen] must end up at `pivot + (screen - pivot) * live`.
-     */
+    /** Keep the live scaled layer anchored at `pivot + (screen - pivot) * live`. */
     private fun shown(screen: Float, live: Float, base: Float, pivot: Float, shift: Float) =
         (screen - base) * live + liveShift(pivot, live, base, shift)
 
@@ -74,14 +66,7 @@ class AnchorTest {
         near(540f, shown(screen = 500f, live = 2f, base = 0f, pivot = 500f, shift = 40f))
     }
 
-    /**
-     * The two halves have to agree, or the page jumps at the moment the fingers come up: what the
-     * layer showed during the pinch is what the laid-out column must show after it.
-     *
-     * Along an axis with nothing between the pages — across them — a point [into] pixels in with
-     * [above] of it past the edge is drawn at `into - above`. Afterwards the column is [live] times
-     * as wide and the reader is wherever `anchor` put them.
-     */
+    /** The live pinch layer and final layout must show the same page position on release. */
     @Test
     fun `the release changes nothing that was on the screen`() {
         for (live in listOf(0.5f, 1.5f, 3f)) {
@@ -95,10 +80,7 @@ class AnchorTest {
         }
     }
 
-    /**
-     * Forty pages, every seventh one landscape, with the 21 px gap 8 dp makes under each on a
-     * Pixel 8, at its 1080 px fit width.
-     */
+    /** Forty pages with landscape pages and Pixel 8 sized gaps. */
     private val pages = Pagination(
         List(40) { if (it % 7 == 3) PageSize(842f, 595f) else PageSize(595f, 842f) },
         gap = 21f,
@@ -106,11 +88,7 @@ class AnchorTest {
     private val width = 1080
 
     /**
-     * Down the column the two halves have to agree as well, and there the column is not one thing
-     * that scales: the pages grow with the zoom and the gaps between them do not. So what the layer
-     * showed under the fingers — the point under [pivot] when they landed, carried to
-     * `pivot + shift` — has to be under them once the column is laid out at the new zoom, on any
-     * page, at any zoom, however far the hand moved.
+     * A pinch must preserve the point under the fingers while pages scale and gaps remain fixed.
      */
     @Test
     fun `a release leaves the word under the fingers under them`() {
@@ -154,10 +132,7 @@ class AnchorTest {
         assertEquals(0f, to.panX, 0f)
     }
 
-    /**
-     * Past the end the column is asked for more than it has and stops at its end by itself, which
-     * it can only do if what it is asked for is still past the end, not the top of the last page.
-     */
+    /** Overscroll past the end must clamp there, not to the top of the last page. */
     @Test
     fun `a release past the end of the document stays past it`() {
         val end = pages.top(40, width, 3f)
@@ -166,10 +141,7 @@ class AnchorTest {
         assertEquals(end + 500f, pages.top(row, width, 3f) + into, 1f)
     }
 
-    /**
-     * At the ceiling the layer stops growing and still follows the hand, so the release is a drag:
-     * the zoom stays and the column moves as far as the fingers did.
-     */
+    /** At maximum zoom, a pinch drag pans without changing zoom. */
     @Test
     fun `a release at the ceiling keeps the zoom and moves with the hand`() {
         val hand = Offset(40f, -70f)

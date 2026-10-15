@@ -1,5 +1,4 @@
-//! Zoom, for a note, an image, a PDF and a shell alike: the step, its limits, the wheel and the
-//! status bar readout.
+//! Shared zoom steps, limits, wheel handling and readouts for notes, images, PDFs and shells.
 
 use super::*;
 

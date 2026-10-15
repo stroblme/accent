@@ -1,5 +1,4 @@
-//! The Ports pane: the forwards running over the window's ssh connection, and the row that
-//! starts another one.
+//! Show SSH forwards and controls for adding them in the Ports pane.
 
 use crate::widgets::{scroller, status_page};
 use accent_api::ssh::{Direction, Forward};
@@ -10,22 +9,19 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Two machines wired together, which is what a forward is: a port on one cabled to a port on the
-/// other. The rest of Adwaita's network names are signal strengths, a server tower or a VPN
-/// shield — none of them a port.
+/// A wired-network icon depicts the two ports joined by a forward more clearly than
+/// Adwaita's signal, server or VPN icons.
 pub(super) const ICON: &str = "network-wired-symbolic";
 
-/// What the Ports pane asks of the ssh connection behind the vault. The first two are called on a
-/// worker thread: ssh has to answer before either returns, and a host that is slow to would
-/// otherwise hold the window.
+/// Operations the Ports pane needs from the vault's SSH connection. The first two run on
+/// workers so slow SSH responses do not block the window.
 #[allow(clippy::type_complexity)]
 pub struct Data {
-    /// Start a forward, either way. Answers an error message when ssh refuses, which is what the
-    /// pane shows.
+    /// Start a forward in either direction; return an error message if SSH refuses.
     pub add_forward: Arc<dyn Fn(Forward) -> Result<(), String> + Send + Sync>,
-    /// Take a forward down. Nothing to answer: the row goes either way.
+    /// Stop a forward; its row is removed regardless of the result.
     pub remove_forward: Arc<dyn Fn(Forward) + Send + Sync>,
-    /// The forwards the connection keeps, which are the rows. Asks nothing of ssh.
+    /// Return the connection's forwards without querying SSH.
     pub forwards: Box<dyn Fn() -> Vec<Forward>>,
 }
 

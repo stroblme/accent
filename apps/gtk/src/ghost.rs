@@ -1,12 +1,12 @@
 //! Inline suggestions accepted with Tab or one word at a time with Ctrl+Right.
 //!
 //! The vault's `inline_completion` supplies suggestions; `multicaret::View` paints them
-//! outside the buffer, avoiding undo, save and reparse work. Suggestions appear only at
-//! line ends with no selection or secondary carets, so they cannot cover existing text.
+//! outside the buffer, avoiding undo, save and reparse work. They appear only at line ends
+//! without a selection or secondary carets.
 //!
-//! The completion popup suppresses requests and painting, giving Tab one owner. Typing a
-//! matching prefix or accepting a word preserves the remainder; other edits or caret moves
-//! clear it. Suggestions are limited to one line.
+//! The completion popup suppresses suggestions so Tab has one owner. Typing a matching prefix
+//! or accepting a word preserves the remainder; other edits or caret moves clear it.
+//! Suggestions occupy one line.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

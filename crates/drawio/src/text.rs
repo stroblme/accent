@@ -1,5 +1,5 @@
-//! Label text for search and replacement, one line per label. Edits use the model
-//! so XML attributes, style keys and ids cannot become search hits.
+//! Label text for search and replacement, one line per label. Searching the model excludes XML
+//! attributes, style keys, and IDs.
 
 use crate::label::{self, Run};
 use crate::model::{Cell, CellId, File};

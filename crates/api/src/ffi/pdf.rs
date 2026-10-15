@@ -1,7 +1,6 @@
-//! PDF reading and ink editing using the desktop's `accent_core::pdf::ledger`.
-//! Methods lock the session, then pdfium's process-wide lock; call off the
-//! main thread. Use one caller-owned worker for ordered tiles. UniFFI cannot
-//! interrupt calls, so cancellation happens between operations.
+//! PDF reading and ink editing through `accent_core::pdf::ledger`. Methods lock the session and
+//! pdfium in that order; call them off the main thread. Use one caller-owned worker for ordered
+//! tiles and cancel between operations, since UniFFI cannot interrupt a call.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

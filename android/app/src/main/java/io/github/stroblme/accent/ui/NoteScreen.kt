@@ -43,14 +43,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
 
-/**
- * One note, read or written.
- *
- * Reading is the default, because that is what a phone is mostly for here: the same HTML the
- * desktop preview renders, in a WebView, which is the only thing on the platform that draws
- * MathML. Writing is the same text with the same styling spans the desktop editor uses, applied
- * to the field's output rather than to a buffer of tags.
- */
+/** Display a note as rendered HTML or editable Markdown with core styling spans. */
 @Composable
 fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) -> Unit) {
     var editing by remember(open.rel) { mutableStateOf(false) }
@@ -106,7 +99,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) ->
 @Composable
 private fun ConflictBanner(conflict: String, onMine: () -> Unit, onTheirs: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 8.dp)) {
-        Text("This note has edits from another device.", style = MaterialTheme.typography.bodyMedium)
+        Text("Sync found another version of this note.", style = MaterialTheme.typography.bodyMedium)
         Row {
             TextButton(onClick = onMine) { Text("Keep mine") }
             TextButton(onClick = onTheirs) { Text("Keep theirs") }
@@ -119,26 +112,18 @@ private fun ConflictBanner(conflict: String, onMine: () -> Unit, onTheirs: () ->
 private fun ChangedBanner(onKeep: () -> Unit, onReload: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 8.dp)) {
         Text(
-            "This note changed on disk. Saving is paused to protect your edits.",
+            "This note changed on disk. Saving is paused until you choose a version.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Row {
             TextButton(onClick = onKeep) { Text("Keep mine") }
-            TextButton(onClick = onReload) { Text("Take the version on disk") }
+            TextButton(onClick = onReload) { Text("Use saved version") }
         }
     }
     HorizontalDivider()
 }
 
-/**
- * Leaving a note — closing it, closing the vault, opening another — over edits saving was paused
- * on, which would otherwise drop them with nothing said.
- *
- * One of the app's two dialogs, with [UnsavedDialog]. A decision is a row above the note
- * (MOBILE_DESIGN.md), but this one is asked on the way out, and the row goes with the note it
- * sits over. The choices are the banner's, and Cancel stays with it; stacked, because three
- * labels this long do not fit side by side on a phone.
- */
+/** Ask how to handle edits paused by a save conflict before leaving the note. */
 @Composable
 private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
     AlertDialog(
@@ -150,17 +135,14 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
         confirmButton = {
             Column(horizontalAlignment = Alignment.End) {
                 TextButton(onClick = { onAnswer(true) }) { Text("Keep mine") }
-                TextButton(onClick = { onAnswer(false) }) { Text("Take the version on disk") }
+                TextButton(onClick = { onAnswer(false) }) { Text("Use saved version") }
                 TextButton(onClick = { onAnswer(null) }) { Text("Cancel") }
             }
         },
     )
 }
 
-/**
- * Leaving a note whose edits could not be written, for [why] — a full disk, a folder gone — and
- * will not be on any exit: [LeaveDialog]'s question, with the one way out that does not write.
- */
+/** Ask whether to leave when edits could not be saved for [why]. */
 @Composable
 private fun UnsavedDialog(why: String, onAnswer: (Boolean?) -> Unit) {
     AlertDialog(
@@ -177,33 +159,8 @@ private fun UnsavedDialog(why: String, onAnswer: (Boolean?) -> Unit) {
 // ------------------------------------------------------------------------------------ reading
 
 /**
- * The rendered note, and where a search hit lands in it.
- *
- * `accent://open/…` is a link to another note and is handed back to the app, and so is
- * `accent://tag/…`, a tag, which [onTag] opens Browse on; `accent://file/…` is an image, served
- * off the vault and recoloured as a PDF page is when it reads as a document ([served]); [MERMAID]
- * is the diagram library, served out of the APK. Nothing else loads at all — the same rule the
- * desktop preview enforces with a content blocker.
- *
- * A tap on an image opens it on its own screen ([ImageScreen]), where it can be zoomed and
- * inverted; one on an image inside a link is the link's, as on any page. A long press on an image
- * inverts it against the rule in place, for as long as the app runs ([Inverted]); anywhere else
- * the press is the WebView's own, a selection. The page is loaded again for it, as for a palette
- * change, and puts the reader back where they were.
- *
- * A hit arrives as the query it was found by ([Open.find]) and is placed by the WebView's own
- * find-in-page: every occurrence marked, the first one scrolled to. No offset crosses into the
- * app at all — `SearchHit.at` is bytes into the markdown source and this screen holds the page
- * that source rendered to — so there is nothing to convert and nothing to get wrong. What it
- * costs is that the two do not agree on everything: the index folds accents and reads the markup,
- * find-in-page does neither, so a query it cannot match marks nothing and the note opens at the
- * top, which is where it opened before any of this (see NOTEPAD).
- *
- * The marking goes on the reader's first tap, which is the Android analogue of the desktop's
- * reveal highlight going on the first keystroke: it says where you were sent, and once that has
- * been read it is in the way. A tap does *not* take the reader's own find off ([FindBar]): those
- * matches are being stepped through rather than read once, and a reveal and a find bar are never
- * on the screen together — opening the bar clears whatever was marked before it.
+ * Render a note with search highlights. Route app links locally, serve vault images through
+ * [served], load [MERMAID] from the APK, and block other requests.
  */
 @Composable
 private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) -> Unit) {
@@ -396,28 +353,16 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
     }
 }
 
-/**
- * A page the rendered view was told to load: the note, its HTML, and what its images were served
- * under. [scroll] is where the reader is put once it is up, and [back] whether that is a place
- * they are brought back to rather than kept at; neither is part of which page it is.
- */
+/** Rendered note page and image theme; [scroll] and [back] control restoration, not identity. */
 private data class Load(val rel: String, val html: String, val dark: Boolean, val inverted: Set<String>) {
     var scroll = 0
     var back = false
 }
 
-/**
- * The address of the image under the reader's last touch, if the view's hit test puts one of
- * [types] there: the hit is taken on the way down, so it is ready by the time a tap or a long
- * press is decided.
- */
+/** Capture the touched image URL before tap or long-press recognition. */
 private fun WebView.imageHit(vararg types: Int): String? = hitTestResult.takeIf { it.type in types }?.extra
 
-/**
- * What a rendered page may load: [MERMAID] and its bootstrap out of the APK, and the vault's
- * images, [served] in the [dark] theme or a light one with the [inverted] ones turned round, each
- * handed to [onImage] by the address the page asked for it at. Nothing else.
- */
+/** Allow only APK diagram scripts and themed vault images; block all other WebView requests. */
 internal fun pageRequest(
     view: WebView,
     request: WebResourceRequest,
@@ -449,13 +394,7 @@ internal fun baseUri(rel: String): String {
 
 internal fun decode(s: String): String = runCatching { URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)
 
-/**
- * The shell around `to_html`'s fragment.
- *
- * The colours are handed in rather than read from a stylesheet, exactly as the desktop does:
- * a WebView cannot see the app's palette, and the palette is the system's. A note with a mermaid
- * fence gets the [mermaid] scripts too, in the dark or the light theme as the page is.
- */
+/** Wrap `to_html` in the current app palette and optional Mermaid scripts. */
 internal fun page(body: String, fg: Color, bg: Color, accent: Color): String = """
 <!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -485,10 +424,7 @@ ${conflictCss(fg)}
 </style></head><body>$body</body></html>
 """
 
-/**
- * A conflict block's boxes (`to_html`), in the desktop's tints of its sides and each caption in
- * its marker line's ([conflictTints]).
- */
+/** Style conflict blocks with desktop tints and marker captions ([conflictTints]). */
 private fun conflictCss(ink: Color): String =
     listOf("current", "base", "incoming").zip(conflictTints(ink)).joinToString("\n") { (side, tint) ->
         "  .conflict-$side { background: ${tint.first.rgba()}; }\n" +
@@ -516,17 +452,8 @@ private const val BOOTSTRAP = "accent://app/bootstrap.js"
 private val SCRIPTS = setOf(MERMAID, BOOTSTRAP)
 
 /**
- * Mermaid, and the bootstrap that draws a note's diagrams with it, the one the desktop runs
- * (`vendor/mermaid/bootstrap.js`): in the [theme] picked by the page's lightness, and without the
- * scroll-sync marker a phone has no use for.
- *
- * The only scripts a page ever runs. The policy admits a script only with the nonce drawn here,
- * fresh for every page and unknowable to a note, so the note's own `<script>`, `onerror` or
- * `javascript:` link stays as dead as on a page with scripting off. All sit in the head, ahead of
- * the note, where nothing it leaves unclosed can take them in; the library and the bootstrap are
- * deferred, so the note is drawn before 3.4 MB of it is parsed. MOBILE_DESIGN.md says why the rest
- * of the view's lockdown makes this enough. `accentDrawn` says the drawing is done, which is what
- * a print waits for ([printNote]).
+ * Load Mermaid and its bootstrap with a fresh nonce, excluding note scripts.
+ * Defer execution until rendering completes; printing waits for `accentDrawn`.
  */
 private fun mermaid(theme: String): String {
     val nonce = UUID.randomUUID()
@@ -543,16 +470,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // ------------------------------------------------------------------------------------ writing
 
-/**
- * The editor: the note's own text, styled from the core's spans.
- *
- * The markup stays visible and is dimmed rather than hidden — Apostrophe's rule, and the
- * desktop's — because a phone keyboard has no way to put back a character it cannot see.
- *
- * The text is the model's ([VaultModel.buffer]) and so is the writing of it: what is typed here
- * is what the rendered view draws and what autosave writes out, and nothing about either is keyed
- * on which note this is. The editor is the field and its styling, and nothing else.
- */
+/** Edit [VaultModel.buffer] with core styling spans while keeping Markdown markup visible. */
 @Composable
 private fun Editor(model: VaultModel) {
     val colors = MaterialTheme.colorScheme
@@ -568,12 +486,8 @@ private fun Editor(model: VaultModel) {
 }
 
 /**
- * Applies the core's spans to the field's output; nothing it does reaches the saved text.
- *
- * The parse is kept against the text it was of, because this runs on every output pass — a
- * recomposition for any reason at all, not only a keystroke — and parsing a note of any size that
- * often is the composition thread's whole frame. One parse per text, as the desktop does behind
- * its render debounce.
+ * Style the field output without changing saved text; cache parsing by text to avoid work
+ * on unrelated recompositions.
  */
 private class Styling(
     private val fg: Color,

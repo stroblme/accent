@@ -17,12 +17,12 @@ use super::{MAX_OUT, Server, answer, etag_string, explore, fail, image_type, lin
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SearchArgs {
-    /// Words to find, in any order; the last one also matches as the start of a word, and a
-    /// query found in no word is looked for inside words.
+    /// Search terms in any order. The final term also matches word prefixes; if no words match,
+    /// retry as substrings.
     query: String,
-    /// Most rows to return, 20 when left out, 100 at most. A row is one occurrence.
+    /// Maximum rows: 20 by default, up to 100. Each row is one occurrence.
     limit: Option<usize>,
-    /// Also search the files git ignores, left out otherwise.
+    /// Include files ignored by Git.
     include_ignored: Option<bool>,
 }
 
@@ -30,8 +30,7 @@ struct SearchArgs {
 struct ReadArgs {
     /// The file, relative to the vault root.
     path: String,
-    /// Only the section under this heading, its subsections included: the heading's text or its
-    /// slug, `notes-1` naming the second of two `Notes`.
+    /// Read this heading and its subsections by heading text or slug (e.g. `notes-1`).
     heading: Option<String>,
 }
 
@@ -55,14 +54,13 @@ struct DirArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct LimitArgs {
-    /// Most rows to return, 20 when left out, 500 at most.
+    /// Maximum rows: 20 by default, up to 500.
     limit: Option<usize>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct LinkArgs {
-    /// A link target as a note writes it: `Note`, `Note#Heading`, `folder/Note.md`, or a whole
-    /// `[[Note#Heading|alias]]`.
+    /// Link target as written in a note, such as `Note#Heading` or `[[Note#Heading|alias]]`.
     target: String,
 }
 
@@ -70,40 +68,38 @@ struct LinkArgs {
 struct PatchArgs {
     /// The note, relative to the vault root.
     path: String,
-    /// The section to change, as `read_note` takes it. Left out, the whole note, which `append`
-    /// and `prepend` change and `replace` does not: `write_note` writes a whole note.
+    /// Section accepted by `read_note`. Omit for the whole note with `append` or `prepend`;
+    /// use `write_note` to replace a whole note.
     heading: Option<String>,
-    /// `replace` the section's text, its heading kept; or `append` it after the section's last
-    /// line, or `prepend` it under the heading (under the frontmatter for the whole note).
+    /// Patch mode: replace section text, append after it, or prepend below its heading
+    /// (or below frontmatter for the whole note).
     mode: Mode,
-    /// The markdown to put there.
+    /// Markdown to insert.
     content: String,
-    /// The etag `read_note` gave, so that a note changed since is not patched. Left out, the
-    /// note is patched as it is now.
+    /// Etag from `read_note`; omit to patch the current version.
     etag: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct WriteArgs {
-    /// The file, relative to the vault root; its folders are made as needed.
+    /// File path relative to the vault root; missing parent folders are created.
     path: String,
-    /// The whole text.
+    /// Complete file text.
     content: String,
-    /// The etag `read_note` gave: required to overwrite a file that exists, which is then
-    /// refused if it changed since. Left out, only a new file is written.
+    /// Etag from `read_note`, required to overwrite an unchanged file. Omit for a new file.
     etag: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct TemplateArgs {
-    /// The template: its name in the vault's templates folder, or its path.
+    /// Template name or path in the vault's templates folder.
     template: String,
-    /// The note to make, relative to the vault root, `.md` added when it names no extension.
-    /// Left out, the template's own `accent-target:` says where.
+    /// New note path relative to the vault root; `.md` is added if no extension is given.
+    /// Omit to use the template's `accent-target:`.
     path: Option<String>,
 }
 
-/// The tools that write, which `--read-only` leaves out.
+/// Tools omitted by `--read-only`.
 pub(super) const WRITE_TOOLS: [&str; 3] = ["patch_note", "write_note", "create_note_from_template"];
 
 #[tool_router(vis = "pub(super)")]
@@ -138,9 +134,8 @@ impl Server {
         .await
     }
 
-    /// Read a file: a note or any other text file whole, or the section under one heading. The
-    /// first block is `{path, etag}`, the etag being what a write of the file is checked against;
-    /// the second is the text. An image comes back as an image, another binary file as its size.
+    /// Read a text file or one heading section. Return `{path, etag}` and text blocks; images
+    /// return image data and other binaries return their size.
     #[tool(annotations(read_only_hint = true))]
     async fn read_note(
         &self,
@@ -248,8 +243,8 @@ impl Server {
         .await
     }
 
-    /// The file a link leads to, as following it in accent opens it, and the 1-based line its
-    /// `#heading` or `#^block` is on. `path` is null when nothing in the vault answers to it.
+    /// Resolve a link as Accent would open it, including the 1-based line of its heading or block.
+    /// `path` is null if the vault has no target.
     #[tool(annotations(read_only_hint = true))]
     async fn resolve_link(
         &self,
@@ -279,11 +274,9 @@ impl Server {
         .await
     }
 
-    /// Explore a vault question using words, names, paths, `[[links]]` and `#tags`. Returns
-    /// ranked Markdown file cards with outlines, links, backlinks and matching sections quoted
-    /// as `<line> <text>`, then names omitted files. A path or link alone returns that file's
-    /// whole card. Calls use name matching unless `precise` requests the language server, which
-    /// may be slower on first use.
+    /// Explore words, names, paths, `[[links]]`, and `#tags`. Return ranked Markdown cards
+    /// with line-numbered excerpts and omitted file names. A path alone returns its whole
+    /// card. `precise` requests slower language-server call hierarchy.
     #[tool(annotations(read_only_hint = true))]
     async fn explore(
         &self,
@@ -296,10 +289,8 @@ impl Server {
         .await
     }
 
-    /// The entries of one folder, folders first: each one's path, kind (`dir`, `note`, `pdf`,
-    /// `file`), a file's size in bytes, when it was last modified (UTC), a note's title, and
-    /// whether the index holds it, which a dependency or build tree it never walks is listed
-    /// without.
+    /// List folder entries, folders first, with path, kind, size, UTC modification time, note title,
+    /// and whether the index includes each entry.
     #[tool(annotations(read_only_hint = true))]
     async fn list_dir(&self, Parameters(a): Parameters<DirArgs>) -> Result<CallToolResult, String> {
         self.blocking(move |s| {
@@ -335,8 +326,7 @@ impl Server {
         .await
     }
 
-    /// The files modified last, newest first: notes, PDFs and other files alike, leaving out
-    /// what git ignores. Each row is the path and when it was modified (UTC).
+    /// List non-ignored files by UTC modification time, newest first.
     #[tool(annotations(read_only_hint = true))]
     async fn recent_changes(
         &self,
@@ -362,8 +352,7 @@ impl Server {
         .await
     }
 
-    /// The notes links point at that are not written yet, by the path a new note would take
-    /// for them, each with up to five of the notes and lines linking to it.
+    /// List unresolved link targets and up to five linking notes and lines per target.
     #[tool(annotations(read_only_hint = true))]
     async fn missing_notes(
         &self,
@@ -409,8 +398,7 @@ impl Server {
         .await
     }
 
-    /// The highlights made on a PDF, which accent keeps as links in the notes: each one's
-    /// 1-based page, the text it quotes, and the note and line holding it.
+    /// List PDF highlights stored as note links, with page, quoted text, note, and line.
     #[tool(annotations(read_only_hint = true))]
     async fn pdf_annotations(
         &self,
@@ -519,9 +507,8 @@ impl Server {
         .await
     }
 
-    /// Make a note from one of the vault's templates, its placeholders filled in. Without
-    /// `path` it goes where the template's `accent-target:` says, and a note already there, such
-    /// as today's daily note, is left as it is. Returns its path, and whether it is new.
+    /// Create a note from a template. Without `path`, use its `accent-target:`. Leave an
+    /// existing target unchanged and return its path and creation status.
     #[tool]
     async fn create_note_from_template(
         &self,
@@ -557,7 +544,7 @@ impl Server {
     }
 }
 
-/// A file's kind as `list_dir` names it.
+/// File kind used by `list_dir`.
 fn kind_name(kind: FileKind) -> &'static str {
     match kind {
         FileKind::Dir => "dir",
@@ -568,14 +555,14 @@ fn kind_name(kind: FileKind) -> &'static str {
     }
 }
 
-/// A modification time as the wire carries it: RFC 3339, UTC, to the second.
+/// Format modification time as RFC 3339 UTC, to the second.
 fn modified(mtime_ns: i64) -> String {
     chrono::DateTime::from_timestamp_nanos(mtime_ns)
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string()
 }
 
-/// Where a patch puts its text in the section: in place of it, after it, or before it.
+/// Patch placement: replace, append, or prepend.
 #[derive(Deserialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 enum Mode {
@@ -610,7 +597,7 @@ fn patched(text: &str, at: Range<usize>, mode: Mode, content: &str) -> String {
     format!("{}{lead}{new}{gap}{}", &text[..at.start], &text[at.end..])
 }
 
-/// Where a note's own text starts: past its frontmatter, which a prepend leaves first.
+/// Offset after frontmatter, which prepend must preserve.
 fn body_start(text: &str) -> usize {
     markdown::analyze(text)
         .spans
@@ -621,7 +608,7 @@ fn body_start(text: &str) -> usize {
         })
 }
 
-/// An etag as [`etag_string`] spells it.
+/// Parse an etag formatted by [`etag_string`].
 fn parse_etag(etag: &str) -> Result<Etag, String> {
     let bad = || format!("{etag:?} is not an etag read_note gave");
     // From the right: the mtime of a file from before 1970 is negative.
@@ -637,7 +624,7 @@ fn parse_etag(etag: &str) -> Result<Etag, String> {
     })
 }
 
-/// A write refused because the file moved on since it was read.
+/// Represent a write rejected because the file changed since reading.
 fn changed(rel: &str, now: Etag) -> String {
     format!(
         "{rel} changed since it was read: read it again (its etag is now {})",
@@ -652,7 +639,7 @@ fn unsaved(rel: &str, e: Error) -> String {
     }
 }
 
-/// The byte range of the section under `heading`, or the headings there are.
+/// Find the section byte range under `heading`, or available headings.
 fn section(text: &str, heading: &str) -> Result<Range<usize>, String> {
     markdown::section(text, heading).ok_or_else(|| {
         let headings: Vec<String> = markdown::analyze(text)

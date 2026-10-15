@@ -39,7 +39,7 @@ CANVAS = 256
 
 
 def flatten(svg: Path) -> list[tuple[str, str]]:
-    """Every drawn path in document order, as (fill, d)."""
+    """Return drawn paths in document order as (fill, d) pairs."""
     out: list[tuple[str, str]] = []
 
     def walk(el):

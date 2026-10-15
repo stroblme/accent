@@ -1,5 +1,4 @@
-//! The PDF's side of the drawing ring: the widths, colours and eraser ways on its outer orbit,
-//! shown for the tool in hand, and what picking one writes into the config.
+//! PDF drawing-ring options for width, colour and eraser mode, stored in config.
 
 use adw::prelude::*;
 use gtk::glib;
@@ -71,20 +70,32 @@ impl PdfRing {
     pub fn new() -> Rc<PdfRing> {
         let ring = Ring::<Mode>::new();
         // Nine slots outside the tools: the widths at the top, the colours after them.
-        let slots = 3 + crate::theme::swatches().len();
+        let swatch_count = crate::theme::swatches().len();
+        let slots = 3 + swatch_count;
         let option = |i: usize, child: &gtk::Widget| ring.add_option(i, slots, child);
         let widths: Vec<_> = [5.0, 8.0, 12.0]
             .into_iter()
             .enumerate()
-            .map(|(i, diameter)| option(i, dot(diameter, |area| area.color()).upcast_ref()))
+            .map(|(i, diameter)| {
+                let button = option(i, dot(diameter, |area| area.color()).upcast_ref());
+                button.set_tooltip_text(Some(["Narrow Width", "Medium Width", "Wide Width"][i]));
+                button
+            })
             .collect();
-        let swatches: Vec<_> = (0..crate::theme::swatches().len())
+        let swatches: Vec<_> = (0..swatch_count)
             .map(|i| {
                 let colour = move |_: &gtk::DrawingArea| match crate::theme::swatches()[i] {
                     Some(rgb) => crate::theme::rgba(rgb, 1.0),
                     None => crate::theme::accent(),
                 };
-                option(3 + i, dot(14.0, colour).upcast_ref())
+                let button = option(3 + i, dot(14.0, colour).upcast_ref());
+                let label = match i {
+                    0 => "Accent Colour".to_string(),
+                    i if i + 1 == swatch_count => "Black".to_string(),
+                    _ => format!("Colour {}", i + 1),
+                };
+                button.set_tooltip_text(Some(&label));
+                button
             })
             .collect();
         let erasers: Vec<_> = ERASERS

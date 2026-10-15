@@ -86,18 +86,10 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/**
- * What the pen is doing. A finger never draws: it moves the page.
- *
- * [Read] is not on the toolbar — it is what the toolbar looks like with nothing chosen, and
- * tapping the tool in hand is what puts it down.
- */
+/** Active PDF tool. [Read] means no drawing tool; fingers pan the page. */
 enum class Tool { Read, Pen, Highlighter, Eraser }
 
-/**
- * A PDF inside a vault: strokes are written back into the file it came from, and the notes that
- * link into it paint their highlights over it.
- */
+/** Vault PDF with editable strokes and note-linked highlights. */
 @Composable
 fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome) {
     val path = pdf.path
@@ -336,15 +328,7 @@ private fun Reader(
     }
 }
 
-/**
- * The document's bookmarks over the page, put away by pulling it down.
- *
- * The surface Browse already uses, because this is the same kind of thing: a list the reader came
- * to on purpose and leaves by the gesture every other panel here leaves by. A depth is an indent
- * and nothing more — a PDF outline nests as deep as its author liked, and rows that fold are rows
- * whose folding has to be remembered. A bookmark naming no page is drawn and does nothing, which
- * is what it does in the file.
- */
+/** Show the PDF outline in a pull-to-close panel, indenting rows by bookmark depth. */
 @Composable
 private fun Contents(marks: List<Outline>, onClose: () -> Unit, onGo: (Int) -> Unit) {
     PullDownPanel(onClose) {
@@ -371,31 +355,15 @@ private fun Contents(marks: List<Outline>, onClose: () -> Unit, onGo: (Int) -> U
 /** How far one level of the outline is pushed in. Half a gutter: deep outlines are common. */
 private const val INDENT_DP = 8
 
-/**
- * Whether a PDF may be drawn on at all.
- *
- * Off until the mobile design settles — the toolbar is five words where the desktop has a ring of
- * icons, and where it belongs on a phone is the same question the floating buttons answer. With
- * no way to pick a tool, [Tool.Read] is the only state there is and a finger only ever moves the
- * page. Not `const`, so the toolbar below is compiled rather than folded away.
- */
+/** Drawing stays disabled until the mobile toolbar design is settled. */
 private val ANNOTATIONS = false
 
 /** How long after the last stroke the document is written back. */
 private const val INK_SAVE_MS = 1000L
 
 /**
- * The document as a column of pages, panned and pinched as one surface.
- *
- * The column does the laying out and the recycling; the gesture does everything else. Both axes
- * move from the same handler, so a diagonal drag goes diagonally instead of picking a side.
- *
- * A pinch never lays the column out again. It scales one layer under the fingers and commits
- * once, on release — what every other reader on the platform does, and the only way the
- * arithmetic can be right: asking the list where it is and telling it where to go in the same
- * frame reads back the position from before the answer, so the page crept away from the fingers a
- * little more every frame. The page stretches the bitmap it already has and is drawn again at the
- * zoom the fingers leave it at.
+ * Lay out pages as one scrollable, pannable, zoomable column. Scale the existing layer
+ * during a pinch and commit layout and rendering on release.
  */
 @Composable
 private fun Pages(
@@ -441,13 +409,7 @@ private fun Pages(
     val pages = remember(doc) { Pagination(doc.sizes, gap) }
     val maxZoom = remember(viewport) { ceiling(viewport) }
 
-    /**
-     * The `/Link` boxes of the pages that are composed, left here by each of them.
-     *
-     * The hit test has to happen where the chrome's tap is decided, and that is this box rather
-     * than any one page, so what each page reads goes somewhere the box can see. A page scrolled
-     * away takes its entry with it.
-     */
+    /** Collect composed pages' `/Link` boxes for tap hit-testing above the pages. */
     val links = remember(doc) { mutableStateMapOf<Int, List<PdfLinkBox>>() }
     /** The highlights a note's links paint on the composed pages, left here as [links] are. */
     val marks = remember(doc) { mutableStateMapOf<Int, List<Mark>>() }
@@ -465,32 +427,20 @@ private fun Pages(
     val asked = remember(doc) { mutableSetOf<Int>() }
     /** The word a long press made, which the drag after it grows from. */
     var word by remember(doc) { mutableStateOf<Selection?>(null) }
-    /**
-     * Whether the selection has its menu: one the reader made has, one a followed link shows does
-     * not until a handle is touched — it is there to be read, not copied.
-     */
+    /** Show the menu for a user selection, but delay it for a linked selection until touched. */
     var menu by remember(doc) { mutableStateOf(false) }
     /** A finger is on a handle or still growing a long press's word. */
     var dragging by remember(doc) { mutableStateOf(false) }
     /** Where the pages' box is in the window, which is where the menu is placed from. */
     var origin by remember { mutableStateOf(Offset.Zero) }
     val haptics = LocalHapticFeedback.current
-    /**
-     * Where each jump in this document was taken from, the latest last: what Back retraces before
-     * it leaves. Kept as a page and points down it rather than the row and offset the column was
-     * at, which are pixels at one zoom and would be wrong after a pinch between the jump and Back.
-     */
+    /** Back stack of page positions in points, independent of zoom. */
     val back = remember(doc) { mutableStateListOf<Pair<Int, Float>>() }
     // [onTap] captures its predicate once, so what the predicate reads has to be state it can read
     // again. The zoom, the pan, the viewport and the map above all are; the tool in hand is not.
     val inHand by rememberUpdatedState(tool)
 
-    /**
-     * The zoom the bitmaps were drawn at, and the part of the column they were drawn for. Both
-     * follow the hands once they stop rather than every frame: a render started mid-gesture is
-     * thrown away before it lands, and past [WHOLE_PAGE_PX] there is no whole page to draw anyway,
-     * only whichever rectangle of it the screen is over.
-     */
+    /** Render scale and visible column region, updated after a gesture settles. */
     var settled by remember { mutableStateOf(Settled(1f, IntRect.Zero)) }
     LaunchedEffect(pages, viewport) {
         snapshotFlow {
@@ -515,23 +465,13 @@ private fun Pages(
         }.collect { tell(it) }
     }
 
-    /**
-     * Put [top] points down page [index] at the top of the screen.
-     *
-     * Through [Pagination] and `requestScrollToItem`, which is the path a pinch commit takes, so a
-     * jump lands in the same place whatever zoom the pages are at: a row index on its own means a
-     * different place on the page at every zoom, and the offset into the row is where that is said.
-     */
+    /** Scroll to [top] points down page [index] using zoom-aware [Pagination]. */
     fun goTo(index: Int, top: Float) {
         val (row, into) = pages.to(index, top, viewport.width, zoom)
         list.requestScrollToItem(row, into)
     }
 
-    /**
-     * Bring [rect], in points on page [index], into view below the bar if it is not: to the middle
-     * of what the bar leaves, so it arrives with room around it to be read in. [jumped] puts where
-     * the reader was on the way Back, as a find's first match does and its steps do not.
-     */
+    /** Bring [rect] on page [index] below the bar if needed; [jumped] records Back history. */
     fun show(index: Int, rect: Rect, jumped: Boolean = false) {
         val above = pages.above(list, viewport.width, zoom)
         val to = pages.reveal(index, rect, above, panX, viewport, zoom, clear) ?: return
@@ -541,24 +481,14 @@ private fun Pages(
     }
 
     /**
-     * [goTo], remembering where the reader was so Back returns there. Only jumps come here: a
-     * link and a bookmark, as on the desktop. Scrolling is reading, and a history of every page
-     * passed would have nothing left to go back to.
+     * Perform [goTo] and record the previous position for Back; ordinary scrolling adds no history.
      */
     fun jump(index: Int, top: Float) {
         back += pages.place(pages.above(list, viewport.width, zoom), viewport.width, zoom)
         goTo(index, top)
     }
 
-    /**
-     * Follow a link: down the document, or out of the app.
-     *
-     * The chrome is left exactly where the reader had it. This used to put it up, to undo a toggle
-     * it could not stop; now that the tap is claimed before [Chrome.tapped] is reached, a tap on a
-     * link is a link's tap and nothing else's, and somebody reading with the bar down stays that
-     * way. A bookmark still calls [Chrome.show], because dismissing the panel really is something
-     * else deciding where the reader is.
-     */
+    /** Follow an internal or external link without changing chrome visibility. */
     fun follow(target: LinkTarget) {
         when (target) {
             is LinkTarget.Page -> jump(target.page.toInt(), target.top ?: 0f)
@@ -599,10 +529,7 @@ private fun Pages(
         }
     }
 
-    /**
-     * Where the two handles hang from on the screen: the foot of the first glyph's start and of
-     * the last one's end. None while a pinch holds the layer scaled.
-     */
+    /** Screen positions of selection handles, unavailable during a live pinch. */
     fun anchors(): Pair<Offset, Offset>? {
         if (live != 1f) return null
         val first = chosen.firstOrNull { it.boxes.isNotEmpty() } ?: return null
@@ -613,10 +540,7 @@ private fun Pages(
             pages.screen(last.page, b.right, b.bottom, above, panX, viewport.width, zoom)
     }
 
-    /**
-     * The end a press on a handle keeps still, which is the other one; `null` for a press on
-     * neither. The nearer handle where the two are close.
-     */
+    /** Return the stationary endpoint when a handle is pressed, preferring the nearer handle. */
     fun heldAt(at: Offset): Caret? {
         val (start, end) = anchors() ?: return null
         val now = selection ?: return null
@@ -670,11 +594,7 @@ private fun Pages(
         selection = null
     }
 
-    /**
-     * Put the link to the selection on the clipboard, one per page it covers — `page=N` names one
-     * page — and let it go. Pasting it into a note is what makes the highlight: there is no
-     * Highlight of its own, as on the desktop.
-     */
+    /** Copy one selection link per page and clear the selection; note links create highlights. */
     fun copyLink() {
         val pieces = chosen
         selection = null
@@ -684,25 +604,7 @@ private fun Pages(
         }
     }
 
-    /**
-     * Whether this tap belongs to a link rather than to the chrome.
-     *
-     * Decided here because this is where the chrome's own tap is decided and the two have to be
-     * ordered — [onTap] asks before it toggles. A tap is never during a pinch (a second finger and
-     * any movement past the slop both rule one out), so the layer under the fingers is at rest: the
-     * pages are offset by [panX] across and by what the column has scrolled down, and nothing else.
-     *
-     * A tool in hand claims nothing. The page is a canvas then, and the drawing handler on it owns
-     * every press that lands.
-     *
-     * A highlight is asked after the links, as on the desktop: a link inside one is still a link.
-     * It opens the note it comes from, and hands over where the reader is, for Back from that note
-     * to come back to. Another reader's comment is asked last, and shows every comment under the
-     * finger in a dialog.
-     *
-     * While there is a selection a tap only lets it go, wherever it lands — but for a tap on one
-     * of its handles, which leaves it be.
-     */
+    /** Handle selections, PDF links, highlights, and comments before chrome toggling. */
     fun claimed(at: Offset): Boolean {
         if (selection != null) {
             if (heldAt(at) == null) selection = null
@@ -992,16 +894,7 @@ private fun Pages(
     }
 }
 
-/**
- * Lay the content out exactly this big and put its top-left corner in the parent's, however much
- * bigger than the parent that is.
- *
- * `requiredWidth` looks like it does this and does not: it reports the parent a size coerced back
- * into the incoming constraints and then centres the content in it, so half of everything the zoom
- * added was taken off the left — a page that jumped sideways on every pinch and left a band of
- * background down its right. Anchoring the corner is the whole of what a scrolled, panned surface
- * wants, and it is the same answer on both axes.
- */
+/** Measure at [width] × [height] while anchoring oversized content at the parent's top-left. */
 private fun Modifier.oversize(width: Int, height: Int) = layout { measurable, constraints ->
     val placeable = measurable.measure(Constraints.fixed(width, height))
     layout(constraints.constrainWidth(width), constraints.constrainHeight(height)) {
@@ -1012,35 +905,15 @@ private fun Modifier.oversize(width: Int, height: Int) = layout { measurable, co
 /** Sideways travel is bounded by how much wider than the screen the pages have become. */
 private fun holdXAt(p: Float, width: Int, zoom: Float) = p.coerceIn(-width * (zoom - 1f), 0f)
 
-/**
- * Where a layer scaled about its own corner has to be moved to, for the point the fingers began
- * between to stay between them.
- *
- * [pivot] is that point, [live] how much further apart they have got, [base] the translation the
- * layer already had along this axis and [shift] how far the hand has moved since.
- */
+/** Translation that keeps [pivot] under moving fingers as scale [live] and pan change. */
 internal fun liveShift(pivot: Float, live: Float, base: Float, shift: Float): Float =
     pivot * (1f - live) + base * live + shift
 
-/**
- * Where the content has to sit along one axis after a gesture, so that whatever was under the
- * fingers is still under them.
- *
- * [scrolled] is how much of the document is already past the near edge, [centroid] where the
- * fingers are between them, [by] how much further apart they got and [pan] how far they moved.
- * Everything grows away from the centroid, which is why the answer is not simply `scrolled * by`
- * — that grows away from the corner, and the page slides out from under the hand.
- */
+/** Final offset that preserves the point beneath the fingers after zoom [by] and [pan]. */
 internal fun anchor(scrolled: Float, centroid: Float, by: Float, pan: Float): Float =
     (scrolled + centroid) * by - centroid - pan
 
-/**
- * Where the pages sit in the column, so a zoom can put the reader back where they were.
- *
- * The list only says which page is at the top and how far into it, both in whatever pixels the
- * current zoom makes; turning that into a distance from the start of the document, and back
- * again at another zoom, is all this does.
- */
+/** Map list row and offset to a document position independent of zoom. */
 internal class Pagination(private val sizes: List<PageSize>, private val gap: Float) {
     private fun height(index: Int, width: Int, zoom: Float): Float {
         val size = sizes.getOrNull(index) ?: return gap
@@ -1062,10 +935,7 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
     fun at(y: Float, width: Int, zoom: Float): Pair<Int, Int> =
         row(y, width, zoom).let { (index, into) -> index to into.roundToInt() }
 
-    /**
-     * [at] before the rounding. Past the end it stays on the last row, overrun and all, for the
-     * column to stop at its end: the top of the last page would be a jump back up it.
-     */
+    /** Round [at], preserving overrun past the last row so the column clamps at its end. */
     private fun row(y: Float, width: Int, zoom: Float): Pair<Int, Float> {
         var left = y.coerceAtLeast(0f)
         for (i in sizes.indices) {
@@ -1077,25 +947,13 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
         return if (last < 0) 0 to 0f else last to left + height(last, width, zoom)
     }
 
-    /**
-     * Where [y] pixels from the start at zoom [from] is at zoom [to]: the same place on the same
-     * page. Not `y * to / from`, which grows the gaps between the pages as well — they do not grow
-     * — and so lands further out the further down the document the point is.
-     */
+    /** Map [y] between zoom levels while keeping fixed page gaps unchanged. */
     private fun rescale(y: Float, width: Int, from: Float, to: Float): Float {
         val (index, into) = row(y, width, from)
         return top(index, width, to) + into * to / from
     }
 
-    /**
-     * Which page a point in the column fell on, and where on it, or `null` for one that fell on no
-     * page at all — the gap between two, or past the end of the last.
-     *
-     * [x] and [y] are column pixels at [zoom], which is what a tap on the pages is once the pan and
-     * the scroll are taken off it. The answer is in the page's own points, the space the core
-     * talks about links in, and carries the scale that got it there, because that is what turns a
-     * fingertip measured in pixels into a slop measured in points.
-     */
+    /** Map column pixel coordinates [x], [y] at [zoom] to page points, or null for gaps. */
     fun on(x: Float, y: Float, width: Int, zoom: Float): Landing? {
         if (y < 0f) return null
         var left = y
@@ -1112,35 +970,20 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
         return null
     }
 
-    /**
-     * The row, and the offset into it, that put [y] points down page [index] at the top of the
-     * screen — what a bookmark and an internal link both ask for.
-     *
-     * The same two steps a pinch commit takes: a distance from the start of the document, then
-     * back to a row at the zoom in hand. A row index on its own would be a different place on the
-     * page at every zoom, and [y] past the end of the page falls through to the next one, which is
-     * what [at] does with any overrun.
-     */
+    /** Find the row and offset for [y] points down page [index] at the current zoom. */
     fun to(index: Int, y: Float, width: Int, zoom: Float): Pair<Int, Int> {
         val size = sizes.getOrNull(index) ?: return index to 0
         return at(top(index, width, zoom) + y * (width * zoom / size.width), width, zoom)
     }
 
-    /**
-     * The page, and the points down it, that [y] pixels from the start lands on at [zoom]: the
-     * inverse of [to], and the form a place is kept in so that [to] can find it again at any zoom.
-     */
+    /** Map document pixel position [y] at [zoom] to page and point offset. */
     fun place(y: Float, width: Int, zoom: Float): Pair<Int, Float> {
         val (index, into) = at(y, width, zoom)
         val size = sizes.getOrNull(index) ?: return index to 0f
         return index to into / (width * zoom / size.width)
     }
 
-    /**
-     * Where [x], [y] points on page [index] are on the screen, [above] pixels scrolled and pushed
-     * [panX] sideways: [on] the other way round, for what is drawn over the pages rather than on
-     * them.
-     */
+    /** Map page point [x], [y] to screen coordinates with scroll [above] and [panX]. */
     fun screen(
         index: Int,
         x: Float,
@@ -1155,10 +998,8 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
     }
 
     /**
-     * Where the column has to be for [rect], in points on page [index], to be in view — or `null`
-     * when it already is, [above] pixels scrolled and pushed [panX] sideways on a [viewport] whose
-     * top [clear] pixels a bar covers. What is out of view along an axis is brought to the middle
-     * of what the bar leaves along it; an axis it is already in view along is left alone.
+     * Return scroll and pan needed to show [rect] within [viewport] below [clear],
+     * or null when it is already visible.
      */
     fun reveal(
         index: Int,
@@ -1183,14 +1024,7 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
         return Reveal(row, into, holdXAt(x, viewport.width, zoom))
     }
 
-    /**
-     * Where the column has to be once a pinch is let go, for what the layer showed under the
-     * fingers to stay there: the zoom, the pan, and how much of the document is above the screen.
-     *
-     * [above] and [panX] are where the column was when the pinch began — it does not move during
-     * one — [pivot] where the fingers began between them, [live] how much further apart they got
-     * and [shift] how far they moved: the layer drew what was under [pivot] at `pivot + shift`.
-     */
+    /** Commit pinch zoom, pan, and scroll while preserving the point under the fingers. */
     fun released(
         above: Float,
         panX: Float,
@@ -1220,17 +1054,7 @@ internal data class Landing(val page: Int, val point: Point, val scale: Float)
 private val PAGE_GAP = 8.dp
 private const val MIN_ZOOM = 1f
 
-/**
- * How far in a pinch may go.
- *
- * Memory no longer decides it: past [WHOLE_PAGE_PX] a page is drawn one screenful at a time, so a
- * render costs the same at any zoom. What the pixels are worth does. 8× fit width puts an A0 poster
- * — 2384 pt across, the widest paper anyone opens and the case that asked for this — at 3.6 px/pt on
- * a 1080 px screen, about the 2.6 px/pt such a screen draws a point at 1:1. Its 8 pt small print
- * stands 29 px tall, where the old ceiling of 6× reached 22 and then failed to draw at all, a whole
- * A0 page at 6× being 59 M pixels. An A4 page reaches 14.5 px/pt. Deeper buys detail the paper has
- * not got, and a shallower range is easier to land a pinch with on the thing being looked at.
- */
+/** Maximum zoom relative to fit width; large pages use visible tiles beyond [WHOLE_PAGE_PX]. */
 private const val MAX_ZOOM = 8f
 
 /** How long the typing rests before a find starts over. */
@@ -1239,36 +1063,17 @@ private const val FIND_AFTER_MS = 150L
 /** How long the hands rest before the pages are drawn again at where they left them. */
 private const val RESHARPEN_MS = 180L
 
-/**
- * How big a whole-page render may get before only the part on screen is drawn: 8 M pixels, which is
- * 32 MB of ARGB. An A4 page at a phone's fit width is 1.7 M, so ordinary reading and a pinch to
- * about twice that stay whole and nothing blanks while the column is scrolled.
- */
+/** Render whole pages up to 8 Mpx (32 MB ARGB); use visible tiles beyond that. */
 private const val WHOLE_PAGE_PX = 8_000_000L
 
 /** Where the reader had got to when the hands stopped: the zoom, and the column rect on screen. */
 private data class Settled(val zoom: Float, val window: IntRect)
 
-/**
- * How far in this screen may be pinched, which is not always [MAX_ZOOM].
- *
- * [oversize] asks Compose to lay the column out `width × zoom` wide, and a pinch shrinking back
- * from the ceiling asks for it `height × zoom` tall. `Constraints` packs a pair of sizes into one
- * `Long` and can hold at most 32766 px in one dimension beside 65534 in the other, so a column past
- * that throws where it is measured. At 8× that leaves every phone and tablet the whole of it — the
- * clamp bites only above a 4095 px-wide or 8191 px-tall viewport, which is a desktop-sized window
- * rather than a device — but it is what makes [MAX_ZOOM] a number the layout can honour rather than
- * one that happens to fit the screens on sale.
- */
+/** Clamp [MAX_ZOOM] so Compose constraints stay within 32766 px width and 65534 px height. */
 internal fun ceiling(viewport: IntSize): Float =
     minOf(MAX_ZOOM, 32766f / viewport.width, 65534f / viewport.height)
 
-/**
- * The part of a page worth drawing, in the page's own pixels.
- *
- * The whole of [page] while that is small enough to hold, which is every page at reading zoom and
- * is why a scrolling column never waits for a tile; only what [window] covers once it is not.
- */
+/** Draw all of a small [page], or only its intersection with [window] when large. */
 internal fun visible(page: IntRect, window: IntRect): IntRect =
     if (page.width.toLong() * page.height <= WHOLE_PAGE_PX) page else page.intersect(window)
 
@@ -1435,11 +1240,7 @@ private fun Page(
     }
 }
 
-/**
- * A selection handle hanging from [at]: a round drop whose one square corner points at the glyph,
- * up and to the left for the end of a selection and up and to the right for its start — the
- * shape the platform's text handles have.
- */
+/** Draw a platform-shaped selection handle anchored at [at]. */
 private fun DrawScope.handle(at: Offset, r: Float, toRight: Boolean, colour: Color) {
     val side = if (toRight) 1f else -1f
     drawCircle(colour, r, at + Offset(side * r, r))
@@ -1451,12 +1252,8 @@ private val HANDLE = 10.dp
 private val HANDLE_REACH = 24.dp
 
 /**
- * The platform's floating text toolbar over what is selected, as every text view raises one: the
- * system draws it, places it clear of what [around] answers (window pixels) and follows it when
- * told the selection moved. `null` puts it away.
- *
- * [around] is read here rather than handed in as a value, so a scroll under a selection moves the
- * toolbar without composing the pages again.
+ * Show the system selection toolbar around [around], updating its position on scroll.
+ * Pass null to dismiss it.
  */
 @Composable
 private fun SelectionMenu(around: () -> AndroidRect?, actions: List<Pair<String, () -> Unit>>) {
@@ -1505,25 +1302,14 @@ private fun DrawScope.box(r: Rect, scale: Float, colour: Color) = drawRect(
 /** A page as it was last drawn: the bitmap, the part of the page it covers, and in what pixels. */
 private data class Sheet(val image: ImageBitmap, val at: IntRect, val px: Int)
 
-/**
- * Which link a tap landed in, or none.
- *
- * [at] and [slop] are in page points, the space the core answers links in, so what zoom the page is
- * drawn at does not come into it. There is a slop at all because a link is usually one line of text
- * — about 18 px tall at a phone's fit width, against a fingertip of forty. The last match wins:
- * `/Link` boxes may overlap, and the later annotation is the one drawn on top of the other.
- */
+/** Hit-test links in page points using [slop]; the last overlapping annotation wins. */
 internal fun hit(links: List<PdfLinkBox>, at: Point, slop: Float): PdfLinkBox? =
     links.lastOrNull { it.rect.near(at, slop) }
 
 /** A highlight a note's link paints, and the link that paints it. */
 internal data class Mark(val quads: List<Rect>, val link: PdfLink)
 
-/**
- * Which highlight a tap landed in, or none: the first whose quads it is [near], which is the one
- * the desktop's `highlight_at` opens where two overlap — the links arrive in the order the index
- * lists them.
- */
+/** Return the first highlight near a tap, matching desktop overlap order. */
 internal fun markAt(marks: List<Mark>, at: Point, slop: Float): Mark? =
     marks.firstOrNull { mark -> mark.quads.any { it.near(at, slop) } }
 
@@ -1531,11 +1317,7 @@ internal fun markAt(marks: List<Mark>, at: Point, slop: Float): Mark? =
 internal fun commentsAt(comments: List<Comment>, at: Point, slop: Float): List<Comment> =
     comments.filter { comment -> comment.areas.any { it.near(at, slop) } }
 
-/**
- * Other readers' comments, read and never written: under the author as the title, or "Comment"
- * with none, the text selectable to copy as the desktop's popover's is. Several under one finger
- * stack under "Comments", each under its author. Close, Back and a tap outside all put it away.
- */
+/** Show read-only PDF comments, grouping overlaps under "Comments" with selectable text. */
 @Composable
 private fun Comments(comments: List<Comment>, onClose: () -> Unit) {
     val one = comments.singleOrNull()
@@ -1575,17 +1357,12 @@ private fun Rect.near(at: Point, slop: Float): Boolean =
 private const val TAP_SLOP = 12f
 
 /**
- * Hand a document's URL to the platform.
- *
- * The one place this reader reaches the network, so the system's chooser answers it rather than a
- * view of ours: nothing is fetched, nothing is opened inside the app, and a scheme a reader would
- * not expect a document to carry is refused, with a line to [onSay] that it was — a PDF can say
- * `file:` or `javascript:` as easily as `https:`, and neither is a link anybody meant to follow.
- * A link no app on the device takes says so too.
+ * Open allowed document URLs through the system chooser and report rejected schemes or
+ * missing handlers through [onSay].
  */
 private fun leave(context: Context, uri: String, onSay: (String) -> Unit) {
     val target = Uri.parse(uri)
-    if (target.scheme?.lowercase() !in OUTWARD) return onSay("Links of this kind are not opened")
+    if (target.scheme?.lowercase() !in OUTWARD) return onSay("This type of link can't be opened")
     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, target)) }
         .onFailure { onSay("No app can open this link") }
 }

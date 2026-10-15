@@ -1,5 +1,4 @@
-//! The window's layout: the editor and split modes, presentation mode, the preview and the
-//! chrome that fades while typing.
+//! Arrange editor, split, preview and presentation layouts with fading chrome.
 
 use super::*;
 

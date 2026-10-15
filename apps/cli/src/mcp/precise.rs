@@ -10,8 +10,7 @@ use accent_core::code::{self, Lang, SymbolKind};
 
 use super::Shared;
 
-/// Timeouts for first answers, subsequent requests and idle shutdown. Cold server startup can
-/// take seconds; idle shutdown releases substantial server memory before the next cold start.
+/// Timeouts for startup, requests, and idle shutdown of language servers.
 const WAITS: Waits = Waits {
     starting: Duration::from_secs(20),
     asking: Duration::from_secs(10),
@@ -20,12 +19,11 @@ const WAITS: Waits = Waits {
 
 pub(super) struct Precise<'a> {
     s: &'a Shared,
-    /// Why a language's server was given up on in this explore: its declarations go by name.
+    /// Reason this language server was abandoned for the current exploration.
     failed: HashMap<Lang, String>,
-    /// Each file's text and declarations, read once.
+    /// Text and declarations cached once per file.
     files: Files,
-    /// The declarations made of a server's items, which the index has no row for, by file and
-    /// start.
+    /// Declarations inferred from server items missing from the index, grouped by file and start.
     made: HashSet<(String, i64)>,
 }
 
@@ -41,7 +39,7 @@ impl<'a> Precise<'a> {
         }
     }
 
-    /// Why a server was given up on, each once: "rust-analyzer not ready".
+    /// One failure reason per language server.
     pub fn failures(&self) -> Vec<String> {
         let mut out: Vec<String> = self.failed.values().cloned().collect();
         out.sort();
@@ -49,7 +47,7 @@ impl<'a> Precise<'a> {
         out
     }
 
-    /// The lines calling `sym`, each with the declaration it is in; `None` to go by name.
+    /// Return callers of `sym` and their containing declarations, or `None` to match by name.
     pub fn callers(&mut self, sym: &CodeSymbol) -> Option<Vec<Mention>> {
         let calls = self.ask(sym, true)?;
         let mut out: Vec<Mention> = Vec::new();
@@ -84,7 +82,7 @@ impl<'a> Precise<'a> {
         Some(out)
     }
 
-    /// The declarations `sym` calls inside the vault; `None` to go by name.
+    /// Return vault declarations called by `sym`, or `None` to match by name.
     pub fn callees(&mut self, sym: &CodeSymbol) -> Option<Vec<CodeSymbol>> {
         let calls = self.ask(sym, false)?;
         let mut out: Vec<CodeSymbol> = Vec::new();
@@ -104,7 +102,7 @@ impl<'a> Precise<'a> {
         Some(out)
     }
 
-    /// The server's answer about `sym`, asked at its name; `None` to go by name.
+    /// Query the server for `sym`; return `None` to match by name.
     fn ask(&mut self, sym: &CodeSymbol, incoming: bool) -> Option<Vec<Call>> {
         // What a type or a macro is called from is where its name is written.
         if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
@@ -136,7 +134,7 @@ impl<'a> Precise<'a> {
     }
 }
 
-/// `rel`'s text and declarations, read once, if it may be shown.
+/// Read and cache `rel`'s text and declarations if it may be shown.
 fn file<'f>(files: &'f mut Files, s: &Shared, rel: &str) -> Option<&'f (String, Vec<CodeSymbol>)> {
     files
         .entry(rel.to_string())
@@ -150,10 +148,8 @@ fn file<'f>(files: &'f mut Files, s: &Shared, rel: &str) -> Option<&'f (String, 
         .as_ref()
 }
 
-/// The declaration at the far end of `c`: the innermost of the index's `decls` with its name
-/// whose lines hold `line` (the call's, or the name's), else one made of the server's item — a
-/// function a macro writes, as `methods!` writes the vault's, which the index has no row for —
-/// and whether it was made.
+/// Resolve call `c` to the innermost indexed declaration matching its name and line, or
+/// create one from a server item when the index has none.
 fn decl_of(text: &str, decls: &[CodeSymbol], c: &Call, line: u32) -> Option<(CodeSymbol, bool)> {
     let indexed = decls
         .iter()

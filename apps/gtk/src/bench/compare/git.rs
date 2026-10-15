@@ -1,4 +1,4 @@
-//! Drills over the comparisons the Git pane's rows open: the working tree, the index, a commit.
+//! Drill comparisons opened from Git rows: working tree, index and commits.
 
 use super::disk::centre;
 use super::*;

@@ -42,102 +42,60 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * Put a note's text in the buffer as its own, with nothing to undo back into.
- *
- * The state object outlives every note it holds, and a programmatic edit is an undo step like any
- * other, so the history has to go with the text: an undo that walked back past the load would put
- * one file's words in another's.
- */
+/** Load note text and reset undo history so undo cannot restore a previous note. */
 fun TextFieldState.load(text: String) {
     setTextAndPlaceCursorAtEnd(text)
     undoState.clearHistory()
 }
 
+/** The document in front of the reader: a note, a PDF or an image, one at a time. */
+sealed interface Doc {
+    val rel: String
+}
+
 /** What the note in front of the reader is, and what the vault has to say about it. */
 data class Open(
-    val rel: String,
-    /**
-     * The text as the vault has it: what was read off disk, or what was last written back.
-     *
-     * What the *reader* has is [VaultModel.buffer], and the difference between the two is the
-     * whole of "this note is dirty" — it is what autosave compares against and what a write
-     * replaces.
-     */
+    override val rel: String,
+    /** Last text read or saved on disk. Compare with [VaultModel.buffer] to detect edits. */
     val text: String = "",
     val etag: Etag? = null,
     /** Somebody else wrote the file while it was open and dirty: autosave has stopped. */
     val changedOnDisk: Boolean = false,
     /** Conflict copies Syncthing left beside it. */
     val conflicts: List<String> = emptyList(),
-    /**
-     * The query that led here, until the page has been marked with it.
-     *
-     * A search hit and a file row are the same act of opening a note, and this is the only thing
-     * that tells them apart: one was looked for, the other was picked off a list. Consumed once
-     * the way [VaultState.message] is ([found]), because where a reader was sent is a moment
-     * rather than something the note now has.
-     */
+    /** Search query to highlight once when the opened note appears ([found]). */
     val find: String? = null,
-    /**
-     * How far down the rendered page it opens, in pixels: where the reader was when they followed
-     * a backlink out of it, which Back returns them to ([Back.File]), or when they opened the
-     * editor, which Done returns them to ([VaultModel.keepPlace]). Consumed once the page is up,
-     * as [find] is ([VaultModel.placed]).
-     */
+    /** One-time scroll position for Back or return from editing ([VaultModel.placed]). */
     val scroll: Int = 0,
-    /**
-     * Whether the reader has the note's own find open ([VaultModel.finding]).
-     *
-     * Not [find]: that is one word the app was handed and marks once, this is a bar the reader
-     * types into. It belongs to the note in front, so opening another puts it away.
-     */
+    /** Whether this note's find bar is open ([VaultModel.finding]). */
     val finding: Boolean = false,
     /** Print… was picked for the note, and its screen has yet to hand it to the print system. */
     val printing: Boolean = false,
-    /**
-     * The reader is on the way out of the note — closing it, closing the vault, opening another —
-     * over edits saving was paused on, and has been asked which version to keep
-     * ([VaultModel.answer]).
-     */
+    /** Pending exit over unsaved edits after a save conflict ([VaultModel.answer]). */
     val leaving: Boolean = false,
-    /**
-     * The reader is on the way out of the note, its edits could not be written, for this reason,
-     * and they have been asked whether to go without them ([VaultModel.answer]).
-     */
+    /** Pending exit after a failed save, with its reason ([VaultModel.answer]). */
     val unsaved: String? = null,
-) {
+    /** What closing the note goes back to. Anything else opened lets it go. */
+    val back: Back? = null,
+) : Doc {
     /** Whether [typed] holds anything the vault does not have: what a write would put there. */
     fun dirty(typed: CharSequence): Boolean = typed.toString() != text
 
-    /**
-     * Whether taking [typed] away would lose edits: saving is paused while the file has moved
-     * under the note, so no exit can write them. A banner over a note nobody typed into has
-     * nothing to lose.
-     */
+    /** Whether leaving would lose [typed] edits while saving is paused. */
     fun wouldLose(typed: CharSequence): Boolean = changedOnDisk && dirty(typed)
 }
 
-/**
- * The PDF in front of the reader: where it is in the vault, where on disk, and where it opens —
- * and whether its find is open ([VaultModel.finding]) and Print… waits on it, as a note's do
- * ([Open.finding], [Open.printing]).
- */
+/** Open PDF path, starting position, find state, and pending print request. */
 data class OpenPdf(
-    val rel: String,
+    override val rel: String,
     val path: String,
     val at: PdfPlace? = null,
     val finding: Boolean = false,
     val printing: Boolean = false,
-)
+) : Doc
 
-/**
- * The image in front of the reader: where it is in the vault, and where on disk. It opens on the
- * image screen rather than as a note, which is what every file that was not a PDF used to do.
- * [animated] is read off the file where the image is resolved, never on the main thread: an
- * animated GIF, WebP or PNG is never recoloured, so it has no Invert.
- */
-data class OpenImage(val rel: String, val path: String, val animated: Boolean)
+/** Open image path and animation flag. Animated images cannot be recoloured or inverted. */
+data class OpenImage(override val rel: String, val path: String, val animated: Boolean) : Doc
 
 /** [rel] at [path], read for whether it moves. Blocking. */
 private fun imageAt(rel: String, path: String) = OpenImage(rel, path, isAnimated(path))
@@ -147,19 +105,11 @@ sealed interface Back {
     /** A PDF, by a tap on a highlight the note's link paints, kept where the reader was in it. */
     data class Pdf(val pdf: OpenPdf) : Back
 
-    /**
-     * Any document, by one of Browse's backlinks, opened again where its screen last said the
-     * reader was ([VaultModel.reading]): [at] in a PDF, [scroll] pixels down a note. An image
-     * opens fitted, as it always does.
-     */
+    /** Reopen a backlink source at its last PDF or note position; images open fitted. */
     data class File(val rel: String, val at: PdfPlace? = null, val scroll: Int = 0) : Back
 }
 
-/**
- * Where a PDF opens: [top] points down page [page], at [zoom] and pushed [panX] pixels sideways —
- * the place a reader left it, which Back from a note returns them to. Or the page a link into it
- * names and the four numbers of the passage it quotes there, shown as the selection.
- */
+/** PDF page, offset, zoom, pan, or selected passage for an internal link. */
 data class PdfPlace(
     val page: Int,
     val top: Float = 0f,
@@ -170,84 +120,68 @@ data class PdfPlace(
 
 data class VaultState(
     val root: String? = null,
-    /**
-     * [root] is the folder just picked, and the core has not handed the vault over yet: the index
-     * is being opened, and on the app's first vault the library loaded. Set on the pick itself,
-     * so the picker is gone by the next frame rather than sitting there as if the tap were lost.
-     */
+    /** Vault [root] is opening; show loading immediately while the core initializes. */
     val opening: Boolean = false,
     val indexing: Boolean = false,
-    /**
-     * The reader stopped the walk ([VaultModel.stopIndexing]): the index holds what it had read,
-     * and nothing but [VaultModel.resumeIndexing] walks again — not even the rescan every return
-     * to the app asks for. Opening the vault again is a resume too, as is Reload Vault.
-     */
+    /** Index walk paused by the reader; only resume or reopening starts another walk. */
     val paused: Boolean = false,
     /** Files the walk has been through so far, for as long as one is running. */
     val scanned: Long = 0,
-    /**
-     * Which half of the work is running. Nothing is in the index during [Phase.SCAN] — the walk
-     * is still finding the files — so that is the one phase where the tree really has nothing to
-     * show and the app has to say so rather than invite a reader in.
-     */
+    /** Index phase. During [Phase.SCAN], no files are available to browse. */
     val phase: Phase? = null,
-    /**
-     * Whether the index has anything in it yet: what the start screen's status line says in
-     * words, and the one thing the Browse button is allowed to depend on.
-     *
-     * A latch, because [indexing] is about work running and not about the index being empty. It
-     * is false for exactly one stretch of a vault's life — its first walk, until the first batch
-     * of files has been read — and a walk over an index that already has files (the rescan every
-     * resume starts) leaves it alone, those files still being there to browse. A walk stopped
-     * before its first batch sets it only if an earlier walk left files in the index.
-     */
+    /** Latch once indexed files are available; retain during rescans. */
     val ready: Boolean = false,
     /**
-     * How often what the index holds has moved on: each time the tree catches up with a running
-     * walk, and when one ends. What a list drawn from the index is keyed on, so a file the walk
-     * reads while the list is open turns up in it without the query being typed again.
+     * Revision incremented as indexing publishes batches or finishes, triggering list refreshes.
      */
     val revision: Int = 0,
     /** The directories whose children have been listed, so the tree redraws in place. */
     val children: Map<String, List<FileRow>> = emptyMap(),
     val expanded: Set<String> = setOf(""),
     val results: List<SearchHit> = emptyList(),
-    /**
-     * The query [results] answer. Behind the field while a search is under way, which is the one
-     * thing that tells "nothing found" from "not answered yet".
-     */
+    /** Query for [results], retained while the next search runs. */
     val searched: String = "",
-    val open: Open? = null,
-    val pdf: OpenPdf? = null,
-    val image: OpenImage? = null,
-    /** What closing the open note goes back to. Anything else opened lets it go. */
-    val back: Back? = null,
+    val doc: Doc? = null,
     val message: String? = null,
 ) {
-    /**
-     * Whether the vault opened for [picked] is still wanted: the reader may have closed it, or
-     * picked another, while the core was opening it.
-     */
+    /** The note in front, if a note is. */
+    val note: Open? get() = doc as? Open
+
+    /** [f] applied to the note in front, if it is [rel] when that is given; anything else stays. */
+    fun withNote(rel: String? = null, f: (Open) -> Open): VaultState {
+        val now = note?.takeIf { rel == null || it.rel == rel } ?: return this
+        return copy(doc = f(now))
+    }
+
+    /** Find opened or closed on the note or PDF in front; an image has none. */
+    fun finding(on: Boolean): VaultState = copy(
+        doc = when (doc) {
+            is Open -> doc.copy(finding = on)
+            is OpenPdf -> doc.copy(finding = on)
+            else -> doc
+        },
+    )
+
+    /** Print asked for, or handed over, on the note or PDF in front; an image has none. */
+    fun printing(on: Boolean): VaultState = copy(
+        doc = when (doc) {
+            is Open -> doc.copy(printing = on)
+            is OpenPdf -> doc.copy(printing = on)
+            else -> doc
+        },
+    )
+
+    /** The document in front closed: back to the PDF the note was reached from, else nothing. */
+    fun closed(): VaultState = copy(doc = (note?.back as? Back.Pdf)?.pdf)
+
+    /** Whether the still-opening vault for [picked] is still wanted. */
     fun waitsFor(picked: String): Boolean = opening && root == picked
 
-    /**
-     * No walk running any more, whatever ended it short of finishing: a failure, or the events
-     * no longer being read. What the status line and the service a walk holds go by, and what
-     * lets the next return to the app walk again. What the index holds is left as it is.
-     */
+    /** Clear indexing state after failure or interrupted event reading; retain indexed files. */
     fun walkOver(): VaultState = copy(indexing = false, paused = false, scanned = 0, phase = null)
 }
 
-/**
- * What the switcher ranks: every file the index holds, then every note in a folder git ignores
- * that it does not, then every note a link names that is not there yet, by the path creating it
- * would give it, then every front matter alias, by the alias.
- *
- * One list, so they rank together, in that order: the ranking is stable, so at the same score an
- * indexed file leads an ignored one, a file that is there leads a note only linked to, and a path
- * leads an alias. A row is a place in [names] rather than the string there, because one alias can
- * name two notes.
- */
+/** Switcher names in tie-break order: indexed, ignored, missing linked, then aliases. */
 class Corpus(
     files: List<String> = emptyList(),
     ignored: List<String> = emptyList(),
@@ -260,10 +194,7 @@ class Corpus(
     /** What the ranking reads. */
     val names = files + unindexed + missing + aliases.map { it.name }
 
-    /**
-     * [names] held on the core's side, ranked there: a keystroke sends the query, not the names.
-     * Built on first use, which [VaultModel.loadNames] makes off the main thread.
-     */
+    /** Core-ranked switcher names loaded off the main thread on first use. */
     val ranker: Ranker by lazy { Ranker(names) }
 
     private val indexed = files.size
@@ -282,12 +213,7 @@ class Corpus(
     /** Where [rel] is among the paths, if it is: how a recent note finds its row. */
     fun find(rel: String): Int? = names.subList(0, paths).indexOf(rel).takeIf { it >= 0 }
 
-    /**
-     * What a row reads and what picking it does: [name] over [rel], and a pick opens [rel], or
-     * writes it first when it is [unwritten]. A path's name is its file's; an alias is its own,
-     * with the whole path of its note under it, since the alias says nothing of where that is.
-     * An [ignored] note is in a folder git ignores, which the row says, as the desktop's does.
-     */
+    /** Switcher row label and target [rel]; create [unwritten] notes when picked. */
     data class Row(
         val name: String,
         val rel: String,
@@ -296,12 +222,7 @@ class Corpus(
     )
 }
 
-/**
- * When the switcher's names are read again: never two loads at once, and an asking that comes
- * while one runs is kept for one more load after it rather than restarting it. A load cut short
- * is a load thrown away, and one that took longer than the typing between two keystrokes, or than
- * the walk between two batches, never landed at all.
- */
+/** Coalesce requests during a name load into one follow-up load instead of restarting it. */
 class Reload {
     private var running = false
 
@@ -325,25 +246,14 @@ class Reload {
     }
 }
 
-/**
- * The notes behind a document's [links], once each, in the index's path order: a note that links
- * to it three times is one backlink, as it is on the desktop.
- */
+/** Deduplicate [links] by source note in indexed path order. */
 fun linkingNotes(links: List<Backlink>): List<String> = links.map { it.srcRelPath }.distinct()
 
-/**
- * Back to [rel] at [here], if that is where its screen last said the reader was, and otherwise at
- * its top: a place said of another document is no place in this one.
- */
+/** Return to [rel] at [here] only if that position belongs to the same document. */
 fun backTo(rel: String, here: Back.File?): Back.File =
     here?.takeIf { it.rel == rel } ?: Back.File(rel)
 
-/**
- * [save] against [expected], and when the etag gate refuses, the file as it is now if it still
- * holds [last] — what was last read or written: Syncthing setting an mtime or writing the same
- * bytes again moves the etag alone. Anything else there stays a refusal. The desktop's
- * `unchanged` (`save.rs`).
- */
+/** Save against [expected]. If the etag changed but text still equals [last], retry the save. */
 fun saveOver(expected: Etag?, last: String, read: () -> Note, save: (Etag?) -> Etag): Etag =
     try {
         save(expected)
@@ -353,11 +263,7 @@ fun saveOver(expected: Etag?, last: String, read: () -> Note, save: (Etag?) -> E
     }
 
 /**
- * The vault, its events, and the one note in front of the reader.
- *
- * Every call into the core is blocking and goes on [Dispatchers.IO]; nothing here touches the
- * main thread except the state it publishes. Nothing arrives from the filesystem on its own —
- * the vault is opened unwatched — so [rescan] is what the app calls when it comes back.
+ * Vault state and open note. Blocking core calls use [Dispatchers.IO]; filesystem updates use [rescan].
  */
 class VaultModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(VaultState())
@@ -365,15 +271,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     val recents = Recents(app)
 
-    /**
-     * The note's text, as the reader has it: the editor's field state, hoisted.
-     *
-     * The editor is not the only thing that touches it. Taking the version on disk replaces it,
-     * closing the vault has to write it out before the handle goes, and the rendered view draws
-     * from it so that an edit cannot be in one view and not the other — none of which a state
-     * remembered inside the editor could be reached for. One object for the app's life, because
-     * building another throws away the undo history with it; the text in it is replaced ([load]).
-     */
+    /** Hoisted editor buffer shared by rendering, saving, and conflict resolution. */
     val buffer = TextFieldState()
 
     private var vault: Vault? = null
@@ -384,10 +282,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** One [write] at a time, so each goes out with the etag the one before it recorded. */
     private val writing = Mutex()
 
-    /**
-     * The switcher's names ([loadNames]): null until first read, then the index's as soon as they
-     * are, the ignored notes joining when their walk lands.
-     */
+    /** Switcher names, `null` until first load; ignored notes join when scanned. */
     private val _names = MutableStateFlow<Corpus?>(null)
     val names: StateFlow<Corpus?> = _names.asStateFlow()
 
@@ -435,12 +330,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Open the vault at [root], leaving the picker on the next frame.
-     *
-     * The core's open is quick on a warm index, but the first one of a run loads the library and
-     * a new vault creates its index; the reader waits for neither on a picker that has not moved.
-     * What the core hands back is let go if the reader has closed the vault, or picked another,
-     * in the meantime.
+     * Open [root] asynchronously, leaving the picker immediately and discarding superseded results.
      */
     fun open(root: String) {
         _state.value = VaultState(root = root, opening = true)
@@ -539,13 +429,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         seen = null
     }
 
-    /**
-     * Say how far the walk has got, and let the tree catch up with it.
-     *
-     * The index fills as the walk goes, in batches, so the directories already in it can be
-     * listed while the rest are still being found. On a vault of any size that is the difference
-     * between a tree that appears when the walk ends and one that is usable from the start.
-     */
+    /** Publish walk progress and refresh the tree after each indexed batch. */
     private suspend fun walking(p: Progress) {
         // Out of [Phase.SCAN] with files behind it is the moment there is something to open, and
         // it is the moment the status line says so.
@@ -570,15 +454,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(revision = it.revision + 1) }
     }
 
-    /**
-     * Read the switcher's names again, in the model's own time: what asks for them never waits
-     * on, or cancels, a load ([Reload]), and the names it already has stay up meanwhile.
-     *
-     * The index's lists are queries and come first. With [walkIgnored], the folders git ignores
-     * are walked after them, as the desktop's Go to File walks them as it opens: over shared
-     * storage that is a walk of the whole vault, the slow half, so their notes join the list when
-     * it lands rather than holding the list back.
-     */
+    /** Reload switcher names without cancelling an active load; optionally scan ignored folders. */
     fun loadNames(walkIgnored: Boolean) {
         if (!reload.ask(walkIgnored)) return
         viewModelScope.launch {
@@ -650,36 +526,25 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
         if (!was.paused && !was.indexing) runCatching { v.rescan() }
         // An open note may have been changed by Syncthing while the app was away.
-        _state.value.open?.let { onChanged(it.rel) }
+        _state.value.note?.let { onChanged(it.rel) }
     }
 
-    /**
-     * Reload Vault: a [rescan], except on a paused vault, which refuses every walk but a resume.
-     * A reader asking for the vault to be read again there means the rest of it, so it resumes.
-     */
+    /** Rescan the vault, or resume indexing if it was paused. */
     fun reloadVault() {
         if (!_state.value.paused) {
             rescan()
             return
         }
         resumeIndexing()
-        _state.value.open?.let { onChanged(it.rel) }
+        _state.value.note?.let { onChanged(it.rel) }
     }
 
-    /**
-     * Stop the walk, keeping what it has indexed.
-     *
-     * Nothing changes here yet: the walk finishes the file it is on and then says it stopped,
-     * and that reconcile is what pauses the vault ([apply]). Until it lands, Stop is still Stop.
-     */
+    /** Request a stop; pause after the active file completes, retaining indexed files. */
     fun stopIndexing() = viewModelScope.launch(Dispatchers.IO) {
         runCatching { vault?.stopIndexing() }
     }
 
-    /**
-     * Finish a stopped walk. Said at once, as the desktop does: a walk is starting, and a second
-     * press would ask for a second one.
-     */
+    /** Resume a paused walk and publish its starting state immediately. */
     fun resumeIndexing() = viewModelScope.launch(Dispatchers.IO) {
         val v = vault ?: return@launch
         _state.update { it.copy(indexing = true, paused = false) }
@@ -688,16 +553,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------------------ one file
 
-    /**
-     * Open a file, and — for a search hit — say what was being looked for.
-     *
-     * [find] is the query rather than [SearchHit.at]: the hit's range is bytes into the markdown
-     * source and the screen holds the page that source rendered to, so the only thing that
-     * survives the crossing is the words. A PDF drops it.
-     *
-     * [at] is where a PDF opens, and [back] the document a note is opened from, for [close] to
-     * return to; see [openFromPdf].
-     */
+    /** Open a file and pass a search query for one-time highlighting. PDFs ignore the query. */
     fun openFile(rel: String, find: String? = null, at: PdfPlace? = null, back: Back? = null) {
         // What is in the buffer belongs to the note it was typed into, and the buffer is about to
         // hold another note's text: a write left pending across the swap would put these words in
@@ -717,19 +573,13 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         recents.touch(Recents.Kind.Notes, rel)
         if (rel.endsWith(".pdf", ignoreCase = true)) {
             val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
-            path.onSuccess { p ->
-                _state.update {
-                    it.copy(pdf = OpenPdf(rel, p, at), open = null, image = null, back = null)
-                }
-            }
+            path.onSuccess { p -> _state.update { it.copy(doc = OpenPdf(rel, p, at)) } }
                 .onFailure { fail("Cannot open this file", it) }
             return
         }
         if (imageKind(rel) != null) {
             val image = withContext(Dispatchers.IO) { runCatching { imageAt(rel, v.pathOf(rel)) } }
-            image.onSuccess { i ->
-                _state.update { it.copy(image = i, open = null, pdf = null, back = null) }
-            }
+            image.onSuccess { i -> _state.update { it.copy(doc = i) } }
                 .onFailure { fail("Cannot open this file", it) }
             return
         }
@@ -742,49 +592,33 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             buffer.load(note.text)
             _state.update {
                 it.copy(
-                    pdf = null,
-                    image = null,
-                    open = Open(
+                    doc = Open(
                         rel, note.text, note.etag,
-                        conflicts = conflicts, find = find, scroll = scroll,
+                        conflicts = conflicts, find = find, scroll = scroll, back = back,
                     ),
-                    back = back,
                 )
             }
         }.onFailure { fail("Cannot read this note", it) }
     }
 
-    /**
-     * Put the note down, writing anything the pause was still holding — and go back to the
-     * document it was reached from ([Back]), if a highlight or a backlink is what opened it.
-     */
+    /** Close the note after saving pending edits, then return to its backlink source if any. */
     fun close() = leave {
-        when (val to = _state.value.back) {
+        when (val to = _state.value.note?.back) {
             // [show], not [openFile]: the buffer has been dealt with, and going through [leave]
             // again would ask again about edits the reader has just chosen to drop.
             is Back.File -> show(to.rel, at = to.at, scroll = to.scroll)
-            else -> _state.update {
-                it.copy(open = null, pdf = (to as? Back.Pdf)?.pdf, image = null, back = null)
-            }
+            else -> _state.update { it.closed() }
         }
     }
 
-    /**
-     * Open the note whose link paints a highlight on the PDF in front, marked at the text the link
-     * quotes, as the desktop opens it on a click. The PDF is kept at [place], where the reader
-     * was, for Back from the note to return to.
-     */
+    /** Open a PDF highlight's source note and save the PDF position for Back. */
     fun openFromPdf(link: PdfLink, place: PdfPlace) {
-        val from = _state.value.pdf ?: return
+        val from = _state.value.doc as? OpenPdf ?: return
         val back = Back.Pdf(from.copy(at = place, finding = false))
         openFile(link.srcRelPath, find = link.alias, back = back)
     }
 
-    /**
-     * Where the reader is in the document in front, as its screen last said ([reading]): what a
-     * backlink followed out of it keeps for Back. Not state, since nothing draws from it and it
-     * changes with every frame of a scroll.
-     */
+    /** Last document position for returning from a backlink; kept outside UI state. */
     private var here: Back.File? = null
 
     /**
@@ -801,12 +635,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun openBacklink(note: String, from: String) = openFile(note, back = backTo(from, here))
 
-    /**
-     * The image an embed names, in the vault and on this device: the path as the note spells it
-     * when a file is there, and otherwise the one the index places that name at — `![[img.png]]` is
-     * written the way a wikilink is, and the file lives in `Attachments/`. Null for a path out of
-     * the vault, or for nothing at all. Blocking: the rendered view asks from its loading thread.
-     */
+    /** Resolve an embedded image within the vault, including indexed wikilink targets. */
     fun image(rel: String): OpenImage? {
         val v = vault ?: return null
         return runCatching { v.asset(rel)?.let { imageAt(it, v.pathOf(it)) } }.getOrNull()
@@ -827,18 +656,12 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         runCatching { vault?.filesWithTag(tag) }.getOrNull().orEmpty().map { it.relPath }
     }
 
-    /**
-     * The templates that say where their notes go (`accent-target:`), which New from Template…
-     * offers, as the desktop's does; null with no vault open.
-     */
+    /** Templates with `accent-target:` offered by New from Template…; `null` without a vault. */
     suspend fun templateTargets(): List<String>? = withContext(Dispatchers.IO) {
         vault?.let { v -> runCatching { v.templateTargets() }.getOrDefault(emptyList()) }
     }
 
-    /**
-     * The templates Today's Note may use: those whose `accent-target:` is dated (`{{date…}}`), so
-     * the note one makes is the day's. Null with no vault open.
-     */
+    /** Templates with a dated `accent-target:` for Today's Note; `null` without a vault. */
     suspend fun dailyTemplates(): List<String>? = withContext(Dispatchers.IO) {
         vault?.let { v ->
             runCatching {
@@ -855,16 +678,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         runCatching { vault?.pdfLinks(rel) }.getOrNull().orEmpty()
     }
 
-    /**
-     * Put the vault down and go back to the picker.
-     *
-     * The recent list keeps it, so the picker offers it straight back; what goes is the handle and
-     * everything the screen was reading out of it. Closed in the order [open] closes the one it
-     * replaces, and for the same reason: [listen] is waiting on a half-second drain, sees that
-     * `vault` is no longer the vault it was given, and leaves. Its blocked call is safe — uniffi
-     * counts the calls in flight and frees the object behind the last of them, and the next one
-     * throws, which that loop already treats as the end.
-     */
+    /** Close the vault, retain it in recents, and release its state and handle. */
     fun closeVault() = leave {
         // After the buffer is written rather than before, because the write goes through the
         // handle: the buffer is the only copy of whatever was typed in the last second.
@@ -876,16 +690,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Follow a link out of the rendered note.
-     *
-     * The target is what the link spelled — a note's name, a path, possibly with a `#heading` or
-     * a PDF's `page=` after it. The index is what knows which file that is, and failing it the
-     * disk, for a file in a tree the index does not hold (a gitignored `build/`); a target
-     * neither can place is a link to a note nobody has written yet, which only the switcher
-     * writes.
-     *
-     * A PDF opens on the page the link names, showing the passage its numbers quote there, as the
-     * desktop follows one. A heading after a note's name is not placed yet.
+     * Resolve note links through the index or disk, creating missing notes and opening PDF anchors.
      */
     fun openLink(target: String) = viewModelScope.launch {
         val v = vault ?: return@launch
@@ -912,23 +717,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         data class Failed(val why: String) : Saved
     }
 
-    /**
-     * Write the note back, refusing rather than resolving when the file has moved under it — its
-     * text, not its etag alone ([saveOver]).
-     *
-     * A refusal leaves the buffer alone and raises the banner: that buffer holds the only copy of
-     * both the edits and the answer nobody has given yet. Same rule as the desktop. [force] is
-     * that answer given as Keep mine, and writes over whatever is on disk: a save that expects no
-     * particular version is the core's forced write, the desktop's Overwrite.
-     *
-     * One at a time ([writing]), and once the core is writing, the rest runs whether or not the
-     * caller is still waiting: autosave is cancelled by the next keystroke, and a write the core
-     * committed but nobody recorded leaves an etag the file no longer has, which the next write
-     * reads as somebody else's change.
-     */
+    /** Save the buffer, serializing writes; preserve it and show a banner on content conflicts. */
     private suspend fun write(text: String, force: Boolean = false): Saved = writing.withLock {
         val v = vault ?: return@withLock Saved.Written
-        val open = _state.value.open ?: return@withLock Saved.Written
+        val open = _state.value.note ?: return@withLock Saved.Written
         if (!force && !open.dirty(text)) return@withLock Saved.Written
         if (!force && open.wouldLose(text)) return@withLock Saved.Paused
         withContext(NonCancellable) {
@@ -944,15 +736,16 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     // What was just written is what is on disk, so there is nothing left to
                     // choose between.
                     _state.update { s ->
-                        val now = s.open?.takeIf { it.rel == open.rel } ?: return@update s
-                        s.copy(open = now.copy(text = text, etag = etag, changedOnDisk = false))
+                        s.withNote(open.rel) {
+                            it.copy(text = text, etag = etag, changedOnDisk = false)
+                        }
                     }
                     Saved.Written
                 },
                 onFailure = { e ->
                     when (e) {
                         is AccentException.ChangedOnDisk -> {
-                            _state.update { it.copy(open = it.open?.copy(changedOnDisk = true)) }
+                            _state.update { s -> s.withNote { it.copy(changedOnDisk = true) } }
                             Saved.Paused
                         }
                         else -> Saved.Failed(failure("Cannot save this note", e))
@@ -963,12 +756,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Write what is in the buffer before whatever is about to take it away.
-     *
-     * The pause is a coroutine that will be cancelled with the vault or superseded by the next
-     * note, so the exits ask for the write themselves. A note with saving paused is left alone:
-     * that pause is the point of the banner, and writing anyway would overwrite the file the
-     * reader has not chosen yet.
+     * Save before an exit can discard the buffer; leave paused conflicts for the reader to resolve.
      */
     private suspend fun flush(): Saved = write(buffer.text.toString())
 
@@ -978,38 +766,28 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     private fun leave(then: suspend () -> Unit) = viewModelScope.launch { exit(flush(), then) }
 
-    /**
-     * Go once the buffer is [saved], and otherwise hold the exit and ask.
-     *
-     * Edits saving is paused on, or was just refused, and edits a write failed on are what no
-     * exit can write, and going anyway would drop them with nothing said. So the exit is held
-     * instead and the reader asked which version to keep ([Open.leaving]), or whether to go
-     * without them ([Open.unsaved]); [answer] lets it go or drops it.
-     */
+    /** Exit when [saved]; otherwise hold the exit and ask about edits that cannot be saved. */
     private suspend fun exit(saved: Saved, then: suspend () -> Unit) {
         when (saved) {
             Saved.Written -> then()
             Saved.Paused -> {
                 held = then
-                _state.update { it.copy(open = it.open?.copy(leaving = true)) }
+                _state.update { s -> s.withNote { it.copy(leaving = true) } }
             }
             is Saved.Failed -> {
                 held = then
-                _state.update { it.copy(open = it.open?.copy(unsaved = saved.why)) }
+                _state.update { s -> s.withNote { it.copy(unsaved = saved.why) } }
             }
         }
     }
 
     /**
-     * The reader's answer to the exit [exit] holds: `true` keeps their edits over the version on
-     * disk and goes, `false` goes without them — nothing writes them, saving being paused or
-     * failing — and `null` stays, edits and banner as they were. A failed write is offered only
-     * `false` and `null`, and a Keep mine that fails is asked about as one.
+     * Resolve a pending [exit]: keep edits, discard them, or stay. Failed saves cannot keep edits.
      */
     fun answer(keep: Boolean?) = viewModelScope.launch {
         val then = held ?: return@launch
         held = null
-        _state.update { it.copy(open = it.open?.copy(leaving = false, unsaved = null)) }
+        _state.update { s -> s.withNote { it.copy(leaving = false, unsaved = null) } }
         when (keep) {
             null -> {}
             true -> exit(write(buffer.text.toString(), force = true), then)
@@ -1025,12 +803,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         if (saved is Saved.Failed) said(saved.why)
     }
 
-    /**
-     * Take what is on disk, dropping the edits in the buffer. Not through [leave], whose write of
-     * those edits would be refused and ask again the question this answers.
-     */
+    /** Replace the buffer with disk text, discarding local edits without another save attempt. */
     fun reload() {
-        val open = _state.value.open ?: return
+        val open = _state.value.note ?: return
         viewModelScope.launch { show(open.rel) }
     }
 
@@ -1042,10 +817,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }.onFailure { fail("Cannot create this note", it) }
     }
 
-    /**
-     * Make the note [template] says it goes to and open it, or open the one it made already —
-     * asked twice in a day, a dated target is the same note, which is what makes it a daily one.
-     */
+    /** Create or open the note at [template]'s target, including an existing daily note. */
     fun fromTemplate(template: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val made = withContext(Dispatchers.IO) { runCatching { v.noteFromTemplate(template) } }
@@ -1056,12 +828,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }.onFailure { fail("Cannot create this note", it) }
     }
 
-    /**
-     * Write a note a link names, and open it: a "Not created" row in the switcher.
-     *
-     * The rows are kept from one walk to the next, so the note may have been written since they
-     * were read — by Syncthing, or by this row before the index caught up — and is then opened.
-     */
+    /** Create a missing linked note or open it if another writer created it first. */
     fun create(rel: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         if (withContext(Dispatchers.IO) { v.exists(rel) }) openFile(rel) else newNote(rel)
@@ -1069,13 +836,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     // ----------------------------------------------------------------------- sync conflicts
 
-    /**
-     * Keep the conflict copy: its text becomes the note's and the copy goes, with any edits not
-     * written yet — kept away from [leave] as [reload] is, the file having just moved under them.
-     */
+    /** Use the conflict copy as note text and delete it, preserving pending edits. */
     fun keepTheirs(conflict: String) = viewModelScope.launch {
         val v = vault ?: return@launch
-        val open = _state.value.open ?: return@launch
+        val open = _state.value.note ?: return@launch
         val done = withContext(Dispatchers.IO) { runCatching { v.adoptConflict(open.rel, conflict) } }
         done.onSuccess { show(open.rel) }.onFailure { fail("Cannot take the other copy", it) }
     }
@@ -1085,30 +849,23 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val v = vault ?: return@launch
         val done = withContext(Dispatchers.IO) { runCatching { v.delete(conflict) } }
         done.onSuccess {
-            _state.update {
-                it.copy(open = it.open?.copy(conflicts = it.open.conflicts - conflict))
-            }
+            _state.update { s -> s.withNote { it.copy(conflicts = it.conflicts - conflict) } }
         }.onFailure { fail("Cannot remove the other copy", it) }
     }
 
     private fun onConflict(original: String) = _state.update { s ->
-        if (s.open?.rel != original) s else s.copy(open = s.open.copy(conflicts = emptyList()))
-    }.also { _state.value.open?.let { open -> refreshConflicts(open.rel) } }
+        s.withNote(original) { it.copy(conflicts = emptyList()) }
+    }.also { _state.value.note?.let { open -> refreshConflicts(open.rel) } }
 
     private fun refreshConflicts(rel: String) = viewModelScope.launch(Dispatchers.IO) {
         val v = vault ?: return@launch
         val found = runCatching { v.conflictsOf(rel) }.getOrDefault(emptyList())
-        _state.update { if (it.open?.rel != rel) it else it.copy(open = it.open.copy(conflicts = found)) }
+        _state.update { s -> s.withNote(rel) { it.copy(conflicts = found) } }
     }
 
     // ------------------------------------------------------------------------------- search
 
-    /**
-     * How many searches have been asked for. An answer to any but the last is dropped: the core
-     * interrupts a search a newer one supersedes, and its answer, an error, would otherwise empty
-     * the list — a count rather than the query, because the same query is asked again as the
-     * walk reads more files, and the second asking supersedes the first.
-     */
+    /** Search generation; ignore superseded responses, including errors. */
     private val asked = AtomicInteger()
 
     fun search(query: String) {
@@ -1124,82 +881,55 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** The query has been marked on the page. One-shot, the same way [said] is. */
-    fun found() = _state.update { it.copy(open = it.open?.copy(find = null)) }
+    fun found() = _state.update { s -> s.withNote { it.copy(find = null) } }
 
     /** The rendered note has been put back where the reader was ([Open.scroll]). */
-    fun placed() = _state.update { it.copy(open = it.open?.copy(scroll = 0)) }
+    fun placed() = _state.update { s -> s.withNote { it.copy(scroll = 0) } }
 
-    /**
-     * Keep where the reader is in the rendered note for when it is drawn again: the editor takes
-     * its place, and Done builds the view anew.
-     */
+    /** Save rendered-note position across an editor visit. */
     fun keepPlace() = _state.update { s ->
-        s.copy(open = s.open?.let { it.copy(scroll = backTo(it.rel, here).scroll) })
+        s.withNote { it.copy(scroll = backTo(it.rel, here).scroll) }
     }
 
-    /**
-     * Open or put away the find of whatever is in front, a note or a PDF.
-     *
-     * With nothing in front there is nothing to find in and this does nothing, which is what
-     * [close] already does from the same palette.
-     */
-    fun finding(on: Boolean) = _state.update {
-        it.copy(open = it.open?.copy(finding = on), pdf = it.pdf?.copy(finding = on))
-    }
+    /** Toggle find for the open note or PDF; do nothing with no document open. */
+    fun finding(on: Boolean) = _state.update { it.finding(on) }
 
-    /**
-     * Ask for, or take back once it is under way, Print… of whatever is in front, a note or a
-     * PDF: the screen showing it does the printing, since that wants the page and the document
-     * it holds. With neither in front it does nothing, as [finding] does.
-     */
-    fun printing(on: Boolean) = _state.update {
-        it.copy(open = it.open?.copy(printing = on), pdf = it.pdf?.copy(printing = on))
-    }
+    /** Toggle printing for the open note or PDF; its screen performs the print. */
+    fun printing(on: Boolean) = _state.update { it.printing(on) }
 
     fun said(message: String?) = _state.update { it.copy(message = message) }
 
     // ------------------------------------------------------------------------------ helpers
 
-    /**
-     * Someone else wrote a file. Only the open note needs to know.
-     *
-     * A note holding nothing the vault does not have takes the new text as it stands, as the
-     * desktop reloads a clean tab; one holding edits raises the banner, since which of the two to
-     * keep is the reader's call.
-     */
+    /** Reload a clean open note after external changes; show a conflict for local edits. */
     private fun onChanged(rel: String) {
-        val open = _state.value.open ?: return
+        val open = _state.value.note ?: return
         if (open.rel != rel) return
         refreshConflicts(rel)
         viewModelScope.launch {
             val v = vault ?: return@launch
             val read = withContext(Dispatchers.IO) { runCatching { v.read(rel) } }
             val note = read.getOrNull() ?: return@launch
-            val cur = _state.value.open?.takeIf { it.rel == rel } ?: return@launch
+            val cur = _state.value.note?.takeIf { it.rel == rel } ?: return@launch
             // Nothing was typed here, so taking the new text loses nothing. The buffer and the
             // state in one step, as a note is opened.
             val take = cur.text != note.text && !cur.dirty(buffer.text)
             if (take) buffer.load(note.text)
             _state.update { s ->
-                val now = s.open?.takeIf { it.rel == rel } ?: return@update s
-                s.copy(
-                    open = when {
+                s.withNote(rel) { now ->
+                    when {
                         // Only touched: the text is the one already here.
                         now.etag != null && now.text == note.text -> now.copy(etag = note.etag)
                         take -> now.copy(text = note.text, etag = note.etag, changedOnDisk = false)
                         else -> now.copy(changedOnDisk = true)
-                    },
-                )
+                    }
+                }
             }
         }
     }
 
     /**
-     * Put a vault handle down without holding the frame.
-     *
-     * The last call to go frees the object, and the core's `Drop` shuts the language sessions
-     * down and joins the index worker — seconds, on a vault being reconciled for the first time.
-     * On a thread of its own, so the screen that asked is not the thread that waits.
+     * Release the vault off the UI thread; core drop may wait for indexing and language sessions.
      */
     private fun release(handle: Vault?) {
         val going = handle ?: return

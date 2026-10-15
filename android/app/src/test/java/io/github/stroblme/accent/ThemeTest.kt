@@ -15,12 +15,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The split between what the device is asked for and what the app brings: the accent is the
- * system's, the page and the ink on it are the desktop's. Material You tints its own surface and
- * text towards the wallpaper, so a scheme handed in here arrives tinted and has to come out flat.
- * Worth a test because it is pure arithmetic on a data class and nothing else here is.
- */
+/** System accent combines with fixed desktop page and ink colours despite Material You tinting. */
 class ThemeTest {
     private val tinted = Color(0xFFFEF7FF)
     private val white = Color(0xFFFFFFFF)
@@ -41,7 +36,7 @@ class ThemeTest {
         assertEquals(shade, dark.surfaceContainerHighest)
     }
 
-    /** A printout is the light page in either theme, so its accent is the light theme's. */
+    /** Printouts use the light page and accent in either theme. */
     @Test
     fun `paper takes the light theme's accent`() {
         val ink = Color(0xFF3584E4)
@@ -59,10 +54,7 @@ class ThemeTest {
         assertEquals(Color(0xFFEBEBEB), dark.onSurface)
     }
 
-    /**
-     * The dim step is libadwaita's `.dim-label`, 55% of the ink over the page, and is pinned
-     * because it is the one value here chosen for parity over contrast: 3.2:1 on white.
-     */
+    /** Dim labels match libadwaita's 55% ink opacity. */
     @Test
     fun `secondary text is the dim label over the same page`() {
         val light = lightColorScheme(onSurfaceVariant = tinted).flattened(dark = false)
@@ -71,10 +63,7 @@ class ThemeTest {
         assertEquals(0xFF8E8E8F.toInt(), dark.onSurfaceVariant.toArgb())
     }
 
-    /**
-     * A conflict block's sides are the desktop's green and blue mixed with the ink as its editor
-     * and preview mix them: under white ink these are the numbers its Dark preview paints.
-     */
+    /** Conflict colours match the desktop's green and blue mixed with ink. */
     @Test
     fun `a conflict is tinted as on the desktop`() {
         val (current, base, incoming) = conflictTints(Color.White)
@@ -86,7 +75,7 @@ class ThemeTest {
         assertTrue(html, ".conflict-incoming { background: rgba(122, 172, 238, 0.16); }" in html)
     }
 
-    /** The one family that is still the device's answer to what colour it is. */
+    /** The accent family comes from the device. */
     @Test
     fun `the accent comes through untouched`() {
         val accent = Color(0xFF6750A4)
@@ -94,10 +83,7 @@ class ThemeTest {
         assertEquals(accent, darkColorScheme(primary = accent).flattened(dark = true).primary)
     }
 
-    /**
-     * A PDF page, and an image that reads as a document: onto the dark page in a dark theme, left
-     * alone in a light one, and the other way round for a file the reader has inverted.
-     */
+    /** Documents use the dark page in dark theme, with inversion swapping page themes. */
     @Test
     fun `a document is recoloured onto the dark page`() {
         val dark = Theme.Recolour(0x1D1D20u, 0xEBEBEBu)
@@ -107,7 +93,7 @@ class ThemeTest {
         assertEquals(dark, pageTheme(dark = false, inverted = true))
     }
 
-    /** What makes the Browse pill dark on a light theme and light on a dark one. */
+    /** Browse pill contrast reverses between light and dark themes. */
     @Test
     fun `the inverse pair is the other mode's page`() {
         val light = lightColorScheme().flattened(dark = false)

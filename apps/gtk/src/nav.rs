@@ -1,5 +1,4 @@
-//! Panes and tabs as places: which pane is active, splitting and moving tabs between panes, and
-//! the back/forward history of where the reader has been.
+//! Manage active panes, tab splitting and moves, and Back/Forward history.
 
 use super::*;
 

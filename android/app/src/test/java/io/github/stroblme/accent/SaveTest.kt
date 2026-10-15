@@ -7,15 +7,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
-/**
- * A save the etag gate refuses, which looks at the file before it asks: an etag that moved over
- * the same text is no change. The vault behind it needs a device; the decision is [saveOver].
- */
+/** [saveOver] treats a changed etag with identical text as no conflict. */
 class SaveTest {
     private val read = Etag(1, 7uL, 1uL)
     private val touched = Etag(2, 7uL, 1uL)
 
-    /** A file on disk at [etag] holding [text], gated as the core gates a save. */
+    /** Gate a disk file at [etag] containing [text] as the core does. */
     private class Disk(var text: String, var etag: Etag) {
         fun save(text: String, expected: Etag?): Etag {
             if (expected != null && expected != etag) throw AccentException.ChangedOnDisk(etag)

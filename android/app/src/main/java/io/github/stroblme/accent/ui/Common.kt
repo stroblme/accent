@@ -64,27 +64,11 @@ fun flatRow() = ListItemDefaults.colors(containerColor = MaterialTheme.colorSche
 /** The gutter every screen keeps at its sides. */
 val Gutter: Dp = 16.dp
 
-/**
- * The gap a document keeps from the top of its frame and from the foot of the screen.
- *
- * The same on a note and on a PDF, which is the whole point of it: what is being read sits in the
- * same rectangle whichever of the two it is.
- */
+/** Shared top and bottom inset for note and PDF content. */
 val DocumentGap: Dp = 8.dp
 
 /**
- * The motion a surface arrives with, leaves with, and steps sideways with.
- *
- * Two durations and three curves. 200 ms for something arriving and 150 ms for something leaving
- * or moving across — Material's short-4 and short-3, the fast end of its own scale, because this
- * is a reading app and a transition that has to be waited for is worse than no transition at all.
- * What arrives decelerates into place and what leaves accelerates away, which is Material's
- * asymmetry and its reason: arriving is watched, leaving is not. A step sideways does both, since
- * it is one surface travelling rather than a new one showing up.
- *
- * Nothing here asks about reduced motion and nothing needs to: Compose scales every animation by
- * the platform's animator duration scale, so a device with animations turned off gets all of this
- * at once.
+ * Transition timing for arrival, exit, and sideways navigation, respecting system motion settings.
  */
 fun <T> arriving(): FiniteAnimationSpec<T> = tween(200, easing = LinearOutSlowInEasing)
 
@@ -98,14 +82,7 @@ fun Color.rgb(): UInt = (0xFFFFFF and toArgb()).toUInt()
 /** Whether this is a colour to read light text off. */
 fun Color.dark(): Boolean = luminance() < 0.5f
 
-/**
- * Whether the chrome is up: the bar over a note, and the Browse button at the foot of the screen.
- *
- * The desktop fades its chrome while the reader types. A phone has almost none to fade, so the
- * rule becomes the one every reader on the platform uses — it goes when the content scrolls on and
- * comes back when it scrolls back or is tapped. What is counted is travel rather than the last
- * delta, so a finger resting on a page does not flicker it.
- */
+/** Visibility of the document bar and Browse button. */
 class Chrome {
     var shown by mutableStateOf(true)
         private set
@@ -136,27 +113,7 @@ class Chrome {
     }
 }
 
-/**
- * A tap that puts the chrome up or takes it down, seen before anything else gets it.
- *
- * On the initial pass, because what is underneath may be a view rather than a composable: a
- * `WebView` consumes what its own scrolling used, and a consumed change is one no gesture on the
- * main pass can read. Nothing is consumed here either, so the tap still reaches whatever it was
- * aimed at.
- *
- * A tap and nothing else. A press held past the platform's long-press time belongs to whatever is
- * under the finger — a selection in the rendered note — so the wait for the fingers to come up is
- * given exactly that long and the chrome stays where it was.
- *
- * [claimed] is asked first, and is told where the tap landed: a surface with something of its own
- * at that point — a link on a PDF page — takes the tap by answering true, and the chrome does not
- * move. It is only ever asked about a gesture that turned out to be a tap, so it may act on what it
- * finds rather than answer and wait to be called again.
- *
- * [onTapped] is whatever else the surface wants the same tap to mean: a rendered note takes its
- * search highlight off with it. Both are captured once, along with the gesture, so what either
- * reads has to be state it can read again rather than a value it closed over.
- */
+/** Toggle chrome on an unclaimed tap without consuming the tap from the underlying view. */
 fun Modifier.onTap(
     chrome: Chrome,
     claimed: (Offset) -> Boolean = { false },
@@ -187,13 +144,7 @@ fun Modifier.onTap(
     }
 }
 
-/**
- * A floating button: what a phone has where the desktop has a header bar.
- *
- * Inverted against the page — dark on a light theme, light on a dark one — because it is the one
- * thing on the screen that is not the document, and a pale pill on a pale page is a pill nobody
- * sees. The one place the app spends contrast rather than colour.
- */
+/** Floating action styled with inverted page contrast. */
 @Composable
 fun Pill(label: String, onClick: () -> Unit) {
     Surface(
@@ -210,13 +161,7 @@ fun Pill(label: String, onClick: () -> Unit) {
     }
 }
 
-/**
- * The bar over a document: what it is called, and what can be done to it — text buttons, at its
- * end.
- *
- * The same bar over a note and over a PDF, so that the viewport under it begins in the same place
- * in both.
- */
+/** Shared document bar with title and trailing actions for notes and PDFs. */
 @Composable
 fun DocumentBar(title: String, actions: @Composable RowScope.() -> Unit) {
     Row(
@@ -234,11 +179,7 @@ fun DocumentBar(title: String, actions: @Composable RowScope.() -> Unit) {
     }
 }
 
-/**
- * A bar action that stays on until it is pressed again — Invert — drawn as the bar's other text
- * buttons are, and filled with the accent while it is on. Its label says what it does, not whether
- * it is doing it, so the fill is what says that.
- */
+/** Toggle action whose accent fill indicates its active state. */
 @Composable
 fun BarToggle(label: String, on: Boolean, onClick: () -> Unit, enabled: Boolean = true) {
     val colors = MaterialTheme.colorScheme
@@ -256,10 +197,7 @@ fun BarToggle(label: String, on: Boolean, onClick: () -> Unit, enabled: Boolean 
     }
 }
 
-/**
- * Chrome that goes and comes back. It lies over the document ([DocumentFrame]), so nothing under
- * it moves when it does.
- */
+/** Chrome overlays the document, preserving its position when shown or hidden. */
 @Composable
 fun FadingBar(visible: Boolean, content: @Composable () -> Unit) {
     AnimatedVisibility(
@@ -271,24 +209,7 @@ fun FadingBar(visible: Boolean, content: @Composable () -> Unit) {
     }
 }
 
-/**
- * A document, with its [bar] lying over the top of it rather than above it. A note and a PDF both.
- *
- * A document is read at a scroll offset, and a PDF at a zoom as well. A bar that takes its space
- * from the layout gives the document a different height every time it comes and goes, and a
- * document laid out again is text that moves — the one thing the reader who tapped for the bar did
- * not ask for. Here the content keeps the whole rectangle whether the bar is up or not, so a tap
- * changes only what is drawn on top.
- *
- * What that costs is the head of the document, which the bar covers while it is up and which
- * cannot be scrolled out from under it, the document being at its top already: a PDF's page
- * margin, but a note's first line. The way to it is the tap that raised the bar, since the same
- * tap takes it away. A strip of the bar's height reserved at the top of the document would buy
- * those lines with a permanent gap on a screen whose chrome is down most of the time.
- *
- * [content] is told how tall the bar is, for the one surface that has to keep clear of it: the
- * editor, whose bar never goes.
- */
+/** Overlay [bar] without moving the document; pass its height to [content] for clearance. */
 @Composable
 fun DocumentFrame(
     barShown: Boolean,
@@ -332,32 +253,13 @@ fun ScreenBar(title: String) {
 private val PullToClose: Dp = 96.dp
 
 /**
- * Where a pointer event stops.
- *
- * A panel lies over what is being read rather than replacing it, and a background is paint rather
- * than a target: with no gesture of its own the blank half of the panel is never hit at all and
- * the press reaches the document below it, so a tap beside a file row toggles the note's chrome.
- * Nothing is consumed, so the rows, the chips and the field still get their own.
- *
- * The other use is a bar lying over a document: there the point is the opposite one — what is
- * underneath must *not* get the press, or a tap on the title would be read as a tap on the page.
+ * Mark only the panel surface as a pointer target while allowing child controls and outside taps.
  */
 fun Modifier.stopsHere(): Modifier = pointerInput(Unit) {
     awaitEachGesture { awaitFirstDown(requireUnconsumed = false) }
 }
 
-/**
- * A panel over the document that goes when it is pulled down.
- *
- * What is inside it scrolls first: only a drag the list cannot use — one with nothing left above
- * it — moves the panel, which is what makes this a pull rather than a gesture that fights the
- * content. Letting go past [PullToClose] closes it and anything less springs back. The handle at
- * the top says so, and can be dragged itself; Back still works, which is why there is no button.
- *
- * A drag that began by scrolling the list stops where the list does. Reaching the top of the files
- * is something a reader does on the way to the first of them, and it must not also be the thing
- * that takes the files away: closing is a second pull, from a standstill.
- */
+/** Close a panel after a pull beyond [PullToClose]; let its content scroll first. */
 @Composable
 fun PullDownPanel(onClose: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
     var pulled by remember { mutableFloatStateOf(0f) }
@@ -442,12 +344,7 @@ private fun Handle(modifier: Modifier = Modifier) {
     }
 }
 
-/**
- * The query field, at the foot of the screen it belongs to.
- *
- * Below its own answers rather than above them: that is where the thumb is, and where the keyboard
- * leaves it when it comes up.
- */
+/** Place the query field below results, near the thumb and above the keyboard. */
 @Composable
 fun Field(
     value: String,
@@ -465,21 +362,7 @@ fun Field(
     )
 }
 
-/**
- * A document's own find: the page in front, where Browse's Search is every note in the vault. A
- * note's and a PDF's alike.
- *
- * At the foot of the screen, which is where every query field in this app is and where the
- * keyboard leaves the thumb. It is the one piece of chrome that does not go while the keyboard is
- * up, because the keyboard is what it is for — the Browse pill goes instead, so the vault's search
- * and the page's find are never on the screen together. It takes its space from the document
- * rather than floating over it: a bar over the last lines would cover the match it had just found.
- *
- * Back is the way out, as it is out of the panel. The arrows are disabled rather than absent while
- * there is nothing to step through, and [count] — "3/12", or "None" — is the only thing that says a
- * word is not there at all: everything else about a find that matches nothing looks like a find
- * that has not scrolled yet.
- */
+/** Find bar for the open document, above the keyboard and outside its scroll viewport. */
 @Composable
 fun FindBar(
     query: String,
@@ -512,20 +395,8 @@ fun FindBar(
 }
 
 /**
- * Panning and pinching as one gesture, with the throw that follows it.
- *
- * One handler for both axes, because two — one per direction — is what makes a diagonal drag
- * pick a side and stick to it. [onGesture] is called with where the fingers are between them,
- * how far they moved and how much further apart they got, all at once; [onFling] with the
- * velocity they left behind.
- *
- * [onEnd] is called when the fingers come up, with the velocity they left behind: a drag ends in a
- * throw and a pinch in the one layout the gesture is worth, and only the caller knows which it
- * was. [onDown] is called as the first finger lands, before anything moves: where a throw is
- * stopped.
- *
- * A gesture whose events something nearer the finger has already taken — the pen drawing on the
- * page — is dropped rather than fought over.
+ * Report combined pan and zoom through [onGesture], stopping flings on [onDown] and
+ * reporting release velocity through [onEnd].
  */
 suspend fun PointerInputScope.panZoom(
     onDown: () -> Unit,

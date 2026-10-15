@@ -11,27 +11,26 @@ use super::explore::count;
 use super::precise::Precise;
 use super::{Shared, fail};
 
-/// Declarations one name stands for, at most, and the names followed.
+/// Maximum declarations per name and names followed.
 const DEFS: usize = 3;
 const SEEDS: usize = 6;
-/// Places one name is read at, at most.
+/// Maximum references to one name.
 const MENTIONS: usize = 200;
-/// Caller hops a test is looked for within, and the callers asked at each.
+/// Caller depth and fan-out when searching for tests.
 const HOPS: usize = 3;
 const PER_HOP: usize = 8;
-/// Calls a call path follows from a declaration, and declarations it reads in all.
+/// Call-path depth and total declarations traversed.
 const PATH_HOPS: usize = 3;
 const PATH_NODES: usize = 150;
 
-/// A declaration the question names.
+/// A declaration named in the question.
 pub(super) struct Seed {
     pub sym: CodeSymbol,
-    /// How many declarations share its name.
+    /// Number of declarations sharing this name.
     pub defs: usize,
 }
 
-/// The declarations each of `names` (`name` or `Container::name`) stands for: its name exactly,
-/// in the case written where any is.
+/// Resolve `names` to declarations, matching bare or qualified names in the given case.
 pub(super) fn seeds(s: &Shared, names: &[String]) -> Result<Vec<Seed>, String> {
     let mut out: Vec<Seed> = Vec::new();
     for name in names {
@@ -175,8 +174,7 @@ pub(super) fn graph(
     Ok(g)
 }
 
-/// Where callers and callees come from: the language servers when `precise` is there and one
-/// answers for the declaration, else its name.
+/// Use language-server call hierarchy when `precise` succeeds; otherwise match by name.
 struct Edges<'a> {
     s: &'a Shared,
     code: Reader<'a>,
@@ -185,8 +183,7 @@ struct Edges<'a> {
 }
 
 impl Edges<'_> {
-    /// The places calling `sym`, each with the declaration it is in, and whether they were
-    /// found by name.
+    /// Return callers of `sym`, their containing declarations, and whether matching used names.
     fn callers(&mut self, sym: &CodeSymbol) -> Result<(Vec<Mention>, bool), String> {
         if let Some(found) = self.precise.as_mut().and_then(|p| p.callers(sym)) {
             return Ok((found, false));
@@ -204,8 +201,7 @@ impl Edges<'_> {
         self.code.callees(sym)
     }
 
-    /// What one asked declaration is told apart by: a name answers the same for each of its
-    /// declarations, a language server does not.
+    /// Identify one declaration; name matching conflates declarations with the same name.
     fn key(&self, sym: &CodeSymbol) -> String {
         match self.precise {
             Some(_) => format!("{}:{}", sym.rel_path, sym.byte_start),
@@ -214,7 +210,7 @@ impl Edges<'_> {
     }
 }
 
-/// `Container::name`, as explore names a declaration.
+/// Format a declaration as `Container::name`.
 pub(super) fn label(sym: &CodeSymbol) -> String {
     match &sym.container {
         Some(c) => format!("{c}::{}", sym.name),
@@ -222,13 +218,12 @@ pub(super) fn label(sym: &CodeSymbol) -> String {
     }
 }
 
-/// Whether two rows are one declaration.
+/// Whether two rows identify the same declaration.
 fn same(a: &CodeSymbol, b: &CodeSymbol) -> bool {
     a.rel_path == b.rel_path && a.byte_start == b.byte_start
 }
 
-/// The places in code that write `name` inside a declaration other than its own: its callers,
-/// read once per explore.
+/// Find references to `name` within other declarations, reading each file once.
 fn callers<'a>(
     s: &Shared,
     mentioned: &'a mut HashMap<String, Vec<Mention>>,
@@ -245,7 +240,7 @@ fn callers<'a>(
     Ok(&mentioned[name])
 }
 
-/// Whether a test calls `sym`, or a caller of it does, within [`HOPS`] callers.
+/// Whether a test reaches `sym` within [`HOPS`] caller hops.
 fn tested(edges: &mut Edges, sym: &CodeSymbol, callers_of: &[Mention]) -> Result<String, String> {
     let is_test = |m: &Mention| m.symbol.as_ref().is_some_and(|c| c.test);
     if let Some(t) = callers_of.iter().find(|m| is_test(m)) {
@@ -274,7 +269,7 @@ fn tested(edges: &mut Edges, sym: &CodeSymbol, callers_of: &[Mention]) -> Result
     Ok(format!("no tests found within {HOPS} caller hops"))
 }
 
-/// `a → b → c` for each seed another seed is reached from by calls, within [`PATH_HOPS`].
+/// Format call paths between seeds within [`PATH_HOPS`] hops.
 fn call_paths(edges: &mut Edges, seeds: &[Seed]) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for from in seeds {
@@ -308,7 +303,7 @@ fn call_paths(edges: &mut Edges, seeds: &[Seed]) -> Result<Vec<String>, String> 
     Ok(out)
 }
 
-/// The code files explore reads, each once, masked.
+/// Code files read and masked once per exploration.
 struct Reader<'a> {
     s: &'a Shared,
     files: HashMap<String, Option<String>>,
@@ -322,7 +317,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// The declarations `sym`'s body calls by name, each name's nearest few.
+    /// Find nearby declarations called by name from `sym`.
     fn callees(&mut self, sym: &CodeSymbol) -> Result<Vec<CodeSymbol>, String> {
         let s = self.s;
         let entry = self.files.entry(sym.rel_path.clone()).or_insert_with(|| {

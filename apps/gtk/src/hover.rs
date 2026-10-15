@@ -77,8 +77,7 @@ pub fn markup_of(md: &str) -> String {
     out.trim().to_string()
 }
 
-/// The severities as the hover names them, which is the only place three of the four are named
-/// at all.
+/// Labels for diagnostic severities in the hover.
 fn severity_label(severity: accent_api::Severity) -> &'static str {
     match severity {
         accent_api::Severity::Error => "Error",
@@ -88,7 +87,7 @@ fn severity_label(severity: accent_api::Severity) -> &'static str {
     }
 }
 
-/// One diagnostic as a line of markup: what it is, what it says, and who said it.
+/// Format a diagnostic's severity, message and source as markup.
 fn diagnostic_markup(item: &accent_api::Diagnostic) -> String {
     let mut line = format!(
         "<b>{}</b>: {}",

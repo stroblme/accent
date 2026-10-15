@@ -1,5 +1,4 @@
-//! Whether the Files tree and the Git pane's two lists keep their place through what changes
-//! under them.
+//! Check whether Files and Git lists keep their positions as contents change.
 
 use super::*;
 

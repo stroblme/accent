@@ -151,7 +151,7 @@ impl App {
         self.keep_relinks(&key, &relinks.borrow());
         if !self.reconciled.get() {
             let name = doc::file_name(&key);
-            let wait = format!("The links into {name} follow once the vault is indexed");
+            let wait = format!("Links to {name} will update when indexing finishes");
             self.relinked(&key, &wait);
         }
         self.relink(&key);

@@ -1,4 +1,4 @@
-//! Probe minimap viewport-band accuracy, jump/drag behavior and frame cost.
+//! Probe minimap band accuracy, navigation and frame cost.
 
 use super::*;
 use crate::minimap::Minimap;
@@ -6,13 +6,13 @@ use accent_core::config::Theme;
 
 /// How many steps a `frames` or `typing` round takes.
 const STEPS: usize = 120;
-/// How long a frame or two takes to land.
+/// Time for one or two frames to settle.
 const FRAME: Duration = Duration::from_millis(300);
 /// How long a round waits for the XTEST input it asked for.
 const XTEST: Duration = Duration::from_secs(10);
 
 /// `ACCENT_BENCH_MINIMAP=<round>:<rel>` fills a scratch note with 256 KB of sections
-/// and enables the minimap. Rounds:
+/// and enables the minimap. Available rounds:
 ///
 /// - `band`: compare view and band line ranges at four scroll positions, folded,
 ///   unwrapped, at 150% zoom and in collapsed/expanded comparisons. `ok` requires

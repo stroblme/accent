@@ -21,15 +21,12 @@ use crate::index::PdfLink;
 /// index of the link they came from.
 pub type LinkHighlights = HashMap<usize, Vec<(Vec<Rect>, usize)>>;
 
-/// Where each note link lands on the page today, per page, with the index of the link it is.
+/// Locate note-link highlights by page and link index.
 ///
-/// The four numbers first, and the text the link quotes as the fallback — a document rebuilt
-/// with different line breaks moves the numbers but not the sentence. A link whose quads a real
-/// `/Highlight` already covers is left out: it has been exported, and the annotation is in the
-/// page's own pixels.
+/// Try the stored glyph numbers first, then the quoted text if a rebuild moved them. Omit quads
+/// already covered by an exported `/Highlight` annotation.
 ///
-/// `glyphs` is the caller's cache of page text, read into as needed: extracting a page's text is
-/// most of the work, and the same page is asked for again by a selection and an export.
+/// `glyphs` caches extracted page text across selection and export.
 pub fn highlight_quads(
     doc: &PdfDoc,
     glyphs: &mut HashMap<usize, Vec<Glyph>>,
@@ -450,15 +447,11 @@ impl PdfDoc {
             .collect())
     }
 
-    /// Every `/Ink` annotation on a page, flattened, with its box and style: what the Adjust tool
-    /// takes hold of. Curves are sampled, so a circle's rim answers to the pointer and not the
-    /// control polygon around it. A hidden one, which an erase of another editor's stroke
-    /// leaves, is not there.
+    /// Return visible `/Ink` annotations with flattened strokes, bounds and style for the Adjust
+    /// tool. Sampling curves makes hit testing follow the painted edge.
     ///
-    /// Another editor's stroke is found by its `/InkList`, which is in the page's own points and
-    /// holds every stroke, rather than by what its appearance stream draws: that may be in a
-    /// space of its own, whose `/Matrix` and `/BBox` pdfium does not hand out, and is once Adjust
-    /// has moved it (`transform_ink`).
+    /// Read external strokes from `/InkList` in page coordinates. Their appearance streams may
+    /// use a separate transform that pdfium does not expose.
     ///
     // ponytail: one polyline through every stroke of the `/InkList`, so the gap between two
     // strokes answers to the pointer too, as `flatten` joins two sub-paths.
@@ -484,15 +477,10 @@ impl PdfDoc {
             .collect())
     }
 
-    /// Cut one `/Ink` annotation by the pointer's path from `from` to `to`: take away whatever of
-    /// it lies within `radius` of that path — measured to the stroke's painted edge, so nothing of
-    /// it is left under the eraser — and write each run that is left as an `/Ink` of our own at
-    /// the end of `/Annots`, in the same colour, width and opacity, straight between the
-    /// stroke's flattened points, or another editor's `/InkList` points. The original is taken
-    /// as [`PdfDoc::take_ink`] takes it.
+    /// Erase the painted stroke within `radius` of the path from `from` to `to`. Replace the
+    /// original with straight `/Ink` segments at the end of `/Annots`, preserving its style.
     ///
-    /// `None`, and nothing touched, when the path came nowhere near it or it is not
-    /// [`InkShape::cuttable`].
+    /// Return `None` without changes when the path misses or the stroke is not cuttable.
     ///
     // ponytail: the pieces are straight polylines at the flattening tolerance rather than curves
     // fitted again through `catmull_rom`, which is a spline *through* its points: fitted through
@@ -546,14 +534,11 @@ impl PdfDoc {
         Ok(Some(Cut { was, left, area }))
     }
 
-    /// Move or resize one `/Ink` annotation by an affine map over its page, and say what box the
-    /// move covers — where the stroke was and where it went — and whether it kept its place in
-    /// `/Annots`.
+    /// Transform one `/Ink` annotation, returning the union of old and new bounds and whether
+    /// its `/Annots` position stayed the same.
     ///
-    /// One of ours is deleted and drawn again along the moved path, at the end of `/Annots`, so
-    /// its line keeps its width. Another editor's keeps its place and all it carries: only its
-    /// `/Rect` moves, which every reader fits its appearance stream into, so the stroke moves and
-    /// scales as a picture would, its line included, and its `/InkList` with it.
+    /// Our strokes are redrawn to preserve line width. External strokes keep their position and
+    /// are resized through `/Rect`, preserving their appearance and `/InkList`.
     pub fn transform_ink(&mut self, page: usize, index: usize, m: Matrix) -> Result<(Rect, bool)> {
         let _guard = lock();
         let mut p = self.page(page)?;

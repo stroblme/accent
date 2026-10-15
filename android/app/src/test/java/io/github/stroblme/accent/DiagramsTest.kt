@@ -8,14 +8,11 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Which rendered note runs scripts, and that those scripts are only ever the app's own. Whether
- * mermaid then draws is the WebView's and wants a device.
- */
+/** Only app scripts may run in rendered notes; WebView rendering needs device coverage. */
 class DiagramsTest {
     private val fence = "<pre><code class=\"language-mermaid\">graph TD\n  A --&gt; B\n</code></pre>"
 
-    /** As pulldown-cmark renders a fence: its language as the code's class, and nothing else. */
+    /** A code fence keeps only its language class. */
     @Test
     fun `only a mermaid fence is a diagram`() {
         assertTrue(diagrams(fence))
@@ -25,7 +22,7 @@ class DiagramsTest {
         assertFalse("inline code quoting it", diagrams(quoted))
     }
 
-    /** The note's own `<script>` would need the page's nonce, which it cannot know. */
+    /** A note script lacks the page nonce and cannot run. */
     @Test
     fun `every script on a diagram page carries the policy's nonce, and a plain page has none`() {
         val html = page(fence + "<script>alert(1)</script>", Color.Black, Color.White, Color.Blue)

@@ -1,16 +1,13 @@
-//! The remote backend against a real host, which is the only place several of its parts are
-//! exercised at all: ssh's own multiplexing, a shell that is not ours, and a server binary that
-//! has to start on a machine older than the one that built it.
+//! Exercise the remote backend on a real host, including SSH multiplexing and server startup.
 //!
-//! Opt-in, because it needs a host and a key: set `ACCENT_TEST_REMOTE` to an `ssh://` address
-//! whose path may be created and deleted. Without it the test says so and passes, so `make check`
-//! is unchanged for everyone else. The host needs `git`, `ss` and `pgrep`, and [`HOST_PORT`] free.
+//! Opt in with `ACCENT_TEST_REMOTE=ssh://host/path`, where the path may be created and deleted.
+//! The host needs `git`, `ss`, `pgrep` and an unused [`HOST_PORT`]. Without the variable, the test
+//! skips and passes.
 //!
 //!     make server
 //!     ACCENT_TEST_REMOTE=ssh://myhost/tmp/accent-probe cargo test -p accent-cli --test remote
 //!
-//! One test function, because the first connection after a rebuild uploads the server, and two
-//! tests connecting at once would race each other's upload.
+//! Keep one test function so concurrent connections cannot race the server upload.
 
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -19,10 +16,10 @@ use accent_api::link;
 use accent_api::ssh::{self, Direction, Forward, Url};
 use accent_api::{Event, Vault, VaultConfig, git, rpc};
 
-/// Long enough for a master, an upload of six megabytes and a first reconcile.
+/// Timeout for SSH master startup, upload, and initial reconciliation.
 const BUDGET: Duration = Duration::from_secs(120);
 
-/// The port the host is made to listen on for a forward back to this machine.
+/// Remote listen port forwarded back to this machine.
 const HOST_PORT: u16 = 47913;
 
 #[test]
@@ -518,8 +515,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     exit();
 }
 
-/// Wait for a [`accent_api::Task`] without a runtime of our own: it runs on the library's, and
-/// this only asks whether it has finished.
+/// Wait for an [`accent_api::Task`] running on the library runtime.
 fn wait<T>(task: impl std::future::Future<Output = T>) -> T {
     let mut task = std::pin::pin!(task);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
@@ -531,8 +527,7 @@ fn wait<T>(task: impl std::future::Future<Output = T>) -> T {
     }
 }
 
-/// Two blank pages and one bookmark, "Second", on the second: the smallest PDF with an outline,
-/// written by hand as `accent-api`'s own notes tests write it.
+/// Build a minimal two-page PDF with a bookmark on page two.
 fn bookmarked_pdf() -> Vec<u8> {
     let objs = [
         "<</Type/Catalog/Pages 2 0 R/Outlines 4 0 R>>",
@@ -563,7 +558,7 @@ fn bookmarked_pdf() -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Run `script` on the host over a connection of its own, and answer with what it printed.
+/// Run `script` over a separate SSH connection and return its output.
 fn on_host(url: &Url, script: &str) -> String {
     let out = std::process::Command::new("ssh")
         .arg(url.destination())
@@ -585,8 +580,8 @@ fn host_listens(url: &Url, port: u16) -> bool {
         .is_empty()
 }
 
-/// Whether an `accent-cli serve` runs on the host for this vault. The bracket keeps the pattern
-/// from matching the shell that carries it.
+/// Check whether `accent-cli serve` runs for this vault; bracket the pattern to avoid matching
+/// the search shell.
 fn host_serves(url: &Url) -> bool {
     let pattern = ssh::quote(&format!("[s]erve --vault {}", url.path.display()));
     !on_host(url, &format!("pgrep -f {pattern} || true"))
@@ -594,7 +589,7 @@ fn host_serves(url: &Url) -> bool {
         .is_empty()
 }
 
-/// `kill -9` the master behind `ctl`, which is a link dropped without a word to either end.
+/// Kill the SSH master behind `ctl` without notifying either endpoint.
 fn kill_master(url: &Url, ctl: &std::path::Path) {
     let check = std::process::Command::new("ssh")
         .arg("-o")
@@ -617,7 +612,7 @@ fn kill_master(url: &Url, ctl: &std::path::Path) {
     );
 }
 
-/// The lost link as the window hears it, with no call made: within three seconds of the kill.
+/// Wait up to three seconds for the window to detect the lost link.
 fn wait_lost(events: &Receiver<Event>) -> (String, Duration) {
     let t = Instant::now();
     loop {
@@ -629,8 +624,8 @@ fn wait_lost(events: &Receiver<Event>) -> (String, Duration) {
     }
 }
 
-/// Run `action`, then wait up to five seconds from its start for a `DirsChanged` naming `dir`.
-/// What an earlier step left in the channel is dropped first, so it cannot answer for this one.
+/// Run `action` and wait up to five seconds for a matching `DirsChanged` event.
+/// Discard earlier events first.
 fn changes_dir(events: &Receiver<Event>, dir: &str, action: impl FnOnce()) -> Duration {
     for _ in events.try_iter() {}
     let t = Instant::now();
@@ -644,7 +639,7 @@ fn changes_dir(events: &Receiver<Event>, dir: &str, action: impl FnOnce()) -> Du
     }
 }
 
-/// Whether `probe` comes true within ten seconds.
+/// Wait up to ten seconds for `probe` to become true.
 fn eventually(probe: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
@@ -656,8 +651,7 @@ fn eventually(probe: impl Fn() -> bool) -> bool {
     false
 }
 
-/// Wait for the event `wanted` picks out, printing the connection's steps on the way. Any other
-/// disconnect fails the test.
+/// Wait for `wanted`, logging connection steps; fail on any other disconnect.
 fn wait_for(events: &Receiver<Event>, wanted: impl Fn(&Event) -> bool) {
     let deadline = Instant::now() + BUDGET;
     while Instant::now() < deadline {

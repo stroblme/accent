@@ -1,5 +1,5 @@
-//! The sole index writer and filesystem watcher, running off the UI thread.
-//! Drain the inbox in batches so bulk sync changes produce one [`Event`].
+//! Off-thread index writer and filesystem watcher. Batched messages combine bulk sync changes
+//! into one [`Event`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};

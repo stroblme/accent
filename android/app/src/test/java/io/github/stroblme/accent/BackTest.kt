@@ -3,11 +3,7 @@ package io.github.stroblme.accent
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/**
- * Where Back from a backlink opens the document it was followed out of ([backTo]): where its
- * screen last said the reader was, and only if that was said of this document. The saying and the
- * putting back are the screens' and need a device.
- */
+/** Back from a backlink restores the last position in its source document ([backTo]). */
 class BackTest {
     @Test
     fun `a backlink keeps where the reader was in the document it was followed from`() {

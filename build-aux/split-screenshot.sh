@@ -1,7 +1,5 @@
 #!/bin/sh
-# Join a light and a dark screenshot of the same window along the diagonal
-# from the top-left to the bottom-right corner: light below it, dark above,
-# as in the README's screenshots.
+# Join matching light and dark screenshots diagonally, with dark above the split.
 #
 # Usage: build-aux/split-screenshot.sh <light.png> <dark.png> <out.png>
 set -eu

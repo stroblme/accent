@@ -1,6 +1,5 @@
-//! What accent makes of a draw.io file: its pages, what each paints, anything it could not draw,
-//! how long that took, and whether the file survives a round trip. A tool for checking a real
-//! diagram against the engine, not a test.
+//! Inspect a draw.io file's pages, display lists, unsupported content, rendering time, and
+//! round-trip fidelity against a real diagram.
 //!
 //! `cargo run --release -p accent-drawio --example dump -- diagram.drawio`
 

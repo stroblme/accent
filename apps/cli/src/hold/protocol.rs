@@ -1,10 +1,7 @@
-//! The wire between `attach` and the holder: tagged, length-prefixed frames over a unix socket.
-//!
-//! A frame is `tag u8 | len u32 BE | payload`. The first frame of a connection says what it is
-//! for: `HELLO` attaches a terminal to a shell, `KILL` and `LIST` are one-shot requests. After a
-//! `HELLO` the client sends `INPUT` and `RESIZE`; the holder answers with `OUTPUT`, and at the
-//! end with `EXIT` or `DETACHED`. No serde here: every keystroke and every byte of output takes
-//! this path.
+//! Tagged, length-prefixed frames over a Unix socket: `tag u8 | len u32 BE | payload`.
+//! `HELLO` attaches; `KILL` and `LIST` are one-shot requests. After `HELLO`, the client
+//! sends `INPUT` and `RESIZE`; the holder sends `OUTPUT`, then `EXIT` or `DETACHED`.
+//! Encoding stays manual because every terminal byte passes through here.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
@@ -28,8 +25,8 @@ pub const EXIT: u8 = b'x';
 /// Holder: another terminal took this shell over.
 pub const DETACHED: u8 = b'd';
 
-/// The largest payload a reader accepts, so a garbled length cannot make it allocate gigabytes.
-/// Nothing legitimate comes near it: output and the replay travel in 64 KiB pieces.
+/// Maximum accepted payload, limiting allocation from a corrupt length. Output and replay use
+/// 64 KiB chunks.
 pub const MAX: usize = 1 << 20;
 
 /// Write one frame in a single `write_all`, so two threads that share a stream under a lock
@@ -42,7 +39,7 @@ pub fn write_frame(w: &mut impl Write, tag: u8, payload: &[u8]) -> io::Result<()
     w.write_all(&frame)
 }
 
-/// Read one frame. `None` is a clean end between two frames; an end inside one is an error.
+/// Read one frame. Return `None` on a clean end; reject truncated frames.
 pub fn read_frame(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
     let mut tag = [0];
     if r.read(&mut tag)? == 0 {
@@ -66,8 +63,7 @@ pub fn size(rows: u16, cols: u16) -> [u8; 4] {
     [r0, r1, c0, c1]
 }
 
-/// The size [`size`] wrote. Zero either way is refused: a grid without rows is no terminal, and
-/// the screen model panics on one.
+/// Decode [`size`], rejecting zero dimensions that would panic the screen model.
 pub fn parse_size(bytes: &[u8]) -> Option<(u16, u16)> {
     let [r0, r1, c0, c1] = bytes.try_into().ok()?;
     let (rows, cols) = (u16::from_be_bytes([r0, r1]), u16::from_be_bytes([c0, c1]));
@@ -108,8 +104,7 @@ impl Hello {
         out
     }
 
-    /// `None` for a payload that is not a `Hello`. A variable without `=` is skipped rather than
-    /// refused: no environment can hold one.
+    /// Decode a [`Hello`] or return `None`. Skip environment entries without `=`.
     pub fn decode(bytes: &[u8]) -> Option<Hello> {
         let (rows, cols) = parse_size(bytes.get(..4)?)?;
         let mut parts = bytes[4..].split(|&b| b == 0);

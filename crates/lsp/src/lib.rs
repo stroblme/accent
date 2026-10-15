@@ -1,5 +1,4 @@
-//! UI-independent LSP client with the response types accent uses and stdio child-process
-//! transport on the shared [`runtime()`].
+//! UI-independent LSP client with required response types and stdio transport on [`runtime()`].
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

@@ -1,5 +1,4 @@
-//! The session: what the palette lists, what was recently used, and what a window writes down
-//! and restores between runs.
+//! Session state for the palette, recent items and window restoration.
 
 use super::*;
 use crate::work::or_empty;

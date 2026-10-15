@@ -14,23 +14,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import io.github.stroblme.accent.Open
+import io.github.stroblme.accent.OpenImage
+import io.github.stroblme.accent.OpenPdf
 import io.github.stroblme.accent.VaultModel
 
-/**
- * Which of the two the screen is showing.
- *
- * No stack and no navigation graph: a phone holds one thing at a time, Browse is one step from
- * what is being read, and Back is the way out of it.
- */
+/** Current vault screen: Browse or one open document. */
 private enum class Screen { Home, Browse }
 
-/**
- * The vault: whatever is open, and the one button that reaches everything else.
- *
- * Browse is the files, the search and the palette behind one set of chips. A screen rather than a
- * drawer or a sheet, because an edge swipe and a pull are gestures nothing announces, and every
- * gesture here has to have a visible twin (MOBILE_DESIGN.md).
- */
+/** Show the current document with Browse as the route to files, search, and commands. */
 @Composable
 fun HomeScreen(model: VaultModel) {
     val state by model.state.collectAsState()
@@ -41,12 +33,12 @@ fun HomeScreen(model: VaultModel) {
     val snackbar = remember { SnackbarHostState() }
 
     // Whatever opens arrives with its chrome up, however the last thing read was left.
-    LaunchedEffect(state.open?.rel, state.pdf?.rel, state.image?.rel) { chrome.show() }
+    LaunchedEffect(state.doc?.rel) { chrome.show() }
 
     // Back undoes the last thing that opened, in the order it opened: the screen over the note
     // (Browse's handler is its own, below), then the note. Only with nothing left does it leave
     // the app.
-    val reading = state.open != null || state.pdf != null || state.image != null
+    val reading = state.doc != null
     BackHandler(enabled = screen == Screen.Home && reading) {
         model.close()
     }
@@ -66,27 +58,25 @@ fun HomeScreen(model: VaultModel) {
             // What is being read stays composed under the other two rather than being swapped out
             // for them: a note's rendered view is a `WebView`, and one built again is one scrolled
             // back to the top. Closing Browse is coming back to the same line.
-            val pdf = state.pdf
-            val open = state.open
-            val image = state.image
-            when {
-                pdf != null -> PdfScreen(
+            val doc = state.doc
+            when (doc) {
+                is OpenPdf -> PdfScreen(
                     model = model,
-                    pdf = pdf,
+                    pdf = doc,
                     indexing = state.indexing,
                     chrome = chrome,
                 )
-                open != null -> NoteScreen(
+                is Open -> NoteScreen(
                     model = model,
-                    open = open,
+                    open = doc,
                     chrome = chrome,
                     onTag = {
                         browseTag = it
                         screen = Screen.Browse
                     },
                 )
-                image != null -> ImageScreen(image = image, chrome = chrome)
-                else -> Empty(
+                is OpenImage -> ImageScreen(image = doc, chrome = chrome)
+                null -> Empty(
                     opening = state.opening,
                     indexing = state.indexing,
                     paused = state.paused,
@@ -108,8 +98,9 @@ fun HomeScreen(model: VaultModel) {
                 // of all, since the line above it is already saying what the vault is doing. It
                 // reads [VaultState.ready], which is the same state that line reads, so the two
                 // cannot disagree about whether the reader may start.
-                visible = screen == Screen.Home && chrome.shown && open?.finding != true &&
-                    pdf?.finding != true && state.ready,
+                visible = screen == Screen.Home && chrome.shown &&
+                    (doc as? Open)?.finding != true && (doc as? OpenPdf)?.finding != true &&
+                    state.ready,
                 onBrowse = {
                     browseTag = null
                     screen = Screen.Browse
@@ -140,9 +131,9 @@ fun HomeScreen(model: VaultModel) {
                     indexing = state.indexing,
                     paused = state.paused,
                     scanned = state.scanned,
-                    front = open?.rel ?: pdf?.rel ?: image?.rel,
+                    front = doc?.rel,
                     openTag = browseTag,
-                    printable = open != null || pdf != null,
+                    printable = doc is Open || doc is OpenPdf,
                     onOpen = { rel, find ->
                         model.openFile(rel, find)
                         screen = Screen.Home
@@ -154,13 +145,7 @@ fun HomeScreen(model: VaultModel) {
     }
 }
 
-/**
- * Browse, floating over whatever is being read.
- *
- * It fades with the rest of the chrome, and goes outright while the keyboard is up: there is no
- * room for it there, and a keyboard means the reader is writing rather than looking for something
- * else to read.
- */
+/** Show Browse over the document chrome and hide it while the keyboard is open. */
 @Composable
 private fun BrowseButton(
     visible: Boolean,
@@ -182,23 +167,7 @@ private fun BrowseButton(
 private val ProgressWidth: Dp = 160.dp
 private val ProgressHeight: Dp = 4.dp
 
-/**
- * The screen with nothing open: what the vault is doing, and the way back out of it.
- *
- * A first index is watched from here, so it says in words how far the walk has got and draws the
- * platform's own indeterminate bar under them. Indeterminate because the walk has no total until
- * it ends, and a percentage nobody can honour is worse than a bar that only says "still going".
- * Both are up from the frame after the pick, while the vault is still [opening] and no walk has
- * started: to the reader, that is already the vault being read.
- *
- * Stop sits under the bar while the walk runs, and Resume in its place once it has stopped: the
- * desktop's control beside its indexing line, with the same meaning. Stopping is a pause, not a
- * cancel — what was read stays browsable, and Resume reads the rest.
- *
- * Closing the vault belongs here and nowhere else. It is the one thing that makes sense with no
- * note in front of the reader, and a control that reached over an open document would be a way of
- * losing one's place by mistake.
- */
+/** Show indexing progress and controls when no document is open. */
 @Composable
 private fun Empty(
     opening: Boolean,
@@ -228,8 +197,8 @@ private fun Empty(
             when {
                 // Ahead of the lines below, which are about a walk still running: a stopped one
                 // may have read nothing at all.
-                paused && ready -> "Files read so far are ready to browse."
-                paused -> "No files read yet. Resume when you're ready."
+                paused && ready -> "You can browse files read so far."
+                paused -> "No files read yet. Resume to continue."
                 // A first walk of a large vault takes minutes over shared storage, so it says how
                 // far it has got. Nothing can be opened while it is still finding the files;
                 // once it starts reading them, what it has read is already there to open — which
@@ -239,7 +208,7 @@ private fun Empty(
                 indexing && scanned > 0 -> "%,d files read. You can start now.".format(scanned)
                 // A walk over an index that already has files: the rescan a resume starts.
                 indexing -> "Reading your files…"
-                else -> "Your notes are ready. Browse or search to find one."
+                else -> "Your notes are ready to browse."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -1,8 +1,6 @@
-//! Expose core recolouring and EXIF orientation for Android-decoded
-//! straight-alpha RGBA8 pixels, and the check that leaves an animation alone.
-//! Use the PDF [`Theme`] so figures and pages share paper and ink
-//! ([`accent_core::recolour`], [`accent_core::orientation`],
-//! [`accent_core::animation`]).
+//! Core recolouring, EXIF orientation, and animation detection for Android-decoded straight-alpha
+//! RGBA8 pixels. Figures and pages share the PDF [`Theme`] ([`accent_core::recolour`],
+//! [`accent_core::orientation`], [`accent_core::animation`]).
 
 use accent_core::pdf;
 use accent_core::recolour;

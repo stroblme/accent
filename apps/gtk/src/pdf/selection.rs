@@ -1,5 +1,4 @@
-//! Selecting text on the page: what a drag covers, what it puts on the clipboard, and the links
-//! and highlights a click on the page lands on.
+//! PDF text selection, clipboard copying and hit testing for links and highlights.
 
 use std::collections::HashMap;
 use std::rc::Rc;

@@ -18,10 +18,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import kotlin.math.max
 
-/**
- * What an image is to recolouring, which draws a scan, a plot, a diagram or a screenshot of text on
- * the dark page in a dark theme, as a PDF page is, and leaves a photo alone.
- */
+/** Image classification: documents and screenshots are recoloured for dark pages; photos are not. */
 enum class ImageKind {
     /** Decoded here, and recoloured when it reads as a document. */
     Raster,
@@ -29,17 +26,11 @@ enum class ImageKind {
     /** Always a drawing, and recoloured as a filter, so it stays vector. */
     Svg,
 
-    /**
-     * An animated GIF, WebP or PNG, never recoloured: the decoder takes one still of it, and the
-     * animation would stop. Told from a still by reading the file ([OpenImage.animated]).
-     */
+    /** Animated images are never recoloured because decoding one frame would stop animation. */
     Animation,
 }
 
-/**
- * What an image file is to the recolouring rule, by its extension; null for anything else. A GIF,
- * a WebP or a PNG is a raster here, and an [ImageKind.Animation] once its file says it moves.
- */
+/** Classify supported image extensions; mark animated files as [ImageKind.Animation]. */
 fun imageKind(name: String): ImageKind? = when (name.substringAfterLast('.', "").lowercase()) {
     "png", "jpg", "jpeg", "webp", "gif", "bmp", "avif" -> ImageKind.Raster
     "svg" -> ImageKind.Svg
@@ -47,11 +38,8 @@ fun imageKind(name: String): ImageKind? = when (name.substringAfterLast('.', "")
 }
 
 /**
- * How an image is drawn, by a PDF page's rule ([pageTheme]): the theme recolours a drawing — an SVG
- * always, a raster when it reads as a [document] — and leaves a photo alone. [inverted] sends any
- * image to the other theme's page, whatever it shows, as it does a PDF: onto the dark page in a
- * light theme, as it is in a dark one. [document] costs a decode, so it is asked only in a dark
- * theme and of an image not inverted, the one place the answer changes anything.
+ * Choose page theming for SVGs and document-like rasters; leave photos unchanged.
+ * [inverted] swaps any image to the opposite page theme.
  */
 internal fun imageTheme(kind: ImageKind, dark: Boolean, inverted: Boolean, document: () -> Boolean): Theme =
     when (kind) {
@@ -62,21 +50,8 @@ internal fun imageTheme(kind: ImageKind, dark: Boolean, inverted: Boolean, docum
     }
 
 /**
- * [image] as a rendered page is to show it in a [dark] theme or a light one: as it is on disk, or
- * recoloured, and turned round if it is among the [inverted] — the reader's, or none on paper. A
- * file that cannot be read is refused rather than thrown out of the WebView's thread.
- *
- * Both screens that show an image draw it in a WebView — a note in its page, the image screen on
- * its own — and both come through here, so one figure looks the same in either. Which image reads
- * as a document, and the remap itself, are the core's (`accent_core::recolour`), so it looks the
- * same on the desktop too; the decoding is the platform's.
- *
- * An image recoloured in a light theme is on the dark page, not the screen's, so it gets that page
- * under it: an inverted PDF page is opaque, and a transparent figure's light ink would otherwise
- * sit on white. In a dark theme it is on the screen's own page, and keeps its transparency.
- *
- * Called on the WebView's own loading thread, never the main one: a verdict can be a decode, and a
- * recolour always is.
+ * Serve [image] in the selected theme with [inverted] overrides, blocking unreadable files.
+ * The core recolours documents; Android decodes them. Call on WebView's loading thread.
  */
 fun served(
     image: OpenImage,
@@ -96,24 +71,14 @@ fun served(
     }
 }.getOrElse { blocked() }
 
-/**
- * The file's own bytes. An SVG is named as one, which is the only way a WebView draws it: a raster
- * is recognised by its first bytes, a drawing is not.
- */
+/** Serve original image bytes, retaining the SVG MIME type required by WebView. */
 private fun asItIs(file: File, kind: ImageKind?) =
     WebResourceResponse(if (kind == ImageKind.Svg) SVG else null, null, file.inputStream())
 
 /** A request refused: nothing but the vault's own files loads in a rendered page. */
 internal fun blocked() = WebResourceResponse(null, null, null)
 
-/**
- * Clear the WebViews' memory cache when what it holds was served in another palette, or under
- * another set of [inverted] files. Called before every page load, a printed one's too.
- *
- * The cache is the app's rather than the view's, and a page loaded again takes an image it already
- * holds from there: without this a note would come back from a theme change, or an Invert, with
- * its images as they were. Main thread only, as every load is.
- */
+/** Clear cached images when theme or [inverted] paths change before a page loads. */
 fun WebView.freshen(dark: Boolean, inverted: Set<String> = Inverted.files) {
     val now = dark to inverted
     if (servedUnder.let { it != null && it != now }) clearCache(false)
@@ -123,23 +88,13 @@ fun WebView.freshen(dark: Boolean, inverted: Set<String> = Inverted.files) {
 /** The palette and the inverted files the images in the WebViews' cache were served under. */
 private var servedUnder: Pair<Boolean, Set<String>>? = null
 
-/**
- * What [document] concluded, by [verdictKey]: a verdict is a decode, and a note is loaded again on
- * every palette change. Only the answer is kept, not the pixels, so the cache costs nothing.
- */
+/** Cache only [document] verdicts by [verdictKey], avoiding repeated image decodes. */
 private val verdicts by lazy { LruCache<String, Boolean>(VERDICTS) }
 
 /** A file as [verdicts] knows it: one written again is a different image. */
 internal fun verdictKey(file: File): String = "${file.path}|${file.lastModified()}|${file.length()}"
 
-/**
- * Whether [file] reads as a document, from a copy decoded small: the core samples about 65 000
- * pixels whatever it is given, so a long side of [CLASSIFIED_SIDE] gets the verdict a full decode
- * would at a fraction of the copying.
- *
- * Past [MAX_PIXELS] the image is not looked at, as the core leaves one alone — decoded small here,
- * it would otherwise be measured.
- */
+/** Classify [file] from a bounded decode, skipping images beyond [MAX_PIXELS]. */
 private fun document(file: File): Boolean {
     val key = verdictKey(file)
     verdicts.get(key)?.let { return it }
@@ -154,14 +109,8 @@ private fun document(file: File): Boolean {
 }
 
 /**
- * [file] recoloured onto [theme], as a PNG: straight alpha in and out, so a transparent figure keeps
- * its transparency — unless it is to [fill] it with the paper. Decoded at a long side of
- * [RECOLOURED_SIDE] at most, which keeps a large scan's copies bounded. Null when the platform
- * cannot decode it into RGBA8, and it is then served as it is.
- *
- * Turned first the way the file's EXIF says, as the WebView shows the untouched file and the
- * decoder ignores: a camera's JPEG is stored on its side. The turned pixels fill the same bitmap,
- * its width and height swapped where the turn is a quarter.
+ * Recolour [file] as PNG on [theme], bounding decode size and applying EXIF orientation.
+ * Return null if RGBA8 decoding fails so the caller can serve the original.
  */
 private fun recoloured(file: File, theme: Theme, fill: Boolean): WebResourceResponse? {
     val bitmap = bounds(file)?.let { decode(file, it, RECOLOURED_SIDE) } ?: return null
@@ -181,11 +130,7 @@ private fun bounds(file: File): Size? {
     return Size(options.outWidth, options.outHeight).takeIf { it.width > 0 && it.height > 0 }
 }
 
-/**
- * [file] decoded with its long side brought down to at most [limit], as straight-alpha RGBA8 —
- * what the core reads and writes. Not premultiplied: a half-transparent pixel's colour would be
- * multiplied into its alpha before the core saw it, and could not be taken back out exactly.
- */
+/** Decode [file] to straight-alpha RGBA8 with long side at most [limit]. */
 private fun decode(file: File, size: Size, limit: Int): Bitmap? {
     val options = BitmapFactory.Options().apply {
         inSampleSize = sampleSize(max(size.width, size.height), limit)
@@ -204,10 +149,7 @@ internal fun sampleSize(long: Int, limit: Int): Int {
     return n
 }
 
-/**
- * The pixels in memory order, which for `ARGB_8888` is R, G, B, A — the core's layout — copied
- * without conversion, so a bitmap decoded without premultiplying hands over straight alpha.
- */
+/** `ARGB_8888` bytes are RGBA on this device, matching the core layout without conversion. */
 private fun Bitmap.rgba(): ByteArray = ByteBuffer.allocate(byteCount).also { copyPixelsToBuffer(it) }.array()
 
 private const val SVG = "image/svg+xml"

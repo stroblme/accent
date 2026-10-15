@@ -1,6 +1,5 @@
-//! What the render thread answers a PDF tab, other than the textures the views keep: a page's
-//! links and glyphs, the bookmarks, the search's matches, the history, a save, and the pages again
-//! after a page edit or a read.
+//! Handle render-thread replies for links, glyphs, bookmarks, search, history, saves
+//! and page edits. Views keep tile textures separately.
 
 use std::rc::Rc;
 

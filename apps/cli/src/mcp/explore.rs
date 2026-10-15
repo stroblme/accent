@@ -1,10 +1,6 @@
-//! Answer a vault question with ranked file cards: outlines, links, backlinks and matching
-//! sections quoted with line numbers, within a character budget. Omitted files are named after
-//! the cards.
-//!
-//! Explicit paths, wikilinks and tags select files directly. Other words rank indexed files and
-//! their best passages; matching headings add weight, and links shared with two top files
-//! promote neighbours.
+//! Answer vault questions with ranked file cards, quoted sections, links, and backlinks
+//! within a character budget. Explicit paths, wikilinks, and tags select files; other
+//! terms rank passages and linked neighbours.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -19,45 +15,41 @@ use serde::Deserialize;
 use super::graph::{self, Seed};
 use super::{Shared, fail, locked};
 
-/// Characters an answer takes when the call names no budget, and the bounds of one it names.
+/// Default answer budget and allowed bounds for a requested budget.
 const BUDGET: usize = 16_000;
 const BUDGET_MIN: usize = 4_000;
 const BUDGET_MAX: usize = 24_000;
 
-/// Words a question is searched by; a longer question is mostly its first words.
+/// Maximum search terms taken from a question.
 const MAX_WORDS: usize = 8;
-/// Files the words rank highest that are read for their passages.
+/// Top-ranked files read for passages.
 const CANDIDATES: usize = 40;
-/// Lines a passage spans, and the best passages a card shows.
+/// Passage length and maximum passages per card.
 const PASSAGE: usize = 3;
 const PASSAGES: usize = 6;
-/// Files a card or a line names, and those a card is likely for.
+/// Limits for files named by a card or line and for likely cards.
 const SHOWN: usize = 20;
 const CARDED: usize = 6;
-/// The best files whose links are followed for neighbours.
+/// Top files whose links are followed for neighbours.
 const SEEDS: usize = 8;
-/// Declarations a question's words name that are followed to their callers and callees.
+/// Maximum named declarations followed to callers and callees.
 const WORD_SEEDS: usize = 3;
-/// A section this many lines long or shorter is shown whole; a longer one as its heading and
-/// [`AROUND`] lines either side of each line holding a word.
+/// Show sections up to this length in full; show longer sections around matching lines.
 const WHOLE: usize = 40;
 const AROUND: usize = 2;
-/// Lines of a file shown when nothing in it holds a word, and of a long declaration's head.
+/// Lines shown for unmatched files and the head of long declarations.
 const HEAD: usize = 8;
-/// A declaration this many lines long or shorter is shown whole, with up to [`DOC`] lines of
-/// comments and attributes above it.
+/// Show declarations up to this length in full, including up to [`DOC`] preceding lines.
 const SYMBOL: usize = 60;
 const DOC: usize = 12;
-/// Outline lines, links out, backlinks and tags a card lists before it counts the rest, and a
-/// card of its own asked for by path.
+/// Initial limits for outline lines, links, backlinks, and tags on each card.
 const LIST: usize = 8;
 const LIST_WHOLE: usize = 40;
-/// Characters of one line shown, and of a line the words were found on: a note can hold a data
-/// URI on one line, and a paragraph is one line too.
+/// Line length limits, including longer limits for matches that may contain data URIs.
 const LINE: usize = 300;
 const FOUND_LINE: usize = 2_000;
 
-/// Words that say nothing a file could be found by.
+/// Words ignored when searching for files.
 const STOP: &[&str] = &[
     "a", "about", "after", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for",
     "from", "has", "have", "how", "i", "if", "in", "into", "is", "it", "its", "me", "my", "not",
@@ -73,14 +65,13 @@ pub(super) struct ExploreArgs {
     query: String,
     /// Most characters to answer with: 16000 when left out, 4000 to 24000.
     max_chars: Option<usize>,
-    /// Find the callers and callees of the declarations named by the language server's call
-    /// hierarchy (rust-analyzer, pyright, …) instead of by name: exact where several
-    /// declarations share a name, but slower, and the first such call for a language starts its
-    /// server, falling back to names if it is not ready within 10 s. False when left out.
+    /// Use language-server call hierarchy for named declarations when available. This is more
+    /// precise than name matching but can take up to 10 seconds on first use; fall back to
+    /// names when the server is unavailable. Defaults to false.
     precise: Option<bool>,
 }
 
-/// The question taken apart.
+/// Parsed question terms and explicit file references.
 #[derive(Default)]
 struct Query {
     /// Files a path or a link names, in the question's order.
@@ -100,10 +91,10 @@ impl Query {
     }
 }
 
-/// The files a question finds, best first, each with what it found there.
+/// Ranked files and their matches.
 type Ranked = Vec<(String, Found)>;
 
-/// What the question found in one file.
+/// Matches found in one file.
 #[derive(Default)]
 struct Found {
     score: f64,
@@ -113,7 +104,7 @@ struct Found {
     lines: BTreeSet<usize>,
     /// Byte offsets of the headings holding one.
     headings: Vec<usize>,
-    /// How many of the best files it links to or is linked from, two or more.
+    /// Number of top files linked to or from this file, when at least two.
     near: usize,
     title: Option<String>,
     /// The declarations in it to show: named in the question, or calling or called by one.
@@ -201,9 +192,8 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
     Ok(out)
 }
 
-/// Take the question apart: `[[links]]` and paths name files, `#tags` name the files holding
-/// them, and the rest are words, the ones that say nothing dropped. A path holding spaces is
-/// found as the whole question or between backticks.
+/// Parse explicit paths, `[[links]]`, and `#tags`; search the remaining significant words.
+/// A path with spaces may be the whole question or enclosed in backticks.
 fn parse(s: &Shared, query: &str) -> Result<Query, String> {
     let mut q = Query::default();
     let whole = query.trim().trim_matches(['`', '"', '\'']);
@@ -282,8 +272,7 @@ fn parse(s: &Shared, query: &str) -> Result<Query, String> {
     Ok(q)
 }
 
-/// Whether a word is written as code is: `links_from`, `Index::backlinks`, `self.vault`,
-/// `camelCase`, a capitalised word not at the question's start.
+/// Whether a term has code syntax, such as `links_from`, `Index::backlinks`, or `camelCase`.
 fn codey(token: &str, first: bool) -> bool {
     let inner = |c: char| token.trim_end_matches(c).contains(c);
     token.contains('_')
@@ -293,12 +282,12 @@ fn codey(token: &str, first: bool) -> bool {
         || !first && token.starts_with(char::is_uppercase)
 }
 
-/// Whether `rel` names a file in the vault, which a path in the question pins.
+/// Whether `rel` names a vault file pinned by an explicit path.
 fn is_file(s: &Shared, rel: &str) -> bool {
     s.inside(rel).is_ok() && s.vault.resolve(rel).is_ok_and(|p| p.is_file())
 }
 
-/// The files the question finds, best first, at most [`SHOWN`], and the declarations it names.
+/// Return up to [`SHOWN`] ranked files and named declarations.
 fn rank(s: &Shared, q: &Query) -> Result<(Ranked, Vec<Seed>), String> {
     let mut found: HashMap<String, Found> = HashMap::new();
     let mut cache: HashMap<String, bool> = HashMap::new();
@@ -470,7 +459,7 @@ fn passages(
     }
 }
 
-/// Which of `words` the lower-cased `line` holds, each as the start of a word, as bits.
+/// Encode which words begin in `line` as a bitset.
 fn mask(line: &str, words: &[String]) -> u32 {
     let mut m = 0;
     for (i, w) in words.iter().enumerate() {
@@ -603,7 +592,7 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
     Ok(out)
 }
 
-/// The notes linking to `rel`, each with its line, at most `max` of them read for it.
+/// Return up to `max` notes linking to `rel`, with source lines.
 fn backlinks(s: &Shared, rel: &str, out: &mut String, max: usize) -> Result<(), String> {
     let rows = s.vault.backlinks(rel).map_err(fail)?;
     let total = rows.len();
@@ -622,7 +611,7 @@ fn backlinks(s: &Shared, rel: &str, out: &mut String, max: usize) -> Result<(), 
     Ok(())
 }
 
-/// A titled list of a card's: at most `max` of the rows, and how many more there are.
+/// Format up to `max` titled rows and the count omitted.
 fn list(out: &mut String, title: &str, rows: Vec<String>, max: usize) {
     if rows.is_empty() {
         return;
@@ -636,9 +625,8 @@ fn list(out: &mut String, title: &str, rows: Vec<String>, max: usize) {
     }
 }
 
-/// The 1-based line ranges of a file of `len` lines to show for the `found` lines, `heads`
-/// being its headings' lines: the section each sits in when it is short, else the heading and
-/// a few lines either side; the file's first lines when nothing was found in it.
+/// Choose 1-based line ranges around matches, showing short sections whole and long
+/// sections around matches. Show the file head when nothing matches.
 fn shown_lines(len: usize, heads: &[usize], found: &BTreeSet<usize>) -> Vec<RangeInclusive<usize>> {
     if len == 0 {
         return Vec::new();
@@ -661,10 +649,8 @@ fn shown_lines(len: usize, heads: &[usize], found: &BTreeSet<usize>) -> Vec<Rang
     merge(ranges)
 }
 
-/// The 1-based line ranges of a code file (`all` its lines) to show: each declaration in `show`
-/// and the innermost one around each `found` line, from the comments and attributes above it to
-/// its end — a long one as its head, the found lines and its last line — and a found line no
-/// declaration holds with the lines around it.
+/// Choose 1-based ranges for named declarations and matches, including preceding docs and
+/// attributes. Abbreviate long declarations and show context for unmatched lines.
 fn code_lines(
     all: &[&str],
     symbols: &[CodeSymbol],
@@ -707,7 +693,7 @@ fn code_lines(
     merge(ranges)
 }
 
-/// Whether a line above a declaration belongs to it: a comment, an attribute, an annotation.
+/// Whether a preceding comment, attribute, or annotation belongs to a declaration.
 fn is_preamble(line: &str) -> bool {
     let line = line.trim_start();
     ["///", "//", "/*", "*", "#[", "@", "#"]
@@ -715,7 +701,7 @@ fn is_preamble(line: &str) -> bool {
         .any(|p| line.starts_with(p))
 }
 
-/// Sorted, overlapping and touching ranges made one.
+/// Merge sorted ranges that overlap or touch.
 fn merge(mut ranges: Vec<RangeInclusive<usize>>) -> Vec<RangeInclusive<usize>> {
     ranges.sort_by_key(|r| *r.start());
     let mut merged: Vec<RangeInclusive<usize>> = Vec::new();
@@ -728,7 +714,7 @@ fn merge(mut ranges: Vec<RangeInclusive<usize>>) -> Vec<RangeInclusive<usize>> {
     merged
 }
 
-/// `n` of `what`, in the plural but for one.
+/// Pluralize `what` for `n`.
 pub(super) fn count(n: usize, what: &str) -> String {
     match n {
         1 => format!("1 {what}"),
@@ -736,7 +722,7 @@ pub(super) fn count(n: usize, what: &str) -> String {
     }
 }
 
-/// The longest run of backticks in `text`: the fence around it has to be longer.
+/// Find the longest backtick run so a longer fence can enclose `text`.
 fn longest_tick_run(text: &str) -> usize {
     text.split(|c| c != '`').map(str::len).max().unwrap_or(0)
 }

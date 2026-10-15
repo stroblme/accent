@@ -35,8 +35,7 @@ pub struct Editor {
     current: Option<CellId>,
 }
 
-/// What an undo or redo step puts back: one page, or the whole page list when pages were added
-/// or removed.
+/// State restored by undo or redo: one page, or the page list after an addition or removal.
 // ponytail: snapshots clone a whole page, fine at a few thousand cells for the hundred steps
 // kept; command objects are the upgrade when memory or diffing matters.
 #[derive(Debug, Clone)]
@@ -45,8 +44,7 @@ enum Snapshot {
     Pages(Vec<Page>),
 }
 
-/// New cell ids in draw.io's form, `<guid>-<n>`: `mxGraphModel.createId` behind the
-/// `Editor.guid()` prefix draw.io gives each model.
+/// Draw.io cell IDs in `<guid>-<n>` form (`mxGraphModel.createId`).
 #[derive(Debug, Clone)]
 struct Ids {
     prefix: String,

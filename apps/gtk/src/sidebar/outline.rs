@@ -107,7 +107,7 @@ type Jump = Rc<RefCell<Rc<dyn Fn(u32)>>>;
 pub(super) struct List {
     /// The document the rows are of.
     pub(super) key: String,
-    /// What is shown under the rows, a PDF's thumbnail strip, which is also the document's.
+    /// PDF thumbnail strip shown below the rows and shared with the document.
     pub(super) below: Option<gtk::Widget>,
     /// What the pane shows: the rows, over `below` when there is one.
     pub(super) root: gtk::Widget,
@@ -122,7 +122,7 @@ pub(super) struct List {
     selection: gtk::SingleSelection,
     /// The row the caret is in, which the selection shows. Shared with the pointer-leave handler.
     followed: Rc<Cell<u32>>,
-    /// The row to bring into view, which is not always the selected one: see [`List::follow`].
+    /// Row to bring into view; it may differ from the selection (see [`List::follow`]).
     shown: Rc<Cell<u32>>,
     /// A scroll is waiting for the list's first layout.
     waiting: Rc<Cell<bool>>,

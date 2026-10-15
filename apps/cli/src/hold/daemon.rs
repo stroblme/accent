@@ -1,11 +1,6 @@
-//! One holder process per user and machine owns the held shells.
-//!
-//! Blocking threads accept connections, serve terminals and pump shell output. One `screen` lock
-//! covers model, terminal and exit status, ensuring output is replayed or sent live exactly
-//! once. Threads never hold two locks together.
-//!
-//! Slow readers apply backpressure to the shell; readers stalled for [`STALL`] are disconnected
-//! so dead links cannot block its pty indefinitely.
+//! One holder per user and machine owns shells, ptys, and screen models. A single screen
+//! lock orders output replay and live forwarding. Stalled readers are disconnected after
+//! [`STALL`] so they cannot block a pty indefinitely.
 
 use super::protocol::{self, DETACHED, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT, RESIZE};
 use super::{FAILED, LOCK, SOCKET, lock, screen};
@@ -27,31 +22,29 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// How long a terminal may leave output unread before it is dropped.
+/// Maximum time a terminal may leave output unread before disconnection.
 const STALL: Duration = Duration::from_secs(5);
-/// How long a pty stays quiet before the pump checks that its shell is still there: a shell that
-/// exited while a background job keeps the pty open (`firefox &`) never reads as end-of-file.
+/// Interval between checks for a shell whose background job keeps the pty open.
 const IDLE_MS: i32 = 1000;
-/// Between the hangup and the kill in [`Daemon::kill`].
+/// Grace period between hangup and forced kill in [`Daemon::kill`].
 const GRACE: Duration = Duration::from_secs(1);
-/// The largest read from a pty, and the largest piece of a replay.
+/// Maximum pty read and replay chunk size.
 const CHUNK: usize = 64 * 1024;
 /// Idle timeout before the first shell starts. Allows more than `client::connect`'s two-second
 /// connection window, then removes a holder whose attaching client died.
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Tells attached terminals apart, so that one leaving does not detach the one that took over.
+/// Distinguishes terminals so a departing one cannot detach its replacement.
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Daemon {
     shells: Mutex<Shells>,
     socket: PathBuf,
-    /// When a terminal last connected, for [`Daemon::watch`].
+    /// Last terminal connection time for [`Daemon::watch`].
     seen: Mutex<Instant>,
 }
 
-/// Held shells and pre-creation kills under one lock. Ordering kill and HELLO together prevents
-/// a late attach from creating a shell after Close Tab.
+/// Held shells and pending kills share one lock, preventing a late attach after Close Tab.
 #[derive(Default)]
 struct Shells {
     live: HashMap<String, Arc<Shell>>,
@@ -60,23 +53,23 @@ struct Shells {
 
 struct Shell {
     pid: u32,
-    /// What was started, and when, in seconds since the epoch: for `held`.
+    /// Started command and epoch time, reported by `held`.
     program: PathBuf,
     started: u64,
-    /// Who started it ([`Hello::owner`]), for `held`.
+    /// Owner reported by `held` ([`Hello::owner`]).
     owner: String,
     master: File,
     screen: Mutex<Screen>,
 }
 
-/// What the pump and the connections share, under one lock.
+/// Shell state shared by the pump and connections under one lock.
 struct Screen {
     parser: screen::Parser,
     client: Option<(u64, UnixStream)>,
     exit: Option<i32>,
 }
 
-/// Hold shells until the last one has ended. Returns at once if another holder is running.
+/// Hold shells until the last exits; return immediately if another holder is running.
 pub fn run() -> io::Result<()> {
     let dir = super::dir()?;
     // The lock settles holders started at once by attaches racing each other: one gets it and
@@ -107,7 +100,7 @@ pub fn run() -> io::Result<()> {
 }
 
 impl Daemon {
-    /// One connection. Its first frame says what it is for.
+    /// Handle one connection according to its first frame.
     fn serve(self: Arc<Self>, mut conn: UnixStream) {
         let Ok(Some((tag, payload))) = protocol::read_frame(&mut conn) else {
             return;
@@ -130,8 +123,7 @@ impl Daemon {
         }
     }
 
-    /// A terminal attached: find its shell or start one, then pass its keystrokes and sizes on
-    /// until it goes away.
+    /// Attach a terminal, starting its shell if needed, and forward input until disconnection.
     fn attach(self: &Arc<Self>, hello: &Hello, mut conn: UnixStream) {
         let shell = match self.open(hello) {
             Ok(Some(shell)) => shell,
@@ -177,9 +169,7 @@ impl Daemon {
         shell.detach(me);
     }
 
-    /// The shell `hello` names, started first if there is none by that id, or `None` when a kill
-    /// named it before it was started. Under the lock, so two terminals attaching to a new id at
-    /// once share one shell.
+    /// Find or start `hello`'s shell under the lock. Return `None` if a prior kill names it.
     fn open(self: &Arc<Self>, hello: &Hello) -> io::Result<Option<Arc<Shell>>> {
         let mut shells = lock(&self.shells);
         if let Some(shell) = shells.live.get(&hello.id) {
@@ -238,16 +228,15 @@ impl Daemon {
         self.gone(id, shell, code);
     }
 
-    /// A shell ended: forget it, tell its terminal, and leave if it was the last.
+    /// Forget an ended shell, notify its terminal, and exit if it was the last.
     fn gone(&self, id: &str, shell: &Shell, code: i32) {
         lock(&self.shells).live.remove(id);
         shell.ended(code);
         self.leave_if_idle();
     }
 
-    /// Leave once no terminal has connected for [`WAIT`] and no shell is held: a holder whose
-    /// `attach` died before its HELLO would otherwise wait forever. Only the first shell needs
-    /// waiting for; once one has come, the holder leaves as the last one ends ([`Daemon::gone`]).
+    /// Exit after [`WAIT`] without a shell or terminal, including when an attaching client dies.
+    /// After the first shell, exit when the last one ends.
     fn watch(&self) {
         loop {
             let left = wait_left(*lock(&self.seen), Instant::now());
@@ -268,11 +257,8 @@ impl Daemon {
         }
     }
 
-    /// End shell `id` and what runs in its foreground: a hangup, as a closing terminal gives, and
-    /// after [`GRACE`] a kill for whatever ignored it. Both go to process groups, the shell's and
-    /// the foreground job's, which reaches every process of a pipeline. The shell hangs up its
-    /// other jobs itself. An unknown id is remembered, so that a HELLO still on its way for it
-    /// starts nothing ([`Shells`]).
+    /// Hang up shell `id` and its foreground process groups, then force-kill survivors after
+    /// [`GRACE`]. Remember unknown IDs to prevent pending attachments from creating a shell.
     fn kill(&self, id: &str) {
         let shell = {
             let mut shells = lock(&self.shells);
@@ -390,7 +376,7 @@ impl Shell {
         screen::resize(&mut term.parser, rows, cols);
     }
 
-    /// Terminal `me` went away. The shell stays, unless another terminal already has it.
+    /// Detach terminal `me` while retaining the shell unless another terminal has taken over.
     fn detach(&self, me: u64) {
         let mut term = lock(&self.screen);
         if term.client.as_ref().is_some_and(|(id, _)| *id == me) {
@@ -398,7 +384,7 @@ impl Shell {
         }
     }
 
-    /// The shell ended with `code`. A terminal attaching from now on is told so instead.
+    /// Record shell exit status `code` for later attachments.
     fn ended(&self, code: i32) {
         let mut term = lock(&self.screen);
         term.exit = Some(code);
@@ -419,8 +405,7 @@ impl Shell {
         command_line(&std::fs::read(format!("/proc/{group}/cmdline")).ok()?)
     }
 
-    /// Ask the foreground program to redraw itself, for a full-screen one whose scroll margins and
-    /// character sets the replay cannot bring back.
+    /// Request a redraw from full-screen programs whose state replay cannot restore.
     fn nudge(&self) {
         // SAFETY: plain integer calls on a descriptor `self` keeps open.
         unsafe {
@@ -432,8 +417,7 @@ impl Shell {
     }
 }
 
-/// Open a pty pair with `O_NOCTTY` to avoid controlling-terminal hangups and close-on-exec to
-/// prevent leaked masters from keeping other shells alive.
+/// Open a pty pair without a controlling terminal or inheritable master descriptor.
 fn open_pty() -> io::Result<(File, File)> {
     let open = |path: &Path| {
         OpenOptions::new()
@@ -462,7 +446,7 @@ fn open_pty() -> io::Result<(File, File)> {
     Ok((master, slave))
 }
 
-/// Tell the pty its size. The kernel sends the foreground job SIGWINCH if it changed.
+/// Set the pty size, causing SIGWINCH for its foreground job when changed.
 fn set_winsize(pty: &File, rows: u16, cols: u16) {
     let size = libc::winsize {
         ws_row: rows,
@@ -514,12 +498,12 @@ fn spawn(hello: &Hello, slave: File) -> io::Result<Child> {
     cmd.spawn()
 }
 
-/// The shell to start for `hello`.
+/// Select the shell for `hello`.
 fn program(hello: &Hello) -> &Path {
     var(hello, "SHELL").map_or(Path::new("/bin/sh"), Path::new)
 }
 
-/// A variable of the terminal's environment, if set and not empty.
+/// Return a nonempty terminal environment variable.
 fn var<'a>(hello: &'a Hello, name: &str) -> Option<&'a OsStr> {
     hello
         .env
@@ -529,12 +513,11 @@ fn var<'a>(hello: &'a Hello, name: &str) -> Option<&'a OsStr> {
         .filter(|value| !value.is_empty())
 }
 
-/// The longest command line `held` reports, in characters: a listing travels in one frame of at
-/// most [`protocol::MAX`] bytes, and a command line can be two megabytes.
+/// Maximum command-line length in `held` output, bounded by [`protocol::MAX`].
 const LONGEST: usize = 256;
 
-/// A `/proc/<pid>/cmdline` as a line: its NUL-separated arguments joined by spaces, cut at
-/// [`LONGEST`]. `None` for a process with none, a kernel thread or one that has exited.
+/// Read a process command line, joining NUL-separated arguments and truncating at [`LONGEST`].
+/// Return `None` for exited processes or kernel threads.
 fn command_line(raw: &[u8]) -> Option<String> {
     let line = String::from_utf8_lossy(raw.strip_suffix(&[0]).unwrap_or(raw)).replace('\0', " ");
     if line.is_empty() {
@@ -546,12 +529,12 @@ fn command_line(raw: &[u8]) -> Option<String> {
     })
 }
 
-/// How much of [`WAIT`] is left for a holder a terminal last connected to at `seen`.
+/// Remaining [`WAIT`] time since the last terminal connected.
 fn wait_left(seen: Instant, now: Instant) -> Duration {
     WAIT.saturating_sub(now.saturating_duration_since(seen))
 }
 
-/// A status as a shell reports it: the exit code, or 128 plus the signal that ended the process.
+/// Return the exit code or 128 plus the terminating signal.
 fn status(status: ExitStatus) -> i32 {
     status
         .code()

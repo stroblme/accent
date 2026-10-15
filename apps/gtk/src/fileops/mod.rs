@@ -117,14 +117,13 @@ pub struct Ops {
 
 // --------------------------------------------------------------------------------- creating
 
-/// New file in `dir` ("" is the vault root), from a template when the vault has any.
+/// Create a file in `dir` ("" for the vault root), optionally from a template.
 ///
-/// The name is created exactly as typed: `notes` is a file called `notes`, `main.rs` is a source
-/// file, and only `notes.md` is a note. A template is markdown, so the picker is on screen only
-/// while the typed name says the file will be one.
+/// Use the name exactly as typed: only a `.md` name creates a note. Show the template picker
+/// only for markdown files.
 ///
-/// A name carrying `/` is a path relative to `dir`, exactly as it is in Rename, and the folders it
-/// names are created with it. The line under the entry says where the file will really land.
+/// A name containing `/` is relative to `dir`; create its folders as needed. Show the
+/// resulting destination below the entry.
 pub fn new_file(ops: &Rc<Ops>, dir: &str) {
     new_file_named(ops, dir, "");
 }
@@ -657,11 +656,9 @@ pub fn move_all(ops: &Rc<Ops>, moves: Vec<(String, String)>) {
     });
 }
 
-/// Move to…: `rels` (each with whether it is a folder) into a folder typed into the vault's path
-/// field, keeping their names — what a drop onto a folder does, for a folder that is not on screen
-/// or not there yet. It opens on the folder the first of them is in; one that does not exist is
-/// made with the move, once any Update Links? question is answered, as Rename makes the folders a
-/// typed path names. Through [`move_all`], so a name the folder already holds refuses the batch.
+/// Move `rels` into a typed vault folder, keeping their names. Start in the first item's
+/// folder; create a missing destination after any Update Links? prompt. [`move_all`] rejects
+/// the batch if a name already exists there.
 pub fn move_to(ops: &Rc<Ops>, rels: Vec<(String, bool)>) {
     let rels: Vec<String> = topmost(&rels).into_iter().map(|(rel, _)| rel).collect();
     let Some(first) = rels.first().cloned() else {

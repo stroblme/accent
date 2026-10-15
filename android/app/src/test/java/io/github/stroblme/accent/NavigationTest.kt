@@ -17,23 +17,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/**
- * Where a bookmark or a link puts the reader, which page a finger landed on, and which link.
- *
- * All three are the sort of arithmetic that is wrong by a scale factor and looks almost right,
- * and none needs a device: the panel that lists the bookmarks and the intent that leaves the app
- * do, and are checked by hand instead.
- */
+/** PDF jump, page hit-test, and link coordinates across zoom levels. */
 class NavigationTest {
-    /** Five A4 pages with the 8 px gap the column puts under each, as at a 1080 px fit width. */
+    /** Five A4 pages with 8 px gaps at 1080 px fit width. */
     private val pages = Pagination(List(5) { PageSize(595f, 842f) }, gap = 8f)
     private val width = 1080
 
-    /**
-     * The one thing a jump has to get right: the row it lands on does not depend on the zoom, and
-     * the offset into that row scales with it. Going straight to `requestScrollToItem(page, y)`
-     * with a `y` in points would put the reader 8× too high at 8×.
-     */
+    /** A jump keeps the destination page fixed and scales its offset with zoom. */
     @Test
     fun `a jump lands in the same place whatever the zoom`() {
         val (row, into) = pages.to(2, 100f, width, 1f)
@@ -52,10 +42,7 @@ class NavigationTest {
         assertEquals(0, pages.to(0, 0f, width, 1f).second)
     }
 
-    /**
-     * Back after a jump: the place left is kept on the paper, so a pinch at the destination does
-     * not send the reader back to the right row at the wrong height.
-     */
+    /** Back restores a paper position even after zoom changes at the destination. */
     @Test
     fun `a place left at one zoom is found again at another`() {
         val (page, top) = pages.place(pages.top(2, width, 1f) + 182f, width, 1f)
@@ -68,13 +55,13 @@ class NavigationTest {
         assertEquals(1452f, into.toFloat(), 5f)
     }
 
-    /** A destination past the end of its own page is an overrun, and falls through like one. */
+    /** A destination past its page end falls through to the following page. */
     @Test
     fun `a destination past the end of a page falls onto the next`() {
         assertEquals(1, pages.to(0, 900f, width, 1f).first)
     }
 
-    /** A tap, once the pan and the scroll have been taken off it, is a point in the column. */
+    /** Undo pan and scroll to map a screen tap into the page column. */
     @Test
     fun `a tap on a page comes back in the page's own points`() {
         val land = pages.on(540f, 764f, width, 1f)!!
@@ -85,7 +72,7 @@ class NavigationTest {
         assertEquals(1080f / 595f, land.scale, 0.001f)
     }
 
-    /** The 8 px under each page belongs to no page, and neither does anything past the last. */
+    /** Gaps and space past the last page hit no page. */
     @Test
     fun `a tap that missed every page is on none of them`() {
         val row = pages.top(1, width, 1f)
@@ -94,10 +81,7 @@ class NavigationTest {
         assertNull(pages.on(540f, -1f, width, 1f))
     }
 
-    /**
-     * The property the hit test rests on: the same place on the paper is the same place in points
-     * however far the pages have been pinched, because that is the space links are given in.
-     */
+    /** The same paper point maps to the same page coordinates at every zoom. */
     @Test
     fun `the same point on the paper reads the same at any zoom`() {
         for (zoom in listOf(1f, 8f)) {
@@ -110,10 +94,7 @@ class NavigationTest {
         }
     }
 
-    /**
-     * What is drawn over the pages — a selection's handles, the menu — is placed by the way back
-     * from a point on the paper to the screen, so it has to be the tap's own mapping reversed.
-     */
+    /** Overlay placement reverses the tap mapping from page to screen. */
     @Test
     fun `a point on the paper goes to the screen and back`() {
         for (zoom in listOf(1f, 8f)) {
@@ -168,7 +149,7 @@ class NavigationTest {
         assertNull(pages.reveal(0, rect, above = 0f, panX = 0f, screen, 1f, clear = 150f))
     }
 
-    /** Down the document, it comes to the middle of what the bar leaves of the screen. */
+    /** Centre a jump vertically in the space below the toolbar. */
     @Test
     fun `a passage further down is brought to the middle`() {
         val rect = Rect(100f, 400f, 200f, 412f)
@@ -179,7 +160,7 @@ class NavigationTest {
         assertEquals(0f, to.panX, 0f)
     }
 
-    /** At 4× a passage off the side is panned to the middle, and the scroll is left alone. */
+    /** Pan an offscreen passage to centre at 4× without changing scroll. */
     @Test
     fun `a passage off to the side is panned to it`() {
         val scale = 4 * 1080f / 595f
@@ -193,11 +174,7 @@ class NavigationTest {
     private fun mark(src: String, vararg quads: Rect) =
         Mark(quads.toList(), PdfLink(src, 0L, 0u, listOf(0u, 0u, 0u, 5u), null))
 
-    /**
-     * A highlight over two lines is hit on either, and where two notes highlight the same words
-     * the first listed opens, as the desktop's `highlight_at` has it — unlike a `/Link`, where
-     * the later box is the one on top.
-     */
+    /** Hit either line of a highlight; when highlights overlap, open the first indexed note. */
     @Test
     fun `a tap on a highlight finds its note, the first where two overlap`() {
         val a = mark("A.md", Rect(100f, 200f, 300f, 210f), Rect(100f, 212f, 180f, 222f))
@@ -208,7 +185,7 @@ class NavigationTest {
         assertNull(markAt(listOf(a, b), Point(200f, 240f), slop = 8f))
     }
 
-    /** Every comment under the finger shows, in the page's order, as on the desktop. */
+    /** Show every tapped comment in page order, matching desktop behaviour. */
     @Test
     fun `a tap on comments finds every one under it`() {
         val note = Comment(listOf(Rect(150f, 60f, 170f, 80f)), "Is this right?", "Grace")

@@ -1,7 +1,6 @@
-//! SyncTeX between a LaTeX build's PDF and its sources (DESIGN.md, PDF): Go to Source from a page
-//! and Show in PDF from a `.tex` tab, read by `accent_core::synctex`. A local vault's alone: a
-//! remote vault's PDF is read from a copy with no SyncTeX file beside it, and its sources are on
-//! the host.
+//! SyncTeX navigation between a local LaTeX PDF and its sources (DESIGN.md, PDF).
+//! Go to Source starts from a page; Show in PDF starts from a `.tex` tab. Remote PDFs use
+//! local copies without adjacent SyncTeX data, while their sources remain on the host.
 
 use super::*;
 use accent_core::synctex::{self, Synctex};

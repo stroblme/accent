@@ -26,12 +26,12 @@ fn parse(read: accent_api::Result<accent_core::fs::Read>) -> Parsed {
         Ok(accent_core::fs::Read::Text(text)) => parse_text(text),
         Ok(accent_core::fs::Read::Binary { .. }) => Parsed::Refused(
             "Not a Diagram",
-            "The file is not text, so it cannot be a draw.io diagram.".to_string(),
+            "A draw.io diagram must be a text file.".to_string(),
         ),
         Ok(accent_core::fs::Read::TooLarge { .. }) => Parsed::Refused(
             "File Too Large",
             format!(
-                "The file is over the {} MiB accent will read.",
+                "This file exceeds the {} MiB text file limit.",
                 accent_core::fs::MAX_TEXT / (1024 * 1024)
             ),
         ),
@@ -42,7 +42,7 @@ fn parse(read: accent_api::Result<accent_core::fs::Read>) -> Parsed {
 fn parse_text(text: accent_core::fs::Text) -> Parsed {
     match File::from_bytes(text.text.as_bytes()) {
         Ok(file) => Parsed::Diagram(file, text.etag, text.digest()),
-        Err(e) => Parsed::Refused("Not a Diagram", format!("It could not be read: {e}.")),
+        Err(e) => Parsed::Refused("Not a Diagram", format!("Could not read this file: {e}.")),
     }
 }
 
@@ -377,7 +377,7 @@ impl App {
                 editor::Landing::Failed(e) if report && e.is_offline() => {
                     app.show_offline();
                     if explicit {
-                        app.toast("Not connected, so nothing was saved");
+                        app.toast("Not connected. Changes were not saved");
                     }
                 }
                 editor::Landing::Failed(e) if report => app.cannot("save", e),
@@ -457,7 +457,7 @@ impl App {
         let dialog = adw::AlertDialog::new(
             Some("Diagram Changed on Disk"),
             Some(&format!(
-                "{} was modified elsewhere since you opened it. Reload it and lose your changes, or overwrite it with them.",
+                "{} changed on disk. Reload to discard your edits, or overwrite the disk version.",
                 doc::file_name(&tab.key())
             )),
         );

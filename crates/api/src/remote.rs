@@ -1,8 +1,7 @@
-//! Remote vaults over one system-SSH connection. `accent-cli serve` runs
-//! indexing, watching, search and git beside the files; window sessions and
-//! settings stay local. Opening returns immediately while a connection thread
-//! reports through the shared [`Event`] channel. System SSH handles config,
-//! ProxyJump, the agent and authentication; `SSH_ASKPASS` routes prompts to dialogs.
+//! Remote vaults over system SSH. `accent-cli serve` handles indexing, watching, search, and git
+//! beside the files; window state stays local. Opening returns before the connection completes,
+//! with status reported through [`Event`]. SSH handles configuration and authentication;
+//! `SSH_ASKPASS` routes prompts to dialogs.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Read, Write};

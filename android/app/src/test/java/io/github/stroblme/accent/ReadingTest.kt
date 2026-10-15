@@ -8,33 +8,27 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/**
- * What Browse says while the index does not hold every file. A search that finds nothing during
- * the first walk used to look exactly like one that never will, which is the case this is for.
- */
+/** Browse distinguishes partial search results during indexing from complete empty results. */
 class ReadingTest {
     @Test
     fun `the line is up exactly while a list may be missing files`() {
         assertEquals(
-            "Reading your vault… 120 files so far. Some may not be listed yet.",
+            "Reading your vault… 120 files read. More may appear.",
             readingLine(indexing = true, paused = false, scanned = 120),
         )
         // The rescan's scan, which counts nothing it could show.
         assertEquals(
-            "Reading your vault… Some files may not be listed yet.",
+            "Reading your vault… More files may appear.",
             readingLine(indexing = true, paused = false, scanned = 0),
         )
         assertEquals(
-            "Reading paused. Files not read yet are not listed.",
+            "Reading paused. Results may be incomplete.",
             readingLine(indexing = false, paused = true, scanned = 0),
         )
         assertNull(readingLine(indexing = false, paused = false, scanned = 0))
     }
 
-    /**
-     * A walk that fails, or whose events stop being read, puts down what drives the status line
-     * and the service a walk holds, and leaves what the index already lets the reader do.
-     */
+    /** A failed or unobserved walk clears progress state while retaining indexed results. */
     @Test
     fun `a walk that ends short is over`() {
         val walking = VaultState(root = "/v", indexing = true, scanned = 40, phase = Phase.INDEX)
@@ -46,7 +40,7 @@ class ReadingTest {
         assertEquals(true, over.ready)
     }
 
-    /** The notification a walk holds, before it has a count and once it has one. */
+    /** Indexing notification before and after the file count is known. */
     @Test
     fun `the notification names the vault and counts its files`() {
         assertEquals("Indexing Notes…", indexingText("Notes", 0))

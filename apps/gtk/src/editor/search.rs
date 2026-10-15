@@ -349,7 +349,7 @@ impl Tab {
         )
     }
 
-    /// A one-line selection, which is what the find bar prefills itself from.
+    /// Return a one-line selection for the find bar's initial query.
     pub fn selected_query(&self) -> Option<String> {
         self.selection_text()
             .filter(|s| !s.is_empty() && !s.contains('\n'))
@@ -436,7 +436,7 @@ impl Tab {
         }
     }
 
-    /// "n of m", the way every find bar says it, or that the query does not compile.
+    /// Return the match count as "n of m", or an invalid-query message.
     pub fn matches_label(&self) -> String {
         let (blank, invalid) = {
             let find = self.find.borrow();
@@ -533,7 +533,7 @@ impl Tab {
         self.jump_to(&self.line_iter(line, column), 0.25);
     }
 
-    /// Put the caret at a server position, which is zero-based and counts characters.
+    /// Move the caret to a zero-based, character-counted server position.
     pub fn goto_pos(&self, pos: Pos) {
         self.jump_to(&lang::iter_at(&self.buffer, pos), 0.25);
     }

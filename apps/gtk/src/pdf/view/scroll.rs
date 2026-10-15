@@ -1,5 +1,5 @@
-//! Where the view is in the document: the scroll offset as a page and a point on it, going to a
-//! page or a rectangle of one, and the layout kept across a resize or a zoom.
+//! Track PDF reading position as a page and point, preserving it across resize and zoom.
+//! Navigate to pages or page rectangles.
 
 use adw::prelude::*;
 use gtk::gdk;

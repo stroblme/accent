@@ -1,25 +1,19 @@
-//! A `sourceview5::View` with secondary carets, occurrence selection and box selection.
+//! A `sourceview5::View` with secondary carets, occurrence and box selection.
 //!
-//! GtkTextView supports one insert mark. Secondary carets use right-gravity marks for caret
-//! and anchor, while GTK retains the primary caret for normal selection, IME and scrolling.
-//! The view draws extra carets and replays supported edits and motions at each one.
+//! GTK owns the primary caret for selection, IME and scrolling. Right-gravity marks track
+//! secondary carets and anchors; the view draws them and applies supported edits and motions
+//! to each caret. Shared key handling aligns word deletion and vertical motion across carets.
 //!
-//! A shared `TextViewImpl` also corrects single- and multi-caret motions: Ctrl+Delete removes
-//! whitespace before a word, and Up, Down, Home and End follow document lines.
+//! Shift+Alt drag selects a box. Clicks, external moves, external edits, Escape and dead keys
+//! clear secondary carets; dead keys leave IME preedit to the primary. GTK does not expose its
+//! blink phase, so secondary carets share a custom blink.
 //!
-//! Clicks and external caret moves clear secondaries; Shift+Alt drag creates a box. Dead
-//! keys end the column so IME preedit can reach the primary. All carets share custom blinking
-//! while secondaries exist because GTK's blink phase is inaccessible.
+//! Automatic completion and ghost text pause during multi-caret editing. Ctrl+Space completes
+//! at the primary; typing or accepting ends the column. Printable text, Return, Tab, deletion,
+//! paste and supported motions apply to every caret; overlapping selections merge. Undo and
+//! Redo restore text and carets in one action per edit.
 //!
-//! Automatic completion and ghost text are suppressed during multi-caret editing. Explicit
-//! Ctrl+Space completes at the primary only, ending the column on typing or acceptance.
-//!
-//! Printable text, Return, Tab, deletion and supported motions replay at every caret;
-//! Shift extends each selection, overlapping selections merge, and paste reaches every caret.
-//! Undo and Redo restore caret state with the text; each multi-caret edit is one user action.
-//! Unbound keys retain the column; external edits, moves and Escape end it.
-//!
-//! The view also paints ghost text and focus-mode veils, neither of which belongs in the buffer.
+//! The view also paints ghost text and focus-mode veils outside the buffer.
 
 use crate::editor::{caret, line_end, line_prefix};
 use gtk::glib::translate::IntoGlib;

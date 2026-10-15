@@ -4,14 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The stretch between a pick and the core handing the vault over, which the start screen shows as
- * the vault being read instead of leaving the picker up.
- *
- * Leaving the picker at once means the reader can close the vault, and pick again, before the
- * core has answered, and an answer nobody is waiting for any more has to be let go rather than
- * taken. [VaultState.waitsFor] is that decision and it is plain Kotlin; the screen needs a device.
- */
+/** During vault opening, [VaultState.waitsFor] ignores results from a superseded pick. */
 class OpeningTest {
     @Test
     fun `a pick waits for its own vault`() {

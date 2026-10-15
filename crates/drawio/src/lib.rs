@@ -1,8 +1,7 @@
-//! Read, draw and edit draw.io (`.drawio`) diagrams.
+//! Read, draw, and edit draw.io (`.drawio`) diagrams.
 //!
-//! [`File`] preserves unknown XML so diagrams remain compatible with draw.io.
-//! [`scene()`] produces a toolkit-independent display list; [`Editor`] edits with undo.
-//! GTK and Android share this model without UI types or dependencies on other accent crates.
+//! [`File`] preserves unknown XML for compatibility. [`scene()`] produces a toolkit-independent
+//! display list, and [`Editor`] provides undoable edits. GTK and Android share this UI-free model.
 //!
 //! Parts are ported from mxGraph and draw.io (Apache-2.0); see file headers and `NOTICE`.
 

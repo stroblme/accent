@@ -13,18 +13,17 @@ const HELLO: u8 = b'h';
 const INPUT: u8 = b'i';
 const OUTPUT: u8 = b'o';
 const EXIT: u8 = b'x';
-/// Who the test's shells are for, as an app's state directory would be.
+/// Owner used for test shells.
 const OWNER: &str = "/home/me/.local/state";
 
-/// A `TMPDIR` of our own, so the holder under test never meets the one of whoever runs the tests,
-/// and a holder that outlives a failed test is ended with it.
+/// Isolate the holder in a scratch `TMPDIR` and terminate it after the test.
 struct Holder {
     tmp: PathBuf,
     child: Child,
 }
 
 impl Holder {
-    /// `None` where no pty can be had (some containers and sandboxes): there is nothing to test.
+    /// Return `None` when the environment has no pty.
     fn start(name: &str) -> Option<Holder> {
         if std::fs::OpenOptions::new()
             .read(true)
@@ -78,7 +77,7 @@ impl Holder {
         conn
     }
 
-    /// The holder exits on its own once its last shell has, and takes its socket with it.
+    /// Wait for the holder to exit and remove its socket after the last shell ends.
     fn assert_gone(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.child.try_wait().unwrap().is_none() {
@@ -121,7 +120,7 @@ fn frame(mut conn: &UnixStream) -> (u8, Vec<u8>) {
     (head[0], payload)
 }
 
-/// Read output until it holds `want`, or with `None` until the shell ends; its status if it did.
+/// Read until output contains `want`, or until exit when `want` is `None`.
 fn until(conn: &UnixStream, want: Option<&str>) -> (String, Option<i32>) {
     let mut seen = String::new();
     loop {

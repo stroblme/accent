@@ -1,6 +1,4 @@
-//! The window's side of a PDF tab: opening one, sending its saves to a remote host, the notes'
-//! highlights painted on it, and the PDF commands: the pages, the drawing tools, Undo and Redo,
-//! Export Highlights and a sketch.
+//! Window integration for PDF tabs: opening, remote saves, note highlights and commands.
 
 use crate::*;
 use accent_core::pdf::PageEdit;

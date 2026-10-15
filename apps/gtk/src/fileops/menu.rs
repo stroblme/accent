@@ -1,5 +1,4 @@
-//! The file tree's context menu: what it offers over a row, over a folder and over nothing, and
-//! the action group its items resolve through.
+//! File-tree context menus for rows, folders and empty space, backed by an action group.
 
 use super::clipboard::{self, can_paste};
 use super::{

@@ -1,5 +1,5 @@
-//! Process-wide async runtime shared by language servers and MCP. Two workers handle framing and
-//! JSON while GTK and RPC callers poll from outside the runtime.
+//! Process-wide async runtime shared by language servers and MCP. Two workers handle I/O and JSON
+//! while GTK and RPC callers wait outside the runtime.
 
 use std::sync::OnceLock;
 

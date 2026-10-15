@@ -1,9 +1,7 @@
-//! A PDF in a tab: the document, the reading state around it, and the hooks the window listens
-//! on.
+//! Own a PDF tab's document, reading state and window hooks.
 //!
-//! The widget in `view.rs` knows nothing about pdfium; it asks for tiles and paints what it is
-//! given. `render.rs` is the other half, one thread per open document; this is the reader
-//! between them — the history, the search and the outline that make it more than a viewer.
+//! `view.rs` requests and paints tiles without pdfium access. `render.rs` owns a thread per
+//! document. This module connects them and manages history, search and outline state.
 
 use super::protocol::Request;
 use super::ring;

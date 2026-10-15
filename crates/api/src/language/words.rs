@@ -1,7 +1,6 @@
-//! Prose completion layered beneath structural providers for notes and LaTeX.
-//! Offer document words by frequency, then stems from the system Hunspell
-//! dictionary used by libspelling. [`Layered`] also combines model suggestions
-//! through the same provider interface.
+//! Prose completion beneath structural providers for notes and LaTeX. Suggestions use document
+//! word frequency, then stems from libspelling's Hunspell dictionary. [`Layered`] also combines
+//! model suggestions through the same interface.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

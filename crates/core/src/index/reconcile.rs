@@ -30,22 +30,17 @@ impl Index {
         })
     }
 
-    /// [`reconcile`](Self::reconcile) with explicit walk options, and the index handed to
-    /// `on_progress`. It is called between batches with no transaction open, so the caller can
-    /// write in the middle of a long walk instead of after it.
+    /// Reconcile one folder with explicit walk options. `on_progress` receives the index between
+    /// batches, with no transaction open, so it may write during a long walk.
     ///
-    /// `stop` asks the caller, once per scanned entry and once per write batch, whether to give
-    /// up. Stopping is a **pause**: every row already written stays, and the next reconcile is a
-    /// diff over the same vault, so it indexes the remainder instead of starting over. What comes
-    /// back then has [`ReconcileStats::stopped`] set, which is the only thing that tells a partial
-    /// index from a finished one.
+    /// `stop` is checked for each scanned entry and write batch. Stopping preserves written rows;
+    /// the next reconcile resumes by diffing the vault. [`ReconcileStats::stopped`] identifies a
+    /// partial result.
     ///
-    /// `dir` narrows the walk to one folder, `""` being the whole vault: the folder and what is
-    /// under it are brought in line with the disk, as the whole walk would have them, and no row
-    /// outside it is touched. A file the index already holds by a path outside the folder is an
-    /// alias there, whichever path the whole walk would have kept. A folder that is gone, or that
-    /// the walk would no longer enter, leaves the index with everything under it; one a link
-    /// brings in is walked with the whole vault, a link's rules being those of the pass it starts.
+    /// `dir` is vault-relative; `""` walks the whole vault. A folder walk changes no rows outside
+    /// that folder. Paths already indexed outside it remain aliases, even if a full walk would
+    /// choose a different path. A missing or excluded folder loses its indexed descendants. A
+    /// linked folder uses the traversal rules of the pass that follows the link.
     pub fn reconcile_with(
         &mut self,
         root: &Path,
@@ -308,14 +303,10 @@ impl Index {
         Ok(stats)
     }
 
-    /// Whether this connection's commits wait for the disk. A first index's do not: synced, a
-    /// vault's 0.3 GB index wrote 1.1 GB through 66 syncs, unsynced 0.4 GB through 10. What that
-    /// risks is an index that held nothing before — a power cut or a system crash mid-way (not
-    /// one of accent's own) can leave any page of it damaged. So the walk holds
-    /// [`unsynced_marker`](super::unsynced_marker) locked meanwhile, its name on the disk before
-    /// anything unsynced is, and an open that finds it unlocked checks every page and builds
-    /// anew what is damaged ([`Index::open_or_rebuild`]). Syncing again puts what was written
-    /// unsynced on the disk before the marker goes.
+    /// Set whether commits wait for disk sync. Initial indexing skips syncs for speed. It holds
+    /// [`unsynced_marker`](super::unsynced_marker) locked and persists its name before unsynced
+    /// writes. After a crash, [`Index::open_or_rebuild`] checks an unlocked marker and rebuilds
+    /// a damaged index. Re-enabling sync persists the index before removing the marker.
     fn sync_writes(&mut self, sync: bool) -> Result<()> {
         let db = PathBuf::from(self.conn.path().unwrap_or_default());
         let marker = super::unsynced_marker(&db);
@@ -550,22 +541,11 @@ struct Content {
     symbols: Vec<crate::code::Decl>,
 }
 
-/// Read, hash and parse one scanned entry for [`upsert`].
-///
-/// Everything is read through `fs::read_text`, the same call the editor opens a tab with, so that
-/// every byte offset the index hands out — a search hit, a backlink, a heading — lands on the
-/// buffer it is applied to. That is what makes a CRLF note work: the buffer holds `\n`, and so
-/// must the text the offsets were counted in. `read_text` also brings the NUL sniff and the
-/// `lossy` flag; a lossy note is still indexed because its buffer holds the same replacement
-/// characters, while a lossy source file is dropped rather than indexed as text it is not. Only a
-/// note is read past [`MAX_INDEXED_BODY`], and the size test uses the stat the walk already took
-/// rather than pulling a 15 MiB file into memory for the cap to throw away. PDFs and binaries stay
-/// cheap `(mtime, size, ino)` rows, a file named as a binary format unopened; the `pdf` feature
-/// will add text extraction and can reuse the same hash column when it does.
-///
-/// A file that cannot be read keeps its stat row and loses its body, which is a note that is in
-/// the tree and in no search. Said at `debug!`, the level the walk says its own skips at, because
-/// it is the only trace such a note leaves.
+/// Read, hash and parse one scanned entry for [`upsert`]. Use the editor's text reader so indexed
+/// byte offsets match its buffer, including normalised CRLF and replacement characters in notes.
+/// Lossy source files have no indexed body. Only notes may exceed [`MAX_INDEXED_BODY`]; the walk's
+/// stat avoids reading other oversized files. PDFs and binaries keep stat-only rows. Unreadable
+/// files also keep their stat rows, with the missing body logged at debug level.
 fn read_content(f: &walk::FileMeta) -> Content {
     let body = || match crate::fs::read_text(&f.canonical) {
         Ok(read) => Some(read),

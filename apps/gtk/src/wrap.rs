@@ -1,16 +1,12 @@
-//! Indent wrapped rows behind list or quote markers, or one level beyond a line's indent
+//! Indent wrapped rows behind list or quote markers, or one level beyond the line's indent
 //! ([`typing::wrap_column`]).
 //!
-//! GtkTextView has no wrap-indent API; negative paragraph indents provide hanging indents.
-//! Column tags (`wrap1`..`wrap32`) use widths measured in the view's font. Marker tags measure
-//! the styled marker itself, so proportional fonts align correctly; deeper columns are capped.
-//! A line indented with a tab takes a marker tag, with or without a marker: GtkSourceView puts its
-//! tab stops a whole number of pixels apart, so a tab's columns are not as wide as as many spaces.
+//! GtkTextView has no wrap-indent API, so negative paragraph indents provide hanging indents.
+//! Column tags use measured font widths; marker tags measure styled markers. Tab-indented lines
+//! need marker tags because GtkSourceView's tab stops differ from space widths.
 //!
-//! Paragraph properties come from the first character, so tags cover whole lines and
-//! [`retag`] checks that character. [`follow`] retags only edited lines, keeping keystroke
-//! work independent of file length. [`refence`] follows styling changes so fenced lines
-//! wrap as code even when their text was not edited.
+//! Paragraph properties come from the first character, so tags cover whole lines. [`follow`]
+//! retags only edited lines; [`refence`] updates fenced lines after styling changes.
 
 use crate::{highlight, typing};
 use gtk::pango;

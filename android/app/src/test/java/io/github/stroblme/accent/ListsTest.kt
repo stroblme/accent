@@ -8,13 +8,9 @@ import io.github.stroblme.accent.ui.title
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/**
- * Browse's Tags and Backlinks pages, as far as they are not the core's: which notes a document's
- * backlinks are, what a row and a heading say, and which order a list keeps. The ranking is the
- * switcher's and tested there.
- */
+/** Tags and Backlinks list contents, labels, and order; ranking is tested separately. */
 class ListsTest {
-    /** A note linking three times is one backlink, and the index's path order is kept. */
+    /** Deduplicate repeated backlinks while retaining indexed path order. */
     @Test
     fun `a note is listed once however often it links`() {
         val links = listOf(
@@ -32,10 +28,7 @@ class ListsTest {
         assertEquals("#meeting · 12", tagHeading(TagCount("meeting", 12)))
     }
 
-    /**
-     * No query keeps the list's own order, which for the tags is the core's by count, and all of
-     * it; a query hands the list to the ranking.
-     */
+    /** Empty queries retain full list order; nonempty queries use ranking. */
     @Test
     fun `the order is the list's own until there is a query`() {
         val byCount = List(300) { "tag$it" }

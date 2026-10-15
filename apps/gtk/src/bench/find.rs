@@ -1,5 +1,4 @@
-//! The find bar's own drills: what Ctrl+F and Ctrl+H leave selected in a bar that is already
-//! open, and what its three toggles make of a query.
+//! Find-bar drills for repeated shortcuts, selections and query toggles.
 
 use super::*;
 use crate::find::{Bar, Mode};
@@ -11,14 +10,11 @@ const SETTLED: Duration = Duration::from_millis(300);
 /// One thing to do to the bar, printed as it lands; the step after it prints what settled.
 type Step = Box<dyn Fn(&Rc<App>, &Rc<Bar>)>;
 
-/// `ACCENT_BENCH_FIND=<rel_note>` opens a note, uses two queries so the recall list has something
-/// to walk, and then presses Ctrl+F over the open bar twice: once on the query that was typed,
-/// once on the older one Up recalled. Last it presses Ctrl+H, which selects the replacement
-/// instead. Each is printed as it lands and again once the box's delayed `search-changed` has run,
-/// because the regression this covers was a select-all that came back undone a moment later.
+/// `ACCENT_BENCH_FIND=<rel_note>` tests Ctrl+F on a typed and a recalled query, then Ctrl+H
+/// on the replacement box. Print selections immediately and after delayed `search-changed`:
+/// the regression was a select-all undone by that signal.
 ///
-/// The box the press selects must read `sel=Some((0, n))` — the whole of it — in both lines of
-/// all three cases.
+/// All three cases must report `sel=Some((0, n))` both times.
 ///
 /// `ACCENT_BENCH_FIND=options[:<rel_pdf>]` is [`bench_find_options`] instead.
 pub(super) fn bench_find(app: &Rc<App>, rel: &str) {
@@ -70,22 +66,22 @@ const NOTE: &str = "accent-bench-find.md";
 /// Words the three toggles tell apart, and two calls for the regex to rewrite.
 const TEXT: &str = "Foo foo food foo_bar\nÄ foo(1) FOO(22)\n";
 
-/// `ACCENT_BENCH_FIND=options` writes a note of its own and walks its find bar's toggles over
-/// `foo`, printing the readout and whether the box is marked invalid after each. The counts are
-/// the Search pane's, being its matcher: `plain` 6 matches, `case` 4, `word` 4 (neither `food`
-/// nor `foo_bar`), `case_word` 2, `regex` (`fo+\(`) 2, `invalid` (`foo(`) `Invalid pattern`
-/// with `invalid=true`. `replaced` is Replace All of `(\w+)\((\d+)\)` by `$2-$1`, which must
-/// read `Ä 1-foo 22-FOO` on the second line. Then the bar over the rendered preview, where Regular
-/// Expression is off-limits (`regex=false`) and Whole Word is word starts, as its tooltip says:
-/// `preview_plain` 6 for `foo`, `preview_case` 4, `preview_word` 6 (`food` and `foo_bar` start
-/// with it), `preview_case_word` 4, and for `oo` 6, 5 by case and 0 at word starts. With a PDF,
-/// the generated vault's `Attachments/pages.pdf` ("Page 1" to "Page 5"), the same over it, where
-/// Whole Word is whole words: `page` 5 and 0 by case, `Page` 5 by case, `Pag` 5 and 0 as a whole
-/// word, each found showing its first hit (`1 of 5`); then [`stepping`], which writes the PDF, so
-/// run it on a scratch vault: `pdf_typed` page 3 `3 of 5`, `pdf_enter` page 4 `4 of 5`,
-/// `pdf_shift_enter` page 3 `3 of 5`, `pdf_wrapped` page 2 `1 of 1`, `pdf_edited` page 5
-/// `5 matches`, `pdf_edited_enter` page 5 `5 of 5`. The note is closed, which writes it, and
-/// removed before the drill quits.
+/// `ACCENT_BENCH_FIND=options` writes a note, toggles find options and prints counts and
+/// invalid-state flags. Expected counts for `foo`: `plain` 6, `case` 4, `word` 4 (excluding
+/// `food` and `foo_bar`), `case_word` 2; regex `fo+\(` finds 2. `foo(` reports `Invalid pattern`
+/// and `invalid=true`. Replace All of `(\w+)\((\d+)\)` with `$2-$1` produces
+/// `Ä 1-foo 22-FOO` on the second line.
+///
+/// In rendered preview, regex is unavailable. For `foo`, expect `preview_plain` 6,
+/// `preview_case` 4, `preview_word` 6 and `preview_case_word` 4; Whole Word matches word
+/// starts here. For `oo`, expect 6 plain, 5 by case and 0 at word starts.
+///
+/// With the generated vault's `Attachments/pages.pdf`, Whole Word instead matches entire
+/// words: `page` finds 5, or 0 by case; `Page` finds 5 by case; `Pag` finds 5, or 0 as a
+/// whole word. Each initially shows `1 of 5`. [`stepping`] writes the PDF, so use a scratch
+/// vault: `pdf_typed` page 3 `3 of 5`, `pdf_enter` page 4 `4 of 5`, `pdf_shift_enter` page 3
+/// `3 of 5`, `pdf_wrapped` page 2 `1 of 1`, `pdf_edited` page 5 `5 matches`, and
+/// `pdf_edited_enter` page 5 `5 of 5`. The drill closes and removes its note.
 fn bench_find_options(app: &Rc<App>, pdf: Option<&str>) {
     let path = app.root().join(NOTE);
     if let Err(e) = std::fs::write(&path, TEXT) {

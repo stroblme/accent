@@ -72,13 +72,11 @@ pub(super) fn padding(
 
 /// Measure a line's natural height, subtracting `padded`, and report whether estimated.
 ///
-/// Use validated GTK heights when available. Lazy layout returns zero before validation;
-/// measure character positions within the paragraph meanwhile. U+2029 multi-line paragraphs
-/// also need this path because GTK's figure covers only their first line.
+/// Use validated GTK heights when available. Before validation, measure character positions
+/// within the paragraph. U+2029 paragraphs also need this path: GTK measures only their first line.
 ///
-/// [`UNMEASURED`] marks edited or repadded lines whose cached GTK height still reflects old
-/// text or padding. Estimate until agreement, or clear the mark on a `fresh` pass after
-/// layout idles, preventing stale heights from repeatedly shifting padding.
+/// [`UNMEASURED`] marks edited or repadded lines with stale cached heights. Estimate until
+/// GTK agrees, or clear the mark on a `fresh` pass after layout idles.
 pub(super) fn measure(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -235,13 +233,13 @@ pub(super) fn carried_all(
 
 /// Set paragraph padding to `above` and `below`; return whether it changed.
 ///
-/// GTK reads spacing from the first character. Tags start at the preceding newline and end
-/// before the paragraph's own newline so insertions and first-character deletion retain
-/// padding without affecting the next line. First paragraphs and paragraphs below blank
-/// lines need [`reclaim`] because the preceding newline is unavailable.
+/// GTK reads spacing from the first character. Tags span from the preceding newline to before
+/// the paragraph's own newline, preserving padding through insertions and first-character
+/// deletion without affecting the next line. First paragraphs and those below blank lines
+/// need [`reclaim`] because the preceding newline is unavailable.
 ///
 /// Do not tag a blank line's sole newline with its successor's padding: stale layout would
-/// subtract that padding twice and grow alignment until GTK's height overflowed.
+/// subtract it twice and grow alignment until GTK's height overflows.
 pub(super) fn pad(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,

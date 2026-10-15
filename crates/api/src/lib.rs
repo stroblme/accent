@@ -1,7 +1,6 @@
-//! UI-facing façade with serde data types independent of GTK and Android.
-//! Desktop links it directly; Android uses UniFFI; CLI serves JSON-RPC over stdio.
-//! [`Vault`] owns three SQLite connections, a watcher and batched updates.
-//! Separate caller reads keep indexing work off the UI thread.
+//! UI-facing façade with serde types independent of GTK and Android. Desktop links directly,
+//! Android uses UniFFI, and CLI serves JSON-RPC over stdio. [`Vault`] keeps indexing and caller
+//! reads on separate SQLite connections.
 
 use std::sync::{Mutex, MutexGuard};
 

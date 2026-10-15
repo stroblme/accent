@@ -1,5 +1,4 @@
-//! The file behind a PDF tab: the drawing written out, a remote vault's copy sent on and what the
-//! far end said about it, and the file read again when it changes on disk.
+//! Save, upload and reload the file behind a PDF tab.
 
 use std::cell::Cell;
 use std::rc::Rc;

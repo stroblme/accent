@@ -151,7 +151,7 @@ pub fn cycle_to(len: usize, at: usize, forward: bool) -> usize {
     }
 }
 
-/// `item` to the front of `order`: what selecting a tab does to the most recently used list.
+/// Move `item` to the front of the most recently used order.
 pub fn to_front<T: Clone + PartialEq>(order: &mut Vec<T>, item: &T) {
     order.retain(|p| p != item);
     order.insert(0, item.clone());

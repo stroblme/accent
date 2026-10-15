@@ -1,5 +1,4 @@
-//! The drawing tools' pure geometry: what a drag means under each of them, and what the Adjust
-//! tool takes hold of.
+//! Pure PDF drawing-tool geometry for drags and Adjust handles.
 
 /// What a drag over the page does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

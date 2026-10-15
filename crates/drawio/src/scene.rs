@@ -138,8 +138,8 @@ pub const SHADOW_COLOR: Color = Color {
     a: 64,
 };
 
-/// A drawing primitive. `cell` identifies it for hit testing and selection;
-/// `locked` excludes cells on locked layers from hit tests.
+/// A drawing primitive. `cell` identifies it for selection and hit testing; `locked` excludes
+/// it from hit testing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Prim {
     /// An outline, rotation already applied to its points.

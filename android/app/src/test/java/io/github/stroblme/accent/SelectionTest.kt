@@ -14,10 +14,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/**
- * What a selection on a PDF covers: the desktop's rules over the core's glyphs, which is the part
- * of it that is arithmetic. The handles and the menu over it want a device.
- */
+/** PDF text selection over core glyphs; handles and menus need device coverage. */
 class SelectionTest {
     /** A line of text, one glyph a point wide per character; a space has no box of its own. */
     private fun line(text: String) = text.mapIndexed { i, ch ->
@@ -42,7 +39,7 @@ class SelectionTest {
         assertEquals(4, piece.boxes.size)
     }
 
-    /** A scan between two pages of text gives nothing, and does not stop the pages around it. */
+    /** An empty text page does not block selection across adjacent pages. */
     @Test
     fun `a page without text in the middle gives nothing`() {
         val glyphs = mapOf(0 to line("ab"), 1 to emptyList(), 2 to line("cd"))
@@ -55,7 +52,7 @@ class SelectionTest {
         assertNull(Selection(Caret(0, 0), Caret(1, 0)).pieces(mapOf(0 to line("ab"))))
     }
 
-    /** Inside a glyph's box it is that glyph; in the margin, the nearest one level with it. */
+    /** Select the containing glyph, or the nearest aligned glyph from its margin. */
     @Test
     fun `a finger takes the glyph under it, or the nearest one`() {
         val glyphs = line("ab cd")
@@ -73,7 +70,7 @@ class SelectionTest {
         assertEquals(5..5, wordAt(glyphs, 5))
     }
 
-    /** Dragged either way, the word the press made stays selected. */
+    /** Preserve the pressed word when a selection drag reverses direction. */
     @Test
     fun `a word grows towards the finger and keeps itself`() {
         val word = Selection(Caret(0, 3), Caret(0, 5))

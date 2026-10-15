@@ -169,7 +169,7 @@ pub fn is_loose_key(key: &str) -> bool {
     Path::new(key).is_absolute()
 }
 
-/// The last path segment, which is what a tab is titled with.
+/// Return the final path segment used as the tab title.
 pub fn file_name(key: &str) -> &str {
     accent_core::path::basename(key)
 }

@@ -34,12 +34,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
 /**
- * One open document, and the single thread every call about it goes down.
- *
- * pdfium is serialised by one lock inside the core, so calling it from several threads only
- * queues them somewhere less useful. One executor per document keeps a stroke ordered after the
- * tile it was drawn over, which is what the desktop's render thread does; and since uniffi
- * cannot interrupt a call, a tile is the unit of work a caller can give up on.
+ * Serialize one PDF's core calls on a dedicated executor to preserve rendering and stroke order.
  */
 class PdfModel(private val session: PdfSession) : AutoCloseable {
     private val worker = Executors.newSingleThreadExecutor { r ->
@@ -54,10 +49,7 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     var dirty by mutableStateOf(false)
         private set
 
-    /**
-     * How many changes this document has seen. Autosave waits on it rather than on [dirty], so a
-     * second stroke restarts the wait instead of letting the first one's save land mid-drawing.
-     */
+    /** Change revision used to restart autosave delay after each edit. */
     var revision by mutableIntStateOf(0)
         private set
     var canUndo by mutableStateOf(false)
@@ -69,18 +61,7 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
         sizes = session.pageSizes()
     }
 
-    /**
-     * Pages already drawn, so scrolling back to one shows it instead of drawing it again.
-     *
-     * Sized against the heap the device hands this process rather than a number picked by hand: an
-     * eighth of it, which is what Android's own bitmap-caching guidance spends. On the 256 MB a
-     * phone usually gives that is 32 MB — five A4 pages at a 1080 px fit width, so about two
-     * screens either side of the one being read survive a scroll away and back.
-     *
-     * Whole pages only. A tile is cut to the screen it was drawn for, so the next look at that page
-     * wants a different rectangle of it, and keeping them would fill the budget with pixels nobody
-     * asks for twice.
-     */
+    /** Cache whole pages using one-eighth of the app heap; viewport tiles remain uncached. */
     private val pages = object : LruCache<Drawn, ImageBitmap>(
         (Runtime.getRuntime().maxMemory() / 8).toInt(),
     ) {
@@ -105,11 +86,7 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
                 .getOrNull()
         }
 
-    /**
-     * The document's bookmarks, flat, each carrying how deep it sits. A file with none answers an
-     * empty list, and so does a file that will not say — there is nothing a reader could do about
-     * the difference.
-     */
+    /** Return flat bookmarks with depth, or an empty list when none can be read. */
     suspend fun outline(): List<Outline> = on {
         runCatching { session.outline() }.getOrDefault(emptyList())
     }
@@ -135,9 +112,7 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     }
 
     /**
-     * The link glyphs [start] until [end] of page [index] make into this document, named [name],
-     * with the text they spell as its alias: what Copy Link puts on the clipboard, in the
-     * desktop's words — `[[name#page=N&selection=a,b,c,d|the text]]`.
+     * Build a selection link from page [index] glyphs [start] through [end], using text as alias.
      */
     suspend fun link(name: String, index: Int, start: Int, end: Int): String? = on {
         runCatching { session.selectionLink(name, index.toUInt(), start.toUInt(), end.toUInt()) }
@@ -145,19 +120,13 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
             .getOrNull()
     }
 
-    /**
-     * Every match of [text] on page [index], one box each over the lines it runs across — the
-     * desktop marks a match the same way. One page per call, so a find can stop between two.
-     */
+    /** Find [text] on page [index], returning boxes one page at a time. */
     suspend fun search(index: Int, text: String): List<Rect> = on {
         runCatching { session.search(index.toUInt(), text) }.getOrDefault(emptyList())
             .mapNotNull { hit -> hit.quads.reduceOrNull { a, b -> a.union(b) } }
     }
 
-    /**
-     * Where these note links land on their pages today, each answer naming its link by its index
-     * in [links]. Uncached: the core keeps the page text it reads, which is most of the cost.
-     */
+    /** Resolve current destinations for [links], keyed by their list indexes. */
     suspend fun highlights(links: List<PdfLink>): List<LinkHighlight> = on {
         session.linkHighlights(links)
     }
@@ -167,11 +136,7 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
         readHistory()
     }
 
-    /**
-     * Rub out along a drag. The core answers one stroke at a time, so this asks until it says
-     * there is nothing more under the line — and tells it after the first that the rest belong
-     * to the same gesture, which is what makes one drag one Undo.
-     */
+    /** Erase all strokes along a drag as one undo gesture. */
     suspend fun erase(page: Int, points: List<Point>, radius: Float, partial: Boolean) = on {
         var joined = false
         for ((from, to) in points.zipWithNext()) {
@@ -201,8 +166,7 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     suspend fun bytes(): ByteArray? = on { runCatching { session.saveBytes() }.getOrNull() }
 
     /**
-     * What Print… hands on: the document as it stands with the note [links] that land written in
-     * as highlights in [rgba] (`0xRRGGBBAA`). The document itself gains nothing.
+     * Return a print copy with note [links] embedded as [rgba] highlights; leave the source unchanged.
      */
     suspend fun printCopy(links: List<PdfLink>, rgba: UInt): Result<ByteArray> = on {
         runCatching { session.copyWithHighlights(links, rgba) }
@@ -236,13 +200,7 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
             PdfModel(PdfSession.openBytes(bytes)).also { it.orClose() }
         }
 
-        /**
-         * Load, and put the document down again if nobody is waiting for it any more.
-         *
-         * A reader who leaves one PDF for another cancels this coroutine, and a cancelled
-         * `withContext` throws its result away — which for a document is a session and a render
-         * thread the caller never sees and so can never close.
-         */
+        /** Close a loaded PDF if its waiting coroutine was cancelled before receiving it. */
         private suspend fun PdfModel.orClose() {
             load()
             if (!currentCoroutineContext().isActive) close()
@@ -250,17 +208,7 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     }
 }
 
-/**
- * The core hands over tightly packed RGBA8; Android wants a bitmap. One copy, not a loop.
- *
- * `ARGB_8888` is named for how a pixel packs into an `int`, not for how it lies in memory, and the
- * platform spells the memory out: "When accessing directly via #copyPixelsFromBuffer or
- * #copyPixelsToBuffer, use this formula to pack into 32 bits: `(A & 0xff) << 24 | (B & 0xff) << 16
- * | (G & 0xff) << 8 | (R & 0xff)`". Little-endian, that int is the bytes R, G, B, A in that order
- * — what the core already produces — and `copyPixelsFromBuffer` copies them without changing them.
- *
- * Which is also why it may: not converting means not premultiplying, and a page render is opaque.
- */
+/** Copy core RGBA8 bytes into `ARGB_8888`; little-endian layout matches without conversion. */
 private fun Tile.bitmap(): ImageBitmap =
     Bitmap.createBitmap(width.toInt(), height.toInt(), Bitmap.Config.ARGB_8888)
         .apply { copyPixelsFromBuffer(ByteBuffer.wrap(rgba)) }

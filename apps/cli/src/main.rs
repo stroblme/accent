@@ -1,7 +1,5 @@
-//! Headless vault queries, MCP serving, remote RPC and persistent-shell commands. Queries update
-//! only the cache index using the app's scan policy and defaults; `mcp` exposes reads and writes
-//! to agents. `serve` runs on remote hosts, while holder commands preserve shells across
-//! windows.
+//! Headless vault queries, MCP serving, remote RPC, and held shells. Queries update the
+//! cache index using the app's scan policy.
 
 mod hold;
 mod mcp;
@@ -42,9 +40,8 @@ impl Common {
             .unwrap_or_else(|| default_db_path(&self.vault))
     }
 
-    /// Open the vault as the app does and wait for the walk that brings its index up to date,
-    /// telling `progress` how it goes. Unwatched: the command is over before a change could
-    /// matter.
+    /// Open and reconcile the vault index using the app's scan policy, reporting progress.
+    /// Stop watching when the command ends.
     fn open(&self, progress: impl Fn(Progress)) -> Result<(Vault, ReconcileStats)> {
         let (vault, events) =
             Vault::open_unwatched_at(&self.vault, &self.db_path(), VaultConfig::default())?;
@@ -66,41 +63,41 @@ enum Cmd {
     Index {
         #[command(flatten)]
         common: Common,
-        /// Print per-batch progress.
+        /// Print progress after each batch.
         #[arg(long)]
         progress: bool,
     },
-    /// Walk the vault without touching the database (scan-only timing).
+    /// Scan the vault without updating the database.
     Scan {
         #[command(flatten)]
         common: Common,
-        /// List every path the symlink rules rejected.
+        /// List paths rejected by symlink rules.
         #[arg(long)]
         show_skipped: bool,
     },
-    /// Full-text search over the indexed files.
+    /// Search indexed file text.
     Search {
         #[command(flatten)]
         common: Common,
         query: Vec<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
-        /// Also search the files git ignores, which are left out by default as in the Search pane.
+        /// Include files ignored by Git.
         #[arg(long)]
         all: bool,
     },
-    /// Notes linking to a file.
+    /// List notes linking to a file.
     Backlinks {
         #[command(flatten)]
         common: Common,
         rel_path: String,
     },
-    /// Every tag with its use count.
+    /// List tags and use counts.
     Tags {
         #[command(flatten)]
         common: Common,
     },
-    /// Index contents at a glance.
+    /// Summarise index contents.
     Stats {
         #[command(flatten)]
         common: Common,
@@ -116,50 +113,35 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
-    /// Serve one vault to an agent over the Model Context Protocol, on stdin and stdout.
-    ///
-    /// Search, read, backlinks, tags, links and PDF highlights over the index the app keeps,
-    /// which this shares and brings up to date as the app does; and patch, write and make notes
-    /// from templates, each write checked against the etag of the read before it. Answers until
-    /// stdin closes. A vault on this machine only: for one on another, run it there (`ssh host
-    /// accent-cli mcp --vault /path`).
+    /// Serve a local vault over stdio MCP. Expose indexed reads and etag-checked writes
+    /// until stdin closes. Run on the host for a remote vault.
     Mcp {
         #[command(flatten)]
         common: Common,
-        /// Leave out the tools that write: the agent searches and reads, and changes nothing.
+        /// Expose read-only MCP tools.
         #[arg(long)]
         read_only: bool,
     },
-    /// Hold the terminals' shells: the daemon `attach` starts when none is running.
-    ///
-    /// One per user and machine. It leaves on its own when its last shell has ended, or ten
-    /// seconds after it was last asked anything when it never held one, and returns at once when
-    /// another holder is already up.
+    /// Run one shell holder per user and machine. It exits after the last shell, or after ten
+    /// idle seconds if no shell was started.
     Hold,
-    /// Attach this terminal to held shell ID, starting the holder and the shell if need be.
-    ///
-    /// What a terminal tab runs, locally or over `ssh -t`. Closing the terminal only detaches:
-    /// the shell stays with the holder until it exits or is killed. Exits with the shell's status
-    /// when it ends, 0 when detached or taken over by another terminal, and 254 when it could not
-    /// attach at all (never 255, which is ssh's own).
+    /// Attach this terminal to a held shell, starting holder and shell if needed. Closing the
+    /// terminal detaches. Exit with the shell status, 0 on detach, or 254 on failure
+    /// (reserving 255 for SSH).
     Attach {
-        /// Where a new shell starts. Defaults to the current directory.
+        /// Starting directory for a new shell; defaults to the current directory.
         #[arg(long)]
         cwd: Option<PathBuf>,
-        /// Who a new shell is for, as `held` lists it: accent passes its state directory, so that
-        /// its startup sweep ends only shells its own sessions could name.
+        /// Owner shown by `held`; Accent passes its state directory for startup cleanup.
         #[arg(long, default_value = "")]
         owner: String,
         id: String,
     },
-    /// End a held shell and everything running in it.
-    ///
-    /// An id no shell has yet is remembered, so that an attach still on its way with it starts
-    /// nothing; a holder is started to remember it if none is running.
+    /// End a held shell and its jobs. Pending attaches with this ID are cancelled.
     Kill { id: String },
-    /// List the held shells, one JSON object per line.
+    /// List held shells as JSON lines.
     Held,
-    /// Print the last copy (OSC 52) held shell ID made, as base64, and forget it.
+    /// Print and clear the shell's last OSC 52 copy as base64.
     Clip { id: String },
 }
 

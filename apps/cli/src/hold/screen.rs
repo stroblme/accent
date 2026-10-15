@@ -1,13 +1,10 @@
-//! The holder's model of a shell's terminal, and the bytes that paint it back on a new one.
-//!
-//! Every byte the shell writes goes through a `vt100::Parser`, so on attach the holder can send
-//! the history, then the screen as it stands, cursor and input modes included. What is not
-//! reconstructed: scroll margins, character sets, cursor shape and the working directory a shell
-//! announced (OSC 7). A full-screen program is asked to redraw instead (see `daemon::nudge`).
-//! Soft-wrapped history lines come back hard-wrapped.
+//! Capture shell output with `vt100::Parser` and replay history, screen, cursor, and input
+//! modes on attach. Scroll margins, character sets, cursor shape, and OSC 7 working
+//! directory are not restored; full-screen programs are asked to redraw. Soft wraps
+//! return as hard wraps.
 
-/// History lines kept per shell, the scrollback VTE keeps in the window (terminal.rs). Each costs
-/// about 32 bytes per column, so a full history at 120 columns is about 38 MB: this is the knob.
+/// History lines per shell, matching VTE scrollback. At 120 columns, a full history uses about
+/// 38 MB.
 pub const SCROLLBACK: usize = 10_000;
 
 /// The window title the shell last set (OSC 0 or 2).
@@ -26,9 +23,8 @@ pub fn parser(rows: u16, cols: u16) -> Parser {
     Parser::new_with_callbacks(rows, cols, SCROLLBACK, Title::default())
 }
 
-/// Resize without losing the prompt: scroll top rows into history before shrinking if the cursor
-/// would fall off, then move the cursor with the text. Resize the hidden shell screen too so it
-/// restores correctly after a full-screen program exits. `rows` and `cols` must be nonzero.
+/// On shrink, move rows above the cursor into history and keep the cursor with its text.
+/// Resize the hidden shell screen too. `rows` and `cols` must be nonzero.
 pub fn resize(p: &mut Parser, rows: u16, cols: u16) {
     // `?47` switches grids without clearing either, which `?1049` would do.
     // ponytail: here and in `replay`, sequences of ours go through the shell's own parser, so one
@@ -98,7 +94,7 @@ fn history(p: &mut Parser, out: &mut Vec<u8>) {
 mod tests {
     use super::*;
 
-    /// The history as text, oldest line first, and how many lines it has.
+    /// Return history text, oldest first, and its line count.
     fn history_of(p: &mut Parser) -> (String, usize) {
         p.screen_mut().set_scrollback(usize::MAX);
         let seen = (p.screen().contents(), p.screen().scrollback());

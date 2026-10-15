@@ -1,6 +1,6 @@
-//! Where the pages sit at one zoom, and the reading position that survives a change of it.
+//! Pure page layout and reading-position calculations across zoom changes.
 //!
-//! Pure, so the arithmetic that decides what is on screen is testable without a display.
+//! These calculations are testable without a display.
 
 use crate::zoom::{MAX_SCALE, MIN_SCALE, clamp_scale};
 use gtk::graphene;

@@ -16,14 +16,13 @@ const SIZE: i32 = 220;
 /// How far the ring sits from the corner it starts in.
 const INSET: f64 = 24.0;
 
-/// A tool the ring can hold. Its label comes from `ACTIONS` through the action, so a button,
-/// the status bar and the palette say the same word.
+/// A ring tool. Its action supplies the shared label for the button, status bar and palette.
 pub trait Tool: Copy + PartialEq + 'static {
     /// Top first, then clockwise: the tool and its icon name.
     const TOOLS: &'static [(Self, &'static str)];
-    /// The window action that puts it in hand; `None` for the state that is no tool (no button).
+    /// Window action selecting this tool, or `None` for no tool.
     fn action(self) -> Option<&'static str>;
-    /// The state that is no tool in hand, which the ring starts in.
+    /// Initial state with no tool selected.
     fn none() -> Self;
 }
 
@@ -32,8 +31,7 @@ pub struct Ring<T: Tool> {
     root: RingBox,
     buttons: Vec<(T, gtk::ToggleButton)>,
     tool: Cell<T>,
-    /// Where the ring's top-left corner sits in the pane, which is what the overlay's margins are
-    /// set from.
+    /// Ring position in the pane, used for overlay margins.
     at: std::cell::Cell<(f64, f64)>,
     /// Whether the reader moved the ring. Otherwise place it in its default corner whenever shown,
     /// after allocation provides the pane size.

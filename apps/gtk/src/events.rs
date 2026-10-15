@@ -241,7 +241,7 @@ impl App {
                 // that is already there says how many are waiting in the vault. Counted on a
                 // worker, the index being on the host for a remote vault.
                 let message = match stats.stopped {
-                    true => "Indexing paused — what is indexed so far is kept".to_string(),
+                    true => "Indexing paused. Indexed files remain available".to_string(),
                     false => format!(
                         "Indexed {} files ({} new, {} updated)",
                         stats.scanned, stats.added, stats.updated

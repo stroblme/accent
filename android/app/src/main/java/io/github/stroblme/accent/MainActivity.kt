@@ -16,22 +16,12 @@ import io.github.stroblme.accent.ui.HomeScreen
 import io.github.stroblme.accent.ui.LoosePdfScreen
 import io.github.stroblme.accent.ui.VaultPickerScreen
 
-/**
- * The app is two things, and which one it is depends on how it was started.
- *
- * Opened from the launcher it is a vault: a tree, a switcher and a note. Opened from a `VIEW`
- * intent it is a PDF viewer with a pen and no vault at all — the same split the desktop makes
- * between a vault window and a loose one.
- */
+/** Launcher starts a vault editor; a `VIEW` intent starts a standalone PDF viewer. */
 class MainActivity : ComponentActivity() {
     private val model: VaultModel by viewModels()
 
     /**
-     * The PDF a `VIEW` intent asked for, if the app was started by one.
-     *
-     * On the activity rather than inside `setContent`, because [onNewIntent] is what changes it
-     * and nothing inside a composition can be reached from there. That is the whole reason the
-     * activity used to be rebuilt for every intent.
+     * PDF selected by a `VIEW` intent. Activity state lets [onNewIntent] update it outside composition.
      */
     private var loose by mutableStateOf<Uri?>(null)
 
@@ -53,12 +43,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Another intent, which is only worth anything if it names a different PDF.
-     *
-     * Coming back from the launcher is an intent that says nothing about what should be shown, and
-     * rebuilding the activity for it is a reader sent back to the top of the note they were halfway
-     * through — the `WebView` is built again with everything else. So the intent that decided the
-     * screen is the one that stays set, which is also what a later config change reads back.
+     * Apply a new `VIEW` intent only for a different PDF; unrelated intents retain the current screen.
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)

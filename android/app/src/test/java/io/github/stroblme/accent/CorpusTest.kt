@@ -6,11 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * The switcher's corpus: what is ranked, in which order, and what each place in it stands for.
- *
- * The ranking itself is the core's and tested there; its ties go to the earlier place, so the
- * order here is what puts an indexed file ahead of one in a gitignored folder, a file ahead of a
- * note only linked to, and a path ahead of an alias.
+ * Switcher corpus order determines ranking ties among indexed files, ignored files, links, and aliases.
  */
 class CorpusTest {
     private val corpus = Corpus(
@@ -46,9 +42,7 @@ class CorpusTest {
     }
 
     /**
-     * A load of the names is never restarted: what asks while one runs gets one more after it,
-     * walking the ignored folders if any of the askings wanted that, and then nothing. Restarting
-     * it at every keystroke is what kept a slow load from ever landing.
+     * Coalesce requests during a name load into one follow-up load, including ignored folders if requested.
      */
     @Test
     fun `a load asked for again while it runs runs once more after it`() {

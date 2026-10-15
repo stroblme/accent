@@ -14,7 +14,7 @@ use gtk::prelude::*;
 /// Paused-indexing text restored after PDF opening borrows the progress slot, since no new progress will arrive.
 pub const PAUSED: &str = "Indexing paused";
 
-/// What the vault's own indexing is doing, which is what the control beside the line offers.
+/// Vault indexing state and the action offered beside its progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Indexing {
     /// A walk is running: Stop.
@@ -42,7 +42,7 @@ pub struct Bar {
     index: gtk::Button,
     index_label: gtk::Label,
     indexing: Cell<Indexing>,
-    /// The branch readout, which is also the Sync control.
+    /// Branch readout and Sync control.
     branch: gtk::Button,
     branch_label: gtk::Label,
     kind: gtk::Label,
@@ -52,7 +52,7 @@ pub struct Bar {
     /// Word counts remain plain readouts.
     words: gtk::Label,
     facts: gtk::Button,
-    /// The zoom readout, which is also the control that resets it.
+    /// Zoom readout and reset control.
     zoom: gtk::Button,
     zoom_label: gtk::Label,
     /// How much is selected in a text tab, while anything is.
@@ -144,7 +144,7 @@ impl Bar {
     pub fn set_indexing(&self, state: Indexing) {
         self.indexing.set(state);
         let (label, tooltip) = match state {
-            Indexing::Running => ("Stop", "Stop indexing; what is indexed so far is kept"),
+            Indexing::Running => ("Stop", "Stop indexing; indexed files remain available"),
             Indexing::Paused => ("Resume", "Finish indexing this vault"),
             Indexing::Idle => ("", ""),
         };

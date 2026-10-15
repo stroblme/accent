@@ -182,14 +182,11 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Every note a link names that nothing in the vault answers to, once each, by the path New
-    /// File would create it at ([`linked_path`]): what Go to File and `[[` completion offer to
-    /// write. The stored targets are vault paths already — a markdown link's was resolved from its
-    /// note's folder when it was indexed — so `[[Foo]]` and `[t](Foo.md)` from the root are one
-    /// row, and so are two spellings that differ only in case.
+    /// Return missing linked notes by the paths New File would create ([`linked_path`]), deduped
+    /// without regard to case. Targets are already vault-relative, so equivalent wiki and
+    /// markdown links yield one path.
     ///
-    /// A target that is a folder is not a note waiting to be written: an in-note `[t](#anchor)`
-    /// is stored as its note's folder. Nor is a missing image or PDF, which New File cannot make.
+    /// Exclude folder targets (including local anchors) and non-note files.
     pub fn missing_notes(&self) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached(
             "SELECT DISTINCT l.target FROM links l

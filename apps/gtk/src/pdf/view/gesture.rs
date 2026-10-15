@@ -1,5 +1,5 @@
-//! What the pointer does on the page: select, draw, erase and take hold of a stroke, the tool a
-//! press means for the device it came from, and the stylus's dot.
+//! PDF pointer gestures for selection, drawing, erasing and stroke adjustment.
+//! Choose tools by input device and handle stylus dots.
 
 use adw::prelude::*;
 use gtk::subclass::prelude::*;

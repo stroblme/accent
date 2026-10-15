@@ -64,12 +64,12 @@ impl Panel {
         self.show_merge(what, Some(asked));
     }
 
-    /// Open `what`, a file git left unmerged, as a merge of its stages, read in one worker hop.
-    /// `asked` is a row's click (see [`Panel::compare`]), which opens the file's tab as the
-    /// pane's preview; without it the merge goes into the tab already showing the file, as a
-    /// session restore puts one back or a comparison a merge has outgrown is switched to one,
-    /// and a file no longer unmerged stays as it is without a word. A conflict that is not two
-    /// texts — a binary, or a side that deleted the file — leaves the file alone, saying why.
+    /// Open unmerged `what` from its Git stages in one worker hop.
+    ///
+    /// When `asked` comes from a row click ([`Panel::compare`]), open the file as the pane's
+    /// preview. Otherwise use its existing tab, such as one restored from a session. Leave a
+    /// file that is no longer unmerged alone. Binary conflicts and deleted sides cannot form
+    /// a text merge; leave the file alone and explain why.
     fn show_merge(self: &Rc<Self>, what: Comparison, asked: Option<u64>) {
         let (panel, vault) = (self.clone(), self.hooks.vault.clone());
         glib::spawn_future_local(async move {

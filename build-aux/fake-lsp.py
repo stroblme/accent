@@ -44,7 +44,7 @@ INLINE = sys.argv[sys.argv.index("--inline") + 1] if "--inline" in sys.argv else
 
 
 def declared(rel, line, name):
-    """The declaration called `name` on `rel`'s `line`."""
+    """Return the declaration named `name` on `line` of `rel`."""
     text = open(os.path.join(ROOT[0], rel)).read().split("\n")[line]
     at = re.search(r"\b%s\b" % re.escape(name), text)
     span = {"start": {"line": line, "character": at.start()},
@@ -68,7 +68,7 @@ def send(message):
 
 
 def messages():
-    """Every whole message read so far."""
+    """Yield complete messages from the input buffer."""
     global inbox
     while b"\r\n\r\n" in inbox:
         head, rest = inbox.split(b"\r\n\r\n", 1)

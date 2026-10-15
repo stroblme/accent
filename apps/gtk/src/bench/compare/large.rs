@@ -1,5 +1,4 @@
-//! A comparison of a long file: how long it holds the main loop as it opens, lays the diff again
-//! and follows the editor's keystrokes.
+//! Measure main-loop stalls while opening, relayouting and editing a long comparison.
 
 use super::*;
 

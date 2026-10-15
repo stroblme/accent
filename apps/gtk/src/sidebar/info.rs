@@ -169,8 +169,8 @@ impl Info {
         let root = gtk::Stack::builder().vexpand(true).build();
         root.add_named(&upper.paned, Some("sections"));
         let open_one = match vault {
-            Some(_) => "Open a file to see what links to it and what it is.",
-            None => "Open a file to see what it is.",
+            Some(_) => "Open a file to see its references, tags and details.",
+            None => "Open a file to see its details.",
         };
         root.add_named(&status_page(ICON, "No File", open_one), Some("nothing"));
         let info = Rc::new(Info {

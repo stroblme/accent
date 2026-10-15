@@ -1,5 +1,4 @@
-//! Saving a tab and what happens when the disk disagrees: the etag check, the overwrite and
-//! unsaved-changes questions, and resolving a sync conflict.
+//! Save tabs with etag checks and resolve disk or sync conflicts.
 
 use super::*;
 use crate::editor::Saves;
@@ -197,7 +196,7 @@ impl App {
             e if e.is_offline() => {
                 self.show_offline();
                 if explicit {
-                    self.toast("Not connected, so nothing was saved");
+                    self.toast("Not connected. Changes were not saved");
                 }
             }
             e => self.cannot("save", e),
@@ -208,7 +207,7 @@ impl App {
     /// A save can fail before the connection event and must not overwrite its later, specific reason.
     pub(crate) fn show_offline(&self) {
         if !self.connection.is_revealed() {
-            self.show_connection_banner("The vault is not answering");
+            self.show_connection_banner("The vault is not responding");
         }
     }
 

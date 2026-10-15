@@ -1,5 +1,5 @@
-//! Drills over files: the Files pane's rows, copy and paste, New from Template, the path fields,
-//! Save As and closing a window. The tree's own drills are in [`super::folders`].
+//! File drills for rows, clipboard, templates, path fields, Save As and window close.
+//! Tree-specific drills live in [`super::folders`].
 
 use super::folders::{drawn_rows, drawn_tints};
 use super::*;

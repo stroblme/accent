@@ -19,19 +19,19 @@ pub enum Error {
     /// Retrying requires a change on the host.
     #[error("{0}")]
     Refused(String),
-    /// ssh, a forward, a transfer or a deadline failed in a way none of the above names.
+    /// SSH, forwarding, transfer, or deadline failure not covered above.
     #[error("{0}")]
     Remote(String),
     /// The host's `accent-cli` has no such method: it is older than this window.
     #[error("the host's accent-cli has no method {0}")]
     UnknownMethod(String),
-    /// The two ends disagree on what was sent: an argument or an answer that does not read.
+    /// An argument or response could not be decoded by the other end.
     #[error("{0}")]
     Protocol(String),
     /// A language server failed, or there is none to ask.
     #[error("{0}")]
     Language(String),
-    /// A language server cannot answer yet, as one still loading the project says.
+    /// A language server cannot answer while still loading the project.
     #[error("{0}")]
     NotYet(String),
 }
@@ -39,7 +39,7 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
-    /// Whether the link, rather than the call, is what failed.
+    /// Whether the connection failed.
     pub fn is_offline(&self) -> bool {
         matches!(self, Error::Offline(_) | Error::Lost(_))
     }
@@ -57,7 +57,7 @@ impl From<accent_lsp::Error> for Error {
     }
 }
 
-/// A language task that was dropped is one nobody waits for; one that panicked failed.
+/// Treat cancelled language tasks as cancelled requests and panics as failures.
 impl From<tokio::task::JoinError> for Error {
     fn from(e: tokio::task::JoinError) -> Error {
         match e.is_cancelled() {

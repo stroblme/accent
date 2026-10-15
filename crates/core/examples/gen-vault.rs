@@ -1,19 +1,16 @@
 //! `gen-vault`: a synthetic Obsidian-shaped vault for tests and benchmarks.
 //!
 //! ```text
-//! cargo run --release -p accent-core --example gen-vault -- testvault --notes 3600 --files
-//! 40000
+//! cargo run --release -p accent-core --example gen-vault -- /tmp/accent-vault --notes 3600 --files 40000
 //! ```
 //!
-//! Workspace tooling invoked by `make vault`, with linting and tests under the workspace gates.
-//! The real vault is never read. Fixtures model folder depth, note sizes, links, tags, Syncthing
-//! conflicts, Obsidian files, external symlinks, a virtual environment and non-note code files.
+//! Invoked by `make vault`; it never reads the real vault. Fixtures cover folder depth, note
+//! sizes, links, tags, Syncthing conflicts, Obsidian files, symlinks, virtual environments, and
+//! source files.
 //!
-//! The same `--seed --notes --files` produces a byte-identical tree: one splitmix64 stream is
-//! consumed in a fixed order without parallel writes.
+//! Identical `--seed`, `--notes`, and `--files` produce byte-identical output.
 //!
-//! Uses only std. Generated PNGs, JPEGs and PDFs are valid files so preview and PDF tests can
-//! open them.
+//! Generated PNGs, JPEGs, and PDFs are valid for preview and PDF tests.
 
 use anyhow::{Context, Result, bail};
 use std::collections::HashSet;

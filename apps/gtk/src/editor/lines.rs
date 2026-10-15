@@ -8,7 +8,7 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use sourceview5::prelude::*;
 
-/// The spaces and tabs a line opens with, which is what a line inserted below it copies.
+/// Return the leading spaces and tabs copied to a new line below.
 fn leading_indent(line: &str) -> &str {
     let end = line
         .find(|c: char| c != ' ' && c != '\t')

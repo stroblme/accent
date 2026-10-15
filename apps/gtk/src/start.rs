@@ -1,7 +1,7 @@
 //! Start screen: pick a vault when the app is launched without one.
 //!
-//! Nothing here knows about `App`: the window takes the shared config and two callbacks and hands
-//! itself back, so the caller opens the vault and closes this window on its own terms.
+//! The window receives shared config and callbacks, then returns itself to the caller, which
+//! opens the vault and closes the start screen. It does not depend on `App`.
 
 use crate::pathfield;
 use accent_api::ssh;
@@ -147,7 +147,7 @@ pub fn present(
             let status = adw::StatusPage::builder()
                 .icon_name(crate::APP_ID)
                 .title("Accent")
-                .description("Choose a folder of Markdown notes and start writing.")
+                .description("Open a folder of Markdown notes to get started.")
                 .child(&column)
                 .build();
             toolbar.set_content(Some(&status));

@@ -8,17 +8,16 @@ const MAX_RESULTS: usize = 200;
 
 /// Indices of `haystacks` that match `query`, best first, capped at 200.
 ///
-/// `recent` is either empty or one entry per haystack, holding how recently it was used — 0 for
-/// the most recent; see [`accent_core::fuzzy::rank`] for what that does to the order.
+/// `recent` is empty or has one entry per haystack; 0 marks the most recent.
+/// See [`accent_core::fuzzy::rank`] for how recency affects ranking.
 #[uniffi::export]
 pub fn fuzzy_rank(query: String, haystacks: Vec<String>, recent: Vec<Option<u32>>) -> Vec<u32> {
     let recent: Vec<Option<usize>> = recent.iter().map(|r| r.map(|n| n as usize)).collect();
     ranked(&haystacks, &recent, &query)
 }
 
-/// The switcher's names, held on this side: ranking them sends the query and the few recent
-/// paths, where [`fuzzy_rank`] sends every name again on every keystroke — tens of thousands of
-/// strings, which on a phone cost more than a frame before the ranking had begun.
+/// Holds switcher names so ranking sends only the query and recent paths.
+/// [`fuzzy_rank`] resends every name on each keystroke, which can exceed a frame on a phone.
 #[derive(uniffi::Object)]
 pub struct Ranker {
     haystacks: Vec<String>,
@@ -31,8 +30,7 @@ impl Ranker {
         Arc::new(Ranker { haystacks })
     }
 
-    /// [`fuzzy_rank`] over the names held. `recent` is the most recently used first, a name
-    /// taking the place of each one equal to it.
+    /// Rank the held names. `recent` lists paths from most to least recently used.
     pub fn rank(&self, query: String, recent: Vec<String>) -> Vec<u32> {
         let order: HashMap<&str, usize> = recent
             .iter()

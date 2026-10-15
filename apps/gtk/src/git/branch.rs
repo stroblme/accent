@@ -24,10 +24,12 @@ impl Panel {
         // come back costs is everything the pane shows beside it; this is the one surface that
         // can say so without interrupting anyone.
         if state.status_kept {
-            tip.push_str("\n\nThe status could not be refreshed, so the branch and the changes shown may be out of date.");
+            tip.push_str(
+                "\n\nStatus could not be refreshed. Branch and change details may be out of date.",
+            );
         }
         if self.fetch_failed.get() {
-            tip.push_str("\n\nThe last background fetch did not go through, so the counts may be out of date.");
+            tip.push_str("\n\nBackground fetch failed. Pull and push counts may be out of date.");
         }
         self.sync.set_tooltip_text(Some(&tip));
     }
@@ -124,14 +126,10 @@ fn remote_heading() -> gtk::ListBoxRow {
         .build()
 }
 
-/// The branch chooser's rows and which of the local ones HEAD is on.
+/// Build branch chooser rows and identify the checked-out local branch.
 ///
-/// `local` is the local branches, led by whatever HEAD is on when that is not one of them — a
-/// detached HEAD, or a branch with no commit yet, so that the chooser always says where the
-/// repository actually is. `remote` is the remote-tracking branches no local branch shares a name
-/// with, which are the ones there is anything to check out: the others are a local row already.
-/// `None` is a repository git told us nothing about, which shows an empty chooser as it used to
-/// show an empty label.
+/// Include HEAD first if absent from `local` (detached or unborn). Show only remote branches
+/// without a matching local name. A missing HEAD yields an empty chooser.
 pub(super) fn branch_model(
     head: Option<String>,
     branches: &git::Branches,

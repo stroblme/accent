@@ -10,18 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 
-/**
- * Holds the app in the foreground while a walk runs, so that leaving the app does not stop it.
- *
- * The walk is the core's, on a thread of its own, and needs nothing from here but a process that
- * is not frozen: an app left with no foreground service is frozen soon after (the cached-apps
- * freezer), and a first index of a large vault stood still for as long as the reader was
- * elsewhere. [VaultModel] starts it as a walk starts, keeps its notification's count, and stops it
- * as the walk ends or is stopped.
- *
- * No notification permission is asked for this: without one the service runs all the same, and
- * only its notification is missing from the drawer.
- */
+/** Keep Android active during indexing with a foreground service and progress notification. */
 class IndexingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -73,10 +62,7 @@ class IndexingService : Service() {
                 .notify(ID, notification(context, text))
         }
 
-        /**
-         * Let go, or have the service let go once it is up: one stopped before it has called
-         * `startForeground` takes the app down with it, and a quick walk ends before then.
-         */
+        /** Stop after foreground startup; stopping sooner can crash the app. */
         fun stop(context: Context) {
             wanted = false
             if (running) context.stopService(Intent(context, IndexingService::class.java))

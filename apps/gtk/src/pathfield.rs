@@ -100,18 +100,16 @@ fn scroll_to(value: f64, page: f64, top: f64, height: f64) -> f64 {
     }
 }
 
-/// Build a folder-completing path entry with a list revealed inside the form.
+/// Build a path entry with inline folder completion.
 ///
-/// GTK4 has no replacement for GtkEntryCompletion. An inline revealer avoids a popover
-/// covering dialog buttons or taking focus; the folder button opens it without typing.
+/// GTK4 has no GtkEntryCompletion replacement; an inline list keeps dialog buttons visible and
+/// focus on the entry. The folder button opens it without typing.
 ///
-/// The entry keeps focus: Down opens and walks the list, arrows navigate, Tab accepts a
-/// selected or first row, Return accepts only explicit selection, and Escape hides the list.
-/// [`completion_key`] defines and tests this rule.
+/// Down opens and navigates the list. Tab accepts a selected or first row, Return requires a
+/// selection, and Escape hides the list ([`completion_key`]).
 ///
-/// Candidate widths determine the dialog width, which the entry fills. `complete` supplies
-/// whole entry texts, keeping path arithmetic with the caller. While listings are pending it
-/// may return nothing; [`look_again`] refreshes the list when they arrive.
+/// Candidates determine dialog width. `complete` supplies full entry texts and may return nothing
+/// while listings are pending; [`look_again`] refreshes them on arrival.
 pub(crate) fn path_field(
     entry: &gtk::Entry,
     tooltip: &str,

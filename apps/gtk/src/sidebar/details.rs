@@ -1,5 +1,4 @@
-//! The Info pane's Details section: what the file in front is, as rows of a name and a value
-//! under a heading per group.
+//! Show active-file details as grouped name and value rows in the Info pane.
 
 use crate::widgets::scroller;
 use gtk::pango;

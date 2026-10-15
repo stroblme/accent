@@ -301,7 +301,7 @@ fn file_item(ignored: &HashSet<String>, rel: &String) -> Rc<Item> {
     })
 }
 
-/// What the row at `at` reads, which is what finds it again in a list ranked anew.
+/// Return row `at`'s text for restoring selection after reranking.
 fn text_at(selection: &gtk::SingleSelection, at: u32) -> Option<String> {
     let boxed = selection.item(at).and_downcast::<glib::BoxedAnyObject>()?;
     Some(boxed.borrow::<Rc<Item>>().text().to_string())

@@ -1,6 +1,5 @@
-//! What other readers wrote on a page — an annotation's `/Contents` — as the reading view's
-//! tooltip while the pointer is over it, in a popover a click pins, where it can be selected and
-//! copied, and as the Outline pane's list of every comment in the document.
+//! Show PDF annotation comments in tooltips, pinned popovers and the Outline pane.
+//! Pinned comments can be selected and copied.
 
 use std::rc::Rc;
 

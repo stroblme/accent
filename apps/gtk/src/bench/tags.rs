@@ -1,5 +1,4 @@
-//! The Tags section drill: whether its list follows a note's tags as they are written and taken
-//! away, and whether a tag clicked in the preview is picked there.
+//! Check Tags updates as note tags change and preview clicks select them.
 
 use super::*;
 use webkit6::prelude::*;

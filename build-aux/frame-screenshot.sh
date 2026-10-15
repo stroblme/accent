@@ -1,7 +1,5 @@
 #!/bin/sh
-# Give a window capture taken without a compositor what GNOME's window screenshots have:
-# libadwaita's rounded corners (--window-radius: 15px) and its focused `window.csd` shadow, on a
-# transparent margin.
+# Add libadwaita's rounded corners and focused shadow to a compositor-free capture.
 #
 # Usage: build-aux/frame-screenshot.sh <scale> <in.png> <out.png>
 set -eu

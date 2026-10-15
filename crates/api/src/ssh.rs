@@ -1,9 +1,6 @@
-//! Build system-SSH addresses, shell quoting, socket paths and arguments.
-//! One ControlMaster carries RPC, shells and forwards so authentication is
-//! shared and the user's SSH config, ProxyJump and agent apply. One-shot
-//! commands force BatchMode: SSH otherwise falls back from a dead socket to
-//! a new connection that could hang on an invisible prompt. All functions
-//! build strings without spawning processes, so tests need no network.
+//! Build system-SSH addresses, shell quoting, socket paths, and arguments. One ControlMaster
+//! shares authentication among RPC, shells, and forwards. One-shot commands use BatchMode to
+//! avoid hidden prompts after a socket dies. These builders do not spawn processes.
 
 use std::path::{Component, Path, PathBuf};
 

@@ -1,10 +1,6 @@
-//! Capture OSC 52 clipboard copies from local or remote shells because VTE does not implement
-//! them.
-//!
-//! `attach` stores the copy by shell ID and raises the valueless `vte.ext.accent.clipboard`
-//! termprop; the tab retrieves it through `accent-cli clip <id>`. The copy cannot use a termprop
-//! value: VTE limits it to 2 KiB and retains only the last value of a burst. Forward the
-//! original sequence unchanged and never answer queries (`?`).
+//! Capture OSC 52 clipboard copies that VTE does not handle. `attach` stores copies by
+//! shell ID and signals the tab through a valueless termprop; termprop values are limited
+//! to 2 KiB. Forward the original sequence and ignore queries (`?`).
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -13,8 +9,7 @@ use std::path::PathBuf;
 /// termprop. ST, because VTE ignores a termprop sequence ended by BEL.
 pub const SIGNAL: &[u8] = b"\x1b]666;vte.ext.accent.clipboard!\x1b\\";
 
-/// Keep `data`, the base64 of the last copy shell `id` made, for [`take`]. Written aside and
-/// renamed, so a copy taken while the next is being kept is one or the other, whole.
+/// Store shell `id`'s last base64 copy for [`take`]. Rename atomically so reads see a complete copy.
 pub fn keep(id: &str, data: &[u8]) -> io::Result<()> {
     let path = path(id)?;
     let part = path.with_extension("part");
@@ -22,7 +17,7 @@ pub fn keep(id: &str, data: &[u8]) -> io::Result<()> {
     std::fs::rename(&part, &path)
 }
 
-/// `accent-cli clip <id>`: print the last copy shell `id` made, as base64, and forget it.
+/// Print and clear shell `id`'s last base64 copy.
 pub fn take(id: &str) -> io::Result<()> {
     let path = path(id)?;
     let data = std::fs::read(&path)?;
@@ -30,8 +25,7 @@ pub fn take(id: &str) -> io::Result<()> {
     io::stdout().write_all(&data)
 }
 
-/// `clip-<id>` in the holder's private directory. The id names a file, so it may not name a way
-/// out of that directory.
+/// Return `clip-<id>` in the holder's private directory, rejecting paths outside it.
 fn path(id: &str) -> io::Result<PathBuf> {
     if id.is_empty() || id.contains(['/', '.']) {
         return Err(io::Error::new(
@@ -42,8 +36,7 @@ fn path(id: &str) -> io::Result<PathBuf> {
     Ok(super::dir()?.join(format!("clip-{id}")))
 }
 
-/// The most a copy may hold, base64 and all: past it the copy is dropped rather than kept in
-/// memory.
+/// Maximum base64 copy size; discard larger copies.
 const MAX: usize = 16 << 20;
 
 const ESC: u8 = 0x1b;
@@ -51,8 +44,7 @@ const BEL: u8 = 0x07;
 /// What follows `ESC ]` in a copy: the OSC number and its separator.
 const INTRO: &[u8] = b"52;";
 
-/// Where in the output an OSC 52 has got to. A read can end anywhere in one, so this lasts from
-/// one chunk of output to the next.
+/// OSC 52 parser state, retained across output chunks.
 #[derive(Default)]
 pub struct Scanner {
     state: State,
@@ -109,7 +101,7 @@ impl Scanner {
         copy
     }
 
-    /// The base64 of the copy just read, unless it was a query, empty or too long.
+    /// Return the copy's base64 data unless it is a query, empty, or too long.
     fn finish(&mut self) -> Option<Vec<u8>> {
         let body = std::mem::take(&mut self.body);
         let (_, data) = body.split_at(body.iter().position(|&b| b == b';')? + 1);

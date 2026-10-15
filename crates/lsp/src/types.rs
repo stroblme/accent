@@ -29,7 +29,7 @@ use serde_json::Value;
 
 // ------------------------------------------------------------------- the small shapes
 
-/// A caret, counted in whatever unit the server said it encodes positions in.
+/// A caret whose column uses the server's negotiated position encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Position {
@@ -51,8 +51,7 @@ pub struct Location {
     pub range: Range,
 }
 
-/// What a server answers instead of a [`Location`] when it knows both the definition and the part
-/// of it worth selecting. Only the two fields accent uses are kept.
+/// A location with a selection range for the jump target, instead of a [`Location`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocationLink {
@@ -232,8 +231,7 @@ pub enum CompletionTextEdit {
 
 // ------------------------------------------------------------------ inline completion
 
-/// What an inline-completion request answers, in the three shapes the spec permits: a list, a
-/// bare array, or `null` — which is the `Option` around this at the call site.
+/// Inline completion as a list or bare array; `null` is handled by the caller's `Option`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum InlineCompletionResponse {

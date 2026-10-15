@@ -1,9 +1,7 @@
-//! Android UniFFI surface, excluded from desktop builds. Omit git, language
-//! servers and remote vaults; replace types UniFFI cannot carry (`usize`,
-//! `Range`, `PathBuf`, tuples and `char`). Convert Rust byte offsets to
-//! Kotlin UTF-16 units.
-//! Calls are synchronous and UniFFI 0.32 cannot cancel them. Callers stop
-//! between small operations such as tiles, glyph pages or searches.
+//! Android UniFFI surface, excluded from desktop builds. It exposes local vault operations and
+//! converts unsupported Rust types and byte offsets to Kotlin-compatible records and UTF-16
+//! units. Calls are synchronous and cannot be interrupted by UniFFI 0.32; callers cancel between
+//! operations such as tiles, glyph pages, or searches.
 
 mod convert;
 mod error;

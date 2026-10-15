@@ -1,7 +1,5 @@
-//! The page painted from cached tiles: the paper, the tiles on screen over a blurred stand-in,
-//! and what is drawn over a page — highlights, the selection, live strokes, the stroke the Adjust
-//! tool holds and the search's marks — the line a dropped PDF's pages would go in at, and the
-//! tiles still wanted, asked for once per change.
+//! Paint PDF paper, cached tiles and blurred stand-ins, then highlights, selections,
+//! strokes, search marks and the page-drop line. Request missing tiles once per change.
 
 use accent_core::pdf::Theme;
 use adw::prelude::*;

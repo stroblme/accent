@@ -22,12 +22,8 @@ import io.github.stroblme.accent.VaultModel
 import java.io.File
 
 /**
- * Which folder the vault is.
- *
- * A vault is a Syncthing folder full of symlinks and tens of thousands of files, and the Storage
- * Access Framework can neither see one nor walk it at any speed (MOBILE_DESIGN.md, Architecture),
- * so the app asks for all-files access and then works in real paths. The folder picker is only used to *name* the
- * folder; everything after that is `open(2)`.
+ * Use the system picker to name a vault folder, then open its real path.
+ * All-files access is required for symlinked Syncthing vaults (MOBILE_DESIGN.md, Architecture).
  */
 @Composable
 fun VaultPickerScreen(model: VaultModel) {
@@ -65,8 +61,8 @@ fun VaultPickerScreen(model: VaultModel) {
 
             if (!granted) {
                 Text(
-                    "Accent reads notes where you keep them, so it needs access to all files. " +
-                        "Accent doesn't upload them.",
+                    "To read notes in place, Accent needs access to all files. " +
+                        "It doesn't upload your notes.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -108,13 +104,7 @@ fun VaultPickerScreen(model: VaultModel) {
 private fun hasAllFiles(): Boolean =
     Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
 
-/**
- * The real path behind a tree URI.
- *
- * The picker answers with `content://…/tree/primary:Notes`, whose document id names the volume
- * and the path inside it. `primary` is the device's own shared storage, which is where a
- * Syncthing folder lives; anything else is a removable volume under `/storage`.
- */
+/** Resolve a tree URI document ID to a shared-storage or removable-volume path. */
 private fun pathOf(uri: android.net.Uri): String {
     val id = android.provider.DocumentsContract.getTreeDocumentId(uri)
     val (volume, rest) = id.split(':', limit = 2).let { it[0] to it.getOrElse(1) { "" } }

@@ -1,6 +1,6 @@
-//! Drills over comparisons: a note against its disk copy, two blobs, and the working tree.
-//! Those driven by a note's comparison with its disk copy, two blobs among them, are in `disk`,
-//! those driven by the Git pane's rows in `git`, and what both use is here.
+//! Comparison drills for disk copies, two blobs and Git revisions.
+//! `disk` covers note comparisons, `git` covers Git-pane rows, and this module holds shared
+//! helpers.
 
 use super::diagnostics::diagnostic;
 use super::*;

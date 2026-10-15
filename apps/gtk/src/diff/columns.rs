@@ -876,14 +876,14 @@ impl Columns {
 
     /// Measure and pad comparison rows, position buttons and preserve the reading anchor.
     ///
-    /// Unchanged padding stays untouched so repeated passes settle without invalidating layout.
-    /// [`Known`] caches unchanged line heights. Pending lines keep estimates until a `fresh`
-    /// pass after GTK layout idles; unmeasured lines use [`measure`]. Fresh passes also compare
-    /// column totals with GTK and re-read mismatches to catch missed or stale validation.
+    /// Leave unchanged padding intact so repeated passes settle without invalidating layout.
+    /// [`Known`] caches line heights; pending lines retain estimates until a `fresh` pass after
+    /// GTK layout idles. Unmeasured lines use [`measure`]. Fresh passes compare column totals
+    /// with GTK and re-read mismatches.
     ///
     /// Limit work to half the padding-read time or [`SLICE`], prioritising the viewport and rows
-    /// above it. Deferred lines retain prior heights or [`one_line`] estimates and padding;
-    /// idle passes continue after GTK's own layout work, avoiding long synchronous full-file passes.
+    /// above it. Deferred lines retain prior heights or [`one_line`] estimates and padding; idle
+    /// passes continue after GTK layout to avoid blocking on the full file.
     fn relayout(&self, fresh: bool) {
         #[cfg(feature = "bench")]
         let why = match fresh {

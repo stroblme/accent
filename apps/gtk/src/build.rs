@@ -1,5 +1,4 @@
-//! Building a window: the widgets, the sidebar, the Git pane and the file operations, plus the
-//! display-wide font, icons and CSS every window shares.
+//! Build windows and shared fonts, icons and CSS.
 
 use super::*;
 use crate::shell::{Loose, WindowKey};
@@ -1034,21 +1033,15 @@ thread_local! {
 
 /// Install application CSS for focus mode, compact chrome and editor theme integration.
 ///
-/// Focus mode uses opacity to preserve layout, focus and accessibility. Disabled animations
-/// still toggle visibility immediately. Hidden bars remove scroller undershoots; High also
-/// dims dividers. `.accent-flat` gives header/find surfaces the document background.
+/// Focus mode uses opacity to preserve layout, focus and accessibility. Hidden bars remove
+/// scroller undershoots; High also dims dividers. `.accent-flat` matches document backgrounds.
 ///
-/// Use `go-*` disclosure icons because themes such as WhiteSur can supply `pan-*` SVGs GTK
-/// cannot recolour. Section and sidebar-header rules align rows and stacked headers.
-/// Status-bar button rules remove minimum height and padding without losing button roles;
-/// bar padding keeps backgrounds complete in presentation mode. Inactive pane tabs use
-/// outlines, retaining normal hover and single-tab behaviour. Toast spacing and transforms
-/// follow the shared animation duration.
+/// Use `go-*` disclosure icons because some themes supply `pan-*` SVGs GTK cannot recolour.
+/// Other rules align section headers, compact status buttons, outline inactive tabs and keep
+/// presentation backgrounds complete.
 ///
-/// Application-priority CSS overrides GtkSourceView's scheme and widget providers per
-/// property. Keep the scheme for search highlighting, set foreground on `text` and background
-/// on `textview` because the text node forces transparency. Match gutter background to the
-/// page to avoid Solarized's contrasting line-number stripe.
+/// Application-priority CSS overrides GtkSourceView per property. Keep its search highlight,
+/// style foreground on `text` and background on `textview`, and match the gutter to the page.
 // ponytail: the header rule leans on libadwaita's own header padding (6 above a lone header,
 // 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
 // API instead if one ever appears; today the class is the only handle on it.

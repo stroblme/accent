@@ -240,18 +240,16 @@ pub(crate) const MOVE_BOUND: std::time::Duration = std::time::Duration::from_sec
 /// unprocessed files, and another Replace All finishes the remaining matches.
 pub(crate) const REPLACE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Generate matching [`Vault`] methods, RPC routes and wire names from one table.
+/// Generate [`Vault`] methods, RPC routes, and wire names from one table.
 ///
-/// All methods return [`Result`], preserving errors across the wire. A function
-/// after `=` runs beside the repository instead of calling the corresponding
-/// [`Local`] method; git routes retain their `git_` wire prefix.
+/// Methods return [`Result`], preserving errors across the wire. A function after `=` runs beside
+/// the repository instead of calling [`Local`]; git routes keep their `git_` prefix.
 ///
-/// `ref` arguments are borrowed locally and serialized as owned values (`str` as
-/// `String`); `val` arguments travel unchanged. `bounded by` adds the host timeout
-/// to [`rpc::DEADLINE`], so callers wait for operations such as long-running hooks.
+/// `ref` arguments are borrowed locally and serialized as owned values (`str` as `String`);
+/// `val` arguments travel unchanged. `bounded by` adds a host timeout to [`rpc::DEADLINE`].
 ///
-/// Operations with different local and remote behavior are defined separately:
-/// cancellable unindexed searches, byte transfers and worker-backed `repos`.
+/// Operations that differ locally and remotely are defined separately: unindexed searches, byte
+/// transfers, and worker-backed `repos`.
 macro_rules! methods {
     // What one argument is, on the façade, on the wire, and at the call the host makes.
     (@fty ref $t:ty) => { &$t };
@@ -589,12 +587,11 @@ impl Vault {
         self.resolve_link(rel).ok().flatten()
     }
 
-    /// Resolve a link target, or `None` so the UI can offer to create it.
-    /// Try the index, then [`linked_path`] on disk for unindexed trees, then
-    /// [`resolve_ignored`](Self::resolve_ignored) for basename links in ignored folders.
-    /// Use [`stat`](Self::stat) to distinguish missing files from remote failures;
-    /// [`exists`](Self::exists) cannot, and could offer New File while offline.
-    /// The preview uses this; Go to Definition asks the language provider beside the files.
+    /// Resolve a link target through the index, [`linked_path`] on disk, then
+    /// [`resolve_ignored`](Self::resolve_ignored) for ignored folders. Return `None` only for a
+    /// missing file so the UI can offer to create it; [`stat`](Self::stat) preserves remote errors
+    /// that [`exists`](Self::exists) would hide. The preview uses this path; Go to Definition uses
+    /// the language provider beside the files.
     pub fn follow(&self, target: &str) -> Result<Option<String>> {
         if let Some(rel) = self.resolve_link(target)? {
             return Ok(Some(rel));

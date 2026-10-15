@@ -22,19 +22,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-/// Directory names the walk refuses whatever the options say.
+/// Directories excluded by every scan option.
 ///
-/// `.git` is the repository's own storage, which the app reads through git rather than as files,
-/// and `.trash` is what the user already threw away. Neither is reachable even with
-/// [`ScanOptions::include_skipped`]: a search widened to "everything" still means everything in
-/// the vault, not its plumbing.
+/// Git handles `.git`; `.trash` holds discarded files. Even
+/// [`ScanOptions::include_skipped`] excludes both.
 const ALWAYS_SKIP_DIRS: &[&str] = &[".git", ".trash"];
 
-/// Dependency trees that plant no marker file, skipped by name unless the caller asks for them.
+/// Dependency trees without marker files, skipped by name unless requested.
 ///
-/// Deliberately short: matching dependency trees by name is whack-a-mole, so anything that
-/// plants a marker file is caught by [`is_dependency_tree`] instead. These are the trees that
-/// plant none.
+/// Marker-bearing trees are handled by [`is_dependency_tree`] instead.
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "__pycache__",
@@ -50,8 +46,7 @@ const SKIP_DIRS: &[&str] = &[
 /// use `pyvenv.cfg`. Both avoid large dependency walks without per-ecosystem directory names.
 const DEPENDENCY_MARKERS: &[&str] = &["CACHEDIR.TAG", "pyvenv.cfg"];
 
-/// Whether a dependency marker exists. Presence alone avoids opening a tag file for every
-/// directory; the `CACHEDIR.TAG` signature is not validated.
+/// Whether a dependency marker exists. The `CACHEDIR.TAG` signature is not validated.
 fn is_dependency_tree(dir: &Path) -> bool {
     DEPENDENCY_MARKERS.iter().any(|m| dir.join(m).exists())
 }
@@ -76,10 +71,9 @@ fn dir_ignores(root: &Path) -> IncrementalIgnore {
         .expect("one walk root yields one matcher")
 }
 
-/// Does a directory on the way to `rel` — or `rel` itself, when it is one — get ignored by git?
+/// Whether git ignores a directory at or above `rel`.
 ///
-/// `is_dir` decides which: a file is asked about its parent, never about its own name, because a
-/// gitignored file is indexed like any other and left out of queries instead.
+/// For files, check only the parent: individually ignored files remain indexed.
 fn in_ignored_dir(ignores: &mut IncrementalIgnore, rel: &str, is_dir: bool) -> bool {
     let dir = match is_dir {
         true => rel,
@@ -306,27 +300,22 @@ pub fn stat_one(root: &Path, rel: &str) -> crate::Result<Option<FileMeta>> {
     Ok(Some(file_meta(rel.to_string(), &path, &meta)))
 }
 
-/// What the walk makes of a directory, and the one thing the file tree needs beyond "the index
-/// does not hold it": *why*.
+/// Why a directory is absent from the index.
 ///
-/// [`Unindexed::Dependency`] is somebody else's tree — a `node_modules`, a `.venv`, a cargo
-/// `target/` — opened to look at and never to edit; [`Unindexed::Ignored`] is a folder the reader
-/// gitignored on purpose, an `mlruns/` or a build output, which is theirs to change like any other.
-/// The two are kept apart here so the tree does not have to guess at a name.
+/// [`Unindexed::Dependency`] identifies generated dependency trees such as `node_modules`;
+/// [`Unindexed::Ignored`] identifies folders explicitly excluded by git rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unindexed {
     Dependency,
     Ignored,
 }
 
-/// Does the walk refuse to look inside `rel`, and why? `Some` for the trees [`scan`] never enters:
+/// Why [`scan`] does not enter `rel`, or `None` if it does:
 /// [`ALWAYS_SKIP_DIRS`], [`SKIP_DIRS`], anything at or under a [`DEPENDENCY_MARKERS`] file, and
 /// anything at or under a directory git ignores.
 ///
-/// This is [`stat_one`]'s rule asked as a question, so the file tree and the watcher cannot
-/// disagree about which paths the index holds. The vault root is the user's own choice and is
-/// never refused. A dependency tree inside a gitignored folder — the usual `node_modules` under an
-/// ignored build directory — answers `Dependency`: the stricter of the two wins.
+/// Uses [`stat_one`]'s rules so the file tree and watcher agree with the index. The vault root is
+/// always allowed. `Dependency` takes precedence inside a gitignored folder.
 fn is_unindexed(root: &Path, rel: &str, ignores: &mut IncrementalIgnore) -> Option<Unindexed> {
     if rel.is_empty() {
         return None;
@@ -462,23 +451,15 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
     scan_until(root, "", &[], opts, &|| false, &AtomicUsize::new(0))
 }
 
-/// [`scan`], stoppable, and of the folder `dir` alone (vault-relative, `""` for the whole vault).
-/// `stop` is asked once per entry, on the walking threads, so a walk halts within one directory
-/// entry rather than at the end of the vault.
+/// Scan one vault-relative folder (`""` for the whole vault), checking `stop` for each entry.
 ///
-/// A folder's entries come out as the whole walk lists them: its folders are held to the
-/// `.gitignore` of every folder above them as well as their own, and a link inside it to one of
-/// `linked` — the canonical folders the vault already reaches through a link outside `dir` — is
-/// refused as the second way in that it is. `dir` itself is not listed, and nothing above it is
-/// asked whether the walk would enter it: that is the caller's to know.
+/// The scan applies ancestor `.gitignore` rules and rejects links into `linked` folders already
+/// reached outside `dir`. It omits `dir` itself; the caller decides whether to enter it.
 ///
-/// `found` counts the entries as they are kept, before the `(dev, ino)` dedup: what another
-/// thread can report while the walk is still running, which has no total until it ends.
+/// `found` counts kept entries before inode deduplication for progress reporting.
 ///
-/// What comes back from a stopped walk is **short of files the vault holds**, and it is not
-/// marked: a caller that reads it as the whole vault would take everything it never reached for a
-/// deletion. The one caller asks `stop` again itself and drops the result whole
-/// ([`crate::index::Index::reconcile_with`]).
+/// A stopped result is incomplete and unmarked. The caller must check `stop` again and discard
+/// it to avoid treating unvisited files as deleted ([`crate::index::Index::reconcile_with`]).
 pub fn scan_until(
     root: &Path,
     dir: &str,

@@ -314,14 +314,11 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
     })
 }
 
-/// What Discard trashes of the untracked paths under the folder `dir` (`""` for the whole
-/// repository): the names git's default mode gives them, so a folder holding nothing tracked
-/// goes whole rather than file by file, leaving its emptied folders behind.
+/// Untracked paths Discard would trash under `dir` (`""` for the repository). Use git's default
+/// grouping so an entirely untracked folder can go as one path.
 ///
-/// Never a repository of its own, nor a folder holding one anywhere below — an ignored folder
-/// included, where no status lists it: such a folder goes file by file instead (`-uall`), and
-/// the repository, its history with it, stays. A `.git` file counts as much as a directory,
-/// which is what a worktree has.
+/// Keep nested repositories and folders containing them, including ignored ones. List those
+/// folders' files individually (`-uall`). A worktree's `.git` file counts as a repository.
 pub fn untracked(repo: &Repo, dir: &str) -> Result<Vec<String>, Error> {
     let mut found = Vec::new();
     for path in untracked_as(repo, dir, "normal")? {
@@ -482,13 +479,10 @@ pub fn fetch(repo: &Repo) -> Result<String, Error> {
     Ok(transcribe(out))
 }
 
-/// The commits the upstream has and HEAD does not: exactly what a pull would bring in.
+/// Commit IDs upstream has but HEAD does not: what a pull would bring in.
 ///
-/// The oids alone, so a history already on screen can mark the rows a fetch found without asking
-/// git about each one. `HEAD..@{upstream}` is git's own spelling for the range, which means this
-/// refuses — rather than answers emptily — on a detached HEAD, a branch with no upstream and a
-/// repository with no commits. The caller knows which of those it is from [`Branch`] and asks
-/// only when `behind` says there is something to list.
+/// `HEAD..@{upstream}` fails for a detached HEAD, no upstream, or no commits; callers check
+/// [`Branch`] and request IDs only when `behind` is nonzero.
 pub fn incoming(repo: &Repo) -> Result<Vec<String>, Error> {
     let out = run(&repo.root, &["rev-list", "HEAD..@{upstream}"], true)?;
     Ok(String::from_utf8_lossy(&out)

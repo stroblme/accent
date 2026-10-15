@@ -5,8 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// A vault, an index and a config directory of our own, so the test never reads or writes the
-/// caches of whoever is running it.
+/// Create an isolated vault, index, and config directory.
 struct Scratch {
     dir: std::path::PathBuf,
 }

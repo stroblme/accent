@@ -7,12 +7,7 @@ import io.github.stroblme.accent.ffi.uniffiEnsureInitialized
 import java.io.File
 
 /**
- * What has to be true before the core is called the first time.
- *
- * The core writes its config, its session state and its index cache to the XDG directories,
- * because that is where they belong on the machine it was written for. Android has no `HOME` to
- * fall back on, so it is told where those are instead — which is the whole of the porting work,
- * and the reason none of this needed a `#[cfg(target_os = "android")]` in the core.
+ * Set Android paths for the core's XDG config, state, and cache directories before its first call.
  */
 object Native {
     private const val TAG = "accent"

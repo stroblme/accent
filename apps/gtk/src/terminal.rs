@@ -935,13 +935,9 @@ pub fn cli() -> Option<Vec<String>> {
         .then(|| vec![cli.to_string_lossy().into_owned()])
 }
 
-/// In the Flatpak a shell is the host's, as a remote vault's is its host's: one in the sandbox
-/// would see the runtime instead of the user's tools. `flatpak-spawn --host` runs the static
-/// `accent-cli` the Flatpak ships for this machine, by its path on the host (`/.flatpak-info`'s
-/// `app-path` is `/app` there), so the holder and its shells live outside the sandbox. Only while
-/// the app may talk to `org.freedesktop.Flatpak`, which a user can revoke; then a shell is the
-/// sandbox's and unheld. The holder starts a shell with the client's environment, which on the
-/// host lacks what VTE gives the processes it starts, so that is passed on.
+/// Launch the Flatpak's static `accent-cli` on the host so shells use the user's tools. The
+/// `app-path` in `/.flatpak-info` locates it. If Flatpak bus access is unavailable, the caller
+/// falls back to an unheld sandbox shell. Pass VTE's environment values to the host holder.
 fn host_cli(info: &str) -> Option<Vec<String>> {
     let file = glib::KeyFile::new();
     file.load_from_data(info, glib::KeyFileFlags::NONE).ok()?;

@@ -1,14 +1,10 @@
 #!/bin/sh
-# Regenerate the screenshots, the README's docs/screenshot-1..4.png and the metainfo's
-# data/screenshots/*.png, from the vault `make screenshots` generates in
-# target/screenshots/testvault. Each scene is one launch of the bench build on a private Xvfb,
-# whose ACCENT_BENCH_SHOT drill (apps/gtk/src/bench/shots.rs) sets it up and takes it light and
-# dark at scale 2. The README's joins the two (split-screenshot.sh), the metainfo's is the light
-# one alone, as Flathub asks, and frame-screenshot.sh gives both GNOME's corners and shadow.
+# Regenerate README and metainfo screenshots from the generated vault. Each scene launches the
+# ACCENT_BENCH_SHOT drill on private Xvfb in light and dark themes at scale 2. Join the pair for
+# the README, use light alone for metainfo, and add GNOME corners and shadow.
 #
-# What the app sees is made here, under target/screenshots: a home with a plain bash prompt, a
-# stand-in merl-rt for the ghost text, a short history with one staged and one unstaged edit, and
-# a config and GTK settings of stock GNOME rather than this machine's.
+# Build an isolated home, merl-rt stand-in, Git history, and stock GNOME settings under
+# target/screenshots.
 #
 # Usage: build-aux/screenshots.sh <directory holding accent and accent-cli>
 set -eu

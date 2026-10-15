@@ -86,18 +86,13 @@ fn askpass() -> Option<&'static Path> {
     ASKPASS.get().map(PathBuf::as_path)
 }
 
-/// [`command`] for the three that talk to a remote — fetch, pull and push — told to give up on a
-/// link that has stopped answering (see [`SSH`]).
+/// Build a fetch, pull or push command that times out on an unresponsive connection ([`SSH`]).
 ///
-/// `ask` is whether ssh may put the passphrase dialog on screen, which is true of a Sync's pull
-/// and push and false of the autofetch: that one runs on a five-minute timer, so its dialog would
-/// arrive over whatever is being typed with nobody having asked for it, and its own shorter bound
-/// would kill it mid-answer. Note that git reads `SSH_ASKPASS` as the last fallback for
-/// `GIT_ASKPASS` too, so an https remote's username and password come through the same dialog.
+/// `ask` permits a passphrase dialog for user-initiated Sync, but not timed autofetch. Git also
+/// uses `SSH_ASKPASS` as a fallback for HTTPS credentials.
 ///
-/// The user's own settings win. Each variable here would override the configuration, so it is set
-/// only where neither the environment nor the configuration — `core.sshCommand`, `SSH_ASKPASS`,
-/// and `http.keepAlive*` including its per-URL `http.<url>.keepAlive*` form — has one of its own.
+/// Preserve environment and Git configuration for SSH and HTTP keepalive settings; supply defaults
+/// only when the user has set neither.
 pub(super) fn network(root: &Path, args: &[&str], ask: bool) -> Command {
     let mut cmd = command(root, args, false);
     let set = |key: &str| std::env::var_os(key).is_some();

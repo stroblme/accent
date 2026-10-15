@@ -1,6 +1,5 @@
-//! Copying files in and out of a vault on another machine. Bytes travel over ssh, so every one
-//! of these runs on a worker thread, is said in the status bar while it does, and reports once,
-//! when it is over.
+//! Transfer files to or from a remote vault over SSH. Workers keep transfers off the UI thread;
+//! the status bar shows progress and reports the result once.
 
 use super::paths::{child_path, free_path};
 use super::{Ops, batch_to};

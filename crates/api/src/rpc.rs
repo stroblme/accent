@@ -1,10 +1,7 @@
-//! JSON-RPC 2.0 over stdio for remote vaults. One JSON object per line keeps
-//! the protocol readable and manually testable. Requests and responses carry
-//! an `id`; vault [`Event`]s arrive as `event` notifications without one.
-//! File bytes travel separately over SSH, avoiding binary encoding in JSON.
-//! Calls have deadlines so a missing response cannot indefinitely block a caller.
-//! Clients ping every [`PING`]; after its first ping, a server exits on [`SILENCE`]
-//! without input, detecting connections that die without closing stdin.
+//! JSON-RPC 2.0 over stdio for remote vaults, one JSON object per line. Requests and responses
+//! have IDs; vault [`Event`]s are notifications. File bytes travel separately over SSH. Calls have
+//! deadlines, and clients ping every [`PING`]; after the first ping, a server exits on [`SILENCE`]
+//! without input.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};

@@ -117,10 +117,8 @@ impl Open {
 
 /// Every conflict block in `text`, top to bottom.
 ///
-/// A marker out of its place — a second `=======`, a `>>>>>>>` before one — means the block it
-/// is in is no block, and a `<<<<<<<` inside a block starts the next one there. So a block an
-/// edit left unfinished, or one cut short by another inside it, is dropped alone: the blocks
-/// after it are still found.
+/// Malformed or unfinished blocks are skipped without hiding later blocks. A nested `<<<<<<<`
+/// starts a new block; misplaced `=======` or `>>>>>>>` invalidates the current one.
 pub fn blocks(text: &str) -> Vec<Block> {
     let mut found = Vec::new();
     if !text.contains("<<<<<<<") {

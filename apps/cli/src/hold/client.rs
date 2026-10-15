@@ -1,4 +1,4 @@
-//! Relay between a terminal and a held shell, with one-shot kill and listing commands.
+//! Relay terminal I/O to held shells, with one-shot kill and list commands.
 //!
 //! `attach` forwards input, SIGWINCH sizes and output on separate threads. It keeps no
 //! persistent state: terminal closure ends the relay while the holder retains the shell.
@@ -15,9 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-/// Relay this terminal to held shell `id`, starting the holder, and the shell in `cwd` (default:
-/// here) for `owner`, if need be. Returns the exit status for `attach`: the shell's when it ended,
-/// 0 when the terminal was taken over by another, [`FAILED`] when there was nothing to attach to.
+/// Attach this terminal to shell `id`, starting the holder and shell in `cwd` for `owner` if needed.
+/// Returns the shell's exit status, 0 on takeover, or [`FAILED`] if attachment fails.
 pub fn attach(id: &str, cwd: Option<PathBuf>, owner: &str) -> i32 {
     // Absolute: the holder runs in `/`.
     let cwd = std::path::absolute(cwd.unwrap_or_else(|| ".".into())).unwrap_or_default();
@@ -31,14 +30,12 @@ pub fn attach(id: &str, cwd: Option<PathBuf>, owner: &str) -> i32 {
     code
 }
 
-/// End shell `id`, starting a holder if necessary to record the kill before a pending attach can
-/// create it. This handles Close Tab immediately after New Terminal.
+/// End shell `id`, starting a holder if needed to prevent a pending attach from creating it.
 pub fn kill(id: &str) -> io::Result<()> {
     protocol::write_frame(&mut connect()?, KILL, id.as_bytes())
 }
 
-/// Print the held shells, one JSON object per line: nothing when no holder is running, and none
-/// is started to find out.
+/// Print one JSON object per held shell. Do not start a holder to list them.
 pub fn held() -> io::Result<()> {
     let Some(mut conn) = holder()? else {
         return Ok(());
@@ -50,15 +47,13 @@ pub fn held() -> io::Result<()> {
     Ok(())
 }
 
-/// The running holder, if there is one.
+/// Connect to the holder if one is running.
 fn holder() -> io::Result<Option<UnixStream>> {
     Ok(UnixStream::connect(super::dir()?.join(SOCKET)).ok())
 }
 
-/// Attach and pass output on until the shell ends or another terminal takes it. A connection
-/// that ends without either is attached again: the holder may have exited as this one connected,
-/// dropped this terminal for leaving output unread, or crashed (then a fresh shell starts in the
-/// same place). Three such rounds without a byte of output, and it gives up.
+/// Relay until shell exit or takeover. Reattach after an unexpected disconnect, restarting a
+/// crashed holder if needed; give up after three silent attempts.
 fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t) -> i32 {
     let to = Arc::new(Mutex::new(None));
     let mut out = io::stdout().lock();
@@ -129,9 +124,8 @@ fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t) -> i32 {
     FAILED
 }
 
-/// The two threads that talk to whichever connection `to` holds: keystrokes as they come, and
-/// the terminal's size each time SIGWINCH arrives. The end of stdin is the terminal going away,
-/// which detaches: the process exits and the holder sees the connection close.
+/// Forward keystrokes and SIGWINCH sizes to the current connection. EOF on stdin exits
+/// the relay, which detaches the terminal.
 fn forward(to: &Arc<Mutex<Option<UnixStream>>>, winch: libc::sigset_t) {
     let keys_to = to.clone();
     thread::spawn(move || {
@@ -178,9 +172,8 @@ fn forward(to: &Arc<Mutex<Option<UnixStream>>>, winch: libc::sigset_t) {
     });
 }
 
-/// The holder's socket, starting a holder when none answers. Up to 2 s, starting one again every
-/// fifth try: a holder started while the last one was still exiting finds the lock taken and
-/// leaves at once.
+/// Connect to the holder's socket, starting a holder if needed. Retry for up to 2 seconds; start
+/// another holder every fifth attempt in case the previous one found the lock held while exiting.
 // ponytail: polling puts the first shell after a holder start at about 60 ms (measured), 50 of
 // them this sleep. A shorter step, or a pipe the holder closes once bound, if that ever shows.
 fn connect() -> io::Result<UnixStream> {
@@ -256,7 +249,7 @@ fn raw() -> Option<libc::termios> {
     }
 }
 
-/// The size of the terminal on stdin; 24×80 off a terminal, or for one that has no size yet.
+/// Return the terminal size on stdin, or 24×80 if unavailable.
 fn winsize() -> (u16, u16) {
     let mut size = libc::winsize {
         ws_row: 0,

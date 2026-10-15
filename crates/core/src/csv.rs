@@ -1,7 +1,6 @@
-//! CSV column structure: the byte ranges an editor needs to colour a table by column.
+//! CSV cell byte ranges for column-based editor highlighting.
 //!
-//! GtkSourceView's `csv.lang` only knows numbers and strings, so the columns themselves have to
-//! come from here. All ranges are byte offsets into the input text, like `markdown`'s spans.
+//! GtkSourceView's `csv.lang` does not identify columns. Ranges refer to the input text.
 
 use std::ops::Range;
 
@@ -50,10 +49,8 @@ pub fn columns(text: &str) -> Vec<Cell> {
     columns_until(text, delimiter(text), |_| false).0
 }
 
-/// [`columns`] of `text` read from a record start with `delim`, as far as the first later record
-/// start `stop` takes (by its byte offset): the cells before it, and where it is. `None` where it
-/// took none, with every cell to the end. A record start is never inside quotes, so a read begun
-/// at one is what a read of the whole text does from there.
+/// Read cells from a record start until `stop` accepts a later record's byte offset. Return the
+/// accepted offset, or `None` after reading to the end. Record starts never occur inside quotes.
 pub fn columns_until(
     text: &str,
     delim: u8,

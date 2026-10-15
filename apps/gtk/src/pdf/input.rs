@@ -1,5 +1,4 @@
-//! What reaches a PDF tab from its two views, the page's menu and the keys: the wiring `open`
-//! does once, each signal and key handed on to the tab or fired as a window action.
+//! Wire PDF view signals, page menus and keys to tab or window actions in `open`.
 
 use std::rc::Rc;
 

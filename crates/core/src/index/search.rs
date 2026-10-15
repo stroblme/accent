@@ -14,35 +14,26 @@ const CLIP_BEFORE: usize = 40;
 
 const CLIP_AFTER: usize = 200;
 
-/// Shortest mid-word query [`Index::infix`] asks the trigram index for. Below three characters
-/// there is no trigram to look up, and the only answer is reading every body — the one thing the
-/// second index exists to avoid.
+/// Shortest mid-word query supported by the trigram index. Shorter queries would require
+/// reading every body.
 pub const MIN_INFIX: usize = 3;
 
-/// Rows one file may contribute to a grep, however many matches it holds. The list's own cap is
-/// shared by every file the query reaches — and by the three passes the sidebar makes over them —
-/// so without this one file can be the whole answer.
+/// Maximum grep rows per file, preventing one file from filling the result list.
 pub(super) const PER_FILE: usize = 5;
 
 impl Index {
-    /// Search indexed titles and text bodies as one ordered phrase ([`fts_query`]), returning
-    /// occurrences with byte ranges. Directories, PDFs, conflict copies and binaries have no
-    /// searchable body.
+    /// Search indexed titles and bodies as an ordered phrase ([`fts_query`]), returning byte
+    /// ranges. Directories, PDFs, conflict copies and binaries have no searchable body.
     ///
-    /// Exclude ignored files unless `include_ignored`, always retaining markdown notes.
-    /// Exclusions precede the ranking limit so ignored build output cannot displace visible
-    /// results.
+    /// Exclude ignored non-note files unless `include_ignored`; filter before applying `limit`.
     ///
-    /// Exact titles lead, followed by ascending SQLite `bm25`, with title weight 10 and body
-    /// weight 1. Corpus measurements showed partial-title ranking gains saturating near 10;
-    /// larger weights displaced body matches with little benefit.
+    /// Exact titles lead, then SQLite `bm25` ranks matches with title weight 10 and body weight 1.
     ///
-    /// Rank before reading bodies and build snippets locally: FTS5 `snippet()` repeatedly merges
-    /// prefix-term positions and was costly for short queries.
+    /// Rank before reading bodies and build snippets locally to avoid FTS5 `snippet()`'s costly
+    /// prefix-position merging.
     ///
-    /// If no prefix result exists, [`infix`](Self::infix) handles mid-word queries. Otherwise
-    /// [`search_mid_word`](Self::search_mid_word) adds them separately so prefix results appear
-    /// promptly.
+    /// If no prefix result exists, [`infix`](Self::infix) handles mid-word matches. Otherwise
+    /// [`search_mid_word`](Self::search_mid_word) adds them later.
     pub fn search(
         &self,
         query: &str,

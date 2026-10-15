@@ -178,14 +178,12 @@ pub fn relative(dir: &str, rel: &str) -> String {
     parts.join("/")
 }
 
-/// The file a link that resolves to nothing would create: the target exactly as the link spells
-/// it from the vault root, with `.md` added unless it names an extension [`file_type`] knows.
+/// Return the vault path a missing link would create, adding `.md` unless [`file_type`] recognises
+/// the target's extension.
 ///
-/// `[[Notes/Foo]]` is `Notes/Foo.md` and `[[Foo]]` is `Foo.md` at the root — not in the linking
-/// note's folder, which is not what the link says. A known extension is kept, markdown or not:
-/// `[[data.csv]]` asks for a `data.csv`. Any other dot is part of the name, as
-/// `markdown::as_written` reads it: `[[Rev 1.2 notes]]` is `Rev 1.2 notes.md`, and `[[foo.xyz]]`
-/// `foo.xyz.md`, which is also the note both links resolve to once it is written.
+/// Wikilink targets are rooted at the vault, not the linking note's folder. Known extensions stay
+/// intact (`[[data.csv]]`); unknown ones are part of the note name (`[[foo.xyz]]` becomes
+/// `foo.xyz.md`).
 pub fn linked_path(target: &str) -> String {
     let named = basename(target)
         .rsplit_once('.')

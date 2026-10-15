@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Run `accent-cli <args> --vault <dir>/vault --db <dir>/index.db` and hand back what it printed.
+/// Run `accent-cli` against a scratch vault and index, returning its output.
 fn run(dir: &Path, args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_accent-cli"))
         .args(args)

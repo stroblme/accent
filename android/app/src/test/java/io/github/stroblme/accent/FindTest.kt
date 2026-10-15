@@ -6,17 +6,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-/**
- * A find in a PDF, as far as it is arithmetic: the matches kept in page order while the pages
- * arrive out of it, and the steps round the ends. Where a match is brought on screen is
- * `NavigationTest`'s; the bar and the keyboard want a device.
- */
+/** PDF find orders matches by page and wraps navigation when pages arrive out of order. */
 class FindTest {
     private fun box(y: Float) = Rect(0f, y, 10f, y + 10f)
 
     /**
-     * A find starts at the page being read and comes round to the ones before it, which arrive
-     * last and go in front — without moving the reader off the match they are on.
+     * Start at the current page; earlier pages may arrive later without moving the current match.
      */
     @Test
     fun `pages arriving round the end go in front and the reader stays put`() {

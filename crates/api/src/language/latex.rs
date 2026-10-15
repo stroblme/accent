@@ -1,19 +1,13 @@
-//! Correct texlab outlines using the last build's table of contents. Match
-//! `.aux` entries in order rather than by title alone, handling duplicate
-//! titles, commands and class-specific numbering. Find a file's own `.aux`
-//! beside it or in `build/`, `out/`, or latexmkrc-configured output directories,
-//! including mirrored paths below ancestor folders. Source-only counters
-//! cannot reproduce included chapters or custom class/preamble numbering.
+//! Correct texlab outlines with the last build's table of contents. Match `.aux` entries in
+//! order to handle duplicate titles and custom numbering. Find a file's `.aux` beside it or in
+//! `build/`, `out/` or latexmkrc-configured directories, including mirrored ancestor paths.
 //!
-//! For `\input` files without their own `.aux`, choose the nearby table
-//! matching the most headings by level and title in order ([`Tocs::of`]).
-//! Repeated inputs or identical heading sequences use the first match. If
-//! no table matches, keep texlab numbers except for paragraphs, subparagraphs
-//! and starred headings, which this outline leaves unnumbered.
+//! For `\input` files without an `.aux`, use the nearby table matching the most headings by
+//! level and title ([`Tocs::of`]); ties use the first match. Without a match, keep texlab's
+//! numbers except on paragraphs, subparagraphs and starred headings.
 //!
-//! Collapse multiline titles and list only labelled display-math environments,
-//! promoting children of unlabelled environments. [`inputs`] supplements
-//! texlab's `.tex` completion with other files such as exported `.pgf` plots.
+//! Collapse multiline titles and list only labelled display math, promoting children of
+//! unlabelled environments. [`inputs`] adds non-`.tex` files to completion.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;

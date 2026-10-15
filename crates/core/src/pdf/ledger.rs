@@ -8,12 +8,10 @@ use crate::{Error, Result};
 
 use crate::pdf::{self, PageEdit, PdfDoc};
 
-/// One ink stroke as the tools address it: the id it was given, which unlike its place in
-/// `/Annots` survives every erase and move made before it lands, and its shape.
+/// An ink stroke's stable ID and shape. Unlike its `/Annots` index, the ID survives earlier edits.
 pub type NamedInk = (u32, pdf::InkShape);
 
-/// A name no stroke in the process has had. One counter for every thread, so a widget can name
-/// the pieces its eraser cuts before the document has seen them.
+/// Allocate a process-wide stroke ID, including for eraser fragments not yet in the document.
 pub fn fresh_id() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -54,10 +52,8 @@ pub enum Step {
     },
 }
 
-/// The document as it stood on the other side of a page delete, and the names its annotations
-/// had there: before the delete until Undo swaps it in for the document as it then stands, which
-/// waits here in turn for Redo. Swapped whole, so the steps on either side find their strokes
-/// where they left them, and what an Export Highlights wrote on one side stays on that side.
+/// Document and annotation IDs stored across a page deletion. Undo and Redo swap the whole
+/// document, preserving strokes and exported highlights on their respective sides of the edit.
 pub struct Kept {
     doc: PdfDoc,
     ids: HashMap<usize, Vec<Option<u32>>>,
@@ -73,15 +69,10 @@ pub enum Walked {
     Pages(PageEdit, u32),
 }
 
-/// What the render thread knows about the ink of the pages it has touched or listed, so that the
-/// tools can name a stroke wherever it has moved to, and Undo and Redo reach this session's
-/// changes and nothing else.
+/// Track stroke IDs and this session's ink and page edits for Undo and Redo.
 ///
-/// `ids` mirrors a page's `/Annots` from the first time it is touched or listed: `Some` is an
-/// annotation that has been given a name, `None` one nobody has asked about. It is filed under
-/// the page's number today, and follows every page edit. `done` is the undo list and `undone`
-/// the redo list, newest last, one entry per gesture: the strokes one eraser drag takes come back
-/// together.
+/// `ids` mirrors each touched page's `/Annots`, using `None` for unnamed annotations, and follows
+/// page edits. `done` and `undone` store one step per gesture, newest last.
 #[derive(Default)]
 pub struct Ink {
     ids: HashMap<usize, Vec<Option<u32>>>,

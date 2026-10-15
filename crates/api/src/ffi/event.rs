@@ -5,12 +5,12 @@ use crate::ffi::convert::Progress;
 
 #[derive(uniffi::Enum)]
 pub enum Event {
-    /// How far the first walk of a cold vault has got.
+    /// Progress through the initial vault scan.
     Progress {
         progress: Progress,
     },
-    /// A walk ended without finishing ([`crate::Event::WalkFailed`]): nothing is paused, and the
-    /// error, if this vault has not said it already, is an [`Event::Error`].
+    /// A scan failed without pausing indexing ([`crate::Event::WalkFailed`]).
+    /// Its error is reported separately through [`Event::Error`] if not already reported.
     WalkFailed,
     /// Index reconciliation completed, possibly with a partial index if
     /// `stopped`. Only [`Vault::resume_indexing`] resumes a paused vault.
@@ -28,7 +28,7 @@ pub enum Event {
     DirsChanged {
         dirs: Vec<String>,
     },
-    /// Somebody else changed this file. Never our own saves.
+    /// Another process changed this file; our own saves are excluded.
     FileChanged {
         rel: String,
     },

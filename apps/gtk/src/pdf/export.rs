@@ -1,6 +1,5 @@
-//! Export as PDF and Print: the document with its ink and the notes' highlights, written as a
-//! copy — the file itself never changes — and for Print that copy handed to the print system,
-//! so what is printed is what the tab shows.
+//! Export or print a copy of the PDF with ink and note highlights from the current tab.
+//! Printing sends that copy to the print system; the original file stays unchanged.
 
 use std::path::PathBuf;
 use std::rc::Rc;

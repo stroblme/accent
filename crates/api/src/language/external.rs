@@ -1,7 +1,6 @@
-//! Language-server provider over `accent-lsp`. Translate server URIs and
-//! encoded columns (UTF-16 by default) to vault paths and Unicode scalar
-//! columns. Keep open-document text for conversions; pure mappings in
-//! [`map`] can be tested without a server.
+//! Language-server provider over `accent-lsp`. Convert server URIs and encoded columns (UTF-16 by
+//! default) to vault paths and Unicode scalar columns. Open-document text supports conversion;
+//! pure mappings in [`map`] can be tested without a server.
 
 pub(super) mod map;
 

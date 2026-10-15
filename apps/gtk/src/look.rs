@@ -444,7 +444,7 @@ pub(crate) fn animated(path: &Path) -> bool {
 }
 
 /// Why Invert Image Colours is greyed out over an animation, in the palette ([`animated`]).
-pub(crate) const ANIMATED: &str = "An animation is shown as its file is, never recoloured";
+pub(crate) const ANIMATED: &str = "Animated images are shown without recolouring";
 
 /// The same, after the command's name in the preview's menu.
 pub(crate) const ANIMATED_LABEL: &str = "(animated)";

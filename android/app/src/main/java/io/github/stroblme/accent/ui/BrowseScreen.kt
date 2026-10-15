@@ -34,42 +34,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/**
- * What the query means, in the order the chips and the pages go: from the whole vault to the one
- * document — what the notes say, what they are called, what they are about, what links to the one
- * in front — and then what can be done. The rest of the screen is the same in all five.
- */
+/** Search, file, tag, backlink and command pages, in chip order. */
 private enum class Mode { Search, Files, Tags, Backlinks, Command }
 
 /**
- * The vault's files, on a screen of their own.
- *
- * The desktop's eight sidebar panes and its palette collapse into one list: what the field means is
- * a chip away. Search reads the files and falls back to the tree while there is nothing to search
- * for; Files matches names against the recent ones, and Command against what the palette can do.
- * Tags lists the vault's tags, most used first, and a tag opened lists its notes; Backlinks lists
- * the notes linking to the document in front ([front]), which is where a backlink followed from
- * here returns to. The field narrows either as Files ranks names. A screen rather than a drawer
- * because a drawer is an edge swipe, and a gesture nothing announces is a gesture nobody finds.
- *
- * Files, Command and the tags lay their rows out from the bottom up, so the best match is the one
- * nearest the field and the thumb. Search keeps the tree the way a tree reads, from the top, and so
- * do a tag's notes and the backlinks, which are a list under a heading rather than a ranking.
- *
- * A tag tapped in a note opens the panel on that tag's notes ([openTag]), Back from them going to
- * the tags as it does for one opened here.
- *
- * A row hands over the file it names and, if it was a search hit, the query it was found by:
- * that query is the whole difference between the two ways in, and it is what the note marks
- * itself with (`NoteScreen`). A row picked off the tree or the switcher hands over nothing and
- * so lands at the top of its note, which is where a file somebody chose by name belongs.
- *
- * The five modes are pages of one pager, so the swipe between them
- * is the platform's own: the surface follows the thumb and settles at the speed it was thrown, and
- * the drag is claimed by the direction it is going in rather than by whichever node saw the finger
- * first — a page turn and a scroll down cannot be taken for each other, and neither can steal the
- * pull that closes the panel. The chips remain the control and the only announcement: tapping one
- * scrolls the pager, so it still travels the way the ordinal moved.
+ * Browse search results, files, tags, backlinks, and commands. The field filters each page;
+ * search hits pass their query to the opened note for highlighting.
  */
 @Composable
 fun BrowseScreen(
@@ -252,7 +222,7 @@ fun BrowseScreen(
                         rows = placesIn(tagged),
                         onBack = { tag = null },
                     ) { onOpen(it, null) }
-                    all?.isEmpty() == true -> Quiet("No tags yet. Add #tags to your notes to find them here.")
+                    all?.isEmpty() == true -> Quiet("No tags yet. Add a #tag to a note to see it here.")
                     all != null -> Tags(all, placesIn(all)) {
                         tag = it
                         query = ""
@@ -391,10 +361,7 @@ fun BrowseScreen(
     }
 }
 
-/**
- * The vault's tags, most used first — the core's order — or as the query ranks them: a tag's name
- * leading, its count at the row's end. Bottom-up, as a ranking is here.
- */
+/** Show tags by use count or query rank, with counts at the row end. */
 @Composable
 private fun Tags(tags: List<TagCount>, rows: List<Int>, onOpen: (TagCount) -> Unit) {
     LazyColumn(Modifier.fillMaxSize(), reverseLayout = true) {
@@ -418,11 +385,7 @@ private fun Tags(tags: List<TagCount>, rows: List<Int>, onOpen: (TagCount) -> Un
     }
 }
 
-/**
- * Notes under a [heading] — a tag's, or the document's that they link to — each by its name over
- * its folder, from the top. [notes] is null while they are being asked for. A heading given
- * [onBack] is the way back to where the list came from, and says so in the accent.
- */
+/** Show notes under [heading], with [notes] null while loading and [onBack] for navigation. */
 @Composable
 private fun Notes(
     heading: String,
@@ -472,15 +435,12 @@ private data class Ranked(val mode: Mode, val query: String, val rows: List<Int>
 /** How long a query goes unanswered before the bar says it is still being looked for. */
 private const val SLOW_MS = 200L
 
-/**
- * What Browse says over its lists while they may not hold every file — the walk is still reading
- * the vault, or was stopped before the end — and nothing once they do. The start screen's words.
- */
+/** Status shown while indexing is running or paused with incomplete results. */
 internal fun readingLine(indexing: Boolean, paused: Boolean, scanned: Long): String? = when {
     indexing && scanned > 0 ->
-        "Reading your vault… %,d files so far. Some may not be listed yet.".format(scanned)
-    indexing -> "Reading your vault… Some files may not be listed yet."
-    paused -> "Reading paused. Files not read yet are not listed."
+        "Reading your vault… %,d files read. More may appear.".format(scanned)
+    indexing -> "Reading your vault… More files may appear."
+    paused -> "Reading paused. Results may be incomplete."
     else -> null
 }
 
@@ -520,9 +480,8 @@ internal fun tagHeading(tag: TagCount): String = "#${tag.name} · ${tag.count}"
 internal fun title(rel: String): String = rel.substringAfterLast('/').removeSuffix(".md")
 
 /**
- * The places in [names] a list page shows: all of them in their own order — by count for the tags,
- * by path for notes — until there is a [query], and then [rank]'s, whose ties keep that order.
- * Not [fuzzy] for an empty query, which would cap a long list of tags at its 200.
+ * Use list order for empty [query]; otherwise use [rank] with stable ties.
+ * Avoid [fuzzy] for empty queries because it caps long lists.
  */
 internal fun listed(query: String, names: List<String>, rank: (String, List<String>) -> List<Int>) =
     if (query.isBlank()) names.indices.toList() else rank(query, names)
@@ -586,20 +545,13 @@ private fun LazyListScope.rows(
 class Command(val label: String, val run: (VaultModel) -> Unit)
 
 /**
- * New from Template… and Today's Note, the commands that may ask something first: which template.
- * The Command page lists the ones they offer in its own place, as the Tags page lists a tag's
- * notes, and a pick makes the note there or opens the one it made ([VaultModel.fromTemplate]).
- * New from Template… offers every template that says where its notes go, as the desktop's does;
- * Today's Note those whose destination is dated, and asks only when there are several.
+ * Offer templates for New from Template… and dated targets for Today's Note.
+ * A selection creates or opens its note ([VaultModel.fromTemplate]).
  */
 val NewFromTemplate = Command("New from Template…") {}
 val TodaysNote = Command("Today's Note") {}
 
-/**
- * The templates [command] asks the reader to pick from, or null when it does not ask: with none
- * to offer it says why, as the desktop does, and with Today's Note's one it makes that note
- * straight away. Either way the panel closes.
- */
+/** Return templates offered by [command], or null when no choice is needed. */
 private suspend fun pickable(command: Command, model: VaultModel, onClose: () -> Unit): List<String>? {
     val today = command === TodaysNote
     val found = (if (today) model.dailyTemplates() else model.templateTargets()) ?: return null
@@ -618,12 +570,7 @@ private suspend fun pickable(command: Command, model: VaultModel, onClose: () ->
     return null
 }
 
-/**
- * Find is the palette's one entry that changes the screen rather than the vault: it opens the find
- * bar of the note or the PDF in front, which searches that where Search above searches every
- * note. Close Vault was reachable only from the screen with nothing open,
- * which is the one place a reader is not thinking about the vault they are in.
- */
+/** Open find for the front note or PDF, searching within that document. */
 val Commands = listOf(
     Command("New Note") { it.newNote(newName()) },
     NewFromTemplate,
@@ -634,10 +581,7 @@ val Commands = listOf(
     Command("Close Vault") { it.closeVault() },
 )
 
-/**
- * Print… of the note or the PDF in front, listed only while there is one: the system's print UI,
- * which offers Save as PDF too, so there is no Export beside it.
- */
+/** Offer system Print… for the front document; it also supports Save as PDF. */
 val Print = Command("Print…") { it.printing(true) }
 
 private fun newName(): String {

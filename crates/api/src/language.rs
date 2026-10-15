@@ -1,8 +1,7 @@
-//! Completion, navigation, symbols, folds and diagnostics for all text documents.
-//! Code uses `accent-lsp`; notes use the index, behind the same UI interface.
-//! Positions use zero-based lines and Unicode scalar columns to match `GtkTextIter`;
-//! server encoding conversions happen beside the text on its host. Requests run
-//! on the shared runtime as [`Task`]s, cancelled when dropped.
+//! Completion, navigation, symbols, folds, and diagnostics for text documents. Code uses
+//! `accent-lsp`; notes use the index through the same interface. Positions use zero-based lines
+//! and Unicode scalar columns, matching `GtkTextIter`. Server encodings are converted beside the
+//! text. Requests run as [`Task`]s on the shared runtime and cancel when dropped.
 
 use std::collections::HashMap;
 use std::future::Future;

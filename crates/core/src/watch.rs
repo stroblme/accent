@@ -1,9 +1,8 @@
-//! Debounce filesystem events into vault changes. Suppress Syncthing download temporaries and
-//! report conflict copies promptly.
+//! Debounce filesystem events into vault changes, suppressing Syncthing temporaries and promptly
+//! reporting conflict copies.
 //!
-//! Use one non-recursive watch per indexed directory, excluding skipped trees to conserve
-//! inotify watches and event-queue space. Recursive watching can reintroduce dependency trees
-//! and create reconcile loops when directory-open events overflow the queue.
+//! Watch each indexed directory non-recursively. This keeps skipped dependency trees out of
+//! inotify and prevents directory-open events from overflowing the queue and causing scan loops.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

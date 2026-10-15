@@ -1,6 +1,4 @@
-//! Drills over a PDF: the layout either side of Fit Height, the page Add Page After puts in, the
-//! page edits and their menus, another PDF dropped onto one, the Outline pane following the
-//! reader, and the blank document New Drawing writes.
+//! PDF drills for layout, page editing, drops, Outline tracking and New Drawing.
 
 use super::*;
 

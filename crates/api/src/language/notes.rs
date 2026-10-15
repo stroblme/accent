@@ -1,7 +1,6 @@
-//! Index-backed language provider for notes: links are definitions, backlinks
-//! are references, headings are symbols and unresolved links are diagnostics.
-//! The shared interface lets the editor query notes like source files.
-//! Pure transformations precede the provider and can be tested without a vault.
+//! Index-backed language provider for notes. Links act as definitions, backlinks as references,
+//! headings as symbols, and unresolved links as diagnostics. Pure transformations can be tested
+//! without a vault.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};

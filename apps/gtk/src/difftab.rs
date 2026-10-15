@@ -1,5 +1,5 @@
-//! A comparison of two texts that are not files, as a tab of its own: a staged change, a commit
-//! against its parent. The comparison is `diff.rs`'s; this is the tab around it.
+//! Host comparisons of non-file texts, such as staged changes and commits, in their own tabs.
+//! `diff.rs` provides the comparison widget.
 
 use gtk::glib;
 use std::cell::RefCell;
@@ -8,9 +8,8 @@ use std::rc::Rc;
 use crate::diff::{Compare, Side, pane};
 use crate::editor::{self, Flavour};
 
-/// A comparison of two texts that are not files, as a tab of its own: a staged change, a commit
-/// against its parent. Both panes are companions, so the tab carries the font provider the
-/// editor would otherwise have.
+/// Tab for a comparison of non-file texts. It carries the font provider that an editor
+/// would otherwise supply to both panes.
 pub struct DiffTab {
     pub page: adw::TabPage,
     key: String,

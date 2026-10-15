@@ -1,4 +1,4 @@
-//! Drills over a note's text: styling as it is typed, pastes, Ctrl+hover and occurrences.
+//! Drill note styling, paste, Ctrl+hover and occurrences.
 
 use super::*;
 use crate::editor::line_end;

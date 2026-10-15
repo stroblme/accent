@@ -324,13 +324,12 @@ pub(crate) fn install_font(
     }
 }
 
-/// Bring `view`'s pango context to the font its style gives it now, once the rule naming it is in.
+/// Sync `view`'s Pango context with its current style font after the style rule is installed.
 ///
-/// GTK builds a widget's context once and then follows only the style changes it reports to the
-/// widget, measured from the last style it reported rather than from the one the context was
-/// built from. A view's is built before the view is in a window (GtkSourceView measures its tab
-/// stops in `set_tab_width`), from the display-wide editor font, so a font of its own that equals
-/// GTK's default never reached it, nor the tab stops and wrap hangs measured with it (ISSUES.md).
+/// GTK builds the context before the view enters a window, then updates it only for reported
+/// style changes. GtkSourceView measures tab stops in `set_tab_width` using that early context.
+/// If the view's font equals GTK's default, GTK may report no change, leaving tab stops and
+/// wrap indents measured with the display-wide editor font (ISSUES.md).
 pub(crate) fn refont(view: &impl IsA<gtk::Widget>) {
     if let Some(font) = view.create_pango_context().font_description() {
         view.pango_context().set_font_description(&font);

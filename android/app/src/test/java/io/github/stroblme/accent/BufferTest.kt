@@ -7,14 +7,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * The buffer a note is edited in, which lives on the model rather than inside the editor.
- *
- * Worth asserting because it is what was silently wrong: a field state built inside the editor
- * took its text once, so taking the version on disk cleared the banner and kept the old words.
- * [load] is the whole of the difference and it is plain Kotlin, so it can be driven here; the
- * editor around it needs a composition and a real vault and is left to a device.
- */
+/** Note edits live in the model buffer; [load] must replace stale editor text with disk text. */
 class BufferTest {
     @Test
     fun `loading a note replaces what was typed into the last one`() {
@@ -38,7 +31,7 @@ class BufferTest {
         assertFalse("undo must not reach the note before", buffer.undoState.canUndo)
     }
 
-    /** A file changed under a note is taken as it stands only while nothing was typed into it. */
+    /** Reload an external change only when the note has no local edits. */
     @Test
     fun `a note nobody typed into is clean`() {
         val open = Open("a.md", text = "on disk")
@@ -46,7 +39,7 @@ class BufferTest {
         assertTrue(open.dirty("on disk and typed"))
     }
 
-    /** Leaving a note asks only when going would lose something nothing else can write. */
+    /** Prompt on leaving only when local changes would be lost. */
     @Test
     fun `an exit asks only over edits saving was paused on`() {
         val changed = Open("a.md", text = "on disk", changedOnDisk = true)

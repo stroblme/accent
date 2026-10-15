@@ -1,5 +1,4 @@
-//! Drills over a note compared with its disk copy, and the tabs of two blobs some of them open
-//! beside it.
+//! Drills comparing notes with disk copies and other open tabs.
 
 use super::*;
 

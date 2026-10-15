@@ -2,14 +2,7 @@ package io.github.stroblme.accent
 
 import android.content.Context
 
-/**
- * The few things the app remembers between runs: which vaults have been opened, which notes and
- * commands were reached for last.
- *
- * Deliberately not the core's `Config` and `Session`. Those hold a window's panes, its split
- * ratios and its zoom, none of which exist here; and a phone's idea of "where I was" is its own
- * question. What the two do share is the vault, and that is a path.
- */
+/** Persist recent vaults, notes, and commands separately from desktop window session state. */
 class Recents(context: Context) {
     private val prefs = context.getSharedPreferences("recents", Context.MODE_PRIVATE)
 
@@ -22,7 +15,7 @@ class Recents(context: Context) {
         prefs.edit().putString(of.key, kept.joinToString("\n")).apply()
     }
 
-    /** How recently each of [haystacks] was used, for the switcher's ranking. */
+    /** Return recency ranks for [haystacks] used by the switcher. */
     fun ranks(of: Kind, haystacks: List<String>): List<UInt?> {
         val order = list(of).withIndex().associate { (i, v) -> v to i.toUInt() }
         return haystacks.map { order[it] }

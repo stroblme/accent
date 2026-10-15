@@ -22,15 +22,13 @@ mod graph;
 mod precise;
 mod tools;
 
-/// Most a read hands back: a note past it is read a section at a time, an image past it not at
-/// all. A client holds the whole answer in its context.
+/// Maximum read size. Larger notes require section reads; larger images are omitted.
 const MAX_OUT: u64 = 1024 * 1024;
 
-/// How long an index read waits for the first walk of a cold index before it answers from what
-/// is there, saying so.
+/// Maximum wait for an initial index walk before returning partial results.
 const WAIT: Duration = Duration::from_secs(20);
 
-/// What the agent is told about the server before it asks anything.
+/// Server instructions shown to the agent before its first request.
 const INSTRUCTIONS: &str = "The notes of one accent vault: markdown files linked by [[wikilinks]] \
     and tagged with #tags, beside PDFs, code and other files, indexed for search. Start with \
     explore: one call answers a question, a name, a path, a [[link]] or a #tag with the files \
@@ -78,7 +76,7 @@ pub fn run(root: &Path, db: &Path, read_only: bool) -> Result<()> {
     served
 }
 
-/// Whether the index has been brought up to date since the vault was opened.
+/// Whether the initial index walk has completed.
 #[derive(Default)]
 struct Ready {
     state: Mutex<Indexing>,
@@ -88,13 +86,12 @@ struct Ready {
 #[derive(Default)]
 struct Indexing {
     done: bool,
-    /// Files indexed of how many, while the first walk runs.
+    /// Indexed and total file counts during the first walk.
     progress: (usize, usize),
 }
 
 impl Ready {
-    /// Keep up with the vault's events until it closes. They have to be read, the channel being
-    /// unbounded; all that matters here is how far the index is, and what went wrong.
+    /// Consume vault events until close to prevent unbounded channel growth; track progress and errors.
     fn follow(&self, events: Receiver<Event>) {
         for event in events {
             match event {
@@ -110,7 +107,7 @@ impl Ready {
         }
     }
 
-    /// Wait for the first walk, at most [`WAIT`]: `None` once it has ended, or how far it got.
+    /// Wait up to [`WAIT`] for the first walk; return `None` if complete or its progress otherwise.
     fn wait(&self) -> Option<String> {
         let state = locked(&self.state);
         let (state, _) = self
@@ -121,12 +118,11 @@ impl Ready {
     }
 }
 
-/// What every tool call shares, handed to the blocking pool whole.
+/// State shared by tool calls on the blocking pool.
 struct Shared {
     vault: Vault,
     ready: Arc<Ready>,
-    /// Searches take turns: the vault's search stops the one before it, as the Search pane wants
-    /// and two calls of an agent's do not.
+    /// Serialize agent searches because the vault cancels a preceding search.
     search: Mutex<()>,
 }
 
@@ -154,15 +150,13 @@ impl Shared {
         }
     }
 
-    /// Whether a path the index answered with may be shown: [`inside`](Self::inside) holds for
-    /// results as for arguments, or a search would quote what a symlink brings in from outside.
+    /// Check index results with [`inside`](Self::inside) to exclude external symlink targets.
     fn shown(&self, rel: &str) -> bool {
         self.inside(rel).is_ok()
     }
 
-    /// The first `limit` of the rows `fetch(n)` answers, at most `n` of them, that may be
-    /// [`shown`](Self::shown). A symlink can bring in any number of the top rows from outside, so
-    /// the index is asked for twice as many until enough are shown or it has no more.
+    /// Return up to `limit` safe rows from `fetch`, requesting more when external symlinks
+    /// occupy top results.
     fn first_shown<T>(
         &self,
         limit: usize,
@@ -185,8 +179,7 @@ impl Shared {
         }
     }
 
-    /// Refuse a template a symlink takes outside the vault: its text is what the note gets.
-    /// The first of the places the vault looks for it that holds a file is the one it reads.
+    /// Read the first matching template, refusing symlinks outside the vault.
     fn template(&self, name: &str) -> Result<(), String> {
         let dir = self.vault.config().templates_dir;
         match template::candidates(&dir, name)
@@ -207,7 +200,7 @@ impl Shared {
         }
     }
 
-    /// A text file's text, as the index counted its offsets.
+    /// Read text using the encoding assumed by indexed offsets.
     fn text(&self, rel: &str) -> Result<accent_api::Text, String> {
         match self.vault.read_text(rel).map_err(fail)? {
             Read::Text(t) => Ok(t),
@@ -234,7 +227,7 @@ impl Shared {
     }
 }
 
-/// The protocol's handler: the tools' routes, and what they share.
+/// MCP tool routes and their shared state.
 #[derive(Clone)]
 struct Server {
     shared: Arc<Shared>,
@@ -242,8 +235,7 @@ struct Server {
 }
 
 impl Server {
-    /// Run a tool's body on the blocking pool: the façade is synchronous, and the runtime's two
-    /// workers are the language servers' as well.
+    /// Run synchronous façade calls on the blocking pool, leaving runtime workers for language servers.
     async fn blocking(
         &self,
         body: impl FnOnce(&Shared) -> Result<CallToolResult, String> + Send + 'static,
@@ -264,7 +256,7 @@ impl ServerHandler for Server {
     }
 }
 
-/// A tool's answer: compact JSON, and a word on the index while it is still being built.
+/// Return compact JSON and initial-index progress when applicable.
 fn answer(value: Value, partial: Option<String>) -> CallToolResult {
     let mut content = vec![ContentBlock::text(value.to_string())];
     if let Some(at) = partial {
@@ -285,13 +277,12 @@ fn line_at(text: &str, byte: usize) -> (usize, String) {
     (line, text[start..end].trim().chars().take(200).collect())
 }
 
-/// The etag as the wire carries it: a string, its nanosecond mtime being past the 2^53 a
-/// JavaScript client's number holds exactly.
+/// Encode etags as strings to preserve nanosecond timestamps in JavaScript clients.
 fn etag_string(e: Etag) -> String {
     format!("{}-{}-{}", e.mtime_ns, e.size, e.ino)
 }
 
-/// The image types a client shows, by extension.
+/// Image extensions supported by clients.
 fn image_type(rel: &str) -> Option<&'static str> {
     let ext = Path::new(rel).extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {

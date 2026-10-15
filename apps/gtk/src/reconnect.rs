@@ -26,7 +26,7 @@ pub struct Retry {
     since: Cell<Option<Instant>>,
     /// What the banner says was lost, across the failed attempts that follow it.
     lost: RefCell<String>,
-    /// The attempts so far, which is what the next wait grows with.
+    /// Attempt count used to increase the next delay.
     attempts: Cell<u32>,
     /// The once-a-second tick counting down to the next attempt.
     tick: RefCell<Option<glib::SourceId>>,
