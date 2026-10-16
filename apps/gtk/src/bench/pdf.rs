@@ -1047,7 +1047,7 @@ fn on_host(remote: &accent_api::remote::Remote, command: &str) -> bool {
 
 /// End the window's SSH master and hold the link down, with no automatic reconnect: `true` when
 /// the master ended.
-async fn link_down(app: &Rc<App>, remote: &accent_api::remote::Remote) -> bool {
+pub(super) async fn link_down(app: &Rc<App>, remote: &accent_api::remote::Remote) -> bool {
     let argv = accent_api::ssh::exit(remote.url(), remote.control_path());
     let ended = std::process::Command::new(&argv[0])
         .args(&argv[1..])
